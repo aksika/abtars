@@ -12,6 +12,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
+import { abtarsHome } from "../paths.js";
 
 interface FeedConfig {
   url: string;
@@ -100,7 +101,7 @@ async function main(): Promise<void> {
   const hours = parseInt(args.find((_, i, a) => a[i - 1] === "--hours") ?? "24", 10);
 
   const feeds: FeedConfig[] = JSON.parse(readFileSync(feedsPath, "utf-8"));
-  const outDir = join(process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars"), "workspace", "rss");
+  const outDir = join(abtarsHome(), "workspace", "rss");
 
   console.error(`Fetching ${feeds.length} feeds...`);
 
@@ -139,3 +140,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => { console.error(`Fatal: ${err.message}`); process.exit(1); });
+
+// Hard 60s process timeout — prevents hanging indefinitely on slow feeds
+setTimeout(() => { console.error("Timeout: 60s exceeded"); process.exit(1); }, 60_000).unref();

@@ -1,8 +1,5 @@
 import { execAsync } from "./exec-async.js";
-import { readdirSync} from "node:fs";
-import { join } from "node:path";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { abtarsHome } from "../../paths.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd_admin";
@@ -29,7 +26,7 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
       const guestId = `guest-${platformId}`;
       users.push({ userId: guestId, role: "guest", maxClass: 0, tools: [], platforms: { telegram: parseInt(platformId, 10) || 0 } });
       writeFileSync(configPath, JSON.stringify({ users }, null, 2), "utf-8");
-      await ctx.reply(`✅ Approved guest: ${guestId} (platform ID: ${platformId})`);
+      await ctx.reply(`✓ Approved guest: ${guestId} (platform ID: ${platformId})`);
     } catch (err) {
       await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -46,7 +43,7 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
       const raw = JSON.parse(readFileSync(configPath, "utf-8"));
       const users = (Array.isArray(raw.users) ? raw.users : []).filter((u: { userId: string }) => u.userId !== targetUserId);
       writeFileSync(configPath, JSON.stringify({ users }, null, 2), "utf-8");
-      await ctx.reply(`✅ Revoked: ${targetUserId}`);
+      await ctx.reply(`✓ Revoked: ${targetUserId}`);
     } catch (err) {
       await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -63,14 +60,45 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
   return true;
 }
 
-export async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleSkills(text: string, ctx: CommandContext): Promise<boolean> {
+  // #1141: /skill run <name>, /skill stop, /skill list (runnable)
+  const args = text.replace(/^\/skills?\s*/, "").trim();
+  if (args.startsWith("run ")) {
+    const skillName = args.slice(4).trim();
+    if (!skillName) { await ctx.reply("Usage: /skill run <name>"); return true; }
+    const { launchSkill } = await import("../skill-session.js");
+    const err = await launchSkill(skillName, ctx.userId, String(ctx.chatId));
+    await ctx.reply(err ?? `* Skill "${skillName}" started.`);
+    return true;
+  }
+  if (args === "stop") {
+    const { endSkillSession } = await import("../skill-session.js");
+    const ended = await endSkillSession(String(ctx.chatId));
+    await ctx.reply(ended ? "* Skill session ended." : "No active skill session.");
+    return true;
+  }
+  if (args === "list") {
+    const { listRunnableSkills } = await import("../skill-session.js");
+    const skills = listRunnableSkills();
+    if (skills.length === 0) { await ctx.reply("No runnable skills (no skill.json found)."); return true; }
+    const lines = skills.map(s => `  ${s.interactive ? "~" : "*"} ${s.name}${s.description ? ` — ${s.description}` : ""}`);
+    await ctx.reply(`Runnable skills:\n${lines.join("\n")}\n\nUse: /skill run <name>`);
+    return true;
+  }
+
+  if (text.includes("reload")) {
+    const { reloadCatalog } = await import("../../capabilities/hotskills/index.js");
+    const count = reloadCatalog();
+    await ctx.reply(`Reloaded — ${count} skills available.`);
+    return true;
+  }
   const { getSkillCache } = await import("../../capabilities/hotskills/index.js");
   const skills = getSkillCache();
   if (skills.length === 0) { await ctx.reply("📚 No skills loaded."); return true; }
 
   const active = skills.filter(s => !s.skipped);
   const skipped = skills.filter(s => s.skipped);
-  const groups = new Map<string, typeof skills>();
+  const groups = new Map<string, Array<typeof skills[number]>>();
   for (const s of skills) {
     const list = groups.get(s.group) ?? [];
     list.push(s);
@@ -176,7 +204,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/software — Version info, deploy date, npm check, rollback",
     "/software update [pull|deploy] — Pull & build from git",
     "/software update npm — Update from npm registry",
-    "/software rollback <version> — Roll back to previous version",
+    "/software rollback <version|slot> — Roll back to previous version or slot (1-3)",
     "/update — Alias for /software update pull",
     "/model — Model configuration (provider, context, fallbacks)",
     "/model set <name> — Switch model",
@@ -186,6 +214,9 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/mcp — MCP server status",
     "/hooks — List configured hooks",
     "/stop, /ctrlc — Stop current response",
+    "/wait [msg] — Inject message mid-run (non-interrupting)",
+    "/continue — Nudge model to continue after failure",
+    "/usage — Token usage & cost this session",
     "/memory — Memory storage statistics",
     "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
     "/models — Model, transport & agent status (legacy)",
@@ -196,6 +227,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/tasks log <id> — Last 5 runs for a task",
     "/task run <id> — Manually fire a task",
     "/task pause <id> — Pause / /task resume <id> — Resume",
+    "/todo — Todo list",
     "/facts — Core knowledge (user profile + agent notes)",
     "/skills — List active/skipped skills",
     "/session — List sessions",
@@ -214,5 +246,28 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
   }
   cmds.push("/help — Show this help");
   await ctx.reply(`📋 Available commands:\n\n${cmds.join("\n")}`);
+  return true;
+}
+
+export async function handlePeers(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { getPeerTable } = await import("../peer-transport/gossip.js");
+  const peers = getPeerTable(true);
+  if (peers.length === 0) {
+    await ctx.reply("No peers configured or gossip not started.");
+    return true;
+  }
+  const now = Date.now();
+  const lines = peers
+    .sort((a, b) => (a.alive === b.alive ? a.name.localeCompare(b.name) : a.alive ? -1 : 1))
+    .map(p => {
+      const age = Math.round((now - p.lastSeen) / 1000);
+      const ageStr = age < 60 ? `${age}s ago` : `${Math.round(age / 60)}min ago`;
+      const icon = p.alive ? "🟢" : "🔴";
+      const caps = p.capabilities.length ? ` [${p.capabilities.join(", ")}]` : "";
+      return `${icon} **${p.name}** (${ageStr}) — load ${p.load}${caps}`;
+    });
+  const alive = peers.filter(p => p.alive).length;
+  lines.push(`\n${peers.length} peer(s) (${alive} alive, ${peers.length - alive} dead)`);
+  await ctx.reply(lines.join("\n"));
   return true;
 }

@@ -4,7 +4,7 @@ import { getEnv } from "../env-schema.js";
  * Implements IKiroTransport with its own agent loop (send → stream → tools → loop).
  */
 
-import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
+import { logInfo, logWarn, logError, logDebug, logTrace } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { withRetry, isFatal } from "../retry.js";
 import { ConversationSession, type ToolCall, type ContentPart } from "./conversation-session.js";
@@ -26,12 +26,12 @@ export interface DirectApiConfig {
   maxContext: number;
   maxOutput: number;
   maxTurns: number;
+  maxToolRounds?: number;
   apiFormat?: "chat" | "responses" | "anthropic";
   thinking?: { style: "effort"; default: string } | { style: "extended"; default: number };
   fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
 }
 
-export { normalizeToolCalls } from "./transport-utils.js";
 
 export class DirectApiTransport implements IKiroTransport {
   private readonly config: DirectApiConfig;
@@ -49,8 +49,12 @@ export class DirectApiTransport implements IKiroTransport {
   private activeApiKey?: string;
   private activeModel: string;
   private _lastPromptTokens = 0;
+  private _lastCompletionTokens = 0;
   private _activeSessionKey = "";
   private _activeUserId = "master";
+
+  /** Agent name for budget tracking (set by caller). */
+  agentLabel = "professor";
 
   /** Currently active model (may differ from config if on fallback). */
   get currentModel(): string { return this.activeModel; }
@@ -110,17 +114,6 @@ export class DirectApiTransport implements IKiroTransport {
     this._activeSessionKey = sessionKey;
     this._activeUserId = userId || "master";
 
-    // #843: Hydrate session from DB on first use (only system prompt present = fresh after restart)
-    if (session.messages.length === 1 && this.memoryBackend && !this.contextOrchestrator && this.config.maxContext >= 64000) {
-      const sixHoursAgo = Date.now() - 6 * 60 * 60_000;
-      const recent = this.memoryBackend.getRecentConversation(userId || "master", sixHoursAgo, 16);
-      for (const msg of recent) {
-        if (msg.role === "user") session.addUser(msg.content);
-        else if (msg.role === "assistant") session.addAssistant(msg.content);
-      }
-      if (recent.length > 0) logInfo(TAG, `Hydrated session with ${recent.length} messages from DB`);
-    }
-
     // If context orchestrator is active, rebuild messages from DB
     if (this.contextOrchestrator) {
       try {
@@ -154,6 +147,11 @@ export class DirectApiTransport implements IKiroTransport {
     } finally {
       // AfterPrompt hook — observe-only, fire-and-forget
       const durationMs = Date.now() - (this._promptStartedAt ?? Date.now());
+      // #832: metrics
+      import("../metrics-collector.js").then(({ recordLatency, recordCall }) => {
+        recordLatency(`llm:${this.activeModel}`, durationMs);
+        recordCall(`llm:${this.activeModel}`, this._lastAnswer.length > 0);
+      }).catch(() => {});
       import("../hooks/hook-system.js").then(({ hasHooks, fire }) => {
         if (!hasHooks("AfterPrompt")) return;
         fire("AfterPrompt", {
@@ -290,9 +288,14 @@ export class DirectApiTransport implements IKiroTransport {
   private async agentLoop(session: ConversationSession, signal: AbortSignal): Promise<string> {
     let zeroTokenRetries = 0;
     const loopStart = Date.now();
+    const callSigs: string[] = []; // #1133: track across turns for loop detection
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
-      if (signal.aborted) throw new Error("Aborted");
+      if (signal.aborted) return signal.reason === "timeout" ? "Response timed out." : "Interrupted.";
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
+      if (turn >= (this.config.maxToolRounds ?? 25)) {
+        logError(TAG, `Tool loop circuit breaker: ${turn} rounds without final response — aborting`);
+        return "[SYSTEM] Tool loop limit reached. Stopped after " + turn + " rounds.";
+      }
 
       const pendingInstruction = this.getPendingInstruction?.();
       if (pendingInstruction) session.addUser(pendingInstruction);
@@ -303,9 +306,10 @@ export class DirectApiTransport implements IKiroTransport {
         session.updateTokens(usage.prompt_tokens);
         this._contextPercent = session.contextPercent;
         this._lastPromptTokens = usage.prompt_tokens;
+        this._lastCompletionTokens = usage.completion_tokens ?? 0;
         this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
         logTrace(TAG, `${this.activeModel} — ${usage.prompt_tokens}→${usage.completion_tokens ?? 0} tokens, ${Date.now() - (this._lastActivityAt ?? Date.now())}ms`);
-        recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0);
+        recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0, this.agentLabel);
       }
 
       if (toolCalls.length > 0) {
@@ -324,13 +328,43 @@ export class DirectApiTransport implements IKiroTransport {
           this.onSegmentBreak?.(content.trim());
         }
 
-        for (const tc of toolCalls) {
-          if (signal.aborted) throw new Error("Aborted");
+        // #1133: Track tool call signatures for loop detection
+        for (let ti = 0; ti < toolCalls.length; ti++) {
+          const tc = toolCalls[ti]!;
+          if (signal.aborted) {
+            // #1003: inject cancelled results for remaining tools — keeps conversation valid
+            for (const remaining of toolCalls.slice(ti)) {
+              session.addToolResult(remaining.id, remaining.function.name,
+                `[SYSTEM] Cancelled — ${remaining.function.name} skipped due to user interrupt`);
+            }
+            return signal.reason === "timeout" ? "Response timed out." : "Interrupted.";
+          }
           this._lastActivityAt = Date.now();
+
+          // #948: drain /wait between batched tool calls
+          const mid = this.getPendingInstruction?.();
+          if (mid) session.addUser(mid);
+
           this.onToolCallStart?.(tc.function.name ?? "tool");
 
           let args: Record<string, string>;
-          try { args = JSON.parse(tc.function.arguments); } catch (err) { logAndSwallow(TAG, "JSON.parse tool args", err); args = {}; }
+          try { args = JSON.parse(tc.function.arguments); } catch {
+            // #1133: Reject malformed args — never execute with broken arguments
+            const errMsg = `Tool call rejected: malformed arguments (JSON parse error). Reformat and retry.`;
+            logWarn(TAG, `Malformed tool args for ${tc.function.name}: ${tc.function.arguments.slice(0, 80)}`);
+            session.addToolResult(tc.id, tc.function.name, JSON.stringify({ error: errMsg }));
+            continue;
+          }
+
+          // #1133: Loop detection — abort if same call (name+args hash) repeats 3x across turns
+          const { createHash } = await import("node:crypto");
+          const sig = `${tc.function.name}:${createHash("sha256").update(tc.function.arguments).digest("hex").slice(0, 8)}`;
+          callSigs.push(sig);
+          if (callSigs.filter(s => s === sig).length >= 3) {
+            logWarn(TAG, `Tool loop detected: ${tc.function.name} repeated 3x — aborting`);
+            session.addToolResult(tc.id, tc.function.name, JSON.stringify({ error: "[SYSTEM] Repeated identical tool call detected (3x). Stop retrying and provide a final text response to the user." }));
+            break;
+          }
 
           const result = await executeToolCall(tc.function.name, args, { userId: this._activeUserId, signal, sandboxPolicy: this.sandboxPolicy });
           session.addToolResult(tc.id, tc.function.name, result);
@@ -353,7 +387,7 @@ export class DirectApiTransport implements IKiroTransport {
       // Budget-aware backoff on 0→0 token response (#732)
       if (!answer && usage && usage.prompt_tokens === 0) {
         const elapsed = Date.now() - loopStart;
-        const remaining = (this._timeoutOverrideMs ?? 60_000) - elapsed;
+        const remaining = (this._timeoutOverrideMs ?? getEnv().modelApiTimeoutMs) - elapsed;
         const retryDelay = 5000 + (zeroTokenRetries * 3000);
         if (remaining > retryDelay + 5000) {
           zeroTokenRetries++;
@@ -380,9 +414,16 @@ export class DirectApiTransport implements IKiroTransport {
     session: ConversationSession,
     signal: AbortSignal,
   ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
-    // Compose pipeline signal (user /stop) with per-request timeout
+    // Compose pipeline signal (user /stop) with per-request timeout (silence-based)
     const timeoutCtrl = new AbortController();
-    const timer = setTimeout(() => timeoutCtrl.abort(new Error("model API timeout")), this._timeoutOverrideMs ?? getEnv().modelApiTimeoutMs);
+    const timeoutMs = this._timeoutOverrideMs ?? getEnv().modelApiTimeoutMs;
+    this._lastActivityAt = Date.now();
+    const timer = setInterval(() => {
+      if (Date.now() - this._lastActivityAt > timeoutMs) {
+        clearInterval(timer);
+        timeoutCtrl.abort(new Error("model API timeout"));
+      }
+    }, 5000);
     const composed = AbortSignal.any([signal, timeoutCtrl.signal]);
 
     try {
@@ -408,7 +449,7 @@ export class DirectApiTransport implements IKiroTransport {
         else if (event.type === "tool_call_delta") { this.accumulateToolCall(toolCallAcc, event); }
         else if (event.type === "done") { usage = event.usage; }
       }
-      clearTimeout(timer);
+      clearInterval(timer);
       const toolCalls = this.finalizeToolCalls(toolCallAcc);
       return { content: content || null, toolCalls, usage };
     }
@@ -434,7 +475,7 @@ export class DirectApiTransport implements IKiroTransport {
         else if (event.type === "tool_call_delta") { this.accumulateToolCall(toolCallAcc, event); }
         else if (event.type === "done") { usage = event.usage; }
       }
-      clearTimeout(timer);
+      clearInterval(timer);
       const toolCalls = this.finalizeToolCalls(toolCallAcc);
       return { content: content || null, toolCalls, usage };
     }
@@ -459,7 +500,7 @@ export class DirectApiTransport implements IKiroTransport {
     // #869: session-level reasoning override (from /reasoning command)
     if (session.reasoningEffort) {
       const BUDGET_MAP: Record<string, number> = { low: 1024, medium: 4096, high: 16384 };
-      if (this.config.apiFormat === "anthropic") {
+      if ((this.config.apiFormat as string) === "anthropic") {
         body.thinking = { type: "enabled", budget_tokens: BUDGET_MAP[session.reasoningEffort] ?? 4096 };
       } else {
         body.reasoning_effort = session.reasoningEffort;
@@ -523,7 +564,7 @@ export class DirectApiTransport implements IKiroTransport {
 
     return { content: content || null, toolCalls, usage };
     } finally {
-      clearTimeout(timer);
+      clearInterval(timer);
     }
   }
 
@@ -572,8 +613,8 @@ export class DirectApiTransport implements IKiroTransport {
     logInfo(TAG, `Session ${sessionKey} reset`);
   }
 
-  async sendInterrupt(): Promise<void> {
-    for (const ac of this.abortControllers.values()) ac.abort();
+  async sendInterrupt(reason?: string): Promise<void> {
+    for (const ac of this.abortControllers.values()) ac.abort(reason ?? "user");
   }
 
   destroy(): void {
@@ -587,6 +628,12 @@ export class DirectApiTransport implements IKiroTransport {
   get answerOnly(): string { return this._lastAnswer; }
   getActiveSession(): ConversationSession | null { return this.sessions.get(this._activeSessionKey) ?? null; }
   get toolCallsSucceeded(): number { return this._toolCallsSucceeded; }
+
+  lastUsage(): { input: number; output: number } | null {
+    return this._lastPromptTokens || this._lastCompletionTokens
+      ? { input: this._lastPromptTokens, output: this._lastCompletionTokens }
+      : null;
+  }
 
   /** Hot-swap the active model. Takes effect on next API call. */
   setModel(model: string): void {

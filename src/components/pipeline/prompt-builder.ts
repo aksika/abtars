@@ -13,7 +13,6 @@ import { loadUsers } from "../user-registry.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import { readAndClearRestartReason } from "../transport/bridge-lock-transport.js";
-import type { SessionRegistry } from "../session-registry.js";
 import type { MemoryManager } from "abmind";
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import type { InboundMessage } from "../../types/platform.js";
@@ -25,8 +24,7 @@ const ACTIVE_MEMORY_LIMIT = 5;
 export interface BuildPromptDeps {
   memory: MemoryManager | null;
   memoryConfig: { memoryEnabled: boolean; memoryDir: string };
-  sessions: SessionRegistry;
-  sessionManager: import("../session-manager.js").SessionManager;
+  sessionManager: import("../spin.js").Spin;
   conversationBuffer: ConversationBuffer;
   contextPercent: number;
   maxContext?: number;
@@ -46,11 +44,13 @@ export async function buildPrompt(
   deps: BuildPromptDeps,
   registry: UserRegistry,
 ): Promise<BuildPromptResult> {
-  const { memory, sessions, conversationBuffer, contextPercent } = deps;
+  const { memory, conversationBuffer, contextPercent } = deps;
   const { channelId, isGroup } = msg;
   const userId = msg.userId;
   const sessionKey = deps.sessionManager.getActiveSessionId(userId, msg.platform);
   const bufKey = `${msg.platform}:${channelId}`;
+  const { spin } = await import("../spin.js");
+  const pSession = spin.getSessionById(sessionKey);
 
   // --- Timestamp prefix ---
   let prompt = `[${localTime()}] ${text}`;
@@ -96,19 +96,21 @@ export async function buildPrompt(
   }
 
   // --- Session-start injection ---
-  const entry = sessions.getOrCreate(sessionKey);
-  const isSessionStart = entry.pendingStart || !entry.seen;
-  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry.seen} pendingStart=${entry.pendingStart} isSessionStart=${isSessionStart}`);
+  const entry = pSession;
+  const isSessionStart = !entry || entry.pendingStart || !entry.seen;
+  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart}`);
   if (isSessionStart && memory) {
     prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey, deps.maxContext, msg.platform);
   }
-  entry.seen = true;
-  entry.pendingStart = false;
+  if (entry) {
+    entry.seen = true;
+    entry.pendingStart = false;
+  }
 
   // Record user message to memory
   const userRole = registry.byUserId.get(userId)?.role;
   logTrace(TAG, `recordMessage gate: memory=${!!memory} userId=${userId} userRole=${userRole}`);
-  if (memory && userRole !== "guest") {
+  if (memory && userRole !== "guest" && !text.startsWith("[SESSION START]")) {
     const numericMsgId = typeof msg.messageId === "number" ? msg.messageId : undefined;
     memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId: numericMsgId });
   }
@@ -120,7 +122,7 @@ export async function buildPrompt(
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
       try {
         const t0 = performance.now();
-        const priming = sessions.get(sessionKey)?.primingTerms ?? [];
+        const priming = pSession?.primingTerms ?? [];
         const now = new Date();
         const recall = await memory.recallSearch({
           translated: [...new Set([text, ...priming])],
@@ -215,6 +217,7 @@ export function buildSessionStartPrompt(
       const type = typeMap[sessionType] ?? sessionType;
       const index = parseInt(parts[2]!, 10);
       contextParts.push(`[SESSION] #${index} (${type})`);
+      logInfo(TAG, `Injected session identity: #${index} (${type})`);
     }
   }
 
@@ -260,32 +263,36 @@ export function buildSessionStartPrompt(
   if (platform) {
     const CAPS: Record<string, string> = { telegram: "voice, reactions, typing, TTS, groups", discord: "reactions, typing, threads", irc: "text only" };
     contextParts.push(`[SYSTEM] Platform: ${platform} (${CAPS[platform] ?? "unknown"})`);
+    logInfo(TAG, `Injected platform: ${platform}`);
   }
 
-  const compSummary = null; // Legacy compaction removed — context engine handles summaries
-  if (compSummary && sessionKey) {
-    // Dead path — kept for type safety during transition
-  } else {
-    const ctxOpts = isCodeSession ? { skipDailies: true, maxAgeMs: 48 * 60 * 60 * 1000 } : (maxContext && maxContext >= 64000 ? { skipMessages: true } : undefined);
-    const ctxResult = abmind()?.buildSessionStartContext(memory, userId, maxContext, ctxOpts);
+  // Runtime identity (#879) — prevent agent misidentifying itself
+  const transportType = getEnv().defaultTransport === "acp" ? "ACP" : "Direct API";
+  const runtimeLine = `[SYSTEM] Runtime: abtars bridge (${transportType}). All registered bridge tools are available.`;
+  contextParts.push(runtimeLine);
+  logInfo(TAG, `Injected runtime identity: ${transportType}`);
+
+  {
+    const ctxOpts = isCodeSession ? { skipDailies: true, maxAgeMs: 48 * 60 * 60 * 1000 } : undefined;
+    const ctxResult = memory.available !== false ? abmind()?.buildSessionStartContext(memory, userId, maxContext, ctxOpts) : null;
     const ctx = ctxResult?.text ?? null;
     if (ctx) {
       contextParts.push(ctx);
       const s = ctxResult!.stats;
       const ctxPct = maxContext ? Math.round(ctx.length / maxContext * 100) : -1;
-      logInfo(TAG, `Session start: ${s.messages} messages + ${s.dailies} dailies (${(s.usedBytes / 1024).toFixed(1)}KB / ${(s.budget / 1024).toFixed(0)}KB budget, ${ctxPct}% ctx${isCodeSession ? ", Code" : ""})`);
-      logDebug(TAG, `Session context: ${s.messages} msgs, ${s.dailies} dailies, ${s.usedBytes}B / ${s.budget}B budget, ${ctxPct}% ctx`);
+      logInfo(TAG, `Session start: ${s.messages} messages + ${s.dailies}d ${s.weeklies}w ${s.quarterlies}q (${(s.usedBytes / 1024).toFixed(1)}KB / ${(s.budget / 1024).toFixed(0)}KB budget, ${ctxPct}% ctx${isCodeSession ? ", Code" : ""})`);
+      logDebug(TAG, `Session context: ${s.messages} msgs, ${s.dailies}d ${s.weeklies}w ${s.quarterlies}q, ${s.usedBytes}B / ${s.budget}B budget, ${ctxPct}% ctx`);
       logTrace(TAG, `session-start content: ${ctx.slice(0, 500)}...`);
     }
 
     try {
-      const userRole = loadUsers().byUserId.get(userId)?.role ?? "master";
+      const userRole = loadUsers().byUserId.get(userId)?.role ?? "guest";
       if (userRole === "guest") {
         contextParts.push("Hi! How can I help?");
       } else if (userRole === "user") {
         contextParts.push("[SESSION START] Returning user. Be friendly and helpful.");
-      } else if (!isCodeSession) {
-        // Wake-up only for Main sessions
+      } else if (!isCodeSession && memory.available !== false) {
+        // Wake-up only for Main sessions with live memory
         const wakeUp = memory.buildWakeUp();
         if (wakeUp) {
           contextParts.push(wakeUp);
@@ -296,7 +303,7 @@ export function buildSessionStartPrompt(
         // #646 — system status (skip for Code sessions)
         if (sessionKey && !sessionKey.includes("_C_")) {
           const status = abmind()!.buildStatusBlock(memory);
-          if (status) contextParts.push(status);
+          if (status) { contextParts.push(status); logInfo(TAG, `Injected system status (${status.length} chars)`); }
         }
       }
     } catch (err) { logAndSwallow("prompt_builder", "op", err); }
@@ -308,6 +315,7 @@ export function buildSessionStartPrompt(
 
   const result = contextBlock + prompt;
   logTrace(TAG, `session-start assembled: ${contextParts.length} parts, context=${contextBlock.length} chars, prompt=${prompt.length} chars, total=${result.length} chars`);
+  logTrace(TAG, `session-start injections:\n${contextParts.filter(p => p.startsWith("[")).map(p => "  " + p.slice(0, 120)).join("\n")}`);
   if (result.length < 5000) {
     logInfo(TAG, `Session-start prompt suspiciously small (${result.length} chars) — SOUL may be missing`);
   }

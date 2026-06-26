@@ -1,18 +1,42 @@
 # abTARS
 
-**Autonomous AI agent with persistent memory, self-healing, and peer-to-peer communication. Your hardware, your rules.**
+**Meet the latest kid on the block.** An agentic framework designed to survive — and do the job.
 
-abTARS runs 24/7 on your machine — talks to you via Telegram/Discord/IRC, remembers everything across sessions, executes scheduled tasks, and recovers from failures without intervention. Use frontier models through existing CLI subscriptions at zero marginal cost.
+abTARS is an autonomous AI agent that runs 24/7 on your hardware. It talks to you via Telegram, Discord, or IRC. It remembers everything. It recovers from failures without intervention. It coordinates with peer instances across machines. Your hardware, your rules, zero cloud dependency.
 
-## Why abTARS
+## Built on the CIA Triad
 
-- 🧠 **Memory that curates itself** — multi-layer recall (5 search stages + reranking), nightly sleep maintenance, emotion tracking, contradiction detection, Memory Darwinism
-- 🛡️ **Self-hosted, defense-in-depth** — classified memory (4 tiers, encrypted at rest), role-based access, injection scanning, secrets vault
-- 🔄 **Runs months unattended** — 5-layer supervision, leaky-bucket model fallback, self-healing agent, standby-aware recovery
-- 🤝 **Agent-to-agent** — P2P communication with Ed25519 signatures, mDNS wake-up, IRC coordination channels
-- 💰 **Zero idle cost** — no LLM calls at rest, CLI subscription parasitism, budget sleep tiers
+### Confidentiality — classified, encrypted, compartmented
 
-→ **[Why abTARS vs OpenClaw & Hermes](https://aksika.github.io/abtars/why)**
+- **NATO-style memory classification** — 4 tiers (UNCLASSIFIED → SECRET), role-gated access
+- **Encryption at rest** — AES-256 on memory database, derived key from master passphrase
+- **Secrets vault** — isolated directory, 600 perms, never exposed to model context
+- **Signed peer comms** — Ed25519 digital signatures on inter-agent channels
+- **Injection scanning** — untrusted peer payloads scanned before execution
+
+### Integrity — verified, consistent, self-correcting
+
+- **Peer trust levels** — trust=0 (full scan + sandbox) to trust=3 (direct execution)
+- **Memory contradiction detection** — old facts auto-expire when corrected
+- **Atomic state** — crash-safe writes, self-healing lock files, no corrupt state survives
+- **Doctor** — validates PIDs, DB integrity, FTS health, permissions, TLS identity
+- **Single source of truth** — unified bridge.lock, never deleted, always consistent
+
+### Availability — always up, always recovers
+
+- **3-legged supervision** — watchdog → bridge, OS supervisor → watchdog, circuit breaker → rollback
+- **Auto-rollback** — bad deploy detected in ~30s, previous version restored automatically
+- **Self-healing** — corrupt/missing state files recreated, bridge respawned without intervention
+- **Stress-tested** — kill watchdog, kill bridge, corrupt state, deploy garbage — recovers every time
+- **Darkwake-aware** — no false kills during sleep, correct resume classification
+
+### + Distributed Agent Swarm
+
+- **Multi-instance** — abTARS instances discover each other, delegate work, share results
+- **Gossip health** — UDP broadcast (HMAC-signed), load-based routing
+- **Capability discovery** — auto-detect what each peer can do, route accordingly
+- **Artifact transfer** — files flow between peers inline or via S3
+- **Async delegation** — fire tasks at peers, get callbacks when done
 
 ## Architecture
 
@@ -28,66 +52,11 @@ abTARS (bridge)
   ├── Agent Swarm (async background sessions)
   │
   ├── kiro-cli        → Claude, DeepSeek, MiniMax, Qwen (free tier)
-  ├── gemini-cli      → Gemini 2.5
+  ├── gemini-cli      → Gemini 2.5 Pro/Flash (free tier)
   ├── Direct API      → ollama, OpenRouter, any OpenAI-compatible
-  └── Peers           → other abTARS instances via /v1/chat/completions
+  │
+  └── Peer Network (gossip + HTTP delegation + callbacks)
 ```
-
-## Quick Start
-
-```bash
-npm install -g abtars@alpha abmind@alpha
-abmind install
-abtars install
-abtars update
-abtars onboard
-sudo $(which abtars) daemon install
-```
-
-After install, configure `~/.abtars/config/.env` with your Telegram bot token and at least one model provider. Full guide: **[docs/wiki/install.md](docs/wiki/install.md)**
-
-## Features
-
-### Memory (abmind)
-
-Standalone package — works with abTARS, Kiro CLI, Gemini CLI, Claude Code, Codex, Hermes, or any MCP client.
-
-- Multi-layer recall: 5 search stages (porter FTS5 → trigram → binary signatures → vector embeddings → entity graph) + 7 post-processing layers (cross-stage penalty, context boost, emotion boost, spacing boost, quality boost, MMR reranking, interference detection)
-- Agglutinative language support (Hungarian, Finnish, Turkish) — QWERTZ fallback, substring windows
-- 25 emotion types with per-memory scoring, emotional arcs per topic
-- 12-step nightly sleep: extract, consolidate, prune, detect contradictions, fix translations
-- NATO-inspired classification: confidentiality × trust × integrity × credibility
-- AES-256-GCM encrypted secrets vault with auto-redaction from history
-- Memory Darwinism — unused memories fade, recalled memories strengthen
-
-### Reliability
-
-- **L1** Heartbeat — standby detection, bridge.lock, task dispatch
-- **L2** In-process watchdog — detects stuck event loops
-- **L3** External watchdog — catches dead PIDs, stale heartbeats. Circuit breaker prevents restart storms
-- **L4** OS supervisor — launchd (macOS) / systemd (Linux) restarts the watchdog itself
-- **L5** Preventive daily restart — eliminates memory leaks
-- **Model health** — leaky-bucket per model, progressive penalties, arbitrarily long fallback chains
-- **Self-healing agent** — diagnoses failed tasks, attempts repair, suspends after 3 failures
-
-### Agent Swarm
-
-Main agent spawns independent background sessions (own context, own tool loop). Results auto-inject into the parent's next prompt. Up to 3 concurrent. `/wait` injects instructions into running sessions.
-
-### Peer-to-Peer
-
-Multiple abTARS instances communicate via OpenAI-compatible `/v1/chat/completions` endpoint. Bearer auth per peer, Ed25519 signatures, mDNS wake-up for firewalled peers, hop-limit loop prevention.
-
-### Security
-
-- Platform-level access: only registered chatId/userId can reach the agent
-- Role-based: master/user/guest — commands, tools, memory all gated
-- Secrets vault: AES-256-GCM, scrypt-derived key, auto-encrypt on ingest
-- Injection scanner on all inbound messages
-- SSRF guard on browser agent
-- Credential redaction in all logs and exports
-
-## Supported Transports
 
 | Transport | Providers |
 |-----------|-----------|
@@ -111,14 +80,16 @@ Optional: ollama + `nomic-embed-text` for memory embeddings.
 - [Memory System (abmind)](https://github.com/aksika/abmind)
 - [Skills & Extensions](docs/wiki/skills.md)
 - [Deployment & Supervision](docs/wiki/supervision.md)
+- [Resilience & Stress Tests](docs/wiki/resilience.md)
 
 Full docs: **[aksika.github.io/abtars](https://aksika.github.io/abtars/)**
 
 ## Numbers
 
-- 1794 tests (abtars 1016 + abmind 778)
+- 1049+ tests (abtars) + 778 tests (abmind)
+- 8 stress-tested failure scenarios with verified auto-recovery
 - 5 agent types (professor, dreamy, browsie, coding, cron)
-- 5-layer supervision stack
+- 3-legged supervision stack (watchdog, OS supervisor, circuit breaker)
 - 3 platform adapters + OpenAI-compatible API
 - 12-step nightly memory maintenance
 

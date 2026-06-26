@@ -1,48 +1,64 @@
 # Quick Start
 
-Steps only. For detailed explanations, see [Installation](./install.md).
+New to abTARS? This page walks you through what you need and what to decide before installing.
 
-## 1. Install
+Experienced? Jump straight to [Installation](./install.md) for the full technical steps.
 
-```bash
-npm install -g abtars abmind
-```
+## What you'll need
 
-Requires Node.js 22+. For alpha builds: `npm install -g abtars@alpha abmind@alpha`
+1. **A computer that stays on** — Mac mini, NUC, old laptop, cloud VM, WSL on your desktop. abTARS runs 24/7 on your hardware.
 
-## 2. Setup
+2. **Node.js 22+** — the runtime (recommended: Node 24). Install via [Homebrew](https://brew.sh) (`brew install node@24`) on macOS or [NodeSource](https://github.com/nodesource/distributions) on Linux/WSL.
 
-```bash
-abtars install
-abtars update
-abtars onboard
-```
+3. **pnpm** — the package manager. Install with `npm install -g pnpm`.
 
-The onboard wizard asks for:
-- Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- Model provider (Kiro CLI, OpenRouter, ollama, etc.)
-- Agent name and passphrase (for memory encryption)
+4. **A Telegram bot token** — create one via [@BotFather](https://t.me/BotFather) on Telegram. This is how you'll talk to your agent.
 
-> ⚠️ **SECURITY WARNING:** When creating your bot with @BotFather, keep it **private** (not searchable publicly). abTARS has access to your machine via `execute_bash`. If your bot is publicly discoverable, anyone can find and message it. The built-in `users.json` allowlist blocks unknown senders, but defense-in-depth means the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.
+5. **A model provider** — at least one of:
+   - **ollama** (free, runs locally — good for privacy)
+   - **OpenRouter** (paid, access to all frontier models)
+   - **Kiro CLI / Gemini CLI / Claude Code** (if you already use one)
 
-## 3. Start
+## Decisions to make
 
-```bash
-sudo $(which abtars) daemon install
-```
+### How should it run?
 
-Done. Your bot is live on Telegram.
+| Mode | What it means |
+|------|--------------|
+| **Supervised (recommended)** | Installs as an OS service. Auto-restarts on crash, survives reboots, watchdog monitors health. Your agent is always on. |
+| **Simple** | Runs in the background. If it crashes, you restart manually. Good for trying things out. |
 
-## 4. Verify
+### Which model?
+
+Any model works. For the best experience:
+- **128K+ context window** — smaller models lose context fast with tool use
+- **Frontier quality** (GPT-4o, Claude, Gemini Pro) — better at following instructions, harder to manipulate
+- **Local models via ollama** — fully private, no API costs, but weaker on complex tasks
+
+You can switch models anytime via `/model` in Telegram. No reinstall needed.
+
+## Let your AI install it for you
+
+If you use an agentic coding tool (Kiro, Claude Code, Gemini CLI, Cursor, Copilot), just give it the [Installation page](./install.md) and ask it to install abTARS for you. It has all the information it needs — prerequisites, commands, platform-specific steps.
+
+> "Install abTARS on this machine following the install guide. Use alpha channel, supervised mode."
+
+That's it. Your AI colleague handles the rest.
+
+## Manual install
+
+Follow [Installation](./install.md) — it has step-by-step instructions for both Linux/WSL and macOS.
+
+## After install
+
+### Verify it works
 
 ```bash
 abtars status       # should show bridge: ● running
 abtars doctor       # should show all green
 ```
 
-Send a message to your bot — it should respond.
-
-## Post-install cheat sheet
+Send a message to your bot on Telegram — it should respond.
 
 ### Telegram commands
 
@@ -52,49 +68,26 @@ Send a message to your bot — it should respond.
 | `/model` | Switch model/provider on the fly |
 | `/new` | Start a fresh conversation session |
 | `/sleep` | Trigger sleep + memory consolidation |
-| `/restart` | Restart the bridge |
 | `/help` | Full command list |
 
 ### Customize personality
 
-Edit `~/.abmind/memory/core/SOUL.md` — defines who your agent is: name, personality, language, tone.
+Edit `~/.abmind/memory/core/SOUL.md` — this defines who your agent is: name, personality, language, tone. Make it yours.
 
 ### Updating
 
 ```bash
-npm update -g abtars abmind
-abtars update
-```
-
-### Stop / restart
-
-```bash
-sudo systemctl stop abtars      # stop
-sudo systemctl restart abtars   # restart
+abtars update    # pulls latest source, rebuilds, deploys, restarts
 ```
 
 ### Something broke?
 
 ```bash
 abtars doctor --fix
-tail -20 ~/.abtars/logs/bridge-$(date +%F).log
 ```
 
 See [Health Check](./healthcheck.md) for more.
 
-### Where is everything?
+## Security
 
-```
-~/.abtars/
-├── config/          .env, transport.json, models.json, users.json
-├── secret/          API keys (encrypted at rest)
-├── logs/            Daily log files
-├── skills/          core/, self/, custom/
-├── releases/        Versioned deployments
-└── current → releases/<version>
-
-~/.abmind/
-├── memory/core/     SOUL.md, agent_notes.md, user_profile.md
-├── memory/memory.db SQLite memory database
-└── secret/          Encryption key
-```
+> ⚠️ When creating your bot with @BotFather, keep it **private** (not searchable publicly). abTARS has access to your machine via tools. The built-in allowlist blocks unknown senders, but the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.

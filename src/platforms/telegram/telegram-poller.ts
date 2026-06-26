@@ -17,6 +17,7 @@ export class TelegramPoller {
   private readonly onUpdate: (update: TelegramUpdate) => void | Promise<void>;
   private readonly offsetStore: OffsetStore;
   private offset = 0;
+  private lastProcessedId = 0;
   private running = false;
   private abortController: AbortController | null = null;
 
@@ -80,6 +81,7 @@ export class TelegramPoller {
           const sorted = [...updates].sort((a, b) => a.update_id - b.update_id);
 
           for (const update of sorted) {
+            if (update.update_id <= this.lastProcessedId) continue;
             try {
               const result = this.onUpdate(update);
               if (result instanceof Promise) {
@@ -90,8 +92,7 @@ export class TelegramPoller {
             }
           }
 
-          // Advance offset immediately — don't wait for handlers to settle.
-          // Next getUpdates will fetch new messages without blocking on in-flight handlers.
+          this.lastProcessedId = sorted[sorted.length - 1]!.update_id;
           this.offset = sorted[sorted.length - 1]!.update_id + 1;
           await this.offsetStore.write(this.offset);
         }

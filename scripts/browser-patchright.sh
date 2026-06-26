@@ -47,7 +47,7 @@ run_container() {
     $EXTRA_ARGS \
     "$IMAGE"
 
-  echo "✅ Browser container running — socket at $SOCKET_DIR/browser.sock"
+  echo "✓ Browser container running — socket at $SOCKET_DIR/browser.sock"
 }
 
 case "${CMD:-help}" in

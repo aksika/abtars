@@ -8,13 +8,9 @@ Type=simple
 User={{USER}}
 Group={{USER}}
 WorkingDirectory=/home/{{USER}}/.abtars
-ExecStart=/home/{{USER}}/.abtars/scripts/watchdog.sh
+ExecStart=/home/{{USER}}/.abtars/scripts/abtars-watchdog.sh
 Restart=always
 RestartSec=5
-<<<<<<< HEAD
-Environment=NODE_ENV=production
-=======
->>>>>>> dev
 Environment=PATH={{PATH}}
 Environment=ABTARS_HOME=/home/{{USER}}/.abtars
 Environment=ABMIND_HOME=/home/{{USER}}/.abmind

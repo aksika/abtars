@@ -53,4 +53,10 @@ WebSocket pushes live updates (ctx%, new messages, task completions).
 
 ## Access
 
-Local only — binds to `127.0.0.1`. Access via `http://localhost:3000` on the host machine.
+Requires authentication. The token is stored as `WEB_AUTH` in your `.env` file:
+
+```bash
+grep WEB_AUTH ~/.abtars/config/.env
+```
+
+Check the dashboard port with `abtars status` or `/status` in Telegram, then open `http://localhost:<port>?token=<value>` in your browser. The token is auto-generated on first boot if missing.

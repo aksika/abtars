@@ -16,10 +16,16 @@ export function getLogFile(): string {
 }
 
 let currentLevel: LogLevel = "low";
-let fileLogging = true;
+const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+let fileLogging = !isTest;
 
 export function setLogLevel(level: LogLevel): void {
   currentLevel = level;
+}
+
+/** @internal — test-only override for file logging. */
+export function setFileLogging(enabled: boolean): void {
+  fileLogging = enabled;
 }
 
 function shouldLog(minLevel: LogLevel): boolean {
@@ -103,7 +109,6 @@ export function redactSecrets(text: string): string {
   return result;
 }
 
-const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 
 function ts(): string {
   const d = new Date();

@@ -17,13 +17,16 @@ export interface IKiroTransport {
   resetSession(sessionKey: string): Promise<void>;
 
   /** Send Ctrl+C interrupt to the running Kiro CLI process. */
-  sendInterrupt(): Promise<void>;
+  sendInterrupt(reason?: string): Promise<void>;
 
   /** Clean up resources (kill processes, etc.) */
   destroy(): void;
 
   /** Whether this transport is currently operational. */
   readonly isReady: boolean;
+
+  /** Callback fired once when transport becomes operational. */
+  onReady?: () => void;
 
   /** Context window usage percentage (0-100). Returns -1 if unknown/unsupported. */
   readonly contextPercent: number;
@@ -66,4 +69,7 @@ export interface IKiroTransport {
 
   /** Temporarily override model API timeout for next call(s). null resets to default. */
   setTimeoutOverride?(ms: number | null): void;
+
+  /** Token usage from last completed prompt. Returns {input, output} or null if unavailable. */
+  lastUsage?(): { input: number; output: number } | null;
 }

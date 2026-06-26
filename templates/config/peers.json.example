@@ -1,0 +1,6 @@
+{
+  "self": { "name": "default" },
+  "peers": {},
+  "maxHops": 12,
+  "timeoutMs": 60000
+}

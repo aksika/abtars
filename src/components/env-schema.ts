@@ -46,7 +46,7 @@ const SCHEMA: readonly EnvVarDef[] = [
 
   // ── Transport timeouts ──
   { env: "PROMPT_TIMEOUT_SEC", type: "int", default: "180", description: "ACP prompt timeout (seconds)" },
-  { env: "MODEL_API_TIMEOUT_SEC", type: "int", default: "120", description: "Direct API model timeout (seconds)" },
+  { env: "MODEL_API_TIMEOUT_SEC", type: "int", default: "30", description: "Direct API model timeout (seconds)" },
   { env: "WATCHDOG_TOOL_TIMEOUT_SEC", type: "int", default: "180", description: "Watchdog tool call timeout (seconds)" },
   { env: "WATCHDOG_SILENT_SEC", type: "int", default: "300", description: "Watchdog silent timeout (seconds)" },
   { env: "WATCHDOG_ENDLESS_SEC", type: "int", default: "600", description: "Watchdog endless loop timeout (seconds)" },
@@ -61,6 +61,8 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "DISCORD_BOT_TOKEN", type: "string", description: "Discord bot token" },
   { env: "DISCORD_APP_ID", type: "string", description: "Discord application ID" },
   { env: "DISCORD_GROUP_MENTIONS", type: "string", default: "required", description: "Group mention mode: required (need @mention) | optional (bot listens to all, decides itself)" },
+  { env: "DISCORD_ALLOW_BOTS", type: "string", default: "none", description: "Bot message policy: none | mentions | all" },
+  { env: "DISCORD_FREE_CHANNELS", type: "string", default: "", description: "Comma-separated channel IDs where bot responds without @mention" },
 
   // ── Context window ──
   { env: "CTX_WARN_PCT", type: "int", default: "70", description: "Context % to warn user" },
@@ -75,7 +77,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "STREAM_FLUSH_SEC", type: "int", default: "3", description: "Stream edit flush interval (seconds, 0=disabled)" },
 
   // ── Memory ──
-  { env: "MEMORY", type: "string", default: "auto", description: "Memory dir path, 'auto' (detect ~/.abmind/memory), or 'none'" },
+  { env: "MEMORY", type: "string", default: "abmind", description: "Memory provider: 'abmind' (default) or 'none'" },
   { env: "ACTIVE_MEMORY", type: "bool", default: "true", description: "Enable ambient recall on every turn" },
   { env: "PRIMING_MODEL_TOPICS", type: "bool", default: "true", description: "Use model-generated topics for priming" },
 
@@ -107,7 +109,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "SELFHEAL_ENABLED", type: "bool", default: "false", description: "Enable self-healer task" },
 
   // ── Browser ──
-  { env: "BROWSER_ENGINE", type: "string", default: "patchright", description: "Browser engine: patchright, chromium" },
+  { env: "BROWSER_ENGINE", type: "string", default: "cloakbrowser", description: "Browser engine: cloakbrowser" },
   { env: "BROWSER_HEADED", type: "bool", default: "false", description: "Run browser in headed mode" },
   { env: "BROWSER_NO_SANDBOX", type: "bool", default: "false", description: "Disable browser sandbox" },
   { env: "BROWSER_CHANNEL", type: "string", description: "Browser channel (e.g. chrome)" },
@@ -130,7 +132,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "NOTEBOOKLM_DEFAULT_NOTEBOOK", type: "string", default: "", description: "Default NotebookLM notebook" },
   { env: "PERMISSION_TIMEOUT_SEC", type: "int", default: "60", description: "Permission prompt timeout (seconds)" },
   { env: "TRUST_MODE", type: "bool", default: "false", description: "Skip permission prompts" },
-  { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | sandbox" },
+  { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | seatbelt | docker" },
   { env: "MAX_AGENT_CALL_PER_HOUR", type: "int", required: true, description: "Agent API rate limit: max requests per caller per hour" },
   { env: "MAX_AGENT_CALL_PER_DAY", type: "int", required: true, description: "Agent API rate limit: max requests per caller per day" },
   { env: "TELEGRAM_ENABLED", type: "bool", default: "", description: "Enable Telegram platform (fallback: token presence)" },
@@ -140,6 +142,13 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "ENABLE_AGENT_API", type: "bool", default: "false", description: "Enable A2A agent API (exposes port)" },
   { env: "ENABLE_ASYNC_DELEGATION", type: "bool", default: "false", description: "Enable async session delegation tools (spawn/check/terminate)" },
   { env: "MAX_SESSIONS", type: "int", default: "10", description: "Max concurrent managed sessions per user" },
+
+  // ── Artifact Store (S3) ──
+  { env: "ARTIFACT_S3_ENDPOINT", type: "string", description: "S3-compatible endpoint for artifact store" },
+  { env: "ARTIFACT_S3_KEY", type: "string", description: "S3 access key ID" },
+  { env: "ARTIFACT_S3_SECRET", type: "string", description: "S3 secret access key" },
+  { env: "ARTIFACT_S3_BUCKET", type: "string", default: "abtars-artifacts", description: "S3 bucket name" },
+  { env: "ARTIFACT_S3_REGION", type: "string", default: "auto", description: "S3 region (default auto for R2)" },
 ] as const;
 
 // ── Parsed config type ──────────────────────────────────────────────────────
@@ -181,6 +190,8 @@ export interface EnvConfig {
   discordBotToken: string | undefined;
   discordAppId: string | undefined;
   discordGroupMentions: string;
+  discordAllowBots: string;
+  discordFreeChannels: Set<string>;
 
   // Context window
   ctxWarnPct: number;
@@ -274,14 +285,14 @@ function parseBool(raw: string): boolean {
   return raw.toLowerCase() === "true" || raw === "1";
 }
 
-// ── Singleton ───────────────────────────────────────────────────────────────
+// ── Singleton (globalThis to survive esbuild chunk duplication #1171) ────────
 
-let _env: Readonly<EnvConfig> | null = null;
+const _G = globalThis as unknown as { __abtarsEnv: Readonly<EnvConfig> | null };
 
 /** Get the parsed env config. Auto-initializes on first call if needed. */
 export function getEnv(): Readonly<EnvConfig> {
-  if (!_env) initEnv();
-  return _env!;
+  if (!_G.__abtarsEnv) initEnv();
+  return _G.__abtarsEnv!;
 }
 
 /** Sanitized config dump — masks API keys/tokens, shows everything else. For /status. */
@@ -358,6 +369,8 @@ export function initEnv(): Readonly<EnvConfig> {
     discordBotToken: read("DISCORD_BOT_TOKEN"),
     discordAppId: read("DISCORD_APP_ID"),
     discordGroupMentions: readOr("DISCORD_GROUP_MENTIONS", "required"),
+    discordAllowBots: readOr("DISCORD_ALLOW_BOTS", "none"),
+    discordFreeChannels: new Set(readOr("DISCORD_FREE_CHANNELS", "").split(",").map(s => s.trim()).filter(Boolean)),
 
     ctxWarnPct: parseIntSafe(readOr("CTX_WARN_PCT", "70"), "CTX_WARN_PCT"),
     ctxCompactPct: parseIntSafe(readOr("CTX_COMPACT_PCT", "80"), "CTX_COMPACT_PCT"),
@@ -387,7 +400,7 @@ export function initEnv(): Readonly<EnvConfig> {
 
     selfhealEnabled: parseBool(readOr("SELFHEAL_ENABLED", "false")),
 
-    browserEngine: readOr("BROWSER_ENGINE", "patchright"),
+    browserEngine: readOr("BROWSER_ENGINE", "cloakbrowser"),
     browserHeaded: parseBool(readOr("BROWSER_HEADED", "false")),
     browserNoSandbox: parseBool(readOr("BROWSER_NO_SANDBOX", "false")),
     browserChannel: read("BROWSER_CHANNEL"),
@@ -431,12 +444,12 @@ export function initEnv(): Readonly<EnvConfig> {
   for (const w of warnings) logWarn("env", w);
   logInfo("env", `${SCHEMA.length} vars loaded, ${overrideCount} overridden, ${warnings.length} warnings`);
 
-  _env = Object.freeze(env);
-  return _env;
+  _G.__abtarsEnv = Object.freeze(env);
+  return _G.__abtarsEnv;
 }
 
 /** Reset singleton (for tests only). */
-export function _resetEnv(): void { _env = null; }
+export function _resetEnv(): void { _G.__abtarsEnv = null; }
 
 // ── Typo detection helpers ──────────────────────────────────────────────────
 

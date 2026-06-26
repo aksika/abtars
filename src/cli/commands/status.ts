@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars status` — print manifest + bridge state.
  * Read-only. Exit code 0 on healthy install, 1 otherwise.
@@ -9,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export async function status(): Promise<number> {
+  await printBanner("status");
   const paths = packagePaths('abtars');
   const manifest = await readManifest(paths.manifest);
 
@@ -21,7 +23,11 @@ export async function status(): Promise<number> {
   }
 
   const appExists = existsSync(paths.app);
-  const appPrevExists = existsSync(paths.appPrev);
+  let rollbackCount = 0;
+  try {
+    const history: string[] = JSON.parse(readFileSync(paths.releasesHistory, "utf-8"));
+    rollbackCount = Math.min(history.length - 1, 3); // skip current
+  } catch {}
 
   const lines = [
     `abtars status`,
@@ -30,10 +36,10 @@ export async function status(): Promise<number> {
     `  commit:        ${manifest.commit ?? '(unknown)'}`,
     `  branch:        ${manifest.branch ?? '(unknown)'}`,
     `  source:        ${manifest.source}`,
-    `  mode:          ${manifest.installMode ?? 'supervised'}`,
+    `  mode:          ${manifest.installMode ?? 'daemon'}`,
     `  activated:     ${manifest.activatedAt}`,
     `  app/:          ${appExists ? '✓ present' : '✗ missing'}`,
-    `  app.prev/:     ${appPrevExists ? '✓ present' : '○ none'}`,
+    `  rollback:      ${rollbackCount > 0 ? `${rollbackCount} available` : '○ none'}`,
     `  previous:      ${manifest.previousVersion ?? '(none)'}`,
     `  host:          ${manifest.host}`,
   ];
@@ -50,6 +56,15 @@ export async function status(): Promise<number> {
   } catch {
     lines.push(`  bridge:        ○ stopped`);
   }
+
+  // Dashboard + Agent API ports from .env
+  try {
+    const envContent = readFileSync(join(paths.home, 'config', '.env'), 'utf-8');
+    const webPort = envContent.match(/^WEB_PORT=(\d+)/m)?.[1];
+    const apiPort = envContent.match(/^AGENT_API_PORT=(\d+)/m)?.[1];
+    if (webPort) lines.push(`  dashboard:     :${webPort}`);
+    if (apiPort) lines.push(`  agent-api:     :${apiPort}`);
+  } catch { /* no .env */ }
 
   process.stdout.write(`${lines.join('\n')}\n`);
 

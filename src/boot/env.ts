@@ -65,49 +65,21 @@ for (const envPath of ENV_FILES) {
 }
 
 // Load secrets from ~/.abtars/secret/ — decrypt + auto-encrypt plaintext + load into process.env
-import { createDecipheriv, createCipheriv, randomBytes, hkdfSync } from "node:crypto";
+import { loadKey, deriveKey, encrypt, decrypt, validateKey } from "../utils/crypto.js";
 
-if (existsSync(secretDir)) {
-  let purposeKey: Buffer | null = null;
+export function reloadSecrets(): void {
+  if (!existsSync(secretDir)) return;
 
-  function getPurposeKey(): Buffer | null {
-    if (purposeKey) return purposeKey;
-    try {
-      // Read master key directly from file (no abmind import needed in bundle)
-      const abmindHome = process.env["ABMIND_HOME"] ?? resolve(homedir(), ".abmind");
-      const keyFile = resolve(abmindHome, "secret", "abmind.key");
-      if (!existsSync(keyFile)) return null;
-      const hex = readFileSync(keyFile, "utf-8").trim();
-      if (hex.length !== 64) return null;
-      const master = Buffer.from(hex, "hex");
-      purposeKey = Buffer.from(hkdfSync("sha256", master, "", "abtars-secrets-files-v1", 32));
-      return purposeKey;
-    } catch { return null; }
+  const keyFile = resolve(home, "config", "abtars.key");
+  const master = loadKey(keyFile);
+  const purposeKey = master ? deriveKey(master) : null;
+
+  if (purposeKey && !validateKey(keyFile, purposeKey)) {
+    process.stderr.write(`[env] ⚠ abtars.key failed verification — secrets will not be decrypted (wrong passphrase?)\n`);
+    return;
   }
 
-  function decryptFile(raw: string): string | null {
-    const key = getPurposeKey();
-    if (!key) return null;
-    const buf = Buffer.from(raw.slice(4), "base64");
-    const iv = buf.subarray(1, 13);
-    const tag = buf.subarray(buf.length - 16);
-    const ct = buf.subarray(13, buf.length - 16);
-    const d = createDecipheriv("aes-256-gcm", key, iv);
-    d.setAuthTag(tag);
-    return d.update(ct, undefined, "utf-8") + d.final("utf-8");
-  }
-
-  function encryptFile(plaintext: string): string | null {
-    const key = getPurposeKey();
-    if (!key) return null;
-    const iv = randomBytes(12);
-    const c = createCipheriv("aes-256-gcm", key, iv);
-    const enc = Buffer.concat([c.update(plaintext, "utf-8"), c.final()]);
-    return "ENC:" + Buffer.concat([Buffer.from([0x01]), iv, enc, c.getAuthTag()]).toString("base64");
-  }
-
-  // Tokens that should stay readable (not encrypted) — localhost convenience tokens
-  const SKIP_ENCRYPT = new Set(["WEB_AUTH_TOKEN"]);
+  const SKIP_ENCRYPT = new Set(["WEB_AUTH"]);
 
   for (const file of readdirSync(secretDir)) {
     const fullPath = resolve(secretDir, file);
@@ -117,28 +89,28 @@ if (existsSync(secretDir)) {
 
     let value: string | null;
     if (raw.startsWith("ENC:")) {
-      try {
-        value = decryptFile(raw);
-      } catch {
+      if (!purposeKey) continue;
+      value = decrypt(raw, purposeKey);
+      if (!value) {
         process.stderr.write(`[env] ⚠ Failed to decrypt secret/${file} — skipping (wrong key?)\n`);
         continue;
       }
-      if (!value) continue;
     } else {
       value = raw;
-      // Auto-encrypt plaintext in place (skip tokens that need to stay readable)
-      if (!SKIP_ENCRYPT.has(file)) {
-        const encrypted = encryptFile(value);
-        if (encrypted) { try { writeFileSync(fullPath, encrypted, { mode: 0o600 }); } catch { /* leave plaintext */ } }
+      if (purposeKey && !SKIP_ENCRYPT.has(file)) {
+        const encrypted = encrypt(value, purposeKey);
+        try { writeFileSync(fullPath, encrypted, { mode: 0o600 }); } catch { /* leave plaintext */ }
       }
     }
 
-    // No extension → env var. Has extension → tool access only.
     if (!file.includes(".")) {
       process.env[file] = value;
     }
   }
 }
+
+// Run on initial boot
+reloadSecrets();
 
 // Remove legacy <secret> lines from .env (they're redundant now)
 try {

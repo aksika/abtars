@@ -18,7 +18,6 @@ export async function handleMemory(_text: string, ctx: CommandContext): Promise<
     `  weekly: ${stats.consolidationFiles.weekly}`,
     `  quarterly: ${stats.consolidationFiles.quarterly}`, "",
     `📄 Ingested documents: ${stats.ingestedDocuments}`,
-    `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
     `💾 DB size: ${dbMb} MB`, "",
     `📚 Layer 6 (NotebookLM): ${ctx.nlmConfig.enabled ? "enabled" : "disabled"}`,
   ].join("\n");

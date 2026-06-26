@@ -18,7 +18,6 @@ export interface CommandContext {
   memoryConfig: PipelineDeps["memoryConfig"];
   nlmConfig: PipelineDeps["nlmConfig"];
   idleSave: PipelineDeps["idleSave"];
-  sessions: PipelineDeps["sessions"];
   sessionManager: PipelineDeps["sessionManager"];
   updateCtxStart: PipelineDeps["updateCtxStart"];
   cronCurrentJob?: RunningJob | null;

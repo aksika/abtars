@@ -12,10 +12,10 @@ import type { InstantStoreParams } from "../../types/index.js";
 import { logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
-import { loadUsers } from "../user-registry.js";
+import { getMasterUserId } from "../master-user.js";
 
 function getMasterUserId(): string {
-  return loadUsers().users.find(u => u.role === "master")?.userId ?? "aksika";
+  return getMasterUserId();
 }
 
 const TAG = "tool_registry";
@@ -109,9 +109,31 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
   return executeBash(cmd, timeout, signal);
 }
 
+let _seatbeltActive = false;
+let _seatbeltPolicy: import("../seatbelt/policy.js").SeatbeltPolicy | null = null;
+
+/** Wire seatbelt for OS-level command sandboxing (#906). */
+export function setSeatbelt(active: boolean, policy?: import("../seatbelt/policy.js").SeatbeltPolicy): void {
+  _seatbeltActive = active;
+  _seatbeltPolicy = policy ?? null;
+}
+
 function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve) => {
-    const child = execFile("bash", ["-c", cmd], { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    let bin = "bash";
+    let args = ["-c", cmd];
+
+    // #906: Wrap in OS sandbox if seatbelt active and command needs sandboxing
+    if (_seatbeltActive && _seatbeltPolicy) {
+      const { shouldSandbox, wrapCommand } = require("../seatbelt/index.js") as typeof import("../seatbelt/index.js");
+      if (shouldSandbox(cmd)) {
+        const wrapped = wrapCommand(cmd, _seatbeltPolicy);
+        bin = wrapped.bin;
+        args = wrapped.args;
+      }
+    }
+
+    const child = execFile(bin, args, { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       const result: Record<string, unknown> = {};
       if (stdout) result["stdout"] = stdout.slice(0, 50_000);
       if (stderr) result["stderr"] = stderr.slice(0, 10_000);
@@ -121,7 +143,11 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promis
     });
     if (signal) {
       if (signal.aborted) { child.kill("SIGTERM"); return; }
-      const onAbort = (): void => { child.kill("SIGTERM"); };
+      const onAbort = (): void => {
+        child.kill("SIGTERM");
+        // #1003: escalate to SIGKILL if child doesn't exit within 3s
+        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
+      };
       signal.addEventListener("abort", onAbort, { once: true });
       child.on("exit", () => signal.removeEventListener("abort", onAbort));
     }
@@ -153,7 +179,7 @@ export function setPeerActivityCallback(cb: ((msg: string) => void) | null): voi
 
 const bashTool: ToolDefinition = {
   name: "execute_bash",
-  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, abtars.sh, watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised.",
+  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, abtars.sh, abtars-watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised.",
   parameters: {
     type: "object",
     properties: { command: { type: "string", description: "The bash command to execute" } },
@@ -246,12 +272,18 @@ const memoryRecallTool: ToolDefinition = {
   async execute(args, context): Promise<string> {
     if (memoryBackend) {
       try {
+        const t0 = Date.now();
+        const userId = context?.userId ?? getMasterUserId();
+        const { loadUsers } = await import("../user-registry.js");
+        const userEntry = loadUsers().byUserId.get(userId);
         const result = await memoryBackend.recall({
           translated: [args["query"] ?? ""],
           original: args["query"] ?? "",
-          userId: context?.userId ?? getMasterUserId(),
+          userId,
           limit: parseInt(args["limit"] ?? "10", 10),
+          maxClassification: userEntry?.maxClass ?? 1,
         });
+        import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
         return JSON.stringify(result);
       } catch (err) {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
@@ -318,7 +350,7 @@ const webBrowseTool: ToolDefinition = {
     properties: {
       task: { type: "string", description: "What to do on the web" },
       chat_id: { type: "string", description: "Chat ID for result delivery" },
-      engine: { type: "string", enum: ["patchright"], description: "Browser engine (default: patchright)" },
+      engine: { type: "string", enum: ["cloakbrowser"], description: "Browser engine (default: cloakbrowser)" },
     },
     required: ["task", "chat_id"],
   },
@@ -361,7 +393,6 @@ let _ircSend: ((channel: string, message: string) => void) | null = null;
 export function setIrcSend(fn: (channel: string, message: string) => void): void { _ircSend = fn; }
 
 /** @deprecated — secret_get now reads from file, not DB. Kept for backward compat (callers may still call this). */
-export function setSecretGetDb(_db: unknown): void { /* no-op */ }
 
 let _sendDocument: ((path: string, caption?: string) => Promise<number>) | null = null;
 
@@ -576,9 +607,18 @@ const secretGetTool: ToolDefinition = {
 import { skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool } from "./skill-authoring.js";
 import { mcpTool } from "./mcp-tool.js";
 import { getDelegationTools } from "./delegation-tools.js";
+import { getPeerDelegationTools } from "./peer-delegation-tools.js";
+import { getOrcTools } from "./orc-tools.js";
 import { kanbanTool } from "./kanban-tool.js";
+import { channelPostTool, channelReadTool } from "./channel-tool.js";
+import { artifactPushTool, artifactPullTool, artifactAttachTool } from "./artifact-tools.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, ...getDelegationTools()];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerDelegationTools(), ...getOrcTools()];
+
+// Conditional: artifact store tools (#929)
+if (process.env["ARTIFACT_S3_ENDPOINT"]) {
+  ALL_TOOLS.push(artifactPushTool, artifactPullTool);
+}
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 

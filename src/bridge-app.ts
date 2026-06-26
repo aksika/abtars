@@ -10,8 +10,8 @@ import { phaseTransport } from "./boot/phase-transport.js";
 import { phaseMemoryIpc } from "./boot/phase-memory-ipc.js";
 import { phasePipelineDeps } from "./boot/phase-pipeline-deps.js";
 import { phasePlatforms } from "./boot/phase-platforms.js";
+import { phasePlatformsConnect } from "./boot/phase-platforms-connect.js";
 import { phaseCapabilities } from "./boot/phase-capabilities.js";
-import { phaseStartupNotification } from "./boot/phase-startup-notification.js";
 import { phaseHeartbeat } from "./boot/phase-heartbeat.js";
 import { phaseSleep } from "./boot/phase-sleep.js";
 import { phaseDashboard } from "./boot/phase-dashboard.js";
@@ -81,13 +81,12 @@ export class Bridge {
   }
 }
 
+import { bootGraph } from "./boot/boot-graph.js";
+import { BOOT_NODES } from "./boot/boot-nodes.js";
+
 /**
- * Boot phase sequence. Each phase receives the BootCtx and populates
- * fields used by later phases. Order must not change without updating
- * the boot log expectations and phase-order.test.ts.
- *
- * Phases that need the Bridge instance (phase-platforms, phase-shutdown)
- * receive it as a second arg via the dispatcher in startBridge().
+ * Boot phase sequence — retained for phase-order.test.ts compatibility.
+ * The actual dispatcher is bootGraph() which uses BOOT_NODES.
  */
 export const BOOT_PHASES = [
   phaseConfig,
@@ -96,8 +95,8 @@ export const BOOT_PHASES = [
   phaseMemoryIpc,
   phasePipelineDeps,
   phasePlatforms,
+  phasePlatformsConnect,
   phaseCapabilities,
-  phaseStartupNotification,
   phaseHeartbeat,
   phaseSleep,
   phaseDashboard,
@@ -121,39 +120,38 @@ export async function startBridge(): Promise<number> {
     }
   }
 
+  // Boot-time doctor fix — chmod secrets, fix dirs (#1180)
+  try {
+    const { runFixes } = await import("./cli/commands/doctor-probes.js");
+    await runFixes();
+  } catch { /* non-fatal */ }
+
   // Populate version/commit from manifest.json
   const deployed = (await import("./paths.js")).getDeployedVersion();
   ctx.version = deployed.version;
   ctx.commit = deployed.commit;
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
-  initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2) });
+  const startReason = process.env["ABTARS_START_REASON"] ?? "unknown";
+  initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2), startReason });
 
   const bridge = new Bridge(ctx);
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;
   ctx.requestShutdownWithCode = (code: number) => bridge.requestShutdown(code);
 
-  // All other phases — universal try/catch, no phase can crash the bridge (#331)
-  for (const phase of BOOT_PHASES.slice(1)) {
+  // Run boot graph — all phases execute in dependency order (#944)
+  await bootGraph(BOOT_NODES, ctx);
+
+  // phaseShutdown is special (needs Bridge instance) — run after graph
+  {
     const t = Date.now();
     try {
-      let result: import("./boot/context.js").PhaseResult;
-      if (phase === phaseShutdown) {
-        result = await phaseShutdown(ctx, bridge);
-      } else {
-        result = await (phase as (ctx: BootCtx) => Promise<import("./boot/context.js").PhaseResult>)(ctx);
-      }
-      if (!ctx.phaseHealth.has(phase.name)) {
-        ctx.phaseHealth.set(phase.name, { status: result === "skipped" ? "skipped" : "ok" });
-      }
-      if (result === "skipped") {
-        logInfo("boot", `⊘ ${phase.name} (skipped)`);
-      } else {
-        logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
-      }
+      const result = await phaseShutdown(ctx, bridge);
+      ctx.phaseHealth.set(phaseShutdown.name, { status: result === "skipped" ? "skipped" : "ok" });
+      logInfo("boot", `✓ ${phaseShutdown.name} (${Date.now() - t}ms)`);
     } catch (err) {
-      ctx.phaseHealth.set(phase.name, { status: "failed", error: err instanceof Error ? err.message : String(err) });
-      logError("boot", `✗ ${phase.name} failed — continuing without it`, err);
+      ctx.phaseHealth.set(phaseShutdown.name, { status: "failed", error: err instanceof Error ? err.message : String(err) });
+      logError("boot", `✗ ${phaseShutdown.name} failed`, err);
     }
   }
 
@@ -161,6 +159,38 @@ export async function startBridge(): Promise<number> {
   const { hasHooks, fire } = await import("./components/hooks/hook-system.js");
   if (hasHooks("BridgeStart")) {
     await fire("BridgeStart", { event: "BridgeStart", timestamp: new Date().toISOString(), sessionKey: "", platform: "", userId: "" });
+  }
+
+  // #1000: Back online notification FIRST, then greeting
+  if (ctx.telegramAdapter || ctx.discordAdapter) {
+    try {
+      const { sendToMainChat } = await import("./components/main-chat.js");
+      const version = ctx.commit && ctx.commit !== "?" && !ctx.version.includes(ctx.commit)
+        ? `v${ctx.version}-${ctx.commit}` : `v${ctx.version}`;
+      // #1202: Include update result if deploy just completed
+      let deployNote = "";
+      try {
+        const { readFileSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const state = JSON.parse(readFileSync(join(process.env["HOME"] ?? "", ".abtars", "deploy.state"), "utf-8"));
+        if (state.completedAt && Date.now() - new Date(state.completedAt).getTime() < 5 * 60_000) {
+          deployNote = state.status === "success" ? " (updated)" : ` (update ${state.status})`;
+        }
+      } catch {}
+      await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `🔄 Back online. ${version}${deployNote}`);
+      logInfo("main", "Startup: Back online notification sent");
+      const failed = [...ctx.phaseHealth].filter(([, h]) => h.status === "failed" || h.status === "skipped");
+      if (failed.length > 0) {
+        const lines = failed.map(([name, h]) => `  ${h.status === "failed" ? "✗" : "»"} ${name}${h.error ? `: ${h.error}` : ""}`);
+        await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `⚠️ Degraded boot (${failed.length} subsystem${failed.length > 1 ? "s" : ""} down):\n${lines.join("\n")}`);
+      }
+    } catch (err) { logWarn("main", `Back online notification failed: ${err}`); }
+  }
+
+  // #980: Greeting fires via Spin when session is ready (not here — transport may not be handshaked yet)
+  if (ctx.telegramAdapter) {
+    const { spin } = await import("./components/spin.js");
+    spin.setGreetingAdapter(ctx.telegramAdapter);
   }
 
   return bridge.waitForExit();

@@ -11,7 +11,9 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
   const { msg, adapter, deps } = ctx;
   const userId = msg.userId;
   const activeId = deps.sessionManager.getActiveSessionId(userId, msg.platform);
-  const entry = deps.sessions.getOrCreate(activeId);
+  const { spin } = await import("../spin.js");
+  const entry = spin.getSessionById(activeId);
+  if (!entry) { await next(); return; }
 
   if (entry.busy) {
     const text = ctx.text.trim();
@@ -19,7 +21,7 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
 
     // Read-only commands bypass busy guard — produce independent messages (#766)
     const firstWord = lower.split(/\s/)[0]!;
-    const READONLY = ["/memory", "/models", "/status", "/help", "/tasks", "/usage", "/sleep", "/sessions", "/whoami", "/model"];
+    const READONLY = ["/memory", "/models", "/status", "/help", "/tasks", "/usage", "/sleep", "/sessions", "/session", "/whoami", "/model"];
     if (READONLY.includes(firstWord)) {
       await next();
       return;
@@ -63,7 +65,7 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
       logWarn("busy-guard", `Queue overflow for ${activeId} — dropped ${dropped} oldest message(s)`);
     }
     entry.queue.push({ msg, adapter });
-    logDebug("busy-guard", `Queued "${ctx.text.slice(0, 40)}" for ${activeId} (${entry.queue.length} pending)`);
+    logInfo("busy-guard", `Queued "${ctx.text.slice(0, 40)}" for ${activeId} (${entry.queue.length} pending)`);
     if (!ctx.deferReply) {
       if (entry.compacting) {
         try { await adapter.sendMessage(msg.channelId, "☕ Hold on, just tidying up my thoughts over coffee... I'll get to you in a moment!", { threadId: msg.threadId }); }
@@ -77,3 +79,19 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
 
   await next();
 };
+
+/**
+ * Release busy flag and drain next queued message.
+ * Called from message-pipeline finally block.
+ */
+export function releaseBusy(
+  session: { busy: boolean; queue: Array<{ msg: any; adapter: any }>; lastActiveAt: number },
+  pipeline: (msg: any, adapter: any) => Promise<void>,
+): void {
+  session.busy = false;
+  session.lastActiveAt = Date.now();
+  if (session.queue.length) {
+    const next = session.queue.shift()!;
+    pipeline(next.msg, next.adapter).catch(() => {});
+  }
+}

@@ -2,7 +2,7 @@
  * phase-config — boot phase 1: parse CLI flags, load config, set log level.
  *
  * Side effects:
- * - Prepends ~/.abtars/bin to PATH
+ * - Prepends ~/.local/bin to PATH
  * - Truncates ~/.abtars/logs/launchd.log
  * - Sets log level (module-level singleton: logger.currentLevel)
  * - Emits BRIDGE START + startup log lines
@@ -12,7 +12,7 @@
  */
 
 import { logAndSwallow } from "../components/log-and-swallow.js";
-import { writeFileSync, existsSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadAndValidateConfig } from "../components/config.js";
@@ -27,7 +27,7 @@ import type { TtsConfig } from "../components/tts.js";
 
 export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
   // Intentional: raw process.env — mutates PATH for child processes (kiro-cli, gemini-cli)
-  const binDir = join(abtarsHome(), "bin");
+  const binDir = join(homedir(), ".local", "bin");
   if (!process.env["PATH"]?.includes(binDir)) {
     process.env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`;
   }
@@ -36,23 +36,11 @@ export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
   ctx.config = await loadAndValidateConfig();
   setLogLevel(ctx.config.logLevel);
 
-  // Resolve memory path from MEMORY env var
-  const memoryEnv = getEnv().memory;
-  let memoryDir: string;
-  let memoryEnabled: boolean;
-
-  if (memoryEnv === "none") {
-    memoryEnabled = false;
-    memoryDir = "";
-  } else if (memoryEnv === "auto") {
-    const defaultPath = join(homedir(), ".abmind", "memory");
-    memoryEnabled = existsSync(join(defaultPath, "memory.db"));
-    memoryDir = defaultPath;
-  } else {
-    // Explicit path
-    memoryDir = memoryEnv.startsWith("~") ? join(homedir(), memoryEnv.slice(1)) : memoryEnv;
-    memoryEnabled = true;
-  }
+  // Resolve memory provider from MEMORY env var
+  const provider = getEnv().memory; // "abmind" | "none"
+  const memoryEnabled = provider !== "none";
+  const abmindHome = process.env["ABMIND_HOME"] || join(homedir(), ".abmind");
+  const memoryDir = memoryEnabled ? join(abmindHome, "memory") : "";
 
   ctx.memoryConfig = { memoryEnabled, memoryDir } as any;
   // startedAt set by createBootCtx; preserved here
@@ -77,7 +65,7 @@ export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
     ctx.platforms.discord && "discord",
   ].filter(Boolean).join(", ");
   logInfo("main", "──────────── BRIDGE START ────────────");
-  logInfo("main", `🚀 Bridge starting (platforms=${enabledList}, log=${ctx.config.logLevel})`);
+  logInfo("main", `v${ctx.version}${ctx.commit ? "-" + ctx.commit : ""} (platforms=${enabledList}, log=${ctx.config.logLevel})`);
   if (ctx.sttConfig) logInfo("main", `🎤 STT enabled (${ctx.sttConfig.provider}/${ctx.sttConfig.model || "whisper-large-v3"})`);
   if (ctx.ttsConfig) logInfo("main", `🔊 TTS enabled (Edge TTS / ${ctx.ttsConfig.voice})`);
 

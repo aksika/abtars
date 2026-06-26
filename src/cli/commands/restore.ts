@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars restore` — restore from backup archive, auto-detect type.
  *
@@ -10,9 +11,11 @@
 
 import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
+import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { createDecipheriv, hkdfSync } from "node:crypto";
-import { abtarsHome } from "../../paths.js";
+import { reconcile } from "../deploy-lib/reconcile.js";
+import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
 
 export interface RestoreOpts {
   config?: boolean;
@@ -20,6 +23,7 @@ export interface RestoreOpts {
 }
 
 export async function restore(archivePath: string, opts: RestoreOpts = {}): Promise<number> {
+  await printBanner("restore");
   if (!archivePath) {
     process.stderr.write("Usage: abtars restore <file.zip|.7z|.abm|.enc> [--config] [--passphrase <p>]\n");
     return 1;
@@ -47,7 +51,7 @@ export async function restore(archivePath: string, opts: RestoreOpts = {}): Prom
     }
 
     // Decrypt .enc → temp zip
-    const abmindHome = process.env["ABMIND_HOME"] ?? join(dirname(abtarsHome()), ".abmind");
+    const abmindHome = resolveAbmindHome();
     const keyPath = join(abmindHome, "secret", "abmind.key");
     if (!existsSync(keyPath)) {
       process.stderr.write("Error: abmind.key not found — run `abmind restore <file.abm>` first to recreate it, then retry.\n");
@@ -72,19 +76,28 @@ export async function restore(archivePath: string, opts: RestoreOpts = {}): Prom
     const dir = dirname(archivePath);
     const sibling = findSiblingAbm(dir, date);
     if (sibling) {
-      const rc = restoreAbmind(sibling, opts.passphrase);
-      if (rc !== 0) return rc;
+      const rc = restoreAbmindSibling(sibling, opts.passphrase);
+      if (rc !== 0) {
+        // Continue with abtars restore, print prominent message at the end
+        const abmFile = sibling.endsWith(".abm") ? sibling : null;
+        process.on("exit", () => {
+          process.stderr.write("\n\n══════════════════════════════════════════════════\n");
+          process.stderr.write("⚠ MEMORY NOT RESTORED — wrong passphrase.\n");
+          process.stderr.write("Fix: abmind restore " + (abmFile ?? "<file.abm>") + " --passphrase <original>\n");
+          process.stderr.write("══════════════════════════════════════════════════\n");
+        });
+      }
     } else {
       process.stdout.write("ℹ no sibling .abm found — memory not restored\n");
     }
   }
 
-  // Extract zip to ~/.abtars/
+  // Extract zip to ~/.abtars/ (overlays existing — bridge keeps running)
   return extractZip(archivePath, abtarsHome());
 }
 
 function restoreAbmind(abmPath: string, passphrase?: string): number {
-  const args = ["restore", "--input", abmPath, "--mode", "merge"];
+  const args = ["restore", abmPath, "--mode", "merge"];
   if (passphrase) args.push("--passphrase", passphrase);
 
   const envPassphrase = process.env["ABMIND_BACKUP_PASSPHRASE"];
@@ -102,10 +115,38 @@ function restoreAbmind(abmPath: string, passphrase?: string): number {
   return 0;
 }
 
-function extractZip(archivePath: string, destDir: string): number {
-  const is7z = archivePath.endsWith(".7z");
+/** Handle abmind sibling: .abm direct, .7z/.zip → extract to ~/.abmind + find .abm inside */
+function restoreAbmindSibling(siblingPath: string, passphrase?: string): number {
+  if (siblingPath.endsWith(".abm")) return restoreAbmind(siblingPath, passphrase);
 
-  // Sanity check
+  // .7z or .zip: extract filesystem to ~/.abmind/, then find .abm inside and restore memories
+  const abmindHome = resolveAbmindHome();
+  const is7z = siblingPath.endsWith(".7z");
+  const extractResult = is7z
+    ? spawnSync("7z", ["x", `-o${abmindHome}`, "-aoa", "-bso0", siblingPath], { encoding: "utf-8", stdio: "pipe" })
+    : spawnSync("unzip", ["-oq", siblingPath, "-d", abmindHome], { encoding: "utf-8", stdio: "pipe" });
+  if (extractResult.status !== 0) {
+    process.stderr.write("abmind archive extract failed\n");
+    return 1;
+  }
+  process.stdout.write("✓ abmind files restored\n");
+
+  // Find .abm file extracted into abmindHome
+  const abmFile = readdirSync(abmindHome).find(f => f.endsWith(".abm"));
+  if (abmFile) {
+    const abmPath = join(abmindHome, abmFile);
+    const rc = restoreAbmind(abmPath, passphrase);
+    try { unlinkSync(abmPath); } catch {} // cleanup extracted .abm
+    return rc;
+  }
+  process.stdout.write("ℹ no .abm in archive — files restored but memories not imported\n");
+  return 0;
+}
+
+function extractZip(archivePath: string, destDir: string): number {
+  // Avoid "getcwd: cannot access parent directories" if CWD is inside destDir
+  try { process.chdir(homedir()); } catch {}
+  const is7z = archivePath.endsWith(".7z");
   const listCmd = is7z
     ? spawnSync("7z", ["l", archivePath], { encoding: "utf-8" })
     : spawnSync("unzip", ["-l", archivePath], { encoding: "utf-8" });
@@ -117,11 +158,11 @@ function extractZip(archivePath: string, destDir: string): number {
   // Extract, excluding binary dirs + manifest (install state, not user data)
   let result;
   if (is7z) {
-    result = spawnSync("7z", ["x", `-o${destDir}`, "-aoa", "-xr!releases", "-xr!current", "-xr!bin", "-xr!manifest.json", archivePath],
-      { encoding: "utf-8", stdio: "inherit" });
+    result = spawnSync("7z", ["x", `-o${destDir}`, "-aoa", "-bso0", "-xr!releases", "-xr!current", "-xr!bin", "-xr!manifest.json", archivePath],
+      { encoding: "utf-8", stdio: "pipe" });
   } else {
-    result = spawnSync("unzip", ["-o", archivePath, "-d", destDir, "-x", "releases/*", "current/*", "bin/*", "manifest.json"],
-      { encoding: "utf-8", stdio: "inherit" });
+    result = spawnSync("unzip", ["-oq", archivePath, "-d", destDir, "-x", "releases/*", "current/*", "bin/*", "manifest.json"],
+      { encoding: "utf-8", stdio: "pipe" });
   }
 
   if (result.status !== 0) {
@@ -129,24 +170,28 @@ function extractZip(archivePath: string, destDir: string): number {
     return 1;
   }
 
+  // Reconcile runtime tree (skills/core, prompts, config seeds)
+  const templatesSrc = join(homedir(), ".abtars-releases", "src", "abtars", "templates");
+  reconcile(templatesSrc, destDir);
+
   process.stdout.write(`✓ Restored to ${destDir}\n`);
   return 0;
 }
 
 function extractDate(filePath: string): string | null {
   const name = basename(filePath);
-  const match = name.match(/(\d{4}-\d{2}-\d{2})/);
+  const match = name.match(/(\d{8}-\d{4})/);
   return match?.[1] ?? null;
 }
 
 function findSiblingAbm(dir: string, date: string | null): string | null {
   if (!existsSync(dir)) return null;
-  const files = readdirSync(dir).filter(f => f.endsWith(".abm"));
+  // Look for abmind zip first, then .abm
+  const files = readdirSync(dir).filter(f => f.startsWith("abmind-") && (f.endsWith(".zip") || f.endsWith(".7z") || f.endsWith(".abm")));
   if (date) {
     const exact = files.find(f => f.includes(date));
     if (exact) return join(dir, exact);
   }
-  // Fallback: latest .abm in the dir
   const sorted = files.sort().reverse();
   return sorted[0] ? join(dir, sorted[0]) : null;
 }

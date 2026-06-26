@@ -17,8 +17,6 @@ import type { SleepRuntime } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { readEnv, readEnvWithDefault } from "../../components/env.js";
 
-const TAG = "sleep";
-
 export interface SleepOpts {
   sleepHour: number;
   sleepAuditDir: string;
@@ -45,6 +43,8 @@ export interface SleepHandle {
   spawn(): void;
   /** Called by tick system to check if hardware sleep should fire. */
   checkHwSleep(): void;
+  /** Force-clear isActive if no progress in 30min (#990). */
+  checkStale(): void;
 }
 
 const MAX_RETRIES = 3;
@@ -121,7 +121,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       catch (err) { logWarn("sleep", `Invalid SLEEP_QUALITY='${raw}', using ${abmind()!.DEFAULT_LEVEL}: ${err instanceof Error ? err.message : String(err)}`); return abmind()!.DEFAULT_LEVEL; }
     })();
 
-    abmind()!.runSleepCycle({ runtime: opts.runtime, level })
+    abmind()!.runSleepCycle({ runtime: opts.runtime, level, fresh: forced && !!forceSleep?.includes("fresh") })
       .then(async (result: { ok: boolean; failCount: number }) => {
         running = false;
         progress = null;
@@ -223,12 +223,30 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
   }
 
+  function checkStale(): void {
+    if (!running) return;
+    const STALE_MS = 30 * 60_000;
+    try {
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+      const lockPath = join(opts.sleepAuditDir, `sleep_${dateStr}.lock`);
+      if (!existsSync(lockPath)) { running = false; logWarn("sleep", "Sleep stuck — no lock file, force-clearing isActive"); return; }
+      const lock = JSON.parse(readFileSync(lockPath, "utf-8")) as { startedAt?: number; steps?: Record<string, { duration?: number }> };
+      const stepTimes = Object.values(lock.steps ?? {}).map(s => (s as any).startedAt ?? (s as any).completedAt ?? 0).filter(Boolean);
+      const lastActivity = Math.max(lock.startedAt ?? 0, ...stepTimes);
+      if (lastActivity > 0 && Date.now() - lastActivity > STALE_MS) {
+        running = false;
+        logWarn("sleep", `Sleep stuck — no progress in 30min (last activity ${Math.round((Date.now() - lastActivity) / 60_000)}min ago), force-clearing isActive`);
+      }
+    } catch { /* lock file unreadable — leave running as-is, next tick retries */ }
+  }
+
   return {
     get isActive() { return running; },
     get progress() { return progress; },
     get awaitingHwSleep() { return _awaitingHwSleep; },
     spawn: spawnSleep,
     checkHwSleep,
+    checkStale,
   };
 }
 

@@ -20,7 +20,6 @@ vi.mock("../paths.js", () => ({
 }));
 
 import { isDailyCycleDue, resetBedtimeCounter } from "./daily-cycle.js";
-import { SessionRegistry } from "./session-registry.js";
 
 function writeLock(extra: Record<string, unknown> = {}): void {
   writeFileSync(BRIDGE_LOCK, JSON.stringify({ pid: 1, startedAt: Date.now(), lastHeartbeat: Date.now(), ...extra }));
@@ -47,7 +46,6 @@ function baseDeps(overrides: Partial<Parameters<typeof isDailyCycleDue>[0]> = {}
     bridgeLockPath: BRIDGE_LOCK,
     sleepAuditDir: SLEEP_DIR,
     memory: null,
-    sessions: new SessionRegistry(),
     isSleepActive: () => false,
     ...overrides,
   };
@@ -65,12 +63,14 @@ describe("isDailyCycleDue — bridge.lock.forceSleep field", () => {
     expect(readLock().forceSleep).toBe("2026-04-19T12:00:00 test");
   });
 
-  it("returns false when forceSleep is set AND a chat is busy (user-protection wins)", () => {
+  it("returns false when forceSleep is set AND a chat is busy (user-protection wins)", async () => {
     writeLock({ forceSleep: "2026-04-19T12:00:00 test" });
-    const busySessions = new SessionRegistry();
-    busySessions.getOrCreate("chat-1").busy = true;
-    expect(isDailyCycleDue(baseDeps({ sessions: busySessions }))).toBe(false);
-    expect(readLock().forceSleep).toBe("2026-04-19T12:00:00 test"); // still not cleared
+    const spinMod = await import("./spin.js");
+    const origList = spinMod.spin.listAllSessions;
+    (spinMod.spin as any).listAllSessions = () => [{ busy: true, id: "chat-1" }];
+    expect(isDailyCycleDue(baseDeps())).toBe(false);
+    expect(readLock().forceSleep).toBe("2026-04-19T12:00:00 test");
+    (spinMod.spin as any).listAllSessions = origList;
   });
 
   it("returns false when forceSleep is set AND sleep is already active (user-protection wins)", () => {

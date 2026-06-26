@@ -26,6 +26,10 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const notifyPeer = (msg: string): void => { sendNotification(ctx, msg); };
   setPeerActivityCallback(notifyPeer);
 
+  // #978: Create A2A platform adapter (routes peer chat through Spin → Orc)
+  const { AgentApiAdapter } = await import("../platforms/agent-api/agent-api-adapter.js");
+  const a2aAdapter = new AgentApiAdapter();
+
   registry.register("agent-api", {
     configured: Boolean(agentConfig.port),
     async create() {
@@ -36,6 +40,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         memory,
         runtime,
         onPeerActivity: notifyPeer,
+        a2aAdapter,
       });
       ctx.agentApiServer = agentApiServer;
       return {
@@ -55,9 +60,21 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
     // Start mDNS wake-up listener (#425)
     const { loadPeerConfig } = await import("../components/peer-config.js");
     const { startDnsWakeup } = await import("../components/dns-wakeup.js");
+    const { startGossipListener } = await import("../components/peer-transport/gossip.js");
     const { callPeer } = await import("../components/peer-client.js");
     const peerConfig = loadPeerConfig();
     const udpPort = peerConfig.self.udpPort ?? 5353;
+
+    // #971: Start gossip health listener
+    if (Object.keys(peerConfig.peers).length > 0) {
+      startGossipListener();
+    }
+
+    // #972: Start persistent outbound WS connections
+    if (Object.keys(peerConfig.peers).length > 0) {
+      import("../components/peer-transport/index.js").then(({ initPeerTransport }) => initPeerTransport()).catch(() => {});
+    }
+
     if (Object.keys(peerConfig.peers).length > 0) {
       startDnsWakeup(udpPort, peerConfig, async (peerName) => {
         try {

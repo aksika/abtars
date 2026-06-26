@@ -1,6 +1,7 @@
 import net from "node:net";
 import tls from "node:tls";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
+import { recordResult } from "../../components/sha-tracker.js";
 
 const TAG = "irc-client";
 
@@ -75,6 +76,7 @@ export function createIrcClient(opts: IrcClientOptions): IrcClient {
     consecutiveFailures++;
     if (consecutiveFailures >= MAX_RETRIES) {
       logWarn(TAG, `IRC unavailable — giving up after ${MAX_RETRIES} attempts. Restart bridge to retry.`);
+      recordResult("irc-flap", opts.nick ?? "default", false, `${consecutiveFailures} consecutive failures`);
       stopped = true;
       return;
     }

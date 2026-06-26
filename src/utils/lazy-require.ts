@@ -1,9 +1,10 @@
 /**
  * lazy-require.ts — Install optional deps on first use.
- * Installs into ~/.abtars/lib/node_modules/. Falls back gracefully.
+ * Installs into ~/.abtars-releases/deps/node_modules/. Falls back gracefully.
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { logInfo, logWarn } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
 
@@ -12,17 +13,32 @@ const TAG = "deps";
 export interface OptionalDep {
   readonly packages: readonly string[];
   readonly label: string;
+  readonly postInstall?: string;
 }
 
 export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
-  browser: { packages: ["patchright"], label: "Browser automation" },
+  browser: { packages: ["cloakbrowser"], label: "CloakBrowser (stealth Chromium)" },
+  twitter: { packages: ["rettiwt-api"], label: "Twitter/X integration" },
   pdf: { packages: ["pdf-parse"], label: "PDF reading" },
   youtube: { packages: ["youtube-transcript"], label: "YouTube transcripts" },
   image: { packages: ["jimp"], label: "Image processing" },
 };
 
+export interface SystemDep {
+  readonly bin: string;
+  readonly label: string;
+  readonly installHint: string;
+  readonly platform?: "linux" | "darwin";
+}
+
+export const SYSTEM_DEPS: Record<string, SystemDep> = {
+  bwrap:      { bin: "bwrap",      label: "Seatbelt sandbox (Linux)", installHint: "apt install bubblewrap", platform: "linux" },
+  lightpanda: { bin: "lightpanda", label: "Web-fetch level 3",        installHint: "see https://lightpanda.io" },
+  ollama:     { bin: "ollama",     label: "Local embeddings",         installHint: "curl -fsSL https://ollama.ai/install.sh | sh" },
+};
+
 function libDir(): string {
-  const d = join(abtarsHome(), "lib");
+  const d = join(homedir(), ".local", "lib");
   mkdirSync(d, { recursive: true });
   return d;
 }
@@ -31,12 +47,12 @@ function libNodeModules(): string {
   return join(libDir(), "node_modules");
 }
 
-/** Check if a package is installed in ~/.abtars/lib/ */
+/** Check if a package is installed in ~/.abtars-releases/deps/ */
 export function isInstalled(pkg: string): boolean {
   return existsSync(join(libNodeModules(), pkg));
 }
 
-/** Install packages into ~/.abtars/lib/ */
+/** Install packages into ~/.abtars-releases/deps/ */
 export function installPackages(packages: readonly string[]): void {
   const { execSync } = require("node:child_process");
   const dir = libDir();

@@ -67,7 +67,7 @@ export class MemorySearchController {
 
     try {
       const result = await this.deps.memory.recallSearch(
-        { translated, original, userId: userId ?? "master", limit: 10, timeStart, timeEnd, stages },
+        { translated, original, userId: userId ?? "unknown", limit: 10, timeStart, timeEnd, stages },
       );
 
       const webResults = result.results.map(hitToWebResult);

@@ -117,7 +117,7 @@ export class ActionGate {
       }, timer, reminderSent: false });
 
       this.notify!(message, [
-        { text: "✅ Allow once", data: `auth:${requestId}:once` },
+        { text: "✓ Allow once", data: `auth:${requestId}:once` },
         { text: "🔓 Always allow", data: `auth:${requestId}:always` },
         { text: "❌ Deny", data: `auth:${requestId}:deny` },
       ]).catch((err) => {

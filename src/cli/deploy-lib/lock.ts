@@ -15,7 +15,7 @@ import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { unlinkSync } from 'node:fs';
 import { hostname } from 'node:os';
 
-const STALE_MS = 60 * 60 * 1000; // 1 hour
+const STALE_MS = 5 * 60 * 1000; // 5 minutes — deploys take <2min
 
 export interface LockContent {
   readonly pid: number;

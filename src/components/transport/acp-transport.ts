@@ -2,8 +2,8 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { getEnv } from "../env-schema.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 
 /** Write model into ~/.kiro/agents/{name}.json if it differs or is missing. */
@@ -55,7 +55,7 @@ import {
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import type { IKiroTransport } from "./kiro-transport.js";
-import { logInfo, logDebug, logWarn, logError } from "../logger.js";
+import { logInfo, logDebug, logWarn, logError, logTrace } from "../logger.js";
 import { writeRestartReason } from "../transport/bridge-lock-transport.js";
 import { TransportStateMachine } from "./transport-state.js";
 
@@ -74,10 +74,15 @@ export class AcpTransport implements IKiroTransport {
   private sessions = new Map<string, string>(); // sessionKey → acpSessionId
   private responseChunks = new Map<string, string[]>(); // sessionId → chunks
   private lastContextPercent = -1;
+  private static _rawMode = false;
+  private _rawClient: import("./acp-raw-client.js").AcpRawClient | null = null;
+  private _promptSuccessCount = 0;
 
   /** Optional callback for streaming intermediate responses. */
   onIntermediateResponse?: (text: string) => void;
   onToolCallStart?: (toolName: string) => void;
+  /** Fired on reinit — pipeline uses this to flush stale queues. */
+  onReinit?: () => void;
 
   /** Context window usage percentage from Kiro metadata. */
   get contextPercent(): number {
@@ -93,6 +98,7 @@ export class AcpTransport implements IKiroTransport {
   get intermediateDeliveredText(): string { return ""; }
 
   get isConnected(): boolean {
+    if (AcpTransport._rawMode) return this._rawClient?.alive ?? false;
     return this.agent !== null && this.client !== null;
   }
 
@@ -122,7 +128,7 @@ export class AcpTransport implements IKiroTransport {
 
   constructor(cliPath: string, workingDir: string, opts?: { agent?: string; model?: string; cliArgs?: string[]; autoReinit?: boolean; tag?: string }) {
     this.cliPath = cliPath;
-    this.workingDir = workingDir;
+    this.workingDir = resolve(workingDir);
     this.agentName = opts?.agent ?? "professor";
     this.modelId = opts?.model;
     this.extraCliArgs = opts?.cliArgs;
@@ -143,6 +149,50 @@ export class AcpTransport implements IKiroTransport {
   private readonly tag: string;
 
   async initialize(): Promise<void> {
+    for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
+    this.sessions.clear(); // Fresh CLI instance = all old session IDs are stale
+    this.onReinit?.();
+
+    // Kill previous CLI process if dead/disconnected (prevent orphan accumulation)
+    if (this._rawClient && !this._rawClient.alive) {
+      try { this._rawClient.destroy(); } catch {}
+      this._rawClient = null as any;
+    }
+
+    // #924: If raw mode active, use raw pipe client instead of SDK
+    if (AcpTransport._rawMode) {
+      const { AcpRawClient } = await import("./acp-raw-client.js");
+      let args: string[];
+      if (this.extraCliArgs) { args = [...this.extraCliArgs]; }
+      else { args = ["acp", "--agent", this.agentName]; }
+      const cleanEnv = { ...process.env };
+      delete cleanEnv.KIRO_SESSION_ID;
+      delete cleanEnv.QTERM_SESSION_ID;
+      delete cleanEnv.Q_TERM;
+      this._rawClient = new AcpRawClient(this.cliPath, args, cleanEnv, this.workingDir, (method, params) => {
+        logDebug(this.tag, `[ext] ${method}`);
+        if (method === "session/update") {
+          this.handleSessionUpdate(params as any);
+        }
+      });
+      this._rawClient.spawn();
+      this._rawClient.setOnExit((code, signal) => {
+        logWarn(this.tag, `[raw] CLI exited (code=${code}, signal=${signal})`);
+        this.sm.childExited();
+        if (this.sm.state === "reinitializing" && this.autoReinit) {
+          logWarn(this.tag, "Unexpected exit (raw mode) — auto-reinitializing in 5s");
+          setTimeout(() => {
+            this.initialize().then(() => this.sm.reinitSucceeded()).catch(e => { logError(this.tag, "Auto-reinit failed", e); this.sm.reinitFailed(); });
+          }, 5000);
+        }
+      });
+      const result = await this._rawClient.initialize();
+      this._promptSuccessCount = 0;
+      logInfo(this.tag, `ACP initialized [raw mode] (agent: ${result.agentInfo.name})`);
+      this.onReady?.();
+      return;
+    }
+
     // Ensure kiro agent config has the correct model from transport.json
     if (this.modelId) {
       ensureAgentConfig(this.agentName, this.modelId);
@@ -154,10 +204,20 @@ export class AcpTransport implements IKiroTransport {
     } else {
       args = ["acp", "--agent", this.agentName];
     }
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.KIRO_SESSION_ID;
+    delete cleanEnv.QTERM_SESSION_ID;
+    delete cleanEnv.Q_TERM;
     this.agent = spawn(this.cliPath, args, {
       cwd: this.workingDir,
       stdio: ["pipe", "pipe", "pipe"],
+      env: cleanEnv,
     });
+
+    // Track child PID for cleanup on next boot (#921)
+    if (this.agent.pid) {
+      import("./bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid(this.agent!.pid!)).catch(() => {});
+    }
 
     if (!this.agent.stdin || !this.agent.stdout) {
       throw new Error("Failed to create ACP stdio pipes");
@@ -199,6 +259,12 @@ export class AcpTransport implements IKiroTransport {
     const output = Readable.toWeb(this.agent.stdout) as unknown as ReadableStream<Uint8Array>;
     const stream = ndJsonStream(input, output);
 
+    // #7554 workaround: kiro-cli interprets idle stdin as EOF. Periodic empty writes keep pipe alive.
+    const stdinKeepAlive = setInterval(() => {
+      if (this.agent?.stdin?.writable) this.agent.stdin.write("");
+    }, 1000);
+    thisProcess.on("exit", () => clearInterval(stdinKeepAlive));
+
     this.client = new ClientSideConnection(
       () => ({
         sessionUpdate: async (params: SessionNotification) => {
@@ -213,6 +279,11 @@ export class AcpTransport implements IKiroTransport {
             const pct = params["contextUsagePercentage"];
             if (typeof pct === "number") {
               this.lastContextPercent = Math.ceil(pct);
+            }
+            const inTok = typeof params["inputTokens"] === "number" ? params["inputTokens"] as number : 0;
+            const outTok = typeof params["outputTokens"] === "number" ? params["outputTokens"] as number : 0;
+            if (inTok || outTok) {
+              import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, inTok + outTok)).catch(() => {});
             }
           }
           if (method === "_kiro.dev/agent/not_found" || method === "_kiro.dev/model/not_found") {
@@ -230,6 +301,7 @@ export class AcpTransport implements IKiroTransport {
       clientInfo: { name: "abtars", version: "1.0.0" },
     });
     logInfo(this.tag, `ACP initialized (agent: ${initResult.agentInfo?.name ?? "unknown"})`);
+    this.onReady?.();
   }
 
   get isReady(): boolean {
@@ -249,19 +321,24 @@ export class AcpTransport implements IKiroTransport {
     }
   }
 
-  private _pendingPrompt: { sessionKey: string; message: string } | undefined;
+  private _pendingPrompt?: { sessionKey: string; message: string; resolve: (r: string) => void; reject: (e: Error) => void };
+  private _processDeadRetries = 0;
 
   async sendPrompt(sessionKey: string, message: string, _image?: { mime: string; base64: string }, _userId?: string): Promise<string> {
-    if (!this.client) {
+    if (!this.client && !(AcpTransport._rawMode && this._rawClient?.alive)) {
       logWarn(this.tag, "ACP client dead — reinitializing");
-      await this.initialize();
+      await Promise.race([
+        this.initialize(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("ACP reinit timed out (15s)")), 15_000)),
+      ]);
     }
 
     // Layer 2 (#671): queue concurrent prompts instead of crashing
     if (this.sm.state !== "idle") {
       logWarn(this.tag, `Concurrent prompt while ${this.sm.state} — queuing for after completion`);
-      this._pendingPrompt = { sessionKey, message };
-      return "";
+      return new Promise<string>((resolve, reject) => {
+        this._pendingPrompt = { sessionKey, message, resolve, reject };
+      });
     }
 
     this._toolCallsSucceeded = 0;
@@ -285,6 +362,7 @@ export class AcpTransport implements IKiroTransport {
       const result = await this.trackInFlight("prompt", sessionId, () => this.promptWithRetry(sessionId, message));
 
       logDebug(this.tag, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
+      logTrace(this.tag, `Model: ${this.modelId ?? "unknown"}`);
       this.lastSuccessAt = Date.now();
 
       // #287: if model/agent not found was flagged during this session, reject the response
@@ -301,6 +379,11 @@ export class AcpTransport implements IKiroTransport {
     } finally {
       // AfterPrompt hook — observe-only
       const durationMs = Date.now() - this.promptStartedAt;
+      // #832: metrics
+      import("../metrics-collector.js").then(({ recordLatency, recordCall }) => {
+        recordLatency(`llm:${this.modelId ?? "unknown"}`, durationMs);
+        recordCall(`llm:${this.modelId ?? "unknown"}`, true);
+      }).catch(() => {});
       import("../hooks/hook-system.js").then(({ hasHooks, fire }) => {
         if (!hasHooks("AfterPrompt")) return;
         fire("AfterPrompt", {
@@ -311,15 +394,22 @@ export class AcpTransport implements IKiroTransport {
         }).catch(err => logAndSwallow(TAG, "fire AfterPrompt", err));
       }).catch(err => logAndSwallow(TAG, "import hook-system", err));
       this.sm.promptCompleted();
+      import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, 0)).catch(() => {});
 
-      // Drain queued concurrent prompt (#671 Layer 2)
-      if (this._pendingPrompt) {
-        const pending = this._pendingPrompt;
-        this._pendingPrompt = undefined;
-        logInfo(this.tag, `Draining queued prompt after completion`);
-        queueMicrotask(() => { this.sendPrompt(pending.sessionKey, pending.message).catch(err => logAndSwallow(TAG, "drain pending prompt", err)); });
-      }
+      // Drain queued concurrent prompt (#671 Layer 2, #930 fix)
+      this.drainPending();
     }
+  }
+
+  /** Drain queued concurrent prompt — resolve its Promise via a fresh sendPrompt. */
+  private drainPending(): void {
+    if (!this._pendingPrompt) return;
+    const pending = this._pendingPrompt;
+    this._pendingPrompt = undefined;
+    logInfo(this.tag, `Draining queued prompt`);
+    this.sendPrompt(pending.sessionKey, pending.message)
+      .then(r => pending.resolve(r))
+      .catch(e => pending.reject(e instanceof Error ? e : new Error(String(e))));
   }
 
   private readonly _promptTimeoutMs = getEnv().promptTimeoutSec * 1000; // default 3 min
@@ -359,6 +449,16 @@ export class AcpTransport implements IKiroTransport {
   }
 
   private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
+    let sid = sessionId;
+
+    // #924: raw mode — use raw client directly
+    if (AcpTransport._rawMode && this._rawClient) {
+      this.responseChunks.set(sid, []);
+      const result = await this._rawClient.prompt({ sessionId: sid, prompt: [{ type: "text", text: message }] });
+      this._promptSuccessCount++;
+      return result;
+    }
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       // #329: abort immediately if model is known-dead (flag set during handshake)
       if (this._modelNotFound) {
@@ -378,15 +478,40 @@ export class AcpTransport implements IKiroTransport {
         });
         const result = await Promise.race([
           this.client.prompt({
-            sessionId,
+            sessionId: sid,
             prompt: [{ type: "text", text: message }],
           }).finally(() => clearInterval(timeoutTimer)),
           timeoutPromise,
         ]);
+        this._promptSuccessCount++;
         return result;
       } catch (err: unknown) {
         const code = (err as { code?: number }).code;
-        if (code === -32603 && attempt < maxRetries) {
+        const msg = (err as { message?: string }).message ?? "";
+
+        // #924: Detect SDK connection failure on first prompt → switch to raw mode
+        const elapsed = Date.now() - (this.lastActivityAt || 0);
+        if (this._promptSuccessCount === 0 && elapsed < 5000 && (msg.includes("connection closed") || msg.includes("exited before"))) {
+          logWarn(this.tag, `SDK failed on first prompt (${elapsed}ms) — switching to raw pipe mode`);
+          AcpTransport._rawMode = true;
+          this.client = null;
+          for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
+          this.sessions.clear();
+          await this.initialize();
+          sid = await this.getOrCreateSession(this.lastSessionKey);
+          return this.promptWithRetry(sid, message, 0);
+        }
+
+        if (code === -32603 && msg.includes("No session found")) {
+          const key = [...this.sessions.entries()].find(([, v]) => v === sid)?.[0];
+          if (key) { this.cleanupKiroFiles(sid); this.sessions.delete(key); }
+          logWarn(this.tag, `Session ${sessionId} expired — invalidated, will recreate`);
+          if (attempt < maxRetries) {
+            sid = await this.getOrCreateSession(this.lastSessionKey);
+            this.responseChunks.set(sessionId, []);
+            continue;
+          }
+        } else if (code === -32603 && attempt < maxRetries) {
           logWarn(this.tag, `Transient error (code ${code}), retry ${attempt + 1}/${maxRetries}`);
           this.responseChunks.set(sessionId, []); // reset chunks for retry
           await new Promise(r => setTimeout(r, 2000));
@@ -414,6 +539,17 @@ export class AcpTransport implements IKiroTransport {
   }
 
   async sendInterrupt(): Promise<void> {
+    // Raw mode: kill the CLI process (no cancel RPC available)
+    if (AcpTransport._rawMode && this._rawClient) {
+      this._rawClient.destroy();
+      this._rawClient = null;
+      if (this.sm.state !== "idle") this.sm.transition("idle", "interrupt");
+      this.toolMeta = null;
+      logInfo(this.tag, "Interrupt: killed raw CLI process");
+      // Reinitialize for next prompt
+      await this.initialize();
+      return;
+    }
     // Cancel all active sessions
     if (!this.client) return;
     for (const sessionId of this.sessions.values()) {
@@ -431,6 +567,8 @@ export class AcpTransport implements IKiroTransport {
   }
 
   destroy(): void {
+    // #992: clean kiro session files before clearing the map
+    for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
     this.sessions.clear();
     // #160: reject any in-flight ops so they don't hang waiting for a child
     // that's about to be killed (or already gone).
@@ -445,6 +583,14 @@ export class AcpTransport implements IKiroTransport {
       this.client = null;
     }
     logInfo(this.tag, "ACP transport destroyed");
+  }
+
+  /** #992: Remove kiro-cli session files for a given session UUID. */
+  private cleanupKiroFiles(kiroSessionId: string): void {
+    const dir = join(homedir(), ".kiro", "sessions", "cli");
+    for (const ext of [".json", ".jsonl", ".history"]) {
+      try { unlinkSync(join(dir, kiroSessionId + ext)); } catch {}
+    }
   }
 
   async setModel(model: string): Promise<void> {
@@ -538,6 +684,13 @@ export class AcpTransport implements IKiroTransport {
     const existing = this.sessions.get(sessionKey);
     if (existing) return existing;
 
+    if (AcpTransport._rawMode && this._rawClient) {
+      const session = await this._rawClient.newSession({ cwd: this.workingDir, mcpServers: [] });
+      this.sessions.set(sessionKey, session.sessionId);
+      logInfo(this.tag, `Created session ${session.sessionId} for ${sessionKey} [raw]`);
+      return session.sessionId;
+    }
+
     if (!this.client) throw new Error("ACP not initialized");
 
     const session = await this.client.newSession({
@@ -546,7 +699,7 @@ export class AcpTransport implements IKiroTransport {
     });
 
     if (this.isGemini && this.modelId) {
-      try { await this.client.unstable_setSessionModel({ sessionId: session.sessionId, modelId: this.modelId }); }
+      try { await (this.client as any).unstable_setSessionModel({ sessionId: session.sessionId, modelId: this.modelId }); }
       catch { logWarn(this.tag, `unstable_setSessionModel not supported — using default model`); }
     }
 
@@ -575,13 +728,30 @@ export class AcpTransport implements IKiroTransport {
 
     // Process dead
     if (!this.isConnected) {
-      logWarn(this.tag, `[transport-health] Process dead — reinit + re-send`);
+      this._processDeadRetries++;
+      if (this._processDeadRetries > 3) {
+        logWarn(this.tag, `[transport-health] Process dead after 3 retries — dropping poisoned prompt, forcing idle`);
+        this._processDeadRetries = 0;
+        this.lastPromptText = "";
+        this.lastSuccessAt = Date.now(); // suppress further health checks until next real prompt
+        if (this.sm.state !== "idle" && this.sm.state !== "destroyed") {
+          this.sm.transition("idle", "processDeadMaxRetries");
+        }
+        // Reject + drain pending so user's message gets a fresh attempt
+        if (this._pendingPrompt) {
+          this._pendingPrompt.reject(new Error("Transport unavailable after 3 retries"));
+          this._pendingPrompt = undefined;
+        }
+        return;
+      }
+      logWarn(this.tag, `[transport-health] Process dead (attempt ${this._processDeadRetries}/3) — reinit + re-send`);
       this._watchdogLastActionAt = now;
       writeRestartReason("watchdog: process dead");
       await this.initialize();
       if (this.lastPromptText) await this.sendPrompt(this.lastSessionKey, this.lastPromptText);
       return;
     }
+    this._processDeadRetries = 0;
 
     // Tool hung
     if (this.toolMeta && now - this.toolMeta!.startedAt > this._toolTimeout) {

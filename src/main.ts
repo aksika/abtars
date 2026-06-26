@@ -1,7 +1,7 @@
 /**
  * Abtars — entry point.
  * Internal restart loop: exit code 0 = restart, non-zero = die.
- * Under SUPERVISION (supervised-daemon mode), the loop is disabled —
+ * Under DAEMON mode, the loop is disabled —
  * the system supervisor (systemd/launchd) handles restarts.
  *
  * CRITICAL: `./boot/env.js` MUST be the first import. ES static imports are
@@ -13,6 +13,7 @@
 
 import "./boot/env.js";
 process.umask(0o077); // #441: all runtime files 600, dirs 700
+import { reloadSecrets } from "./boot/env.js";
 import { initEnv, _resetEnv } from "./components/env-schema.js";
 import { startBridge } from "./bridge-app.js";
 import { logInfo } from "./components/logger.js";
@@ -20,9 +21,31 @@ import { resetAbmindCache } from "./utils/abmind-lazy.js";
 
 initEnv();
 
+// #1050: Auto-rollback on crash loop — runs before anything else (just file ops)
+import { checkCircuitBreaker } from "./boot/circuit-breaker.js";
+checkCircuitBreaker();
+
+// #1050: Prevent duplicate bridge instances
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+try {
+  const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
+  const lock = JSON.parse(readFileSync(join(home, "bridge.lock"), "utf-8"));
+  if (lock.pid && lock.pid !== process.pid) {
+    process.kill(lock.pid, 0); // throws if dead
+    console.error(`[FATAL] Another bridge running (PID ${lock.pid}) — exiting`);
+    process.exit(1);
+  }
+} catch { /* lock missing, corrupt, or PID dead — proceed */ }
+
 process.on("uncaughtException", (err) => {
   console.error(`[FATAL] Uncaught exception: ${err.stack ?? err.message ?? err}`);
   process.exit(1);
+});
+
+process.on("exit", (code) => {
+  const stack = new Error("exit trace").stack?.split("\n").slice(1, 6).join("\n") ?? "";
+  console.error(`[EXIT] code=${code} at ${new Date().toISOString()}\n${stack}`);
 });
 
 process.on("unhandledRejection", (reason) => {
@@ -49,6 +72,7 @@ process.on("unhandledRejection", (reason) => {
     if (code !== 0) process.exit(code);
     logInfo("main", "♻️ Bridge restart requested — restarting...");
     _resetEnv();
+    reloadSecrets();
     resetAbmindCache();
     initEnv();
   }

@@ -1,18 +1,25 @@
 # Homebrew Tap
 
-To publish:
-
-1. Create repo `aksika/homebrew-abtars` on GitHub
-2. Copy `abtars.rb` to `Formula/abtars.rb` in that repo
-3. Update `sha256` with actual tarball hash: `curl -sL <url> | shasum -a 256`
-4. Users install with:
+## For users
 
 ```bash
 brew tap aksika/abtars
-brew install abtars
+brew install abtars abmind
 ```
 
-On each release:
-- Update `url` to new version tarball
-- Update `sha256`
-- Push to tap repo
+## Setup (tap repo maintainer)
+
+1. Create repo `aksika/homebrew-abtars` on GitHub
+2. Copy formulas to `Formula/abtars.rb` and `Formula/abmind.rb`
+3. Update `sha256` with actual tarball hash:
+   ```bash
+   curl -sL https://registry.npmjs.org/abtars/-/abtars-<version>.tgz | shasum -a 256
+   curl -sL https://registry.npmjs.org/abmind/-/abmind-<version>.tgz | shasum -a 256
+   ```
+
+## Automation
+
+The release workflow (#1103) auto-updates the tap after each `pnpm publish`:
+- Computes SHA256 of the published tarball
+- Pushes updated formula to `aksika/homebrew-abtars`
+- Requires `HOMEBREW_TAP_TOKEN` secret (classic PAT with `repo` scope)

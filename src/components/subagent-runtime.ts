@@ -23,7 +23,7 @@ export interface AgentOpts {
   /** Override model API timeout for this call (ms). */
   timeoutMs?: number;
   /** Override session type (default: derived from agent name). */
-  sessionType?: import("./session-manager.js").SessionType;
+  sessionType?: import("./spin-types.js").SessionType;
 }
 
 /** Persistent transport handle for multi-turn callers. */
@@ -66,7 +66,12 @@ export class SubagentRuntime {
   private readonly activeSpawns = new Map<string, { abort: AbortController; startedAt: number }>();
   private _registry: ModelHealthRegistry | null = null;
   private _mainTransport: IKiroTransport | null = null;
-  private _sessionManager: import("./session-manager.js").SessionManager | null = null;
+  private _lastUsage: { input: number; output: number } | null = null;
+
+  /** Token usage from last complete() call. */
+  get lastUsage(): { input: number; output: number } | null { return this._lastUsage; }
+  private _sessionManager: import("./spin.js").Spin | null = null;
+  private _sandboxEnabled = false;
 
   /** Set shared model health registry (from boot ctx). */
   setRegistry(registry: ModelHealthRegistry): void { this._registry = registry; }
@@ -75,10 +80,24 @@ export class SubagentRuntime {
   setMainTransport(transport: IKiroTransport): void { this._mainTransport = transport; }
 
   /** Set session manager for auto-spawn sub-session creation (#510). */
-  setSessionManager(mgr: import("./session-manager.js").SessionManager): void { this._sessionManager = mgr; }
+  setSessionManager(mgr: import("./spin.js").Spin): void { this._sessionManager = mgr; }
+
+  /** Get session manager (may be null before boot completes). */
+  get sessionManager(): import("./spin.js").Spin | null { return this._sessionManager; }
+
+  /** Enable Docker sandbox for W/B/C sessions (#478). */
+  setSandboxEnabled(enabled: boolean): void { this._sandboxEnabled = enabled; }
 
   /** Send a prompt to a named agent and get the response. */
   async complete(agent: AgentName, prompt: string, opts?: AgentOpts): Promise<string> {
+    const { checkBudget, sendBudgetNotification } = await import("./budget.js");
+    const budgetCheck = checkBudget(agent);
+    if (!budgetCheck.allowed) {
+      const reason = budgetCheck.remaining.tokens <= 0 ? "token" : "call";
+      void sendBudgetNotification(agent, reason);
+      throw new Error(`Daily ${reason} budget exceeded for ${agent}. Resets at midnight.`);
+    }
+
     const sessionStrategy = opts?.session ?? DEFAULT_SESSION[agent] ?? "fresh";
     const start = Date.now();
 
@@ -98,6 +117,7 @@ export class SubagentRuntime {
     try {
       const response = await transport.sendPrompt(sessionKey, prompt);
       const elapsed = Date.now() - start;
+      this._lastUsage = transport.lastUsage?.() ?? null;
       logInfo(TAG, `${agent} complete: ${prompt.length}ch → ${response?.length ?? 0}ch (${elapsed}ms, ${model})`);
       return response ?? "";
     } catch (err) {
@@ -112,14 +132,15 @@ export class SubagentRuntime {
   }
 
   /** Get a persistent session handle for multi-turn callers. */
-  async session(agent: AgentName): Promise<AgentSession> {
-    const cached = this.cache.get(agent) ?? await this.createAgent(agent);
+  async session(agent: AgentName, key?: string): Promise<AgentSession> {
+    const cacheKey = key ? `${agent}:${key}` : agent;
+    const cached = this.cache.get(cacheKey as AgentName) ?? await this.createAgent(agent, undefined, cacheKey);
     return {
       sendPrompt: (sessionKey: string, prompt: string) => cached.transport.sendPrompt(sessionKey, prompt),
       destroy: async () => {
         try { cached.transport.destroy(); } catch (err) { logAndSwallow("subagent_runtime", "op", err); }
-        this.cache.delete(agent);
-        logInfo(TAG, `${agent} session destroyed`);
+        this.cache.delete(cacheKey as AgentName);
+        logInfo(TAG, `${cacheKey} session destroyed`);
       },
       get isReady() { return cached.transport.isReady; },
       get transport() { return cached.transport; },
@@ -131,13 +152,6 @@ export class SubagentRuntime {
     const taskId = randomBytes(4).toString("hex");
     const abort = new AbortController();
     this.activeSpawns.set(taskId, { abort, startedAt: Date.now() });
-
-    // Create sub-session for visibility in /session list (#510)
-    if (this._sessionManager) {
-      const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
-      const sessionType = typeMap[agent];
-      if (sessionType) this._sessionManager.createSubSession("master", "telegram", sessionType);
-    }
 
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
     const timer = setTimeout(() => abort.abort(), timeoutMs);
@@ -192,7 +206,19 @@ export class SubagentRuntime {
     return true;
   }
 
-  private async createAgent(agent: AgentName, sessionType?: import("./session-manager.js").SessionType): Promise<CachedAgent> {
+  private async createAgent(agent: AgentName, sessionType?: import("./spin-types.js").SessionType, cacheKey?: string): Promise<CachedAgent> {
+    const typeMap: Partial<Record<AgentName, import("./spin-types.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
+    const resolvedType = sessionType || typeMap[agent];
+    const sandboxTypes = new Set(["B", "C", "W"]);
+
+    // #478: Route to Docker container for sandboxed session types
+    if (this._sandboxEnabled && resolvedType && sandboxTypes.has(resolvedType)) {
+      const { logInfo } = await import("./logger.js");
+      logInfo("subagent", `Sandbox spawn: ${agent} (type=${resolvedType}) → Docker container`);
+      // TODO (#478-integration): spawn container, connect socket, return proxy transport
+      // For now, fall through to in-process (container-side agent code not yet implemented)
+    }
+
     const { createSubagentTransport } = await import("./agent-registry.js");
     const role = AGENT_TO_ROLE[agent];
     const mainModel = this._mainTransport && "currentModel" in this._mainTransport
@@ -200,18 +226,21 @@ export class SubagentRuntime {
       : undefined;
     const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, mainModel);
 
+    // #1012: Track PID so boot-time cleanup finds orphans
+    if ((transport as any).agent?.pid) {
+      import("./transport/bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid((transport as any).agent.pid)).catch(() => {});
+    }
+
     // Inject session-type-appropriate SOUL bundle (#744)
-    const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
-    const resolvedType = sessionType || typeMap[agent];
     if (resolvedType && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
       const { buildSoulBundle } = await import("./soul-bundle.js");
       const bundle = buildSoulBundle(resolvedType);
       if (bundle) (transport as any).setSystemPrompt(bundle);
     }
 
-    const sessionKey = `system:${agent}`;
+    const sessionKey = `system:${cacheKey ?? agent}`;
     const entry: CachedAgent = { transport, model, sessionKey };
-    this.cache.set(agent, entry);
+    this.cache.set((cacheKey ?? agent) as AgentName, entry);
     (await import("./transport/tool-registry.js")).resetStoreCounter();
     return entry;
   }

@@ -20,7 +20,25 @@ export async function handleSleep(_text: string, ctx: CommandContext): Promise<b
   const lock = auditDir ? readLatestSleepLock(auditDir) : null;
 
   const lines: string[] = ["😴 Sleep status"];
-  const stateLabel = progress ? `🧠 Sleep cycle running (${progress.step}, ${progress.percent}%)` : sleepStatus === "sleeping" ? "😴 Asleep (idle)" : sleepStatus === "hw_sleep" ? "😴 Hardware sleep" : "👋 Awake";
+  let stateLabel: string;
+  if (progress) {
+    stateLabel = `🧠 Sleep cycle running (${progress.step}, ${progress.percent}%)`;
+  } else if (sleepStatus === "sleeping") {
+    stateLabel = "💤 Dreaming";
+    // Show progress from lock file
+    if (lock && lock.status === "ongoing") {
+      const steps = Object.entries(lock.steps);
+      const done = steps.filter(([, s]) => s.status === "ok" || s.status === "skipped").length;
+      const current = steps.find(([, s]) => s.status === "pending" || s.status === "ongoing");
+      const startedAt = lock.startedAt ? new Date(lock.startedAt).toISOString().replace("T", " ").slice(0, 16) : "";
+      if (startedAt) stateLabel += ` (since ${startedAt})`;
+      if (current) stateLabel += `\n  Step: ${current[0]} (${done}/${steps.length})`;
+    }
+  } else if (sleepStatus === "hw_sleep") {
+    stateLabel = "😴 Hardware sleep";
+  } else {
+    stateLabel = "👋 Awake";
+  }
   lines.push(`  State: ${stateLabel}`);
   if (lock) {
     const counts = Object.values(lock.steps);
@@ -53,8 +71,8 @@ export async function handleSleepSub(text: string, ctx: CommandContext): Promise
 
   if (sub === "resume") {
     const lock = auditDir ? readLatestSleepLock(auditDir) : null;
-    const hasFailed = lock && Object.values(lock.steps).some(s => s.status === "failed");
-    if (!lock || lock.status === "completed" || !hasFailed) {
+    const hasIncomplete = lock && Object.values(lock.steps).some(s => s.status === "failed" || s.status === "pending");
+    if (!lock || lock.status === "completed" || !hasIncomplete) {
       await ctx.reply("No failed sleep cycle to resume — use /sleep now for a fresh run.");
       return true;
     }
@@ -66,10 +84,13 @@ export async function handleSleepSub(text: string, ctx: CommandContext): Promise
 
   if (sub === "now") {
     if (auditDir) {
-      try { unlinkSync(todayLockPath(auditDir)); } catch (err) { logAndSwallow("command_handlers", "op", err); }
+      const lock = readLatestSleepLock(auditDir);
+      if (!lock || lock.status === "completed") {
+        try { unlinkSync(todayLockPath(auditDir)); } catch (err) { logAndSwallow("command_handlers", "op", err); }
+      }
     }
     writeForceSleep("fresh via /sleep now");
-    await ctx.reply("⚡ Fresh sleep cycle queued — starts on next heartbeat tick (≤5min)");
+    await ctx.reply("💤 Full sleep cycle initiated");
     logInfo(TAG, "Fresh sleep triggered via /sleep now");
     return true;
   }
@@ -106,7 +127,7 @@ export async function handleWakeup(_text: string, ctx: CommandContext): Promise<
 
 // ── /sleep — status + force-trigger ─────────────────────────────────────────
 
-function readLatestSleepLock(auditDir: string): { date: string; status: string; llmCalls: number; steps: Record<string, { status: string }> } | null {
+function readLatestSleepLock(auditDir: string): { date: string; status: string; llmCalls: number; startedAt?: number; steps: Record<string, { status: string }> } | null {
   try {
     const files = readdirSync(auditDir).filter(f => f.startsWith("sleep_") && f.endsWith(".lock")).sort();
     if (files.length === 0) return null;
@@ -114,7 +135,7 @@ function readLatestSleepLock(auditDir: string): { date: string; status: string; 
     const raw = JSON.parse(readFileSync(join(auditDir, latest), "utf-8"));
     const dateMatch = latest.match(/sleep_(\d{4})(\d{2})(\d{2})/);
     const date = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : "unknown";
-    return { date, status: raw.status ?? "unknown", llmCalls: raw.llmCalls ?? 0, steps: raw.steps ?? {} };
+    return { date, status: raw.status ?? "unknown", llmCalls: raw.llmCalls ?? 0, startedAt: raw.startedAt, steps: raw.steps ?? {} };
   } catch (err) { logAndSwallow(TAG, "readLastSleepAudit", err); return null; }
 }
 

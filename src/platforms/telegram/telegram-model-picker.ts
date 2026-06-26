@@ -55,7 +55,7 @@ export async function handleModelPickerCallback(
       const prefix = agent === "professor" ? "mprov2:professor" : `mprov:${agent}`;
       const buttons = providers.map(p => {
         const count = getModelsForProvider(p.name).length;
-        const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
+        const label = p.name === currentProvider ? `✓ ${p.name} (${count})` : `${p.name} (${count})`;
         return [{ text: label, callback_data: `${prefix}:${p.name}` }];
       });
       buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
@@ -73,7 +73,7 @@ export async function handleModelPickerCallback(
       const slotLabel = slot === "professor" ? "Main" : slot.replace("professor_fb", "Fb");
       const buttons = providers.map(p => {
         const count = getModelsForProvider(p.name).length;
-        const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
+        const label = p.name === currentProvider ? `✓ ${p.name} (${count})` : `${p.name} (${count})`;
         return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
       });
       buttons.push([{ text: "← Back", callback_data: "mslot:professor" }]);
@@ -109,7 +109,7 @@ export async function handleModelPickerCallback(
     const currentProvider = resolveAgent(agent, tc)?.providerName;
     const buttons = providers.map(p => {
       const count = getModelsForProvider(p.name).length;
-      const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
+      const label = p.name === currentProvider ? `✓ ${p.name} (${count})` : `${p.name} (${count})`;
       return [{ text: label, callback_data: `mprov:${agent}:${p.name}` }];
     });
     buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
@@ -146,7 +146,7 @@ export async function handleModelPickerCallback(
     const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
     const buttons = providers.map(p => {
       const count = getModelsForProvider(p.name).length;
-      const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
+      const label = p.name === currentProvider ? `✓ ${p.name} (${count})` : `${p.name} (${count})`;
       return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
     });
     buttons.push([{ text: "← Back", callback_data: "mslot:professor" }]);
@@ -210,7 +210,7 @@ export async function handleModelPickerCallback(
       const { cleanDemotedModels } = await import("../../components/transport-config.js");
       cleanDemotedModels(tc, model);
       writeTransportConfig(tc, `professor fallback ${fbIndex + 1} → ${model} (${providerName})`);
-      await api.sendMessage(chatId, `✅ Fallback ${fbIndex + 1} → ${model} (${providerName})`);
+      await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`);
     } else {
       const oldProvider = tc.agents[agentKey]?.provider;
       tc.agents[agentKey] = { ...tc.agents[agentKey]!, model, provider: providerName };
@@ -242,7 +242,7 @@ export async function handleModelPickerCallback(
 
       if (isProfessor && !providerChanged && "setModel" in deps.transport) {
         await (deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
-        await api.sendMessage(chatId, `✅ Switched to ${model}`);
+        await api.sendMessage(chatId, `✓ Switched to ${model}`);
       } else if (isProfessor && providerChanged && oldType === newType && "switchProvider" in deps.transport) {
         try {
           const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
@@ -260,7 +260,7 @@ export async function handleModelPickerCallback(
           await api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
           return;
         }
-        try { await api.sendMessage(chatId, `✅ Switched to ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "sendMessage model switch confirm", err); }
+        try { await api.sendMessage(chatId, `✓ Switched to ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "sendMessage model switch confirm", err); }
       } else if (isProfessor && providerChanged) {
         const cascadeNote = oldType !== newType ? " Subagents also reset." : "";
         try {
@@ -271,7 +271,7 @@ export async function handleModelPickerCallback(
           await api.sendMessage(chatId, `⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}. Try /reset manually.`);
         }
       } else {
-        await api.sendMessage(chatId, `✅ ${agentKey} → ${model} (${providerName})`);
+        await api.sendMessage(chatId, `✓ ${agentKey} → ${model} (${providerName})`);
       }
     }
   } else if (data.startsWith("model:")) {

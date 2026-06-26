@@ -84,10 +84,17 @@ describe("AcpTransport", () => {
       (transport as any).sm = { state: "prompting", startPrompt: vi.fn(), promptCompleted: vi.fn() };
       (transport as any).client = {};
 
-      const result = await transport.sendPrompt("key-1", "hello");
+      // sendPrompt now returns a Promise that blocks — don't await it
+      const promise = transport.sendPrompt("key-1", "hello");
 
-      expect(result).toBe("");
-      expect((transport as any)._pendingPrompt).toEqual({ sessionKey: "key-1", message: "hello" });
+      // Verify it queued (resolve/reject stored)
+      expect((transport as any)._pendingPrompt).toBeDefined();
+      expect((transport as any)._pendingPrompt.sessionKey).toBe("key-1");
+      expect((transport as any)._pendingPrompt.message).toBe("hello");
+
+      // Reject to unblock the promise (cleanup)
+      (transport as any)._pendingPrompt.reject(new Error("test cleanup"));
+      await promise.catch(() => {});
     });
   });
 

@@ -22,10 +22,7 @@ import type { CapabilityRegistry } from "../capabilities/capability.js";
 import type { IDashboardSlot } from "../components/skeleton.js";
 import type { AgentApiServer } from "../components/agent-api-server.js";
 import type { PlatformAdapter } from "../types/platform.js";
-import { SessionRegistry as SessionRegistryClass } from "../components/session-registry.js";
-import type { SessionRegistry } from "../components/session-registry.js";
-import { SessionManager as SessionManagerClass } from "../components/session-manager.js";
-import { getEnv } from "../components/env-schema.js";
+import { spin as spinInstance } from "../components/spin.js";
 import type { ModelHealthRegistry } from "../components/transport/model-health-registry.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
@@ -80,8 +77,7 @@ export interface BootCtx {
   pipelineDeps: PipelineDeps | null;
 
   // ── Session state ──
-  sessions: SessionRegistry;
-  sessionManager: import("../components/session-manager.js").SessionManager;
+  sessionManager: import("../components/spin.js").Spin;
 
   // ── Subsystems ────────────────────────────────────────────────────────
   capabilities: CapabilityRegistry;
@@ -93,6 +89,8 @@ export interface BootCtx {
   dashboardServer: IDashboardSlot | null;
   agentApiServer: AgentApiServer | null;
   actionGate: any;
+  sandboxEnabled: boolean;
+  seatbeltActive: boolean;
   mcpDaemonStarted: boolean;
 
   // ── Callbacks (closures set by phases for cross-phase use) ────────────
@@ -151,8 +149,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     pipelineDeps: null,
 
     // Session state
-    sessions: new SessionRegistryClass(),
-    sessionManager: new SessionManagerClass(getEnv().maxSessions),
+    sessionManager: spinInstance,
 
     // Subsystems
     capabilities: createCapabilityRegistry(),
@@ -164,6 +161,8 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     dashboardServer: null,
     agentApiServer: null,
     actionGate: null,
+    sandboxEnabled: false,
+    seatbeltActive: false,
     mcpDaemonStarted: false,
 
     // Callbacks

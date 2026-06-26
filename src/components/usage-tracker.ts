@@ -1,6 +1,6 @@
 /**
  * usage-tracker.ts — append-only token usage log + aggregation.
- * Storage: ~/.abtars/state/usage.jsonl (one JSON line per prompt).
+ * Storage: ~/.abtars/metrics/usage.jsonl (one JSON line per prompt).
  */
 import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -8,22 +8,31 @@ import { join } from "node:path";
 export interface UsageEntry {
   ts: number;
   model: string;
+  agent: string;
   in: number;
   out: number;
 }
 
 let buffer: UsageEntry[] = [];
 let usagePath = "";
+let _totalTokens = 0;
+
+/** Cumulative token counter (input + output). Monotonically increasing. */
+export function getTotalTokens(): number { return _totalTokens; }
 
 export function initUsageTracker(home: string): void {
-  const stateDir = join(home, "state");
-  if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true });
-  usagePath = join(stateDir, "usage.jsonl");
+  const metricsDir = join(home, "metrics");
+  if (!existsSync(metricsDir)) mkdirSync(metricsDir, { recursive: true });
+  usagePath = join(metricsDir, "usage.jsonl");
 }
 
-export function recordUsage(model: string, inputTokens: number, outputTokens: number): void {
+export function recordUsage(model: string, inputTokens: number, outputTokens: number, agent = ""): void {
+  _totalTokens += inputTokens + outputTokens;
+  if (agent) {
+    import("./budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(agent, inputTokens + outputTokens)).catch(() => {});
+  }
   if (!usagePath) return;
-  buffer.push({ ts: Date.now(), model, in: inputTokens, out: outputTokens });
+  buffer.push({ ts: Date.now(), model, agent, in: inputTokens, out: outputTokens });
   if (buffer.length >= 100) flushUsage();
 }
 

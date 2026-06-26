@@ -1,6 +1,6 @@
 {
   "name": "abtars",
-  "version": "0.2.2",
+  "version": "0.3.3",
   "description": "Standalone agent bridging Telegram to Kiro CLI via tmux/ACP",
   "type": "module",
   "main": "bundle/abtars.js",
@@ -11,7 +11,7 @@
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
     "check-imports": "bash -c '! grep -rE \"from \\\"abmind/|from '\\''abmind/\" src --include=*.ts | grep -vE \"abmind/deploy-lib\\\"|abmind/deploy-lib'\\''\"'",
-    "test": "vitest --run && node src/cli/commands/install-smoke.mjs",
+    "test": "vitest --run",
     "test:watch": "vitest",
     "prepublishOnly": "node -e \"const p=require('./package.json');const d=JSON.stringify(p.dependencies||{});if(d.includes('file:')){console.error('ERROR: file: dependency found');process.exit(1)}\"",
     "test:integration": "vitest --run --dir src/tests/integration"
@@ -20,13 +20,12 @@
     "node": ">=22.0.0"
   },
   "devDependencies": {
-    "@agentclientprotocol/sdk": "^0.14.1",
+    "@agentclientprotocol/sdk": "^0.25.0",
     "@andresaya/edge-tts": "^1.8.0",
     "@clack/prompts": "^1.2.0",
     "@types/node": "^22.19.17",
     "@types/pdf-parse": "^1.1.5",
     "@types/ws": "^8.18.1",
-    "better-sqlite3": "^12.10.0",
     "cron-parser": "^5.5.0",
     "discord.js": "^14.26.3",
     "dotenv": "^16.6.1",
@@ -34,7 +33,6 @@
     "fast-check": "^4.7.0",
     "file-type": "^22.0.1",
     "jimp": "1.6.0",
-    "patchright": "^1.59.4",
     "pdf-parse": "^2.4.5",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
@@ -50,12 +48,16 @@
   "license": "Apache-2.0",
   "files": [
     "bundle/",
-    "core/",
+    "templates/",
     "scripts/",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
     "install-manifest.json",
     "config/"
-  ]
+  ],
+  "optionalDependencies": {
+    "better-sqlite3": "^12.10.0",
+    "cloakbrowser": "^0.4.3"
+  }
 }

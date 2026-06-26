@@ -1,9 +1,8 @@
+import { printBanner } from './banner.js';
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { abtarsHome } from "../../paths.js";
 
-function abtarsHome(): string {
-  return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
-}
 
 const SECRET_PATTERNS = ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD"];
 
@@ -12,6 +11,7 @@ function isSecret(name: string): boolean {
 }
 
 export async function configShow(): Promise<number> {
+  await printBanner("config");
   // Read .env file directly to show what's configured
   const envFile = join(abtarsHome(), "config", ".env");
   let lines: string[];

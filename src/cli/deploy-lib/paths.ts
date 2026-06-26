@@ -44,6 +44,11 @@ export interface PackagePaths {
   readonly bin: string;
   readonly manifest: string;
   readonly lock: string;
+  // #1089: releases dir layout
+  readonly releasesDir: string;
+  readonly releasesCurrentLink: string;
+  readonly releasesHistory: string;
+  readonly releasesSrc: string;
   // Legacy — kept for migration detection only. Remove after all hosts migrated.
   readonly releases: string;
   readonly current: string;
@@ -51,6 +56,7 @@ export interface PackagePaths {
 
 export function packagePaths(pkg: PackageName): PackagePaths {
   const home = resolvePackageHome(pkg);
+  const releasesDir = join(homedir(), '.abtars-releases');
   return {
     home,
     config: join(home, 'config'),
@@ -60,9 +66,14 @@ export function packagePaths(pkg: PackageName): PackagePaths {
     appPrev2: join(home, 'app.prev.2'),
     appPrev3: join(home, 'app.prev.3'),
     appStaging: join(home, 'app.staging'),
-    bin: join(home, 'bin'),
+    bin: resolveUserBinDir(),
     manifest: join(home, 'manifest.json'),
     lock: join(home, '.update.lock'),
+    // #1089
+    releasesDir,
+    releasesCurrentLink: join(releasesDir, 'current'),
+    releasesHistory: join(releasesDir, 'history.json'),
+    releasesSrc: join(releasesDir, 'src'),
     // Legacy
     releases: join(home, 'releases'),
     current: join(home, 'current'),

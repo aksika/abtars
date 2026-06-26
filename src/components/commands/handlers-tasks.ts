@@ -48,7 +48,8 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
       const running = ctx.cronCurrentJob?.entryId === e.id;
       const tick = e.paused ? "⏸" : !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
       const label = e.title || e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
-      return `${tick}  ${e.id.padEnd(22)}${sched.padEnd(16)}${label}`;
+      const name = label.length > 18 ? label.slice(0, 18) : label;
+      return `${tick}  ${name.padEnd(20)}${sched.padEnd(16)}${label}`;
     });
     listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
   } catch (err) {
@@ -59,17 +60,39 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   if (ctx.cronCurrentJob) {
     const j = ctx.cronCurrentJob;
     const ago = Math.round((Date.now() - j.startedAt) / 1000);
-    running = `\n▶ Running: ${j.type} (pid ${j.pid}, ${ago}s ago)\n   ${j.entryId}`;
+    const name = j.message.split("\n")[0].slice(0, 30);
+    running = `\n~ Running: ${name} (${ago}s)`;
   }
   await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "HTML" });
   return true;
 }
 
 export async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<boolean> {
-  const id = text.replace(/^\/(tasks?|cron) run /, "").trim();
-  if (!id) { await ctx.reply("Usage: /task run <cron-id>"); return true; }
+  const raw = text.replace(/^\/(tasks?|cron) run /, "").trim();
+  if (!raw) { await ctx.reply("Usage: /task run <cron-id>"); return true; }
+
+  // Resolve ID: try exact, then normalized (spaces→hyphens, lowercase), then title match
+  let id = raw;
+  const { readEntry, readEntries } = await import("../tasks/task-store.js");
+  if (!readEntry(id)) {
+    const normalized = raw.toLowerCase().replace(/\s+/g, "-");
+    if (readEntry(normalized)) {
+      id = normalized;
+    } else {
+      const byTitle = readEntries().find(e => e.title?.toLowerCase() === raw.toLowerCase());
+      if (byTitle) id = byTitle.id;
+    }
+  }
+
   const err = ctx.enqueueCron?.(id, true);
-  await ctx.reply(err ?? `⏳ Running: ${id}`);
+  if (err) { await ctx.reply(err); return true; }
+  // Resolve display name
+  let name = id;
+  try {
+    const entry = readEntry(id);
+    if (entry) name = entry.title || entry.message.split("\n")[0].slice(0, 30);
+  } catch { /* fallback to id */ }
+  await ctx.reply(`Running task: ${name}`);
   return true;
 }
 
@@ -146,14 +169,85 @@ export async function handleKanban(text: string, ctx: CommandContext): Promise<b
       await ctx.reply("📋 Kanban board is empty.");
       return true;
     }
-    const lines = cards.map((c: { id: number; title: string; status: string; source: string; priority: string; due_at: string | null }) => {
-      const icon = c.status === "delivered" ? "✅" : c.status === "done" ? "📬" : c.status === "running" ? "⏳" : c.status === "failed" ? "❌" : "📥";
+    const lines = cards.map((c: { id: number; title: string; status: string; source: string; priority: string; due_at: string | null; delivered_at: string | null }) => {
+      const icon = c.status === "delivered" ? "✓" : c.status === "done" ? "+" : c.status === "running" ? "~" : c.status === "failed" ? "✗" : "-";
       const due = c.due_at ? ` due:${c.due_at.slice(0, 10)}` : "";
-      return `${icon} #${c.id} ${c.title} (${c.source}/${c.priority})${due}`;
+      const doneAt = c.delivered_at ? ` ${c.delivered_at.slice(2, 10).replace(/-/g, "")}:${c.delivered_at.slice(11, 16).replace(":", "")}` : "";
+      const title = c.title.length > 20 ? c.title.slice(0, 17) + "…" : c.title;
+      return `${icon} #${c.id} ${title} (${c.source}/${c.priority})${doneAt}${due}`;
     });
-    await ctx.reply(`📋 Kanban Board (${cards.length}):\n${lines.join("\n")}`);
+    const header = `📋 Kanban Board (${cards.length}):\n`;
+    let body = "";
+    for (const line of lines) {
+      if (header.length + body.length + line.length + 1 > 3900) {
+        body += `\n… +${cards.length - body.split("\n").length} more`;
+        break;
+      }
+      body += (body ? "\n" : "") + line;
+    }
+    await ctx.reply(header + body);
   } catch (err) {
     await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+  return true;
+}
+
+/** /channel command — master visibility into agent discussions (#891). */
+export async function handleChannel(text: string, ctx: CommandContext): Promise<boolean> {
+  const args = text.replace(/^\/channel\s*/i, "").trim();
+
+  const { channelRead, channelPost } = await import("../tasks/kanban-channel.js");
+
+  // /channel (no args) — list active channels
+  if (!args) {
+    const { kanbanList } = await import("../tasks/kanban-board.js");
+    const active = kanbanList("running");
+    if (active.length === 0) { await ctx.reply("No active channels."); return true; }
+    const lines = active.map((c: any) => {
+      const msgs = channelRead(c.id);
+      return `#${c.id} "${c.title}" — ${msgs.length} msg${msgs.length !== 1 ? "s" : ""}`;
+    });
+    await ctx.reply(`📡 Active channels:\n${lines.join("\n")}`);
+    return true;
+  }
+
+  // /channel <card_id> [message] or /channel <card_id> @Worker msg
+  const match = args.match(/^(\d+)\s*(.*)?$/);
+  if (!match) { await ctx.reply("Usage: /channel [card_id] [message]"); return true; }
+
+  const cardId = parseInt(match[1]!, 10);
+  const rest = (match[2] ?? "").trim();
+
+  // /channel <card_id> — show discussion
+  if (!rest) {
+    const msgs = channelRead(cardId);
+    if (msgs.length === 0) { await ctx.reply(`Channel #${cardId}: empty.`); return true; }
+    const lines = msgs.map(m => {
+      const remote = m.remote_peer ? `[${m.remote_peer}] ` : "";
+      const type = m.msg_type && m.msg_type !== "progress" ? `[${m.msg_type}] ` : "";
+      return `${remote}[${m.from_agent}→${m.to_agent}]${m.directive ? " ⚡" : ""} ${type}${m.message}`;
+    });
+    await ctx.reply(`📡 Channel #${cardId} (${msgs.length} msgs):\n${lines.join("\n")}`);
+    return true;
+  }
+
+  // /channel <card_id> @Worker-01 msg — targeted post
+  const atMatch = rest.match(/^@(\S+)\s+(.+)$/);
+  const to = atMatch ? atMatch[1]! : "ALL";
+  const message = atMatch ? atMatch[2]! : rest;
+  channelPost(cardId, "master", to, message, true);
+  await ctx.reply(`✓ Posted to card:${cardId} [master→${to}]`);
+  return true;
+}
+
+export async function handleTodo(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { existsSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { abtarsHome } = await import("../../paths.js");
+  const todoPath = join(abtarsHome(), "workspace", "todo", "todo.md");
+  if (!existsSync(todoPath)) { await ctx.reply("Todo list is empty."); return true; }
+  const content = readFileSync(todoPath, "utf-8").trim();
+  if (!content || content === "# Todo List") { await ctx.reply("Todo list is empty."); return true; }
+  await ctx.reply(content);
   return true;
 }

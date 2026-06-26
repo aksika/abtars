@@ -167,7 +167,7 @@ export class ResponseFormatter {
       case "start":
         return `🔧 ${toolName}...`;
       case "done":
-        return `✅ ${toolName}`;
+        return `✓ ${toolName}`;
       case "error":
         return `❌ ${toolName} failed`;
     }

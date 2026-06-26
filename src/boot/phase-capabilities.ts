@@ -9,11 +9,21 @@
  * Mutates pipelineDeps.loadedCapabilities in place (closure seen by message-pipeline).
  */
 
-import { logInfo, logWarn, logError } from "../components/logger.js";
+import { logInfo, logWarn, logError, logDebug } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
 export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memory, transport, runtime, capabilities, pipelineDeps } = ctx;
+
+  // Skills catalog: pure filesystem, no deps — always generate (#996)
+  try {
+    const { SkillWatcher } = await import("../components/skill-watcher.js");
+    const { abtarsHome } = await import("../paths.js");
+    const { join } = await import("node:path");
+    const sw = new SkillWatcher(join(abtarsHome(), "skills"), join(abtarsHome(), "skills", "skills_catalog.md"));
+    sw.generateCatalog();
+  } catch {}
+
   if (!transport || !pipelineDeps) { ctx.phaseHealth.set(phaseCapabilities.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phaseCapabilities.name}: skipping — transport not available`); return "skipped"; }
 
   const { createCapabilityApi } = await import("../capabilities/capability.js");
@@ -36,9 +46,13 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
     for (const { name, load } of individualCaps) {
       if (disabled.has(name)) continue;
       try {
+        const { shouldAttempt } = await import("../components/sha-tracker.js");
+        if (!shouldAttempt("missing-dep", name)) { logDebug("capabilities", `Skipped "${name}": SHA cooldown active`); continue; }
         const mod = await load();
         staticCaps.push({ name, module: mod });
       } catch (e) {
+        const { recordResult } = await import("../components/sha-tracker.js");
+        recordResult("missing-dep", name, false, e instanceof Error ? e.message : String(e));
         logWarn("capabilities", `Skipped "${name}": ${e instanceof Error ? e.message : String(e)}`);
       }
     }

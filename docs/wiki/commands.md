@@ -62,8 +62,8 @@ All commands work on Telegram, Discord, and IRC unless noted otherwise.
 
 | Command | Description |
 |---------|-------------|
-| `/skills` | List loaded skills |
-| `/skill` | Reload skills catalog |
+| `/skills`, `/skill` | List active skills (grouped by source) |
+| `/skill reload` | Reload skills catalog |
 
 ## Sessions
 

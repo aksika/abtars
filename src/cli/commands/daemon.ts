@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars daemon` — manage the system service (install/uninstall/start/stop/restart/status).
  */
@@ -5,10 +6,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
+import { abtarsHome } from "../../paths.js";
 
-function abtarsHome(): string {
-  return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
-}
 
 function isWSL(): boolean {
   try { return readFileSync("/proc/version", "utf-8").toLowerCase().includes("microsoft"); } catch { return false; }
@@ -106,7 +105,7 @@ async function daemonInstall(): Promise<number> {
     try {
       const { readFileSync: rfs, writeFileSync: wfs } = await import("node:fs");
       const mf = JSON.parse(rfs(manifestPath, "utf-8"));
-      mf.installMode = "supervised-daemon";
+      mf.installMode = "daemon";
       wfs(manifestPath, JSON.stringify(mf, null, 2) + "\n");
     } catch { /* best effort */ }
     process.stdout.write(`✓ systemd unit installed at ${dst}\n`);
@@ -213,6 +212,7 @@ async function daemonStatus(): Promise<number> {
 // ── router ──
 
 export async function daemon(args: string[]): Promise<number> {
+  await printBanner("daemon");
   const sub = args[0] ?? "status";
   switch (sub) {
     case "install": return daemonInstall();

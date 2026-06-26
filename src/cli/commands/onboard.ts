@@ -1,3 +1,5 @@
+import { printBanner } from './banner.js';
+import { deriveFromPassphrase, writeKeyFile, writeKeyVerify, deriveKey } from '../../utils/crypto.js';
 /**
  * `abtars onboard` — first-time interactive configuration wizard
  * (plan #158 Phase 3, subsumes ticket #153).
@@ -35,8 +37,11 @@ export interface OnboardOptions {
   readonly telegramChatId?: string;
   readonly defaultProvider?: string;
   readonly defaultModel?: string;
+  readonly apiKey?: string;
   readonly discordA2aChannel?: string;
   readonly userName?: string;
+  readonly instanceName?: string;
+  readonly passphrase?: string;
   readonly force: boolean;
 }
 
@@ -54,7 +59,7 @@ const PROVIDER_TRANSPORT_NAME: Record<ProviderChoice, string> = {
   gemini: 'gemini',
 };
 const DEFAULT_MODELS: Record<ProviderChoice, string> = {
-  openrouter: 'google/gemini-2.5-flash',
+  openrouter: 'deepseek/deepseek-v4-flash',
   anthropic: 'claude-sonnet-4-5-20250929',
   openai: 'gpt-4o',
   ollama: 'kimi-k2.5:cloud',
@@ -82,8 +87,9 @@ const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
 };
 
 interface WizardAnswers {
-  readonly installMode: "simple" | "supervised" | "supervised-daemon";
+  readonly installMode: "simple" | "daemon";
   readonly userName: string;
+  readonly instanceName: string;
   readonly passphrase: string;
   readonly telegramToken: string;
   readonly telegramChatId: string;
@@ -97,75 +103,90 @@ interface WizardAnswers {
   readonly bedTime: string;
   readonly wakeTime: string;
   readonly groqApiKey: string;
-  readonly embeddingEnabled: boolean;
   readonly securityMode: string;
   readonly trustMode: boolean;
 }
 
+
 async function runInteractive(existing: WizardAnswers | null): Promise<WizardAnswers | null> {
-  // Dynamic import — @clack/prompts is the only dep introduced in Phase 3;
-  // keep it off the critical path for Phase 1-2 subcommands.
   const { intro, outro, text, select, confirm, isCancel, cancel } = await import('@clack/prompts');
 
   intro('abtars onboard — first-time setup');
-  const noteEmpty = 'press Enter to skip';
 
-  // 1. Deployment mode — set by `abtars install --mode=X`, read from manifest
-  const { packagePaths: pp, readManifest: rm } = await import("../deploy-lib-import.js");
-  const mfPaths = pp('abtars');
-  const mf = await rm(mfPaths.manifest);
-  const installMode = mf?.installMode ?? 'supervised';
+  let userName = '';
 
-  // 1c. User name (for personal greeting)
-  const userName = await text({
-    message: 'Your name',
-    placeholder: 'your name',
-    initialValue: existing?.userName ?? '',
+  // 1. Agent name
+  const instanceName = await text({
+    message: 'abTARS agent name',
+    placeholder: 'MyBot',
+    initialValue: existing?.instanceName ?? '',
+    validate: (v) => v?.trim() ? undefined : 'required',
   });
-  if (isCancel(userName)) { cancel('Cancelled.'); return null; }
+  if (isCancel(instanceName)) { cancel('Cancelled.'); return null; }
 
-  // 1d. Passphrase — moved to `abmind install` (#716)
-  const passphrase = '';
-
-  // 2. Security mode
-  const securityMode = await select({
-    message: 'Security mode — restrict agent file/command access?',
+  // 2. Install mode
+  const installMode = await select({
+    message: 'Install mode',
     options: [
+      { value: 'daemon', label: 'daemon — auto-restart, survives reboot (recommended)' },
+      { value: 'simple', label: 'simple — manual start/stop' },
+    ],
+    initialValue: existing?.installMode ?? 'daemon',
+  });
+  if (isCancel(installMode)) { cancel('Cancelled.'); return null; }
+
+  // 2b. Your name (used for encryption + user identity)
+  if (!userName) {
+    const uname = await text({
+      message: 'Your name (used for encryption + identity)',
+      placeholder: 'aksika',
+      validate: (v) => v?.trim() ? undefined : 'required',
+    });
+    if (isCancel(uname)) { cancel('Cancelled.'); return null; }
+    userName = String(uname).trim();
+  }
+
+  // 2c. Encryption passphrase (mandatory — protects secrets at rest)
+  const passphrase = await text({
+    message: 'Encryption passphrase (protects secrets at rest)',
+    placeholder: 'choose a strong passphrase',
+    validate: (v) => v?.trim() ? undefined : 'required — secrets are encrypted with this',
+  });
+  if (isCancel(passphrase)) { cancel('Cancelled.'); return null; }
+
+  // 3. Security mode
+  const securityMode = await select({
+    message: 'Security mode',
+    options: [
+      { value: 'off', label: 'off — no restrictions (ActionGate still active)' },
       { value: 'guardrails', label: 'guardrails — path guard + command blocklist (recommended)' },
-      { value: 'off', label: 'off — no restrictions (legacy)' },
+      { value: 'seatbelt', label: 'seatbelt — guardrails + OS per-command sandbox (bwrap/sandbox-exec)' },
+      { value: 'docker', label: 'docker — full isolation: per-session Docker containers (requires Docker)' },
     ],
     initialValue: existing?.securityMode ?? 'guardrails',
   });
   if (isCancel(securityMode)) { cancel('Cancelled.'); return null; }
 
-  // 3. Trust mode
-  const trustMode = await confirm({
-    message: 'Trust mode — auto-approve agent permission requests? (recommended for personal use)',
-    initialValue: true,
-  });
-  if (isCancel(trustMode)) { cancel('Cancelled.'); return null; }
-
-  // 4-5. Telegram (optional)
-  const telegramToken = await text({
-    message: `Telegram bot token (@BotFather → /mybots → API Token, ${noteEmpty})`,
-    placeholder: '123456789:ABCdefGHI...',
-    initialValue: existing?.telegramToken,
-    validate: (v) => (!v || v.trim() === '' || v.includes(':')) ? undefined : 'expected format "<id>:<secret>" or empty',
-  });
-  if (isCancel(telegramToken)) { cancel('Cancelled.'); return null; }
-
-  // Chat ID — user enters manually
-  let detectedChatId = existing?.telegramChatId ?? '';
-
+  // 4. Main chat ID
   const telegramChatId = await text({
-    message: `Your Telegram chat ID (message @userinfobot on Telegram to get it)`,
+    message: 'Main chat ID (Telegram)',
     placeholder: '123456789',
-    initialValue: detectedChatId,
-    validate: (v) => (!v || v.trim() === '' || /^-?\d+$/.test(v.trim())) ? undefined : 'expected numeric user ID or empty',
+    initialValue: existing?.telegramChatId ?? '',
+    validate: (v) => (!v || /^-?\d+$/.test(v.trim())) ? undefined : 'expected numeric ID',
   });
   if (isCancel(telegramChatId)) { cancel('Cancelled.'); return null; }
 
-  // 4-6. Discord (all optional)
+  // 5. Telegram bot token
+  const telegramToken = await text({
+    message: 'Telegram bot token (@BotFather)',
+    placeholder: '123456789:ABCdefGHI...',
+    initialValue: existing?.telegramToken ?? '',
+    validate: (v) => (!v || v.includes(':')) ? undefined : 'expected format "id:secret"',
+  });
+  if (isCancel(telegramToken)) { cancel('Cancelled.'); return null; }
+
+  // 6-8. Discord (optional)
+  const noteEmpty = 'Enter to skip';
   const discordBotToken = await text({
     message: `Discord bot token (${noteEmpty})`,
     placeholder: 'MTIzNDU2...',
@@ -177,133 +198,93 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     message: `Discord app ID (${noteEmpty})`,
     placeholder: '987654321098765432',
     initialValue: existing?.discordAppId,
-    validate: (v) => (!v || v.trim() === '' || /^\d{10,20}$/.test(v.trim())) ? undefined : 'expected Discord snowflake or empty',
+    validate: (v) => (!v || v.trim() === '' || /^\d{10,20}$/.test(v.trim())) ? undefined : 'expected snowflake or empty',
   });
   if (isCancel(discordAppId)) { cancel('Cancelled.'); return null; }
 
   const discordA2aChannel = await text({
-    message: `Discord allowed channel ID (${noteEmpty})`,
+    message: `Discord channel ID (${noteEmpty})`,
     placeholder: '987654321098765432',
     initialValue: existing?.discordA2aChannel,
-    validate: (v) => (!v || v.trim() === '' || /^\d{10,20}$/.test(v.trim())) ? undefined : 'expected Discord snowflake or empty',
+    validate: (v) => (!v || v.trim() === '' || /^\d{10,20}$/.test(v.trim())) ? undefined : 'expected snowflake or empty',
   });
   if (isCancel(discordA2aChannel)) { cancel('Cancelled.'); return null; }
 
-  // 7. Provider
+  // 9. Provider
   const defaultProvider = await select<ProviderChoice>({
-    message: 'Default transport provider',
+    message: "Model's provider (use /model to change later)",
     options: [
       { value: 'openrouter', label: 'openrouter — many models via API key' },
       { value: 'anthropic', label: 'anthropic — Claude API (direct)' },
       { value: 'openai', label: 'openai — GPT API (direct)' },
       { value: 'ollama', label: 'ollama — local/cloud Ollama endpoint' },
-      { value: 'kiro', label: 'kiro — Kiro CLI (free or paid; tier via model)' },
-      { value: 'gemini', label: 'gemini — Gemini CLI (free or paid; tier via model)' },
+      { value: 'kiro', label: 'kiro — Kiro CLI' },
+      { value: 'gemini', label: 'gemini — Gemini CLI' },
     ],
-    initialValue: existing?.defaultProvider ?? 'kiro',
+    initialValue: existing?.defaultProvider ?? 'openrouter',
   });
   if (isCancel(defaultProvider)) { cancel('Cancelled.'); return null; }
 
-  // 8. Default model
+  // 10. Main model (prefilled per provider)
   const defaultModel = await text({
-    message: `Default model (for ${defaultProvider})`,
+    message: 'Main model',
     placeholder: DEFAULT_MODELS[defaultProvider],
     initialValue: existing?.defaultModel ?? DEFAULT_MODELS[defaultProvider],
   });
   if (isCancel(defaultModel)) { cancel('Cancelled.'); return null; }
+  const modelStr = String(defaultModel ?? '').trim() || DEFAULT_MODELS[defaultProvider];
 
-  // 9. API key — every provider now has an env var; always ask, allow skip
+  // 11. API key — required + validated for OpenRouter, optional for others
   const apiKeyEnv = PROVIDER_API_KEY_ENV[defaultProvider];
   let providerApiKey = existing?.providerApiKey ?? '';
-  {
+  if (defaultProvider === 'openrouter') {
+    const endpoint = PROVIDER_ENDPOINT[defaultProvider] ?? '';
+    let validated = false;
+    while (!validated) {
+      const v = await text({
+        message: `${apiKeyEnv} (required)`,
+        placeholder: 'sk-or-v1-...',
+        initialValue: providerApiKey || existing?.providerApiKey,
+        validate: (val) => val?.trim() ? undefined : 'API key required for OpenRouter',
+      });
+      if (isCancel(v)) { cancel('Cancelled.'); return null; }
+      providerApiKey = String(v ?? '').trim();
+      process.stdout.write('  Validating key...');
+      const result = await checkModelAvailability(endpoint, providerApiKey, modelStr);
+      if (result.ok) {
+        process.stdout.write(` ✓ valid\n`);
+        validated = true;
+      } else {
+        process.stdout.write(` ✗ ${result.message}\n`);
+        const retry = await confirm({ message: 'Try a different key?', initialValue: true });
+        if (isCancel(retry)) { cancel('Cancelled.'); return null; }
+        if (!retry) { validated = true; }
+      }
+    }
+  } else {
     const v = await text({
       message: `${apiKeyEnv} (${noteEmpty})`,
-      placeholder: existing?.providerApiKey ? '(keep existing)' : 'sk-or-v1-... or leave blank',
+      placeholder: 'leave blank for local providers',
       initialValue: existing?.providerApiKey,
     });
     if (isCancel(v)) { cancel('Cancelled.'); return null; }
     providerApiKey = String(v ?? '').trim() || existing?.providerApiKey || '';
   }
 
-  // 10. Availability check
-  const modelStr = String(defaultModel).trim() || DEFAULT_MODELS[defaultProvider];
-  if (API_PROVIDERS.has(defaultProvider) && providerApiKey) {
-    const check = await confirm({ message: 'Check availability (GET /v1/models)?', initialValue: true });
-    if (isCancel(check)) { cancel('Cancelled.'); return null; }
-    if (check) {
-      const endpoint = PROVIDER_ENDPOINT[defaultProvider] ?? '';
-      const result = await checkModelAvailability(endpoint, providerApiKey, modelStr);
-      process.stdout.write(result.ok ? `✓ ${modelStr} available on ${defaultProvider}\n` : `⚠️  ${result.message}\n`);
-    }
-  }
-
-  // 11. Ultimate fallback (hailMary)
-  const hailMary = await text({
-    message: `Ultimate fallback model — hailMary (${noteEmpty}; uses same provider + key as above)`,
-    placeholder: 'google/gemini-2.5-flash',
-    initialValue: existing?.hailMaryModel ?? 'google/gemini-2.5-flash',
-  });
-  if (isCancel(hailMary)) { cancel('Cancelled.'); return null; }
-  const hailMaryModel = String(hailMary ?? '').trim();
-
-  if (hailMaryModel && API_PROVIDERS.has(defaultProvider) && providerApiKey) {
-    const check = await confirm({ message: `Check hailMary availability (${hailMaryModel})?`, initialValue: true });
-    if (isCancel(check)) { cancel('Cancelled.'); return null; }
-    if (check) {
-      const endpoint = PROVIDER_ENDPOINT[defaultProvider] ?? '';
-      const result = await checkModelAvailability(endpoint, providerApiKey, hailMaryModel);
-      process.stdout.write(result.ok ? `✓ ${hailMaryModel} available\n` : `⚠️  ${result.message}\n`);
-    }
-  }
-
-  // 12. Sleep schedule + voice + trust mode
-  const bedTime = await text({
-    message: `Bed time HH:MM — daily sleep trigger (${noteEmpty} for default 0:30)`,
-    placeholder: '0:30',
-    initialValue: existing?.bedTime,
-    validate: (v) => (!v || /^\d{1,2}:\d{2}$/.test(v.trim())) ? undefined : 'expected H:MM format',
-  });
-  if (isCancel(bedTime)) { cancel('Cancelled.'); return null; }
-
-  const wakeTime = await text({
-    message: `Wake time HH:MM (${noteEmpty} for default 7:00)`,
-    placeholder: '7:00',
-    initialValue: existing?.wakeTime,
-    validate: (v) => (!v || /^\d{1,2}:\d{2}$/.test(v.trim())) ? undefined : 'expected H:MM format',
-  });
-  if (isCancel(wakeTime)) { cancel('Cancelled.'); return null; }
-
-  const groqApiKey = await text({
-    message: `GROQ_API_KEY for voice-note transcription (${noteEmpty})`,
-    placeholder: existing?.groqApiKey ? '(keep existing)' : 'gsk_...',
-    initialValue: existing?.groqApiKey,
-  });
-  if (isCancel(groqApiKey)) { cancel('Cancelled.'); return null; }
-
-  // 12b. Embeddings — handled by `abmind install`, not here
-  const embeddingEnabled = false;
-
-  // 13. Summary + confirmation
+  // Summary
   const mask = (s: string): string => s ? (s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-4)}` : '***') : '(skipped)';
   const lines = [
     '',
     '── Summary ──',
-    `  Deployment mode:     ${installMode}`,
-    `  Your name:           ${String(userName ?? '') || '(skipped)'}`,
-    `  Telegram token:      ${mask(String(telegramToken ?? ''))}`,
+    `  Agent name:          ${String(instanceName ?? '')}`,
+    `  Install mode:        ${installMode}`,
+    `  Security:            ${securityMode}`,
     `  Telegram chat ID:    ${String(telegramChatId ?? '') || '(skipped)'}`,
+    `  Telegram token:      ${mask(String(telegramToken ?? ''))}`,
     `  Discord bot token:   ${mask(String(discordBotToken ?? ''))}`,
-    `  Discord app ID:      ${String(discordAppId ?? '') || '(skipped)'}`,
-    `  Discord channel ID:  ${String(discordA2aChannel ?? '') || '(skipped)'}`,
     `  Provider:            ${defaultProvider}`,
-    `  Default model:       ${modelStr}`,
+    `  Main model:          ${modelStr}`,
     `  ${apiKeyEnv}:        ${mask(providerApiKey)}`,
-    `  hailMary model:      ${hailMaryModel || '(skipped)'}`,
-    `  Bed time:            ${String(bedTime ?? '') || '(default 0:30)'}`,
-    `  Wake time:           ${String(wakeTime ?? '') || '(default 7:00)'}`,
-    `  GROQ_API_KEY:        ${mask(String(groqApiKey ?? ''))}`,
-    `  Embeddings:          ${embeddingEnabled ? 'enabled' : 'disabled'}`,
-    `  Trust mode:          ${trustMode ? 'true (auto-approve)' : 'false (prompt user)'}`,
     '',
   ];
   process.stdout.write(lines.join('\n'));
@@ -314,9 +295,10 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   outro('Writing config…');
 
   return {
-    installMode: installMode as "simple" | "supervised" | "supervised-daemon",
-    userName: String(userName ?? '').trim(),
-    passphrase: String(passphrase ?? ''),
+    installMode: installMode as "simple" | "daemon",
+    userName,
+    instanceName: String(instanceName ?? '').trim(),
+    passphrase: String(passphrase).trim(),
     telegramToken: String(telegramToken ?? '').trim(),
     telegramChatId: String(telegramChatId ?? '').trim(),
     discordBotToken: String(discordBotToken ?? '').trim(),
@@ -325,13 +307,12 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     defaultProvider: defaultProvider as ProviderChoice,
     defaultModel: modelStr,
     providerApiKey,
-    hailMaryModel,
-    bedTime: String(bedTime ?? '').trim(),
-    wakeTime: String(wakeTime ?? '').trim(),
-    groqApiKey: String(groqApiKey ?? '').trim() || existing?.groqApiKey || '',
-    embeddingEnabled: false,
+    hailMaryModel: modelStr,
+    bedTime: '',
+    wakeTime: '',
+    groqApiKey: existing?.groqApiKey ?? '',
     securityMode: String(securityMode ?? 'guardrails'),
-    trustMode: trustMode === true,
+    trustMode: true,
   };
 }
 
@@ -353,18 +334,55 @@ async function checkModelAvailability(endpoint: string, apiKey: string, model: s
   }
 }
 
+async function validateModelCatalog(model: string, provider: string): Promise<{ ok: boolean; message: string }> {
+  try {
+    const { fileURLToPath } = await import('node:url');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      join(here, '..', '..', '..', 'templates', 'config', 'models.json'),
+      join(here, '..', '..', 'templates', 'config', 'models.json'),
+      join(here, '..', 'templates', 'config', 'models.json'),
+      join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'templates', 'config', 'models.json'),
+      join(process.env['HOME'] ?? '', '.abtars', 'config', 'models.json'),
+    ];
+    let catalog: Record<string, { transports?: string[] }> | null = null;
+    for (const p of candidates) {
+      try {
+        catalog = JSON.parse(await readFile(p, 'utf-8'));
+        break;
+      } catch { /* try next */ }
+    }
+    if (!catalog) return { ok: true, message: '' }; // no catalog = skip validation
+    const entry = catalog[model];
+    if (!entry) return { ok: false, message: `Model "${model}" not found in models.json catalog` };
+    const provName = PROVIDER_TRANSPORT_NAME[provider as ProviderChoice] ?? provider;
+    if (entry.transports && !entry.transports.includes(provName)) {
+      return { ok: false, message: `Model "${model}" not available for provider "${provName}" (supported: ${entry.transports.join(', ')})` };
+    }
+    return { ok: true, message: '' };
+  } catch {
+    return { ok: true, message: '' }; // validation error = don't block install
+  }
+}
+
 function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   if (!opts.acceptRisk) {
     return '--non-interactive requires --accept-risk (you are bypassing safety prompts)';
   }
+  if (!opts.instanceName) return '--instance-name is required in non-interactive mode';
+  if (!opts.telegramToken) return '--telegram-token is required in non-interactive mode';
+  if (!opts.telegramChatId) return '--telegram-chat-id is required in non-interactive mode';
+  if (!opts.userName) return '--user-name is required in non-interactive mode';
+  if (!opts.passphrase) return '--passphrase is required in non-interactive mode';
   const provider = (opts.defaultProvider ?? 'openrouter') as ProviderChoice;
   if (!VALID_PROVIDERS.includes(provider)) {
     return `--default-provider must be one of: ${VALID_PROVIDERS.join(', ')}`;
   }
   return {
-    installMode: 'supervised',
+    installMode: 'daemon',
     userName: opts.userName ?? '',
-    passphrase: '',
+    instanceName: opts.instanceName ?? '',
+    passphrase: opts.passphrase ?? '',
     telegramToken: opts.telegramToken ?? '',
     telegramChatId: opts.telegramChatId ?? '',
     discordBotToken: '',
@@ -372,12 +390,11 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     discordA2aChannel: opts.discordA2aChannel ?? '',
     defaultProvider: provider,
     defaultModel: opts.defaultModel ?? DEFAULT_MODELS[provider],
-    providerApiKey: '',
+    providerApiKey: opts.apiKey ?? '',
     hailMaryModel: '',
     bedTime: '',
     wakeTime: '',
     groqApiKey: '',
-    embeddingEnabled: false,
     securityMode: 'guardrails',
     trustMode: true,
   };
@@ -397,6 +414,7 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
     return {
       installMode: 'simple',
       userName: kv.get('USER_DISPLAY_NAME') ?? '',
+      instanceName: '',
       passphrase: '',
       telegramToken: kv.get('TELEGRAM_BOT_TOKEN') ?? '',
       telegramChatId: kv.get('MAIN_CHAT_ID') ?? '',
@@ -410,7 +428,6 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       bedTime: kv.get('BED_TIME') ?? '',
       wakeTime: kv.get('WAKE_TIME') ?? '',
       groqApiKey: kv.get('GROQ_API_KEY') ?? '',
-      embeddingEnabled: kv.get('EMBEDDING_ENABLED') === 'true',
       securityMode: kv.get('SECURITY_MODE') ?? 'guardrails',
       trustMode: kv.get('TRUST_MODE') === 'true',
     };
@@ -424,8 +441,9 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'MAIN_CHAT_ID',
     'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
-    'BED_TIME', 'WAKE_TIME', 'HEARTBEAT_INTERVAL_SEC', 'EMBEDDING_ENABLED', 'TRUST_MODE',
+    'BED_TIME', 'WAKE_TIME', 'HEARTBEAT_INTERVAL_SEC', 'TRUST_MODE',
     'TELEGRAM_ENABLED', 'DISCORD_ENABLED', 'IRC_ENABLED',
+    'LOG_LEVEL', 'ACTIVE_MEMORY', 'ENABLE_AGENT_API', 'SELFHEAL_ENABLED',
   ]);
   const keptLines: string[] = [];
   for (const line of existing.split('\n')) {
@@ -447,18 +465,22 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   if (answers.discordA2aChannel) newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);
   if (answers.bedTime) newBlock.push(`BED_TIME=${answers.bedTime}`);
   if (answers.wakeTime) newBlock.push(`WAKE_TIME=${answers.wakeTime}`);
-  newBlock.push(`HEARTBEAT_INTERVAL_SEC=300`);
-  newBlock.push(`EMBEDDING_ENABLED=${answers.embeddingEnabled ? 'true' : 'false'}`);
+  newBlock.push(`HEARTBEAT_INTERVAL_SEC=60`);
   newBlock.push(`SECURITY_MODE=${answers.securityMode}`);
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
   newBlock.push(`TELEGRAM_ENABLED=${answers.telegramToken ? 'true' : 'false'}`);
   newBlock.push(`DISCORD_ENABLED=${answers.discordBotToken ? 'true' : 'false'}`);
   newBlock.push(`IRC_ENABLED=false`);
+  newBlock.push(`LOG_LEVEL=debug`);
+  newBlock.push(`ACTIVE_MEMORY=true`);
+  newBlock.push(`ENABLE_AGENT_API=false`);
+  newBlock.push(`SELFHEAL_ENABLED=true`);
 
   return [...keptLines, ...newBlock, ''].join('\n');
 }
 
 export async function onboard(opts: OnboardOptions): Promise<number> {
+  await printBanner("install");
   const paths = packagePaths('abtars');
 
   // Install log (#718)
@@ -471,12 +493,37 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     return _origWrite(chunk, ...args);
   }) as typeof process.stdout.write;
 
-  const manifest = await readManifest(paths.manifest);
+  let manifest = await readManifest(paths.manifest);
   if (!manifest) {
-    process.stderr.write(
-      `Not installed yet. Run 'abtars install' first.\n(Manifest not found at ${paths.manifest}.)\n`,
-    );
-    return 2;
+    // First install — create skeleton + manifest
+    const { mkdirSync, existsSync: fileExists, symlinkSync } = await import("node:fs");
+    const { chmod } = await import("node:fs/promises");
+    for (const d of ["logs", "config", "secret", "skills/core", "skills/self", "skills/custom", "skills/downloaded", "kanban", "state"]) {
+      mkdirSync(join(paths.home, d), { recursive: true });
+    }
+    await chmod(join(paths.home, "secret"), 0o700);
+    await chmod(join(paths.home, "config"), 0o700);
+    // Ensure ~/.local/bin/ exists and has our binary (symlink from pnpm bin if needed)
+    const { homedir } = await import("node:os");
+    const localBin = join(homedir(), ".local", "bin");
+    mkdirSync(localBin, { recursive: true });
+    const localAbtars = join(localBin, "abtars");
+    if (!fileExists(localAbtars)) {
+      try {
+        const { execSync: ex } = await import("node:child_process");
+        const pnpmBin = ex("pnpm bin -g", { encoding: "utf-8", timeout: 5000 }).trim();
+        const pnpmAbtars = join(pnpmBin, "abtars");
+        if (fileExists(pnpmAbtars)) {
+          symlinkSync(pnpmAbtars, localAbtars);
+        }
+      } catch { /* pnpm not available — user installed via npm, binary already in PATH */ }
+    }
+    const { hostname } = await import("node:os");
+    const { emptyManifest, writeManifest: wm } = await import("../deploy-lib-import.js");
+    const mode = process.platform === "darwin" ? "daemon" : "daemon";
+    manifest = { ...emptyManifest("abtars", hostname()), installMode: mode } as any;
+    await wm(paths.manifest, manifest as any);
+    process.stdout.write(`✓ skeleton at ${paths.home}\n✓ install mode: ${mode}\n`);
   }
 
   const envPath = join(paths.config, '.env');
@@ -501,9 +548,36 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       return 4;
     }
     answers = result;
+    // Validate API key in non-interactive mode — warn but continue
+    if (answers.providerApiKey && API_PROVIDERS.has(answers.defaultProvider)) {
+      const endpoint = PROVIDER_ENDPOINT[answers.defaultProvider] ?? '';
+      const check = await checkModelAvailability(endpoint, answers.providerApiKey, answers.defaultModel);
+      if (check.ok) {
+        process.stdout.write(`✓ API key valid (${answers.defaultModel} available)\n`);
+      } else {
+        process.stderr.write(`⚠ API key validation failed: ${check.message}\n  Continuing — fix key in ~/.abtars/config/.env or secret/ later.\n`);
+      }
+    }
   } else {
     answers = await runInteractive(existing);
     if (answers === null) return 1;
+  }
+
+  // Validate model against models.json catalog
+  const catalogResult = await validateModelCatalog(answers.defaultModel, answers.defaultProvider);
+  if (!catalogResult.ok) {
+    if (opts.nonInteractive) {
+      if (!opts.force) {
+        process.stderr.write(`error: ${catalogResult.message}\n  Use --force to override.\n`);
+        return 4;
+      }
+      process.stderr.write(`⚠ ${catalogResult.message} (--force: continuing)\n`);
+    } else {
+      const { confirm: cfm, isCancel: isCnl, cancel: cnl } = await import('@clack/prompts');
+      process.stderr.write(`⚠ ${catalogResult.message}\n`);
+      const cont = await cfm({ message: 'Continue with this model?', initialValue: false });
+      if (isCnl(cont) || !cont) { cnl('Cancelled.'); return 1; }
+    }
   }
 
   // Read current .env to preserve operator-added lines.
@@ -596,6 +670,31 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     await writeFile(usersPath, JSON.stringify(users, null, 2) + '\n', { mode: 0o600 });
     process.stdout.write(`✓ users.json → ${usersPath}\n`);
 
+    // #1009: Write instance name to peers.json
+    const peersPath = join(paths.config, 'peers.json');
+    let peersJson: Record<string, unknown> = { self: { name: "default" }, peers: {} };
+    try { peersJson = JSON.parse(await readFile(peersPath, 'utf-8')); } catch { /* missing — use default */ }
+    if (!peersJson.self || typeof peersJson.self !== 'object') peersJson.self = {};
+    (peersJson.self as Record<string, unknown>).name = answers.instanceName || answers.userName.toLowerCase().replace(/[^a-z0-9-]/g, '') || 'default';
+    await writeFile(peersPath, JSON.stringify(peersJson, null, 2) + '\n', { mode: 0o600 });
+    process.stdout.write(`✓ peers.json (self.name: ${(peersJson.self as Record<string, unknown>).name}) → ${peersPath}\n`);
+
+    // Copy models.json (model metadata for context window, cost, rank)
+    const modelsPath = join(paths.config, 'models.json');
+    const { existsSync: modelsExists, copyFileSync: modelsCopy } = await import('node:fs');
+    if (!modelsExists(modelsPath)) {
+      const { fileURLToPath } = await import('node:url');
+      const here = dirname(fileURLToPath(import.meta.url));
+      const modelsCandidates = [
+        join(here, '..', '..', '..', 'config', 'models.json'),
+        join(here, '..', '..', 'config', 'models.json'),
+        join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'config', 'models.json'),
+      ];
+      for (const p of modelsCandidates) {
+        if (modelsExists(p)) { modelsCopy(p, modelsPath); process.stdout.write(`✓ models.json → ${modelsPath}\n`); break; }
+      }
+    }
+
     // Check abmind encryption compatibility
     try {
       const manifestPath = join(homedir(), '.abmind', 'manifest.json');
@@ -606,29 +705,14 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     } catch { /* no abmind or no manifest — fine */ }
   }
 
-  // Seed abmind user_profile.md — only if abmind is already installed
-  if (answers.userName) {
-    const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(paths.home), '.abmind');
-    const profileDir = join(abmindHome, 'memory', 'core');
-    const { existsSync: profileExists } = await import('node:fs');
-    if (profileExists(profileDir)) {
-      const profilePath = join(profileDir, 'user_profile.md');
-      if (!profileExists(profilePath)) {
-        await writeFile(profilePath, `# User Profile\n\nName: ${answers.userName}\n`, { mode: 0o600 });
-        process.stdout.write(`✓ user_profile.md → ${profilePath}\n`);
-      }
-    }
-  }
-
-  // Initialize passphrase-based encryption (#607)
+  // Initialize passphrase-based encryption — generate abtars.key (#1166)
   if (answers.passphrase && answers.userName) {
     try {
-      const { deriveFromPassphrase, writeKeyVerify } = await import("abmind");
-      const { writeToKeyring } = await import("abmind");
-      const key = deriveFromPassphrase(answers.passphrase, answers.userName);
-      writeKeyVerify(key);
-      const stored = writeToKeyring(answers.passphrase);
-      process.stdout.write(`✓ Encryption key derived from passphrase${stored ? " (stored in keyring)" : ""}\n`);
+      const master = deriveFromPassphrase(answers.passphrase, answers.userName);
+      const keyPath = join(paths.home, "config", "abtars.key");
+      writeKeyFile(keyPath, master);
+      writeKeyVerify(keyPath, deriveKey(master));
+      process.stdout.write(`✓ abtars.key derived from passphrase\n`);
     } catch (err) {
       process.stdout.write(`⚠ Key init failed: ${err instanceof Error ? err.message : String(err)}\n`);
     }
@@ -640,62 +724,23 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   }
 
   // Seed default agent-api rules
-  const agentsDir = join(paths.home, 'agents');
-  const agentRulesPath = join(agentsDir, 'default.md');
-  const { existsSync: agentRulesExists } = await import('node:fs');
-  if (!agentRulesExists(agentRulesPath)) {
-    await mkdir(agentsDir, { recursive: true });
-    const bundledPath = join(dirname(fileURLToPath(import.meta.url)), 'agents', 'default.md');
-    const fallbackPath = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'agents', 'default.md');
-    let content = '# Agent-to-Agent API\n\n<!-- See docs for configuration -->\n';
-    try { content = (await readFile(bundledPath, 'utf-8')); } catch {
-      try { content = (await readFile(fallbackPath, 'utf-8')); } catch { /* use default */ }
-    }
-    await writeFile(agentRulesPath, content);
-    process.stdout.write(`✓ agents/default.md → ${agentRulesPath}\n`);
-  }
-
   process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://aksika.github.io/abtars/\n`);
 
-  // Skip the build+start automation in non-interactive mode (scripts expect to do it themselves)
-  if (opts.nonInteractive) {
-    process.stdout.write(`\nNext: 'abtars update' to build, then start the bridge.\n`);
-    return 0;
-  }
-
-  const { existsSync } = await import('node:fs');
-  const hasRelease = existsSync(join(paths.home, 'current'));
-  if (!hasRelease) {
-    process.stdout.write(`\nNext: run 'abtars update' to stage the release, then start the bridge.\n`);
-    return 0;
-  }
-
-  process.stdout.write(`\n✓ Onboarding complete.\n`);
-  process.stdout.write(`\nNext: start the bridge\n`);
-  process.stdout.write(`  Daemon mode:  sudo $(which abtars) daemon install\n`);
-  process.stdout.write(`  Manual mode:  abtars start\n`);
-  return 0;
+  // Run update (clone source, build, deploy, start bridge)
+  process.stdout.write(`\nRunning abtars update...\n`);
+  const { update } = await import("./update.js");
+  return await update({ source: "dev", skipFreshness: true, allowAbmindMismatch: false });
 }
 
 // ── Default task seeding (#383) ─────────────────────────────────────────────
 
-interface TaskTemplateEntry {
-  readonly id?: string;
-  readonly title?: string;
-  readonly message: string;
-  readonly schedule: string;
-  readonly type: "task" | "reminder";
-  readonly executor: "agent" | "script";
-  readonly maxRunsPerDay?: number;
-}
-
 /**
- * Seed default tasks (#383) via `abtars-task add` — skipped if tasks.json
+ * Seed default tasks (#383) via copy — skipped if tasks.json
  * already exists. Called from onboard after .env is persisted so chatId
  * is available.
  */
 async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<void> {
-  const { existsSync } = await import('node:fs');
+  const { existsSync, mkdirSync, copyFileSync } = await import('node:fs');
   const tasksJson = join(abtarsHome, 'tasks', 'tasks.json');
   if (existsSync(tasksJson)) {
     process.stdout.write(`• tasks.json exists — skipping default-task seed\n`);
@@ -704,56 +749,21 @@ async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<voi
 
   const { fileURLToPath } = await import('node:url');
   const here = dirname(fileURLToPath(import.meta.url));
-  // onboard.ts is at src/cli/commands/onboard.ts or dist/cli/commands/onboard.js
-  // tasks.default.json lives at repo root — three levels up.
   const candidates = [
-    join(here, '..', '..', '..', 'tasks.default.json'),
-    join(here, '..', '..', 'tasks.default.json'),
+    join(here, '..', '..', '..', 'config', 'tasks', 'tasks.json'),
+    join(here, '..', '..', 'config', 'tasks', 'tasks.json'),
+    join(abtarsHome, '..', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
+    join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
   ];
   let templatePath: string | null = null;
   for (const p of candidates) {
     if (existsSync(p)) { templatePath = p; break; }
   }
   if (!templatePath) {
-    process.stdout.write(`• tasks.default.json not found — skipping default-task seed\n`);
     return;
   }
 
-  let template: TaskTemplateEntry[];
-  try {
-    const raw = await readFile(templatePath, 'utf-8');
-    template = JSON.parse(raw) as TaskTemplateEntry[];
-  } catch (err) {
-    process.stdout.write(`• Failed to read tasks.default.json: ${err instanceof Error ? err.message : String(err)}\n`);
-    return;
-  }
-
-  const { spawnSync } = await import('node:child_process');
-  let seeded = 0;
-  for (const entry of template) {
-    const args = [
-      'add',
-      '--schedule', entry.schedule,
-      '--message', entry.message,
-      '--chat-id', chatId,
-      '--type', entry.type,
-      '--executor', entry.executor,
-    ];
-    if (entry.id) args.push('--id', entry.id);
-    if (entry.title) args.push('--title', entry.title);
-    if (entry.maxRunsPerDay) args.push('--max-runs-per-day', String(entry.maxRunsPerDay));
-    const result = spawnSync('abtars-task', args, {
-      encoding: 'utf-8',
-      env: { ...process.env, ABTARS_HOME: abtarsHome },
-    });
-    if (result.status === 0) {
-      seeded++;
-    } else {
-      const err = result.error?.message ?? result.stderr?.trim() ?? result.stdout?.trim() ?? `exit ${result.status}`;
-      process.stdout.write(`  ⚠️ failed to seed task "${entry.message.slice(0, 40)}": ${err}\n`);
-    }
-  }
-  if (seeded > 0) {
-    process.stdout.write(`✓ seeded ${seeded} default task${seeded === 1 ? '' : 's'}\n`);
-  }
+  mkdirSync(join(abtarsHome, 'tasks'), { recursive: true });
+  copyFileSync(templatePath, tasksJson);
+  process.stdout.write(`✓ default tasks seeded\n`);
 }

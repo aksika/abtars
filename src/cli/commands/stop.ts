@@ -1,16 +1,10 @@
+import { printBanner } from './banner.js';
 /**
- * abtars stop — kill watchdog (if running) then bridge (#372).
+ * abtars stop — kill watchdog (if running) then bridge.
  *
- * Ordering matters: watchdog dies first so it doesn't respawn the bridge
- * we're about to kill. Each process gets SIGTERM → 5s grace → SIGKILL.
- *
- * Lock files (verified against live install):
- *   ~/.abtars/watchdog.lock = {"pid": number, "lastCheck": epoch-ms}
- *   ~/.abtars/bridge.lock   = {"pid": number, "lastHeartbeat": ..., ...}
- * Both are separate files; no watchdog PID is embedded in bridge.lock.
- *
- * Supervised-daemon mode: refuses without --force (systemd/launchd would
- * respawn immediately). Mirrors the pattern in restart.ts for --cold.
+ * Ordering: watchdog dies first so it doesn't respawn the bridge.
+ * Each process gets SIGTERM → 5s grace → SIGKILL.
+ * Daemon mode: unloads launchd/systemd service before killing.
  */
 
 import { logAndSwallow } from "../../components/log-and-swallow.js";
@@ -18,10 +12,8 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { abtarsHome } from "../../paths.js";
 
-function abtarsHome(): string {
-  return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
-}
 
 function readJsonField(file: string, field: string): unknown {
   try {
@@ -67,44 +59,40 @@ function removeLock(path: string): void {
   catch (err) { logAndSwallow("stop", "op", err); }
 }
 
-export async function stop(opts: { force?: boolean }): Promise<number> {
+export async function stop(opts: {}): Promise<number> {
+  await printBanner("stop");
   const home = abtarsHome();
   const manifestPath = join(home, "manifest.json");
-  const watchdogLock = join(home, "watchdog.lock");
   const bridgeLock = join(home, "bridge.lock");
-  const force = opts.force ?? false;
+  const stoppedSentinel = join(home, ".start-reason");
 
-  // Supervised-daemon refusal
   const installMode = readJsonField(manifestPath, "installMode") as string | undefined;
-  if (installMode === "supervised-daemon" && !force) {
-    process.stderr.write(`Bridge runs under supervised-daemon — use supervisor stop (supervisor will respawn if you kill the process directly).\n`);
+
+  // 0) Write sentinel — prevents watchdog from respawning even if kill races with launchd
+  try { require("node:fs").writeFileSync(stoppedSentinel, "stopped"); } catch {}
+
+  // 1) Unload supervisor service (prevent respawn)
+  let serviceWasStopped = false;
+  if (installMode === "daemon") {
     if (process.platform === "darwin") {
-      process.stderr.write(`  sudo -k launchctl bootout system/com.abtars.daemon\n`);
+      const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
+      const uid = `gui/${process.getuid!()}`;
+      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); serviceWasStopped = true; } catch {}
+      await new Promise(r => setTimeout(r, 1000));
+      // Retry in case launchd respawned before bootout took effect
+      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); } catch {}
     } else {
-      process.stderr.write(`  sudo -k systemctl stop abtars\n`);
+      try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); serviceWasStopped = true; } catch {}
+      try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); } catch {}
     }
-    process.stderr.write(`\nUse 'abtars stop --force' to kill the process anyway (supervisor will respawn).\n`);
-    return 1;
   }
 
-  // 1) Unload supervisor service (prevent respawn) then kill watchdog
-  if (force && process.platform === "darwin") {
-    try { execFileSync("launchctl", ["bootout", `gui/${process.getuid!()}`, join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist")], { timeout: 5000 }); }
-    catch { /* already unloaded or not present */ }
-  }
-
-  const wdPid = readJsonField(watchdogLock, "pid") as number | undefined;
+  const wdPid = readJsonField(bridgeLock, "watchdogPid") as number | undefined;
   let wdResult: KillResult = "not-running";
   let wdPidActual: number | undefined;
   if (wdPid && wdPid > 0) {
     wdPidActual = wdPid;
-    wdResult = await killGracefully(wdPid, ["watchdog.sh"]);
-    if (wdResult === "killed" || wdResult === "forced") {
-      removeLock(watchdogLock);
-    } else if (wdResult === "stale") {
-      process.stdout.write(`⚠️ watchdog.lock PID ${wdPid} is not watchdog.sh — stale lock, removing\n`);
-      removeLock(watchdogLock);
-    }
+    wdResult = await killGracefully(wdPid, ["abtars-watchdog.sh"]);
   }
 
   // 2) Bridge second
@@ -127,14 +115,19 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
   const brMsg = formatResult("Bridge", brResult, brPidActual);
 
   if (wdResult === "not-running" && brResult === "not-running") {
-    process.stdout.write(`Nothing to stop — neither watchdog nor bridge running.\n`);
+    if (serviceWasStopped) {
+      removeLock(bridgeLock);
+      process.stdout.write(`🛑 Stopped via service manager.\n`);
+    } else {
+      process.stdout.write(`Nothing to stop — neither watchdog nor bridge running.\n`);
+    }
     return 0;
   }
 
   process.stdout.write(`🛑 ${wdMsg}\n   ${brMsg}\n`);
 
-  if (force && process.platform === "darwin") {
-    process.stdout.write(`   LaunchAgent unloaded. To restart: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist\n`);
+  if (installMode === "daemon") {
+    process.stdout.write(`   Service unloaded. Use 'abtars start' to restart.\n`);
   }
 
   // Return 0 if nothing's still alive; 1 if we left something running

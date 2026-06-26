@@ -33,23 +33,23 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
   if (!transport || !heartbeat) { ctx.phaseHealth.set(phaseDashboard.name, { status: "skipped", error: "no transport/heartbeat" }); logWarn("boot", `${phaseDashboard.name}: skipping — deps not available`); return "skipped"; }
 
   const dashConfig = loadDashboardConfig(process.env);
-  // Auto-generate WEB_AUTH_TOKEN if missing — persist to .env so it survives restart
+  // Auto-generate WEB_AUTH if missing — persist to .env so it survives restart
   if (!dashConfig.webAuthToken) {
     const { randomBytes } = await import("node:crypto");
     const { readFile, writeFile } = await import("node:fs/promises");
     const token = randomBytes(32).toString("hex");
     dashConfig.webAuthToken = token;
-    process.env["WEB_AUTH_TOKEN"] = token;
+    process.env["WEB_AUTH"] = token;
     const envPath = join(process.cwd(), "config", ".env");
     try {
       let content = "";
       try { content = await readFile(envPath, "utf-8"); } catch (err) { logAndSwallow("phase_dashboard", "op", err); }
-      content = content.replace(/^WEB_AUTH_TOKEN=.*$/m, "").trimEnd();
-      content += `\nWEB_AUTH_TOKEN=${token}\n`;
+      content = content.replace(/^WEB_AUTH=.*$/m, "").trimEnd();
+      content += `\nWEB_AUTH=${token}\n`;
       await writeFile(envPath, content, { mode: 0o600 });
-      logInfo("dashboard", `🔑 WEB_AUTH_TOKEN auto-generated and saved to ${envPath}`);
+      logInfo("dashboard", `🔑 WEB_AUTH auto-generated and saved to ${envPath}`);
     } catch (err) {
-      logInfo("dashboard", `🔑 WEB_AUTH_TOKEN auto-generated (not persisted: ${err instanceof Error ? err.message : String(err)})`);
+      logInfo("dashboard", `🔑 WEB_AUTH auto-generated (not persisted: ${err instanceof Error ? err.message : String(err)})`);
     }
     // Token auto-generated — user can find it in .env
   }
@@ -79,8 +79,8 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
         contextPercent: transport.contextPercent,
       },
       memory: memory ? { getStats: (userId?: string) => memory.getStats(userId) } : null,
-      heartbeat: memory
-        ? { running: memory.getStats()?.heartbeatRunning ?? false, intervalMs: heartbeat.intervalMs, tasks: heartbeat.getTaskNames().map(n => ({ name: n })) }
+      heartbeat: heartbeat
+        ? { running: heartbeat.isRunning, intervalMs: heartbeat.intervalMs, tasks: heartbeat.getTaskNames().map(n => ({ name: n })) }
         : null,
       notebooklm: nlmConfig.enabled,
       agentApi: ctx.agentApiServer ? { getTrafficLog: () => ctx.agentApiServer!.getTrafficLog() } : null,
@@ -116,8 +116,38 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
     });
   }
 
-  await dashboardServer.start();
+  // Auto-pick port on EADDRINUSE (range: configured → configured+10)
+  const basePort = dashConfig.webPort;
+  let bound = false;
+  for (let attempt = 0; attempt <= 10; attempt++) {
+    dashConfig.webPort = basePort + attempt;
+    try {
+      await dashboardServer.start();
+      bound = true;
+      break;
+    } catch (err: any) {
+      if (err?.code === "EADDRINUSE" && attempt < 10) {
+        // Recreate server with new port if not custom module
+        if (!customModule) {
+          dashboardServer = new DashboardServer({
+            config: dashConfig,
+            authGate,
+            getStatus,
+            registry,
+            memorySearchController,
+            agentApiConfig: agentApiOpts ? { port: agentApiOpts.port } : null,
+          });
+        } else {
+          throw err; // custom modules don't support port retry
+        }
+        continue;
+      }
+      throw err;
+    }
+  }
+  if (!bound) { logWarn(TAG, `All ports ${basePort}-${basePort + 10} in use — dashboard disabled`); return "skipped"; }
   ctx.dashboardServer = dashboardServer;
-  logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort}${customModule ? ` (custom: ${customModule})` : ""}`);
+  if (dashConfig.webPort !== basePort) logWarn(TAG, `Port ${basePort} in use — dashboard bound to :${dashConfig.webPort}`);
+  logInfo("main", `Web dashboard on ${dashConfig.webHost}:${dashConfig.webPort}${customModule ? ` (custom: ${customModule})` : ""}`);
   return "ran";
 }

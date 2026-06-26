@@ -4,12 +4,11 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import { readFileSync, existsSync } from "node:fs";
+import { getInstanceName } from "./soul-bundle.js";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ServiceState } from "./service-registry.js";
-
-const TAG = "system_status";
 
 export interface SubsystemHealth {
   name: string;
@@ -117,7 +116,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
   try {
     const { readdirSync } = await import("node:fs");
     const bd = join(homedir(), ".backup-abtars");
-    const bk = readdirSync(bd).filter((f: string) => f.startsWith("abtars-")).sort();
+    const bk = readdirSync(bd).filter((f: string) => f.startsWith("abtars-") && (f.endsWith(".zip") || f.endsWith(".7z"))).sort();
     if (bk.length > 0) lastBackup = bk[bk.length - 1] ?? null;
   } catch (err) { logAndSwallow("system_status", "op", err); }
 
@@ -164,19 +163,21 @@ function phaseToService(phaseName: string): string | null {
 /** Render SystemStatus as plain text for Telegram/Discord /status command. */
 export function renderStatusText(status: SystemStatus): string {
   const uptime = formatUptime(status.uptimeMs);
-  const name = process.env["AGENT_NAME"] ?? process.env["BOT_NAME"] ?? "abtars";
+  const failures = status.subsystems.filter(s => s.status === "failed").length;
+  const mood = failures === 0 ? "😊" : failures <= 2 ? "😐" : "😟";
   const lines: string[] = [
-    `😊 ${name} — online`,
+    `abTARS™ ${getInstanceName()} online ${mood}`,
     `  PID ${process.pid} (up ${uptime})`,
   ];
 
   // Watchdog
-  try {
-    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
-    const wdPid = execFileSync("pgrep", ["-f", "watchdog.sh"], { encoding: "utf-8", timeout: 2000 }).trim().split("\n")[0];
-    if (wdPid) lines.push(`  Watchdog: PID ${wdPid} (bash)`);
-    else lines.push("  Watchdog: not running");
-  } catch { lines.push("  Watchdog: not detected"); }
+  const wdPid = process.env.ABTARS_WATCHDOG_PID;
+  if (wdPid && wdPid !== "0") {
+    try { process.kill(Number(wdPid), 0); lines.push(`  Watchdog: PID ${wdPid}`); }
+    catch { lines.push("  Watchdog: not running (stale PID)"); }
+  } else {
+    lines.push("  Watchdog: not detected");
+  }
 
   // Platforms
   const platforms = status.subsystems.find(s => s.name === "phasePlatforms");
@@ -198,6 +199,26 @@ export function renderStatusText(status: SystemStatus): string {
   // Sleep
   if (status.sleepStatus) lines.push(`  Sleep: ${status.sleepStatus}`);
 
+  // Dashboard
+  const webPort = process.env["WEB_PORT"];
+  if (webPort) lines.push(`  Dashboard: :${webPort}`);
+  else lines.push(`  Dashboard: disabled`);
+
+  // Agent API
+  const apiPort = process.env["AGENT_API_PORT"];
+  if (apiPort) lines.push(`  Agent API: :${apiPort}`);
+
+  // Heartbeat
+  try {
+    const { getHeartbeatInstance } = require("./heartbeat-system.js") as typeof import("./heartbeat-system.js");
+    const hb = getHeartbeatInstance();
+    if (hb) {
+      const mins = Math.round(hb.intervalMs / 60000);
+      const taskCount = hb.getTaskNames().length;
+      lines.push(`  Heartbeat: ${hb.isRunning ? "running" : "stopped"} (${mins}min, ${taskCount} tasks)`);
+    }
+  } catch { /* */ }
+
   // Skills
   try {
     const { getSkillCache } = require("../capabilities/hotskills/index.js") as typeof import("../capabilities/hotskills/index.js");
@@ -207,6 +228,15 @@ export function renderStatusText(status: SystemStatus): string {
       lines.push(`  Skills: ${active} active`);
     }
   } catch { /* hotskills not loaded */ }
+
+  // #478: Sandbox status
+  try {
+    const { getActiveSandboxes } = require("./sandbox-runtime.js") as typeof import("./sandbox-runtime.js");
+    const sandboxes = getActiveSandboxes();
+    if (sandboxes.size > 0) {
+      lines.push(`  🐳 Sandboxes: ${sandboxes.size} active`);
+    }
+  } catch { /* sandbox-runtime not loaded */ }
 
   lines.push("", "🏥 Subsystems:");
 

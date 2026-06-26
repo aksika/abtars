@@ -4,10 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/.abtars/scripts/watchdog.sh
+ExecStart=%h/.abtars-releases/src/abtars/scripts/abtars-watchdog.sh
 Restart=on-failure
 RestartSec=5
 Environment=PATH=%h/.abtars/bin:%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NODE_PATH=%h/.local/lib/node_modules
 
 [Install]
 WantedBy=default.target

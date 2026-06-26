@@ -5,7 +5,7 @@ Dreamy is the nightly memory maintenance agent. After bedtime, it processes the 
 ## How it triggers
 
 1. `BED_TIME` passes (default: 02:00)
-2. Bridge waits for quiet — no messages for `BED_QUIET_TICKS` consecutive heartbeat ticks (default: 6 ticks = 30 min)
+2. Bridge waits for quiet — no messages for `BED_QUIET_MIN` minutes (default: 7)
 3. Dreamy spawns as a subagent (same process, separate session)
 
 If the bridge restarts and sleep hasn't run today, it catches up on next quiet period.
@@ -39,7 +39,7 @@ Steps 8–15 only run on curation days (configurable).
 ```bash
 # ~/.abtars/config/.env
 BED_TIME=02:00
-BED_QUIET_TICKS=6
+BED_QUIET_MIN=7
 SLEEP_QUALITY=normal
 SLEEP_MAX_LLM_CALLS=15
 HARDWARE_SLEEP_AFTER_DREAMY=false

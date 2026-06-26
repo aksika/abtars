@@ -75,7 +75,7 @@ describe("ResponseFormatter", () => {
     });
 
     it("formats done status", () => {
-      expect(formatter.formatToolStatus("readFile", "done")).toBe("✅ readFile");
+      expect(formatter.formatToolStatus("readFile", "done")).toBe("✓ readFile");
     });
 
     it("formats error status", () => {

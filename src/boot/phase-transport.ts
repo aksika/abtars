@@ -23,6 +23,29 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   await buildTransport(ctx);
 
+  // Docker detection (#478)
+  const { isDockerActive, isSeatbeltActive } = await import("../components/guardrails.js");
+  if (isDockerActive()) {
+    const { dockerAvailable } = await import("../components/sandbox-runtime.js");
+    if (dockerAvailable()) {
+      ctx.sandboxEnabled = true;
+      logInfo("main", "🐳 Docker mode active — W/B/C sessions will run in Docker containers");
+    } else {
+      logWarn("main", "SECURITY_MODE=docker but Docker not available — falling back to seatbelt");
+    }
+  }
+
+  // Seatbelt detection (#906)
+  if (isSeatbeltActive()) {
+    const { isAvailable, mechanismName } = await import("../components/seatbelt/index.js");
+    if (isAvailable()) {
+      ctx.seatbeltActive = true;
+      logInfo("main", `🛡️ Seatbelt active — bash commands sandboxed via ${mechanismName()}`);
+    } else {
+      logWarn("main", `SECURITY_MODE=seatbelt but ${mechanismName()} not available — falling back to guardrails`);
+    }
+  }
+
   // Initialize context-window-start for all known users
   if (memoryConfig.memoryEnabled) {
     const reg = loadUsers();
@@ -42,13 +65,29 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
  *   - In either case: bridge stays alive in degraded mode rather than crash-looping
  */
 export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
-  const { config, memoryConfig } = ctx;
+  const { config } = ctx;
 
   let transport: IKiroTransport;
 
   const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary, clearTransportCache, validateProviderReady } = await import("../components/transport-config.js");
+  const { existsSync, renameSync } = await import("node:fs");
+  const { join: pathJoin } = await import("node:path");
   clearTransportCache();  // always re-read (picks up /models change writes)
-  const tc = loadTransport();
+  let tc = loadTransport();
+
+  // Recovery: if transport.json missing/corrupt, try transport.old.json
+  if (!tc) {
+    const configDir = pathJoin(getEnv().abtarsHome, "config");
+    const primary = pathJoin(configDir, "transport.json");
+    const old = pathJoin(configDir, "transport.old.json");
+    if (existsSync(old)) {
+      logDebug("main", "transport.json missing/corrupt — recovering from transport.old.json");
+      renameSync(old, primary);
+      clearTransportCache();
+      tc = loadTransport();
+    }
+  }
+
   const prof = tc ? resolveAgent("professor", tc) : null;
 
   const hm = resolveHailMary(tc);
@@ -63,39 +102,66 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     ctx.hailMary = null;
   }
 
-  let resolved = prof ?? (() => {
-    const fb = getEnvFallback();
-    logWarn("main", `⚠️ Using .env fallback: ${fb.model} via ${fb.providerName}`);
-    return { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
-  })();
+  let resolved: typeof prof = null;
 
-  // #367 — validate the resolved provider BEFORE destroying the existing transport.
-  // If validation fails and an old transport is up, keep it; surface the error.
-  // If no old transport (boot time), try .env fallback.
-  const validation = validateProviderReady(resolved.providerName, resolved.provider, getEnv());
-  if (!validation.ok) {
-    const errMsg = `transport.json configures '${resolved.providerName}' but ${validation.reason}. Fix: ${validation.fix}`;
-    if (ctx.transport) {
-      // Existing transport still good — keep it. Don't destroy.
-      logError("main", `${errMsg} — keeping existing transport up (skipping rebuild)`);
-      return "ran";
+  if (!tc) {
+    // No transport.json and no .old.json — emergency mode from .env
+    const fb = getEnvFallback();
+    const fbValidation = validateProviderReady(fb.providerName, fb.provider, getEnv());
+    if (!fbValidation.ok) {
+      logError("main", `No transport.json, no backup, and .env emergency model also invalid: ${fbValidation.reason}`);
+      logWarn("main", "Transport unavailable — running in Tier 2 (no agent responses)");
+      ctx.transport = null;
+      return "skipped";
     }
-    // Boot-time: try falling back to .env if we weren't already using it
-    if (prof) {
-      const fb = getEnvFallback();
-      logError("main", `${errMsg} — falling back to .env config (${fb.model} via ${fb.providerName})`);
-      resolved = { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
-      // Validate fallback too — if even .env is broken, let the original error bubble
-      const fbValidation = validateProviderReady(resolved.providerName, resolved.provider, getEnv());
-      if (!fbValidation.ok) {
-        logError("main", `.env fallback '${resolved.providerName}' also invalid: ${fbValidation.reason}`);
-        throw new Error(`${errMsg} (and .env fallback is also invalid: ${fbValidation.reason})`);
-      }
+    logWarn("main", `⚠️ No transport.json — emergency mode: ${fb.model} via ${fb.providerName}`);
+    resolved = { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
+    // Notify user (deferred — transport not yet built)
+    setTimeout(() => {
+      import("../components/notification.js").then(({ sendNotification }) =>
+        sendNotification(ctx, `⚠️ transport.json missing, no backup. Running emergency model: ${fb.model}. Fix: /update deploy`))
+        .catch(() => {});
+    }, 10_000);
+  } else {
+    // transport.json valid — walk primary + fb chain
+    const validation = validateProviderReady(prof!.providerName, prof!.provider, getEnv());
+    if (validation.ok) {
+      logDebug("main", `Model init OK: ${prof!.model} via ${prof!.providerName}`);
+      resolved = prof;
     } else {
-      // Already on .env fallback path and it's invalid — hard error
-      throw new Error(errMsg);
+      logDebug("main", `Model init failed: ${prof!.model} — ${validation.reason}`);
+      logWarn("main", `${prof!.model}: ${validation.reason} — trying fallbacks`);
+      // Walk fallback chain
+      for (const fb of prof!.fallbacks) {
+        const fbResolved = resolveAgent("_fb", { ...tc!, agents: { ...tc!.agents, _fb: { model: fb.model, provider: fb.provider } } });
+        if (!fbResolved) continue;
+        const fbVal = validateProviderReady(fbResolved.providerName, fbResolved.provider, getEnv());
+        if (fbVal.ok) {
+          logDebug("main", `Fallback init OK: ${fbResolved.model} via ${fbResolved.providerName}`);
+          resolved = fbResolved;
+          break;
+        }
+        logDebug("main", `Fallback init failed: ${fbResolved.model} — ${fbVal.reason}`);
+        logWarn("main", `${fbResolved.model}: ${fbVal.reason} — trying next`);
+      }
+    }
+
+    if (!resolved) {
+      // ALL configured models failed — hard error (boot) or keep existing (reset)
+      const tried = [prof!.model, ...prof!.fallbacks.map(f => f.model)].join(", ");
+      if (ctx.transport) {
+        logError("main", `All models failed init (${tried}) — keeping existing transport up`);
+        return "ran";
+      }
+      logError("main", `All configured models failed init (${tried}). Fix transport.json or use /emergency`);
+      logWarn("main", "Transport unavailable — running in Tier 2 (no agent responses)");
+      ctx.transport = null;
+      return "skipped";
     }
   }
+
+  // #367 — if existing transport is up and new config rebuild needed, keep old on error
+  // (This path is only hit via /reset rebuild, not boot)
 
   // Destroy old (if any) — now that we know the new config is valid
   if (ctx.transport) {
@@ -152,12 +218,37 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       maxContext: resolved.contextWindow,
       maxOutput: resolved.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
+      maxToolRounds: tc?.maxToolRounds ?? 25,
       apiFormat: resolved.provider.apiFormat,
       thinking: resolved.provider.thinking,
     }, policy);
     logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {
-    try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch (err) { logAndSwallow("phase_transport", "op", err); }
+    // Kill stale ACP processes from previous run (#921, #1012)
+    const { readAndClearAcpPids } = await import("../components/transport/bridge-lock-transport.js");
+    const stalePids = readAndClearAcpPids();
+    for (const pid of stalePids) {
+      try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
+    }
+    if (stalePids.length) logDebug("main", `Killed ${stalePids.length} stale ACP process(es)`);
+    // #1012: Defense-in-depth — kill kiro-cli acp processes whose CWD is inside ~/.abtars/
+    // Safe: agent sessions (AG1-5) have CWD outside ~/.abtars/, won't be touched.
+    try {
+      const { abtarsHome } = await import("../paths.js");
+      const home = abtarsHome();
+      const { readlinkSync } = await import("node:fs");
+      const candidates = execSync("ps ax -o pid,args 2>/dev/null | grep '[k]iro-cli.*acp' | awk '{print $1}' || true", { encoding: "utf-8", timeout: 3000 }).trim().split("\n").filter(Boolean);
+      let killed = 0;
+      for (const p of candidates) {
+        const pid = parseInt(p, 10);
+        if (!pid || pid === process.pid) continue;
+        try {
+          const cwd = readlinkSync(`/proc/${pid}/cwd`);
+          if (cwd.startsWith(home)) { process.kill(pid, "SIGTERM"); killed++; }
+        } catch {} // dead, no /proc (macOS), or no permission
+      }
+      if (killed) logDebug("main", `CWD-checked kill: ${killed} orphan(s)`);
+    } catch { /* best effort */ }
     logInfo("main", `🔌 ACP transport (${resolved.provider.cli ?? "kiro-cli"}, model=${resolved.model})`);
     transport = createAgentTransport("professor", {
       cliPath: resolved.provider.cli ?? config.transport.agentCliPath,
@@ -169,17 +260,25 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   await transport.initialize();
 
-  if ("setSystemPrompt" in transport && typeof (transport as { setSystemPrompt: unknown }).setSystemPrompt === "function") {
-    const { loadSoulBundle } = await import("../components/soul-loader.js");
-    const soul = loadSoulBundle();
-    if (soul) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(soul);
-  }
+  // SOUL bundle set in phase-pipelineDeps (after memory state resolved) #998
 
   if (resolved.fallbacks.length > 0 && resolved.provider.transport !== "api") {
     logWarn("main", `⚠️ Fallbacks configured for ${resolved.provider.transport} transport — only API transport supports model fallback`);
   }
 
   ctx.transport = transport;
+  // Flush message queues on reinit — model lost context
+  if ("onReinit" in transport) {
+    (transport as any).onReinit = () => {
+      const { spin } = require("../components/spin.js") as typeof import("../components/spin.js");
+      for (const s of spin.listAllSessions()) {
+        if (s.queue.length) {
+          logWarn("transport", `Reinit: flushing ${s.queue.length} queued message(s)`);
+          s.queue.length = 0;
+        }
+      }
+    };
+  }
   ctx.modelName = resolved.model;
   ctx.modelProvider = resolved.providerName;
   ctx.fallbackChain = resolved.fallbacks.map((f: { model: string }) => f.model);
@@ -189,14 +288,15 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   }
   ctx.runtime.setMainTransport(transport);
   ctx.runtime.setSessionManager(ctx.sessionManager);
+  if (ctx.sandboxEnabled) ctx.runtime.setSandboxEnabled(true);
 
   // Wire async delegation tools (#570)
   if (getEnv().enableAsyncDelegation) {
     const { setDelegationDeps } = await import("../components/transport/delegation-tools.js");
-    setDelegationDeps(ctx.runtime, ctx.sessionManager);
+    setDelegationDeps(ctx.runtime);
   }
 
-  logInfo("main", "✅ Transport ready");
+  logInfo("main", "✓ Transport ready");
 
   // Wire ActionGate for auth-required commands
   const { join } = await import("node:path");
@@ -207,6 +307,16 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   ctx.actionGate = new ActionGate(authDir);
   setActionGate(ctx.actionGate);
   logDebug("main", "🔒 ActionGate wired");
+
+  // #906: Wire seatbelt into tool-registry
+  if (ctx.seatbeltActive) {
+    const { setSeatbelt } = await import("../components/transport/tool-registry.js");
+    const { getPolicy } = await import("../components/seatbelt/index.js");
+    const home = abtarsHome();
+    const policy = getPolicy("A", join(home, "workspace"), home); // Main session policy
+    setSeatbelt(true, policy);
+    logDebug("main", "🛡️ Seatbelt wired to tool-registry");
+  }
 
   if (resolved.provider.transport === "api" && (ctx.memory as any)?.available) {
     const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
@@ -288,6 +398,6 @@ export async function rebuildTransport(ctx: BootCtx): Promise<PhaseResult> {
   if (ctx.idleSave && ctx.transport) {
     (ctx.idleSave as unknown as { transport: IKiroTransport }).transport = ctx.transport;
   }
-  logInfo("main", "✅ Transport rebuilt");
+  logInfo("main", "✓ Transport rebuilt");
   return "ran";
 }

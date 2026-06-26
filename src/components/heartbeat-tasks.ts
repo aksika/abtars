@@ -4,13 +4,11 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import { execSync } from "node:child_process";
 import { logInfo, logError } from "./logger.js";
 import { setIdleCompactReset } from "./message-pipeline.js";
-import type { SessionRegistry } from "./session-registry.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind";
-import type { HeartbeatTask } from "abmind";
+import type { HeartbeatTask } from "../types/index.js";
 import { isDailyCycleDue, type DailyCycleDeps } from "./daily-cycle.js";
 
 const TAG = "heartbeat_tasks";
@@ -19,7 +17,6 @@ export interface IdleCompactDeps {
   memory: MemoryManager | null;
   memoryDir: string;
   allowedUserIds: Set<number>;
-  sessions: SessionRegistry;
   isSleepActive: () => boolean;
 }
 
@@ -33,17 +30,21 @@ export function createIdleCompactTask(_deps: IdleCompactDeps): HeartbeatTask {
   };
 }
 
-export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string; startSleep?: () => void; checkHwSleep?: () => void; cronBusy?: () => boolean };
+export type AgeCheckDeps = DailyCycleDeps & { startSleep?: () => void; checkHwSleep?: () => void; checkStaleSleep?: () => void; cronBusy?: () => boolean };
 
 /** Daily cycle — spawn Dreamy after BED_TIME + quiet ticks, then hw sleep after more quiet ticks. */
 export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
+  let counter = 0;
   return {
     name: "age-check",
     execute: async () => {
+      counter++;
+      if (counter % 5 !== 0) return; // every 5 ticks (~5 min)
+      if (deps.checkStaleSleep) deps.checkStaleSleep();
       if (deps.checkHwSleep && !deps.cronBusy?.()) deps.checkHwSleep();
       if (!isDailyCycleDue(deps)) return;
       logInfo("age-check", `😴 BED_TIME (${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}) — spawning Dreamy`);
-      try { execSync(`${deps.doctorPath} --fix`, { timeout: 30000 }); } catch (err) { logAndSwallow("heartbeat_tasks", "op", err); }
+      try { import("../cli/commands/doctor-probes.js").then(m => m.runFixes()).catch(() => {}); } catch (err) { logAndSwallow("heartbeat_tasks", "op", err); }
       if (deps.startSleep) { deps.startSleep(); }
     },
   };
@@ -113,13 +114,43 @@ export function createUpdateCheckTask(notify: (msg: string) => void): HeartbeatT
   };
 }
 
-/** #613: Flush skill usage stats to disk every heartbeat tick. */
+/** #613: Flush skill usage stats to disk every 3 hours. */
 export function createSkillStatsFlushTask(): HeartbeatTask {
+  let lastFlushAt = 0;
+  const INTERVAL_MS = 3 * 60 * 60 * 1000;
   return {
     name: "skill-stats-flush",
     execute: async () => {
+      if (Date.now() - lastFlushAt < INTERVAL_MS) return;
+      lastFlushAt = Date.now();
       const { flush } = await import("./skill-stats.js");
       flush();
+    },
+  };
+}
+
+/** #1114: Reload skills catalog every 10 minutes if skill files changed. */
+export function createSkillReloadTask(): HeartbeatTask {
+  let lastCheckAt = 0;
+  let lastMtime = 0;
+  const INTERVAL_MS = 10 * 60 * 1000;
+  return {
+    name: "skill-reload",
+    execute: async () => {
+      if (Date.now() - lastCheckAt < INTERVAL_MS) return;
+      lastCheckAt = Date.now();
+      const { statSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { abtarsHome } = await import("../paths.js");
+      const skillsDir = join(abtarsHome(), "skills");
+      try {
+        const mtime = statSync(skillsDir).mtimeMs;
+        if (mtime === lastMtime) return;
+        lastMtime = mtime;
+        const { reloadCatalog } = await import("../capabilities/hotskills/index.js");
+        const count = reloadCatalog();
+        logInfo("skill-reload", `Catalog regenerated: ${count} skills`);
+      } catch { /* skills dir missing — skip */ }
     },
   };
 }
@@ -195,11 +226,12 @@ export function createAuditRotationTask(): HeartbeatTask {
 
 export interface KanbanDeliveryDeps {
   sendSystemMessage: (prompt: string) => Promise<void>;
+  sendMessage: (chatId: string, text: string) => Promise<void>;
   sendDocument: (chatId: string, filePath: string, caption: string) => Promise<void>;
   chatId: () => string;
 }
 
-/** #857: Kanban delivery — picks up completed cards and delivers via agent pipeline. */
+/** #857/#934: Kanban delivery — routes based on delivery_mode. */
 export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTask {
   return {
     name: "kanban-delivery",
@@ -210,15 +242,20 @@ export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTas
         if (pending.length === 0) return;
 
         for (const card of pending) {
+          if (card.delivery_mode === "silent") {
+            kanbanMarkDelivered(card.id);
+            continue;
+          }
           kanbanSetDelivering(card.id);
           try {
-            await deps.sendSystemMessage(
-              `[SYSTEM] [TASK COMPLETE] Your task "${card.title}" is done. ` +
-              `Announce completion briefly and tell the user to see the attached file. ` +
-              `Do not reproduce the full content.\n\nSummary for your memory: ${card.result_summary ?? "(no summary)"}`
-            );
-            if (card.result_path) {
-              await deps.sendDocument(deps.chatId(), card.result_path, `📄 ${card.title}`);
+            if (card.delivery_mode === "deliver") {
+              if (card.result_path) await deps.sendDocument(deps.chatId(), card.result_path, card.title);
+              await deps.sendSystemMessage(`[SYSTEM] Task "${card.title}" complete. File delivered: ${card.result_path ?? "(no file)"}`);
+            } else {
+              // "announce"
+              await deps.sendSystemMessage(
+                `[TASK COMPLETE] "${card.title}" done.\nResult:\n${card.result_summary ?? "(no output)"}\n\nDeliver this to the user naturally.`
+              );
             }
             kanbanMarkDelivered(card.id);
           } catch (err) {
@@ -227,6 +264,27 @@ export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTas
           }
         }
       } catch (err) { logAndSwallow(TAG, "kanban-delivery", err); }
+    },
+  };
+}
+
+/** #936: Expire idle user sessions managed by Spin. */
+export function createUserSessionExpiryTask(): HeartbeatTask {
+  return {
+    name: "user-session-expiry",
+    execute: async () => {
+      const { spin } = await import("./spin.js");
+      const sessions = spin.listAllSessions();
+      if (!sessions.length) return;
+      const now = Date.now();
+      for (const session of sessions) {
+        if (session.idleTimeoutMs === Infinity) continue;
+        if (session.status !== "ready") continue;
+        if (!session.transport) continue;
+        if (now - session.lastActiveAt > session.idleTimeoutMs) {
+          spin.destroySession(session.userId, session.id);
+        }
+      }
     },
   };
 }
@@ -244,6 +302,25 @@ export function createKanbanCleanupTask(): HeartbeatTask {
         const purged = kanbanCleanup(7);
         if (purged > 0) logInfo(TAG, `Kanban: purged ${purged} delivered cards > 7d`);
       } catch (err) { logAndSwallow(TAG, "kanban-cleanup", err); }
+    },
+  };
+}
+
+/** #832: Metrics flush (every 5min) + prune (daily). */
+export function createMetricsTask(cronQueueDepth: () => number): HeartbeatTask {
+  let flushCounter = 0;
+  let pruneCounter = 0;
+  return {
+    name: "metrics",
+    execute: async () => {
+      try {
+        const { recordCronDepth, flushToFile, pruneMetricsFile } = await import("./metrics-collector.js");
+        recordCronDepth(cronQueueDepth());
+        flushCounter++;
+        if (flushCounter % 6 === 0) flushToFile(); // ~5min (6 ticks × 50s)
+        pruneCounter++;
+        if (pruneCounter % 1728 === 0) pruneMetricsFile(); // ~daily (1728 ticks × 50s)
+      } catch (err) { logAndSwallow(TAG, "metrics", err); }
     },
   };
 }

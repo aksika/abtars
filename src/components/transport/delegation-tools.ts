@@ -5,7 +5,8 @@
 
 import type { ToolDefinition } from "./tool-registry.js";
 import type { SubagentRuntime, AgentName } from "../subagent-runtime.js";
-import type { SessionManager, SessionType } from "../session-manager.js";
+import type { SessionType } from "../spin-types.js";
+import { spin } from "../spin.js";
 import { addCompletion } from "../completion-buffer.js";
 import { logInfo, logWarn } from "../logger.js";
 import { getEnv } from "../env-schema.js";
@@ -14,11 +15,9 @@ const TAG = "delegation";
 const MAX_BACKGROUND = parseInt(process.env["MAX_BACKGROUND_SESSIONS"] ?? "3", 10);
 
 let _runtime: SubagentRuntime | null = null;
-let _sessionManager: SessionManager | null = null;
 
-export function setDelegationDeps(runtime: SubagentRuntime, sessionManager: SessionManager): void {
+export function setDelegationDeps(runtime: SubagentRuntime): void {
   _runtime = runtime;
-  _sessionManager = sessionManager;
 }
 
 // Track active background sessions: taskId → metadata
@@ -59,7 +58,7 @@ export const spawnSessionTool: ToolDefinition = {
     required: ["type", "goal"],
   },
   async execute(args) {
-    if (!_runtime || !_sessionManager) return JSON.stringify({ error: "Delegation not initialized" });
+    if (!_runtime) return JSON.stringify({ error: "Delegation not initialized" });
 
     const typeInfo = TYPE_MAP[args.type ?? "task"];
     if (!typeInfo) return JSON.stringify({ error: `Unknown type: ${args.type}. Use: code, browse, task` });
@@ -71,7 +70,8 @@ export const spawnSessionTool: ToolDefinition = {
     }
 
     // Create session via session manager
-    const session = _sessionManager.createSubSession("master", "telegram", typeInfo.sessionType);
+    const masterUid = (await import("../master-user.js")).getMasterUserId();
+    const session = spin.createSubSession(masterUid, "telegram", typeInfo.sessionType);
     if (typeof session === "string") return JSON.stringify({ error: session });
 
     const goal = args.goal ?? "No goal specified";
@@ -179,14 +179,14 @@ export const terminateSessionTool: ToolDefinition = {
     entry.status = "terminated";
     entry.result = "(terminated by user)";
 
-    if (entry.sessionId && _sessionManager) {
-      const managed = _sessionManager.getSessionById(entry.sessionId);
-      if (managed) managed.paused = true;
+    if (entry.sessionId) {
+      const managed = spin.getSessionById(entry.sessionId);
+      if (managed) managed.status = "paused";
     }
 
     addCompletion({
       sessionId: entry.sessionId,
-      motherId: _sessionManager?.getSessionById(entry.sessionId)?.motherId ?? "",
+      motherId: spin.getSessionById(entry.sessionId)?.motherId ?? "",
       goal: entry.goal,
       status: "terminated",
       result: entry.result,

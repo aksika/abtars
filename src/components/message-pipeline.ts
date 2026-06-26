@@ -9,7 +9,6 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { tryReaction } from "./reactions.js";
-import { SessionRegistry } from "./session-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
@@ -37,8 +36,10 @@ import type { RunningJob } from "./tasks/task-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
+import { releaseBusy } from "./pipeline/busy-guard.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
-import { buildPrompt, buildSessionStartPrompt } from "./pipeline/prompt-builder.js";
+import { buildPrompt } from "./pipeline/prompt-builder.js";
+import { sessionType } from "./spin-types.js";
 
 import { getEnv } from "./env-schema.js";
 import { sanitizeOutbound } from "./sanitize-outbound.js";
@@ -71,24 +72,28 @@ function extractKeywords(text: string): string[] {
     .filter(w => w.length >= 3 && !STOPWORDS.has(w))
     .slice(0, 3);
 }
-export { SessionRegistry } from "./session-registry.js";
 /** Reset by bridge-app on inbound message to re-enable floating compaction. */
 export let resetIdleCompactFlag: (() => void) | null = null;
 export function setIdleCompactReset(fn: () => void): void { resetIdleCompactFlag = fn; }
 
-/** Shared session reset: reset transport, clear buffer, delete session entry. */
+/** Shared session reset: reset transport, clear buffer, mark pendingStart. */
 export async function resetAndPrepare(opts: {
   transport: IKiroTransport;
   sessionKey: string;
   reason: string;
-  sessions: SessionRegistry;
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
 }): Promise<void> {
   await opts.transport.resetSession(opts.sessionKey);
   if (opts.conversationBuffer && opts.bufKey) opts.conversationBuffer.clear(opts.bufKey);
-  opts.sessions.delete(opts.sessionKey);
-  opts.sessions.getOrCreate(opts.sessionKey).pendingStart = true;
+  const { spin } = await import("./spin.js");
+  const pSession = spin.getSessionById(opts.sessionKey);
+  if (pSession) {
+    pSession.seen = false;
+    pSession.pendingStart = true;
+    pSession.busy = false;
+    pSession.queue = [];
+  }
   // #254: clear emergency mode on reset — next session starts fresh
   const t = opts.transport as unknown as { setEmergencyMode?: (o: null) => void };
   t.setEmergencyMode?.(null);
@@ -120,8 +125,7 @@ export interface VoiceDeps {
 
 /** Pipeline dependencies — composed from focused interfaces. */
 export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
-  sessions: SessionRegistry;
-  sessionManager: import("./session-manager.js").SessionManager;
+  sessionManager: import("./spin.js").Spin;
   cronCurrentJob?: () => RunningJob | null;
   enqueueCron?: (entryId: string, manual?: boolean) => string | null;
   requestShutdown?: (code?: number) => void;
@@ -167,13 +171,37 @@ export async function handleInboundMessage(
     }
   }
 
+  // --- #993: If user switched to a non-Main session with live transport, route there directly ---
+  const { spin } = await import("./spin.js");
+  const { sessionType } = await import("./spin-types.js");
+  const switchedSession = spin.getActiveSession(msg.userId, msg.platform);
+  const switchedToLive = switchedSession?.transport && sessionType(switchedSession) !== "A" && switchedSession.status === "ready";
+  if (switchedToLive) {
+    ctx.transport = switchedSession.transport!;
+    ctx.delivery = switchedSession.delivery;
+    // Mark seen so isSessionStart doesn't inject full soul bundle (Orc already has its context)
+    switchedSession.seen = true;
+    switchedSession.lastActiveAt = Date.now();
+  } else {
+    // --- #936: Resolve session via Spin (sets per-user transport + delivery mode) ---
+    try {
+      const userSession = await spin.resolveSession(msg.userId, msg.platform, ctx.chatId);
+      if (userSession.status === "ready" && userSession.transport) {
+        ctx.transport = userSession.transport;
+        ctx.delivery = userSession.delivery;
+      }
+    } catch (err) {
+      logWarn(TAG, `resolveSession failed for ${msg.userId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // --- Core transport/response handling (will become middleware incrementally) ---
   const {
-    transport, memory, memoryConfig,
+    memory, memoryConfig,
     idleSave, conversationBuffer,
     ttsConfig,
-    sessions,
   } = deps;
+  const transport = ctx.transport;
 
   const { channelId, isVoice } = msg;
   const chatId = ctx.chatId;
@@ -185,7 +213,8 @@ export async function handleInboundMessage(
   // Resolve active transport session via session manager (#510)
   const activeSessionId = deps.sessionManager.getActiveSessionId(userId, msg.platform);
 
-  const busyEntry = sessions.getOrCreate(activeSessionId);
+  const pSession = spin.getSessionById(activeSessionId)!;
+  const busyEntry = pSession;
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;
   let toolElapsedTimer: ReturnType<typeof setInterval> | undefined;
@@ -200,7 +229,7 @@ export async function handleInboundMessage(
 
     // --- Build prompt ---
     const { prompt: builtPrompt, imageContent, recalledHits } = await buildPrompt(msg, text, {
-      memory, memoryConfig, sessions, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
+      memory, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: !("agentLoop" in transport),
     }, registry);
 
@@ -239,33 +268,30 @@ export async function handleInboundMessage(
 
     // --- Send to transport ---
     const activeSession = deps.sessionManager.getActiveSession(userId, msg.platform);
-    const agentSession = activeSession.agentSession;
-    logDebug(TAG, `Route: session=${activeSessionId} type=${activeSession.type} agentSession=${agentSession ? "yes" : "no"}`);
+    const sessionTransport = activeSession.transport ?? transport;
+    logDebug(TAG, `Route: session=${activeSessionId} type=${sessionType(activeSession)} transport=${activeSession.transport ? "session" : "main"}`);
 
     // #681: attach sandbox policy (owner for now — peer/guest in #678)
-    if ("sandboxPolicy" in transport) {
+    if ("sandboxPolicy" in sessionTransport) {
       const { buildPolicy } = await import("./tool-sandbox.js");
-      (transport as any).sandboxPolicy = buildPolicy("owner");
+      (sessionTransport as any).sandboxPolicy = buildPolicy("owner");
     }
     // Wire cooperative pause check (#539) — agent loop checks this between tool calls
-    if ("isPaused" in transport) {
-      (transport as any).isPaused = () => activeSession.paused;
+    if ("isPaused" in sessionTransport) {
+      (sessionTransport as any).isPaused = () => activeSession.status === "paused";
     }
 
     // Wire /wait steer injection (#655) — agent loop drains this between tool rounds
     if ("getPendingInstruction" in transport) {
-      const sessionEntry = deps.sessions.getOrCreate(activeSessionId);
       (transport as any).getPendingInstruction = () => {
-        const pending = sessionEntry.pendingWait;
+        const pending = pSession.pendingWait;
         if (!pending) return undefined;
-        sessionEntry.pendingWait = undefined;
+        pSession.pendingWait = undefined;
         return pending;
       };
     }
 
-    const responsePromise = agentSession
-      ? agentSession.sendPrompt(activeSessionId, prompt, imageContent)
-      : transport.sendPrompt(activeSessionId, prompt, imageContent, userId);
+    const responsePromise = sessionTransport.sendPrompt(activeSessionId, prompt, imageContent, userId);
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {
@@ -299,6 +325,7 @@ export async function handleInboundMessage(
       if (!totalToolStartAt) totalToolStartAt = Date.now();
       currentToolName = toolName;
       toolStartAt = Date.now();
+      activeSession.lastActiveAt = Date.now(); // #1198: keep session alive during tool execution
       adapter.sendTyping?.(channelId, msg.threadId).catch(err => logAndSwallow(TAG, "adapter call", err));
 
       // Clear previous elapsed timer
@@ -369,14 +396,15 @@ export async function handleInboundMessage(
 
     // --- Extract clean answer ---
     const cleanAnswer = transport.answerOnly;
-    const rawResponse = sessions.get(activeSessionId)?.fullMode ? response : (cleanAnswer || response);
+    const rawResponse = pSession.fullMode ? response : (cleanAnswer || response);
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
-    // #869: strip <thinking> blocks unless user opted in via /reasoning show
+    // #869: strip <think>/<thinking> blocks unless user opted in via /reasoning show
     const reasoningSession = transport.getActiveSession?.();
     if (!reasoningSession?.showReasoning) {
-      userResponse = userResponse.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "");
+      userResponse = userResponse.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>\s*/g, "");
+      userResponse = userResponse.replace(/<\/think(?:ing)?>\s*/g, "");
     }
 
     // --- Secret redaction (belt-and-suspenders for #436) ---
@@ -387,19 +415,41 @@ export async function handleInboundMessage(
       }
     }
 
+    // --- #936: Simple delivery (non-master sessions) ---
+    if (ctx.delivery === "simple") {
+      if (!userResponse && noReply) return;
+      if (userResponse) {
+        const chunks = adapter.chunkResponse(userResponse);
+        for (const chunk of chunks) {
+          const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
+          if (clean) await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
+        }
+      }
+      // Record assistant response to memory
+      if (memory && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
+        memory.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp: Date.now(), userId, sessionId: activeSessionId });
+      }
+      if (isVoice && ttsConfig && adapter.sendVoice) {
+        try {
+          const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
+          if (audio) await adapter.sendVoice(channelId, audio, { threadId: msg.threadId });
+        } catch (err) { logAndSwallow(TAG, "TTS", err); }
+      }
+      logInfo(TAG, `→ [${msg.platform}] Simple delivery (${userResponse.length} chars)`);
+      // #938: Update session metrics
+      activeSession.messageCount = (activeSession.messageCount ?? 0) + 1;
+      activeSession.contextPercent = transport.contextPercent >= 0 ? transport.contextPercent : undefined;
+      activeSession.toolCallCount = (activeSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
+      return;
+    }
+
     // --- Empty response ---
+    if (!userResponse && reactionEmoji) {
+      userResponse = reactionEmoji; // emoji IS the response — deliver normally
+    }
     if (!userResponse) {
       if (noReply) {
         logDebug(TAG, "LLM returned [NO_REPLY], dropping silently");
-        return;
-      }
-      if (reactionEmoji) {
-        if (adapter.setReaction && msg.messageId) {
-          try { await adapter.setReaction(channelId, msg.messageId, reactionEmoji); }
-          catch { await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId }); }
-        } else {
-          await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
-        }
         return;
       }
       if (transport.toolCallsSucceeded > 0) {
@@ -416,14 +466,6 @@ export async function handleInboundMessage(
     // --- Clear 👀 reaction ---
     if (adapter.setReaction && msg.messageId) {
       await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
-    }
-
-    // --- Standalone emoji → try reaction, fallback to message ---
-    const trimmed = userResponse.trim();
-    const isEmojiOnly = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}]{1,2}$/u.test(trimmed);
-    if (isEmojiOnly) {
-      await tryReaction(adapter, channelId, msg.messageId, trimmed, msg.threadId);
-      return;
     }
 
     // --- Deliver response — always chunk and send (#583) ---
@@ -453,13 +495,13 @@ export async function handleInboundMessage(
     if (getEnv().activeMemory) {
       const modelTopics = getEnv().primingModelTopics && topics ? topics : [];
       const regexKw = extractKeywords(text);
-      const existing = sessions.get(activeSessionId)?.primingTerms ?? [];
-      sessions.getOrCreate(activeSessionId).primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
+      const existing = pSession.primingTerms ?? [];
+      pSession.primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
     }
 
-    // --- Record to memory (skip for guests) ---
+    // --- Record to memory (skip for guests and greeting injects) ---
     const isGuest = registry.byUserId.get(userId)?.role === "guest";
-    if (memory && !isGuest) {
+    if (memory && !isGuest && !text.startsWith("[SESSION START]")) {
       memory.recordMessage({
         role: "assistant", content: cleanAnswer || response,
         timestamp: Date.now(), userId, sessionId: activeSessionId,
@@ -468,7 +510,7 @@ export async function handleInboundMessage(
     }
 
     // --- TTS for voice notes ---
-    if (isVoice && ttsConfig && !sessions.get(activeSessionId)?.fullMode && adapter.sendVoice) {
+    if (isVoice && ttsConfig && !pSession.fullMode && adapter.sendVoice) {
       try {
         await adapter.sendTyping?.(channelId, msg.threadId);
         const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
@@ -489,6 +531,11 @@ export async function handleInboundMessage(
     const ctxAfter = transport.contextPercent;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
     updateBridgeLockField("lastPromptAt", Date.now());
+
+    // #938: Update session metrics
+    activeSession.messageCount = (activeSession.messageCount ?? 0) + 1;
+    activeSession.contextPercent = ctxAfter >= 0 ? ctxAfter : undefined;
+    activeSession.toolCallCount = (activeSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
 
     // --- #824: Citation detection — did the agent use the recalled memories? ---
     if (recalledHits && recalledHits.length > 0 && memory) {
@@ -521,7 +568,7 @@ export async function handleInboundMessage(
       logWarn(TAG, `Model not found for ${activeSessionId}: ${err.message}`);
       await adapter.sendMessage(channelId, `❌ ${err.message}\nUse /model to switch.`, { threadId: msg.threadId });
     } else {
-      logError(TAG, `Error for ${activeSessionId} — ${err instanceof Error ? err.message : JSON.stringify(err)}`);
+      logError(TAG, `Error for ${activeSessionId} — ${err instanceof Error ? err.message : JSON.stringify(err)}${(err as any)?.code ? ` (code=${(err as any).code})` : ""}`);
     }
     if (adapter.setReaction && msg.messageId) {
       await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
@@ -545,17 +592,20 @@ export async function handleInboundMessage(
 
     if (isContextOverflow) {
       logWarn(TAG, `Context overflow detected — auto-resetting session`);
-      await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: `ctx-overflow: ${errStr.slice(0, 100)}`, sessions });
+      await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: `ctx-overflow: ${errStr.slice(0, 100)}` });
       await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
       await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else {
-      const reason = errStr.includes("rate") || errStr.includes("429") ? "Rate limited."
+      logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
+      const reason = errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
+        : errStr.includes("rate") || errStr.includes("429") ? "Rate limited."
         : errStr.includes("auth") || errStr.includes("401") || errStr.includes("403") ? "Authentication failed."
         : errStr.includes("connect") || errStr.includes("ECONNREFUSED") ? "Connection lost."
         : errStr.includes("exhausted") || errStr.includes("no candidates") ? "All models exhausted."
-        : "Something went wrong.";
+        : errStr.includes("aborted") || errStr.includes("code=20") ? "Request aborted — model connection dropped."
+        : `Error: ${errStr.slice(0, 80)}`;
       await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } finally {
@@ -564,35 +614,12 @@ export async function handleInboundMessage(
     if (toolElapsedTimer) clearInterval(toolElapsedTimer);
     transport.onToolCallStart = undefined;
     transport.onSegmentBreak = undefined;
-    busyEntry.busy = false;
+    releaseBusy(pSession, (m, a) => handleInboundMessage(m, a, deps));
     idleSave.reset(activeSessionId, chatId);
-
-    // Drain queued messages
-    const entry = sessions.get(activeSessionId);
-    if (entry?.queue.length) {
-      const next = entry.queue.shift()!;
-      logInfo(TAG, `Draining queued message for ${activeSessionId} (${entry.queue.length} remaining)`);
-      handleInboundMessage(next.msg, next.adapter, deps).catch(e => logError(TAG, "Queue drain error", e));
-    }
   }
 }
 
 /** Build session-start prompt with SOUL + context + greeting, send to transport, push response to adapter. */
-export async function startSession(
-  transport: IKiroTransport,
-  memory: MemoryManager,
-  userId: string,
-  sessionKey: string,
-  greeting: string,
-  sendResponse: (text: string) => Promise<unknown>,
-): Promise<void> {
-  const prompt = buildSessionStartPrompt(greeting, memory, userId, sessionKey);
-  logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
-  const response = await transport.sendPrompt(sessionKey, prompt, undefined, userId);
-  if (response?.trim() && response.trim() !== "[NO_REPLY]" && response.trim() !== "(no response)") {
-    await sendResponse(response);
-    memory.recordMessage({ role: "assistant", content: response, timestamp: Date.now(), userId, sessionId: sessionKey });
-  }
-}
+
 
 

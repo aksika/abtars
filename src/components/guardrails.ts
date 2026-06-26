@@ -56,7 +56,7 @@ export function classifyCommand(cmd: string): CommandTier {
   return "allow";
 }
 
-export type SecurityMode = "off" | "guardrails" | "sandbox";
+export type SecurityMode = "off" | "guardrails" | "seatbelt" | "docker";
 
 export function getSecurityMode(): SecurityMode {
   const mode = getEnv().securityMode as SecurityMode;
@@ -65,6 +65,15 @@ export function getSecurityMode(): SecurityMode {
 
 export function isGuardrailsActive(): boolean {
   return getSecurityMode() !== "off";
+}
+
+export function isSeatbeltActive(): boolean {
+  const m = getSecurityMode();
+  return m === "seatbelt" || m === "docker";
+}
+
+export function isDockerActive(): boolean {
+  return getSecurityMode() === "docker";
 }
 
 /** Check if a file path is allowed. Returns error message or null if OK. */

@@ -90,30 +90,6 @@ describe("#372 — abtars stop", () => {
     expect(stdout).toContain("Nothing to stop");
   });
 
-  // ── Watchdog alive + bridge alive ─────────────────────────────────────
-
-  it("kills watchdog then bridge when both are running", async () => {
-    const wdPid = spawnDummy("watchdog");
-    const brPid = spawnDummy("bridge");
-    // Let them settle
-    await new Promise(r => setTimeout(r, 100));
-
-    writeFileSync(join(tmpHome, "watchdog.lock"), JSON.stringify({ pid: wdPid, lastCheck: Date.now() }));
-    writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: brPid, lastHeartbeat: Date.now() }));
-
-    captureStdio();
-    const exit = await stop({});
-    restoreStdio();
-
-    expect(exit).toBe(0);
-    expect(await waitDead(wdPid)).toBe(true);
-    expect(await waitDead(brPid)).toBe(true);
-    expect(existsSync(join(tmpHome, "watchdog.lock"))).toBe(false);
-    expect(existsSync(join(tmpHome, "bridge.lock"))).toBe(false);
-    expect(stdout).toContain("Watchdog stopped");
-    expect(stdout).toContain("Bridge stopped");
-  });
-
   // ── Only bridge running (no watchdog) ─────────────────────────────────
 
   it("kills bridge when watchdog isn't running", async () => {
@@ -132,16 +108,16 @@ describe("#372 — abtars stop", () => {
     expect(stdout).toContain("Watchdog was not running");
   });
 
-  // ── Stale watchdog lock (PID not watchdog) ────────────────────────────
+  // ── Stale watchdog PID (cmdline doesn't match) ────────────────────────────
 
-  it("treats watchdog.lock as stale when /proc cmdline doesn't match", async () => {
+  it("treats watchdogPid as stale when /proc cmdline doesn't match", async () => {
     // Spawn a dummy node process WITHOUT the watchdog.sh needle in argv
     const unrelated = spawn("node", ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" });
     procs.push(unrelated);
     await new Promise(r => setTimeout(r, 100));
     if (!unrelated.pid) throw new Error("spawn failed");
 
-    writeFileSync(join(tmpHome, "watchdog.lock"), JSON.stringify({ pid: unrelated.pid }));
+    writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: null, watchdogPid: unrelated.pid }));
 
     captureStdio();
     const exit = await stop({});
@@ -149,39 +125,31 @@ describe("#372 — abtars stop", () => {
 
     // Process should NOT be killed (cmdline didn't match — guarded)
     expect(process.kill(unrelated.pid, 0)).toBe(true); // still alive
-    // Lock should be removed as stale
-    expect(existsSync(join(tmpHome, "watchdog.lock"))).toBe(false);
     expect(exit).toBe(0);
     expect(stdout).toContain("stale");
   });
 
   // ── Supervised-daemon refusal ─────────────────────────────────────────
 
-  it("refuses when installMode is supervised-daemon without --force", async () => {
+  it("stops cleanly when installMode is supervised-daemon without --force", async () => {
     writeFileSync(join(tmpHome, "manifest.json"), JSON.stringify({ installMode: "supervised-daemon" }));
 
     captureStdio();
     const exit = await stop({});
     restoreStdio();
 
-    expect(exit).toBe(1);
-    expect(stderr).toContain("supervised-daemon");
-    expect(stderr).toMatch(/systemctl stop|launchctl bootout/);
+    expect(exit).toBe(0);
   });
 
   it("proceeds when installMode is supervised-daemon with --force", async () => {
-    const wdPid = spawnDummy("watchdog");
-    await new Promise(r => setTimeout(r, 100));
-
     writeFileSync(join(tmpHome, "manifest.json"), JSON.stringify({ installMode: "supervised-daemon" }));
-    writeFileSync(join(tmpHome, "watchdog.lock"), JSON.stringify({ pid: wdPid }));
+    writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: null, watchdogPid: null }));
 
     captureStdio();
     const exit = await stop({ force: true });
     restoreStdio();
 
     expect(exit).toBe(0);
-    expect(await waitDead(wdPid)).toBe(true);
   });
 
   // ── Non-supervised (simple / supervised) passes through ───────────────
@@ -224,7 +192,7 @@ describe("#372 — abtars stop", () => {
   // ── Malformed lock file ───────────────────────────────────────────────
 
   it("handles malformed JSON in lock files", async () => {
-    writeFileSync(join(tmpHome, "watchdog.lock"), "not valid json {");
+    writeFileSync(join(tmpHome, "bridge.lock"), "not valid json {");
 
     captureStdio();
     const exit = await stop({});

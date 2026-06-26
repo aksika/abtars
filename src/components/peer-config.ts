@@ -14,6 +14,7 @@ export interface PeerEntry {
   host: string;
   port: number;
   token: string;
+  trust?: number;
   mode?: "plain" | "signed";
   verifyKey?: string;
   udpPort?: number;
@@ -22,11 +23,13 @@ export interface PeerEntry {
   allowedTools?: string[];
   allowedRead?: string[];
   allowedWrite?: string[];
+  transport?: "http" | "ws-outbound";
 }
 
 export interface PeerConfig {
   self: { name: string; signingKey?: string; udpPort?: number };
   peers: Record<string, PeerEntry>;
+  gossipSecret?: string;
   maxHops: number;
   timeoutMs: number;
 }
@@ -52,6 +55,7 @@ export function loadPeerConfig(): PeerConfig {
         if (typeof e.host === "string" && typeof e.port === "number" && typeof e.token === "string") {
           peers[name] = {
             host: e.host, port: e.port, token: e.token,
+            ...(typeof e.trust === "number" ? { trust: e.trust } : {}),
             ...(e.mode === "signed" ? { mode: "signed" as const } : {}),
             ...(typeof e.verifyKey === "string" ? { verifyKey: e.verifyKey } : {}),
             ...(typeof e.udpPort === "number" ? { udpPort: e.udpPort } : {}),
@@ -73,6 +77,7 @@ export function loadPeerConfig(): PeerConfig {
         ...(typeof raw.self?.udpPort === "number" ? { udpPort: raw.self.udpPort } : {}),
       },
       peers,
+      ...(typeof raw.gossipSecret === "string" ? { gossipSecret: raw.gossipSecret } : {}),
       maxHops: typeof raw.maxHops === "number" ? raw.maxHops : DEFAULTS.maxHops,
       timeoutMs: typeof raw.timeoutMs === "number" ? raw.timeoutMs : DEFAULTS.timeoutMs,
     };

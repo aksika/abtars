@@ -1,6 +1,6 @@
 import { logInfo, logWarn, logDebug } from "./logger.js";
-import { updateLastHeartbeat } from "./transport/bridge-lock-transport.js";
-import type { HeartbeatTask } from "abmind";
+import { updateLastHeartbeat, updateBridgeLockField } from "./transport/bridge-lock-transport.js";
+import type { HeartbeatTask } from "../types/index.js";
 
 export type HeartbeatConfig = {
   enabled: boolean;
@@ -27,9 +27,20 @@ export class HeartbeatSystem implements ITaskSlot {
   private tasks: HeartbeatTask[] = [];
   private running = false;
   private lastTickAt = 0;
+  private tickCount = 0;
   private readonly taskStatuses = new Map<string, TaskStatus>();
+  private _cronQueue: { enqueue: (entry: any, cb: any) => void } | null = null;
+  private _notify: ((chatId: string, text: string) => void) | null = null;
 
   constructor(private config: HeartbeatConfig) {}
+
+  /** Late-bind: attach cronQueue after construction (used by graph boot). */
+  setCronQueue(queue: { enqueue: (entry: any, cb: any) => void }): void { this._cronQueue = queue; }
+  get cronQueue() { return this._cronQueue; }
+
+  /** Late-bind: attach notification sender after construction (used by graph boot). */
+  setNotify(fn: (chatId: string, text: string) => void): void { this._notify = fn; }
+  get notify() { return this._notify; }
 
   /** Register a task to run on each heartbeat tick. */
   registerTask(task: HeartbeatTask): void {
@@ -137,7 +148,24 @@ export class HeartbeatSystem implements ITaskSlot {
     // Update bridge.lock with lastHeartbeat
     updateLastHeartbeat();
 
+    // Heap stats — once per hour (every 60 ticks)
+    this.tickCount++;
+    if (this.tickCount % 60 === 0) {
+      const heap = Math.round(process.memoryUsage().heapUsed / 1048576);
+      updateBridgeLockField("heapUsedMB", heap);
+      if (heap > 820) {
+        logWarn(TAG, `Heap high: ${heap}MB / 1024MB (80%+)`);
+      } else {
+        logDebug(TAG, `Heap: ${heap}MB / 1024MB`);
+      }
+    }
+
     // Kick the watchdog
     this.config.onTick?.();
   }
 }
+
+// #1181: Module-level singleton for local access (avoids circular dep via abmind)
+let _instance: HeartbeatSystem | null = null;
+export function setHeartbeatInstance(hb: HeartbeatSystem): void { _instance = hb; }
+export function getHeartbeatInstance(): HeartbeatSystem | null { return _instance; }

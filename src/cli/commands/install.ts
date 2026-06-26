@@ -1,17 +1,16 @@
 /**
- * `abtars install [--force]` — first-time setup.
+ * `abtars install [--force]` — scaffolding utilities.
  *
- *   - No existing ~/.abtars: create dirs, seed config/ from .env.example,
- *     create PATH symlinks. Does NOT run onboard (Phase 3).
- *   - Existing ~/.abtars: refuse unless --force (which
- *     re-seeds missing config and reconciles symlinks, no code changes).
+ *   Exports writeWrapper (used by deploy.ts) and install() for legacy paths.
+ *   The primary install flow is in onboard.ts (called by CLI dispatcher).
  */
 
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { hostname, homedir as _homedir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { emptyManifest, packagePaths, readManifest, resolveUserBinDir, writeManifest } from '../deploy-lib-import.js';
 
 /** Resolve real user home even under sudo. */
@@ -28,7 +27,7 @@ export interface InstallOptions {
   readonly restore?: string;
   readonly force: boolean;
   readonly dryRun: boolean;
-  readonly mode?: "simple" | "supervised";
+  readonly mode?: "simple" | "daemon";
 }
 
 // CLI wrappers are read from install-manifest.json at runtime.
@@ -168,15 +167,15 @@ async function reconcilePathLink(
 
 export async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
   const bundleFile = name === 'abtars' ? 'abtars-cli.js' : `${name}.js`;
-  const home = currentLink.replace(/\/current$/, '');
+  // #912: ensure node is in PATH on macOS (homebrew) and Linux (.local/bin)
+  const pathPreamble = `export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"\nexport NODE_PATH="$HOME/.local/lib/node_modules:\${NODE_PATH:-}"\n`;
   let content: string;
 
   if (name === 'abmind') {
-    // #863: abmind resolves from bundle, source, or npm global — no current/ symlink
     content = `#!/usr/bin/env bash
-# Resolve abmind CLI — no ~/.abmind/current dependency (#863)
-BUNDLE_CLI="$HOME/.abtars/app/bundle/node_modules/abmind/dist/cli/abmind.js"
-SRC_CLI="$HOME/.abtars/src/abmind/dist/cli/abmind.js"
+${pathPreamble}# Resolve abmind CLI — no ~/.abmind/current dependency (#863)
+BUNDLE_CLI="$HOME/.abtars/app/node_modules/abmind/dist/cli/abmind.js"
+SRC_CLI="$HOME/.abtars-releases/src/abmind/dist/cli/abmind.js"
 GLOBAL_CLI="$(npm root -g 2>/dev/null)/abmind/dist/cli/abmind.js"
 if [ -f "$BUNDLE_CLI" ]; then
   exec node "$BUNDLE_CLI" "$@"
@@ -194,7 +193,7 @@ fi
     const distFile = name === 'abtars' ? 'abtars.js' : `${name}.js`;
     const fallback = join(currentLink, 'dist', 'cli', distFile);
     content = `#!/usr/bin/env bash
-if [ -f "${target}" ]; then
+${pathPreamble}if [ -f "${target}" ]; then
   exec node "${target}" "$@"
 elif [ -f "${fallback}" ]; then
   exec node "${fallback}" "$@"
@@ -213,6 +212,7 @@ fi
     process.stdout.write(`[dry-run] write wrapper ${path}\n`);
     return;
   }
+  try { const { unlinkSync } = await import("node:fs"); unlinkSync(path); } catch { /* doesn't exist */ }
   await writeFile(path, content, { mode: 0o755 });
 }
 
@@ -225,7 +225,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   const paths = packagePaths('abtars');
   const home = paths.home;
   const userBinDir = resolveUserBinDir();
-  const repoRoot = process.cwd();
+  const repoRoot = join(dirname(realpathSync(process.argv[1] ?? fileURLToPath(import.meta.url))), "..");
 
   // Install log (#718)
   const { initInstallLog, logInstall, logInstallHeader } = await import("../install-log.js");
@@ -239,6 +239,18 @@ export async function install(opts: InstallOptions): Promise<number> {
 
   const homeExists = await exists(home);
   const manifest = homeExists ? await readManifest(paths.manifest) : null;
+
+  // #1101: Detect and remove stale shims from previous installs
+  try {
+    const { execSync } = await import("node:child_process");
+    const shimPath = execSync("which abtars 2>/dev/null", { encoding: "utf-8" }).trim();
+    const pnpmHome = process.env.PNPM_HOME ?? "";
+    if (shimPath && pnpmHome && !shimPath.startsWith(pnpmHome) && !shimPath.includes(".abtars")) {
+      const { unlinkSync } = await import("node:fs");
+      try { unlinkSync(shimPath); process.stdout.write(`✓ removed stale shim ${shimPath}\n`); }
+      catch { process.stderr.write(`⚠️  Stale shim at ${shimPath} — remove manually: rm ${shimPath}\n`); }
+    }
+  } catch { /* which failed — no shim */ }
 
   if (homeExists && manifest && !opts.force && !opts.restore) {
     process.stderr.write(
@@ -256,7 +268,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   } catch { /* not running or no sudo — fine */ }
   try {
     const { execSync } = await import("node:child_process");
-    execSync("pkill -f 'watchdog.sh' 2>/dev/null", { stdio: "ignore" });
+    execSync("pkill -f 'abtars-watchdog.sh' 2>/dev/null", { stdio: "ignore" });
   } catch { /* no watchdog — fine */ }
 
   // Create skeleton (idempotent)
@@ -266,25 +278,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   // Core templates: abmind seeds its own on first boot (#427 ensureInitialized).
   // No longer seeded by abtars install.
 
-  // Create kiro-cli agent config — ACP transport needs ~/.kiro/agents/professor.json
-  const kiroAgentsDir = join(homedir(), '.kiro', 'agents');
-  const professorJson = join(kiroAgentsDir, 'professor.json');
-  if (!opts.dryRun) {
-    await mkdir(kiroAgentsDir, { recursive: true });
-    if (!(await exists(professorJson))) {
-      await writeFile(professorJson, JSON.stringify({
-        name: "professor",
-        description: "Abtars bridge agent",
-        tools: ["*"],
-        allowedTools: ["@builtin"],
-        toolsSettings: { shell: { autoAllowReadonly: true } },
-        includeMcpJson: true,
-      }, null, 2) + '\n');
-      process.stdout.write(`✓ kiro agent: ${professorJson}\n`);
-    }
-  } else {
-    process.stdout.write(`[dry-run] create ${professorJson}\n`);
-  }
+  // Kiro agent config created on-demand by ACP transport (ensureAgentConfig)
 
   // Generate Ed25519 identity keypair (skip if already exists)
   const identityKey = join(paths.config, 'identity.key');
@@ -332,25 +326,10 @@ export async function install(opts: InstallOptions): Promise<number> {
   }
   process.stdout.write(`✓ wrappers in ${paths.bin}\n`);
 
-  // Reconcile PATH symlinks
-  if (!opts.dryRun) await mkdir(userBinDir, { recursive: true });
-  const refused: string[] = [];
-  for (const name of installManifest.cliWrappers) {
-    const r = await reconcilePathLink(paths.bin, userBinDir, name, opts.force, opts.dryRun);
-    if (r.action === 'refused') {
-      refused.push(r.message ?? name);
-    }
-  }
-  if (refused.length > 0) {
-    process.stderr.write(`\nPATH symlink conflicts:\n  ${refused.join('\n  ')}\n`);
-  } else {
-    process.stdout.write(`✓ PATH symlinks in ${userBinDir}\n`);
-  }
-
   // Warn if ~/.local/bin not on PATH
-  if (!isPathOnPATH(userBinDir)) {
+  if (!isPathOnPATH(paths.bin)) {
     process.stderr.write(
-      `\nWarning: ${userBinDir} is not on $PATH. Add to your shell config:\n  export PATH="${userBinDir}:$PATH"\n`,
+      `\nWarning: ${paths.bin} is not on $PATH. Add to your shell config:\n  export PATH="${paths.bin}:$PATH"\n`,
     );
   }
 
@@ -372,7 +351,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   //   3. default: supervised
   const manifestForMode = await readManifest(paths.manifest);
   const existingMode = manifestForMode?.installMode;
-  const mode = opts.mode ?? existingMode ?? "supervised";
+  const mode = opts.mode ?? existingMode ?? "daemon";
   if (manifestForMode) {
     await writeManifest(paths.manifest, { ...manifestForMode, installMode: mode });
   }
@@ -410,7 +389,8 @@ export async function install(opts: InstallOptions): Promise<number> {
       process.stdout.write(`✓ restored abtars data\n`);
     }
     // Copy abmind files
-    const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(home), '.abmind');
+    const { resolveAbmindHome } = await import("../deploy-lib/paths.js");
+    const abmindHome = resolveAbmindHome();
     const abmindSrc = join(tmpDir, 'abmind');
     if (fileExists(abmindSrc)) {
       spawnSync('cp', ['-r', ...readdirSync(abmindSrc).map(f => join(abmindSrc, f)), abmindHome], { stdio: 'inherit' });
@@ -423,7 +403,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   }
 
   // --- supervised: load user-scope watchdog (LaunchAgent / systemd user) ---
-  if (mode === 'supervised') {
+  if (mode === 'daemon') {
     const { execSync } = await import('node:child_process');
     if (process.platform === 'darwin') {
       const plistSrc = join(home, 'scripts', 'com.abtars.watchdog.plist');
@@ -432,11 +412,13 @@ export async function install(opts: InstallOptions): Promise<number> {
         const content = readFileSync(plistSrc, 'utf-8').replaceAll('{{HOME}}', homedir());
         const { writeFileSync } = await import('node:fs');
         writeFileSync(plistDst, content);
-        try { execSync(`launchctl load "${plistDst}"`, { stdio: 'ignore' }); } catch { /* already loaded */ }
+        const uid = `gui/${process.getuid!()}`;
+        try { execSync(`launchctl bootstrap ${uid} "${plistDst}"`, { stdio: 'ignore', timeout: 5000 }); } catch { /* already loaded */ }
         process.stdout.write(`✓ watchdog LaunchAgent loaded\n`);
       }
     } else if (process.platform === 'linux') {
-      const unitSrc = join(home, 'scripts', 'abtars-watchdog.service');
+      const releaseSrc = join(homedir(), '.abtars-releases', 'src', 'abtars', 'scripts', 'abtars-watchdog.service');
+      const unitSrc = existsSync(releaseSrc) ? releaseSrc : join(home, 'scripts', 'abtars-watchdog.service');
       const unitDir = join(homedir(), '.config', 'systemd', 'user');
       if (existsSync(unitSrc)) {
         mkdirSync(unitDir, { recursive: true });
@@ -452,9 +434,8 @@ export async function install(opts: InstallOptions): Promise<number> {
     process.stdout.write(`Next: 'abtars update' to build and activate the first release.\n`);
   } else {
     process.stdout.write(`\n── Next steps ──\n`);
-    process.stdout.write(`  1. Run 'abtars onboard' to configure Telegram token + model provider\n`);
-    process.stdout.write(`  2. (Optional) Install Ollama for memory embeddings: curl -fsSL https://ollama.com/install.sh | sh\n`);
-    process.stdout.write(`  3. Start the bridge: 'abtars restart' or use the watchdog\n\n`);
+    process.stdout.write(`  1. (Optional) Install Ollama for memory embeddings: curl -fsSL https://ollama.com/install.sh | sh\n`);
+    process.stdout.write(`  2. Start the bridge: 'abtars restart' or use the watchdog\n\n`);
   }
 
   const { printHealthSummary } = await import('./health-check.js');

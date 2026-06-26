@@ -1,0 +1,29 @@
+{
+  "_comment": "SHA fault policy — changes apply after restart or /doctor fix",
+  "faults": {
+    "missing-dep": { "action": "disable-capability", "cooldown": 604800, "maxRetries": 1 },
+    "db-corruption": { "action": "rebuild", "cooldown": 86400, "maxRetries": 3 },
+    "irc-flap": { "action": "disable-capability", "cooldown": 604800, "maxRetries": 5 },
+    "autofix-known": { "action": "spawn-command", "cooldown": 86400, "maxRetries": 3 },
+    "autofix-unknown": { "action": "spawn-agent", "cooldown": 86400, "maxRetries": 1 }
+  },
+  "fixes": [
+    { "pattern": "FTS index", "action": "run", "command": ["abtars-edit", "--rebuild-fts"], "cooldownMin": 30 },
+    { "pattern": "database disk image is malformed", "action": "run", "command": ["abtars-edit", "--rebuild-fts"], "cooldownMin": 30 },
+    { "pattern": "-32603", "action": "suppress" },
+    { "pattern": "Transient error", "action": "suppress" },
+    { "pattern": "fetch failed", "action": "suppress" },
+    { "pattern": "[self-healer]", "action": "suppress" },
+    { "pattern": "[watchdog]", "action": "suppress" },
+    { "pattern": "[db-integrity]", "action": "suppress" },
+    { "pattern": "ECONNRESET", "action": "suppress" },
+    { "pattern": "ETIMEDOUT", "action": "suppress" },
+    { "pattern": "socket hang up", "action": "suppress" },
+    { "pattern": "auto-approved", "action": "suppress" },
+    { "pattern": "permission", "action": "suppress" },
+    { "pattern": "BUG REPORT", "action": "suppress" },
+    { "pattern": "AUTO-FIX", "action": "suppress" },
+    { "pattern": "Tool args", "action": "suppress" },
+    { "pattern": "Normalized", "action": "suppress" }
+  ]
+}

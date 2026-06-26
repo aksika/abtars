@@ -22,16 +22,16 @@ export interface Manifest {
   readonly activatedAt: string;
   /** Hostname where install lives (informational). */
   readonly host: string;
-  /** Source adapter that produced the current release (local | npm | github). */
-  readonly source: 'local' | 'npm' | 'github';
+  /** Source adapter that produced the current release. */
+  readonly source: 'dev' | 'alpha' | 'stable' | 'local' | 'npm' | 'github';
   /** Applied migrations (ordered). */
   readonly migrationsApplied: readonly string[];
   /** Previous version (for rollback). Null on first install. */
   readonly previousVersion: string | null;
   /** Previous commit (for rollback reference). */
   readonly previousCommit: string | null;
-  /** Install mode: simple (manual), supervised (launchd/systemd user-scope), or supervised-daemon (system-scope). */
-  readonly installMode?: 'simple' | 'supervised' | 'supervised-daemon';
+  /** Install mode: simple (manual) or daemon (watchdog + OS integration if available). */
+  readonly installMode?: 'simple' | 'daemon';
   /** Repo root path (set when source=local). Null for npm installs. */
   readonly repoRoot?: string | null;
 }
@@ -59,7 +59,7 @@ export function emptyManifest(pkg: 'abtars' | 'abmind', host: string): Manifest 
     packageLockHash: null,
     activatedAt: new Date().toISOString(),
     host,
-    source: 'local',
+    source: 'dev',
     migrationsApplied: [],
     previousVersion: null,
     previousCommit: null,

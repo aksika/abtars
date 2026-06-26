@@ -1,21 +1,20 @@
+import { printBanner } from './banner.js';
 /**
- * `abtars rollback` — swap app/ with a prior version, restart, health-verify.
+ * `abtars rollback` — repoint current symlink to a previous release from history.json.
  * --to N (1-3, default 1) selects which prior to restore.
  */
 
-import { existsSync, renameSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
-import {
-  acquireLock,
-  healthProbe,
-  packagePaths,
-  readManifest,
-  writeManifest,
-} from '../deploy-lib-import.js';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, symlinkSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { acquireLock, packagePaths } from '../deploy-lib-import.js';
 
 export async function rollback(opts?: { to?: number }): Promise<number> {
+  await printBanner("rollback");
   const paths = packagePaths('abtars');
-  const manifest = await readManifest(paths.manifest);
+  const releasesDir = resolve(homedir(), '.abtars-releases');
+  const historyFile = join(releasesDir, 'history.json');
+  const currentLink = join(releasesDir, 'current');
   const slot = opts?.to ?? 1;
 
   if (slot < 1 || slot > 3) {
@@ -23,62 +22,50 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
     return 2;
   }
 
-  const prevDir = join(paths.home, `app.prev.${slot}`);
+  let history: string[] = [];
+  try { history = JSON.parse(readFileSync(historyFile, "utf-8")); } catch {}
 
-  // Backward compat: check old app.prev/ if slot 1 and new format doesn't exist
-  const legacyPrev = paths.appPrev;
-  if (slot === 1 && !existsSync(prevDir) && existsSync(legacyPrev)) {
-    renameSync(legacyPrev, prevDir);
-  }
-
-  if (!existsSync(prevDir)) {
-    process.stderr.write(`Nothing to roll back to (no app.prev.${slot}/ found).\n`);
+  if (history.length <= slot) {
+    process.stderr.write(`Nothing at slot ${slot} (history has ${history.length} entries).\n`);
     return 2;
   }
 
-  if (!manifest?.version) {
-    process.stderr.write(`No active release in manifest; nothing to roll back.\n`);
+  const target = history[slot]!;
+  const targetDir = join(releasesDir, target);
+  if (!existsSync(targetDir)) {
+    process.stderr.write(`Release dir ${target} not found on disk.\n`);
     return 2;
   }
 
   const release = await acquireLock(paths.lock, 'rollback');
   try {
-    // Swap: app/ → app.broken/, app.prev.N/ → app/
-    const brokenDir = join(paths.home, 'app.broken');
-    rmSync(brokenDir, { recursive: true, force: true });
-    renameSync(paths.app, brokenDir);
-    renameSync(prevDir, paths.app);
-    rmSync(brokenDir, { recursive: true, force: true });
-    process.stdout.write(`✓ rolled back: app.prev.${slot}/ → app/\n`);
+    // Repoint current symlink
+    try { unlinkSync(currentLink); } catch {}
+    symlinkSync(targetDir, currentLink);
 
-    // Update manifest (swap version ↔ previousVersion)
-    if (manifest.previousVersion) {
-      await writeManifest(paths.manifest, {
-        ...manifest,
-        version: manifest.previousVersion,
-        commit: manifest.previousCommit,
-        activatedAt: new Date().toISOString(),
-        previousVersion: manifest.version,
-        previousCommit: manifest.commit,
-      });
-      process.stdout.write(`✓ manifest: ${manifest.version} → ${manifest.previousVersion}\n`);
-    }
+    // Also repoint legacy app/ symlink
+    try { unlinkSync(paths.app); } catch {}
+    try { symlinkSync(targetDir, paths.app); } catch {}
 
-    // Restart bridge
-    const restartTs = Date.now();
-    const { restart } = await import('./restart.js');
-    process.stdout.write(`♻️ Restarting bridge...\n`);
-    await restart({ cold: true }).catch(() => {});
+    process.stdout.write(`✓ rolled back to ${target} (slot ${slot})\n`);
 
-    // Health probe
-    const health = await healthProbe(paths.home, restartTs, 60_000);
-    if (health.healthy) {
-      process.stdout.write(`✓ Bridge healthy (PID ${health.pid})\n`);
-    } else {
-      process.stderr.write(`⚠️ Bridge may not have started. Check logs.\n`);
-    }
+    // Reset circuit breaker counter
+    try {
+      const state = JSON.parse(readFileSync(join(paths.home, 'deploy.state'), 'utf-8'));
+      state.restartCount = 0;
+      writeFileSync(join(paths.home, 'deploy.state'), JSON.stringify(state) + '\n');
+    } catch {}
 
-    process.stdout.write(`\nRollback complete.\n`);
+    // Write start reason + restart
+    writeFileSync(join(paths.home, '.start-reason'), `rollback:${target}`);
+
+    // Kill bridge so WD respawns from rolled-back code
+    try {
+      const bridgePid = JSON.parse(readFileSync(join(paths.home, 'bridge.lock'), 'utf-8')).pid;
+      if (bridgePid > 0) process.kill(bridgePid, 'SIGTERM');
+    } catch {}
+
+    process.stdout.write(`♻️ Bridge killed — WD will respawn from ${target}\n`);
     return 0;
   } finally {
     await release();

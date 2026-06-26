@@ -60,6 +60,7 @@ export type TelegramMessageReactionUpdated = {
 export type TelegramUpdate = {
   update_id: number;
   message?: TelegramMessage;
+  edited_message?: TelegramMessage;
   callback_query?: TelegramCallbackQuery;
   message_reaction?: TelegramMessageReactionUpdated;
 };

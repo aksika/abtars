@@ -50,39 +50,7 @@
     "overflow",
     "state"
   ],
-  "configSeeds": [
-    {
-      "source": ".env.example",
-      "dest": "config/.env",
-      "mode": "0600"
-    },
-    {
-      "source": ".env.skills.example",
-      "dest": "config/.env.skills",
-      "mode": "0600"
-    },
-    {
-      "source": "models.default.json",
-      "dest": "config/models.json"
-    },
-    {
-      "source": "config/transport.json.example",
-      "dest": "config/transport.json"
-    },
-    {
-      "source": "config/users.json.example",
-      "dest": "config/users.json"
-    },
-    {
-      "source": "tasks.default.json",
-      "dest": "tasks/tasks.json"
-    },
-    {
-      "source": "config/peers.json.example",
-      "dest": "config/peers.json",
-      "mode": "0600"
-    }
-  ],
+  "configSeeds": [],
   "requiredConfigs": [
     {
       "path": "config/transport.json",
@@ -126,10 +94,7 @@
     "abtars",
     "abtars-browser",
     "abtars-restart",
-<<<<<<< HEAD
-=======
     "abtars-rss",
->>>>>>> dev
     "abtars-task",
     "abtars-tweet",
     "abtars-todo"

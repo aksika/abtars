@@ -5,38 +5,32 @@ import { homedir} from "node:os";
 import { logInfo} from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { readEntries as cronReadEntries } from "../tasks/task-store.js";
-import { abtarsHome } from "../../paths.js";
+import { abtarsHome, abtarsRoot } from "../../paths.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd";
 
 export async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
-  const arg = _text.replace(/^\/doctor\s*/i, "").trim().toLowerCase();
+  const arg = _text.replace(/^\/(doctor|health)\s*/i, "").trim().toLowerCase();
 
-  // /doctor fix → run doctor.sh --fix
+  // /doctor fix → run fixes
   if (arg === "fix" || arg === "fix-full") {
-    const flag = arg === "fix-full" ? "--fix-full" : "--fix";
     try {
-      const raw = await execAsync("bash", [join(abtarsHome(), "scripts", "doctor.sh"), flag], 30000);
-      await ctx.reply(`🩺 doctor.sh ${flag}:\n${raw || "(no output)"}`);
+      const { runFixes, runAllProbes, renderHuman } = await import("../../cli/commands/doctor-probes.js");
+      const fixes = await runFixes();
+      const fixLines = fixes.map(f => `  ${f.success ? "+" : "x"} ${f.action}`).join("\n");
+      const output = await runAllProbes();
+      await ctx.reply(`🩺 Fix:\n${fixLines || "(nothing to fix)"}\n\n${renderHuman(output)}`);
     } catch (err) {
-      await ctx.reply(`❌ doctor.sh failed: ${err instanceof Error ? err.message : String(err)}`);
+      await ctx.reply(`x doctor fix failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return true;
   }
 
-  const { getDoctorReport, renderDoctorText } = await import("../doctor/index.js");
-  const force = arg === "force";
-  const svcStates = ctx.registry?.getStates() ?? {};
   await ctx.reply("🩺 Running diagnostics...");
-  const report = await getDoctorReport({
-    memory: ctx.memory,
-    transport: ctx.transport,
-    telegramRunning: svcStates.telegram?.running ?? false,
-    discordRunning: svcStates.discord?.running ?? false,
-    phaseHealth: ctx.phaseHealth,
-  }, { force });
-  await ctx.reply(renderDoctorText(report));
+  const { runAllProbes, renderHuman } = await import("../../cli/commands/doctor-probes.js");
+  const output = await runAllProbes();
+  await ctx.reply(renderHuman(output));
   return true;
 }
 
@@ -77,32 +71,47 @@ export async function handleWait(text: string, ctx: CommandContext): Promise<boo
 
 export async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> {
   await ctx.transport.sendInterrupt();
-  ctx.sessions.getOrCreate(ctx.sessionKey).busy = false;
+  const { spin } = await import("../spin.js");
+  const s = spin.getSessionById(ctx.sessionKey);
+  if (s) s.busy = false;
   await ctx.reply("🛑 Ctrl+C sent.");
   logInfo(TAG, "Ctrl+C interrupt sent");
   return true;
 }
 
 export async function handleRestart(_text: string, ctx: CommandContext): Promise<boolean> {
-  await ctx.reply("♻️ Restarting bridge...");
+  const { writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
+  writeFileSync(join(home, ".start-reason"), "user-restart");
+
+  const arg = _text.replace(/^\/restart\s*/i, "").trim().toLowerCase();
+  if (arg === "cold") {
+    await ctx.reply("+ Cold restart...");
+    setTimeout(() => process.exit(0), 500);
+    return true;
+  }
+  await ctx.reply("+ Restarting bridge...");
   setTimeout(() => ctx.requestShutdown?.(0), 500);
   return true;
 }
 
 export async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<boolean> {
-  const cronInfo = ctx.memory?.getCronInfo();
-  if (!cronInfo) { await ctx.reply("💓 Heartbeat not available."); return true; }
+  const { getHeartbeatInstance } = await import("../heartbeat-system.js");
+  const hb = getHeartbeatInstance();
+  if (!hb) { await ctx.reply("💓 Heartbeat not available."); return true; }
 
-  const mins = Math.round(cronInfo.intervalMs / 60000);
+  const mins = Math.round(hb.intervalMs / 60000);
   const lines = [
-    `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min interval)`,
+    `💓 Heartbeat: ${hb.isRunning ? "running" : "stopped"} (${mins}min interval)`,
     "",
   ];
 
   // Task statuses
-  if (cronInfo.taskStatuses.size > 0) {
+  const statuses = hb.getTaskStatuses();
+  if (statuses.size > 0) {
     lines.push("Tasks (last tick):");
-    for (const [name, status] of cronInfo.taskStatuses) {
+    for (const [name, status] of statuses) {
       lines.push(`  ${status} ${name}`);
     }
   }
@@ -121,35 +130,82 @@ export async function handleHeartbeat(_text: string, ctx: CommandContext): Promi
 }
 
 export async function handleHealing(text: string, ctx: CommandContext): Promise<boolean> {
-  if (!ctx.selfHealerTask) { await ctx.reply("🩺 Self-healer not available."); return true; }
-  const arg = text.replace(/^\/healing\s*/, "").trim().toLowerCase();
-  if (arg === "on") {
-    ctx.selfHealerTask.enabled = true;
-  } else if (arg === "off") {
-    ctx.selfHealerTask.enabled = false;
-  } else if (arg === "reset") {
-    ctx.selfHealerTask.resetCircuitBreaker?.();
-    await ctx.reply("🩺 Circuit breaker reset — all paused rules re-enabled.");
+  const arg = text.replace(/^\/healing\s*/, "").trim();
+  const cmd = arg.toLowerCase().split(/\s+/)[0] ?? "";
+
+  if (cmd === "on") {
+    if (ctx.selfHealerTask) ctx.selfHealerTask.enabled = true;
+    await ctx.reply("🩺 Self-healing: ON");
+    logInfo(TAG, "Self-healer ON by user");
     return true;
   }
-  const status = ctx.selfHealerTask.enabled ? "ON" : "OFF";
-  const paused = ctx.selfHealerTask.pausedRules?.() ?? 0;
-  const pausedText = paused > 0 ? ` (${paused} rule${paused > 1 ? "s" : ""} paused)` : "";
-  await ctx.reply(`🩺 Self-healing: ${status}${pausedText}`);
-  if (arg === "on" || arg === "off") logInfo(TAG, `Self-healer ${status} by user`);
+  if (cmd === "off") {
+    if (ctx.selfHealerTask) ctx.selfHealerTask.enabled = false;
+    await ctx.reply("🩺 Self-healing: OFF");
+    logInfo(TAG, "Self-healer OFF by user");
+    return true;
+  }
+  if (cmd === "reset") {
+    const { resetAutofixState } = await import("../sha-tracker.js");
+    resetAutofixState();
+    await ctx.reply("🩺 Autofix state reset — all suppressed faults re-enabled.");
+    return true;
+  }
+  if (cmd === "list") {
+    const { loadFixes } = await import("../sha-tracker.js");
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const fixes = loadFixes();
+    if (fixes.length === 0) { await ctx.reply("🩺 No fix rules configured."); return true; }
+    let state: Record<string, { totalRuns?: number }> = {};
+    try { state = JSON.parse(readFileSync(join(process.env["ABTARS_HOME"] || join(process.env["HOME"] || "~", ".abtars"), "state", "sha-state.json"), "utf-8")); } catch {}
+    const lines = fixes.map(f => {
+      const v = f.verified === false ? " ⚠️" : "";
+      const src = f.createdAt ? "(self)" : "(core)";
+      const runs = state[`autofix-known:${f.pattern}`]?.totalRuns ?? 0;
+      const runsText = runs > 0 ? ` [${runs}x]` : "";
+      return `• "${f.pattern.slice(0, 20)}" → ${f.command?.[0] ?? "?"} ${src}${v}${runsText}`;
+    });
+    await ctx.reply(`🩺 Fix rules (${fixes.length}):\n${lines.join("\n")}`);
+    return true;
+  }
+  if (cmd === "approve") {
+    const pattern = arg.slice(8).trim();
+    if (!pattern) { await ctx.reply("Usage: /healing approve <pattern>"); return true; }
+    const { approveFix } = await import("../sha-tracker.js");
+    const ok = approveFix(pattern);
+    await ctx.reply(ok ? `✓ Approved: "${pattern}"` : `❌ Pattern not found in self-rules.`);
+    return true;
+  }
+  if (cmd === "disable") {
+    const pattern = arg.slice(8).trim();
+    if (!pattern) { await ctx.reply("Usage: /healing disable <pattern>"); return true; }
+    const { disableFix } = await import("../sha-tracker.js");
+    const ok = disableFix(pattern);
+    await ctx.reply(ok ? `✓ Disabled: "${pattern}"` : `❌ Pattern not found in self-rules.`);
+    return true;
+  }
+
+  // Default: show status
+  const status = ctx.selfHealerTask?.enabled ? "ON" : "OFF";
+  await ctx.reply(`🩺 Self-healing: ${status}\nCommands: /healing [on|off|list|reset|approve|disable]`);
   return true;
 }
 
 export async function handleFull(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.platform !== "telegram") { await ctx.reply("📺 Full mode is only available on Telegram."); return true; }
-  ctx.sessions.getOrCreate(ctx.sessionKey).fullMode = true;
+  const { spin } = await import("../spin.js");
+  const s = spin.getSessionById(ctx.sessionKey);
+  if (s) s.fullMode = true;
   await ctx.reply("📺 Full mode — sending raw output, TTS disabled.");
   return true;
 }
 
 export async function handleShort(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.platform !== "telegram") { await ctx.reply("✂️ Short mode is only available on Telegram."); return true; }
-  ctx.sessions.getOrCreate(ctx.sessionKey).fullMode = false;
+  const { spin } = await import("../spin.js");
+  const s = spin.getSessionById(ctx.sessionKey);
+  if (s) s.fullMode = false;
   await ctx.reply("✂️ Short mode — clean responses, TTS enabled.");
   return true;
 }
@@ -182,7 +238,8 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   const ctxPct = ctx.transport.contextPercent >= 0
     ? `${ctx.transport.contextPercent}%`
     : "n/a";
-  const cronInfo = ctx.memory?.getCronInfo();
+  const { getHeartbeatInstance } = await import("../heartbeat-system.js");
+  const hb = getHeartbeatInstance();
 
   // Transport details from transport.json
   const { loadTransport: lt, resolveAgent: ra } = await import("../transport-config.js");
@@ -203,16 +260,21 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     `📊 Context window: ${ctxPct}`,
     `⏱️ Uptime: ${uptime}`,
   ];
-  if (cronInfo) {
-    const mins = Math.round(cronInfo.intervalMs / 60000);
+  if (hb) {
+    const mins = Math.round(hb.intervalMs / 60000);
     lines.push(
-      `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min)`,
+      `💓 Heartbeat: ${hb.isRunning ? "running" : "stopped"} (${mins}min)`,
     );
     if (ctx.loadedCapabilities?.length) {
       lines.push(`🔌 Capabilities: ${ctx.loadedCapabilities.join(", ")}`);
     }
-    lines.push(`😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`);
-    const sp = ctx.sleepProgress?.();
+    // Last sleep audit from filesystem
+    try {
+      const { readdirSync } = await import("node:fs");
+      const sleepDir = join(homedir(), ".abmind", "memory", "sleep");
+      const files = readdirSync(sleepDir).filter((f: string) => f.startsWith("sleep_")).sort();
+      lines.push(`😴 Last sleep: ${files.length > 0 ? files[files.length - 1] : "(never)"}`);
+    } catch { lines.push("😴 Last sleep: (unknown)"); }    const sp = ctx.sleepProgress?.();
     if (sp) {
       lines.push(`😴 Sleep: ${sp.percent}% (${sp.step})`);
     }
@@ -311,6 +373,18 @@ export async function handleUsage(_text: string, ctx: CommandContext): Promise<b
     msg += `\n💳 OpenRouter: $${credits.remaining.toFixed(2)} remaining ($${credits.purchased.toFixed(2)} purchased, $${credits.used.toFixed(2)} used)`;
   }
 
+  // Budget status
+  const { getBudgetStatus } = await import("../budget.js");
+  const budgetItems = getBudgetStatus();
+  if (budgetItems.length > 0) {
+    msg += `\n\n📋 Budget (today):`;
+    for (const { agent, used, limit } of budgetItems) {
+      const tokStr = limit.tokens ? `${Math.round(used.tokens / 1000)}K/${limit.tokens}K` : "unlimited";
+      const callStr = limit.calls ? `${used.calls}/${limit.calls}` : "unlimited";
+      msg += `\n  ${agent}: ${tokStr} tokens, ${callStr} calls`;
+    }
+  }
+
   await ctx.reply(msg.trim());
   return true;
 }
@@ -357,114 +431,140 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   const user = loadUsers().byUserId.get(ctx.userId);
   const isMaster = user?.role === "master";
 
-  // /software rollback <version>
+  // /software rollback <version|slot>
   if (arg.startsWith("rollback")) {
     if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
     const targetVersion = arg.replace(/^rollback\s*/, "").trim();
     if (!targetVersion) {
-      await ctx.reply("Usage: /software rollback <version>\nUse /software to see available versions.");
+      await ctx.reply("Usage: /software rollback <slot 1-3>\nUse /software to see available versions.");
       return true;
     }
 
-    let targetSlot: number | null = null;
-    for (let i = 1; i <= 3; i++) {
-      const pkgPath = join(home, `app.prev.${i}`, "package.json");
-      try {
-        const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
-        if (ver === targetVersion) { targetSlot = i; break; }
-      } catch { /* slot empty */ }
-    }
-
-    if (!targetSlot) {
-      await ctx.reply(`❌ Version ${targetVersion} not found in rollback slots.`);
+    const asSlot = parseInt(targetVersion);
+    if (!(asSlot >= 1 && asSlot <= 3) || String(asSlot) !== targetVersion) {
+      await ctx.reply(`❌ Invalid slot: ${targetVersion}. Use 1, 2, or 3.`);
       return true;
     }
 
-    await ctx.reply(`⚠️ Rolling back to ${targetVersion}...`);
+    await ctx.reply(`⚠️ Rolling back to slot ${asSlot}...`);
     try {
       const { rollback } = await import("../../cli/commands/rollback.js");
-      await rollback({ to: targetSlot });
+      const code = await rollback({ to: asSlot });
+      if (code !== 0) {
+        await ctx.reply(`❌ Rollback failed (exit ${code}).`);
+      }
     } catch (err) {
       await ctx.reply(`❌ Rollback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return true;
   }
 
-  // /software update [deploy|pull]
-  if (arg === "update" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build" ||
-      arg === "update pull" || arg === "pull" || arg === "") {
-    // /update with no args → treat as /software (show info)
-    if (arg === "" && _text.match(/^\/software\s*$/i)) {
-      // Fall through to info display below
-    } else if (arg === "update pull" || arg === "pull") {
-      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
-      try {
-        const { spawnSync } = await import("node:child_process");
-        const { mkdirSync } = await import("node:fs");
-        const srcDir = join(home, "src", "abtars");
-        const abmindDir = join(home, "src", "abmind");
-        logInfo("update", "Pull requested");
-        if (!existsSync(join(srcDir, ".git"))) {
-          await ctx.reply("Cloning abtars repo...");
-          mkdirSync(join(home, "src"), { recursive: true });
-          const cl = spawnSync("git", ["clone", "git@github.com:aksika/abtars.git", srcDir], { encoding: "utf-8", timeout: 60_000 });
-          if (cl.status !== 0) { logInfo("update", "Clone failed"); await ctx.reply(`Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
-        }
-        spawnSync("git", ["-C", srcDir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-        const r = spawnSync("git", ["-C", srcDir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
-        if (r.status !== 0) { await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
-        let pulled = `Pulled:\n${(r.stdout || "").trim().slice(0, 300)}`;
-        if (existsSync(join(abmindDir, ".git"))) {
-          spawnSync("git", ["-C", abmindDir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-          const ab = spawnSync("git", ["-C", abmindDir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
-          if (ab.status !== 0) { await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
-          pulled += `\nabmind: ${(ab.stdout || "").trim().slice(0, 200)}`;
-        }
-        logInfo("update", `Pull complete`);
-        await ctx.reply(`${pulled}\n\nReady to deploy: /update deploy`);
-      } catch (err) {
-        await ctx.reply(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      return true;
-    } else if (arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build") {
-      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
-      try {
-        const { spawnSync, spawn } = await import("node:child_process");
-        const srcDir = join(home, "src", "abtars");
-        const abmindDir = join(home, "src", "abmind");
-        if (!existsSync(join(srcDir, ".git"))) {
-          await ctx.reply("No source repo. Run /update pull first.");
-          return true;
-        }
-        // Guard: skip if already running this commit
-        const { getDeployedVersion } = await import("../../paths.js");
-        const head = spawnSync("git", ["-C", srcDir, "rev-parse", "--short", "HEAD"], { encoding: "utf-8" }).stdout.trim();
-        const running = getDeployedVersion();
-        if (head && (running.version.includes(head) || running.commit === head)) {
-          await ctx.reply(`Already running ${head}. Nothing to deploy.`);
-          return true;
-        }
-        logInfo("update", `Deploy starting (non-blocking)`);
-        await ctx.reply("⚙️ Deploying (building in background)...");
-
-        // Spawn build-and-deploy.sh detached — bridge stays responsive (#871)
-        const script = join(srcDir, "scripts", "build-and-deploy.sh");
-        spawn("bash", [script, srcDir, abmindDir], {
-          detached: true,
-          stdio: "ignore",
-        }).unref();
-      } catch (err) {
-        await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      return true;
-    } else if (arg === "update" || arg === "npm" || arg === "update npm") {
-      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
-      logInfo("update", "npm update starting");
-      await ctx.reply("Updating from npm...");
-      const { spawn } = await import("node:child_process");
-      spawn("abtars", ["update", "--source", "npm"], { detached: true, stdio: "ignore" }).unref();
+  // /update dev | alpha | stable
+  if (arg === "update" || arg === "update dev" || arg === "dev" ||
+      arg === "update git" || arg === "git" ||
+      arg === "update alpha" || arg === "alpha" ||
+      arg === "update stable" || arg === "stable" ||
+      arg === "update deploy" || arg === "deploy" || arg === "update pull" || arg === "pull" || arg === "update build" || arg === "build") {
+    // /update with no args → show usage
+    if (arg === "update") {
+      await ctx.reply("Usage: /update dev | alpha | stable");
       return true;
     }
+    // dev + hidden aliases (git, pull, deploy, build)
+    const channel = (arg === "dev" || arg === "update dev" || arg === "git" || arg === "update git" || arg === "update pull" || arg === "pull" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build")
+      ? "dev"
+      : (arg === "alpha" || arg === "update alpha") ? "alpha" : "stable";
+
+    if (!isMaster) { await ctx.reply("Requires master role."); return true; }
+
+    if (channel === "dev") {
+      const { spawn } = await import("node:child_process");
+      const releasesRoot = join(process.env["HOME"] ?? "", ".abtars-releases", "src");
+      const abtarsDir = join(releasesRoot, "abtars");
+      const abmindDir = join(releasesRoot, "abmind");
+
+      // Async helper — never blocks the event loop
+      const execP = (cmd: string, args: string[], opts: { cwd?: string; timeout: number }): Promise<{ stdout: string; ok: boolean }> =>
+        new Promise((resolve) => {
+          const { spawn: sp } = require("node:child_process") as typeof import("node:child_process");
+          let stdout = "";
+          const proc = sp(cmd, args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });
+          proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+          const timer = setTimeout(() => { proc.kill("SIGKILL"); resolve({ stdout, ok: false }); }, opts.timeout);
+          proc.on("close", (code) => { clearTimeout(timer); resolve({ stdout, ok: code === 0 }); });
+          proc.on("error", () => { clearTimeout(timer); resolve({ stdout, ok: false }); });
+        });
+
+      const emergencyScript = join(abtarsDir, "scripts", "emergency-update.sh");
+
+      // Show incoming commits (async, non-blocking)
+      await ctx.reply("Checking for updates...");
+      const fetchResult = await execP("git", ["-C", abtarsDir, "fetch", "origin", "dev"], { timeout: 30_000 });
+      if (!fetchResult.ok) {
+        await ctx.reply("git fetch timed out — running emergency update.");
+        spawn("bash", [emergencyScript], { detached: true, stdio: "ignore" }).unref();
+        return true;
+      }
+
+      const logResult = await execP("git", ["-C", abtarsDir, "log", "--oneline", "HEAD..origin/dev"], { timeout: 5_000 });
+      const commits = logResult.stdout.trim();
+      if (!commits) {
+        await ctx.reply("Already up to date.");
+        return true;
+      }
+      const lines = commits.split("\n");
+      await ctx.reply(`${lines.length} new commit(s):\n${commits.slice(0, 300)}\n\nDeploying...`);
+      logInfo("update", "git update requested");
+
+      // Checkout + build (async, with timeout fallback)
+      try {
+        const co = await execP("git", ["-C", abtarsDir, "checkout", "origin/dev"], { timeout: 10_000 });
+        if (!co.ok) throw new Error("checkout failed");
+
+        if (existsSync(join(abmindDir, ".git"))) {
+          await execP("git", ["-C", abmindDir, "fetch", "origin", "dev"], { timeout: 30_000 });
+          await execP("git", ["-C", abmindDir, "checkout", "origin/dev"], { timeout: 10_000 });
+        }
+
+        const build = await execP("node", ["esbuild.config.js"], { cwd: abtarsDir, timeout: 60_000 });
+        if (!build.ok) throw new Error("build failed");
+      } catch {
+        await ctx.reply("Build/checkout failed — running emergency update.");
+        spawn("bash", [emergencyScript], { detached: true, stdio: "ignore" }).unref();
+        return true;
+      }
+
+      // Deploy from fresh bundle (detached — survives bridge restart)
+      const bundleCli = join(abtarsDir, "bundle", "abtars-cli.js");
+      spawn("node", [bundleCli, "update", "--dev", abtarsDir], { detached: true, stdio: "ignore" }).unref();
+    } else if (channel === "alpha") {
+      await ctx.reply("Updating from npm (alpha)...");
+      logInfo("update", "npm alpha update requested");
+      const { spawn } = await import("node:child_process");
+      const child = spawn("abtars", ["update", "--source", "npm", "--tag", "alpha"], { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+      child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
+    } else {
+      await ctx.reply("Updating from npm (stable)...");
+      logInfo("update", "npm stable update requested");
+      const { spawn } = await import("node:child_process");
+      const child = spawn("abtars", ["update", "--source", "npm"], { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+      child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
+    }
+    return true;
+  }
+
+  if ((arg as string) === "npm" || (arg as string) === "update npm") {
+    // Legacy: /update npm → alpha
+    if (!isMaster) { await ctx.reply("Requires master role."); return true; }
+    logInfo("update", "npm alpha update (legacy /update npm)");
+    await ctx.reply("Updating from npm (alpha)...");
+    const { spawn } = await import("node:child_process");
+    spawn("abtars", ["update", "--source", "npm", "--tag", "alpha"], { detached: true, stdio: "ignore" }).unref();
+    return true;
   }
 
   // /software check — force-refresh npm registry
@@ -512,11 +612,16 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
 
   // abmind block
   lines.push("");
+  // Only show abmind if configured as memory provider (#1162)
+  const { getEnv } = await import("../env-schema.js");
+  const memoryProvider = getEnv().memory;
+  if (memoryProvider === "abmind" || memoryProvider === "auto") {
   // Try deployed copy first (always up to date), fall back to ~/.abmind/manifest.json
   const abmindBundlePkg = join(home, "app", "bundle", "node_modules", "abmind", "package.json");
   const abmindAppPkg = join(home, "app", "node_modules", "abmind", "package.json");
-  const abmindHome = process.env["ABMIND_HOME"] ?? join(home, "..", ".abmind");
-  const abmindManifest = join(abmindHome, "manifest.json");
+  const { abmindHome: resolveAbmind } = await import("../../paths.js");
+  const abmHome = resolveAbmind();
+  const abmindManifest = join(abmHome, "manifest.json");
   const abmindPkgPath = existsSync(abmindBundlePkg) ? abmindBundlePkg : existsSync(abmindAppPkg) ? abmindAppPkg : null;
   if (abmindPkgPath) {
     try {
@@ -548,22 +653,96 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   } else {
     lines.push("  abmind: not installed");
   }
+  } // end memoryProvider gate
 
   // Rollback slots
   lines.push("");
   lines.push("  Rollback:");
-  for (let i = 1; i <= 3; i++) {
-    const pkgPath = join(home, `app.prev.${i}`, "package.json");
-    try {
-      const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
-      lines.push(`    ${i}: ${ver}`);
-    } catch {
-      lines.push(`    ${i}: (empty)`);
+  try {
+    const { resolve } = await import("node:path");
+    const { homedir } = await import("node:os");
+    const historyPath = resolve(homedir(), ".abtars-releases", "history.json");
+    const history: string[] = JSON.parse(readFileSync(historyPath, "utf-8"));
+    const prev = history.slice(1, 4); // skip current (index 0)
+    for (let i = 0; i < 3; i++) {
+      lines.push(`    ${i + 1}: ${prev[i] ?? "(empty)"}`);
+    }
+  } catch {
+    for (let i = 1; i <= 3; i++) {
+      const pkgPath = join(home, `app.prev.${i}`, "package.json");
+      try {
+        const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
+        lines.push(`    ${i}: ${ver}`);
+      } catch {
+        lines.push(`    ${i}: (empty)`);
+      }
     }
   }
 
+  // Deploy state (#878)
+  try {
+    const stateRaw = readFileSync(join(home, "deploy.state"), "utf-8");
+    const ds = JSON.parse(stateRaw);
+    if (ds.status === "running") {
+      const ago = Math.round((Date.now() - new Date(ds.startedAt).getTime()) / 60_000);
+      lines.push(`\n  🔄 Deploy in progress (${ago}min ago)`);
+    } else if (ds.status === "failed") {
+      lines.push(`\n  ❌ Last deploy failed: ${ds.error}\n     Log: ~/.abtars/logs/${ds.logFile}`);
+    } else if (ds.status === "partial") {
+      lines.push(`\n  ⚠️ Last deploy incomplete: missing ${ds.missing?.join(", ")}`);
+    }
+  } catch { /* no state file = normal */ }
+
   lines.push("");
-  lines.push("  /update [pull|deploy|npm] | /software rollback <version>");
+  lines.push("  /update [dev|alpha|stable] | /software rollback <version>");
+  await ctx.reply(lines.join("\n"));
+  return true;
+}
+
+export async function handleRollback(text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = text.replace(/^\/rollback\s*/i, "").trim();
+  const slot = parseInt(arg) || 1;
+  if (slot < 1 || slot > 3) {
+    await ctx.reply("Slot must be 1-3. Usage: /rollback 1");
+    return true;
+  }
+  await ctx.reply(`Rolling back to slot ${slot}...`);
+  const { rollback } = await import("../../cli/commands/rollback.js");
+  const code = await rollback({ to: slot });
+  await ctx.reply(code === 0 ? `+ Rolled back to slot ${slot}` : `x Rollback failed (code ${code})`);
+  return true;
+}
+
+/** #832: /metrics — structured observability summary. */
+export async function handleMetrics(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { getMetricsSummary } = await import("../metrics-collector.js");
+  const s = getMetricsSummary();
+
+  const lines: string[] = ["Metrics (recent window):"];
+
+  // LLM
+  const models = Object.entries(s.llm);
+  if (models.length > 0) {
+    lines.push("\nLLM latency:");
+    for (const [model, m] of models) {
+      lines.push(`  ${model}: p50=${m.p50}ms p95=${m.p95}ms max=${m.max}ms | ${m.calls} calls, ${m.failures} fails`);
+    }
+  } else { lines.push("\nLLM: no data yet"); }
+
+  // Recall
+  if (s.recall) {
+    lines.push(`\nRecall: p50=${s.recall.p50}ms p95=${s.recall.p95}ms (${s.recall.calls} calls)`);
+  }
+
+  // Sleep
+  if (s.sleep) {
+    const rate = s.sleep.calls > 0 ? Math.round((1 - s.sleep.failures / s.sleep.calls) * 100) : 100;
+    lines.push(`\nSleep: ${s.sleep.calls} runs, ${rate}% success`);
+  }
+
+  // Cron
+  lines.push(`\nCron depth: avg=${s.cronDepth.avg} max=${s.cronDepth.max}`);
+
   await ctx.reply(lines.join("\n"));
   return true;
 }

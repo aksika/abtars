@@ -28,6 +28,10 @@ export async function handleNewReset(text: string, ctx: CommandContext): Promise
   const label = isResetDefault ? "🔄 Reset to defaults." : "🔄 Transport reloaded.";
   await ctx.reply(label);
 
+  // Greet in the new session (#968)
+  const newSession = ctx.sessionManager.getActiveSession(ctx.userId, ctx.platform);
+  ctx.sessionManager.greetSession(newSession, ctx.chatId, ctx.userId);
+
   logInfo(TAG, `Reset session → ${activeId} (${ctx.platform})`);
   return true;
 }
@@ -155,7 +159,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
           signal: AbortSignal.timeout(10_000),
         });
         if (res.ok) {
-          results.push(`✅ ${model} — alive`);
+          results.push(`✓ ${model} — alive`);
           if (catalog[model]) catalog[model]!.status = "alive";
         } else {
           const body = await res.text().catch(err => { logAndSwallow(TAG, "read model probe error body", err); return ""; });
@@ -212,7 +216,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
     }
-    await ctx.reply(`✅ Switched to ${newModel}`);
+    await ctx.reply(`✓ Switched to ${newModel}`);
     return true;
   }
 
@@ -238,7 +242,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       if (models.length === 0) { await ctx.reply(`❌ No models found for provider "${providerArg}"`); return true; }
       const lines = [`📋 Models on ${providerArg}:`];
       for (const m of models) {
-        const current = m.id === currentModel ? " ✅" : "";
+        const current = m.id === currentModel ? " ✓" : "";
         lines.push(`  • ${m.id}${current}`);
       }
       lines.push(`\nUse /model quick <name> to switch.`);
@@ -287,7 +291,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       }
     }
     writeTransportConfig(tc, `global provider → ${providerName}`);
-    await ctx.reply(`✅ All agents → ${providerName}. Use /reset to apply.`);
+    await ctx.reply(`✓ All agents → ${providerName}. Use /reset to apply.`);
     return true;
   }
 
@@ -315,7 +319,6 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     }
     lines.push(line);
   }
-  lines.push("  Cron: inherits Professor");
   if (prof?.provider.fallbackChain?.length) {
     lines.push(`\n🛟 Fallback chain: ${prof.provider.fallbackChain.join(" → ")}`);
   }
@@ -344,5 +347,16 @@ export async function handleReasoning(text: string, ctx: CommandContext): Promis
   } else {
     await ctx.reply(`Reasoning: effort=${session.reasoningEffort ?? "default"}, display=${session.showReasoning ? "show" : "hide"}`);
   }
+  return true;
+}
+
+export async function handleContinue(_text: string, ctx: CommandContext): Promise<boolean> {
+  const response = await ctx.transport.sendPrompt(
+    ctx.sessionKey,
+    "[SYSTEM] Something went wrong during your previous response. Continue from where you left off.",
+    undefined,
+    ctx.userId,
+  );
+  if (response) await ctx.reply(response);
   return true;
 }

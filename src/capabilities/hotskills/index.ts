@@ -12,10 +12,13 @@ let _instance: SkillWatcher | null = null;
 /** Get cached skill info from the last catalog generation. */
 export function getSkillCache(): readonly SkillInfo[] { return _instance?.skills ?? []; }
 
+/** Reload the skills catalog. Returns skill count. */
+export function reloadCatalog(): number { return _instance?.generateCatalog() ?? 0; }
+
 export function register(api: CapabilityApi): void {
   const skillWatcher = new SkillWatcher(
     join(abtarsHome(), "skills"),
-    join(abtarsHome(), "core", "skills_catalog.md"),
+    join(abtarsHome(), "skills", "skills_catalog.md"),
   );
   _instance = skillWatcher;
 

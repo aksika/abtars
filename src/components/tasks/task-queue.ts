@@ -18,7 +18,7 @@ import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt, readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./task-store.js";
 import { recordRun } from "./task-checker.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail } from "./kanban-board.js";
+import { kanbanComplete, kanbanFail } from "./kanban-board.js";
 import type { CronEntry } from "../../cli/abtars-task.js";
 import { localDate } from "../../utils/date.js";
 
@@ -103,7 +103,7 @@ function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } 
   // Glob associated files: {taskname}_* in same directory (cap 10k chars total)
   const dir = dirname(filePath);
   const base = basename(filePath, ".md");
-  const associated = readdirSync(dir).filter(f => f.startsWith(base + "_")).sort();
+  const associated = readdirSync(dir).filter(f => f !== base + ".md" && !f.startsWith(".")).sort();
   if (associated.length > 0) {
     let injected = "\n\n---\n## Associated files\n";
     let totalChars = 0;
@@ -251,6 +251,8 @@ export class CronQueue {
 
     if (entry.executor === "script") {
       this.runScript(entry, job.onComplete);
+    } else if (entry.executor === "orc") {
+      this.runOrc(entry);
     } else {
       this.runAgent(entry, job.onComplete, job.manual);
     }
@@ -306,6 +308,19 @@ export class CronQueue {
     return false;
   }
 
+  private runOrc(entry: CronEntry): void {
+    logInfo(TAG, `▶ Orc: "${entry.message.slice(0, 60)}"`);
+    import("../spin.js").then(({ spin }) => {
+      spin.dispatch({ type: "O", goal: entry.message, source: "task", priority: entry.priority ?? "MEDIUM", deliveryMode: entry.deliveryMode });
+      this.clearCurrent();
+      this.processNext();
+    }).catch((err) => {
+      logWarn(TAG, `Orc dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.clearCurrent();
+      this.processNext();
+    });
+  }
+
   private runScript(entry: CronEntry, onComplete?: TaskCompleteCallback): void {
     logInfo(TAG, `▶ Script: "${entry.message.slice(0, 60)}"`);
     try {
@@ -318,7 +333,7 @@ export class CronQueue {
       child.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
 
       child.on("exit", (code) => {
-        const status = code === 0 ? "✅" : `❌ (exit ${code})`;
+        const status = code === 0 ? "✓" : `❌ (exit ${code})`;
         logInfo(TAG, `■ Script ${status}: "${entry.message.slice(0, 60)}"`);
         recordRunToFile(entry.id, code ?? undefined);
         if (code === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
@@ -381,32 +396,80 @@ export class CronQueue {
       }
     }
 
+    // #1141: Inject task-scoped persistent context if it exists
+    const contextFile = join(abtarsHome(), "workspace", entry.id, "CONTEXT.md");
+    if (existsSync(contextFile)) {
+      const raw = readFileSync(contextFile, "utf-8").trim();
+      if (raw) {
+        const ctx = raw.length > 30000 ? (logWarn(TAG, `Task context truncated (${raw.length} > 30000)`), raw.slice(0, 30000)) : raw;
+        prompt = `[TASK CONTEXT — your notes from previous runs]\n${ctx}\n\n[TASK]\n${prompt}`;
+        logInfo(TAG, `Injected task context (${ctx.length} chars)`);
+      }
+    }
+
     logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
+
+    // #936 Phase 2: Route to user session via injectGreeting if targetUserId is set
+    if (entry.targetUserId) {
+      this.setCurrent(entry, 0, "agent");
+      try {
+        const { spin } = await import("../spin.js");
+        const response = await spin.injectGreeting(entry.targetUserId, prompt);
+        if (response) {
+          recordRunToFile(entry.id, 0);
+          recordRun(entry, 0);
+          logInfo(TAG, `✓ Greeting delivered to ${entry.targetUserId}`);
+        } else {
+          recordRunToFile(entry.id, 1);
+          logWarn(TAG, `Greeting failed for ${entry.targetUserId}`);
+        }
+      } catch (err) {
+        recordRunToFile(entry.id, 1);
+        logWarn(TAG, `Greeting error: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        this.clearCurrent();
+        this.processNext();
+      }
+      return;
+    }
 
     // Set current BEFORE any await — prevents race where enqueue() sees _current=null
     // and calls processNext() again while we're awaiting the dynamic import.
     this.setCurrent(entry, 0, "agent");
 
-    // Kanban board: track this task
-    const boardId = kanbanEnqueue(entry.message, "task", entry.id);
-    kanbanRunning(boardId);
+    // #1141: Skill-trigger task — delegate to launchSkill()
+    if ((entry as any).skill) {
+      const { launchSkill } = await import("../skill-session.js");
+      const userId = entry.targetUserId ?? String(entry.chatId);
+      const err = await launchSkill((entry as any).skill, userId, String(entry.chatId), prompt);
+      if (err) logWarn(TAG, `Skill launch failed for "${entry.id}": ${err}`);
+      else logInfo(TAG, `■ Skill "${(entry as any).skill}" launched for "${entry.id}"`);
+      recordRunToFile(entry.id, err ? 1 : 0);
+      if (!err) recordRun(entry, 0);
+      this.clearCurrent();
+      this.processNext();
+      return;
+    }
 
+    // Kanban board: track this task (Spin handles card lifecycle)
     // Set $WORKSPACE for agent tool execution — all output goes here
     const workspace = join(abtarsHome(), "workspace", entry.id);
     mkdirSync(workspace, { recursive: true });
     process.env["WORKSPACE"] = workspace;
 
-    const { SubagentRuntime } = await import("../subagent-runtime.js");
-    const runtime = new SubagentRuntime();
+    const { spin } = await import("../spin.js");
 
-    // 30-min hard timeout (starts at execution, not enqueue)
+    // 30-min hard timeout
     this.timeout = setTimeout(() => {
-      logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min) — shutting down runtime`);
-      runtime.shutdown();
+      logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min)`);
     }, AGENT_TIMEOUT_MS);
 
-    runtime.complete("task", prompt)
-      .then((response) => {
+    // #935: map agent field to session type (canonical task routing — distinct from TYPE_AGENT in spin-types which maps type→model-role)
+    const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
+    const sessionType = (AGENT_SESSION[entry.agent ?? ""] ?? "T") as import("../spin-types.js").SessionType;
+
+    spin.dispatchAwait({ type: sessionType, title: entry.title ?? entry.message.slice(0, 80), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM", chatId: String(entry.chatId), deliveryMode: entry.deliveryMode })
+      .then(({ cardId: boardId, result: response }) => {
         // Guard: if model returned raw JSON tool output ({"stdout":...,"exit_code":...}),
         // extract just the meaningful content. This happens when the model echoes its last
         // tool result instead of synthesizing a human-readable response.
@@ -429,18 +492,23 @@ export class CronQueue {
           }
           exitCode = dod.passed ? 0 : 1;
           dodResult = `\nDoD: ${dod.passed ? "PASSED" : "FAILED"}\n${dod.details}`;
-          logInfo(TAG, `■ Agent DoD ${dod.passed ? "✅" : "❌"}: "${entry.message.slice(0, 60)}"\n${dod.details}`);
+          logInfo(TAG, `■ Agent DoD ${dod.passed ? "✓" : "❌"}: "${entry.message.slice(0, 60)}"\n${dod.details}`);
         } else {
           logInfo(TAG, `■ Agent completed: "${entry.message.slice(0, 60)}"`);
         }
 
-        // Write result file
-        const resultPath = writeResultFile(entry.id, cleaned);
+        // Write result file — skip if DoD files exist (they ARE the result)
+        // #1118: inline tasks skip file writing — deliver text directly via kanban
+        const producedFiles = dodPaths.filter(p => existsSync(p));
+        const isReport = entry.deliveryMethod === "report";
+        const resultPath = producedFiles.length > 0 ? producedFiles[0] : (isReport ? writeResultFile(entry.id, cleaned) : null);
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         // Kanban board: mark complete or failed
         if (exitCode === 0) {
-          kanbanComplete(boardId, resultPath, summary);
+          // #1118: inline tasks store full response as summary (delivered as chat message)
+          const kanbanSummary = isReport ? summary : cleaned;
+          kanbanComplete(boardId, resultPath, kanbanSummary);
         } else {
           kanbanFail(boardId, `${summary}${dodResult}`);
         }
@@ -448,7 +516,7 @@ export class CronQueue {
         recordRunToFile(entry.id, exitCode);
         if (exitCode === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
         const paused = this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
-        const icon = exitCode === 0 ? "✅" : "❌";
+        const icon = exitCode === 0 ? "✓" : "❌";
         if (exitCode !== 0) {
           scheduleRetry(entry, !!entry._retrying);
           if (!paused) this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);
@@ -458,7 +526,8 @@ export class CronQueue {
           onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`, producedFiles.length > 0 ? producedFiles : undefined);
         }
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
+        const boardId = 0; // card already tracked by Spin
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
         kanbanFail(boardId, err instanceof Error ? err.message : String(err));
         recordRunToFile(entry.id, 1);
@@ -471,7 +540,6 @@ export class CronQueue {
         }
       })
       .finally(() => {
-        runtime.shutdown();
         this.clearCurrent();
         this.processNext();
       });

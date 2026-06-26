@@ -1,0 +1,10 @@
+node_modules
+.git
+dist
+src
+docs
+*.test.ts
+*.test.js
+.github
+.kiro
+coverage

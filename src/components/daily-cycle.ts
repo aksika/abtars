@@ -1,4 +1,5 @@
 import { getEnv } from "./env-schema.js";
+import { spin } from "./spin.js";
 /**
  * Daily cycle check — shared by standby handler and age-check heartbeat task.
  *
@@ -12,7 +13,6 @@ import { safeReadJson } from "./safe-json.js";
 import { abmind } from "../utils/abmind-lazy.js";
 import { readBridgeLockField } from "./transport/bridge-lock-transport.js";
 
-import type { SessionRegistry } from "./session-registry.js";
 
 export interface DailyCycleDeps {
   sleepHour: number;
@@ -20,7 +20,6 @@ export interface DailyCycleDeps {
   bridgeLockPath: string;
   sleepAuditDir: string;
   memory: IMemorySystem | null;
-  sessions: SessionRegistry;
   isSleepActive: () => boolean;
 }
 
@@ -37,7 +36,7 @@ export function resetBedtimeCounter(): void {
 /** Returns true if conditions are met for the daily restart + sleep cycle. */
 export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   // User-protection guards — NEVER bypass, even when forced.
-  if ([...deps.sessions.keys()].some(k => deps.sessions.get(k)?.busy) || deps.isSleepActive()) return false;
+  if (spin.listAllSessions().some(s => s.busy) || deps.isSleepActive()) return false;
 
   // Force-sleep request in bridge.lock — short-circuit time/audit/startedAt guards.
   // Peek-only here; spawnSleep() clears the field via readAndClearForceSleep().

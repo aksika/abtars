@@ -12,7 +12,7 @@
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { abtarsHome } from "../../paths.js";
+import { abtarsHome, abtarsRoot } from "../../paths.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 
 const TAG = "browse";
@@ -75,7 +75,7 @@ export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId
 // --- Prompt loading ---
 
 export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string): string {
-  const path = join(abtarsHome(), "prompts", "browsing_prompt.md");
+  const path = join(abtarsRoot(), "prompts", "browsing_prompt.md");
 
   if (!existsSync(path)) {
     throw new Error(`browsing_prompt.md not found at ${path}`);

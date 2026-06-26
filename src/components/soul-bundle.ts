@@ -6,14 +6,14 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { logInfo, logDebug, logWarn } from "./logger.js";
-import { abtarsHome } from "../paths.js";
+import { logInfo, logDebug, logWarn, logError } from "./logger.js";
+import { abtarsHome, abtarsRoot } from "../paths.js";
 import { loadUsers, buildUsersBlock } from "./user-registry.js";
 import type { MemoryManager } from "abmind";
-import type { SessionType } from "./session-manager.js";
+import type { SessionType } from "./spin-types.js";
 
 const TAG = "soul-bundle";
-const HOST_CORE_DIR = join(abtarsHome(), "core");
+const HOST_CORE_DIR = abtarsRoot();
 
 function readOr(path: string): string {
   try { return existsSync(path) ? readFileSync(path, "utf-8").trim() : ""; } catch { return ""; }
@@ -25,8 +25,12 @@ const TYPE_IDENTITY: Record<SessionType, string | null> = {
   B: "I am a browse agent. I fetch web content and return results. No memory access.",
   C: "I am a coding agent. I write and fix code. Be concise.",
   T: "I am a task agent. I execute scheduled tasks. Write all output to $WORKSPACE.",
-  S: "I am the self-healing agent. I diagnose and fix system failures. If unfixable, state: Requires human intervention.",
+  S: null, // reserved — not actively used
   P: "I am responding to a peer agent request. Be precise and technical.",
+  O: null, // Orchestrator — dedicated prompt loaded separately
+  W: null, // Worker — dedicated prompt file (core/prompts/worker.md)
+  D: null, // Dreamy — sleep prompt loaded separately
+  H: "I am the Healer. I diagnose and fix system failures. If unfixable, state: Requires human intervention.",
 };
 
 function buildModelInstructions(): string {
@@ -53,23 +57,30 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
   const parts: string[] = [];
 
   if (type === "A") {
-    // Full Main bundle
+    // Full Main bundle — requires memory state to be known (#998)
     let bundle: { soul: string; profile: string; notes: string; memoryTools: string; coreFacts: string } | null = null;
     try { bundle = memory?.getSessionBundle() ?? null; } catch (err) { logAndSwallow(TAG, "op", err); }
 
-    const soul = bundle?.soul || readOr(join(HOST_CORE_DIR, "SOUL.md"));
-    const memoryTools = bundle?.profile || readOr(join(HOST_CORE_DIR, "user_profile.md"));
-    const userProfile = bundle?.notes || readOr(join(HOST_CORE_DIR, "agent_notes.md"));
-    const agentNotes = bundle?.memoryTools || readOr(join(HOST_CORE_DIR, "TOOLS.md"));
-    const coreFacts = bundle?.coreFacts || readOr(join(HOST_CORE_DIR, "core_facts.md"));
+    if (memory && memory.available !== false && !bundle?.soul) {
+      logWarn(TAG, "SOUL bundle empty — disabling memory until next boot");
+      memory.available = false;
+    }
 
-    if (soul) parts.push(soul);
-    if (memoryTools) parts.push(memoryTools);
-    if (userProfile) parts.push(userProfile);
-    if (agentNotes) parts.push(agentNotes);
-    if (coreFacts) parts.push(coreFacts);
+    if (!memory || memory.available === false) {
+      // No memory provider — use default-minimal.md fallback bundle (#1164)
+      const minimal = readOr(join(abtarsHome(), "prompts", "default-minimal.md"));
+      if (minimal) parts.push(minimal);
+      else parts.push("[SYSTEM] Memory unavailable. Operate without persistent memory.");
+    } else {
+      // Normal: full bundle
+      if (bundle!.soul) parts.push(bundle!.soul);
+      if (bundle!.profile) parts.push(bundle!.profile);
+      if (bundle!.notes) parts.push(bundle!.notes);
+      if (bundle!.memoryTools) parts.push(bundle!.memoryTools);
+      if (bundle!.coreFacts) parts.push(bundle!.coreFacts);
+    }
 
-    const skillsCatalog = readOr(join(HOST_CORE_DIR, "skills_catalog.md"));
+    const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
     if (skillsCatalog) parts.push(skillsCatalog);
 
     const modelInstructions = buildModelInstructions();
@@ -88,15 +99,20 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
       const registry = loadUsers();
       if (registry.users.length > 0) parts.push(buildUsersBlock(registry));
     } catch (err) { logAndSwallow(TAG, "op", err); }
+  } else if (type === "W") {
+    // Worker: dedicated prompt file only
+    const workerPrompt = readOr(join(HOST_CORE_DIR, "prompts", "worker.md"));
+    if (workerPrompt) parts.push(workerPrompt);
+  } else if (type === "O") {
+    // Orc: dedicated prompt file only
+    const orcPrompt = readOr(join(HOST_CORE_DIR, "prompts", "orc.md"));
+    if (orcPrompt) parts.push(orcPrompt);
   } else {
-    // Lightweight bundle: identity + core facts + skills
+    // Lightweight bundle: identity + skills
     const identity = TYPE_IDENTITY[type];
     if (identity) parts.push(identity);
 
-    const coreFacts = readOr(join(HOST_CORE_DIR, "core_facts.md"));
-    if (coreFacts) parts.push(coreFacts);
-
-    const skillsCatalog = readOr(join(HOST_CORE_DIR, "skills_catalog.md"));
+    const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
     if (skillsCatalog) parts.push(skillsCatalog);
   }
 
@@ -109,5 +125,23 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
 
   logInfo(TAG, `Bundle [${type}]: ${parts.length} parts`);
   logDebug(TAG, `Parts: ${parts.map((p, i) => `${i}:${p.length}ch`).join(", ")}`);
-  return parts.join("\n\n---\n\n");
+  return resolveVariables(parts.join("\n\n---\n\n"));
+}
+
+/** #1009: Resolve template variables in prompts. */
+function resolveVariables(text: string): string {
+  return text.replaceAll("{instance_name}", getInstanceName());
+}
+
+/** #1009: Instance identity from peers.json self.name. */
+export function getInstanceName(): string {
+  try {
+    const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+    const name = loadPeerConfig().self.name;
+    if (!name || name === "default") {
+      logError(TAG, "Instance name not configured — set self.name in peers.json");
+      return "unknown";
+    }
+    return name;
+  } catch { return "unknown"; }
 }

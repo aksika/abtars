@@ -6,7 +6,7 @@
 import { getEnv } from "../components/env-schema.js";
 import { logInfo, logWarn } from "../components/logger.js";
 import type { BootCtx } from "./context.js";
-import type { HeartbeatTask } from "abmind";
+import type { HeartbeatTask } from "../types/index.js";
 
 export function createModelHealthTask(ctx: BootCtx): { task: HeartbeatTask; runNow: () => Promise<void> } {
   let done = false;
@@ -48,7 +48,7 @@ export function createModelHealthTask(ctx: BootCtx): { task: HeartbeatTask; runN
             method: "POST",
             headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
             body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
-            signal: AbortSignal.timeout(10_000),
+            signal: AbortSignal.timeout(30_000),
           });
           if (!res.ok) {
             warnings.push(`⚠️ ${model} — ${res.status} ${res.statusText} (affects ${agentNames.join(", ")})`);

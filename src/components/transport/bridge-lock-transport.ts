@@ -12,6 +12,20 @@ import { localISO } from "../../utils/local-time.js";
 
 export type SleepStatus = "awake" | "sleeping" | "hw_sleep";
 
+/** Add an ACP child PID to bridge.lock tracking. */
+export function trackAcpPid(pid: number): void {
+  const pids = readBridgeLockField<number[]>("acpPids") ?? [];
+  pids.push(pid);
+  updateBridgeLockField("acpPids", pids);
+}
+
+/** Read and clear stale ACP PIDs from bridge.lock. */
+export function readAndClearAcpPids(): number[] {
+  const pids = readBridgeLockField<number[]>("acpPids") ?? [];
+  if (pids.length) updateBridgeLockField("acpPids", []);
+  return pids;
+}
+
 /** Read lastPromptAt from bridge.lock. Returns 0 if missing/unreadable. */
 export function readLastPromptAt(): number {
   try {
@@ -96,14 +110,33 @@ export function readAndClearForceSleep(): string | null {
 }
 
 /** Initialize bridge.lock with full boot state. Single writer for initial creation. */
-export function initBridgeLock(opts: { pid: number; startedAt: number; version: string; argv: string[] }): void {
+export interface PrevBridgeState { pid: number | null; lastHeartbeat: number | null }
+
+export function initBridgeLock(opts: { pid: number; startedAt: number; version: string; argv: string[]; startReason?: string }): PrevBridgeState {
   const p = join(abtarsHome(), "bridge.lock");
+  let prev: PrevBridgeState = { pid: null, lastHeartbeat: null };
   try {
+    // Read existing state (may have watchdogPid from watchdog, or stale pid from previous bridge)
+    let existing: Record<string, unknown> = {};
+    try { existing = JSON.parse(readFileSync(p, "utf-8")); } catch { /* missing or corrupt — cold boot */ }
+    const prevPid = typeof existing.pid === "number" ? existing.pid : null;
+    prev = { pid: prevPid, lastHeartbeat: typeof existing.lastHeartbeat === "number" ? existing.lastHeartbeat : null };
+    // Classify boot type from previous heartbeat gap
+    let bootType = "cold";
+    if (prev.lastHeartbeat) {
+      const gapS = (Date.now() - prev.lastHeartbeat) / 1000;
+      if (gapS < 300) bootType = "darkwake";
+      else if (gapS <= 7200) bootType = "short-outage";
+      else bootType = "long-outage";
+    }
+    // Merge: preserve watchdogPid from watchdog or env var
+    const wdPid = Number(process.env.ABTARS_WATCHDOG_PID) || existing.watchdogPid || null;
     atomicWriteSync(p, JSON.stringify({
-      pid: opts.pid, startedAt: opts.startedAt, version: opts.version,
-      sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(),
+      pid: opts.pid, watchdogPid: wdPid, startedAt: opts.startedAt, version: opts.version,
+      sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(), startReason: opts.startReason ?? "unknown", bootType,
     }));
   } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
+  return prev;
 }
 
 /** Update lastHeartbeat timestamp in bridge.lock (called every tick). */

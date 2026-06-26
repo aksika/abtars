@@ -54,6 +54,10 @@ abtars-task add --at "2026-06-01T15:00" --message "Dentist appointment" --chat-i
 # Recurring task (agent executes)
 abtars-task add --schedule "0 17 * * 5" --message "Summarize my week" --chat-id <ID> --type task --executor agent
 
+# Recurring task with task file
+abtars-task add --id weekly-report --schedule "0 17 * * 5" --message "Run weekly report" \
+  --task-file "~/.abtars/tasks/weekly-report/TASK.md" --chat-id <ID> --type task --executor agent
+
 # Recurring task (script executes)
 abtars-task add --schedule "0 3 * * *" --message "abmind backup" --chat-id <ID> --type task --executor script
 
@@ -64,6 +68,31 @@ abtars-task pause <id>
 abtars-task resume <id>
 abtars-task history <id>
 ```
+
+## Task file structure
+
+Complex tasks live in their own directory under `~/.abtars/tasks/`:
+
+```
+~/.abtars/tasks/
+├── tasks.json                  # Registry (schedule, executor, taskFile)
+├── weekly-report/
+│   ├── TASK.md                 # Main prompt (what the agent does)
+│   ├── sources.json            # Data file (auto-injected as context)
+│   └── template.md             # Supporting file (auto-injected)
+├── daily-backup/
+│   └── TASK.md
+└── finance-report/
+    ├── TASK.md
+    ├── feeds.json
+    └── stock-watchlist.md
+```
+
+When a task with a `taskFile` fires, the agent receives:
+1. The TASK.md content as the prompt
+2. All sibling files automatically injected as context (up to 10KB total)
+
+Use `{today}` in TASK.md — it's replaced with today's date at runtime.
 
 ## Schedule format
 

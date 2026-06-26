@@ -1,4 +1,4 @@
-import type { Page } from "patchright";
+import type { Page } from "cloakbrowser";
 
 /**
  * Strips non-content HTML elements and returns clean plain text.

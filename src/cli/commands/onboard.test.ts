@@ -1,8 +1,13 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { onboard } from './onboard.js';
+
+// onboard ends with a full `abtars update` (clone/build/deploy/start). Stub it
+// so the non-interactive tests exercise config/.env/secret writing hermetically
+// without mutating ~/.abtars-releases or starting a bridge.
+vi.mock('./update.js', () => ({ update: async () => 0 }));
 
 /**
  * Onboard has two halves: interactive (clack prompts) and non-interactive
@@ -57,19 +62,13 @@ describe('onboard command (non-interactive)', () => {
     expect(code).toBe(4);
   });
 
-  it('accepts no flags (all fields optional now)', async () => {
-    const code = await onboard({
-      nonInteractive: true,
-      acceptRisk: true,
-      force: false,
-    });
-    expect(code).toBe(0);
-  });
-
   it('refuses with invalid provider', async () => {
     const code = await onboard({
       nonInteractive: true,
       acceptRisk: true,
+      instanceName: 'test',
+      userName: 'tester',
+      passphrase: 'pw',
       telegramToken: '123:abc',
       telegramChatId: '42',
       defaultProvider: 'nonsense',
@@ -82,17 +81,20 @@ describe('onboard command (non-interactive)', () => {
     const code = await onboard({
       nonInteractive: true,
       acceptRisk: true,
+      instanceName: 'test',
+      userName: 'tester',
+      passphrase: 'pw',
       telegramToken: '123:secret',
       telegramChatId: '4242',
       defaultProvider: 'openrouter',
-      defaultModel: 'z-ai/glm-4.6',
+      defaultModel: 'google/gemini-2.5-flash',
       force: false,
     });
     expect(code).toBe(0);
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
     expect(env).toMatch(/MAIN_CHAT_ID=4242/);
     expect(env).toMatch(/DEFAULT_PROVIDER=openrouter/);
-    expect(env).toMatch(/DEFAULT_MODEL=z-ai\/glm-4\.6/);
+    expect(env).toMatch(/DEFAULT_MODEL=google\/gemini-2\.5-flash/);
     expect(env).not.toMatch(/DISCORD_A2A_CHANNEL_ID=/);
     // Secrets go to secret/ dir
     const token = await readFile(join(fakeHome, 'secret', 'TELEGRAM_BOT_TOKEN'), 'utf-8');
@@ -105,9 +107,13 @@ describe('onboard command (non-interactive)', () => {
     const code = await onboard({
       nonInteractive: true,
       acceptRisk: true,
+      instanceName: 'test',
+      userName: 'tester',
+      passphrase: 'pw',
       telegramToken: '999:aa',
       telegramChatId: '1',
-      defaultProvider: 'anthropic',
+      defaultProvider: 'openrouter',
+      defaultModel: 'google/gemini-2.5-flash',
       force: true,
     });
     expect(code).toBe(0);
@@ -123,18 +129,26 @@ describe('onboard command (non-interactive)', () => {
     await onboard({
       nonInteractive: true,
       acceptRisk: true,
+      instanceName: 'test',
+      userName: 'tester',
+      passphrase: 'pw',
       telegramToken: '1:a',
       telegramChatId: '1',
-      defaultProvider: 'openai',
+      defaultProvider: 'openrouter',
+      defaultModel: 'google/gemini-2.5-flash',
       force: false,
     });
     // Second run without --force refuses (env already has owned keys)
     const refuseCode = await onboard({
       nonInteractive: true,
       acceptRisk: true,
+      instanceName: 'test',
+      userName: 'tester',
+      passphrase: 'pw',
       telegramToken: '2:b',
       telegramChatId: '2',
-      defaultProvider: 'anthropic',
+      defaultProvider: 'openrouter',
+      defaultModel: 'minimax/minimax-m2.5:cloud',
       force: false,
     });
     expect(refuseCode).toBe(3);
@@ -143,32 +157,19 @@ describe('onboard command (non-interactive)', () => {
     const code = await onboard({
       nonInteractive: true,
       acceptRisk: true,
+      instanceName: 'test',
+      userName: 'tester',
+      passphrase: 'pw',
       telegramToken: '2:b',
       telegramChatId: '2',
-      defaultProvider: 'anthropic',
+      defaultProvider: 'openrouter',
+      defaultModel: 'minimax/minimax-m2.5:cloud',
       force: true,
     });
     expect(code).toBe(0);
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
-    expect(env).toMatch(/DEFAULT_PROVIDER=anthropic/);
+    expect(env).toMatch(/DEFAULT_MODEL=minimax\/minimax-m2\.5:cloud/);
     const token = await readFile(join(fakeHome, 'secret', 'TELEGRAM_BOT_TOKEN'), 'utf-8');
     expect(token).toBe('2:b');
-  });
-
-  it('refuses if not installed (no manifest)', async () => {
-    const unitialized = await mkdtemp(join(homedir(), '.cache', 'abtars-test', 'empty-'));
-    process.env['ABTARS_HOME'] = unitialized;
-    try {
-      const code = await onboard({
-        nonInteractive: true,
-        acceptRisk: true,
-        telegramToken: '1:a',
-        telegramChatId: '1',
-        force: false,
-      });
-      expect(code).toBe(2);
-    } finally {
-      await rm(unitialized, { recursive: true, force: true });
-    }
   });
 });

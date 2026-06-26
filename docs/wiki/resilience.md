@@ -62,17 +62,31 @@ A heartbeat task that detects recurring errors in the bridge log and either auto
 
 **Toggle:** `/healing` command enables/disables the self-healer. `/healing reset` clears circuit breakers.
 
-### Task-failure SHA
+### SHA: Self-Healing Agent
 
-When a scheduled task fails, a dedicated self-healing agent session diagnoses and attempts to fix the issue.
+When a scheduled task fails, a dedicated self-healing agent session diagnoses and attempts to fix the issue programmatically.
+
+**Enable/disable:**
+
+```bash
+# Enable (add to ~/.abtars/config/.env)
+SELFHEAL_ENABLED=true
+
+# Disable
+SELFHEAL_ENABLED=false    # or remove the line (default: off)
+```
+
+SHA also requires `~/.abtars/config/sha-policy.json` (seeded automatically during install). If the policy file is missing, SHA auto-disables at boot with a single log message — no repeated warnings. To re-enable: restore the policy file and restart the bridge.
+
+Or at runtime: `/healing` command toggles the self-healer on/off. `/healing reset` clears circuit breakers.
 
 **Flow:**
 
-1. Task fails → user sees `⚠️ &lt;task&gt; failed`
+1. Task fails → user sees `⚠️ <task> failed`
 2. SHA fires in an isolated `_S_` (System) session → user sees `🔧 Calling self-healing agent`
 3. SHA diagnoses root cause and attempts programmatic fix
 4. If fixed → task succeeds on next tick
-5. If unfixable → SHA reports "Requires human intervention: &lt;reason&gt;"
+5. If unfixable → SHA reports "Requires human intervention: <reason>"
 6. After 3 consecutive failures → task auto-pauses, user sees `⛔ Needs manual fix`
 
 **Three-state concurrency guard:**
@@ -82,6 +96,12 @@ When a scheduled task fails, a dedicated self-healing agent session diagnoses an
 | `idle` | Fire SHA with all pending failures | Normal path |
 | `running` | Drop entirely (no count, no notify) | SHA might be fixing it right now |
 | `cooldown` (60s) | Count + notify, skip SHA | Let fix propagate before retrying |
+
+**What SHA can and cannot do:**
+
+SHA is forbidden from modifying vital config files (`transport.json`, `.env`, `peers.json`, `users.json`) unless the bridge is in a crash loop. It can fix JSON corruption, pause tasks, and repair scripts. The full rules are in its system prompt at `src/boot/phase-pipeline-deps.ts`.
+
+**Auto-fix whitelist:** Pattern-based rules live in `src/components/self-healer/`. When a known error matches, a predefined repair action runs. Custom rules can be added there.
 
 **Isolation:** SHA runs in a System session (`_S_` type) — no access to user memory, no memory storage, minimal SOUL prompt. Cannot pollute the user's conversation context.
 
@@ -169,7 +189,7 @@ When everything is working (the common case):
 🩺 Health check...
 [doctor] Done. 0 fixes applied, 0 warnings.
 ♻️ Bridge starting...
-✅ All systems healthy
+✓ All systems healthy
 ```
 
 When doctor self-heals something:
@@ -178,7 +198,35 @@ When doctor self-heals something:
 [doctor] FIX: installed and loaded watchdog LaunchAgent
 [doctor] Done. 1 fixes applied, 0 warnings.
 ♻️ Bridge starting...
-✅ All systems healthy
+✓ All systems healthy
 ```
 
 No manual intervention needed in either case.
+
+## Stress Tests (verified 2026-06-17, KP + Molty)
+
+The watchdog singleton system (#1035) and instant-death detection (#1042) were stress-tested on both hosts:
+
+| # | Scenario | Expected | Result | Recovery |
+|---|----------|----------|--------|----------|
+| 1 | Kill watchdog | Bridge stays alive, new WD can start + adopt | ✓ | 0s (bridge unaffected) |
+| 2 | Start duplicate watchdog | "Watchdog already running", exits | ✓ | — |
+| 3 | Kill bridge | Watchdog detects + respawns | ✓ | ~25s |
+| 4 | Delete bridge.lock | Watchdog self-heals: recreates file + spawns | ✓ | ~55s |
+| 5 | Corrupt bridge.lock | Same as missing: self-heal + spawn | ✓ | ~60s |
+| 6 | Kill zombie watchdog (non-owner) | Exits without killing bridge | ✓ | 0s |
+| 7 | `abtars stop` | Both die cleanly, file preserved | ✓ | — |
+| 8 | Deploy corrupt bundle | Instant-death → circuit breaker → auto-rollback | ✓ | ~70s |
+| 9 | Start 2nd watchdog (systemd race) | PID guard blocks before flock, exits 0 | ✓ | — |
+
+### Protection stack
+
+```
+Bridge heartbeat    → detects own deadlock     → exits (L2 restarts)
+Watchdog poll (60s) → detects dead/stale bridge → kill + respawn
+Watchdog spawn wait → detects instant-death     → double-count → fast rollback
+Circuit breaker     → 3 failures in 180s        → auto-rollback to app.prev.1
+flock singleton     → prevents duplicate WD     → second instance exits
+Ownership trap      → zombie WD can't kill      → exits without damage
+launchd/systemd     → WD dies for any reason    → respawns WD → adopts bridge
+```

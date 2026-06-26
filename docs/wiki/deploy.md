@@ -8,7 +8,7 @@ How code gets from source to a running bridge.
 
 ```bash
 abtars update                # from npm (stable/alpha)
-abtars update --from-local   # build + deploy from local git checkout
+abtars update --local   # build + deploy from local git checkout
 abtars update --dry-run      # preview, no mutations
 abtars rollback              # swap app/ ↔ app.prev/, restart
 abtars restart               # restart without rebuild
@@ -128,7 +128,7 @@ Via Telegram:
 
 Or via SSH/tmux:
 ```bash
-tmux send-keys -t remote 'cd ~/abmind && git pull --ff-only origin dev && npm run build && cd ~/abtars && git pull --ff-only origin dev && abtars update --from-local' Enter
+tmux send-keys -t remote 'cd ~/abmind && git pull --ff-only origin dev && npm run build && cd ~/abtars && git pull --ff-only origin dev && abtars update --local' Enter
 ```
 
 ## Rollback

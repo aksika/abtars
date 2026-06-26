@@ -1,246 +1,324 @@
 # Installation
 
-## Requirements
+## Prerequisites
 
-- Node.js 22+
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather)) or Discord bot token
-- At least one model provider (ollama, OpenRouter, Kiro CLI, Gemini CLI, Codex, or Claude Code)
+### Node.js 22+ (required)
+
+abTARS requires Node.js 22 or later. Recommended: Node.js 24 (latest even release).
+
+**macOS (Homebrew):**
+
+```bash
+brew install node@24
+brew link node@24
+node --version   # should show v24.x.x
+```
+
+**Linux / WSL (NodeSource):**
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node --version   # should show v24.x.x
+```
+
+### pnpm (required)
+
+```bash
+npm install -g pnpm
+```
+
+### git (required)
+
+```bash
+git --version   # any recent version
+```
+
+### Telegram bot token (required)
+
+Create a bot via [@BotFather](https://t.me/BotFather) on Telegram. You'll need:
+- The bot token (e.g. `123456:ABC-DEF...`)
+- Your chat ID (send `/start` to [@userinfobot](https://t.me/userinfobot))
+
+### Model provider (at least one)
+
+| Provider | Type | Setup |
+|----------|------|-------|
+| **ollama** | Local, free | `curl -fsSL https://ollama.ai/install.sh \| sh` (Linux) or `brew install ollama` (macOS) |
+| **OpenRouter** | Cloud, aggregator | Sign up at [openrouter.ai](https://openrouter.ai), get an API key. Access to all major models. |
+| **OpenAI** | Cloud, direct | API key from [platform.openai.com](https://platform.openai.com) |
+| **Anthropic** | Cloud, direct | API key from [console.anthropic.com](https://console.anthropic.com) |
+| **Kiro CLI** | Local AI coding tool | Install [Kiro](https://kiro.dev) separately |
+| **Gemini CLI** | Local AI coding tool | Install [Gemini CLI](https://github.com/google-gemini/gemini-cli) separately |
 
 ### Model requirements
 
-abTARS can run with any LLM that supports the OpenAI chat completions API format, including local models via ollama.
+abTARS works with any LLM that supports the OpenAI chat completions API format, including local models via ollama.
 
 | | Minimum | Recommended |
 |---|---|---|
 | **Context window** | 32K tokens | 128K+ tokens |
 | **Model quality** | Any instruction-following model | State-of-the-art (GPT-4o, Claude, Gemini Pro, DeepSeek V3+) |
 
-**Context window:** abTARS works with 32K context models (including small local models), but the experience degrades quickly with tool use. The soul bundle, tool definitions, and session history consume ~20% of a 32K window at startup, leaving limited room for conversation. With 128K+ models, the agent can hold long conversations with heavy tool use without losing context.
+**Context window:** abTARS works with 32K models, but tool use eats context fast. 128K+ recommended for comfortable operation.
 
-**Model quality and security:** abTARS injects persona instructions, memory context, and tool schemas into the system prompt. Weaker models may leak internal instructions to users, follow injected instructions from user messages, or fail to respect classification boundaries. For deployments where prompt injection resistance matters, use state-of-the-art frontier models — they have significantly better instruction-following and are harder to manipulate.
+**Model quality and security:** abTARS injects persona, memory, and tool schemas into the system prompt. Weaker models may leak instructions or follow injected prompts from user messages. For production, use frontier models.
 
-## Agent install
+### Optional dependencies
 
-Give this page to your favourite AI agent (Claude, Gemini, Codex, Kiro) and ask it to install abTARS for you. It has all the information it needs right here. 😉
+| Dependency | What for | macOS | Linux/WSL |
+|-----------|----------|-------|-----------|
+| ollama | Local embeddings + models | `brew install ollama` | See [ollama.ai](https://ollama.ai) |
+| bubblewrap | Sandbox (Linux only) | N/A | `apt install bubblewrap` |
+| lightpanda | Fast web fetch | See [lightpanda.io](https://lightpanda.io) | See [lightpanda.io](https://lightpanda.io) |
+
+Or install all optional npm deps at once after the CLI is available:
+
+```bash
+abtars deps install all
+```
+
+## Quick install (4 steps)
+
+```bash
+# 1. Install CLI tools
+ABTARS_V=$(npm view abtars@alpha version)
+ABMIND_V=$(npm view abmind@alpha version)
+pnpm add -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"
+
+# Ensure abtars is on PATH (pnpm global bin location varies by platform):
+export PATH="$(pnpm bin -g):$HOME/.local/bin:$PATH"
+# Add the line above to ~/.bashrc or ~/.zshrc for persistence.
+
+# 2. Optional deps (recommended before first start)
+abtars deps install all
+
+# 3. Install + deploy + start bridge
+abtars install --non-interactive --accept-risk \
+  --instance-name "MyBot" \
+  --telegram-token "YOUR_BOT_TOKEN" \
+  --telegram-chat-id "YOUR_CHAT_ID" \
+  --user-name "yourname" \
+  --passphrase "your-encryption-passphrase" \
+  --default-provider openrouter \
+  --default-model "deepseek/deepseek-v4-flash" \
+  --api-key "sk-or-v1-..."
+
+# 4. Install memory system (picks up username + agent name from abtars config)
+abmind install --non-interactive \
+  --passphrase "your-passphrase"
+```
+
+Step 3 automatically clones source, builds, deploys, and starts the bridge (daemon mode). The bot is live after this completes. Step 4 discovers username and agent name from the abtars config created in step 3 — no need to pass them again.
+
+### What each step does
+
+| Step | What happens |
+|------|-------------|
+| `pnpm add -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"` | Installs CLI tools globally (explicit version avoids pnpm cache staleness) |
+| `abtars deps install all` | Installs optional npm packages (browser, PDF, YouTube, image) |
+| `abtars install` | Creates config, clones source, builds, deploys release, starts bridge |
+| `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption (discovers user from abtars) |
+
+### System dependencies (optional)
+
+```bash
+abtars deps list    # shows what's available + install hints
+```
+
+| Dependency | What for | Install |
+|-----------|----------|---------|
+| ollama | Local embeddings + local models | `curl -fsSL https://ollama.ai/install.sh \| sh` |
+| bwrap | Sandbox (Linux) | `apt install bubblewrap` |
+| lightpanda | Fast web fetch | See https://lightpanda.io |
+
+Install ollama before `abmind install` if you want local embeddings.
+
+## Interactive install
+
+Omit `--non-interactive` and the wizard will prompt for each value:
+
+```bash
+ABTARS_V=$(npm view abtars@alpha version)
+ABMIND_V=$(npm view abmind@alpha version)
+pnpm add -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"
+abtars deps install all
+abtars install
+abmind install
+```
+
+## Install modes
+
+| Mode | How it works | Who |
+|------|-------------|-----|
+| **daemon** (default) | launchd/systemd manages watchdog → auto-restart on crash | Production |
+| **simple** | No daemon, user runs `abtars start/stop` manually | Testing, development |
+
+Set during install. Daemon mode starts automatically after `abtars install`. Simple mode requires `abtars start`.
+
+**Simple mode note:** If you use optional deps (`abtars deps install`), add to your shell profile:
+```bash
+export NODE_PATH="$HOME/.abtars-releases/deps/node_modules:$NODE_PATH"
+```
+Daemon mode sets this automatically.
 
 ## Install channels
 
 | Channel | Command | Who |
 |---|---|---|
-| **Stable** | `npm install -g abtars abmind` | Normal users |
-| **Alpha** | `npm install -g abtars@alpha abmind@alpha` | Early adopters, testers |
-| **Dev** | `git clone` + `abtars update --from-local` | Contributors, developers |
+| **Stable** | `pnpm install -g abtars abmind` | Normal users |
+| **Alpha** | `pnpm add -g "abtars@$(npm view abtars@alpha version)" "abmind@$(npm view abmind@alpha version)"` | Early adopters |
+| **Dev** | `git clone` + `abtars update --local` | Contributors |
 
-Stable ≤ Alpha ≤ Dev.
-
-## Manual install (npm)
-
-### Stable
+## Commands reference
 
 ```bash
-npm install -g abtars abmind
-abmind install
-abtars install
-abtars update
-abtars onboard
-sudo $(which abtars) daemon install
+abtars start          # Start bridge (simple mode) or load daemon
+abtars stop           # Stop bridge + watchdog
+abtars restart        # Warm restart (in-process)
+abtars restart --cold # Kill + fresh start
+abtars update         # Pull latest source, rebuild, deploy
+abtars doctor         # Health check
+abtars status         # Bridge status
+abtars deps list      # Show optional deps
+abtars deps install X # Install optional dep
 ```
 
-### Alpha (recommended)
+## Updating
 
 ```bash
-npm install -g abtars@alpha abmind@alpha
-abmind install
-abtars install
-abtars update
-abtars onboard
-sudo $(which abtars) daemon install
+abtars update    # pulls latest source, rebuilds, deploys, restarts (daemon mode)
 ```
 
-### Git (development, build from source)
-
-```bash
-git clone git@github.com:aksika/abtars.git
-git clone git@github.com:aksika/abmind.git
-cd abmind && npm install && npm run build && cd ..
-cd abtars && npm install && abtars update --from-local
-abtars onboard
-sudo $(which abtars) daemon install
-```
-
-| Step | What happens |
-|------|-------------|
-| `npm install -g abtars abmind` | Installs CLI tools globally (stable channel) |
-| `abmind install` | Creates `~/.abmind/`, prompts for encryption passphrase, initializes memory DB |
-| `abtars install` | Creates `~/.abtars/` skeleton (config, scripts, skills) |
-| `abtars update` | Stages the release (copies bundle to `~/.abtars/releases/`) |
-| `abtars onboard` | Interactive setup: Telegram token, model, user ID |
-| `sudo ... daemon install` | Registers systemd service, starts the bridge |
-
-After `daemon install`, the bridge is running and responding to messages. No separate restart needed.
-
-## Install from source (git clone)
-
-```bash
-git clone https://github.com/aksika/abtars.git
-cd abtars
-npm install
-npm run bundle
-abtars install
-abtars update --from-local
-abtars onboard
-sudo $(which abtars) daemon install
-```
-
-To update after pulling new commits:
-
-```bash
-git pull
-abtars update --from-local
-```
-
-This rebuilds and hot-restarts the bridge in one command.
-
-## Memory (abmind)
-
-`abmind` is optional but recommended. Without it, the bridge responds but forgets between sessions. The `abtars onboard` wizard installs it automatically if available on PATH.
-
-What memory adds:
-- Persistent recall across sessions
-- Overnight sleep maintenance (fact extraction, consolidation)
-- Emotion tagging and memory promotion
-- Searchable memory via tools
-- Personalized SOUL (agent identity)
-
-## Daemon management
-
-```bash
-abtars daemon status      # show service state
-sudo systemctl stop abtars       # stop
-sudo systemctl start abtars      # start
-sudo systemctl restart abtars    # restart
-sudo $(which abtars) daemon uninstall   # remove the service
-```
-
-For development (no daemon):
-```bash
-abtars start    # direct start, foreground watchdog
-abtars stop     # stop
-```
+In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
 
 ## What gets created
 
 ```
-~/.abtars/
-├── config/          # .env, transport.json, models.json, users.json
-├── secret/          # API keys (encrypted at rest)
-├── current/         # symlink → active release
-├── releases/        # versioned bundles
-├── logs/            # bridge-YYYY-MM-DD.log
-├── scripts/         # watchdog.sh, doctor.sh
-├── skills/          # core/ + custom/ + self/
-├── workspace/       # agent working directory
-└── bridge.pid       # PID of running bridge
+~/.local/bin/
+├── abtars               # CLI wrapper (overwritten on every deploy)
+├── abtars-browser       # browser subprocess wrapper
+├── abtars-task          # task subprocess wrapper
+└── ...                  # other tool wrappers
 
-~/.abmind/           # (only after abmind install)
+~/.abtars/
+├── config/              # .env, transport.json, users.json, peers.json
+├── secret/              # API keys (encrypted at rest after first boot)
+├── skills/              # core/ + custom/
+├── logs/                # bridge-YYYY-MM-DD.log, watchdog.log
+└── app -> releases/current  # symlink to active release
+
+~/.abtars-releases/
+├── src/                 # source checkouts (abtars/, abmind/)
+├── deps/node_modules/   # optional deps (abtars deps install)
+├── <commit>/            # deployed releases
+├── current -> <commit>  # active release symlink
+└── history.json         # release history
+
+~/.abmind/
 └── memory/
-    ├── memory.db    # SQLite + FTS5 + embeddings
-    ├── core/        # SOUL.md, agent_notes.md, user_profile.md
-    ├── daily/       # daily summaries + retrospectives
-    └── sleep/       # sleep cycle state + logs
+    ├── memory.db        # SQLite + FTS5 + embeddings
+    ├── core/            # SOUL.md, agent_notes.md, user_profile.md
+    └── sleep/           # sleep cycle state + logs
 ```
 
 ## Providers
 
-| Provider | Transport | Setup |
-|----------|-----------|-------|
-| ollama | Direct API | `ollama serve` locally, free |
-| OpenRouter | Direct API | API key in `~/.abtars/secret/OPENROUTER_API_KEY` |
-| Kiro CLI | ACP | `kiro-cli` installed, AWS account |
-| Gemini CLI | ACP | `gemini` installed, Google account |
-| Codex | Direct API | `codex` installed, OpenAI account |
-| Claude Code | ACP | `claude` installed |
+| Provider | What you need |
+|----------|---------------|
+| ollama | Running locally (`ollama serve`). Free, no API key. |
+| OpenRouter | An API key from [openrouter.ai](https://openrouter.ai) |
+| OpenAI | An API key from [platform.openai.com](https://platform.openai.com) |
+| Anthropic | An API key from [console.anthropic.com](https://console.anthropic.com) |
+| Kiro CLI | `kiro-cli` installed and on PATH |
+| Gemini CLI | `gemini` installed and on PATH |
 
-Configure in `~/.abtars/config/transport.json`. The onboard wizard sets this up interactively.
+The install wizard asks for your provider and API key — it handles the rest.
+
+Configure in `~/.abtars/config/transport.json`.
+
+## Managing API keys
+
+abTARS stores all secrets in `~/.abtars/secret/` — one file per key, encrypted at rest (AES-256-GCM). You never edit config files for keys.
+
+### Adding a key after install
+
+```bash
+# Write the key (no trailing newline!)
+echo -n "sk-or-v1-abc123..." > ~/.abtars/secret/OPENROUTER_API_KEY
+
+# Restart to pick it up (encrypted automatically on boot)
+abtars stop --force && abtars start
+```
+
+The filename becomes the environment variable name. That's the only rule.
+
+### Provider keys
+
+| Provider | Secret filename | Where to get it |
+|----------|----------------|-----------------|
+| OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
+| OpenAI | `OPENAI_API_KEY` | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| Anthropic | `ANTHROPIC_API_KEY` | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) |
+
+### Service/skill keys (optional integrations)
+
+| Service | Secret filename | Settings (in `.env.skills`) |
+|---------|----------------|----------------------------|
+| Home Assistant | `HA_TOKEN` | `HA_URL=http://192.168.1.4:8123` |
+| Groq (voice STT) | `GROQ_API_KEY` | `STT_MODEL=whisper-large-v3` |
+| Google AI (images) | `GOOGLE_AI_API_KEY` | `GOOGLE_AI_MODEL=gemini-2.0-flash-preview-image-generation` |
+| Discord | `DISCORD_BOT_TOKEN` | `DISCORD_APP_ID=your-app-id` |
+
+Example — adding Home Assistant:
+
+```bash
+# 1. Drop the long-lived access token
+echo -n "eyJ0eXAi..." > ~/.abtars/secret/HA_TOKEN
+
+# 2. Add non-secret settings
+echo "HA_URL=http://192.168.1.4:8123" >> ~/.abtars/config/.env.skills
+
+# 3. Restart
+abtars stop --force && abtars start
+```
+
+Your agent can now control Home Assistant. See [Adding a Service](./add-service.md) for the full guide (including writing skills).
+
+### Removing a key
+
+```bash
+rm ~/.abtars/secret/OPENAI_API_KEY
+abtars stop --force && abtars start
+```
+
+### How it stays safe
+
+- Files are AES-256-GCM encrypted at rest after the first boot
+- Keys only exist as plaintext in memory while the bridge runs
+- All secret files are `chmod 600` (owner-read only)
+- `abtars doctor` checks vault integrity on every run
+- Logs never contain secret values
+
+See [Secrets Vault](./secrets.md) for the full technical details.
 
 ## Post-install verification
 
-See [Health Check](./healthcheck.md) for detailed commands.
-
 ```bash
-abtars status           # should show bridge: ● running
-abtars doctor           # should show all green
+abtars doctor    # all green = healthy
+abtars status    # shows PID, uptime, model
 ```
 
 Send a message to your bot on Telegram — it should respond.
 
-## Migrating / Restoring
-
-To restore from a backup (e.g. new machine or after a wipe):
+## Backup & Restore
 
 ```bash
-abtars restore ~/path/to/abtars-backup.zip
-abmind restore --input ~/path/to/abmind-backup.abm --passphrase "your-passphrase" --username "your-name"
-abtars restart --cold
-```
-
-See [Backup & Restore](./backup.md) for details.
-
-## Updating
-
-### npm (stable or alpha)
-
-```bash
-npm update -g abtars abmind
-abtars update
-```
-
-### Git (via Telegram)
-
-From Telegram chat with your bot:
-
-```
-/update pull    — pulls latest code
-/update deploy  — builds, stages, restarts bridge
-```
-
-### Git (manual CLI)
-
-```bash
-cd ~/path/to/abtars
-bash scripts/deploy.sh
-```
-
-## Platform-specific notes
-
-### Linux (systemd)
-
-Daemon mode installs `/etc/systemd/system/abtars.service`:
-```bash
-sudo systemctl status abtars
-sudo systemctl restart abtars
-```
-
-### macOS (launchd)
-
-Daemon mode installs `/Library/LaunchDaemons/com.abtars.daemon.plist`:
-```bash
-sudo $(which abtars) daemon stop
-sudo $(which abtars) daemon start
-```
-
-### WSL
-
-Ensure systemd is enabled in `/etc/wsl.conf`:
-```ini
-[boot]
-systemd=true
+abtars backup                    # creates ~/.backup-abtars/abtars-<date>.zip
+abtars restore ~/path/to.zip    # restores config + data
+abmind restore --input ~/path/to.abm --passphrase "X" --username "Y"
 ```
 
 ## Troubleshooting
 
 See [Health Check](./healthcheck.md) and [Troubleshooting](./troubleshooting.md).
-
-<!-- test 1780584552 -->
-
-<!-- force-1780586373 -->

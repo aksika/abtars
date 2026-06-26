@@ -52,7 +52,7 @@ export class TelegramAdapter implements PlatformAdapter {
   private readonly securityGate: SecurityGate;
   private readonly formatter = new ResponseFormatter();
   private readonly config: TelegramAdapterConfig;
-  private readonly deps: TelegramAdapterDeps;
+  private deps: TelegramAdapterDeps;
   private poller: TelegramPoller | null = null;
   private botUsername = "";
   _pendingSlot: string | undefined;
@@ -64,6 +64,9 @@ export class TelegramAdapter implements PlatformAdapter {
     this.config = config;
     this.deps = deps;
   }
+
+  /** Late-bind: replace pipeline deps after construction (used by graph boot). */
+  setMessageHandler(deps: TelegramAdapterDeps): void { this.deps = deps; }
 
   /** Send a system notification to a chat (fire-and-forget). */
   sendNotification(chatId: string, text: string): void {
@@ -79,7 +82,7 @@ export class TelegramAdapter implements PlatformAdapter {
     await p.idleSave.save(sessionKey, chatId);
     await resetAndPrepare({
       transport: this.deps.transport, sessionKey, reason,
-      sessions: p.sessions, conversationBuffer: this.deps.conversationBuffer, bufKey,
+      conversationBuffer: this.deps.conversationBuffer, bufKey,
     });
     if (p.memoryConfig.memoryEnabled) {
       const reg = loadUsers();
@@ -226,7 +229,7 @@ export class TelegramAdapter implements PlatformAdapter {
       return;
     }
 
-    const message = update.message;
+    const message = update.message ?? (update.edited_message?.text?.startsWith("/") ? update.edited_message : undefined);
     if (!message?.from) return;
 
     const hasText = Boolean(message.text);
@@ -402,12 +405,14 @@ export class TelegramAdapter implements PlatformAdapter {
 
     // #512: commands bypass the sequential await — execute immediately even if agent is mid-stream
     if (text.startsWith("/") && !text.startsWith("//")) {
+      if (!this.deps.pipeline?.sessionManager) return; // pipeline not wired yet
       handleInboundMessage(inbound, this, this.deps.pipeline).catch((err) => {
         logError(TAG, `Command dispatch error: ${err instanceof Error ? err.message : String(err)}`);
       });
       return;
     }
 
+    if (!this.deps.pipeline?.sessionManager) return; // pipeline not wired yet
     await handleInboundMessage(inbound, this, this.deps.pipeline);
   }
 
@@ -462,9 +467,9 @@ export class TelegramAdapter implements PlatformAdapter {
     } else {
       const reactionUser = loadUsers().byPlatformId.get("telegram:" + user.id)?.userId ?? "unknown";
       const activeId = this.deps.sessionManager.getActiveSessionId(reactionUser, "telegram");
-      const { sessions } = this.deps.pipeline;
-      const entry = sessions.getOrCreate(activeId);
-      if (entry.busy) {
+      const { spin } = await import("../../components/spin.js");
+      const entry = spin.getSessionById(activeId);
+      if (entry?.busy) {
         entry.queue.push({ msg: { userId: reactionUser, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this });
         logDebug(TAG, `Queued reaction signal for busy ${activeId} (${entry.queue.length} pending)`);
       } else {

@@ -1,27 +1,44 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { busyGuardMiddleware } from "./busy-guard.js";
-import { SessionRegistry } from "../session-registry.js";
+import type { ManagedSession } from "../spin-types.js";
 
-function makeCtx(overrides: Record<string, unknown> = {}) {
-  const sessions = new SessionRegistry();
-  const sessionKey = (overrides.sessionKey as string) ?? "master:tg";
-  const activeId = "1_A_01"; // transport session ID
+function makeSession(overrides: Partial<ManagedSession> = {}): ManagedSession {
   return {
-    msg: { sessionKey, channelId: "100", threadId: undefined, platform: "tg", ...overrides },
+    id: "1_A_01", userId: "master", platform: "tg", chatId: 100,
+    delivery: "simple", active: true, status: "ready",
+    idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+    log: [], shortIndex: 1,
+    busy: false, queue: [], fullMode: false, pendingStart: false, seen: false,
+    compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    ...overrides,
+  };
+}
+
+function makeCtx(sessionOverrides: Partial<ManagedSession> = {}, overrides: Record<string, unknown> = {}) {
+  return {
+    msg: { channelId: "100", threadId: undefined, platform: "tg", ...overrides },
     adapter: { sendMessage: vi.fn().mockResolvedValue(1) },
     deps: {
-      sessions,
       transport: { sendInterrupt: vi.fn() },
-      sessionManager: { getActiveSessionId: () => activeId },
+      sessionManager: { getActiveSessionId: () => "1_A_01" },
     },
     text: (overrides.text as string) ?? "hello",
     handled: false,
+    _session: makeSession(sessionOverrides),
   } as any;
 }
 
+async function mockSpin(session: ManagedSession) {
+  const spinMod = await import("../spin.js");
+  vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
+}
+
+afterEach(() => { vi.restoreAllMocks(); });
+
 describe("busyGuardMiddleware", () => {
   it("passes through when not busy", async () => {
-    const ctx = makeCtx();
+    const ctx = makeCtx({ busy: false });
+    await mockSpin(ctx._session);
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
     expect(next).toHaveBeenCalled();
@@ -29,30 +46,28 @@ describe("busyGuardMiddleware", () => {
   });
 
   it("queues message when busy", async () => {
-    const ctx = makeCtx();
-    ctx.deps.sessions.getOrCreate("1_A_01").busy = true;
+    const ctx = makeCtx({ busy: true });
+    await mockSpin(ctx._session);
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
     expect(ctx.handled).toBe(true);
     expect(next).not.toHaveBeenCalled();
     expect(ctx.adapter.sendMessage).not.toHaveBeenCalled();
-    expect(ctx.deps.sessions.get("1_A_01")?.queue).toHaveLength(1);
+    expect(ctx._session.queue).toHaveLength(1);
   });
 
   it("shows coffee message when compacting", async () => {
-    const ctx = makeCtx();
-    const entry = ctx.deps.sessions.getOrCreate("1_A_01");
-    entry.busy = true;
-    entry.compacting = true;
+    const ctx = makeCtx({ busy: true, compacting: true });
+    await mockSpin(ctx._session);
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
     expect(ctx.adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("coffee"), expect.any(Object));
   });
 
   it("bare wait interrupts and stops (legacy compat)", async () => {
-    const ctx = makeCtx({ text: "wait" });
+    const ctx = makeCtx({ busy: true }, { text: "wait" });
     ctx.text = "wait";
-    ctx.deps.sessions.getOrCreate("1_A_01").busy = true;
+    await mockSpin(ctx._session);
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
     expect(ctx.deps.transport.sendInterrupt).toHaveBeenCalled();
@@ -61,14 +76,13 @@ describe("busyGuardMiddleware", () => {
   });
 
   it("skips generic notification when ctx.deferReply is set", async () => {
-    const ctx = makeCtx();
-    ctx.deps.sessions.getOrCreate("1_A_01").busy = true;
+    const ctx = makeCtx({ busy: true });
+    await mockSpin(ctx._session);
     ctx.deferReply = true;
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
     expect(ctx.handled).toBe(true);
     expect(ctx.adapter.sendMessage).not.toHaveBeenCalled();
-    // Still queued
-    expect(ctx.deps.sessions.get("1_A_01")?.queue).toHaveLength(1);
+    expect(ctx._session.queue).toHaveLength(1);
   });
 });
