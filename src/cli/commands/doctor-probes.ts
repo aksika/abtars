@@ -168,7 +168,7 @@ async function probeSpin(): Promise<ProbeResult> {
 }
 
 async function probeKanban(): Promise<ProbeResult> {
-  const dbPath = join(home, "kanban.db");
+  const dbPath = join(home, "kanban", "kanban.db");
   if (!existsSync(dbPath)) return { name: "kanban", status: "skipped", detail: "kanban.db not found" };
   try {
     const Db = require("better-sqlite3");
@@ -198,8 +198,8 @@ async function probeSha(): Promise<ProbeResult> {
   if (!existsSync(catalog)) return { name: "sha", status: "skipped", detail: "no catalog" };
   const content = readFileSync(catalog, "utf-8");
   if (/self.heal|healer|auto.fix/i.test(content)) return { name: "sha", status: "ok", detail: "rules loaded" };
-  // Check healer-rules.json
-  if (existsSync(join(configDir, "healer-rules.json"))) return { name: "sha", status: "ok", detail: "rules loaded" };
+  // Check sha-policy.json
+  if (existsSync(join(configDir, "sha-policy.json"))) return { name: "sha", status: "ok", detail: "rules loaded" };
   return { name: "sha", status: "skipped", detail: "no healer rules configured" };
 }
 
@@ -252,16 +252,12 @@ async function probeA2a(): Promise<ProbeResult> {
   const port = peers.self.udpPort;
   try {
     const dgram = await import("node:dgram");
-    const result = await new Promise<boolean>((resolve) => {
+    const inUse = await new Promise<boolean>((resolve) => {
       const sock = dgram.createSocket("udp4");
-      const timer = setTimeout(() => { sock.close(); resolve(false); }, 1000);
-      sock.on("message", () => { clearTimeout(timer); sock.close(); resolve(true); });
-      sock.on("error", () => { clearTimeout(timer); sock.close(); resolve(false); });
-      // Send a ping to self — gossip layer will echo/process
-      const ping = Buffer.from(JSON.stringify({ type: "ping", from: "__doctor__" }));
-      sock.send(ping, port, "127.0.0.1");
+      sock.on("error", (err: NodeJS.ErrnoException) => { sock.close(); resolve(err.code === "EADDRINUSE"); });
+      sock.bind(port, "127.0.0.1", () => { sock.close(); resolve(false); });
     });
-    return { name: "a2a", status: result ? "ok" : "failed", detail: result ? `UDP :${port} alive` : `UDP :${port} no response` };
+    return { name: "a2a", status: inUse ? "ok" : "failed", detail: inUse ? `UDP :${port} alive` : `UDP :${port} not bound` };
   } catch {
     return { name: "a2a", status: "failed", detail: "UDP probe error" };
   }
