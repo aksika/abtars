@@ -415,7 +415,7 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       installMode: 'simple',
       userName: kv.get('USER_DISPLAY_NAME') ?? '',
       instanceName: '',
-      passphrase: opts.passphrase ?? '',
+      passphrase: '',
       telegramToken: kv.get('TELEGRAM_BOT_TOKEN') ?? '',
       telegramChatId: kv.get('MAIN_CHAT_ID') ?? '',
       discordBotToken: kv.get('DISCORD_BOT_TOKEN') ?? '',
