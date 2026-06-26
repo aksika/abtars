@@ -174,7 +174,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
   let soulBundle: SystemStatus["soulBundle"] = null;
   try {
     const { getEnv } = await import("./env-schema.js");
-    const memoryProvider = (getEnv() as any).memoryProvider ?? "none";
+    const memoryProvider = (getEnv() as any).memory ?? "abmind";
     if (memoryProvider === "abmind" || memoryProvider === "auto") {
       const coreDir = join(homedir(), ".abmind", "memory", "core");
       const available = SOUL_CORE_FILES.filter(f => existsSync(join(coreDir, f))).length;
@@ -306,7 +306,7 @@ export function renderStatusText(status: SystemStatus): string {
       lastPromptStr = agoSec < 60 ? `${agoSec}s ago` : `${Math.round(agoSec / 60)}m ago`;
     }
   } catch { /* ignore */ }
-  lines.push(`  ✓ model: ${modelShort}${lastPromptStr ? `\n    last prompt: ${lastPromptStr}` : ""}`);
+  lines.push(`  ✓ model: ${modelShort}${lastPromptStr ? ` / ${lastPromptStr}` : ""}`);
 
   lines.push(`  ✓ spin: ${status.activeSessions} active session${status.activeSessions !== 1 ? "s" : ""}`);
 
@@ -316,15 +316,14 @@ export function renderStatusText(status: SystemStatus): string {
     lines.push("  ✗ kanban: not initialized");
   }
 
-  // SHA — try hotskills/self-healer, fall back to subsystem
-  let shaLine = "  ~ sha: no healer rules configured";
+  // SHA — check sha-policy.json existence (same as doctor probe)
   try {
-    const { getSkillCache } = require("../capabilities/hotskills/index.js") as typeof import("../capabilities/hotskills/index.js");
-    const skills = getSkillCache();
-    const sha = skills.find((s: any) => s.name === "sha" || s.name === "self-healer");
-    if (sha) shaLine = `  ${sha.skipped ? "~" : "✓"} sha: ${sha.skipped ? sha.skipReason ?? "disabled" : "active"}`;
-  } catch { /* use default */ }
-  lines.push(shaLine);
+    const { abtarsHome } = require("../paths.js") as typeof import("../paths.js");
+    const policyExists = existsSync(join(abtarsHome(), "config", "sha-policy.json"));
+    lines.push(`  ${policyExists ? "✓" : "~"} SHA: ${policyExists ? "rules configured" : "no policy configured"}`);
+  } catch {
+    lines.push("  ~ SHA: no policy configured");
+  }
 
   try {
     const { getSkillCache } = require("../capabilities/hotskills/index.js") as typeof import("../capabilities/hotskills/index.js");
@@ -352,7 +351,7 @@ export function renderStatusText(status: SystemStatus): string {
   lines.push(`  ${subIcon(apiSub)} agent-api${apiPort ? `: ${apiPort}` : ""}`);
 
   if (status.peersConfigured > 0) {
-    lines.push(`  ~ peers: ${status.peersConfigured} configured`);
+    lines.push(`  ✓ peers: ${status.peersConfigured} configured`);
   } else {
     lines.push("  ○ peers: none configured");
   }
