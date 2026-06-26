@@ -23,6 +23,19 @@
       "kiro"
     ]
   },
+  "claude-haiku-4.5": {
+    "contextWindow": 200000,
+    "maxOutput": 8192,
+    "rank": 3,
+    "cost": {
+      "input": 0.25,
+      "output": 1.25
+    },
+    "transports": [
+      "kiro"
+    ],
+    "description": "Claude Haiku model"
+  },
   "deepseek-3.2": {
     "contextWindow": 128000,
     "maxOutput": 8192,
