@@ -1,4 +1,4 @@
-# Installation
+# Install: Stable — 0.3.3
 
 ## Prerequisites
 
