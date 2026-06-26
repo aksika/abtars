@@ -478,50 +478,65 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     if (!isMaster) { await ctx.reply("Requires master role."); return true; }
 
     if (channel === "dev") {
-      const { spawnSync, spawn } = await import("node:child_process");
+      const { spawn } = await import("node:child_process");
       const releasesRoot = join(process.env["HOME"] ?? "", ".abtars-releases", "src");
       const abtarsDir = join(releasesRoot, "abtars");
       const abmindDir = join(releasesRoot, "abmind");
 
-      // Fetch + show incoming commits
-      let msg = "Pulling...\n";
-      let hasNew = false;
-      for (const [name, dir] of [["abtars", abtarsDir], ["abmind", abmindDir]] as const) {
-        if (!existsSync(join(dir, ".git"))) { msg += `${name}: no repo\n`; continue; }
-        spawnSync("git", ["-C", dir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000, killSignal: "SIGKILL" });
-        const log = spawnSync("git", ["-C", dir, "log", "--oneline", "HEAD..origin/dev"], { encoding: "utf-8", killSignal: "SIGKILL" });
-        const commits = (log.stdout || "").trim();
-        if (commits) {
-          hasNew = true;
-          const lines = commits.split("\n");
-          msg += `${name}: ${lines.length} commit${lines.length > 1 ? "s" : ""}\n${commits.slice(0, 300)}\n`;
-        } else {
-          msg += `${name}: already up to date\n`;
-        }
-      }
-      if (!hasNew) {
-        await ctx.reply(msg.trim() + "\n\nNothing new. Skipping deploy.");
+      // Async helper — never blocks the event loop
+      const execP = (cmd: string, args: string[], opts: { cwd?: string; timeout: number }): Promise<{ stdout: string; ok: boolean }> =>
+        new Promise((resolve) => {
+          const { spawn: sp } = require("node:child_process") as typeof import("node:child_process");
+          let stdout = "";
+          const proc = sp(cmd, args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });
+          proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+          const timer = setTimeout(() => { proc.kill("SIGKILL"); resolve({ stdout, ok: false }); }, opts.timeout);
+          proc.on("close", (code) => { clearTimeout(timer); resolve({ stdout, ok: code === 0 }); });
+          proc.on("error", () => { clearTimeout(timer); resolve({ stdout, ok: false }); });
+        });
+
+      const emergencyScript = join(abtarsDir, "scripts", "emergency-update.sh");
+
+      // Show incoming commits (async, non-blocking)
+      await ctx.reply("Checking for updates...");
+      const fetchResult = await execP("git", ["-C", abtarsDir, "fetch", "origin", "dev"], { timeout: 30_000 });
+      if (!fetchResult.ok) {
+        await ctx.reply("git fetch timed out — running emergency update.");
+        spawn("bash", [emergencyScript], { detached: true, stdio: "ignore" }).unref();
         return true;
       }
-      await ctx.reply(msg + "\nDeploying...");
+
+      const logResult = await execP("git", ["-C", abtarsDir, "log", "--oneline", "HEAD..origin/dev"], { timeout: 5_000 });
+      const commits = logResult.stdout.trim();
+      if (!commits) {
+        await ctx.reply("Already up to date.");
+        return true;
+      }
+      const lines = commits.split("\n");
+      await ctx.reply(`${lines.length} new commit(s):\n${commits.slice(0, 300)}\n\nDeploying...`);
       logInfo("update", "git update requested");
 
-      // Pull + build fresh source, then deploy from fresh bundle
-      spawnSync("git", ["-C", abtarsDir, "fetch", "origin", "dev"], { timeout: 30_000, killSignal: "SIGKILL" });
-      spawnSync("git", ["-C", abtarsDir, "checkout", "origin/dev"], { timeout: 10_000, killSignal: "SIGKILL" });
-      if (existsSync(join(abmindDir, ".git"))) {
-        spawnSync("git", ["-C", abmindDir, "fetch", "origin", "dev"], { timeout: 30_000, killSignal: "SIGKILL" });
-        spawnSync("git", ["-C", abmindDir, "checkout", "origin/dev"], { timeout: 10_000, killSignal: "SIGKILL" });
-      }
-      const build = spawnSync("node", ["esbuild.config.js"], { cwd: abtarsDir, encoding: "utf-8", timeout: 60_000 });
-      if (build.status !== 0) {
-        await ctx.reply(`x Build failed:\n${(build.stderr || build.stdout || "").slice(-300)}`);
+      // Checkout + build (async, with timeout fallback)
+      try {
+        const co = await execP("git", ["-C", abtarsDir, "checkout", "origin/dev"], { timeout: 10_000 });
+        if (!co.ok) throw new Error("checkout failed");
+
+        if (existsSync(join(abmindDir, ".git"))) {
+          await execP("git", ["-C", abmindDir, "fetch", "origin", "dev"], { timeout: 30_000 });
+          await execP("git", ["-C", abmindDir, "checkout", "origin/dev"], { timeout: 10_000 });
+        }
+
+        const build = await execP("node", ["esbuild.config.js"], { cwd: abtarsDir, timeout: 60_000 });
+        if (!build.ok) throw new Error("build failed");
+      } catch {
+        await ctx.reply("Build/checkout failed — running emergency update.");
+        spawn("bash", [emergencyScript], { detached: true, stdio: "ignore" }).unref();
         return true;
       }
-      // Run deploy from the FRESH bundle (not the old deployed binary)
+
+      // Deploy from fresh bundle (detached — survives bridge restart)
       const bundleCli = join(abtarsDir, "bundle", "abtars-cli.js");
-      const child = spawn("node", [bundleCli, "update", "--dev", abtarsDir], { detached: true, stdio: "ignore" });
-      child.unref();
+      spawn("node", [bundleCli, "update", "--dev", abtarsDir], { detached: true, stdio: "ignore" }).unref();
     } else if (channel === "alpha") {
       await ctx.reply("Updating from npm (alpha)...");
       logInfo("update", "npm alpha update requested");
