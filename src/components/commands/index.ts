@@ -25,6 +25,7 @@ registerExact("/reset", handleNewReset);
 registerExact("/compact", handleCompact);
 registerExact("/status", handleStatus);
 registerExact("/doctor", handleDoctor);
+registerExact("/health", handleDoctor);
 registerExact("/stop", handleStop);
 registerExact("/ctrlc", handleStop);
 registerExact("/wait", handleWait);

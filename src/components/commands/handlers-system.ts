@@ -11,7 +11,7 @@ import type { CommandContext } from "./types.js";
 const TAG = "cmd";
 
 export async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
-  const arg = _text.replace(/^\/doctor\s*/i, "").trim().toLowerCase();
+  const arg = _text.replace(/^\/(doctor|health)\s*/i, "").trim().toLowerCase();
 
   // /doctor fix → run fixes
   if (arg === "fix" || arg === "fix-full") {

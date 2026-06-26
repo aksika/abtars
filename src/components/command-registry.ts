@@ -17,6 +17,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "software", description: "Version, deploy info, rollback" },
   { name: "model", description: "Model configuration & switching" },
   { name: "doctor", description: "Deep healthcheck (probes all subsystems)" },
+  { name: "health", description: "Deep healthcheck (alias for /doctor)" },
   { name: "mcp", description: "MCP server status" },
   { name: "hooks", description: "List configured hooks" },
   { name: "stop", description: "Stop current response" },

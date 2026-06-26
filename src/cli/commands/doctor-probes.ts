@@ -22,7 +22,7 @@ export interface FixResult {
   success: boolean;
 }
 
-export type LayerName = "body" | "heart" | "brain" | "tribe";
+export type LayerName = "body" | "heart" | "brain" | "soul" | "tribe";
 
 export interface DoctorOutput {
   version: "1.0";
@@ -267,19 +267,40 @@ async function probeA2a(): Promise<ProbeResult> {
   }
 }
 
+// ── Soul Probes ──────────────────────────────────────────────────────────────
+
+async function probeMind(): Promise<ProbeResult> {
+  try {
+    const { spawnSync } = await import("node:child_process");
+    const r = spawnSync("abmind", ["doctor", "--json"], { encoding: "utf-8", timeout: 10_000 });
+    if (r.status === null || r.error) return { name: "mind", status: "skipped", detail: "abmind not on PATH" };
+    const data = JSON.parse(r.stdout);
+    const checks: Array<{ name: string; status: string }> = data.checks ?? [];
+    const total = checks.length;
+    const ok = checks.filter(c => c.status === "ok").length;
+    const warnings = checks.filter(c => c.status === "warn" || c.status === "error");
+    if (warnings.length === 0) return { name: "mind", status: "ok", detail: `abmind: ${ok}/${total} ok` };
+    const names = warnings.slice(0, 3).map(w => w.name).join(", ");
+    return { name: "mind", status: "failed", detail: `abmind: ${ok}/${total} (${warnings.length} issues: ${names})` };
+  } catch {
+    return { name: "mind", status: "skipped", detail: "abmind doctor failed" };
+  }
+}
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 export async function runAllProbes(): Promise<DoctorOutput> {
   const start = Date.now();
 
-  const [body, heart, brain, tribe] = await Promise.all([
+  const [body, heart, brain, soul, tribe] = await Promise.all([
     Promise.all([probePlatforms(), probeDashboard(), probeSecurity(), probeWatchdog()].map(p => timedProbe(() => p))),
     Promise.all([probeHeartbeat()].map(p => timedProbe(() => p))),
     Promise.all([probeTransport(), probeSpin(), probeKanban(), probeSkills(), probeSha()].map(p => timedProbe(() => p))),
+    Promise.all([probeMind()].map(p => timedProbe(() => p))),
     Promise.all([probeAgentApi(), probePeers(), probeTls(), probeA2a()].map(p => timedProbe(() => p))),
   ]);
 
-  return { version: "1.0", totalMs: Date.now() - start, layers: { body, heart, brain, tribe } };
+  return { version: "1.0", totalMs: Date.now() - start, layers: { body, heart, brain, soul, tribe } };
 }
 
 // ── Fix Logic ────────────────────────────────────────────────────────────────
