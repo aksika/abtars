@@ -135,6 +135,12 @@ export async function main(argv: readonly string[]): Promise<number> {
           allowAbmindMismatch: flags.get('allow-abmind-mismatch') === true,
         });
       }
+      case '__deploy': {
+        // Hidden (#1237): activation entry. Run by the freshly-staged bundle;
+        // consumes a StagedRelease produced by the bootstrap. Not user-facing.
+        const { deployActivationCli } = await import('./deploy-lib/deploy.js');
+        return await deployActivationCli(flags);
+      }
       case 'rollback':
         return await rollback({ to: typeof flags.get('to') === 'string' ? Number(flags.get('to')) : undefined });
       case 'backup':
