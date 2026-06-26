@@ -17,7 +17,7 @@ export interface IKiroTransport {
   resetSession(sessionKey: string): Promise<void>;
 
   /** Send Ctrl+C interrupt to the running Kiro CLI process. */
-  sendInterrupt(): Promise<void>;
+  sendInterrupt(reason?: string): Promise<void>;
 
   /** Clean up resources (kill processes, etc.) */
   destroy(): void;

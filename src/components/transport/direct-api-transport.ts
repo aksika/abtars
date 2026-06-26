@@ -290,7 +290,7 @@ export class DirectApiTransport implements IKiroTransport {
     const loopStart = Date.now();
     const callSigs: string[] = []; // #1133: track across turns for loop detection
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
-      if (signal.aborted) return "[SYSTEM] Interrupted by user.";
+      if (signal.aborted) return signal.reason === "timeout" ? "[SYSTEM] Response timed out." : "[SYSTEM] Interrupted by user.";
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
       if (turn >= (this.config.maxToolRounds ?? 25)) {
         logError(TAG, `Tool loop circuit breaker: ${turn} rounds without final response — aborting`);
@@ -337,7 +337,7 @@ export class DirectApiTransport implements IKiroTransport {
               session.addToolResult(remaining.id, remaining.function.name,
                 `[SYSTEM] Cancelled — ${remaining.function.name} skipped due to user interrupt`);
             }
-            return "[SYSTEM] Interrupted by user.";
+            return signal.reason === "timeout" ? "[SYSTEM] Response timed out." : "[SYSTEM] Interrupted by user.";
           }
           this._lastActivityAt = Date.now();
 
@@ -613,8 +613,8 @@ export class DirectApiTransport implements IKiroTransport {
     logInfo(TAG, `Session ${sessionKey} reset`);
   }
 
-  async sendInterrupt(): Promise<void> {
-    for (const ac of this.abortControllers.values()) ac.abort();
+  async sendInterrupt(reason?: string): Promise<void> {
+    for (const ac of this.abortControllers.values()) ac.abort(reason ?? "user");
   }
 
   destroy(): void {

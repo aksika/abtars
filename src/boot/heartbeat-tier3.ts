@@ -180,7 +180,7 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
       for (const s of spinRef.listAllSessions()) {
         if (s.busy && s.lastActiveAt && now - s.lastActiveAt > 60_000) {
           if (transport && "sendInterrupt" in transport) {
-            (transport as { sendInterrupt: () => Promise<void> }).sendInterrupt().catch(() => {});
+            (transport as { sendInterrupt: (r?: string) => Promise<void> }).sendInterrupt("timeout").catch(() => {});
           }
           s.busy = false;
           logWarn(TAG, `Force-cleared stuck busy on ${s.id} (>60s) — interrupted`);
