@@ -5,7 +5,7 @@
 
 import { logAndSwallow } from "./log-and-swallow.js";
 import { getInstanceName } from "./soul-bundle.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ServiceState } from "./service-registry.js";
@@ -29,6 +29,15 @@ export interface SystemStatus {
   subsystems: SubsystemHealth[];
   tasks: { recurring: number; pending: number; paused: number };
   lastBackup: string | null;
+  // New fields for redesigned /status output
+  securityMode: string;
+  trustMode: boolean;
+  activeSessions: number;
+  kanban: { active: number; total: number } | null;
+  soulBundle: { available: number; total: number } | null;
+  peersConfigured: number;
+  /** Per-platform running state: key = "telegram"/"discord"/"irc", value = running */
+  platformStates: Record<string, boolean>;
 }
 
 export interface StatusContext {
@@ -39,6 +48,9 @@ export interface StatusContext {
   bridgeLockPath: string;
   heartbeat: { intervalMs: number } | null;
 }
+
+const SOUL_CORE_FILES = ["SOUL.md", "user_profile.md", "agent_notes.md", "memory-tools.md", "core_facts.md"] as const;
+const PLATFORM_NAMES = ["telegram", "discord", "irc"] as const;
 
 export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus> {
   // Version + commit from manifest.json (single source of truth)
@@ -69,19 +81,15 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
   for (const [name, health] of ctx.phaseHealth) {
     const entry: SubsystemHealth = { name, status: health.status };
 
-    // For platform services, override with live ServiceRegistry state
     const svcName = phaseToService(name);
     if (svcName && serviceStates[svcName]) {
       const svc = serviceStates[svcName] as ServiceState;
       if (health.status === "ok" && !svc.running) {
         entry.status = svc.retrying ? "retrying" : "stopped";
       }
-      if (svc.retrying) {
-        entry.detail = `retry #${svc.retrying.attempt}`;
-      }
+      if (svc.retrying) entry.detail = `retry #${svc.retrying.attempt}`;
     }
 
-    // Add contextual detail for specific phases
     if (name === "phaseTransport" && health.status === "ok" && ctx.transport) {
       entry.detail = `${transportType} (${transportProvider}), ${ctx.transport.isReady ? "ready" : "not ready"}`;
     }
@@ -97,6 +105,13 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
     }
 
     subsystems.push(entry);
+  }
+
+  // Platform running states (telegram, discord, irc)
+  const platformStates: Record<string, boolean> = {};
+  for (const name of PLATFORM_NAMES) {
+    const svc = serviceStates[name];
+    if (svc) platformStates[name] = svc.running;
   }
 
   // Tasks
@@ -120,19 +135,63 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
     if (bk.length > 0) lastBackup = bk[bk.length - 1] ?? null;
   } catch (err) { logAndSwallow("system_status", "op", err); }
 
-  // Context percent from bridge.lock
+  // Context percent + sleep status from bridge.lock
   let contextPercent = -1;
-  try {
-    const lock = JSON.parse(readFileSync(ctx.bridgeLockPath, "utf-8"));
-    if (typeof lock.contextPercent === "number") contextPercent = lock.contextPercent;
-  } catch { /* ignore */ }
-
-  // Sleep status
   let sleepStatus: string | null = null;
   try {
     const lock = JSON.parse(readFileSync(ctx.bridgeLockPath, "utf-8"));
+    if (typeof lock.contextPercent === "number") contextPercent = lock.contextPercent;
     sleepStatus = lock.sleepStatus ?? null;
   } catch { /* ignore */ }
+
+  // Security mode + trust
+  let securityMode = "off";
+  let trustMode = false;
+  try {
+    const { getSecurityMode } = await import("./guardrails.js");
+    const { getEnv } = await import("./env-schema.js");
+    securityMode = getSecurityMode();
+    trustMode = (getEnv() as any).trustMode === true;
+  } catch (err) { logAndSwallow("system_status", "trust", err); }
+
+  // Active Spin session count
+  let activeSessions = 0;
+  try {
+    const { spin } = await import("./spin.js");
+    activeSessions = spin.listAllSessions().length;
+  } catch (err) { logAndSwallow("system_status", "spin", err); }
+
+  // Kanban active/total via kanbanList
+  let kanban: SystemStatus["kanban"] = null;
+  try {
+    const { kanbanList } = await import("./tasks/kanban-board.js");
+    const all = kanbanList();
+    const active = all.filter((c: any) => ["queued", "running", "delivering"].includes(c.status)).length;
+    kanban = { active, total: all.length };
+  } catch (err) { logAndSwallow("system_status", "kanban", err); }
+
+  // Soul bundle availability (only when abmind memory)
+  let soulBundle: SystemStatus["soulBundle"] = null;
+  try {
+    const { getEnv } = await import("./env-schema.js");
+    const memoryProvider = (getEnv() as any).memoryProvider ?? "none";
+    if (memoryProvider === "abmind" || memoryProvider === "auto") {
+      const coreDir = join(homedir(), ".abmind", "memory", "core");
+      const available = SOUL_CORE_FILES.filter(f => existsSync(join(coreDir, f))).length;
+      soulBundle = { available, total: SOUL_CORE_FILES.length };
+    }
+  } catch (err) { logAndSwallow("system_status", "soul", err); }
+
+  // Peers configured count (exclude "self" entry)
+  let peersConfigured = 0;
+  try {
+    const { abtarsHome } = await import("../paths.js");
+    const peersPath = join(abtarsHome(), "config", "peers.json");
+    if (existsSync(peersPath)) {
+      const peers = JSON.parse(readFileSync(peersPath, "utf-8")) as Record<string, unknown>;
+      peersConfigured = Object.keys(peers).filter(k => k !== "self").length;
+    }
+  } catch (err) { logAndSwallow("system_status", "peers", err); }
 
   return {
     version,
@@ -147,14 +206,19 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
     subsystems,
     tasks,
     lastBackup,
+    securityMode,
+    trustMode,
+    activeSessions,
+    kanban,
+    soulBundle,
+    peersConfigured,
+    platformStates,
   };
 }
 
 /** Map phase names to ServiceRegistry service names (for live state merge). */
 function phaseToService(phaseName: string): string | null {
   switch (phaseName) {
-    case "phasePlatforms": return null; // platforms registers telegram + discord separately
-    case "phaseDashboard": return null;
     case "phaseAgentApi": return "agent-api";
     default: return null;
   }
@@ -163,15 +227,17 @@ function phaseToService(phaseName: string): string | null {
 /** Render SystemStatus as plain text for Telegram/Discord /status command. */
 export function renderStatusText(status: SystemStatus): string {
   const uptime = formatUptime(status.uptimeMs);
-  const failures = status.subsystems.filter(s => s.status === "failed").length;
+  const failures = status.subsystems.filter(s => s.status === "failed" || s.status === "stopped").length;
   const mood = failures === 0 ? "😊" : failures <= 2 ? "😐" : "😟";
+  const sleepLabel = status.sleepStatus ?? "awake";
+
   const lines: string[] = [
-    `abTARS™ ${getInstanceName()} online ${mood}`,
+    `abTARS™ ${getInstanceName()} — ${sleepLabel} ${mood}`,
     `  PID ${process.pid} (up ${uptime})`,
   ];
 
   // Watchdog
-  const wdPid = process.env.ABTARS_WATCHDOG_PID;
+  const wdPid = process.env["ABTARS_WATCHDOG_PID"];
   if (wdPid && wdPid !== "0") {
     try { process.kill(Number(wdPid), 0); lines.push(`  Watchdog: PID ${wdPid}`); }
     catch { lines.push("  Watchdog: not running (stale PID)"); }
@@ -179,79 +245,136 @@ export function renderStatusText(status: SystemStatus): string {
     lines.push("  Watchdog: not detected");
   }
 
-  // Platforms
-  const platforms = status.subsystems.find(s => s.name === "phasePlatforms");
-  if (platforms?.detail) lines.push(`  Platforms: ${platforms.detail}`);
+  lines.push(`  Security: ${status.securityMode}`);
+  if (status.trustMode) lines.push("  Trust: (trusted)");
 
-  // Model + context
-  lines.push(`  Model: ${status.model.split("/").pop() ?? status.model}`);
-  if (status.contextPercent >= 0) lines.push(`  Context: ${status.contextPercent}%`);
+  // ── Body ──────────────────────────────────────────────────────────────
+  lines.push("", "Body:");
 
-  // Last prompt
-  try {
-    const lock = JSON.parse(readFileSync(join(homedir(), ".abtars", "bridge.lock"), "utf-8"));
-    if (lock.lastPromptAt) {
-      const ago = Math.round((Date.now() - lock.lastPromptAt) / 1000);
-      lines.push(`  Last prompt: ${ago < 60 ? `${ago}s ago` : `${Math.round(ago / 60)}m ago`}`);
-    }
-  } catch { /* no lock */ }
+  // Platforms: per-platform from collected platformStates
+  const platformEntries = (["telegram", "discord", "irc"] as const)
+    .filter(name => name in status.platformStates)
+    .map(name => `${status.platformStates[name] ? "✓" : "✗"} ${name.charAt(0).toUpperCase() + name.slice(1)}`);
 
-  // Sleep
-  if (status.sleepStatus) lines.push(`  Sleep: ${status.sleepStatus}`);
+  if (platformEntries.length > 0) {
+    lines.push(`  ✓ platforms: ${platformEntries.join("  ")}`);
+  } else {
+    const platformSub = status.subsystems.find(s => s.name === "phasePlatforms");
+    lines.push(`  ${subIcon(platformSub)} platforms${platformSub?.detail ? `: ${platformSub.detail}` : ""}`);
+  }
 
-  // Dashboard
-  const webPort = process.env["WEB_PORT"];
-  if (webPort) lines.push(`  Dashboard: :${webPort}`);
-  else lines.push(`  Dashboard: disabled`);
+  const dashSub = status.subsystems.find(s => s.name === "phaseDashboard");
+  const webPort = (process.env["WEB_PORT"] ?? "").replace(/^:/, "");
+  if (dashSub && dashSub.status !== "skipped") {
+    lines.push(`  ${subIcon(dashSub)} dashboard${webPort ? `: ${webPort}` : ""}`);
+  } else {
+    lines.push("  ○ dashboard: disabled");
+  }
 
-  // Agent API
-  const apiPort = process.env["AGENT_API_PORT"];
-  if (apiPort) lines.push(`  Agent API: :${apiPort}`);
+  // ── Heart ─────────────────────────────────────────────────────────────
+  lines.push("", "Heart:");
 
-  // Heartbeat
   try {
     const { getHeartbeatInstance } = require("./heartbeat-system.js") as typeof import("./heartbeat-system.js");
     const hb = getHeartbeatInstance();
     if (hb) {
-      const mins = Math.round(hb.intervalMs / 60000);
-      const taskCount = hb.getTaskNames().length;
-      lines.push(`  Heartbeat: ${hb.isRunning ? "running" : "stopped"} (${mins}min, ${taskCount} tasks)`);
+      const intervalSec = Math.round(hb.intervalMs / 1000);
+      let lastTickAgo = "";
+      try {
+        const lock = JSON.parse(readFileSync(join(homedir(), ".abtars", "bridge.lock"), "utf-8"));
+        if (lock.lastHeartbeat) {
+          const agoSec = Math.round((Date.now() - lock.lastHeartbeat) / 1000);
+          lastTickAgo = ` / ${agoSec < 60 ? `${agoSec}s ago` : `${Math.round(agoSec / 60)}m ago`}`;
+        }
+      } catch { /* ignore */ }
+      lines.push(`  ${hb.isRunning ? "✓" : "✗"} heartbeat: ${intervalSec}s${lastTickAgo}`);
+      lines.push(`  ✓ internal tasks: ${hb.getTaskNames().length}`);
+    } else {
+      lines.push("  ✗ heartbeat: not running");
     }
-  } catch { /* */ }
+  } catch { lines.push("  ○ heartbeat: not loaded"); }
 
-  // Skills
+  // ── Brain ─────────────────────────────────────────────────────────────
+  lines.push("", "Brain:");
+
+  const modelShort = status.model.split("/").pop() ?? status.model;
+  let lastPromptStr = "";
+  try {
+    const lock = JSON.parse(readFileSync(join(homedir(), ".abtars", "bridge.lock"), "utf-8"));
+    if (lock.lastPromptAt) {
+      const agoSec = Math.round((Date.now() - lock.lastPromptAt) / 1000);
+      lastPromptStr = agoSec < 60 ? `${agoSec}s ago` : `${Math.round(agoSec / 60)}m ago`;
+    }
+  } catch { /* ignore */ }
+  lines.push(`  ✓ model: ${modelShort}${lastPromptStr ? `\n    last prompt: ${lastPromptStr}` : ""}`);
+
+  lines.push(`  ✓ spin: ${status.activeSessions} active session${status.activeSessions !== 1 ? "s" : ""}`);
+
+  if (status.kanban) {
+    lines.push(`  ✓ kanban: ${status.kanban.active}/${status.kanban.total}`);
+  } else {
+    lines.push("  ✗ kanban: not initialized");
+  }
+
+  // SHA — try hotskills/self-healer, fall back to subsystem
+  let shaLine = "  ~ sha: no healer rules configured";
   try {
     const { getSkillCache } = require("../capabilities/hotskills/index.js") as typeof import("../capabilities/hotskills/index.js");
     const skills = getSkillCache();
-    if (skills.length > 0) {
-      const active = skills.filter(s => !s.skipped).length;
-      lines.push(`  Skills: ${active} active`);
-    }
+    const sha = skills.find((s: any) => s.name === "sha" || s.name === "self-healer");
+    if (sha) shaLine = `  ${sha.skipped ? "~" : "✓"} sha: ${sha.skipped ? sha.skipReason ?? "disabled" : "active"}`;
+  } catch { /* use default */ }
+  lines.push(shaLine);
+
+  try {
+    const { getSkillCache } = require("../capabilities/hotskills/index.js") as typeof import("../capabilities/hotskills/index.js");
+    const skills = getSkillCache();
+    const active = skills.filter((s: any) => !s.skipped).length;
+    lines.push(`  ✓ skills: ${active} active`);
   } catch { /* hotskills not loaded */ }
 
-  // #478: Sandbox status
-  try {
-    const { getActiveSandboxes } = require("./sandbox-runtime.js") as typeof import("./sandbox-runtime.js");
-    const sandboxes = getActiveSandboxes();
-    if (sandboxes.size > 0) {
-      lines.push(`  🐳 Sandboxes: ${sandboxes.size} active`);
-    }
-  } catch { /* sandbox-runtime not loaded */ }
+  // ── Soul ──────────────────────────────────────────────────────────────
+  lines.push("", "Soul:");
 
-  lines.push("", "🏥 Subsystems:");
-
-  for (const s of status.subsystems) {
-    const icon = s.status === "ok" ? "✓" : s.status === "skipped" ? "○" : "✗";
-    const label = s.name.replace("phase", "").replace(/([A-Z])/g, " $1").trim().toLowerCase();
-    const detail = s.detail ? ` — ${s.detail}` : "";
-    lines.push(`  ${icon} ${label}${detail}`);
+  if (status.soulBundle) {
+    const allPresent = status.soulBundle.available === status.soulBundle.total;
+    lines.push(`  ${allPresent ? "✓" : "~"} memory: abmind working`);
+    lines.push(`    soul bundle: ${status.soulBundle.available}/${status.soulBundle.total} available`);
+  } else {
+    lines.push("  ✗ memory: none");
   }
 
+  // ── Tribe ─────────────────────────────────────────────────────────────
+  lines.push("", "Tribe:");
+
+  const apiSub = status.subsystems.find(s => s.name === "phaseAgentApi");
+  const apiPort = (process.env["AGENT_API_PORT"] ?? "").replace(/^:/, "");
+  lines.push(`  ${subIcon(apiSub)} agent-api${apiPort ? `: ${apiPort}` : ""}`);
+
+  if (status.peersConfigured > 0) {
+    lines.push(`  ~ peers: ${status.peersConfigured} configured`);
+  } else {
+    lines.push("  ○ peers: none configured");
+  }
+
+  const a2aSub = status.subsystems.find(s => s.name === "phaseA2a" || s.name === "phaseGossip");
+  lines.push(`  ${subIcon(a2aSub)} a2a${a2aSub?.detail ? `: ${a2aSub.detail}` : ""}`);
+
+  // ── Footer ────────────────────────────────────────────────────────────
   lines.push("");
-  lines.push(`⏰ Tasks: ${status.tasks.recurring} recurring, ${status.tasks.pending} pending${status.tasks.paused ? `, ${status.tasks.paused} paused` : ""}`);
-  if (status.lastBackup) lines.push(`💾 Last backup: ${status.lastBackup}`);
+  lines.push(`Tasks: ${status.tasks.recurring} recurring, ${status.tasks.pending} pending${status.tasks.paused ? `, ${status.tasks.paused} paused` : ""}`);
+  if (status.lastBackup) lines.push(`Last backup: ${status.lastBackup}`);
 
   return lines.join("\n");
+}
+
+function subIcon(sub: SubsystemHealth | undefined): string {
+  if (!sub) return "○";
+  switch (sub.status) {
+    case "ok": return "✓";
+    case "skipped": return "○";
+    default: return "✗";
+  }
 }
 
 function formatUptime(ms: number): string {
