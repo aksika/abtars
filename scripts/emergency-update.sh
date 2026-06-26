@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Emergency update — bypasses deployed abtars binary.
-# Fetches latest dev, builds fresh, deploys from source bundle.
+# Canonical fallback (#1237) — for when the deployed abtars CLI cannot even start.
+# Identical result to `abtars update --dev`: fetch latest dev, build fresh, then
+# run the deploy from the freshly-built bundle (never the stale deployed binary).
+# The normal `abtars update` does the same thing via src/cli/bootstrap.ts; this
+# shell mirror needs no working deployed binary at all.
 # Usage: bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
 
 set -euo pipefail
