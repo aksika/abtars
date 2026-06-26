@@ -4,13 +4,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 let tmpDir: string;
-vi.mock("../../paths.js", () => ({
-  abtarsHome: () => tmpDir,
-}));
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, homedir: () => tmpDir };
+});
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "deps-test-"));
-  mkdirSync(join(tmpDir, "lib", "node_modules"), { recursive: true });
+  mkdirSync(join(tmpDir, ".local", "lib", "node_modules"), { recursive: true });
 });
 
 afterEach(() => {
@@ -52,7 +53,7 @@ describe("abtars deps", () => {
   it("remove cleans up package dir", async () => {
     const { deps } = await import("./deps.js");
     // Fake an installed package
-    const pkgDir = join(tmpDir, "lib", "node_modules", "pdf-parse");
+    const pkgDir = join(tmpDir, ".local", "lib", "node_modules", "pdf-parse");
     mkdirSync(pkgDir, { recursive: true });
     writeFileSync(join(pkgDir, "index.js"), "");
     

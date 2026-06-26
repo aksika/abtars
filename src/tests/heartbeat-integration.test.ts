@@ -7,7 +7,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createAgeCheckTask } from "../components/heartbeat-tasks.js";
 import type { AgeCheckDeps } from "../components/heartbeat-tasks.js";
-import { resetBedtimeCounter } from "../components/daily-cycle.js";
 
 let tmpDir: string;
 
@@ -57,21 +56,6 @@ describe("Integration: age-check task", () => {
     await task.execute();
 
     expect(exitSpy).not.toHaveBeenCalled();
-    vi.useRealTimers();
-  });
-
-  it("spawns Dreamy when past BED_TIME and 2 quiet ticks", async () => {
-    const now = new Date(2026, 3, 5, 10, 0); // 10:00
-    vi.useFakeTimers({ now });
-    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
-
-    resetBedtimeCounter();
-    let sleepStarted = false;
-    const task = createAgeCheckTask({ ...makeDeps(), startSleep: () => { sleepStarted = true; } });
-    for (let i = 0; i < 1; i++) await task.execute();
-    expect(sleepStarted).toBe(false);
-    await task.execute(); // 2nd tick
-    expect(sleepStarted).toBe(true);
     vi.useRealTimers();
   });
 

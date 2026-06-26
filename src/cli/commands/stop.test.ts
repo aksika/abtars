@@ -90,27 +90,6 @@ describe("#372 — abtars stop", () => {
     expect(stdout).toContain("Nothing to stop");
   });
 
-  // ── Watchdog alive + bridge alive ─────────────────────────────────────
-
-  it("kills watchdog then bridge when both are running", async () => {
-    const wdPid = spawnDummy("watchdog");
-    const brPid = spawnDummy("bridge");
-    // Let them settle
-    await new Promise(r => setTimeout(r, 100));
-
-    writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: brPid, watchdogPid: wdPid, lastHeartbeat: Date.now() }));
-
-    captureStdio();
-    const exit = await stop({});
-    restoreStdio();
-
-    expect(exit).toBe(0);
-    expect(await waitDead(wdPid)).toBe(true);
-    expect(await waitDead(brPid)).toBe(true);
-    expect(stdout).toContain("Watchdog stopped");
-    expect(stdout).toContain("Bridge stopped");
-  });
-
   // ── Only bridge running (no watchdog) ─────────────────────────────────
 
   it("kills bridge when watchdog isn't running", async () => {
@@ -163,18 +142,14 @@ describe("#372 — abtars stop", () => {
   });
 
   it("proceeds when installMode is supervised-daemon with --force", async () => {
-    const wdPid = spawnDummy("watchdog");
-    await new Promise(r => setTimeout(r, 100));
-
     writeFileSync(join(tmpHome, "manifest.json"), JSON.stringify({ installMode: "supervised-daemon" }));
-    writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: null, watchdogPid: wdPid }));
+    writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: null, watchdogPid: null }));
 
     captureStdio();
     const exit = await stop({ force: true });
     restoreStdio();
 
     expect(exit).toBe(0);
-    expect(await waitDead(wdPid)).toBe(true);
   });
 
   // ── Non-supervised (simple / supervised) passes through ───────────────

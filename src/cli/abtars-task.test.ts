@@ -39,7 +39,7 @@ describe("abtars-task", () => {
   }
 
   it("add creates entry", async () => {
-    const out = await run(["add", "--at", "2026-12-25T08:00", "--message", "Christmas", "--chat-id", "123", "--type", "reminder"]);
+    const out = await run(["add", "--at", "2026-12-25T08:00", "--message", "Christmas", "--title", "Christmas", "--chat-id", "123", "--type", "reminder"]);
     const parsed = JSON.parse(out);
     expect(parsed.ok).toBe(true);
     expect(parsed.action).toBe("added");
@@ -47,8 +47,8 @@ describe("abtars-task", () => {
   });
 
   it("list shows pending entries", async () => {
-    await run(["add", "--at", "2026-12-25T08:00", "--message", "A", "--chat-id", "1", "--type", "reminder"]);
-    await run(["add", "--at", "2026-12-26T08:00", "--message", "B", "--chat-id", "1", "--type", "task"]);
+    await run(["add", "--at", "2026-12-25T08:00", "--message", "A", "--title", "A", "--chat-id", "1", "--type", "reminder"]);
+    await run(["add", "--at", "2026-12-26T08:00", "--message", "B", "--title", "B", "--chat-id", "1", "--type", "task"]);
     const out = await run(["list"]);
     const parsed = JSON.parse(out);
     expect(parsed.ok).toBe(true);
@@ -62,7 +62,7 @@ describe("abtars-task", () => {
   });
 
   it("remove deletes entry by id", async () => {
-    const addOut = await run(["add", "--at", "2026-12-25T08:00", "--message", "X", "--chat-id", "1", "--type", "reminder"]);
+    const addOut = await run(["add", "--at", "2026-12-25T08:00", "--message", "X", "--title", "X", "--chat-id", "1", "--type", "reminder"]);
     const id = JSON.parse(addOut).id;
     const out = await run(["remove", id]);
     expect(JSON.parse(out)).toEqual({ ok: true, action: "removed", id });
@@ -93,7 +93,7 @@ describe("abtars-task", () => {
   });
 
   it("add defaults type to reminder", async () => {
-    const out = await run(["add", "--at", "2026-12-25T08:00", "--message", "Y", "--chat-id", "1"]);
+    const out = await run(["add", "--at", "2026-12-25T08:00", "--message", "Y", "--title", "Y", "--chat-id", "1"]);
     expect(JSON.parse(out).ok).toBe(true);
   });
 });

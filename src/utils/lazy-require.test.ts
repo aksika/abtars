@@ -3,11 +3,12 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-// Mock abtarsHome to use temp dir
+// Mock homedir so lib dir resolves under a temp dir (code uses ~/.local/lib via homedir())
 let tmpDir: string;
-vi.mock("../paths.js", () => ({
-  abtarsHome: () => tmpDir,
-}));
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, homedir: () => tmpDir };
+});
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "lazy-require-test-"));
@@ -46,7 +47,7 @@ describe("lazyRequire", { timeout: 30000 }, () => {
   it("creates lib dir if missing", async () => {
     const { isInstalled } = await import("./lazy-require.js");
     isInstalled("anything");
-    expect(existsSync(join(tmpDir, "lib"))).toBe(true);
+    expect(existsSync(join(tmpDir, ".local", "lib"))).toBe(true);
   });
 });
 
@@ -57,6 +58,6 @@ describe("OPTIONAL_DEPS registry", () => {
     expect(OPTIONAL_DEPS.pdf).toBeDefined();
     expect(OPTIONAL_DEPS.youtube).toBeDefined();
     expect(OPTIONAL_DEPS.image).toBeDefined();
-    expect(OPTIONAL_DEPS.browser.packages).toContain("patchright");
+    expect(OPTIONAL_DEPS.browser.packages).toContain("cloakbrowser");
   });
 });
