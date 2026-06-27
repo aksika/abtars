@@ -25,7 +25,7 @@ IS_MAC="$(uname | grep -q Darwin && echo 1 || echo 0)"
 die() { echo "x $*" >&2; exit 1; }
 step() { echo "+ $*"; }
 # Read a JSON field from a file via node (node is always present — esbuild needs it).
-jget() { node -e 'try{const v=require(process.argv[1])[process.argv[2]];if(v!=null)process.stdout.write(String(v))}catch{}' "$1" "$2" 2>/dev/null || true; }
+jget() { node -e 'const fs=require("fs");try{const v=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))[process.argv[2]];if(v!=null)process.stdout.write(String(v))}catch{}' "$1" "$2" 2>/dev/null || true; }
 
 [ -d "$SRC_DIR/.git" ] || die "abtars source not found at $SRC_DIR"
 
@@ -78,9 +78,11 @@ fi
 step "staging release $VERSION -> $RELEASE_DIR ..."
 mkdir -p "$RELEASES_DIR"
 rm -rf "$RELEASE_DIR"
-cp -r "$SRC_DIR/bundle" "$RELEASE_DIR"
+mkdir -p "$RELEASE_DIR"                # must exist so cp nests bundle/ rather than flattening it
+cp -r "$SRC_DIR/bundle" "$RELEASE_DIR/"   # -> $RELEASE_DIR/bundle/
 printf '{"type":"module","name":"abtars","version":"%s"}\n' "$VERSION" > "$RELEASE_DIR/package.json"
 [ -d "$SRC_DIR/templates" ] && cp -r "$SRC_DIR/templates" "$RELEASE_DIR/templates"
+[ -f "$SRC_DIR/install-manifest.json" ] && cp "$SRC_DIR/install-manifest.json" "$RELEASE_DIR/install-manifest.json"
 
 # ── 5. history.json (unshift, cap 4) ───────────────────────────────────────
 node -e '
@@ -133,7 +135,10 @@ rm -f "$ABTARS_HOME/.stopped"
 step "respawning daemon..."
 echo "deploy-respawn" > "$ABTARS_HOME/.start-reason"
 if [ "$IS_MAC" = "1" ]; then
-  [ -f "$PLIST" ] && launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || true
+  if [ -f "$PLIST" ]; then
+    # bootout->bootstrap can race (launchd tear-down); retry once after a beat
+    launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || { sleep 2; launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || echo "! watchdog bootstrap failed — run: launchctl bootstrap $UID_LABEL \"$PLIST\""; }
+  fi
 else
   systemctl --user daemon-reload 2>/dev/null || true
   systemctl --user unmask abtars-watchdog 2>/dev/null || true
