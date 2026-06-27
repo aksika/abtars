@@ -5,13 +5,13 @@
  *   The primary install flow is in onboard.ts (called by CLI dispatcher).
  */
 
-import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { hostname, homedir as _homedir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { emptyManifest, packagePaths, readManifest, resolveUserBinDir, writeManifest } from '../deploy-lib-import.js';
+import { emptyManifest, packagePaths, readManifest, writeManifest } from '../deploy-lib-import.js';
 
 /** Resolve real user home even under sudo. */
 function homedir(): string {
@@ -38,34 +38,6 @@ async function exists(p: string): Promise<boolean> {
   try {
     await stat(p);
     return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * True if `p` exists as any filesystem entry — regular file, directory,
- * symlink (including dangling). Use this for collision checks in
- * reconcilePathLink, where a dangling symlink still occupies the inode
- * and would cause EEXIST on symlink(). `exists()` above uses stat() which
- * follows symlinks and returns false on dangling ones; that's wrong for
- * collision detection.
- */
-async function existsAny(p: string): Promise<boolean> {
-  try {
-    const { lstat } = await import('node:fs/promises');
-    await lstat(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function isSymlink(p: string): Promise<boolean> {
-  try {
-    const { lstat } = await import('node:fs/promises');
-    const s = await lstat(p);
-    return s.isSymbolicLink();
   } catch {
     return false;
   }
@@ -103,66 +75,6 @@ async function seedConfig(repoRoot: string, _configDir: string, dryRun: boolean,
     seeded.push(basename(dst));
   }
   return seeded;
-}
-
-/**
- * Reconcile a single PATH symlink at ~/.local/bin/<name>.
- * Policy (plan §"PATH symlink collision"):
- *   - Missing  → create
- *   - Symlink pointing into our own ~/.abtars/bin/ → overwrite
- *   - Anything else → refuse with message, unless force
- */
-async function reconcilePathLink(
-  binDir: string,
-  userBinDir: string,
-  name: string,
-  force: boolean,
-  dryRun: boolean,
-): Promise<{ action: string; message?: string }> {
-  const linkPath = join(userBinDir, name);
-  const targetPath = join(binDir, name);
-  const linkExists = await existsAny(linkPath);
-  if (!linkExists) {
-    if (dryRun) return { action: `[dry-run] ln -s ${targetPath} ${linkPath}` };
-    await symlink(targetPath, linkPath);
-    return { action: `created ${linkPath}` };
-  }
-  if (await isSymlink(linkPath)) {
-    const { readlink, unlink } = await import('node:fs/promises');
-    const current = await readlink(linkPath);
-    // "We own it" means: points at THIS install's bin dir, not a fuzzy match
-    // on any path containing /.abtars/bin/. A smoke-test install at
-    // ABTARS_HOME=~/.cache/ab-smoke-.../ must not clobber the real
-    // ~/.abtars symlinks. Compare absolute paths directly.
-    const ownsIt = current === targetPath;
-    if (ownsIt) {
-      if (dryRun) return { action: `[dry-run] overwrite ${linkPath} (we own it)` };
-      await unlink(linkPath);
-      await symlink(targetPath, linkPath);
-      return { action: `updated ${linkPath}` };
-    }
-    if (force) {
-      if (dryRun) return { action: `[dry-run] --force overwrite ${linkPath} (currently -> ${current})` };
-      await unlink(linkPath);
-      await symlink(targetPath, linkPath);
-      return { action: `forced overwrite ${linkPath} (was -> ${current})` };
-    }
-    return {
-      action: 'refused',
-      message: `${linkPath} is a symlink to ${current} (not ours). Pass --force to overwrite.`,
-    };
-  }
-  if (force) {
-    if (dryRun) return { action: `[dry-run] --force overwrite ${linkPath} (regular file)` };
-    const { unlink } = await import('node:fs/promises');
-    await unlink(linkPath);
-    await symlink(targetPath, linkPath);
-    return { action: `forced overwrite ${linkPath} (was regular file)` };
-  }
-  return {
-    action: 'refused',
-    message: `${linkPath} exists as a regular file (not our symlink). Pass --force to overwrite.`,
-  };
 }
 
 export async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
@@ -224,7 +136,6 @@ function isPathOnPATH(userBinDir: string): boolean {
 export async function install(opts: InstallOptions): Promise<number> {
   const paths = packagePaths('abtars');
   const home = paths.home;
-  const userBinDir = resolveUserBinDir();
   const repoRoot = join(dirname(realpathSync(process.argv[1] ?? fileURLToPath(import.meta.url))), "..");
 
   // Install log (#718)

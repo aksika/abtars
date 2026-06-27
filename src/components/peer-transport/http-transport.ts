@@ -36,7 +36,7 @@ export class HttpTransport implements PeerTransport {
             if (!cards.length) return;
             const card = cards[0]!;
             if (p.tokens_used) kanbanAddTokens(card.id, p.tokens_used);
-            if (p.status === "done") kanbanComplete(card.id, undefined, p.result_summary);
+            if (p.status === "done") kanbanComplete(card.id, null, p.result_summary ?? "");
             else kanbanFail(card.id, p.error ?? "remote failure");
             import("../nerve.js").then(({ nerve }) => nerve.emit(p.status === "done" ? "card:done" : "card:failed", card.id));
           }).catch(() => {});
@@ -58,15 +58,6 @@ export class HttpTransport implements PeerTransport {
   /** Check if a peer is reachable via WS. */
   hasWsConnection(peer: string): boolean {
     return this.wsClients.get(peer)?.connected ?? false;
-  }
-
-  /** Send via WS if available, otherwise fall back to HTTP. */
-  private async wsOrHttp(peer: string, method: string, payload: unknown, httpFallback: () => Promise<unknown>): Promise<unknown> {
-    const ws = this.wsClients.get(peer);
-    if (ws?.connected) {
-      return ws.send(method, payload);
-    }
-    return httpFallback();
   }
 
   discover(): PeerCard[] {

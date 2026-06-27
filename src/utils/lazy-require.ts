@@ -6,7 +6,6 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logWarn } from "../components/logger.js";
-import { abtarsHome } from "../paths.js";
 
 const TAG = "deps";
 

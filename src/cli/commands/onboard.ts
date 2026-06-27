@@ -26,7 +26,6 @@ import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { fileURLToPath } from 'node:url';
 import { packagePaths, readManifest } from '../deploy-lib-import.js';
 import { showHintOnce } from '../../components/hints.js';
 
@@ -739,7 +738,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
  * already exists. Called from onboard after .env is persisted so chatId
  * is available.
  */
-async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<void> {
+async function seedDefaultTasks(_chatId: string, abtarsHome: string): Promise<void> {
   const { existsSync, mkdirSync, copyFileSync } = await import('node:fs');
   const tasksJson = join(abtarsHome, 'tasks', 'tasks.json');
   if (existsSync(tasksJson)) {

@@ -1,11 +1,10 @@
-import { execAsync } from "./exec-async.js";
 import { readFileSync, readdirSync} from "node:fs";
 import { join } from "node:path";
 import { homedir} from "node:os";
 import { logInfo} from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { readEntries as cronReadEntries } from "../tasks/task-store.js";
-import { abtarsHome, abtarsRoot } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd";

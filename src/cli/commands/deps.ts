@@ -9,7 +9,6 @@ import { OPTIONAL_DEPS, SYSTEM_DEPS, isInstalled, installPackages } from "../../
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { existsSync, rmSync } from "node:fs";
-import { abtarsHome } from "../../paths.js";
 import { homedir } from "node:os";
 
 function libNmDir(): string {

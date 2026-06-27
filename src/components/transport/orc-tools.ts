@@ -6,7 +6,7 @@
  */
 
 import type { ToolDefinition } from "./tool-registry.js";
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo } from "../logger.js";
 
 const TAG = "orc-tools";
 
@@ -36,15 +36,17 @@ const spawnWorkerTool: ToolDefinition = {
   },
   async execute(args: Record<string, string>): Promise<string> {
     if (!_activeOrcCardId) return "[err] No active Orc project. spawn_worker only works during orchestration.";
+    const goal = args.goal;
+    if (!goal) return "[err] goal is required";
     const { spin } = await import("../spin.js");
     const cardId = spin.spawnChild(_activeOrcCardId, {
-      goal: args.goal,
-      title: args.title || args.goal.slice(0, 40),
+      goal,
+      title: args.title || goal.slice(0, 40),
       source: "agent",
       priority: args.priority as any,
     });
-    logInfo(TAG, `spawn_worker card:${cardId} parent:${_activeOrcCardId} — ${(args.title || args.goal).slice(0, 60)}`);
-    return `+ Worker card #${cardId} created: "${args.title || args.goal.slice(0, 40)}"`;
+    logInfo(TAG, `spawn_worker card:${cardId} parent:${_activeOrcCardId} — ${(args.title || goal).slice(0, 60)}`);
+    return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"`;
   },
 };
 
@@ -84,7 +86,7 @@ const cancelWorkerTool: ToolDefinition = {
   },
   async execute(args: Record<string, string>): Promise<string> {
     if (!_activeOrcCardId) return "[err] No active Orc project.";
-    const cardId = parseInt(args.card_id, 10);
+    const cardId = parseInt(args.card_id ?? "", 10);
     if (isNaN(cardId)) return "[err] Invalid card_id.";
     const { kanbanGetCard, kanbanFail } = await import("../tasks/kanban-board.js");
     const card = kanbanGetCard(cardId);

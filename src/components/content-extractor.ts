@@ -1,4 +1,4 @@
-import type { Page } from "cloakbrowser";
+import type { Page } from "../types/browser.js";
 
 /**
  * Strips non-content HTML elements and returns clean plain text.

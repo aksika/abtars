@@ -78,7 +78,7 @@ export const peerDelegateTool: ToolDefinition = {
       // #949: Create hollow session to track remote worker locally
       if (remoteSessionId) {
         const { spin } = await import("../spin.js");
-        const { getMasterUserId } = await import("../../boot/phase-config.js");
+        const { getMasterUserId } = await import("../master-user.js");
         spin.createHollowSession(getMasterUserId(), "telegram", "W", peer, remoteSessionId);
       }
 

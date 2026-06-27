@@ -7,7 +7,6 @@
 
 import { getEnv } from "../components/env-schema.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
-import { join } from "node:path";
 import { createSelfHealerTask } from "../components/self-healer.js";
 import {
   createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask,
@@ -16,7 +15,7 @@ import {
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn } from "../components/logger.js";
-import { abtarsHome, abtarsRoot } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import { createCronCallback } from "./phase-pipeline-deps.js";
 import { createModelHealthTask } from "./heartbeat-model-health.js";
 import { readEnvWithDefault } from "../components/env.js";
@@ -175,7 +174,7 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   // Busy-unstick
   {
     const { spin: spinRef } = require("../components/spin.js") as typeof import("../components/spin.js");
-    heartbeat.registerTask({ name: "busy-unstick", execute: () => {
+    heartbeat.registerTask({ name: "busy-unstick", execute: async () => {
       const now = Date.now();
       for (const s of spinRef.listAllSessions()) {
         if (s.busy && s.lastActiveAt && now - s.lastActiveAt > 60_000) {

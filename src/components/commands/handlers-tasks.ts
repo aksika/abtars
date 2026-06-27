@@ -60,7 +60,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   if (ctx.cronCurrentJob) {
     const j = ctx.cronCurrentJob;
     const ago = Math.round((Date.now() - j.startedAt) / 1000);
-    const name = j.message.split("\n")[0].slice(0, 30);
+    const name = (j.message.split("\n")[0] ?? "").slice(0, 30);
     running = `\n~ Running: ${name} (${ago}s)`;
   }
   await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "HTML" });
@@ -90,7 +90,7 @@ export async function handleTasksTrigger(text: string, ctx: CommandContext): Pro
   let name = id;
   try {
     const entry = readEntry(id);
-    if (entry) name = entry.title || entry.message.split("\n")[0].slice(0, 30);
+    if (entry) name = entry.title || (entry.message.split("\n")[0] ?? "").slice(0, 30);
   } catch { /* fallback to id */ }
   await ctx.reply(`Running task: ${name}`);
   return true;

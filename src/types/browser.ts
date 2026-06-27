@@ -1,3 +1,14 @@
+import type { launch } from "cloakbrowser";
+
+/**
+ * Playwright Browser/BrowserContext/Page types. cloakbrowser (#1203) re-exports
+ * only launch funcs, not the underlying Playwright types — derive them from
+ * launch()'s return type so we stay decoupled from a direct playwright dep.
+ */
+export type Browser = Awaited<ReturnType<typeof launch>>;
+export type BrowserContext = Awaited<ReturnType<Browser["newContext"]>>;
+export type Page = Awaited<ReturnType<BrowserContext["newPage"]>>;
+
 /** Actions the browser tool supports. */
 export type BrowserActionType =
   | "navigate"
@@ -53,8 +64,8 @@ export type PageElement = {
 /** Internal session state tracked by BrowserManager. */
 export type BrowserSession = {
   sessionId: string;
-  context: import("cloakbrowser").BrowserContext;
-  page: import("cloakbrowser").Page;
+  context: BrowserContext;
+  page: Page;
   createdAt: number;
   lastActivityAt: number;
 };

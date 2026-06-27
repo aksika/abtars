@@ -508,7 +508,7 @@ export class CronQueue {
         if (exitCode === 0) {
           // #1118: inline tasks store full response as summary (delivered as chat message)
           const kanbanSummary = isReport ? summary : cleaned;
-          kanbanComplete(boardId, resultPath, kanbanSummary);
+          kanbanComplete(boardId, resultPath ?? null, kanbanSummary);
         } else {
           kanbanFail(boardId, `${summary}${dodResult}`);
         }

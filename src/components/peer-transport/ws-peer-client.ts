@@ -127,7 +127,7 @@ export class WsPeerClient {
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
     if (this.pongTimer) { clearTimeout(this.pongTimer); this.pongTimer = null; }
     // Reject all pending requests
-    for (const [id, p] of this.pending) {
+    for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       p.reject(new Error("WS connection closed"));
     }

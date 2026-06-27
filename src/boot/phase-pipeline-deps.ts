@@ -25,7 +25,6 @@ import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { TaskCompleteCallback } from "../components/tasks/task-queue.js";
-import { sanitizeOutbound } from "../components/sanitize-outbound.js";
 import { getEnv } from "../components/env-schema.js";
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
@@ -253,7 +252,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 }
 
 /** Export cronCallback factory for phase-heartbeat's age-check task re-enqueue. */
-export function createCronCallback(ctx: BootCtx): TaskCompleteCallback {
+export function createCronCallback(_ctx: BootCtx): TaskCompleteCallback {
   return (_chatId, _message, _result, _dodFiles) => {
     // #857/#1020: delivery handled exclusively by kanban board (phase-heartbeat card:done handler).
   };

@@ -148,7 +148,7 @@ export class AgentApiServer {
           const config = loadPeerConfig();
           for (const [name, entry] of Object.entries(config.peers)) {
             const result = verifyJwt(token, entry.token, config.self.name);
-            if (result.status === "valid") {
+            if (result.ok) {
               this.peerWss!.handleUpgrade(req, socket, head, (ws) => {
                 this.peerWsConnections.set(name, ws);
                 logInfo(TAG, `Peer WS connected: ${name}`);
@@ -636,7 +636,7 @@ export class AgentApiServer {
       const response = await this.a2aAdapter.handlePeerMessage(caller, sessionId, lastMsg.content);
 
       const { buildChatResponse } = await import("./openai-compat-translate.js");
-      const chatResp = buildChatResponse({ content: response, model: body.model ?? "default" });
+      const chatResp = buildChatResponse({ content: response, model: (body as { model?: string }).model ?? "default" });
       const respBody = JSON.stringify(chatResp);
 
       this.pushTraffic({ ts: start, ip, endpoint: "v1/chat/completions", prompt: (lastMsg.content as string).slice(0, 200), response: response.slice(0, 200), durationMs: Date.now() - start, status: 200 });
@@ -709,7 +709,7 @@ export class AgentApiServer {
 
   /** #894 — /v1/tasks: async delegation. Returns 202 + cardId immediately. */
   private async handleV1Tasks(req: IncomingMessage, res: ServerResponse, caller: string): Promise<void> {
-    let body: { goal?: string; priority?: string; context?: string; callback_peer?: string; artifacts?: Array<{ name: string; content: string }> };
+    let body: { goal?: string; priority?: string; context?: string; callback_peer?: string; delivery_mode?: string; artifacts?: Array<{ name: string; content: string }> };
     try {
       body = JSON.parse(await readBody(req));
     } catch (err) {
@@ -732,7 +732,7 @@ export class AgentApiServer {
       goal: body.context ? `${goal}\n\nContext: ${body.context}` : goal,
       source: "peer",
       priority: body.priority ?? "MEDIUM",
-      deliveryMode: body.delivery_mode,
+      deliveryMode: body.delivery_mode as "silent" | "deliver" | "announce" | undefined,
       callbackPeer: body.callback_peer,
       sourcePeer: caller,
     });
@@ -815,7 +815,8 @@ export class AgentApiServer {
   /** #949 — GET /v1/tasks/:cardId/messages?since=: pull messages for catch-up. */
   private handleChannelPull(url: string, res: ServerResponse, cardId: number): void {
     const sinceMatch = url.match(/[?&]since=([^&]+)/);
-    const since = sinceMatch ? decodeURIComponent(sinceMatch[1]) : "1970-01-01";
+    const sinceRaw = sinceMatch?.[1];
+    const since = sinceRaw ? decodeURIComponent(sinceRaw) : "1970-01-01";
     const { channelGetSince } = require("./tasks/kanban-channel.js") as typeof import("./tasks/kanban-channel.js");
     const messages = channelGetSince(cardId, since);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ messages }));

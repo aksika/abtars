@@ -8,7 +8,6 @@ import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
-import { tryReaction } from "./reactions.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
@@ -39,7 +38,6 @@ import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, 
 import { releaseBusy } from "./pipeline/busy-guard.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
 import { buildPrompt } from "./pipeline/prompt-builder.js";
-import { sessionType } from "./spin-types.js";
 
 import { getEnv } from "./env-schema.js";
 import { sanitizeOutbound } from "./sanitize-outbound.js";

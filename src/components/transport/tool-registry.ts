@@ -14,10 +14,6 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { getMasterUserId } from "../master-user.js";
 
-function getMasterUserId(): string {
-  return getMasterUserId();
-}
-
 const TAG = "tool_registry";
 
 // #449: append-only audit log

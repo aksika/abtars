@@ -5,7 +5,7 @@ import { printBanner } from './banner.js';
  * Cold (--cold): kill process, then start fresh.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";

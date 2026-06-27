@@ -246,7 +246,7 @@ async function probeTls(): Promise<ProbeResult> {
 
 async function probeA2a(): Promise<ProbeResult> {
   const peersPath = join(configDir, "peers.json");
-  const peers = readJson(peersPath);
+  const peers = readJson(peersPath) as { gossipSecret?: string; peers?: Record<string, { token?: string }>; self?: { udpPort?: number } } | null;
   if (!peers?.self?.udpPort) return { name: "a2a", status: "skipped", detail: "no gossip port configured" };
 
   const port = peers.self.udpPort;
@@ -311,7 +311,7 @@ export async function runAllProbes(): Promise<DoctorOutput> {
 
 export async function runFixes(): Promise<FixResult[]> {
   const { chmodSync, unlinkSync, mkdirSync, existsSync: ex, readdirSync: rd, statSync: st, readFileSync: rf, writeFileSync: wf } = await import("node:fs");
-  const { execSync, spawnSync } = await import("node:child_process");
+  const { spawnSync } = await import("node:child_process");
   const fixes: FixResult[] = [];
 
   function fix(probe: string, action: string, fn: () => void): void {

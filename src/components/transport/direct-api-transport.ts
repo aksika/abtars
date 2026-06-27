@@ -419,7 +419,7 @@ export class DirectApiTransport implements IKiroTransport {
     const timeoutMs = this._timeoutOverrideMs ?? getEnv().modelApiTimeoutMs;
     this._lastActivityAt = Date.now();
     const timer = setInterval(() => {
-      if (Date.now() - this._lastActivityAt > timeoutMs) {
+      if (Date.now() - (this._lastActivityAt ?? 0) > timeoutMs) {
         clearInterval(timer);
         timeoutCtrl.abort(new Error("model API timeout"));
       }
