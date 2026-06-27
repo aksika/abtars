@@ -16,24 +16,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'pnpm'
+          cache: 'npm'
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci
 
       - name: Build
         run: node esbuild.config.js
 
       - name: Test
-        run: pnpm test -- --silent
+        run: npm test -- --silent
 
       - name: Smoke test (install + help)
         run: |

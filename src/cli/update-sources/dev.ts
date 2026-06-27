@@ -151,18 +151,11 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
       const pkgVersion = await readPackageVersion(repoRoot);
       const version = `${pkgVersion}-${commit}`;
 
-      // Install deps into the repo (if not skipped).
+      // Install deps into the repo (if not skipped). npm ci wipes node_modules
+      // and installs from package-lock.json — also clears any stale pnpm store
+      // (the .pnpm workspace: links that npm cannot parse). (#1234)
       if (opts.skipInstall !== true) {
-        const pnpmPath = (() => {
-          try { return spawnSync('which', ['pnpm'], { encoding: 'utf-8' }).stdout.trim() || 'pnpm'; } catch { return 'pnpm'; }
-        })();
-        try {
-          runCmd(pnpmPath, ['install', '--frozen-lockfile'], repoRoot);
-        } catch (err) {
-          if (err instanceof LocalBuildError && err.message.includes('ENOENT')) {
-            runCmd('npm', ['install'], repoRoot);
-          } else throw err;
-        }
+        runCmd('npm', ['ci'], repoRoot);
       }
 
       // Bundle mode (esbuild) — build directly, skip npm run bundle (it requires ../abmind)

@@ -59,7 +59,7 @@ export function syncSrcRepos(srcDir: string, names: readonly string[]): void {
 export function ensureAbmindBuilt(abmindSrcDir: string): void {
   if (existsSync(join(abmindSrcDir, "package.json")) && !existsSync(join(abmindSrcDir, "dist", "cli", "abmind.js"))) {
     try {
-      execSync("pnpm install --ignore-scripts 2>/dev/null || npm install --ignore-scripts 2>/dev/null", { cwd: abmindSrcDir, stdio: "pipe", timeout: 120_000 });
+      execSync("npm install --ignore-scripts", { cwd: abmindSrcDir, stdio: "pipe", timeout: 120_000 });
       execSync("npm run build", { cwd: abmindSrcDir, stdio: "pipe", timeout: 60_000 });
     } catch {}
   }
