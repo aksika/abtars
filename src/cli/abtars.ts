@@ -53,14 +53,14 @@ function printUsage(): void {
     `abtars — install/update CLI (#158)
 
 Usage:
-  abtars install [--force] [--mode=simple|supervised] [--restore <backup.zip>]
+  abtars install [--force] [--mode=simple|daemon] [--restore <backup.zip>]
+  abtars install --non-interactive --accept-risk [onboard flags...]
   abtars uninstall [--yes]
   abtars update  [--dev [DIR] | --alpha | --stable]
   abtars rollback [--to <version>]
   abtars backup [--config] [--encrypt] [--output <dir>] [--prune-days N]
   abtars restore <file.zip|.7z|.abm|.enc> [--config] [--passphrase <p>]
   abtars doctor [--json] [--fix]
-  abtars install [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   abtars restart [--cold]
   abtars start
   abtars stop
@@ -68,7 +68,7 @@ Usage:
   abtars logs
   abtars config
   abtars deps [list|install|remove]
-`,
+  `,
   );
 }
 
@@ -93,6 +93,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   try {
     switch (command) {
       case 'install':
+        if (flags.get('help') === true) { printUsage(); return 0; }
         return await onboard({
           nonInteractive: flags.get('non-interactive') === true,
           acceptRisk: flags.get('accept-risk') === true,

@@ -1,7 +1,7 @@
 import { printBanner } from './banner.js';
 import { deriveFromPassphrase, writeKeyFile, writeKeyVerify, deriveKey } from '../../utils/crypto.js';
 /**
- * `abtars onboard` — first-time interactive configuration wizard
+ * `abtars install` — first-time interactive configuration wizard
  * (plan #158 Phase 3, subsumes ticket #153).
  *
  * Two modes:
@@ -19,7 +19,7 @@ import { deriveFromPassphrase, writeKeyFile, writeKeyVerify, deriveKey } from '.
  *   - Channel allowlist/users.json multi-user editing (#67 / #204)
  *   - Skills configuration (each skill's .env key)
  *   - Transport provider credentials beyond DEFAULT_PROVIDER (operator
- *     edits config/.env directly post-onboard)
+ *     edits config/.env directly post-install)
  */
 
 import { logAndSwallow } from "../../components/log-and-swallow.js";
@@ -502,7 +502,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     }
     await chmod(join(paths.home, "secret"), 0o700);
     await chmod(join(paths.home, "config"), 0o700);
-    // Ensure ~/.local/bin/ exists and has our binary (symlink from pnpm bin if needed)
+    // Ensure ~/.local/bin/ exists and has our binary (symlink from global npm bin if needed)
     const { homedir } = await import("node:os");
     const localBin = join(homedir(), ".local", "bin");
     mkdirSync(localBin, { recursive: true });
@@ -510,12 +510,12 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     if (!fileExists(localAbtars)) {
       try {
         const { execSync: ex } = await import("node:child_process");
-        const pnpmBin = ex("pnpm bin -g", { encoding: "utf-8", timeout: 5000 }).trim();
-        const pnpmAbtars = join(pnpmBin, "abtars");
-        if (fileExists(pnpmAbtars)) {
-          symlinkSync(pnpmAbtars, localAbtars);
+        const globalBin = ex("npm root -g", { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "ignore"] }).trim().replace(/\/node_modules$/, "");
+        const npmAbtars = join(globalBin, "abtars");
+        if (fileExists(npmAbtars)) {
+          symlinkSync(npmAbtars, localAbtars);
         }
-      } catch { /* pnpm not available — user installed via npm, binary already in PATH */ }
+      } catch { /* npm not available — binary already in PATH */ }
     }
     const { hostname } = await import("node:os");
     const { emptyManifest, writeManifest: wm } = await import("../deploy-lib-import.js");

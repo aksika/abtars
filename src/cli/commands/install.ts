@@ -1,8 +1,8 @@
 /**
- * `abtars install [--force]` — scaffolding utilities.
+ * `abtars install [--force]` — first-time scaffolding + configuration wizard.
  *
  *   Exports writeWrapper (used by deploy.ts) and install() for legacy paths.
- *   The primary install flow is in onboard.ts (called by CLI dispatcher).
+ *   The primary install flow is in onboard.ts (called by CLI dispatcher as `abtars install`).
  */
 
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
