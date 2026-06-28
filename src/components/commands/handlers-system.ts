@@ -269,10 +269,14 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     }
     // Last sleep audit from filesystem
     try {
-      const { readdirSync } = await import("node:fs");
-      const sleepDir = join(homedir(), ".abmind", "memory", "sleep");
-      const files = readdirSync(sleepDir).filter((f: string) => f.startsWith("sleep_")).sort();
-      lines.push(`😴 Last sleep: ${files.length > 0 ? files[files.length - 1] : "(never)"}`);
+      const { readdirSync, existsSync } = await import("node:fs");
+      const { abmindHome } = await import("../../paths.js");
+      const sleepDir = join(abmindHome(), "memory", "sleep");
+      if (!existsSync(sleepDir)) { lines.push("😴 Last sleep: (never)"); }
+      else {
+        const files = readdirSync(sleepDir).filter((f: string) => f.startsWith("sleep_")).sort();
+        lines.push(`😴 Last sleep: ${files.length > 0 ? files[files.length - 1] : "(never)"}`);
+      }
     } catch { lines.push("😴 Last sleep: (unknown)"); }    const sp = ctx.sleepProgress?.();
     if (sp) {
       lines.push(`😴 Sleep: ${sp.percent}% (${sp.step})`);

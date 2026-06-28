@@ -55,12 +55,15 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
     // No bundled abmind and none installed → genuinely optional. loadAbmind()
     // already logged the precise reason; degrade quietly.
     ctx.memory = nullMemory;
+    ctx.memoryConfig.memoryEnabled = false;
+    ctx.memoryConfig.memoryDir = "";
     return "skipped";
   }
 
   if (!ctx.memoryConfig.memoryEnabled) {
     logInfo("main", "🧠 Memory disabled");
     ctx.memory = nullMemory;
+    ctx.memoryConfig.memoryDir = "";
     return "skipped";
   }
 
@@ -73,6 +76,8 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
   } catch (err) {
     logWarn("main", `⚠️ Memory init failed: ${err instanceof Error ? err.message : String(err)}. Running without persistent memory.`);
     ctx.memory = nullMemory;
+    ctx.memoryConfig.memoryEnabled = false;
+    ctx.memoryConfig.memoryDir = "";
     return "skipped";
   }
 }

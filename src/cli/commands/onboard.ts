@@ -25,7 +25,6 @@ import { deriveFromPassphrase, writeKeyFile, writeKeyVerify, deriveKey } from '.
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
 import { packagePaths, readManifest, resolveReleasesDir } from '../deploy-lib-import.js';
 import { showHintOnce } from '../../components/hints.js';
 
@@ -696,7 +695,8 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 
     // Check abmind encryption compatibility
     try {
-      const manifestPath = join(homedir(), '.abmind', 'manifest.json');
+      const { abmindHome } = await import("../../paths.js");
+      const manifestPath = join(abmindHome(), 'manifest.json');
       const manifest = JSON.parse((await import('node:fs')).readFileSync(manifestPath, 'utf-8'));
       if (manifest.encryptionUser && manifest.encryptionUser !== answers.userName) {
         process.stdout.write(`⚠️  abmind encryption uses name '${manifest.encryptionUser}' but you entered '${answers.userName}'. Backup restore will need the encryption name ('${manifest.encryptionUser}').\n`);

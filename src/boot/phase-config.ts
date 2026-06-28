@@ -20,7 +20,7 @@ import { parsePlatformFlags } from "../components/cli-flags.js";
 import { setLogLevel, logInfo } from "../components/logger.js";
 import { getEnv } from "../components/env-schema.js";
 import { loadNLMConfig } from "../components/nlm-command-handler.js";
-import { abtarsHome } from "../paths.js";
+import { abtarsHome, abmindHome } from "../paths.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
@@ -39,13 +39,12 @@ export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
   // Resolve memory provider from MEMORY env var
   const provider = getEnv().memory; // "abmind" | "none"
   const memoryEnabled = provider !== "none";
-  const abmindHome = process.env["ABMIND_HOME"] || join(homedir(), ".abmind");
-  const memoryDir = memoryEnabled ? join(abmindHome, "memory") : "";
+  const memoryDir = memoryEnabled ? join(abmindHome(), "memory") : "";
 
   ctx.memoryConfig = { memoryEnabled, memoryDir } as any;
   // startedAt set by createBootCtx; preserved here
   ctx.bridgeLockPath = join(abtarsHome(), "bridge.lock");
-  ctx.sleepAuditDir = join(memoryDir || join(homedir(), ".abmind", "memory"), "sleep");
+  ctx.sleepAuditDir = memoryDir ? join(memoryDir, "sleep") : "";
 
   // Usage tracker
   const { initUsageTracker } = await import("../components/usage-tracker.js");

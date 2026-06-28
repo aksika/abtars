@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { abtarsHome } from "../paths.js";
+import { abtarsHome, abmindHome } from "../paths.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 
 export interface SandboxPolicy {
@@ -27,7 +27,7 @@ export interface CheckResult {
 const PATH_BLACKLIST: readonly string[] = [
   resolve(abtarsHome(), "config"),
   resolve(abtarsHome(), "secret"),
-  resolve(homedir(), ".abmind"),
+  resolve(abmindHome()),
 ];
 
 const AUDIT_DIR = join(abtarsHome(), "logs");

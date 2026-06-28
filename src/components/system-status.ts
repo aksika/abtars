@@ -174,11 +174,14 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
   let soulBundle: SystemStatus["soulBundle"] = null;
   try {
     const { getEnv } = await import("./env-schema.js");
+    const { abmindHome } = await import("../paths.js");
     const memoryProvider = (getEnv() as any).memory ?? "abmind";
     if (memoryProvider === "abmind" || memoryProvider === "auto") {
-      const coreDir = join(homedir(), ".abmind", "memory", "core");
-      const available = SOUL_CORE_FILES.filter(f => existsSync(join(coreDir, f))).length;
-      soulBundle = { available, total: SOUL_CORE_FILES.length };
+      const coreDir = join(abmindHome(), "memory", "core");
+      if (existsSync(coreDir)) {
+        const available = SOUL_CORE_FILES.filter(f => existsSync(join(coreDir, f))).length;
+        soulBundle = { available, total: SOUL_CORE_FILES.length };
+      }
     }
   } catch (err) { logAndSwallow("system_status", "soul", err); }
 
