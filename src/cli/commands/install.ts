@@ -186,6 +186,12 @@ export async function install(opts: InstallOptions): Promise<number> {
   await createSkeleton(home, opts.dryRun);
   process.stdout.write(`✓ skeleton at ${home}\n`);
 
+  // Install native deps (better-sqlite3, sqlite-vec) — required for kanban
+  if (!opts.dryRun) {
+    const deps = await import('./deps.js');
+    await deps.deps(['install', 'native']);
+  }
+
   // Core templates: abmind seeds its own on first boot (#427 ensureInitialized).
   // No longer seeded by abtars install.
 

@@ -55,9 +55,5 @@
     "CHANGELOG.md",
     "install-manifest.json",
     "config/"
-  ],
-  "optionalDependencies": {
-    "better-sqlite3": "^12.10.0",
-    "cloakbrowser": "^0.4.3"
-  }
+  ]
 }

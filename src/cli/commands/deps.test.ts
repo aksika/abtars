@@ -42,11 +42,13 @@ describe("abtars deps", () => {
     write.mockRestore();
   });
 
-  it("install with no args shows usage", async () => {
+  it("install with no args defaults to native group", async () => {
     const { deps } = await import("./deps.js");
-    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const code = await deps(["install"]);
-    expect(code).toBe(1);
+    expect(code).toBe(0);
+    const output = write.mock.calls.map(c => c[0]).join("");
+    expect(output).toContain("native");
     write.mockRestore();
   });
 

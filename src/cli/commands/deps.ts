@@ -33,16 +33,14 @@ function list(): number {
     process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label} (${dep.packages.join(", ")})\n`);
   }
 
-  process.stdout.write(`\nInstall: abtars deps install <name|all>  (fresh, always reinstall)\nUpdate:  abtars deps update [name|all]   (skip if present)\nRemove:  abtars deps remove <name>\n`);
+  process.stdout.write(`\nInstall: abtars deps install [name|all]  (default: native)\nUpdate:  abtars deps update [name|all]   (skip if present)\nRemove:  abtars deps remove <name>\n`);
   return 0;
 }
 
 function install(names: string[]): number {
-  if (names.length === 0) {
-    process.stderr.write("Usage: abtars deps install <name|all>\nRun 'abtars deps list' to see available.\n");
-    return 1;
-  }
-  const targets = names.includes("all") ? Object.keys(OPTIONAL_DEPS) : names;
+  const targets = names.length === 0 ? ["native"] : names.includes("all")
+    ? Object.keys(OPTIONAL_DEPS)
+    : names;
   for (const name of targets) {
     const dep = OPTIONAL_DEPS[name];
     if (!dep) {

@@ -5,6 +5,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -170,8 +171,12 @@ async function probeSpin(): Promise<ProbeResult> {
 async function probeKanban(): Promise<ProbeResult> {
   const dbPath = join(home, "kanban", "kanban.db");
   if (!existsSync(dbPath)) return { name: "kanban", status: "skipped", detail: "kanban.db not found" };
+  const sharedNm = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
+  if (!existsSync(sharedNm)) return { name: "kanban", status: "skipped", detail: "better-sqlite3 not installed (run: abtars deps install)" };
   try {
-    const Db = require("better-sqlite3");
+    const { createRequire } = await import("node:module");
+    const _require = createRequire(import.meta.url);
+    const Db = _require(sharedNm);
     const db = new Db(dbPath, { readonly: true });
     const row = db.prepare("SELECT COUNT(*) as cnt FROM cards").get() as { cnt: number };
     const stuck = db.prepare("SELECT COUNT(*) as cnt FROM cards WHERE status='running' AND updated_at < datetime('now', '-10 minutes')").get() as { cnt: number };

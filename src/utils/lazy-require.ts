@@ -1,13 +1,16 @@
 /**
  * lazy-require.ts — Install optional deps on first use.
- * Installs into ~/.abtars-releases/deps/node_modules/. Falls back gracefully.
+ * Installs into ~/.local/lib/node_modules/. Falls back gracefully.
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { createRequire } from "node:module";
 import { logInfo, logWarn } from "../components/logger.js";
 
 const TAG = "deps";
+
+const _require = createRequire(import.meta.url);
 
 export interface OptionalDep {
   readonly packages: readonly string[];
@@ -16,11 +19,12 @@ export interface OptionalDep {
 }
 
 export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
+  native:  { packages: ["better-sqlite3", "sqlite-vec"], label: "SQLite native deps (kanban + memory)" },
   browser: { packages: ["cloakbrowser"], label: "CloakBrowser (stealth Chromium)" },
   twitter: { packages: ["rettiwt-api"], label: "Twitter/X integration" },
-  pdf: { packages: ["pdf-parse"], label: "PDF reading" },
+  pdf:     { packages: ["pdf-parse"], label: "PDF reading" },
   youtube: { packages: ["youtube-transcript"], label: "YouTube transcripts" },
-  image: { packages: ["jimp"], label: "Image processing" },
+  image:   { packages: ["jimp"], label: "Image processing" },
 };
 
 export interface SystemDep {
@@ -59,13 +63,13 @@ export function installPackages(packages: readonly string[]): void {
 }
 
 /**
- * Lazy import — tries normal import, falls back to ~/.abtars/lib/, auto-installs if missing.
+ * Lazy import — tries normal import, falls back to ~/.local/lib/node_modules/, auto-installs if missing.
  */
 export async function lazyRequire<T = any>(pkg: string, label?: string): Promise<T> {
   // Try normal resolution first (globally installed or in bundle)
   try { return await import(pkg); } catch { /* not found normally */ }
 
-  // Try from ~/.abtars/lib/
+  // Try from ~/.local/lib/node_modules/
   const libNm = libNodeModules();
   const pkgPath = join(libNm, pkg);
   if (existsSync(pkgPath)) {
@@ -81,4 +85,14 @@ export async function lazyRequire<T = any>(pkg: string, label?: string): Promise
     logWarn(TAG, `Failed to install ${pkg}: ${err instanceof Error ? err.message : String(err)}`);
     throw new Error(`Optional dependency "${pkg}" not available. Install with: abtars deps install ${label ?? pkg}`);
   }
+}
+
+/**
+ * Resolve a native dep from ~/.local/lib/node_modules/ first, then normal resolution.
+ * Uses createRequire for ESM compatibility.
+ */
+export function resolveNativeDep(pkg: string): any {
+  const sharedPath = join(homedir(), ".local", "lib", "node_modules", pkg);
+  if (existsSync(sharedPath)) return _require(sharedPath);
+  return _require(pkg);
 }

@@ -8,8 +8,10 @@
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
+import { resolveNativeDep } from "../../utils/lazy-require.js";
+import { logWarn } from "../logger.js";
 
-// better-sqlite3 is external (native module, available at runtime via abmind)
+// better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
 type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void };
 
 export interface KanbanCard {
@@ -43,26 +45,15 @@ export interface KanbanCard {
 }
 
 let _db: SqliteDb | null = null;
+let _dbAttempted = false;
 
-function db(): SqliteDb {
-  if (!_db) {
-    const dir = join(abtarsHome(), "kanban");
-    mkdirSync(dir, { recursive: true });
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    let Database: any;
-    try {
-      Database = require("better-sqlite3");
-    } catch {
-      // Self-heal: attempt native rebuild (#1185)
-      try {
-        const { execSync } = require("node:child_process");
-        const modPath = require.resolve("better-sqlite3/package.json").replace("/package.json", "");
-        execSync("npx --yes node-gyp rebuild", { cwd: modPath, timeout: 60_000, stdio: "pipe" });
-        Database = require("better-sqlite3");
-      } catch (e) {
-        throw new Error(`better-sqlite3 not available and rebuild failed: ${e instanceof Error ? e.message : e}`);
-      }
-    }
+function db(): SqliteDb | null {
+  if (_dbAttempted) return _db;
+  _dbAttempted = true;
+  const dir = join(abtarsHome(), "kanban");
+  mkdirSync(dir, { recursive: true });
+  try {
+    const Database = resolveNativeDep("better-sqlite3");
     _db = new Database(join(dir, "kanban.db")) as SqliteDb;
     _db.pragma("journal_mode = WAL");
     _db.exec(`CREATE TABLE IF NOT EXISTS kanban_board (
@@ -98,15 +89,25 @@ function db(): SqliteDb {
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN source_peer TEXT`); } catch {}
+  } catch {
+    logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
+    _db = null;
   }
   return _db;
 }
 
 import { nerve } from "../nerve.js";
 
+/** Return db or null (with warning logged once). */
+function dbOrNull(): SqliteDb | null {
+  return db();
+}
+
 export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; blocked_by?: string; chatId?: string; sourcePeer?: string }): number {
+  const d = dbOrNull();
+  if (!d) return 0;
   const deliveryMode = opts?.deliveryMode ?? "deliver";
-  const stmt = db().prepare(
+  const stmt = d.prepare(
     `INSERT INTO kanban_board (title, source, source_id, priority, type, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
@@ -117,19 +118,25 @@ export function kanbanEnqueue(title: string, source: string, sourceId?: string, 
 }
 
 export function kanbanRunning(id: number): void {
-  db().prepare(`UPDATE kanban_board SET status = 'running', updated_at = datetime('now') WHERE id = ?`).run(id);
+  const d = dbOrNull();
+  if (!d) return;
+  d.prepare(`UPDATE kanban_board SET status = 'running', updated_at = datetime('now') WHERE id = ?`).run(id);
   nerve.fire("card:running", id);
 }
 
 export function kanbanComplete(id: number, resultPath: string | null, summary: string): void {
-  db().prepare(
+  const d = dbOrNull();
+  if (!d) return;
+  d.prepare(
     `UPDATE kanban_board SET status = 'done', result_path = ?, result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(resultPath, summary.slice(0, 4000), id);
   nerve.fire("card:done", id);
 }
 
 export function kanbanFail(id: number, error: string): void {
-  db().prepare(
+  const d = dbOrNull();
+  if (!d) return;
+  d.prepare(
     `UPDATE kanban_board SET status = 'failed', error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(error.slice(0, 1000), id);
   nerve.fire("card:failed", id);
@@ -139,7 +146,9 @@ const MAX_RETRIES = 3;
 
 /** Fail with retry logic — exponential backoff (10s→20s→40s, cap 5min). After MAX_RETRIES → permanent fail. */
 export function kanbanRetryOrFail(id: number, error: string): "retrying" | "failed" {
-  const card = db().prepare("SELECT retry_count FROM kanban_board WHERE id = ?").get(id) as { retry_count: number } | undefined;
+  const d = dbOrNull();
+  if (!d) return "failed";
+  const card = d.prepare("SELECT retry_count FROM kanban_board WHERE id = ?").get(id) as { retry_count: number } | undefined;
   const retryCount = (card?.retry_count ?? 0) + 1;
   if (retryCount > MAX_RETRIES) {
     kanbanFail(id, `${error} (after ${MAX_RETRIES} retries)`);
@@ -147,7 +156,7 @@ export function kanbanRetryOrFail(id: number, error: string): "retrying" | "fail
   }
   const backoffMs = Math.min(10_000 * Math.pow(2, retryCount - 1), 300_000);
   const nextRetryAt = new Date(Date.now() + backoffMs).toISOString();
-  db().prepare(
+  d.prepare(
     `UPDATE kanban_board SET status = 'queued', retry_count = ?, next_retry_at = ?, error = ?, updated_at = datetime('now') WHERE id = ?`
   ).run(retryCount, nextRetryAt, error.slice(0, 1000), id);
   nerve.fire("card:queued", id);
@@ -155,83 +164,101 @@ export function kanbanRetryOrFail(id: number, error: string): "retrying" | "fail
 }
 
 export function kanbanPending(): KanbanCard[] {
-  return db().prepare(
+  const d = dbOrNull();
+  if (!d) return [];
+  return d.prepare(
     `SELECT * FROM kanban_board WHERE status = 'done' AND delivery_attempts < 3 ORDER BY priority = 'CRITICAL' DESC, priority = 'HIGH' DESC, created_at ASC`
   ).all() as KanbanCard[];
 }
 
 export function kanbanSetDelivering(id: number): void {
-  db().prepare(`UPDATE kanban_board SET status = 'delivering', updated_at = datetime('now') WHERE id = ?`).run(id);
+  const d = dbOrNull();
+  if (!d) return;
+  d.prepare(`UPDATE kanban_board SET status = 'delivering', updated_at = datetime('now') WHERE id = ?`).run(id);
 }
 
 export function kanbanMarkDelivered(id: number): void {
-  db().prepare(
+  const d = dbOrNull();
+  if (!d) return;
+  d.prepare(
     `UPDATE kanban_board SET status = 'delivered', delivered_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(id);
   nerve.fire("card:delivered", id);
 }
 
 export function kanbanDeliveryFailed(id: number): void {
-  const card = db().prepare(`SELECT delivery_attempts FROM kanban_board WHERE id = ?`).get(id) as { delivery_attempts: number } | undefined;
+  const d = dbOrNull();
+  if (!d) return;
+  const card = d.prepare(`SELECT delivery_attempts FROM kanban_board WHERE id = ?`).get(id) as { delivery_attempts: number } | undefined;
   const attempts = (card?.delivery_attempts ?? 0) + 1;
   if (attempts >= 3) {
-    db().prepare(`UPDATE kanban_board SET status = 'failed', error = 'delivery failed after 3 attempts', delivery_attempts = ?, updated_at = datetime('now') WHERE id = ?`).run(attempts, id);
+    d.prepare(`UPDATE kanban_board SET status = 'failed', error = 'delivery failed after 3 attempts', delivery_attempts = ?, updated_at = datetime('now') WHERE id = ?`).run(attempts, id);
   } else {
-    db().prepare(`UPDATE kanban_board SET status = 'done', delivery_attempts = ?, updated_at = datetime('now') WHERE id = ?`).run(attempts, id);
+    d.prepare(`UPDATE kanban_board SET status = 'done', delivery_attempts = ?, updated_at = datetime('now') WHERE id = ?`).run(attempts, id);
   }
 }
 
 export function kanbanList(filter?: string, filterKey?: string): KanbanCard[] {
+  const d = dbOrNull();
+  if (!d) return [];
   if (filter === "*") {
-    return db().prepare(`SELECT * FROM kanban_board ORDER BY created_at DESC LIMIT 50`).all() as KanbanCard[];
+    return d.prepare(`SELECT * FROM kanban_board ORDER BY created_at DESC LIMIT 50`).all() as KanbanCard[];
   }
   if (filter && filterKey) {
     if (filterKey === "labels") {
-      // LIKE match for comma-separated labels
-      return db().prepare(`SELECT * FROM kanban_board WHERE labels LIKE ? ORDER BY created_at DESC LIMIT 50`).all(`%${filter}%`) as KanbanCard[];
+      return d.prepare(`SELECT * FROM kanban_board WHERE labels LIKE ? ORDER BY created_at DESC LIMIT 50`).all(`%${filter}%`) as KanbanCard[];
     }
     const allowed = new Set(["status", "source", "priority", "type"]);
     if (allowed.has(filterKey)) {
-      return db().prepare(`SELECT * FROM kanban_board WHERE ${filterKey} = ? ORDER BY created_at DESC LIMIT 50`).all(filter) as KanbanCard[];
+      return d.prepare(`SELECT * FROM kanban_board WHERE ${filterKey} = ? ORDER BY created_at DESC LIMIT 50`).all(filter) as KanbanCard[];
     }
   }
   if (filter) {
-    // Bare word = status filter
-    return db().prepare(`SELECT * FROM kanban_board WHERE status = ? ORDER BY created_at DESC LIMIT 50`).all(filter) as KanbanCard[];
+    return d.prepare(`SELECT * FROM kanban_board WHERE status = ? ORDER BY created_at DESC LIMIT 50`).all(filter) as KanbanCard[];
   }
-  return db().prepare(`SELECT * FROM kanban_board WHERE status NOT IN ('delivered') ORDER BY status = 'running' DESC, priority = 'CRITICAL' DESC, created_at DESC LIMIT 50`).all() as KanbanCard[];
+  return d.prepare(`SELECT * FROM kanban_board WHERE status NOT IN ('delivered') ORDER BY status = 'running' DESC, priority = 'CRITICAL' DESC, created_at DESC LIMIT 50`).all() as KanbanCard[];
 }
 
 export function kanbanUpdate(id: number, fields: Partial<Pick<KanbanCard, "title" | "status" | "priority" | "type" | "labels" | "due_at" | "notes" | "parent_id" | "approval">>): void {
+  const d = dbOrNull();
+  if (!d) return;
   const sets: string[] = ["updated_at = datetime('now')"];
   const vals: unknown[] = [];
   for (const [k, v] of Object.entries(fields)) {
     if (v !== undefined) { sets.push(`${k} = ?`); vals.push(v); }
   }
   vals.push(id);
-  db().prepare(`UPDATE kanban_board SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+  d.prepare(`UPDATE kanban_board SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
 }
 
 export function kanbanCleanup(olderThanDays = 7): number {
-  const result = db().prepare(
+  const d = dbOrNull();
+  if (!d) return 0;
+  const result = d.prepare(
     `DELETE FROM kanban_board WHERE status = 'delivered' AND delivered_at < datetime('now', '-' || ? || ' days')`
   ).run(olderThanDays);
   return result.changes;
 }
 
 export function kanbanGetCard(id: number): KanbanCard | undefined {
-  return db().prepare(`SELECT * FROM kanban_board WHERE id = ?`).get(id) as KanbanCard | undefined;
+  const d = dbOrNull();
+  if (!d) return undefined;
+  return d.prepare(`SELECT * FROM kanban_board WHERE id = ?`).get(id) as KanbanCard | undefined;
 }
 
 export function kanbanGetChildren(parentId: number): KanbanCard[] {
-  return db().prepare(`SELECT * FROM kanban_board WHERE parent_id = ? ORDER BY id`).all(parentId) as KanbanCard[];
+  const d = dbOrNull();
+  if (!d) return [];
+  return d.prepare(`SELECT * FROM kanban_board WHERE parent_id = ? ORDER BY id`).all(parentId) as KanbanCard[];
 }
 
 export function kanbanAddTokens(id: number, tokens: number): void {
-  db().prepare(`UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now') WHERE id = ?`).run(tokens, id);
+  const d = dbOrNull();
+  if (!d) return;
+  d.prepare(`UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now') WHERE id = ?`).run(tokens, id);
   const card = kanbanGetCard(id);
   if (card?.parent_id) {
-    db().prepare(`UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now') WHERE id = ?`).run(tokens, card.parent_id);
+    d.prepare(`UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now') WHERE id = ?`).run(tokens, card.parent_id);
   }
 }
 
@@ -246,7 +273,8 @@ export function kanbanProgress(id: number, data: { toolUseCount?: number; tokenC
     _progressTimers.delete(id);
     const pending = _progressPending.get(id);
     if (pending) {
-      db().prepare(`UPDATE kanban_board SET progress = ?, updated_at = datetime('now') WHERE id = ?`).run(JSON.stringify(pending), id);
+      const d = dbOrNull();
+      if (d) d.prepare(`UPDATE kanban_board SET progress = ?, updated_at = datetime('now') WHERE id = ?`).run(JSON.stringify(pending), id);
       _progressPending.delete(id);
     }
   }, 30_000));

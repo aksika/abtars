@@ -35,12 +35,16 @@ function checkEmbeddingModel(): HealthItem {
 }
 
 function checkSqliteVec(home: string): HealthItem {
+  const sharedNm = join(homedir(), ".local", "lib", "node_modules", "sqlite-vec");
+  if (existsSync(sharedNm)) {
+    return { ok: true, label: "sqlite-vec (vector search)" };
+  }
   const abmindLib = join(process.env["ABMIND_HOME"] ?? join(homedir(), ".abmind"), "lib", "node_modules", "sqlite-vec");
   const bundleNm = join(home, "current", "node_modules", "sqlite-vec");
   if (existsSync(abmindLib) || existsSync(bundleNm)) {
     return { ok: true, label: "sqlite-vec (vector search)" };
   }
-  return { ok: false, label: "sqlite-vec (falling back to brute-force search)", hint: "Run: abmind install or cd ~/.abmind/lib && npm install sqlite-vec" };
+  return { ok: false, label: "sqlite-vec (falling back to brute-force search)", hint: "Run: abtars deps install" };
 }
 
 export function printHealthSummary(home: string): void {
