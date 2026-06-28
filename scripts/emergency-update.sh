@@ -30,13 +30,14 @@ jget() { node -e 'const fs=require("fs");try{const v=JSON.parse(fs.readFileSync(
 [ -d "$SRC_DIR/.git" ] || die "abtars source not found at $SRC_DIR"
 
 # ── 1. Sync source ─────────────────────────────────────────────────────────
-step "fetching latest dev..."
-git -C "$SRC_DIR" fetch --depth 1 origin dev
-git -C "$SRC_DIR" reset --hard origin/dev
-if [ -d "$ABMIND_DIR/.git" ]; then
-  git -C "$ABMIND_DIR" fetch --depth 1 origin dev
-  git -C "$ABMIND_DIR" reset --hard origin/dev
-fi
+step "bypassing dev branch fetch/reset..."
+# git -C "$SRC_DIR" fetch --depth 1 origin dev
+# git -C "$SRC_DIR" reset --hard origin/dev
+# if [ -d "$ABMIND_DIR/.git" ]; then
+#   git -C "$ABMIND_DIR" fetch --depth 1 origin dev
+#   git -C "$ABMIND_DIR" reset --hard origin/dev
+# fi
+
 
 COMMIT="$(git -C "$SRC_DIR" rev-parse --short HEAD)"
 PKG_VERSION="$(node -p "require('$SRC_DIR/package.json').version")"
