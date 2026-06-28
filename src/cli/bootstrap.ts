@@ -8,13 +8,14 @@
  * safe-abort (the running release keeps serving).
  *
  * Keep this minimal: reuse the existing obtain primitives (syncSrcRepos +
- * UpdateSource.prepare + copyAbmind). No imports from components/*, no business
- * logic, no activation logic.
+ * UpdateSource.prepare). No imports from components/*, no business logic, no
+ * activation logic. #1243: abmind is no longer obtained here — it ships
+ * separately and is discovered at runtime.
  */
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { cleanStaleStaging, packagePaths } from "./deploy-lib/index.js";
-import { syncSrcRepos, ensureAbmindBuilt, copyAbmind } from "./deploy-lib/deploy.js";
+import { syncSrcRepos } from "./deploy-lib/deploy.js";
 import { makeLocalBuildSource } from "./update-sources/dev.js";
 import { makeNpmSource } from "./update-sources/npm.js";
 import type { SourceName, StagedRelease } from "./update-sources/types.js";
@@ -33,8 +34,7 @@ export async function bootstrap(opts: BootstrapOptions): Promise<number> {
   cleanStaleStaging(paths.appStaging);
   let staged: StagedRelease;
   if (channel === "dev") {
-    try { syncSrcRepos(srcDir, ["abtars", "abmind"]); } catch { return 1; }
-    ensureAbmindBuilt(join(srcDir, "abmind"));
+    try { syncSrcRepos(srcDir, ["abtars"]); } catch { return 1; }
     const source = makeLocalBuildSource({ repoRoot, allowStale: true });
     staged = await source.prepare({ stagingDir: paths.appStaging, home: paths.home, allowStale: true });
   } else {
@@ -42,10 +42,6 @@ export async function bootstrap(opts: BootstrapOptions): Promise<number> {
     staged = await source.prepare({ stagingDir: paths.appStaging, home: paths.home, allowStale: true });
   }
   process.stdout.write(`✓ obtained ${staged.version}\n`);
-
-  // abmind seam: acquire into the staged release here (dev: from the synced
-  // src/abmind; alpha/stable: registry tarball). __deploy never touches abmind.
-  await copyAbmind(staged.stagedPath, repoRoot);
 
   // ── Hand off to FRESH __deploy (runs the just-staged bundle) ───────
   // Detach (when needed) is the caller's concern: the /update bridge handler

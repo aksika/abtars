@@ -10,6 +10,11 @@
  *
  * Owns no module-level singletons (setMemoryLogger is a setter on abmind's
  * internal logger, not an abtars singleton).
+ *
+ * #1243: abmind is discovered at runtime from the GLOBAL install, not bundled
+ * in the release. A legacy release may still carry a bundled abmind — its
+ * presence without a resolvable global abmind means a half-migrated host that
+ * would SILENTLY lose memory; we refuse to degrade silently in that case.
  */
 
 import { logDebug, logInfo, logWarn, logError } from "../components/logger.js";
@@ -21,22 +26,34 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
-  // #864: Detect duplicate abmind — dual instances cause silent DB corruption
   const home = process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars");
-  const abmindPaths = [
-    join(home, "app", "node_modules", "abmind", "package.json"),
+
+  // Legacy bundled-abmind paths (pre-#1243). Under #1243 these should not exist
+  // in a fresh release; their presence signals a migrating host.
+  const legacyAbmindPkgs = [
     join(home, "app", "bundle", "node_modules", "abmind", "package.json"),
-  ];
-  const existing = abmindPaths.filter(p => existsSync(p));
-  if (existing.length > 1) {
-    logError("boot", `FATAL: duplicate abmind at ${existing.map(p => p.replace("/package.json", "")).join(" + ")}. Delete one to prevent dual DB connections. Refusing to start.`);
-    process.exit(1);
-  }
+    join(home, "app", "node_modules", "abmind", "package.json"),
+  ].filter(p => existsSync(p));
 
   const mod = await loadAbmind();
 
+  // #864 (preserved): two bundled abminds → dual DB connections → silent corruption.
+  if (legacyAbmindPkgs.length > 1) {
+    logError("boot", `FATAL: duplicate bundled abmind at ${legacyAbmindPkgs.map(p => p.replace("/package.json", "")).join(" + ")}. Delete one to prevent dual DB connections. Refusing to start.`);
+    process.exit(1);
+  }
+
+  // #1243 migration guard: a legacy bundled abmind is present but no global
+  // abmind resolves. Don't silently fall back to nullMemory — that hides a lost
+  // subsystem. Demand the global install first.
+  if (legacyAbmindPkgs.length === 1 && !mod) {
+    logError("boot", `FATAL: legacy bundled abmind at ${legacyAbmindPkgs[0]!.replace("/package.json", "")} but no global abmind is resolvable. #1243 ships abmind separately — install it first: npm install -g abmind@latest. Refusing to start without memory.`);
+    process.exit(1);
+  }
+
   if (!mod) {
-    logWarn("main", "⚠️ abmind not available — running without persistent memory");
+    // No bundled abmind and none installed → genuinely optional. loadAbmind()
+    // already logged the precise reason; degrade quietly.
     ctx.memory = nullMemory;
     return "skipped";
   }

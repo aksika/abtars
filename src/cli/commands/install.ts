@@ -85,18 +85,18 @@ export async function writeWrapper(binDir: string, name: string, currentLink: st
 
   if (name === 'abmind') {
     content = `#!/usr/bin/env bash
-${pathPreamble}# Resolve abmind CLI — no ~/.abmind/current dependency (#863)
-BUNDLE_CLI="$HOME/.abtars/app/node_modules/abmind/dist/cli/abmind.js"
-SRC_CLI="$HOME/.abtars-releases/src/abmind/dist/cli/abmind.js"
+${pathPreamble}# Resolve abmind CLI — global install is canonical under #1243 (no longer bundled in the release)
+LOCAL_CLI="$HOME/.local/lib/node_modules/abmind/dist/cli/abmind.js"
 GLOBAL_CLI="$(npm root -g 2>/dev/null)/abmind/dist/cli/abmind.js"
-if [ -f "$BUNDLE_CLI" ]; then
-  exec node "$BUNDLE_CLI" "$@"
-elif [ -f "$SRC_CLI" ]; then
-  exec node "$SRC_CLI" "$@"
+SRC_CLI="$HOME/.abtars-releases/src/abmind/dist/cli/abmind.js"
+if [ -f "$LOCAL_CLI" ]; then
+  exec node "$LOCAL_CLI" "$@"
 elif [ -f "$GLOBAL_CLI" ]; then
   exec node "$GLOBAL_CLI" "$@"
+elif [ -f "$SRC_CLI" ]; then
+  exec node "$SRC_CLI" "$@"
 else
-  echo "abmind: not found. Install via npm or deploy via abtars update." >&2
+  echo "abmind: not found. Install via: npm install -g abmind" >&2
   exit 1
 fi
 `;

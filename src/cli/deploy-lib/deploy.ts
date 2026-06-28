@@ -6,9 +6,9 @@
  */
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, mkdirSync, copyFileSync, unlinkSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, mkdirSync, copyFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { execSync, spawnSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import { acquireLock, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
 import { makeLocalBuildSource } from "../update-sources/dev.js";
 import { makeNpmSource } from "../update-sources/npm.js";
@@ -52,18 +52,8 @@ export function syncSrcRepos(srcDir: string, names: readonly string[]): void {
   }
 }
 
-/**
- * Ensure abmind src is built (needs deps for tsc). Obtain step.
- * NOTE: pnpm fallback retained until WS-A (#1234); abmind path unification is #1238.
- */
-export function ensureAbmindBuilt(abmindSrcDir: string): void {
-  if (existsSync(join(abmindSrcDir, "package.json")) && !existsSync(join(abmindSrcDir, "dist", "cli", "abmind.js"))) {
-    try {
-      execSync("npm install --ignore-scripts", { cwd: abmindSrcDir, stdio: "pipe", timeout: 120_000 });
-      execSync("npm run build", { cwd: abmindSrcDir, stdio: "pipe", timeout: 60_000 });
-    } catch {}
-  }
-}
+// abmind is no longer built or bundled by abtars (#1243) — it ships as a
+// separate global package, discovered at runtime via import("abmind").
 
 /**
  * Monolithic deploy: obtain (sync + prepare + abmind) then activate.
@@ -76,8 +66,7 @@ export async function deploy(opts: DeployOptions): Promise<number> {
 
   if (!opts.localDir) {
     const srcDir = join(paths.releasesDir, "src");
-    try { syncSrcRepos(srcDir, ["abtars", "abmind"]); } catch { return 1; }
-    ensureAbmindBuilt(join(srcDir, "abmind"));
+    try { syncSrcRepos(srcDir, ["abtars"]); } catch { return 1; }
   }
 
   const repoRoot = opts.localDir ?? join(paths.releasesDir, "src", "abtars");
@@ -100,8 +89,6 @@ export async function deploy(opts: DeployOptions): Promise<number> {
 
     const staged = await source.prepare({ stagingDir: paths.appStaging, home: paths.home, allowStale: !!opts.skipFreshness });
     process.stdout.write(`✓ staged ${staged.version}\n`);
-
-    await copyAbmind(staged.stagedPath, repoRoot);
 
     return await deployActivation({ staged, channel: opts.source, repoRoot });
   } finally {
@@ -386,40 +373,6 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
   process.stdout.write(`✓ skills + prompts synced\n`);
 }
 
-// ── Copy abmind ─────────────────────────────────────────────────────────────
-export async function copyAbmind(stagingDir: string, repoRoot: string): Promise<void> {
-  const abmindSrc = join(repoRoot, "..", "abmind");
-  if (existsSync(join(abmindSrc, "package.json"))) {
-    // Dev mode: build from sibling git repo
-    try {
-      execSync("npm run build", { cwd: abmindSrc, stdio: "pipe", timeout: 60_000 });
-    } catch {}
-    if (!existsSync(join(abmindSrc, "dist", "cli", "abmind.js"))) {
-      process.stdout.write(`⚠ abmind build failed (no dist output)\n`);
-      return;
-    }
-    process.stdout.write(`✓ abmind rebuilt\n`);
-    const dest = join(stagingDir, "node_modules", "abmind");
-    cpSync(abmindSrc, dest, { recursive: true, filter: (src) => !src.includes("node_modules") && !src.includes(".git") });
-    try { chmodSync(join(dest, "dist/cli/abmind.js"), 0o755); } catch {}
-    process.stdout.write(`✓ abmind copied\n`);
-    return;
-  }
-
-  // Registry mode (#1176): fetch abmind tarball directly
-  try {
-    const { resolveVersion, downloadTarball } = await import("../update-sources/registry-client.js");
-    const tag = process.env["ABMIND_TAG"] ?? "alpha";
-    const { version, tarballUrl } = await resolveVersion("abmind", tag);
-    const dest = join(stagingDir, "node_modules", "abmind");
-    const tgzPath = join(stagingDir, `abmind-${version}.tgz`);
-    await downloadTarball(tarballUrl, tgzPath);
-    mkdirSync(dest, { recursive: true });
-    spawnSync("tar", ["-xzf", tgzPath, "--strip-components=1", "-C", dest], { stdio: "pipe" });
-    if (existsSync(tgzPath)) unlinkSync(tgzPath);
-    try { chmodSync(join(dest, "dist/cli/abmind.js"), 0o755); } catch {}
-    process.stdout.write(`✓ abmind ${version} (registry)\n`);
-  } catch (err) {
-    process.stdout.write(`⚠ abmind fetch skipped: ${err instanceof Error ? err.message : String(err)}\n`);
-  }
-}
+// abmind is no longer copied into the release (#1243) — it is discovered at
+// runtime from the global install. The legacy two-mode copy (sibling-repo
+// rebuild + registry tarball) lived here.
