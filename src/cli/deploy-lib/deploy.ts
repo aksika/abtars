@@ -154,6 +154,10 @@ export async function deployActivationCli(flags: ReadonlyMap<string, string | bo
  *
  * The stop/respawn sequence (Step 7/8) is FROZEN (abtars.md watchdog) — moved
  * verbatim from the previous monolithic deploy().
+ *
+ * BASH MIRROR: scripts/emergency-update.sh reimplements this activation in pure
+ * shell as the zero-dependency last resort (no deployed binary needed). If this
+ * stop/respawn sequence or the release path layout changes, update it too.
  */
 async function deployActivation(args: { staged: StagedRelease; channel: SourceName; repoRoot: string }): Promise<number> {
   const { staged, channel, repoRoot } = args;
