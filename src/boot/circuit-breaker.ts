@@ -6,14 +6,14 @@
  */
 
 import { readFileSync, existsSync, writeFileSync, unlinkSync, symlinkSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { join } from "node:path";
+import { resolveAbtarsHome, resolveReleasesDir } from "../cli/deploy-lib/paths.js";
 
 const MAX_DEATHS = 4;
 
 export function checkCircuitBreaker(): void {
-  const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
-  const releasesDir = resolve(homedir(), ".abtars-releases");
+  const home = resolveAbtarsHome();
+  const releasesDir = resolveReleasesDir();
   const stateFile = join(home, "deploy.state");
   const historyFile = join(releasesDir, "history.json");
   const currentLink = join(releasesDir, "current");

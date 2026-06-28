@@ -16,6 +16,7 @@ import { spawnSync } from "node:child_process";
 import { createDecipheriv, hkdfSync } from "node:crypto";
 import { reconcile } from "../deploy-lib/reconcile.js";
 import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
+import { resolveReleasesDir } from "../deploy-lib/paths.js";
 
 export interface RestoreOpts {
   config?: boolean;
@@ -171,7 +172,7 @@ function extractZip(archivePath: string, destDir: string): number {
   }
 
   // Reconcile runtime tree (skills/core, prompts, config seeds)
-  const templatesSrc = join(homedir(), ".abtars-releases", "src", "abtars", "templates");
+  const templatesSrc = join(resolveReleasesDir(), "src", "abtars", "templates");
   reconcile(templatesSrc, destDir);
 
   process.stdout.write(`✓ Restored to ${destDir}\n`);

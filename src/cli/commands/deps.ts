@@ -10,9 +10,10 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
+import { resolveReleasesDir } from "../deploy-lib/paths.js";
 
-function libNmDir(): string {
-  return join(homedir(), ".local", "lib", "node_modules");
+function resolveNmDir(): string {
+  return process.env['ABTARS_NM'] ?? join(homedir(), '.local', 'lib', 'node_modules');
 }
 
 function list(): number {
@@ -49,7 +50,7 @@ function install(names: string[]): number {
       return 1;
     }
     // Always remove + reinstall
-    const nm = libNmDir();
+    const nm = resolveNmDir();
     for (const pkg of dep.packages) {
       const p = join(nm, pkg);
       if (existsSync(p)) rmSync(p, { recursive: true, force: true });
@@ -59,7 +60,7 @@ function install(names: string[]): number {
       installPackages(dep.packages);
       if (dep.postInstall) {
         process.stdout.write(`  post-install: ${dep.postInstall}\n`);
-        spawnSync("npx", ["--prefix", join(homedir(), ".abtars-releases", "deps"), ...dep.postInstall.split(" ")], { stdio: "inherit" });
+        spawnSync("npx", ["--prefix", join(resolveReleasesDir(), "deps"), ...dep.postInstall.split(" ")], { stdio: "inherit" });
       }
       process.stdout.write(`✓ ${name} installed\n`);
     } catch (err) {
@@ -88,7 +89,7 @@ function update(names: string[]): number {
       installPackages(dep.packages);
       if (dep.postInstall) {
         process.stdout.write(`  post-install: ${dep.postInstall}\n`);
-        spawnSync("npx", ["--prefix", join(homedir(), ".abtars-releases", "deps"), ...dep.postInstall.split(" ")], { stdio: "inherit" });
+        spawnSync("npx", ["--prefix", join(resolveReleasesDir(), "deps"), ...dep.postInstall.split(" ")], { stdio: "inherit" });
       }
       process.stdout.write(`✓ ${name} installed\n`);
     } catch (err) {
@@ -105,7 +106,7 @@ function remove(names: string[]): number {
     process.stderr.write("Usage: abtars deps remove <name>\n");
     return 1;
   }
-  const nm = libNmDir();
+  const nm = resolveNmDir();
   for (const name of names) {
     const dep = OPTIONAL_DEPS[name];
     if (!dep) {

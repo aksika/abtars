@@ -4,12 +4,13 @@
  *   - deployActivation()                — brick-risk, runs fresh via __deploy
  * deploy() keeps the monolithic path (obtain+activate) for --local and tests.
  */
-import { hostname } from "node:os";
+import { hostname, homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, mkdirSync, copyFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { execSync } from "node:child_process";
 import { acquireLock, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
+import { resolveAbmindHome } from "./paths.js";
 import { makeLocalBuildSource } from "../update-sources/dev.js";
 import { makeNpmSource } from "../update-sources/npm.js";
 import type { SourceName, StagedRelease } from "../update-sources/types.js";
@@ -272,7 +273,7 @@ async function deployActivation(args: { staged: StagedRelease; channel: SourceNa
   // 8.2 Restart daemon service
   if (mode === "daemon") {
     if (process.platform === "darwin") {
-      const plistPath = join(process.env["HOME"] ?? "", "Library/LaunchAgents/com.abtars.watchdog.plist");
+      const plistPath = join(homedir(), "Library/LaunchAgents/com.abtars.watchdog.plist");
       const uid = `gui/${process.getuid?.() ?? 501}`;
       try { execSync(`launchctl bootstrap ${uid} "${plistPath}"`, { stdio: "ignore", timeout: 5000 }); } catch {}
     } else {
@@ -327,7 +328,7 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
   process.stdout.write(`✓ wrappers refreshed (${installManifest.cliWrappers.length} files)\n`);
 
   // One-time cleanup: remove stale binary dirs from data directories (#1134)
-  const abmindHome = join(process.env["HOME"] ?? "", ".abmind");
+  const abmindHome = resolveAbmindHome();
   for (const stale of [join(abmindHome, "bin"), join(abmindHome, "current"), join(abmindHome, "lib"), join(paths.home, "bin"), join(paths.home, "scripts"), join(paths.releasesDir, "deps")]) {
     if (existsSync(stale)) {
       rmSync(stale, { recursive: true, force: true });
@@ -339,9 +340,9 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
   const repoScripts = join(repoRoot, "scripts");
   if (process.platform === "darwin") {
     const src = join(repoScripts, "com.abtars.watchdog.plist");
-    const dst = join(process.env["HOME"] ?? "", "Library/LaunchAgents/com.abtars.watchdog.plist");
+    const dst = join(homedir(), "Library/LaunchAgents/com.abtars.watchdog.plist");
     if (existsSync(src)) {
-      let srcContent = readFileSync(src, "utf-8").replace(/\{\{HOME\}\}/g, process.env["HOME"] ?? "");
+      let srcContent = readFileSync(src, "utf-8").replace(/\{\{HOME\}\}/g, homedir());
       const dstContent = existsSync(dst) ? readFileSync(dst, "utf-8") : "";
       if (srcContent !== dstContent) {
         writeFileSync(dst, srcContent);
@@ -353,7 +354,7 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
     }
   } else {
     const src = join(repoScripts, "abtars-watchdog.service");
-    const dst = join(process.env["HOME"] ?? "", ".config/systemd/user/abtars-watchdog.service");
+    const dst = join(homedir(), ".config/systemd/user/abtars-watchdog.service");
     if (existsSync(src) && existsSync(dst)) {
       const srcContent = readFileSync(src, "utf-8");
       const dstContent = readFileSync(dst, "utf-8");

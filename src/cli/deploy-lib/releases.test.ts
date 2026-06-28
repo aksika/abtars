@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { atomicSwap, configSnapshot, cleanStaleStaging, writeSentinel, readSentinel, clearSentinel } from './releases.js';
+import { atomicSwap, configSnapshot, cleanStaleStaging, healthProbe, writeSentinel, readSentinel, clearSentinel } from './releases.js';
 
 describe('deploy-lib/releases', () => {
   let tmp: string;
@@ -162,5 +162,30 @@ describe('deploy-lib/releases', () => {
 
   it('readSentinel returns null when file does not exist', () => {
     expect(readSentinel(tmp)).toBeNull();
+  });
+
+  it('healthProbe with mock lockReader returns healthy immediately', async () => {
+    const now = Date.now();
+    const lockContent = JSON.stringify({ pid: 12345, lastHeartbeat: now + 1000 });
+    let calls = 0;
+    const result = await healthProbe(tmp, now - 1000, 5000, {
+      lockReader: () => {
+        calls++;
+        // First call (oldPid lookup) returns error → oldPid = 0
+        if (calls === 1) throw new Error('no file yet');
+        return lockContent;
+      },
+    });
+    expect(result.healthy).toBe(true);
+    expect(result.pid).toBe(12345);
+  });
+
+  it('healthProbe with mock lockReader returns unhealthy when stale', async () => {
+    const now = Date.now();
+    const lockContent = JSON.stringify({ pid: 12345, lastHeartbeat: now - 5000 });
+    const result = await healthProbe(tmp, now, 100, {
+      lockReader: () => lockContent,
+    });
+    expect(result.healthy).toBe(false);
   });
 });

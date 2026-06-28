@@ -11,7 +11,7 @@ import { hostname, homedir as _homedir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { emptyManifest, packagePaths, readManifest, writeManifest } from '../deploy-lib-import.js';
+import { emptyManifest, packagePaths, readManifest, resolveReleasesDir, writeManifest } from '../deploy-lib-import.js';
 
 /** Resolve real user home even under sudo. */
 function homedir(): string {
@@ -328,7 +328,7 @@ export async function install(opts: InstallOptions): Promise<number> {
         process.stdout.write(`✓ watchdog LaunchAgent loaded\n`);
       }
     } else if (process.platform === 'linux') {
-      const releaseSrc = join(homedir(), '.abtars-releases', 'src', 'abtars', 'scripts', 'abtars-watchdog.service');
+      const releaseSrc = join(resolveReleasesDir(), 'src', 'abtars', 'scripts', 'abtars-watchdog.service');
       const unitSrc = existsSync(releaseSrc) ? releaseSrc : join(home, 'scripts', 'abtars-watchdog.service');
       const unitDir = join(homedir(), '.config', 'systemd', 'user');
       if (existsSync(unitSrc)) {

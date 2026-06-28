@@ -26,7 +26,7 @@ import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { packagePaths, readManifest } from '../deploy-lib-import.js';
+import { packagePaths, readManifest, resolveReleasesDir } from '../deploy-lib-import.js';
 import { showHintOnce } from '../../components/hints.js';
 
 export interface OnboardOptions {
@@ -341,7 +341,7 @@ async function validateModelCatalog(model: string, provider: string): Promise<{ 
       join(here, '..', '..', '..', 'templates', 'config', 'models.json'),
       join(here, '..', '..', 'templates', 'config', 'models.json'),
       join(here, '..', 'templates', 'config', 'models.json'),
-      join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'templates', 'config', 'models.json'),
+      join(resolveReleasesDir(), 'src', 'abtars', 'templates', 'config', 'models.json'),
       join(process.env['HOME'] ?? '', '.abtars', 'config', 'models.json'),
     ];
     let catalog: Record<string, { transports?: string[] }> | null = null;
@@ -687,7 +687,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       const modelsCandidates = [
         join(here, '..', '..', '..', 'config', 'models.json'),
         join(here, '..', '..', 'config', 'models.json'),
-        join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'config', 'models.json'),
+        join(resolveReleasesDir(), 'src', 'abtars', 'config', 'models.json'),
       ];
       for (const p of modelsCandidates) {
         if (modelsExists(p)) { modelsCopy(p, modelsPath); process.stdout.write(`✓ models.json → ${modelsPath}\n`); break; }
@@ -751,8 +751,7 @@ async function seedDefaultTasks(_chatId: string, abtarsHome: string): Promise<vo
   const candidates = [
     join(here, '..', '..', '..', 'config', 'tasks', 'tasks.json'),
     join(here, '..', '..', 'config', 'tasks', 'tasks.json'),
-    join(abtarsHome, '..', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
-    join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
+    join(resolveReleasesDir(), 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
   ];
   let templatePath: string | null = null;
   for (const p of candidates) {

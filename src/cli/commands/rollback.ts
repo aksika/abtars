@@ -5,14 +5,13 @@ import { printBanner } from './banner.js';
  */
 
 import { existsSync, readFileSync, writeFileSync, unlinkSync, symlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { acquireLock, packagePaths } from '../deploy-lib-import.js';
 
 export async function rollback(opts?: { to?: number }): Promise<number> {
   await printBanner("rollback");
   const paths = packagePaths('abtars');
-  const releasesDir = resolve(homedir(), '.abtars-releases');
+  const releasesDir = paths.releasesDir;
   const historyFile = join(releasesDir, 'history.json');
   const currentLink = join(releasesDir, 'current');
   const slot = opts?.to ?? 1;
