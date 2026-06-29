@@ -4,9 +4,6 @@ import { homedir } from "node:os";
 function abtarsHome() {
   return process.env.ABTARS_HOME ?? join(homedir(), ".abtars");
 }
-function reportsDir(cat) {
-  return join(abtarsHome(), "reports", cat);
-}
 function localDate() {
   const d = /* @__PURE__ */ new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -20,7 +17,6 @@ const TWITTER_DIR = join(AB_HOME, "workspace", "twitterX");
 const COOKIE_PATH = join(AB_HOME, "secret", "x-cookies.json");
 const BASE_FOLLOWS = join(TWITTER_DIR, process.env["TWEET_BASE_FOLLOWS_FILE"] ?? "base.follows.json");
 const AGENT_FOLLOWS = join(TWITTER_DIR, process.env["TWEET_FOLLOWS_FILE"] ?? "agent.follows.json");
-const REPORTS_DIR = reportsDir("x");
 const OUTPUT_DIR = join(TWITTER_DIR, "output");
 async function sendReportToTelegram(filePath, caption) {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
@@ -231,15 +227,19 @@ async function runFeed(format, count, topN, discover, outputPath) {
   writeFileSync(outFile, JSON.stringify(payload, null, 2), "utf8");
   console.error(`\u{1F4C4} ${top.length} tweets written to ${outFile}`);
   if (format === "md") {
+    if (!outputPath) {
+      console.error("Newsletter mode (--format md) requires --output <path>. See SKILL.md for the convention.");
+      process.exit(1);
+    }
     const md = renderNewsletter(top, candidates, date);
-    mkdirSync(REPORTS_DIR, { recursive: true });
-    const reportPath = join(REPORTS_DIR, `AI-Daily-${date}.md`);
-    writeFileSync(reportPath, md, "utf8");
-    console.error(`\u{1F4F0} Newsletter written to ${reportPath}`);
-    await sendReportToTelegram(reportPath, `AI Daily ${date}`).catch((err) => {
-      console.error(`\u26A0 Telegram send failed: ${err instanceof Error ? err.message : String(err)}`);
+    mkdirSync(join(outputPath, ".."), { recursive: true });
+    writeFileSync(outputPath, md, "utf8");
+    console.error(`📰 Newsletter written to ${outputPath}`);
+    await sendReportToTelegram(outputPath, `AI Daily ${date}`).catch((err) => {
+      console.error(`⚠ Telegram send failed: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
+}
 }
 const BEARER = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 const GQL_TWEET_DETAIL = "https://x.com/i/api/graphql/97JF30KziU00483E_8elBA/TweetDetail";
