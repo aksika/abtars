@@ -76,20 +76,70 @@ async function timedProbe(fn: () => Promise<ProbeResult>): Promise<ProbeResult> 
 // ── Body Probes ──────────────────────────────────────────────────────────────
 
 async function probePlatforms(): Promise<ProbeResult> {
-  const env = readEnv();
-  const parts: string[] = [];
-  if (env.get("TELEGRAM_BOT_TOKEN") || env.get("TELEGRAM_TOKEN")) parts.push("telegram");
-  if (env.get("DISCORD_TOKEN") || env.get("DISCORD_BOT_TOKEN")) parts.push("discord");
-  if (env.get("IRC_SERVER")) parts.push("irc");
+  const { readSecret, initSecretsKey } = await import("../../components/secrets.js");
+  initSecretsKey();
 
-  if (parts.length === 0) return { name: "platforms", status: "failed", detail: "no platform configured" };
+  const results: Array<{ name: string; status: "ok" | "failed" | "skipped"; detail: string }> = [];
 
-  // Check bridge.lock for running status
-  const lock = readJson(join(home, "bridge.lock"));
-  if (lock?.pid && pidAlive(lock.pid)) {
-    return { name: "platforms", status: "ok", detail: parts.map(p => `${p} ✓`).join(", ") };
+  // Telegram: read token, call getMe
+  const telegramToken = readSecret("TELEGRAM_BOT_TOKEN") ?? readSecret("TELEGRAM_TOKEN");
+  if (telegramToken) {
+    const r = await verifyTelegram(telegramToken);
+    results.push({ name: "telegram", ...r });
   }
-  return { name: "platforms", status: "ok", detail: `configured: ${parts.join(", ")} (bridge not running)` };
+
+  // Discord: read token, call gateway
+  const discordToken = readSecret("DISCORD_BOT_TOKEN") ?? readSecret("DISCORD_TOKEN");
+  if (discordToken) {
+    const r = await verifyDiscord(discordToken);
+    results.push({ name: "discord", ...r });
+  }
+
+  // IRC: skip real verification (connection-based), just check if configured
+  const ircServer = readSecret("IRC_SERVER");
+  if (ircServer) {
+    results.push({ name: "irc", status: "ok", detail: "server configured (connection not verified)" });
+  }
+
+  if (results.length === 0) return { name: "platforms", status: "skipped", detail: "no platform configured" };
+
+  const failed = results.filter(r => r.status === "failed");
+  const skipped = results.filter(r => r.status === "skipped");
+  const allOk = failed.length === 0 && skipped.length === 0;
+  const status = allOk ? "ok" : failed.length > 0 ? "failed" : "ok";
+  const detail = results.map(r => `${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`).join(", ");
+  return { name: "platforms", status, detail };
+}
+
+async function verifyTelegram(token: string): Promise<{ status: "ok" | "failed" | "skipped"; detail: string }> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (res.ok) return { status: "ok", detail: "getMe ok" };
+    if (res.status === 401 || res.status === 403) return { status: "failed", detail: "invalid token" };
+    return { status: "skipped", detail: `http ${res.status}` };
+  } catch {
+    return { status: "skipped", detail: "unreachable" };
+  }
+}
+
+async function verifyDiscord(token: string): Promise<{ status: "ok" | "failed" | "skipped"; detail: string }> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch("https://discord.com/api/v10/users/@me", {
+      headers: { "Authorization": `Bot ${token}` },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (res.ok) return { status: "ok", detail: "gateway ok" };
+    if (res.status === 401 || res.status === 403) return { status: "failed", detail: "invalid token" };
+    return { status: "skipped", detail: `http ${res.status}` };
+  } catch {
+    return { status: "skipped", detail: "unreachable" };
+  }
 }
 
 async function probeDashboard(): Promise<ProbeResult> {
