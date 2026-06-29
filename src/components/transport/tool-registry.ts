@@ -564,29 +564,9 @@ const secretGetTool: ToolDefinition = {
     const name = args.name?.trim();
     if (!name) return JSON.stringify({ error: "name is required" });
     try {
-      const { join } = await import("node:path");
-      const { homedir } = await import("node:os");
-      const { readFileSync, existsSync } = await import("node:fs");
-      const { createDecipheriv, hkdfSync } = await import("node:crypto");
-      const { loadKey } = await import("abmind");
-
-      const secretPath = join(homedir(), ".abtars", "secret", name);
-      if (!existsSync(secretPath)) return JSON.stringify({ error: `secret '${name}' not found` });
-
-      const raw = readFileSync(secretPath, "utf-8").trim();
-      if (!raw) return JSON.stringify({ error: `secret '${name}' is empty` });
-
-      let value: string;
-      if (raw.startsWith("ENC:")) {
-        const master = loadKey();
-        const key = Buffer.from(hkdfSync("sha256", master, "", "abtars-secrets-files-v1", 32));
-        const buf = Buffer.from(raw.slice(4), "base64");
-        const d = createDecipheriv("aes-256-gcm", key, buf.subarray(1, 13));
-        d.setAuthTag(buf.subarray(buf.length - 16));
-        value = d.update(buf.subarray(13, buf.length - 16), undefined, "utf-8") + d.final("utf-8");
-      } else {
-        value = raw;
-      }
+      const { readSecret } = await import("../../components/secrets.js");
+      const value = readSecret(name);
+      if (value === undefined) return JSON.stringify({ error: `secret '${name}' not found or could not be decrypted` });
 
       // For env-var type (no extension): also inject into process.env
       if (!name.includes(".")) {
