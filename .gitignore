@@ -41,3 +41,4 @@ backlog.db
 bundle/
 src/capabilities/_registry.generated.ts
 abtars-backup-*.zip
+*.tgz
