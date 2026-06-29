@@ -4,6 +4,7 @@
  */
 
 import { logInfo, logWarn } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, kanbanGetCard, isUnblocked } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
@@ -37,6 +38,7 @@ export class Spin {
   private memory: { recordMessage(opts: { role: string; content: string; timestamp: number; userId: string; sessionId: string }): void } | null = null;
   private orcSession: AgentSession | null = null;
   private _lastHealerDoneAt = 0;
+  private _housekeepCounter = 0;
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
   setMemory(memory: Spin["memory"]): void { this.memory = memory; }
@@ -456,6 +458,11 @@ export class Spin {
     this.drainQueued();
     this.checkStaleWorkers();
     await this.pollRemoteCards();
+    this._housekeepCounter++;
+    if (this._housekeepCounter % 72 === 0) {
+      this.pruneSkillTrash();
+      this.rotateAuditLog();
+    }
   }
 
   private checkStaleWorkers(): void {
@@ -472,6 +479,58 @@ export class Spin {
         }
       }
     }
+  }
+
+  /** #613: Prune .trash/ entries older than 7 days (~hourly). */
+  private pruneSkillTrash(): void {
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    const { existsSync, readdirSync, rmSync, statSync } = require("node:fs") as typeof import("node:fs");
+    const { join } = require("node:path") as typeof import("node:path");
+    const { abtarsHome } = require("../paths.js") as typeof import("../paths.js");
+    const trashPath = join(abtarsHome(), "skills", ".trash");
+    if (!existsSync(trashPath)) return;
+    const now = Date.now();
+    for (const entry of readdirSync(trashPath)) {
+      try {
+        const full = join(trashPath, entry);
+        const stat = statSync(full);
+        if (now - stat.mtimeMs > SEVEN_DAYS_MS) {
+          rmSync(full, { recursive: true });
+          logInfo("skill-trash-prune", `Pruned: ${entry}`);
+        }
+      } catch (err) { logAndSwallow(TAG, "prune entry", err); }
+    }
+  }
+
+  /** #681: Rotate audit.jsonl when > 10MB, prune files older than 30 days (~hourly). */
+  private rotateAuditLog(): void {
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    const { existsSync, statSync, renameSync, readdirSync, unlinkSync } = require("node:fs") as typeof import("node:fs");
+    const { join } = require("node:path") as typeof import("node:path");
+    const { abtarsHome } = require("../paths.js") as typeof import("../paths.js");
+    const logsDir = join(abtarsHome(), "logs");
+    const auditPath = join(logsDir, "audit.jsonl");
+    if (!existsSync(auditPath)) return;
+    try {
+      const stat = statSync(auditPath);
+      if (stat.size > 10 * 1024 * 1024) {
+        const date = new Date().toISOString().slice(0, 10);
+        renameSync(auditPath, join(logsDir, `audit-${date}.jsonl`));
+        logInfo("audit-rotation", `Rotated audit.jsonl (${(stat.size / 1024 / 1024).toFixed(1)}MB)`);
+      }
+    } catch (err) { logAndSwallow(TAG, "audit rotate", err); }
+    const now = Date.now();
+    try {
+      for (const f of readdirSync(logsDir)) {
+        if (!f.startsWith("audit-") || !f.endsWith(".jsonl")) continue;
+        const full = join(logsDir, f);
+        const stat = statSync(full);
+        if (now - stat.mtimeMs > THIRTY_DAYS_MS) {
+          unlinkSync(full);
+          logInfo("audit-rotation", `Pruned: ${f}`);
+        }
+      }
+    } catch (err) { logAndSwallow(TAG, "audit prune", err); }
   }
 
   private async pollRemoteCards(): Promise<void> {
