@@ -2,7 +2,7 @@
  * phase-memory-ipc — boot phase 4: wire LLM callback + start memory IPC server.
  *
  * Must run after phase-transport (needs ctx.transport for the LLM callback).
- * Must run after phase-memory (no-op if ctx.memory is null).
+ * Must run after phase-memory (no-op if abmind not installed).
  *
  * - Binds memory.setLlmCall to route through ctx.transport
  * - Starts MemoryIpcServer on its own SQLite backend (out-of-proc clients)
@@ -11,12 +11,13 @@
  */
 
 import type { BootCtx, PhaseResult } from "./context.js";
+import { abmind, loadAbmind } from "../utils/abmind-lazy.js";
 
 export async function phaseMemoryIpc(ctx: BootCtx): Promise<PhaseResult> {
-  if (!ctx.memory) return "skipped";
+  const mod = abmind() ?? await loadAbmind();
+  if (!mod) return "skipped";
 
-  const { MemoryIpcServer } = await import("abmind");
-  const { SqliteBackend } = await import("abmind");
+  const { MemoryIpcServer, SqliteBackend } = mod;
   const ipcBackend = new SqliteBackend(ctx.memoryConfig);
   await ipcBackend.initialize();
   const memoryIpc = new MemoryIpcServer(ipcBackend);
