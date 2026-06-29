@@ -32,6 +32,7 @@ export async function bootstrap(opts: BootstrapOptions): Promise<number> {
 
   // ── Obtain (fail-safe) ─────────────────────────────────────────────
   cleanStaleStaging(paths.appStaging);
+  cleanStaleStaging(join(paths.home, 'app.staging'));  // legacy #1247 cleanup
   let staged: StagedRelease;
   if (channel === "dev") {
     try { syncSrcRepos(srcDir, ["abtars"]); } catch { return 1; }

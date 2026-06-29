@@ -82,6 +82,7 @@ export async function deploy(opts: DeployOptions): Promise<number> {
   const release = await acquireLock(paths.lock, "deploy");
   try {
     cleanStaleStaging(paths.appStaging);
+    cleanStaleStaging(join(paths.home, 'app.staging'));  // legacy #1247 cleanup
     process.stdout.write(`Building from ${repoRoot}...\n`);
 
     const source = opts.source === "alpha" || opts.source === "stable"

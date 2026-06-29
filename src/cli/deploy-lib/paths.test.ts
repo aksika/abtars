@@ -55,14 +55,15 @@ describe('deploy-lib/paths', () => {
     expect(resolveUserBinDir()).toBe('/tmp/test-bin');
   });
 
-  it('packagePaths composes all sub-paths under home', () => {
+  it('packagePaths composes all sub-paths under home and releasesDir', () => {
     process.env['ABTARS_HOME'] = '/x/ab';
+    process.env['ABTARS_RELEASES'] = '/x/releases';
     const p = packagePaths('abtars');
     expect(p.home).toBe('/x/ab');
     expect(p.config).toBe('/x/ab/config');
     expect(p.app).toBe('/x/ab/app');
     expect(p.appPrev).toBe('/x/ab/app.prev');
-    expect(p.appStaging).toBe('/x/ab/app.staging');
+    expect(p.appStaging).toBe('/x/releases/app.staging');
     expect(p.bin).toBe(join(homedir(), '.local', 'bin'));
     expect(p.manifest).toBe('/x/ab/manifest.json');
     expect(p.lock).toBe('/x/ab/.update.lock');
