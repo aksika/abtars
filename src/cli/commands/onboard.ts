@@ -41,6 +41,8 @@ export interface OnboardOptions {
   readonly instanceName?: string;
   readonly passphrase?: string;
   readonly force: boolean;
+  readonly source?: 'dev' | 'alpha' | 'stable';
+  readonly localDir?: string;
 }
 
 type ProviderChoice = 'openrouter' | 'anthropic' | 'openai' | 'ollama' | 'kiro' | 'gemini';
@@ -728,7 +730,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   // Run update (clone source, build, deploy, start bridge)
   process.stdout.write(`\nRunning abtars update...\n`);
   const { update } = await import("./update.js");
-  return await update({ source: "dev", skipFreshness: true, allowAbmindMismatch: false });
+  return await update({ source: opts.source ?? "alpha", localDir: opts.localDir, skipFreshness: true, allowAbmindMismatch: false });
 }
 
 // ── Default task seeding (#383) ─────────────────────────────────────────────

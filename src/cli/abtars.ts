@@ -92,8 +92,24 @@ export async function main(argv: readonly string[]): Promise<number> {
 
   try {
     switch (command) {
-      case 'install':
+      case 'install': {
         if (flags.get('help') === true) { printUsage(); return 0; }
+        // Channel: --dev [dir], --alpha, --stable (same as update)
+        let source: 'dev' | 'alpha' | 'stable' = 'alpha';
+        let installLocalDir: string | undefined;
+        if (flags.get('dev') === true || typeof flags.get('dev') === 'string') {
+          source = 'dev';
+          if (typeof flags.get('dev') === 'string') installLocalDir = flags.get('dev') as string;
+        } else if (flags.get('alpha') === true) {
+          source = 'alpha';
+        } else if (flags.get('stable') === true) {
+          source = 'stable';
+        } else if (flags.has('local') || flags.get('source') === 'local') {
+          source = 'dev';
+          if (typeof flags.get('local') === 'string') installLocalDir = flags.get('local') as string;
+        } else if (flags.get('source') === 'npm') {
+          source = 'alpha';
+        }
         return await onboard({
           nonInteractive: flags.get('non-interactive') === true,
           acceptRisk: flags.get('accept-risk') === true,
@@ -107,7 +123,10 @@ export async function main(argv: readonly string[]): Promise<number> {
           instanceName: typeof flags.get('instance-name') === 'string' ? (flags.get('instance-name') as string) : undefined,
           passphrase: typeof flags.get('passphrase') === 'string' ? (flags.get('passphrase') as string) : undefined,
           force: flags.get('force') === true,
+          source,
+          localDir: installLocalDir,
         });
+      }
       case 'uninstall':
         return await uninstall({ yes: flags.get('yes') === true });
       case 'update': {
