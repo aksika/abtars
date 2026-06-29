@@ -280,19 +280,12 @@ async function probeA2a(): Promise<ProbeResult> {
 
 async function probeMind(): Promise<ProbeResult> {
   try {
-    const { spawnSync } = await import("node:child_process");
-    const r = spawnSync("abmind", ["doctor", "--json"], { encoding: "utf-8", timeout: 10_000 });
-    if (r.status === null || r.error) return { name: "mind", status: "skipped", detail: "abmind not on PATH" };
-    const data = JSON.parse(r.stdout);
-    const checks: Array<{ name: string; status: string }> = data.checks ?? [];
-    const total = checks.length;
-    const ok = checks.filter(c => c.status === "ok").length;
-    const warnings = checks.filter(c => c.status === "warn" || c.status === "error");
-    if (warnings.length === 0) return { name: "mind", status: "ok", detail: `abmind: ${ok}/${total} ok` };
-    const names = warnings.slice(0, 3).map(w => w.name).join(", ");
-    return { name: "mind", status: "failed", detail: `abmind: ${ok}/${total} (${warnings.length} issues: ${names})` };
+    const { loadAbmind } = await import("../../utils/abmind-lazy.js");
+    const mod = await loadAbmind();
+    if (!mod) return { name: "mind", status: "skipped", detail: "abmind not installed" };
+    return { name: "mind", status: "ok", detail: "abmind loaded (in-process)" };
   } catch {
-    return { name: "mind", status: "skipped", detail: "abmind doctor failed" };
+    return { name: "mind", status: "skipped", detail: "abmind load failed" };
   }
 }
 
