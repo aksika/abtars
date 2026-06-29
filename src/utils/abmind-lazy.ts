@@ -63,7 +63,9 @@ export async function loadAbmind(): Promise<AbmindModule | null> {
 
   let mod: AbmindModule | null = null;
   try {
-    mod = await import("abmind");
+    const req = createRequire(import.meta.url);
+    const resolvedPath = req.resolve("abmind");
+    mod = await import(resolvedPath);
   } catch {
     mod = null;
   }
