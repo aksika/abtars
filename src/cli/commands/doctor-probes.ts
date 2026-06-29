@@ -173,18 +173,23 @@ async function probeKanban(): Promise<ProbeResult> {
   if (!existsSync(dbPath)) return { name: "kanban", status: "skipped", detail: "kanban.db not found" };
   const sharedNm = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
   if (!existsSync(sharedNm)) return { name: "kanban", status: "skipped", detail: "better-sqlite3 not installed (run: abtars deps install)" };
+  let Db: any;
   try {
     const { createRequire } = await import("node:module");
     const _require = createRequire(import.meta.url);
-    const Db = _require(sharedNm);
+    Db = _require(sharedNm);
+  } catch (err) {
+    return { name: "kanban", status: "skipped", detail: `better-sqlite3 not loadable: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  try {
     const db = new Db(dbPath, { readonly: true });
-    const row = db.prepare("SELECT COUNT(*) as cnt FROM cards").get() as { cnt: number };
-    const stuck = db.prepare("SELECT COUNT(*) as cnt FROM cards WHERE status='running' AND updated_at < datetime('now', '-10 minutes')").get() as { cnt: number };
+    const row = db.prepare("SELECT COUNT(*) as cnt FROM kanban_board").get() as { cnt: number };
+    const stuck = db.prepare("SELECT COUNT(*) as cnt FROM kanban_board WHERE status='running' AND updated_at < datetime('now', '-10 minutes')").get() as { cnt: number };
     db.close();
     const detail = stuck.cnt > 0 ? `${row.cnt} cards, ${stuck.cnt} stuck` : `${row.cnt} cards`;
     return { name: "kanban", status: stuck.cnt > 0 ? "failed" : "ok", detail };
-  } catch {
-    return { name: "kanban", status: "skipped", detail: "better-sqlite3 not available" };
+  } catch (err) {
+    return { name: "kanban", status: "skipped", detail: `kanban.db query failed: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
