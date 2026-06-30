@@ -39,7 +39,7 @@ function checkSqliteVec(_home: string): HealthItem {
   if (existsSync(sharedNm)) {
     return { ok: true, label: "sqlite-vec (vector search)" };
   }
-  return { ok: false, label: "sqlite-vec (falling back to brute-force search)", hint: "Run: abtars deps install" };
+  return { ok: false, label: "sqlite-vec (falling back to brute-force search)", hint: "Run: abmind deps install" };
 }
 
 export function printHealthSummary(home: string): void {
