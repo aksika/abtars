@@ -201,6 +201,17 @@ async function probeHeartbeat(): Promise<ProbeResult> {
   return { name: "heartbeat", status: "ok", detail: ago(ageMs) };
 }
 
+// #1261: single-bridge invariant — catches duplicate-bridge regressions at runtime.
+// pgrep counts the bridge processes. >1 means a second bridge is running (likely orphaned).
+async function probeSingleBridge(): Promise<ProbeResult> {
+  const { spawnSync } = await import("node:child_process");
+  const pgrep = spawnSync("pgrep", ["-f", "app/bundle/abtars.js"], { encoding: "utf-8" });
+  const pids = pgrep.stdout ? pgrep.stdout.trim().split("\n").filter(Boolean) : [];
+  if (pids.length === 0) return { name: "single-bridge", status: "skipped", detail: "no bridge running" };
+  if (pids.length === 1) return { name: "single-bridge", status: "ok", detail: `pid:${pids[0]}` };
+  return { name: "single-bridge", status: "failed", detail: `${pids.length} bridges running: ${pids.join(",")}` };
+}
+
 // ── Brain Probes ─────────────────────────────────────────────────────────────
 
 async function probeTransport(): Promise<ProbeResult> {
@@ -350,7 +361,7 @@ export async function runAllProbes(): Promise<DoctorOutput> {
   const start = Date.now();
 
   const [body, heart, brain, soul, tribe] = await Promise.all([
-    Promise.all([probePlatforms(), probeDashboard(), probeSecurity(), probeWatchdog()].map(p => timedProbe(() => p))),
+    Promise.all([probePlatforms(), probeDashboard(), probeSecurity(), probeWatchdog(), probeSingleBridge()].map(p => timedProbe(() => p))),
     Promise.all([probeHeartbeat()].map(p => timedProbe(() => p))),
     Promise.all([probeTransport(), probeSpin(), probeKanban(), probeSkills(), probeSha()].map(p => timedProbe(() => p))),
     Promise.all([probeMind()].map(p => timedProbe(() => p))),

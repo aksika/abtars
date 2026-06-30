@@ -64,7 +64,10 @@ while true; do
 
   # Start bridge
   BRIDGE_REASON="${REASON:-watchdog-respawn}"
-  cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="$HOME/.local/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$BRIDGE_REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
+  # #1261: exec replaces the subshell with the env->nohup->node chain so $! is the real node PID.
+  # Without exec, bash forks a subshell for `cd && env=value cmd &` and $! returns the subshell,
+  # leaving node as a grandchild that gets orphaned when the subshell dies.
+  cd "$AB" && exec env ABTARS_WATCHDOG_PID=$$ NODE_PATH="$HOME/.local/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$BRIDGE_REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
   disown $PID
   SPAWNED_AT=$(date +%s)
