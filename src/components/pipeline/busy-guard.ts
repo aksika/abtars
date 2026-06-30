@@ -4,6 +4,7 @@
 
 import type { Middleware } from "./middleware.js";
 import { logInfo, logDebug, logWarn } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 
 const MAX_QUEUE_DEPTH = 20;
 
@@ -92,6 +93,6 @@ export function releaseBusy(
   session.lastActiveAt = Date.now();
   if (session.queue.length) {
     const next = session.queue.shift()!;
-    pipeline(next.msg, next.adapter).catch(() => {});
+    pipeline(next.msg, next.adapter).catch((err) => { logAndSwallow("busy-guard", "drain", err); });
   }
 }
