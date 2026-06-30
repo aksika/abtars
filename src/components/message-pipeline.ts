@@ -41,6 +41,7 @@ import { buildPrompt } from "./pipeline/prompt-builder.js";
 
 import { getEnv } from "./env-schema.js";
 import { sanitizeOutbound } from "./sanitize-outbound.js";
+import { abmind } from "../utils/abmind-lazy.js";
 
 const TAG = "pipeline";
 const PRIMING_MAX = 8;
@@ -536,18 +537,21 @@ export async function handleInboundMessage(
     activeSession.toolCallCount = (activeSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
 
     // --- #824: Citation detection — did the agent use the recalled memories? ---
-    if (recalledHits && recalledHits.length > 0 && memory) {
+    if (recalledHits && recalledHits.length > 0 && memoryConfig.memoryEnabled && memory) {
       try {
-        const { detectCitations } = await import("abmind");
-        const citedIds = detectCitations(userResponse, recalledHits);
-        if (citedIds.length > 0) memory.bumpCitedCount(citedIds);
-        logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
-        // Track recalledIds for emoji reaction feedback (1h TTL)
-        if (lastSentMsgId != null) {
-          recalledIdsPerMessage.set(Number(lastSentMsgId), recalledHits.map(h => h.id));
+        const mod = abmind();
+        if (mod) {
+          const { detectCitations } = mod;
+          const citedIds = detectCitations(userResponse, recalledHits);
+          if (citedIds.length > 0) memory.bumpCitedCount(citedIds);
+          logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
+          // Track recalledIds for emoji reaction feedback (1h TTL)
+          if (lastSentMsgId != null) {
+            recalledIdsPerMessage.set(Number(lastSentMsgId), recalledHits.map(h => h.id));
+          }
         }
       } catch (err) {
-        logDebug(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`);
+        logWarn(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 

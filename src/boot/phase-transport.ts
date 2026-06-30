@@ -13,6 +13,7 @@ import { createAgentTransport } from "../components/agent-registry.js";
 import { logDebug, logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
+import { abmind } from "../utils/abmind-lazy.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 
@@ -326,28 +327,31 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     // Wire context engine for automatic compaction (DirectApiTransport-specific).
     const db = ctx.memory!.getDb?.() ?? ctx.memory!.getDatabase?.();
     if (db && resolved.contextWindow >= 128000) {
-      const { ContextEngine } = await import("abmind");
-      const { createContextOrchestrator } = await import("../components/context/index.js");
-      const contextEngine = new ContextEngine(db);
-      const orchestrator = createContextOrchestrator(
-        contextEngine,
-        async (systemPrompt: string, userPrompt: string) => {
-          const { streamSingleCompletion } = await import("../components/transport/stream-single.js");
-          return streamSingleCompletion({
-            endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
-            apiKey: getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY") ?? undefined,
-            model: resolved.model,
-            systemPrompt,
-            userPrompt,
-            maxTokens: 4096,
-          });
-        },
-        (_chatId: string) => {
-          try { return ctx.memory?.getLastMessageTimestamp(true) ?? null; } catch (err) { logAndSwallow(TAG, "getLastMessageTimestamp", err); return null; }
-        },
-      );
-      (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).contextOrchestrator = orchestrator;
-      logInfo("main", "📦 Context engine wired (auto-compaction active)");
+      const mod = abmind();
+      if (mod) {
+        const { ContextEngine } = mod;
+        const { createContextOrchestrator } = await import("../components/context/index.js");
+        const contextEngine = new ContextEngine(db);
+        const orchestrator = createContextOrchestrator(
+          contextEngine,
+          async (systemPrompt: string, userPrompt: string) => {
+            const { streamSingleCompletion } = await import("../components/transport/stream-single.js");
+            return streamSingleCompletion({
+              endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
+              apiKey: getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY") ?? undefined,
+              model: resolved.model,
+              systemPrompt,
+              userPrompt,
+              maxTokens: 4096,
+            });
+          },
+          (_chatId: string) => {
+            try { return ctx.memory?.getLastMessageTimestamp(true) ?? null; } catch (err) { logAndSwallow(TAG, "getLastMessageTimestamp", err); return null; }
+          },
+        );
+        (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).contextOrchestrator = orchestrator;
+        logInfo("main", "📦 Context engine wired (auto-compaction active)");
+      }
     }
   }
 

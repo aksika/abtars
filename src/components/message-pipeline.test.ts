@@ -2,6 +2,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
 import type { ManagedSession } from "./spin-types.js";
 
+const detectCitationsSpy = vi.fn().mockReturnValue([1]);
+let abmindReturn: any = { detectCitations: detectCitationsSpy };
+
+vi.mock("../utils/abmind-lazy.js", () => ({
+  abmind: () => abmindReturn,
+  loadAbmind: vi.fn(),
+  resetAbmindCache: vi.fn(),
+  ABMIND_MIN: [0, 3, 0],
+  isSupportedVersion: vi.fn().mockReturnValue(true),
+  parseSemver: vi.fn(),
+}));
+
 const MASTER_REGISTRY: UserRegistry = {
   users: [{ userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
   byPlatformId: new Map([["master:telegram", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
@@ -270,5 +282,102 @@ describe("handleInboundMessage", () => {
     await handleInboundMessage(makeMsg({ userId: "adrika" }), adapter, deps);
 
     expect(transport.sendPrompt).toHaveBeenCalledWith("test_A_01", expect.any(String), undefined, "adrika");
+  });
+});
+
+describe("citation detection (#1270)", () => {
+  let transport: IKiroTransport;
+  let buildPromptSpy: any;
+
+  beforeEach(async () => {
+    transport = mockTransport();
+    setUserRegistryOverride(MASTER_REGISTRY);
+    detectCitationsSpy.mockClear();
+    detectCitationsSpy.mockReturnValue([1]);
+    abmindReturn = { detectCitations: detectCitationsSpy };
+    const spinMod = await import("./spin.js");
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
+      id, userId: "master", platform: "telegram", chatId: 100,
+      delivery: "simple", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    }));
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
+      id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+      delivery: "simple", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    }));
+    const pipelineMod = await import("./pipeline/prompt-builder.js");
+    buildPromptSpy = vi.spyOn(pipelineMod, "buildPrompt").mockResolvedValue({
+      prompt: "hello",
+      isSessionStart: false,
+      imageContent: undefined,
+      recalledHits: [{ id: 1, contentEn: "test memory" }],
+    } as any);
+  });
+
+  afterEach(() => {
+    setUserRegistryOverride(null);
+    vi.restoreAllMocks();
+  });
+
+  it("skips citation detection when memoryConfig.memoryEnabled is false", async () => {
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {
+      memory: { bumpCitedCount: vi.fn(), recordMessage: vi.fn() } as any,
+      memoryConfig: { memoryEnabled: false, memoryDir: "/tmp" },
+    });
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    expect(detectCitationsSpy).not.toHaveBeenCalled();
+  });
+
+  it("calls detectCitations from lazy module when memoryConfig.memoryEnabled is true", async () => {
+    const bumpCited = vi.fn();
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {
+      memory: { bumpCitedCount: bumpCited, recordMessage: vi.fn() } as any,
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+    });
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    expect(detectCitationsSpy).toHaveBeenCalledWith("Hello from Kiro!", [{ id: 1, contentEn: "test memory" }]);
+    expect(bumpCited).toHaveBeenCalledWith([1]);
+  });
+
+  it("skips citation detection when abmind() returns null even if memoryEnabled is true", async () => {
+    abmindReturn = null;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {
+      memory: { bumpCitedCount: vi.fn(), recordMessage: vi.fn() } as any,
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+    });
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+  });
+
+  it("logs WARN (not DEBUG) when detectCitations throws", async () => {
+    abmindReturn = { detectCitations: () => { throw new Error("boom"); } };
+    const logMod = await import("./logger.js");
+    const warnSpy = vi.spyOn(logMod, "logWarn").mockImplementation(() => {});
+    const debugSpy = vi.spyOn(logMod, "logDebug").mockImplementation(() => {});
+
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {
+      memory: { bumpCitedCount: vi.fn(), recordMessage: vi.fn() } as any,
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+    });
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    expect(warnSpy).toHaveBeenCalledWith("pipeline", expect.stringContaining("Citation detection failed"));
+    expect(debugSpy).not.toHaveBeenCalledWith("pipeline", expect.stringContaining("Citation detection failed"));
   });
 });
