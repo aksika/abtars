@@ -1,5 +1,5 @@
 import { logInfo, logWarn, logDebug } from "./logger.js";
-import { isWsl } from "./platform-detect.js";
+import { isWsl, WSL_STANDBY_THRESHOLD_MS } from "./platform-detect.js";
 import { updateLastHeartbeat, updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import type { HeartbeatTask } from "../types/index.js";
 
@@ -116,7 +116,7 @@ export class HeartbeatSystem implements ITaskSlot {
     // Standby detection: gap > threshold means process was suspended
     // #1265: on WSL, use 180min threshold (VM freeze from host sleep ≠ real suspend).
     // On real Linux/Mac, 3× interval (180s) is sufficient.
-    const standbyThresholdMs = isWsl() ? 180 * 60 * 1000 : this.config.intervalMs * 3;
+    const standbyThresholdMs = isWsl() ? WSL_STANDBY_THRESHOLD_MS : this.config.intervalMs * 3;
     if (gap > standbyThresholdMs) {
       const gapMin = Math.round(gap / 60000);
       logInfo(TAG, `Standby resume detected — suspended ${gapMin}min`);

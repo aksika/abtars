@@ -29,6 +29,10 @@ export function isWsl(): boolean {
   return _isWslCache;
 }
 
+/** #1265: Standby gap threshold for WSL. Below 3h = host-sleep freeze (survived, no restart).
+ *  Above 3h = network state likely stale (DNS, TCP keepalives), restart is justified. */
+export const WSL_STANDBY_THRESHOLD_MS = 180 * 60 * 1000;
+
 export type ResumeKind = "dark" | "full" | "unknown";
 
 /** Classify the current wake state. Fast, non-throwing. */
