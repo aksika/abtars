@@ -1,7 +1,7 @@
-import { readFileSync, readdirSync} from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir} from "node:os";
-import { logInfo} from "../logger.js";
+import { homedir } from "node:os";
+import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { readEntries as cronReadEntries } from "../tasks/task-store.js";
 import { abtarsHome } from "../../paths.js";
@@ -524,13 +524,41 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const co = await execP("git", ["-C", abtarsDir, "checkout", "origin/dev"], { timeout: 10_000 });
         if (!co.ok) throw new Error("checkout failed");
 
-        if (existsSync(join(abmindDir, ".git"))) {
+        // Always ensure abmind source exists (#1268: clone if missing)
+        const abmindGit = join(abmindDir, ".git");
+        if (!existsSync(abmindGit)) {
+          const cloneResult = await execP("git", ["clone", "--depth", "1", "-b", "dev", "https://github.com/aksika/abmind.git", abmindDir], { timeout: 120_000 });
+          if (!cloneResult.ok) logWarn("update", "abmind clone failed — skipping abmind update");
+        }
+        if (existsSync(abmindGit)) {
           await execP("git", ["-C", abmindDir, "fetch", "origin", "dev"], { timeout: 30_000 });
           await execP("git", ["-C", abmindDir, "checkout", "origin/dev"], { timeout: 10_000 });
         }
 
         const build = await execP("node", ["esbuild.config.js"], { cwd: abtarsDir, timeout: 60_000 });
         if (!build.ok) throw new Error("build failed");
+
+        // Conditionally update abmind via #1268 channel-mixing logic
+        if (ctx.memoryConfig.memoryEnabled && existsSync(abmindGit)) {
+          let needAbmindUpdate = false;
+          try {
+            const manifestRaw = readFileSync(join(homedir(), ".abmind", "manifest.json"), "utf-8");
+            const mf = JSON.parse(manifestRaw) as { source?: string; commit?: string };
+            if (!mf.source) {
+              needAbmindUpdate = true;
+            } else if (mf.source === "npm") {
+              needAbmindUpdate = true;
+            } else {
+              const headCommit = (await execP("git", ["-C", abmindDir, "rev-parse", "--short", "HEAD"], { timeout: 5_000 })).stdout.trim();
+              if (!headCommit || headCommit !== (mf.commit ?? "")) needAbmindUpdate = true;
+            }
+          } catch {
+            needAbmindUpdate = true;
+          }
+          if (needAbmindUpdate) {
+            spawn("abmind", ["update", "--dev", abmindDir], { detached: true, stdio: "ignore" }).unref();
+          }
+        }
       } catch {
         await ctx.reply("Build/checkout failed — running emergency update.");
         spawn("bash", [emergencyScript], { detached: true, stdio: "ignore" }).unref();
@@ -548,6 +576,9 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       let stderr = "";
       child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
       child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
+      if (ctx.memoryConfig.memoryEnabled) {
+        spawn("abmind", ["update", "--alpha"], { detached: true, stdio: "ignore" }).unref();
+      }
     } else {
       await ctx.reply("Updating from npm (stable)...");
       logInfo("update", "npm stable update requested");
@@ -556,6 +587,9 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       let stderr = "";
       child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
       child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
+      if (ctx.memoryConfig.memoryEnabled) {
+        spawn("abmind", ["update", "--stable"], { detached: true, stdio: "ignore" }).unref();
+      }
     }
     return true;
   }
