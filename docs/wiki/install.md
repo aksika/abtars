@@ -22,12 +22,6 @@ sudo apt-get install -y nodejs
 node --version   # should show v24.x.x
 ```
 
-### pnpm (required)
-
-```bash
-npm install -g pnpm
-```
-
 ### git (required)
 
 ```bash
@@ -84,10 +78,10 @@ abtars deps install all
 # 1. Install CLI tools
 ABTARS_V=$(npm view abtars@alpha version)
 ABMIND_V=$(npm view abmind@alpha version)
-pnpm add -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"
+npm install -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"
 
-# Ensure abtars is on PATH (pnpm global bin location varies by platform):
-export PATH="$(pnpm bin -g):$HOME/.local/bin:$PATH"
+# Ensure abtars is on PATH (nvm-global bin location):
+export PATH="$HOME/.nvm/versions/node/$(node -v | tr -d v)/bin:$HOME/.local/bin:$PATH"
 # Add the line above to ~/.bashrc or ~/.zshrc for persistence.
 
 # 2. Optional deps (recommended before first start)
@@ -115,7 +109,7 @@ Step 3 automatically clones source, builds, deploys, and starts the bridge (daem
 
 | Step | What happens |
 |------|-------------|
-| `pnpm add -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"` | Installs CLI tools globally (explicit version avoids pnpm cache staleness) |
+| `npm install -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"` | Installs CLI tools globally (explicit version avoids npm cache staleness) |
 | `abtars deps install all` | Installs optional npm packages (browser, PDF, YouTube, image) |
 | `abtars install` | Creates config, clones source, builds, deploys release, starts bridge |
 | `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption (discovers user from abtars) |
@@ -141,7 +135,7 @@ Omit `--non-interactive` and the wizard will prompt for each value:
 ```bash
 ABTARS_V=$(npm view abtars@alpha version)
 ABMIND_V=$(npm view abmind@alpha version)
-pnpm add -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"
+npm install -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"
 abtars deps install all
 abtars install
 abmind install
@@ -158,7 +152,7 @@ Set during install. Daemon mode starts automatically after `abtars install`. Sim
 
 **Simple mode note:** If you use optional deps (`abtars deps install`), add to your shell profile:
 ```bash
-export NODE_PATH="$HOME/.abtars-releases/deps/node_modules:$NODE_PATH"
+export NODE_PATH="$HOME/.local/lib/node_modules:$NODE_PATH"
 ```
 Daemon mode sets this automatically.
 
@@ -166,9 +160,9 @@ Daemon mode sets this automatically.
 
 | Channel | Command | Who |
 |---|---|---|
-| **Stable** | `pnpm install -g abtars abmind` | Normal users |
-| **Alpha** | `pnpm add -g "abtars@$(npm view abtars@alpha version)" "abmind@$(npm view abmind@alpha version)"` | Early adopters |
-| **Dev** | `git clone` + `abtars update --local` | Contributors |
+| **Stable** | `npm install -g abtars abmind` | Normal users |
+| **Alpha** | `npm install -g "abtars@alpha" "abmind@alpha"` | Early adopters |
+| **Dev** | `git clone` + `abtars update --dev .` | Contributors |
 
 ## Commands reference
 
@@ -210,10 +204,11 @@ In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
 
 ~/.abtars-releases/
 ├── src/                 # source checkouts (abtars/, abmind/)
-├── deps/node_modules/   # optional deps (abtars deps install)
-├── <commit>/            # deployed releases
-├── current -> <commit>  # active release symlink
+├── <version>/           # deployed releases (e.g., 0.3.4-alpha.6)
+├── current -> <version> # active release symlink
 └── history.json         # release history
+
+~/.local/lib/node_modules/   # unified native deps dir (better-sqlite3, optional deps)
 
 ~/.abmind/
 └── memory/

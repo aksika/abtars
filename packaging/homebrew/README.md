@@ -19,7 +19,7 @@ brew install abtars abmind
 
 ## Automation
 
-The release workflow (#1103) auto-updates the tap after each `pnpm publish`:
+The release workflow (#1103) auto-updates the tap after each `npm publish`:
 - Computes SHA256 of the published tarball
 - Pushes updated formula to `aksika/homebrew-abtars`
 - Requires `HOMEBREW_TAP_TOKEN` secret (classic PAT with `repo` scope)

@@ -4,29 +4,23 @@ abtars and abmind install, update, and run entirely in user space. No root acces
 
 ## Prerequisites
 
-```bash
-# Install pnpm (one-time) — no sudo
-curl -fsSL https://get.pnpm.io/install.sh | sh -
-pnpm setup
-# Restart your shell or: source ~/.bashrc (or ~/.zshrc)
-```
+- **Node.js 22+** — install via [Homebrew](https://brew.sh) on macOS, [NodeSource](https://github.com/nodesource/distributions) on Linux/WSL, or [nvm](https://github.com/nvm-sh/nvm) (recommended)
+- **npm** — comes with Node.js
 
 ## Install (3 steps)
 
 ```bash
-pnpm install -g abtars abmind    # 1. CLI on PATH
-abmind install                    # 2. memory system
-abtars install                    # 3. bridge setup → starts running
+npm install -g abtars abmind    # 1. CLI on PATH
+abmind install                  # 2. memory system
+abtars install                  # 3. bridge setup → starts running
 ```
 
-pnpm installs global packages to your home directory:
-- Linux: `~/.local/share/pnpm/`
-- macOS: `~/Library/pnpm/`
+`npm install -g` installs global packages to your user directory when using a user-owned prefix (nvm, or `npm config set prefix ~/.npm-global`).
 
 ## Update
 
 ```bash
-abtars update    # pulls, builds, deploys — no sudo
+abtars update --alpha    # pulls, builds, deploys — no sudo
 ```
 
 ## Run as a service (survives reboot)
@@ -58,17 +52,25 @@ After that: never sudo again.
 
 | Component | Location | Owner |
 |-----------|----------|-------|
-| pnpm + packages | `~/.local/share/pnpm/` | user |
+| Node + npm packages | `~/.nvm/versions/node/...` (nvm) or `~/.npm-global/` | user |
 | abtars releases | `~/.abtars-releases/` | user |
 | abtars runtime | `~/.abtars/` | user |
 | abmind data | `~/.abmind/` | user |
 | Watchdog service | `~/Library/LaunchAgents/` or `~/.config/systemd/user/` | user |
+| Native deps (better-sqlite3, etc.) | `~/.local/lib/node_modules/` | user |
 | Source (optional) | `~/.abtars-releases/src/` | user |
 
 Everything lives under `~/`. No system paths touched. No `/usr/local/`. No `/etc/`. No root.
 
-## What about npm?
+## If npm defaults to `/usr/local/`
 
-If you installed with npm and npm's prefix is `/usr/local/` (macOS default), you may have needed sudo for `npm install -g`. Switching to pnpm eliminates this — pnpm never uses system paths.
+On macOS, npm's default prefix is `/usr/local/`, which requires sudo for `npm install -g`. Fix:
 
-If you're stuck with npm: `npm config set prefix ~/.npm-global` moves the global dir to user space. Then no sudo needed for npm either.
+```bash
+npm config set prefix ~/.npm-global
+export PATH="$HOME/.npm-global/bin:$PATH"
+```
+
+Add the export to your shell profile (`~/.zshrc` / `~/.bashrc`) for persistence.
+
+**Recommended:** use [nvm](https://github.com/nvm-sh/nvm) instead. It installs Node + npm to `~/.nvm/` — no sudo needed, and you can have multiple Node versions side by side.

@@ -10,7 +10,7 @@ Experienced? Jump straight to [Installation](./install.md) for the full technica
 
 2. **Node.js 22+** — the runtime (recommended: Node 24). Install via [Homebrew](https://brew.sh) (`brew install node@24`) on macOS or [NodeSource](https://github.com/nodesource/distributions) on Linux/WSL.
 
-3. **pnpm** — the package manager. Install with `npm install -g pnpm`.
+3. **npm** — the package manager. Comes with Node.js.
 
 4. **A Telegram bot token** — create one via [@BotFather](https://t.me/BotFather) on Telegram. This is how you'll talk to your agent.
 

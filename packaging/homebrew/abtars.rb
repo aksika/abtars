@@ -22,8 +22,7 @@ class Abtars < Formula
         abtars install
 
       To add persistent memory:
-        pnpm install -g abmind@alpha
-        pnpm approve-builds -g
+        npm install -g abmind@alpha
         abmind install
         abtars restart
     EOS
