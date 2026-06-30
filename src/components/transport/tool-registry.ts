@@ -34,6 +34,10 @@ export type ToolDefinition = {
 const BASH_TIMEOUT_MS = 300_000;
 const CLI_TIMEOUT_MS = 60_000;
 
+// #1266: when no in-process memory backend is wired, return this error
+// rather than silently shelling out to a CLI on PATH we don't trust.
+const MEMORY_BACKEND_ERROR = "memory backend not initialized — abmind failed to load or below supported floor";
+
 /**
  * Patterns that would spawn or restart a bridge/watchdog process.
  * Blocked to prevent the LLM (especially fallback models) from accidentally
@@ -245,12 +249,7 @@ const memoryStoreTool: ToolDefinition = {
         return JSON.stringify({ error: msg });
       }
     }
-    let cmd = `abmind store --translated ${JSON.stringify(args["translated"] ?? "")} --type ${args["type"] ?? "fact"}`;
-    if (args["original"]) cmd += ` --original ${JSON.stringify(args["original"])}`;
-    if (args["emotion"]) cmd += ` --emotion-score ${args["emotion"]}`;
-    if (args["confidence"]) cmd += ` --confidence ${args["confidence"]}`;
-    if (args["classification"]) cmd += ` --classification ${args["classification"]}`;
-    return runBash(cmd, CLI_TIMEOUT_MS);
+    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
   },
 };
 
@@ -285,9 +284,7 @@ const memoryRecallTool: ToolDefinition = {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
       }
     }
-    let cmd = `abmind recall ${JSON.stringify(args["query"] ?? "")}`;
-    if (args["limit"]) cmd += ` --limit ${args["limit"]}`;
-    return runBash(cmd, CLI_TIMEOUT_MS);
+    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
   },
 };
 
@@ -326,15 +323,7 @@ const memoryEditTool: ToolDefinition = {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
       }
     }
-    let cmd = `abmind edit --memory-id ${args["memory_id"] ?? "0"}`;
-    if (args["translated"]) cmd += ` --translated ${JSON.stringify(args["translated"])}`;
-    if (args["original"]) cmd += ` --original ${JSON.stringify(args["original"])}`;
-    if (args["type"]) cmd += ` --type ${args["type"]}`;
-    if (args["emotion"]) cmd += ` --emotion-score ${args["emotion"]}`;
-    if (args["confidence"]) cmd += ` --confidence ${args["confidence"]}`;
-    if (args["classification"]) cmd += ` --classification ${args["classification"]}`;
-    if (args["caller"]) cmd += ` --caller ${args["caller"]}`;
-    return runBash(cmd, CLI_TIMEOUT_MS);
+    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
   },
 };
 

@@ -318,30 +318,12 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     logDebug("main", "🛡️ Seatbelt wired to tool-registry");
   }
 
-  if (resolved.provider.transport === "api" && (ctx.memory as any)?.available) {
-    const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
-    // #860: Use the SAME MemoryManager instance — don't create a second SqliteBackend.
-    // Two separate DB connections to the same WAL-mode file corrupt each other's handles.
-    const mm = ctx.memory!;
-    const backend = {
-      initialize: async () => {},
-      close: () => {},
-      instantStore: (p: any) => mm.editor.instantStore(p),
-      editMemory: (p: any) => mm.editor.editMemory(p),
-      reclassifyMemory: (id: number, level: number, uo: boolean) => { mm.editor.reclassifyMemory(id, level, uo); return Promise.resolve(); },
-      adjustRelevance: (id: number, delta: number) => { mm.editor.adjustRelevance(id, delta); return Promise.resolve(); },
-      mergeMemories: (a: number, b: number) => mm.editor.mergeMemories(a, b),
-      cascadeDelete: (ids: number[], uid: string) => mm.editor.cascadeDelete(ids, uid),
-      recall: (p: any) => mm.recallSearch(p),
-      rebuildFtsIndexes: () => mm.rebuildFtsIndexes(),
-    };
-    setMemoryBackend(backend as any);
-    logInfo("main", "🧠 In-process memory wired to tool registry (shared handle)");
-
-    // #843: Wire memory to transport for session hydration on restart
+  // #843: Wire memory to DirectApiTransport for session hydration on restart.
+  // Transport-specific — only DirectApiTransport has this field.
+  if (resolved.provider.transport === "api" && ctx.memory) {
     (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).memoryBackend = ctx.memory!;
 
-    // Wire context engine for automatic compaction
+    // Wire context engine for automatic compaction (DirectApiTransport-specific).
     const db = ctx.memory!.getDb?.() ?? ctx.memory!.getDatabase?.();
     if (db && resolved.contextWindow >= 128000) {
       const { ContextEngine } = await import("abmind");
@@ -350,7 +332,6 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       const orchestrator = createContextOrchestrator(
         contextEngine,
         async (systemPrompt: string, userPrompt: string) => {
-          // Use the transport itself for summarization (same model, same endpoint)
           const { streamSingleCompletion } = await import("../components/transport/stream-single.js");
           return streamSingleCompletion({
             endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",

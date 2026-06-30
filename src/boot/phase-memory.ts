@@ -72,6 +72,27 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
     await memory.initialize();
     ctx.memory = memory;
     logDebug("main", `🧠 Memory enabled (dir=${ctx.memoryConfig.memoryDir})`);
+
+    // #1266: Wire in-process memory to the tool registry, transport-agnostic.
+    // #860: Use the SAME MemoryManager instance — don't create a second SqliteBackend.
+    // Two separate DB connections to the same WAL-mode file corrupt each other's handles.
+    const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
+    const mm = ctx.memory!;
+    const backend = {
+      initialize: async () => {},
+      close: () => {},
+      instantStore: (p: any) => mm.editor.instantStore(p),
+      editMemory: (p: any) => mm.editor.editMemory(p),
+      reclassifyMemory: (id: number, level: number, uo: boolean) => { mm.editor.reclassifyMemory(id, level, uo); return Promise.resolve(); },
+      adjustRelevance: (id: number, delta: number) => { mm.editor.adjustRelevance(id, delta); return Promise.resolve(); },
+      mergeMemories: (a: number, b: number) => mm.editor.mergeMemories(a, b),
+      cascadeDelete: (ids: number[], uid: string) => mm.editor.cascadeDelete(ids, uid),
+      recall: (p: any) => mm.recallSearch(p),
+      rebuildFtsIndexes: () => mm.rebuildFtsIndexes(),
+    };
+    setMemoryBackend(backend as any);
+    logInfo("main", "🧠 In-process memory wired to tool registry (shared handle)");
+
     return "ran";
   } catch (err) {
     logWarn("main", `⚠️ Memory init failed: ${err instanceof Error ? err.message : String(err)}. Running without persistent memory.`);

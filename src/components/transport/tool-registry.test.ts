@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall } from "./tool-registry.js";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, setMemoryBackend } from "./tool-registry.js";
 
 describe("isBridgeSpawnCommand", () => {
   it.each([
@@ -77,5 +77,44 @@ describe("executeToolCall", () => {
     const result = await executeToolCall("nonexistent_tool", {});
     const parsed = JSON.parse(result);
     expect(parsed.error).toContain("Unknown tool");
+  });
+});
+
+// #1266: when no in-process memory backend is wired, the memory_* tools
+// must return a clear error rather than silently shelling out to a CLI
+// on PATH we don't trust.
+describe("memory tools with no backend wired (#1266)", () => {
+  beforeEach(() => {
+    setMemoryBackend(null);
+  });
+
+  it("memory_recall returns backend-not-initialized error, no shell-out", async () => {
+    const tool = getToolDefinitions().find(t => t.name === "memory_recall");
+    expect(tool).toBeDefined();
+    const result = await tool!.execute({ query: "anything" });
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toMatch(/memory backend not initialized/);
+  });
+
+  it("memory_store returns backend-not-initialized error, no shell-out", async () => {
+    const tool = getToolDefinitions().find(t => t.name === "memory_store");
+    expect(tool).toBeDefined();
+    const result = await tool!.execute({ translated: "x", type: "fact" });
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toMatch(/memory backend not initialized/);
+  });
+
+  it("memory_edit returns backend-not-initialized error, no shell-out", async () => {
+    const tool = getToolDefinitions().find(t => t.name === "memory_edit");
+    expect(tool).toBeDefined();
+    const result = await tool!.execute({ memory_id: "1" });
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toMatch(/memory backend not initialized/);
+  });
+
+  it("executeToolCall routes to the same null-backend path", async () => {
+    const result = await executeToolCall("memory_recall", { query: "x" });
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toMatch(/memory backend not initialized/);
   });
 });
