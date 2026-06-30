@@ -3,7 +3,7 @@
  * Single flat Map<sessionId, ManagedSession>. No bucketing. No PlatformState.
  */
 
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, kanbanGetCard, isUnblocked } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
@@ -255,7 +255,7 @@ export class Spin {
       if (s.userId !== userId) continue;
       if (sessionId && s.id !== sessionId) continue;
       if (s.idleTimeoutMs === Infinity) continue;
-      if (s.transport) { try { s.transport.destroy(); } catch {} s.transport = undefined; }
+      if (s.transport) { try { s.transport.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } s.transport = undefined; }
       s.status = "ended";
       s.active = false;
       pushLog(s, "destroyed");
@@ -265,38 +265,19 @@ export class Spin {
 
   destroyAll(): void {
     for (const s of this.sessions.values()) {
-      if (s.transport) { try { s.transport.destroy(); } catch {} }
+      if (s.transport) { try { s.transport.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } }
     }
-    if (this.orcSession) { try { this.orcSession.destroy(); } catch {} this.orcSession = null; }
+    if (this.orcSession) { try { this.orcSession.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } this.orcSession = null; }
     this.sessions.clear();
     this.nextIndex = 0;
     logInfo(TAG, "All sessions destroyed (shutdown)");
   }
 
-  // ── inject() ───────────────────────────────────────────────────────────
-
-  async inject(userId: string, prompt: string, opts?: { deliver?: boolean }): Promise<string | null> {
-    const registry = loadUsers();
-    const user = registry.byUserId.get(userId);
-    if (!user) { logWarn(TAG, `inject: unknown user ${userId}`); return null; }
-    const chatId = user.platforms.telegram ?? user.platforms.discord;
-    if (!chatId) { logWarn(TAG, `inject: no chatId for ${userId}`); return null; }
-    const platform = user.platforms.telegram ? "telegram" : "discord";
-    const numericChatId = typeof chatId === "number" ? chatId : parseInt(String(chatId), 10);
-
-    try {
-      const session = await this.resolveSession(userId, platform, numericChatId);
-      if (!session.transport) { logWarn(TAG, `inject: no transport for ${userId}`); return null; }
-      const response = await session.transport.sendPrompt(`${userId}:inject`, prompt, undefined, userId);
-      session.messageCount++;
-      pushLog(session, `inject (deliver=${opts?.deliver ?? true})`);
-      logInfo(TAG, `inject delivered to ${userId} (${response.length} chars, deliver=${opts?.deliver ?? true})`);
-      return (opts?.deliver ?? true) ? response : null;
-    } catch (err) {
-      logWarn(TAG, `inject failed for ${userId}: ${err instanceof Error ? err.message : String(err)}`);
-      return null;
-    }
-  }
+  // ── injectGreeting() ───────────────────────────────────────────────────
+  // #1106: replaced inject() (which generated a model response but never
+  // delivered to the user). injectGreeting routes a synthetic message
+  // through the normal pipeline — the model responds AND the response is
+  // delivered to the user via the standard adapter.sendMessage path.
 
   async injectGreeting(userId: string, prompt: string): Promise<string | null> {
     if (!this._greetingAdapter) { logWarn(TAG, "injectGreeting: no adapter"); return null; }
@@ -462,6 +443,7 @@ export class Spin {
     if (this._housekeepCounter % 72 === 0) {
       this.pruneSkillTrash();
       this.rotateAuditLog();
+      this.pruneEndedSessions();
     }
   }
 
@@ -533,6 +515,18 @@ export class Spin {
     } catch (err) { logAndSwallow(TAG, "audit prune", err); }
   }
 
+  /** #1248: Prune ended sessions older than 1 hour (~hourly). Prevents unbounded Map growth. */
+  private pruneEndedSessions(): void {
+    const ONE_HOUR_MS = 60 * 60 * 1000;
+    const now = Date.now();
+    for (const [id, s] of this.sessions) {
+      if (s.status === "ended" && now - s.lastActiveAt > ONE_HOUR_MS) {
+        this.sessions.delete(id);
+        logDebug(TAG, `Pruned ended session: ${s.userId} id=${id}`);
+      }
+    }
+  }
+
   private async pollRemoteCards(): Promise<void> {
     const remoteCards = kanbanList("running", "status").filter(c => c.type === "remote");
     if (remoteCards.length === 0) return;
@@ -551,7 +545,7 @@ export class Spin {
         const result = await transport.checkTask(meta.peer, meta.remote_task_id);
         if (result.status === "done") kanbanComplete(card.id, null, result.result?.slice(0, 500) ?? "completed");
         else if (result.status === "failed") kanbanFail(card.id, result.error ?? "remote task failed");
-      } catch {}
+      } catch (err) { logAndSwallow(TAG, "pollRemote", err); }
     }
   }
 
@@ -580,22 +574,6 @@ export class Spin {
     const agentName = request.agent ?? typeAgent(request.type);
     logInfo(TAG, `▶ ${request.type} card:${cardId} agent=${agentName}`);
 
-    const staleMs = parseInt(process.env["WORKER_STALE_MS"] ?? "300000", 10);
-    let lastActivityAt = Date.now();
-
-    const timer = setTimeout(() => {
-      logWarn(TAG, `⏱️ ${request.type} card:${cardId} timed out`);
-      this.runtime?.interruptSpawn(`spin-${cardId}`);
-    }, timeoutMs);
-
-    const staleCheck = setInterval(() => {
-      if (Date.now() - lastActivityAt > staleMs) {
-        clearInterval(staleCheck);
-        logWarn(TAG, `⏱️ ${request.type} card:${cardId} stale (no activity ${staleMs / 1000}s)`);
-        this.runtime?.interruptSpawn(`spin-${cardId}`);
-      }
-    }, 60_000);
-
     try {
       const { buildSoulBundle } = await import("./soul-bundle.js");
       const bundle = buildSoulBundle(request.type);
@@ -620,7 +598,7 @@ export class Spin {
         this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
       }
       return result;
-    } finally { clearTimeout(timer); clearInterval(staleCheck); }
+    } finally {}
   }
 
   private async executeOrc(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {

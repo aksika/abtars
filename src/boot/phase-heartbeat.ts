@@ -82,17 +82,15 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     },
   });
 
-  // sendSystemMessage — uses spin.inject() (singleton, no transport dep)
+  // sendSystemMessage — #1106: use injectGreeting (routes through pipeline,
+  // model response is delivered to master user via standard adapter path).
+  // Replaces spin.inject() which generated a response but never delivered it.
   const { spin } = await import("../components/spin.js");
   const masterUser = loadUsers().users.find(u => u.role === "master");
   const masterUserId = masterUser?.userId ?? "master";
   ctx.sendSystemMessage = async (prompt: string): Promise<void> => {
     try {
-      const response = await spin.inject(masterUserId, `[SYSTEM] ${prompt}`, { deliver: true });
-      if (response) {
-        const { sendNotification } = await import("../components/notification.js");
-        sendNotification(ctx, response);
-      }
+      await spin.injectGreeting(masterUserId, `[SYSTEM] ${prompt}`);
     } catch (err) {
       logWarn("main", `System message failed: ${err instanceof Error ? err.message : String(err)}`);
     }

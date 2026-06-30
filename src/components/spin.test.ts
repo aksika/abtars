@@ -116,29 +116,31 @@ describe("Spin — unified session router (#943)", () => {
     });
   });
 
-  describe("inject", () => {
+  describe("injectGreeting", () => {
     it("returns null for unknown user", async () => {
-      const result = await spin.inject("nobody", "hello");
+      const result = await spin.injectGreeting("nobody", "hello");
       expect(result).toBeNull();
     });
 
-    it("creates session and delivers greeting for known user", async () => {
-      const result = await spin.inject("adrika", "Good morning!");
-      expect(result).toBeDefined();
-    });
-
-    it("reuses existing session", async () => {
-      await spin.resolveSession("adrika", "telegram", 222);
-      const session = spin.getActiveSession("adrika", "telegram");
-      const transportBefore = session.transport;
-
-      await spin.inject("adrika", "Hello again!");
-      expect(session.transport).toBe(transportBefore);
-    });
-
-    it("returns null when deliver=false", async () => {
-      const result = await spin.inject("adrika", "system msg", { deliver: false });
+    it("returns null when no greeting adapter is set", async () => {
+      spin.setGreetingAdapter(null as any);
+      const result = await spin.injectGreeting("adrika", "Good morning!");
       expect(result).toBeNull();
+      spin.setGreetingAdapter({ injectMessage: () => {} } as any);
+    });
+
+    it("injects synthetic message via the adapter so pipeline delivers response (#1106 regression)", async () => {
+      const captured: any[] = [];
+      spin.setGreetingAdapter({ injectMessage: (msg) => captured.push(msg) } as any);
+      const result = await spin.injectGreeting("adrika", "[SYSTEM] scheduled check-in");
+      expect(result).toBe("routed");
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toMatchObject({
+        userId: "adrika",
+        text: "[SYSTEM] scheduled check-in",
+        isGroup: false,
+        isVoice: false,
+      });
     });
   });
 
