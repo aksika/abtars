@@ -379,6 +379,16 @@ export class CronQueue {
       const idleMs = Date.now() - readLastPromptAt();
       if (idleMs < 90_000) {
         logInfo(TAG, `⏸ Deferring agent task "${entry.id}" — user active ${Math.round(idleMs / 1000)}s ago`);
+        entry.consecutiveFails = (entry.consecutiveFails ?? 0) + 1;
+        if (entry.consecutiveFails >= 3) {
+          entry.paused = true;
+          logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${entry.consecutiveFails} idle-gate deferrals`);
+          this.onTaskPaused?.(entry.chatId, entry.title ?? entry.message.slice(0, 60), `idle-gate hit ${entry.consecutiveFails}× in a row`);
+        }
+        writeEntry(entry);
+        scheduleRetry(entry, !!entry._retrying);
+        this.clearCurrent();
+        this.processNext();
         return;
       }
     }

@@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
 import * as child_process from "node:child_process";
 import { CronQueue } from "./task-queue.js";
 import type { CronEntry } from "../../cli/abtars-task.js";
+import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
+import { readEntry, writeEntry } from "./task-store.js";
 
 // Mock child_process.spawn so no real bash commands run.
 vi.mock("node:child_process", async () => {
@@ -15,6 +17,15 @@ vi.mock("./task-store.js", () => ({
   recordRun: vi.fn(),
   readEntry: vi.fn(),
   writeEntry: vi.fn(),
+}));
+
+// Mock bridge-lock so readLastPromptAt is controllable per test.
+vi.mock("../transport/bridge-lock-transport.js", () => ({
+  readLastPromptAt: vi.fn().mockReturnValue(0),
+  readBridgeLockField: vi.fn().mockReturnValue(undefined),
+  updateBridgeLockField: vi.fn(),
+  trackAcpPid: vi.fn(),
+  readAndClearAcpPids: vi.fn().mockReturnValue([]),
 }));
 
 // Controllable fake child used by spawn(). Test drives exit via `fakeChild.emit("exit", code)`.
@@ -35,6 +46,7 @@ function makeEntry(overrides: Partial<CronEntry> = {}): CronEntry {
     chatId: 1,
     type: "task",
     executor: "script",
+    schedule: "*/5 * * * *",
     fired: false,
     createdAt: Date.now(),
     ...overrides,
@@ -107,5 +119,82 @@ describe("CronQueue", () => {
     // And finally "low1"
     activeChildren[2]!.emit("exit", 0);
     expect(queue.currentJob?.entryId).toBe("low1");
+  });
+});
+
+describe("CronQueue.runAgent idle-gate (#1269)", () => {
+  let queue: CronQueue;
+  let recentActivity: number;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    recentActivity = Date.now();
+    vi.mocked(readLastPromptAt).mockImplementation(() => recentActivity);
+    vi.mocked(readEntry).mockImplementation((id: string) => {
+      const entry: CronEntry = makeEntry({ id, executor: "agent" });
+      return entry;
+    });
+    queue = new CronQueue("kiro-cli", ".");
+  });
+
+  function entryWrites(id: string): CronEntry[] {
+    return vi.mocked(writeEntry).mock.calls
+      .map((c) => c[0] as CronEntry)
+      .filter((e) => e.id === id);
+  }
+
+  it("re-queues via scheduleRetry when user is active within 90s", async () => {
+    const entry = makeEntry({ id: "briefing", executor: "agent" });
+    queue.enqueue(entry);
+
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const writes = entryWrites("briefing");
+    expect(writes.length).toBeGreaterThanOrEqual(2);
+    const runAgentWrite = writes.find((w) => w.consecutiveFails === 1);
+    expect(runAgentWrite).toBeDefined();
+    const retryWrite = writes.find((w) => w.fireAt > Date.now());
+    expect(retryWrite).toBeDefined();
+    expect(queue.currentJob).toBeNull();
+  });
+
+  it("auto-pauses after 3 consecutive idle-gate deferrals", async () => {
+    const entry = makeEntry({ id: "briefing", executor: "agent", consecutiveFails: 2 });
+    queue.enqueue(entry);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const writes = entryWrites("briefing");
+    const runAgentWrite = writes.find((w) => w.consecutiveFails === 3);
+    expect(runAgentWrite).toBeDefined();
+    expect(runAgentWrite!.paused).toBe(true);
+  });
+
+  it("does not re-queue when manual trigger (idle gate skipped)", async () => {
+    const entry = makeEntry({ id: "manual", executor: "agent" });
+    queue.enqueue(entry, undefined, true);
+
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const writes = entryWrites("manual");
+    const deferralWrites = writes.filter((w) => w.consecutiveFails !== undefined);
+    expect(deferralWrites.length).toBe(0);
+  });
+
+  it("does not re-queue when user is idle > 90s (idle gate passes)", async () => {
+    recentActivity = Date.now() - 5 * 60_000;
+    vi.mocked(readLastPromptAt).mockImplementation(() => recentActivity);
+
+    const entry = makeEntry({ id: "briefing", executor: "agent" });
+    queue.enqueue(entry);
+
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const writes = entryWrites("briefing");
+    const deferralWrites = writes.filter((w) => w.consecutiveFails !== undefined);
+    expect(deferralWrites.length).toBe(0);
   });
 });
