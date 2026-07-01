@@ -10,8 +10,9 @@ import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
-import type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
+import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions } from "./spin-types.js";
 import { typeAgent, sessionType } from "./spin-types.js";
+import { profileFor, type SessionProfile } from "./spin-profiles.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
 
@@ -318,6 +319,184 @@ export class Spin {
     logInfo(TAG, "Spawning persistent Orc session");
     this.orcSession = await this.runtime!.session("browsie");
     return this.orcSession;
+  }
+
+  // ── #1271: unified session API ────────────────────────────────────────
+  //
+  // spin(spec) is the single chokepoint for issuing a model prompt. Per-type
+  // behavior lives in SESSION_PROFILES (spin-profiles.ts) — no `type === "…"`
+  // branches here. Continuation (pipeline main turn, sleep step N) is just
+  // spin() with a sessionId.
+
+  async spin(spec: SpinSessionSpec): Promise<SpinResult> {
+    if (!this.runtime) throw new Error("Spin: runtime not set");
+    const profile = profileFor(spec.type);
+
+    // 1. Defaults
+    const userId   = spec.userId ?? getMasterUserId();
+    const platform = spec.platform ?? "background";
+    const chatId   = spec.chatId ?? 0;
+    const agent    = spec.agent ?? profile.agent;
+    const timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const terminate = spec.terminateAfter ?? profile.terminateAfter;
+    const persistent = spec.persistent ?? (profile.transportMode === "persistent");
+
+    // 2. Resolve session (reuse | active | singleton | transient) — driven by profile, no type branches
+    let session: ManagedSession;
+    if (spec.sessionId) {
+      const found = this.sessions.get(spec.sessionId);
+      if (!found) throw new Error(`Spin: sessionId ${spec.sessionId} not found`);
+      session = found;
+    } else if (spec.active || profile.resolution === "active") {
+      session = this.getActiveSession(userId, platform);
+    } else if (profile.resolution === "singleton") {
+      session = this.getOrCreateVisibleSession(userId, spec.type)!;
+    } else {
+      const r = Sessions.allocateSession(this.sessions, this.nextIndex, spec.type, userId, platform, chatId);
+      this.nextIndex = r.nextIndex; session = r.session;
+      if (spec.metadata) session.metadata = { ...spec.metadata };
+    }
+    const stepIndex = (session.messageCount >> 1) + 1;
+
+    // 3. Kanban card (user-facing work only)
+    let cardId = spec.cardId;
+    if (cardId === undefined && spec.goal !== undefined) {
+      cardId = kanbanEnqueue(spec.title ?? spec.goal.slice(0, 80), spec.source ?? "user", undefined, {
+        priority: spec.priority ?? "MEDIUM", type: spec.type, parent_id: spec.parentCardId,
+        deliveryMode: spec.deliveryMode, chatId: chatId ? String(chatId) : undefined,
+        notes: spec.callbackPeer ? JSON.stringify({ callback_peer: spec.callbackPeer }) : undefined,
+        sourcePeer: spec.sourcePeer,
+      });
+    }
+    if (cardId !== undefined && this.canDispatch(spec.type, cardId)) {
+      this.markRunning(spec.type, cardId); kanbanRunning(cardId);
+    }
+
+    // 4. before-hook
+    await profile.beforePrompt?.(session, cardId);
+
+    // 5. Resolve the execution transport. Reuse the session's OWN transport if it
+    //    already has one (A per-user main turn, D step N, O reuse). Only
+    //    create+attach for a NEW persistent session.
+    let sessionTransport = session.transport as IKiroTransport | undefined;
+    if (persistent && !sessionTransport) {
+      const agentSession = await this.runtime.session(agent, profile.resolution === "active" ? userId : undefined);
+      sessionTransport = agentSession.transport as IKiroTransport;
+      session.transport = sessionTransport;
+      session.status = "ready";
+    }
+
+    // 6. Build prompt via decorators
+    let prompt = spec.prompt ?? spec.goal ?? "";
+    for (const decorate of profile.decorators) {
+      prompt = await decorate(prompt, { session, cardId, parentCardId: spec.parentCardId });
+    }
+    pushLog(session, `spin type=${spec.type} agent=${agent} step=${stepIndex}`);
+
+    // 7. Execute — persistent/continuation sends via the session's own transport
+    //    (key = session.id preserves the Orc sneak-in); oneshot uses runtime.complete.
+    const started = Date.now();
+    const exec = sessionTransport
+      ? sessionTransport.sendPrompt(session.id, prompt, spec.imageContent as { mime: string; base64: string } | undefined, spec.userId ?? userId)
+      : this.runtime.complete(agent, prompt, { timeoutMs, session: "fresh" });
+
+    if (!spec.await) {
+      exec.then(r => this.finishSpin(spec, profile, session, cardId, stepIndex, started, r || "(no output)", terminate))
+          .catch(e => this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate));
+      return { sessionId: session.id, cardId };
+    }
+    try {
+      const result = (await exec) || "(no output)";
+      await this.finishSpin(spec, profile, session, cardId, stepIndex, started, result, terminate);
+      return { sessionId: session.id, cardId, result };
+    } catch (err) {
+      await this.failSpin(spec, profile, session, cardId, stepIndex, started, err, terminate);
+      throw err;
+    }
+  }
+
+  private async finishSpin(
+    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession,
+    cardId: number | undefined, stepIndex: number, started: number, result: string,
+    terminate: "call" | "response" | "external",
+  ): Promise<void> {
+    // Persistent sends go through session.transport (runtime.lastUsage is only
+    // updated by runtime.complete). Prefer the transport's own usage; fall back
+    // to runtime for oneshot.
+    const usage = (session.transport as { lastUsage?: () => { input: number; output: number } | null } | undefined)?.lastUsage?.()
+      ?? this.runtime?.lastUsage ?? null;
+    session.messageCount += 2;
+    session.lastActiveAt = Date.now();
+    session.tokenCount = usage ? usage.input + usage.output : session.tokenCount;
+    pushLog(session, "complete");
+
+    if (this.memory) {
+      const sid = cardId !== undefined ? `${spec.type}_card${cardId}` : `${spec.type}_${session.id}`;
+      this.memory.recordMessage({ role: "user", content: spec.goal ?? spec.prompt ?? "", timestamp: Date.now(), userId: "system", sessionId: sid });
+      this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
+    }
+    if (cardId !== undefined) {
+      const { drainArtifacts } = require("./transport/artifact-tools.js") as typeof import("./transport/artifact-tools.js");
+      const artifacts = drainArtifacts(cardId);
+      kanbanComplete(cardId, null, result.slice(0, 500));
+      if (spec.callbackPeer) {
+        const card = kanbanGetCard(cardId);
+        fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
+      }
+    }
+
+    await profile.afterPrompt?.(session, cardId);
+    const stepEvent: StepEvent = {
+      sessionId: session.id, cardId, stepIndex, result,
+      durationMs: Date.now() - started,
+      inputTokens: usage?.input, outputTokens: usage?.output,
+    };
+    await spec.onStepComplete?.(stepEvent);
+
+    this.applyTerminate(session, terminate);
+    if (cardId !== undefined) { this.markDone(spec.type, cardId); this.drainQueued(); }
+  }
+
+  private async failSpin(
+    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession,
+    cardId: number | undefined, stepIndex: number, started: number, err: unknown,
+    terminate: "call" | "response" | "external",
+  ): Promise<void> {
+    const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
+    logWarn(TAG, `${spec.type} spin failed: ${msg}`);
+    pushLog(session, `failed: ${msg.slice(0, 80)}`);
+    if (cardId !== undefined) {
+      kanbanRetryOrFail(cardId, msg);
+      if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
+    }
+    await profile.afterPrompt?.(session, cardId);
+    const stepEvent: StepEvent = {
+      sessionId: session.id, cardId, stepIndex,
+      error: err instanceof Error ? err : new Error(msg),
+      durationMs: Date.now() - started,
+    };
+    await spec.onStepComplete?.(stepEvent);
+
+    this.applyTerminate(session, terminate);
+    if (cardId !== undefined) { this.markDone(spec.type, cardId); this.drainQueued(); }
+  }
+
+  private applyTerminate(session: ManagedSession, terminate: "call" | "response" | "external"): void {
+    if (terminate === "call") this.sessions.delete(session.id);
+    else if (terminate === "response") { session.status = "ended"; session.active = false; }
+    // "external" → stays alive (Orc, persistent D); 1hr housekeeping prunes ended ones
+  }
+
+  /** #1271: Background one-shot (e.g. compaction summary). Returns the result string. */
+  async dispatchBackground(opts: DispatchBackgroundOptions): Promise<string> {
+    const { result } = await this.spin({
+      type: opts.type ?? "S",
+      prompt: opts.prompt,
+      timeoutMs: opts.timeoutMs,
+      agent: opts.agent,
+      await: true,
+    });
+    return result ?? "";
   }
 
   // ── Dispatch ───────────────────────────────────────────────────────────
