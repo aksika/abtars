@@ -36,6 +36,8 @@ interface AgentApiDeps {
   workingDir: string;
   memory: IMemorySystem | null;
   runtime: SubagentRuntime;
+  /** Spin session manager (#1271) — used for /v1/chat/completions main path. */
+  sessionManager?: import("./spin.js").Spin;
   /** Optional callback for peer activity notifications (A2A). */
   onPeerActivity?: (msg: string) => void;
   /** A2A platform adapter — routes chat through pipeline/Spin (#978). */
@@ -75,6 +77,7 @@ export class AgentApiServer {
   private agentSession: AgentSession | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private runtime: SubagentRuntime;
+  private sessionManager?: import("./spin.js").Spin;
   private guestName = "GUEST";
   private onPeerActivity?: (msg: string) => void;
   private tlsEnabled = false;
@@ -87,6 +90,7 @@ export class AgentApiServer {
     this.workingDir = deps.workingDir;
     this.memory = deps.memory;
     this.runtime = deps.runtime;
+    this.sessionManager = deps.sessionManager;
     this.onPeerActivity = deps.onPeerActivity;
     this.a2aAdapter = deps.a2aAdapter;
 
@@ -670,6 +674,7 @@ export class AgentApiServer {
       rulesAlreadyInjected: this.rulesInjected,
       markRulesInjected: () => { this.rulesInjected = true; },
       guestName: this.guestName,
+      sessionManager: this.sessionManager,
     });
 
     // Reflect traffic log for observability

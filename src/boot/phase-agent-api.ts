@@ -39,6 +39,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         workingDir: config.transport.workingDir,
         memory,
         runtime,
+        sessionManager: ctx.sessionManager,
         onPeerActivity: notifyPeer,
         a2aAdapter,
       });

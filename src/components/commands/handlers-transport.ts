@@ -351,12 +351,12 @@ export async function handleReasoning(text: string, ctx: CommandContext): Promis
 }
 
 export async function handleContinue(_text: string, ctx: CommandContext): Promise<boolean> {
-  const response = await ctx.transport.sendPrompt(
-    ctx.sessionKey,
-    "[SYSTEM] Something went wrong during your previous response. Continue from where you left off.",
-    undefined,
-    ctx.userId,
-  );
+  // #1271: /continue goes through spin() continuation (model-call chokepoint)
+  const { result: response } = await ctx.sessionManager.spin({
+    type: "A", sessionId: ctx.sessionKey,
+    prompt: "[SYSTEM] Something went wrong during your previous response. Continue from where you left off.",
+    userId: ctx.userId, await: true,
+  });
   if (response) await ctx.reply(response);
   return true;
 }

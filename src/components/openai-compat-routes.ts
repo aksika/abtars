@@ -139,6 +139,8 @@ export interface ChatCompletionsDeps {
   markRulesInjected: () => void;
   /** Guest name from auth (A2A code path). */
   guestName: string;
+  /** #1271: Spin session manager for the unified chokepoint. Optional for back-compat. */
+  sessionManager?: import("./spin.js").Spin;
 }
 
 export interface ChatCompletionsResult {
@@ -220,7 +222,17 @@ export async function handleChatCompletions(
   logInfo(TAG, `/v1/chat/completions guest=${deps.guestName} session=${effectiveSessionKey} promptLen=${flat.prompt.length} stream=${stream}`);
 
   // Send to the agent — this is the slow bit
-  const reply = await deps.session.sendPrompt(effectiveSessionKey, fullPrompt);
+  // #1271: route through spin() (model-call chokepoint). Falls back to legacy
+  // deps.session.sendPrompt when sessionManager is not wired (defensive).
+  let reply: string;
+  if (deps.sessionManager) {
+    const r = await deps.sessionManager.spin({
+      type: "A", sessionId: effectiveSessionKey, prompt: fullPrompt, await: true,
+    });
+    reply = r.result ?? "";
+  } else {
+    reply = await deps.session.sendPrompt(effectiveSessionKey, fullPrompt);
+  }
 
   // Record the assistant turn — skip for peer (A2A) sessions
   if (!isPeer) deps.memory?.recordMessage({ role: "assistant", content: reply, timestamp: Date.now(), userId: "master", sessionId: effectiveSessionKey });

@@ -60,10 +60,13 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       const msg = `[System] You ARE the self-healing agent. A scheduled task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}${pending}\n\nDiagnose the root cause. If you can fix it programmatically (script fix, token refresh, pause task), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.\n\nFORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:\n- transport.json\n- .env / .env.skills\n- peers.json\n- users.json\nException: fixing JSON structural corruption (invalid syntax, parse errors) is always allowed.\n\nA single task failure is NOT grounds for config changes. Investigate root cause, report findings.`;
       void (async () => {
         try {
-          const { SubagentRuntime } = await import("../components/subagent-runtime.js");
-          const runtime = new SubagentRuntime();
-          await runtime.complete("coding", msg, { sessionType: "S" });
-          await runtime.shutdown();
+          // #1271: SHA goes through the unified spin() chokepoint (S profile =
+          // coding agent, call-terminate — session is created and deleted).
+          await ctx.sessionManager.spin({
+            type: "S",
+            prompt: msg,
+            await: true,
+          });
         } catch (err) {
           logWarn("main", `SHA session failed: ${err}`);
         } finally {
