@@ -290,7 +290,17 @@ export async function handleInboundMessage(
       };
     }
 
-    const responsePromise = sessionTransport.sendPrompt(activeSessionId, prompt, imageContent, userId);
+    // #1271: pipeline main turn goes through spin(spec) (model-call chokepoint).
+    // Streaming/tool callbacks remain pipeline-owned (set on the transport before,
+    // reset in the finally below). spin() sends via the session's own transport.
+    const responsePromise = deps.sessionManager.spin({
+      type: sessionType(activeSession),
+      sessionId: activeSessionId,
+      prompt,
+      imageContent,
+      userId,
+      await: true,
+    }).then(r => r.result ?? "");
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {

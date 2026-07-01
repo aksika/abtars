@@ -79,6 +79,18 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
       getActiveSessionId: () => "test_A_01",
       getActiveSession: () => session,
       getSessionById: (id: string) => id === "test_A_01" ? session : undefined,
+      spin: async (spec: any) => {
+        // #1271: pipeline tests stub spin() to call the transport directly
+        // (mirrors pre-refactor sendPrompt behavior). Streaming/tool callbacks
+        // are set on the transport by the pipeline itself.
+        const result = await transport.sendPrompt(
+          spec.sessionId ?? "test_A_01",
+          spec.prompt,
+          spec.imageContent,
+          spec.userId,
+        );
+        return { sessionId: spec.sessionId ?? "test_A_01", result: result ?? "" };
+      },
     } as any,
     updateCtxStart: vi.fn(),
     _session: session,
