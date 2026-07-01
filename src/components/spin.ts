@@ -11,7 +11,7 @@ import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
 import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions } from "./spin-types.js";
-import { typeAgent, sessionType } from "./spin-types.js";
+import { sessionType } from "./spin-types.js";
 import { profileFor, type SessionProfile } from "./spin-profiles.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
@@ -307,19 +307,14 @@ export class Spin {
 
   getOrcSession(): AgentSession | null { return this.orcSession?.isReady ? this.orcSession : null; }
 
+  /** @deprecated Use `spin({ type:"O", sessionId, prompt:"[USER] "+msg, await:true })`. */
   async sendUserToOrc(message: string): Promise<string | null> {
-    const orc = this.getOrcSession();
-    if (!orc) return null;
-    const response = await orc.sendPrompt("orc:user", `[USER] ${message}`);
-    return response;
+    const orcSession = [...this.sessions.values()].find(s => s.id.includes("_O_") && s.status !== "ended");
+    if (!orcSession) return null;
+    const { result } = await this.spin({ type: "O", sessionId: orcSession.id, prompt: `[USER] ${message}`, await: true });
+    return result ?? null;
   }
 
-  private async getOrCreateOrc(): Promise<AgentSession> {
-    if (this.orcSession?.isReady) return this.orcSession;
-    logInfo(TAG, "Spawning persistent Orc session");
-    this.orcSession = await this.runtime!.session("browsie");
-    return this.orcSession;
-  }
 
   // ── #1271: unified session API ────────────────────────────────────────
   //
@@ -442,7 +437,7 @@ export class Spin {
       let artifacts: Array<{ name: string; content: string }> = [];
       try {
         const { drainArtifacts } = require("./transport/artifact-tools.js") as typeof import("./transport/artifact-tools.js");
-        artifacts = drainArtifacts(cardId);
+        artifacts = drainArtifacts(cardId) ?? [];
       } catch { /* artifact-tools unavailable (e.g. test env) — skip */ }
       kanbanComplete(cardId, null, result.slice(0, 500));
       if (spec.callbackPeer) {
@@ -505,7 +500,10 @@ export class Spin {
     return result ?? "";
   }
 
-  // ── Dispatch ───────────────────────────────────────────────────────────
+  // ── Dispatch (legacy wrappers, #1271) ───────────────────────────────────
+  // dispatch / dispatchAwait / getOrCreateOrc / sendUserToOrc are thin wrappers
+  // around the unified spin(spec) chokepoint. dispatchBackground is the new
+  // background-only entry point.
 
   /** #1010: O-type reuses existing session (one Orc). All others create new. */
   private getOrCreateVisibleSession(userId: string, type: SessionType): ManagedSession | undefined {
@@ -518,7 +516,13 @@ export class Spin {
     return typeof sub === "string" ? undefined : sub;
   }
 
+  /**
+   * @deprecated Use `spin({ type, goal, …, await: false })` instead.
+   * Backward-compat wrapper: creates a kanban card, then dispatches via spin().
+   * Returns the cardId synchronously; the model call runs in the background.
+   */
   dispatch(request: SpinRequest): { cardId: number; sessionId?: string } {
+    // Pre-create the card (matches old behavior — card exists even if blocked)
     const cardTitle = request.title ?? request.goal.slice(0, 80);
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
       priority: request.priority ?? "MEDIUM", type: request.type,
@@ -527,74 +531,54 @@ export class Spin {
       chatId: request.chatId, sourcePeer: request.sourcePeer,
     });
 
+    // Concurrency gate: blocked cards stay queued for drainQueued() to pick up.
     if (!this.canDispatch(request.type, cardId)) {
       logInfo(TAG, `${request.type} card:${cardId} queued (concurrency gate)`);
       return { cardId };
     }
 
-    this.markRunning(request.type, cardId);
-    kanbanRunning(cardId);
-
-    const masterUserId = getMasterUserId();
-    const session = this.getOrCreateVisibleSession(masterUserId, request.type);
-    if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatch card:${cardId}`); }
-
-    const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.execute(request, cardId, timeout)
-      .then(result => {
-        const { drainArtifacts } = require("./transport/artifact-tools.js") as typeof import("./transport/artifact-tools.js");
-        const artifacts = drainArtifacts(cardId);
-        kanbanComplete(cardId, null, result.slice(0, 500));
-        if (request.callbackPeer) {
-          const card = kanbanGetCard(cardId);
-          fireCallback(request.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
-        }
-      })
-      .catch(err => {
-        const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
-        logWarn(TAG, `${request.type} card:${cardId} failed: ${msg}`);
-        kanbanRetryOrFail(cardId, msg);
-        if (request.callbackPeer) fireCallback(request.callbackPeer, cardId, "failed", undefined, msg);
-      })
-      .finally(() => {
-        this.markDone(request.type, cardId);
-        if (session) { session.status = "ended"; session.active = false; pushLog(session, "completed"); }
-        this.drainQueued();
-      });
-
-    return { cardId, sessionId: session?.id };
+    void this.spin({
+      type: request.type,
+      goal: request.goal,
+      cardId,
+      parentCardId: request.parentCardId,
+      title: request.title,
+      priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
+      source: request.source,
+      deliveryMode: request.deliveryMode,
+      agent: request.agent,
+      timeoutMs: request.timeoutMs,
+      callbackPeer: request.callbackPeer,
+      sourcePeer: request.sourcePeer,
+      chatId: request.chatId ? Number(request.chatId) : undefined,
+      await: false,
+    });
+    return { cardId };
   }
 
+  /**
+   * @deprecated Use `spin({ type, goal, …, await: true })` instead.
+   * Backward-compat wrapper: synchronously dispatches and returns the result.
+   */
   async dispatchAwait(request: SpinRequest): Promise<{ cardId: number; result: string }> {
-    // #987: enforce concurrency + cooldown gates (same as dispatch)
+    // #987: enforce concurrency + cooldown gates
     if (!this.canDispatch(request.type, 0)) {
       throw new Error(`${request.type} session busy or in cooldown — skipping`);
     }
-
-    const cardTitle = request.title ?? request.goal.slice(0, 80);
-    const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
-      priority: request.priority ?? "MEDIUM", type: request.type,
-      parent_id: request.parentCardId, deliveryMode: request.deliveryMode,
-      chatId: request.chatId,
+    const { cardId, result } = await this.spin({
+      type: request.type,
+      goal: request.goal,
+      title: request.title,
+      priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
+      source: request.source,
+      deliveryMode: request.deliveryMode,
+      agent: request.agent,
+      timeoutMs: request.timeoutMs,
+      parentCardId: request.parentCardId,
+      chatId: request.chatId ? Number(request.chatId) : undefined,
+      await: true,
     });
-
-    this.markRunning(request.type, cardId);
-    kanbanRunning(cardId);
-
-    const masterUserId = getMasterUserId();
-    const session = this.getOrCreateVisibleSession(masterUserId, request.type);
-    if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatchAwait card:${cardId}`); }
-
-    const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    try {
-      const result = await this.execute(request, cardId, timeout);
-      return { cardId, result };
-    } finally {
-      this.markDone(request.type, cardId);
-      // O-type: session stays alive until Orc idle timeout (visible in /session)
-      if (session && request.type !== "O") { session.status = "ended"; session.active = false; pushLog(session, "completed"); }
-      this.drainQueued();
-    }
+    return { cardId: cardId!, result: result! };
   }
 
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {
@@ -750,89 +734,6 @@ export class Spin {
   private markDone(type: SessionType, cardId: number): void {
     this.running.get(type)?.delete(cardId);
     if (type === "H") this._lastHealerDoneAt = Date.now();
-  }
-
-  private async execute(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
-    if (!this.runtime) throw new Error("Spin: runtime not set");
-    if (request.type === "O") return this.executeOrc(request, cardId, timeoutMs);
-
-    const agentName = request.agent ?? typeAgent(request.type);
-    logInfo(TAG, `▶ ${request.type} card:${cardId} agent=${agentName}`);
-
-    try {
-      const { buildSoulBundle } = await import("./soul-bundle.js");
-      const bundle = buildSoulBundle(request.type);
-      let fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
-
-      // #891: auto-inject channel messages for W/O sessions
-      if (request.type === "W" || request.type === "T") {
-        const { channelUnread } = await import("./tasks/kanban-channel.js");
-        const workerName = `Worker-${String(cardId).padStart(2, "0")}`;
-        const parentCard = request.parentCardId ?? cardId;
-        const msgs = channelUnread(parentCard, workerName);
-        if (msgs.length > 0) {
-          const lines = msgs.map(m => `[${m.from_agent}→${m.to_agent}]${m.directive ? " ⚡" : ""} ${m.message}`);
-          fullPrompt = `[CHANNEL — ${msgs.length} message(s) for ${workerName}]\n${lines.join("\n")}\n[/CHANNEL]\n\n${fullPrompt}`;
-        }
-      }
-
-      const result = (await this.runtime.complete(agentName, fullPrompt, { timeoutMs, session: "fresh" })) || "(no output)";
-      if (this.memory) {
-        const sid = `${request.type}_card${cardId}`;
-        this.memory.recordMessage({ role: "user", content: request.goal, timestamp: Date.now(), userId: "system", sessionId: sid });
-        this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
-      }
-      return result;
-    } finally {}
-  }
-
-  private async executeOrc(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
-    const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
-    const { setActiveOrcCard } = await import("./transport/orc-tools.js");
-    updateBridgeLockField("orc_active", cardId);
-    setActiveOrcCard(cardId);
-    const orc = await this.getOrCreateOrc();
-    logInfo(TAG, `▶ O card:${cardId} (persistent Orc)`);
-
-    // #993: Attach Orc transport to visible session — user can sneak in
-    let orcSessionKey = "orc:project"; // fallback
-    for (const [, s] of this.sessions) {
-      if (s.id.includes("_O_") && s.status !== "ended") {
-        s.transport = orc.transport as any;
-        s.status = "ready";
-        orcSessionKey = s.id; // use proper ManagedSession ID as ACP session key
-        break;
-      }
-    }
-    const timer = setTimeout(() => { logWarn(TAG, `⏱️ O card:${cardId} timed out`); }, timeoutMs);
-    try {
-      const { buildSoulBundle } = await import("./soul-bundle.js");
-      const bundle = buildSoulBundle("O");
-
-      // #1005: CONTEXT wrapper (same pattern as Main)
-      const { localDateTime } = await import("../utils/local-time.js");
-      const context = `[CONTEXT — do not respond to this section]\n[PROJECT] card #${cardId}\n[CURRENT TIME] ${localDateTime()}\n[/CONTEXT]\n\n`;
-
-      let fullPrompt = context + (bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal);
-      const { drainOrcNotifications } = await import("./spin-notifications.js");
-      const notifications = drainOrcNotifications(cardId);
-      if (notifications.length) fullPrompt = notifications.join("\n") + "\n\n" + fullPrompt;
-
-      // #891: Orc sees ALL channel messages on its card
-      const { channelUnread } = await import("./tasks/kanban-channel.js");
-      const orcMsgs = channelUnread(cardId, "Orc");
-      if (orcMsgs.length > 0) {
-        const lines = orcMsgs.map(m => `[${m.from_agent}→${m.to_agent}]${m.directive ? " ⚡" : ""} ${m.message}`);
-        fullPrompt = `[CHANNEL — ${orcMsgs.length} message(s)]\n${lines.join("\n")}\n[/CHANNEL]\n\n${fullPrompt}`;
-      }
-
-      const result = (await orc.sendPrompt(orcSessionKey, fullPrompt)) || "(no output)";
-      if (this.memory) {
-        this.memory.recordMessage({ role: "user", content: request.goal, timestamp: Date.now(), userId: "system", sessionId: orcSessionKey });
-        this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: orcSessionKey });
-      }
-      return result;
-    } finally { clearTimeout(timer); updateBridgeLockField("orc_active", null); setActiveOrcCard(null); }
   }
 }
 
