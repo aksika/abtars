@@ -60,6 +60,24 @@ npm uninstall -g abtars && npm install -g abtars
 cd ~/workspace/ab/abtars && node bundle/abtars-cli.js update --from-local
 ```
 
+**`abtars update` fails with `no release staged. Run 'abtars install' first.`** —
+the wrapper cannot find the bundle that the symlink should point at, so the
+update flow itself cannot run. The bridge is usually dead at this point and
+the watchdog cannot recover it. Run the emergency script, which builds + stages
++ repoints symlinks + restarts the watchdog without needing a working deployed
+binary:
+
+```bash
+bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
+```
+
+If the script's source checkout is not on the commit you want:
+`cd ~/.abtars-releases/src/abtars && git checkout <sha>` first. The script
+determines the deployed version from the source HEAD, so an out-of-date
+checkout deploys an out-of-date version. The watchdog's health probe runs for
+~120s after the script finishes; if the bridge is still not healthy, check
+`~/.abtars/logs/bridge.log`.
+
 ### macOS launchd
 
 The watchdog runs as a LaunchAgent at `~/Library/LaunchAgents/com.abtars.watchdog.plist`.

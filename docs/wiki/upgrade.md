@@ -81,3 +81,24 @@ Auto-rollback handles most cases. If both new and rolled-back versions fail:
 2. Restore config: `cp ~/.abtars/config/.pre-update/* ~/.abtars/config/`
 3. Manual start: `node ~/.abtars/app/bundle/abtars.js`
 4. Nuclear: `abtars stop --force && abtars update --from-local`
+
+## If `abtars update` itself is broken (no release staged)
+
+When the deployed CLI is so broken that `abtars update` cannot run — for example
+`abtars: no release staged. Run 'abtars install' first.` because the wrapper
+can't locate the bundle, or the bridge is dead and the watchdog can't respawn
+it — use the emergency script. It does the full deploy (build, stage, swap
+symlinks, restart, health-probe) with plain `npm` + `esbuild` and direct
+launchctl/systemd calls. No working deployed binary required.
+
+```bash
+bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
+```
+
+The script reads `HEAD` from `~/.abtars-releases/src/abtars` to determine the
+version, so make sure that checkout is on the commit you want first
+(`cd ~/.abtars-releases/src/abtars && git checkout <sha>` or `git pull`).
+
+This is a manual mirror of the `deploy.ts` activation flow. If you change one,
+update the other. See `scripts/emergency-update.sh` header for the full mirror
+contract.
