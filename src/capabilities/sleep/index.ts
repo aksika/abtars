@@ -23,7 +23,7 @@ export interface SleepOpts {
   sleepAuditDir: string;
   memoryEnabled: boolean;
   memoryDir?: string;
-  /** LLM runtime adapter — bridge wraps its SubagentRuntime.complete("dreamy", ...). */
+  /** LLM runtime adapter — bridge wraps spin({ type: "D", ... }) (#1271). */
   runtime: SleepRuntime;
   onComplete: () => void;
   getLastMsgTs?: () => number;
