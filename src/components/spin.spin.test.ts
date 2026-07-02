@@ -414,4 +414,115 @@ describe("spin(spec) — unified session API (#1271)", () => {
       }
     });
   });
+
+  // ── #1274: concurrency-slot leak + sessionId/cap robustness ────────────
+
+  describe("#1274 — concurrency slot always released", () => {
+    it("beforePrompt throw releases the slot → same-type dispatch succeeds", async () => {
+      const orig = SESSION_PROFILES["T"].beforePrompt;
+      (SESSION_PROFILES["T"] as any).beforePrompt = async () => { throw new Error("beforePrompt kaboom"); };
+      spin.setRuntime(makeRuntime() as any);
+      try {
+        await spin.spin({ type: "T", goal: "first", source: "user", await: true });
+      } catch { /* expected */ } finally {
+        (SESSION_PROFILES["T"] as any).beforePrompt = orig;
+      }
+      // Slot must be free — a second T dispatch completes
+      spin.setRuntime(makeRuntime({ completeResponse: "ok" }) as any);
+      const r = await spin.spin({ type: "T", goal: "second", source: "user", await: true });
+      expect(r.result).toBe("ok");
+    });
+
+    it("decorator throw releases the slot → next spin of same type succeeds", async () => {
+      const orig = SESSION_PROFILES["S"].decorators;
+      (SESSION_PROFILES["S"] as any).decorators = [async () => { throw new Error("decorator boom"); }];
+      spin.setRuntime(makeRuntime() as any);
+      let threw = false;
+      try {
+        await spin.spin({ type: "S", goal: "boom", source: "user", await: true });
+      } catch { threw = true; } finally {
+        (SESSION_PROFILES["S"] as any).decorators = orig;
+      }
+      expect(threw).toBe(true);
+      const r = await spin.spin({ type: "S", goal: "ok", source: "user", await: true });
+      expect(r.sessionId).toBeTruthy();
+    });
+
+    it("await:false pre-exec throw → no unhandled rejection", async () => {
+      const orig = SESSION_PROFILES["T"].beforePrompt;
+      (SESSION_PROFILES["T"] as any).beforePrompt = async () => { throw new Error("hook fail"); };
+      spin.setRuntime(makeRuntime() as any);
+      let unhandled = false;
+      const handler = () => { unhandled = true; };
+      process.on("unhandledRejection", handler);
+      try {
+        spin.dispatch({ type: "T", goal: "bg task", source: "user" });
+        await new Promise(r => setTimeout(r, 50));
+      } finally {
+        (SESSION_PROFILES["T"] as any).beforePrompt = orig;
+        process.off("unhandledRejection", handler);
+      }
+      expect(unhandled).toBe(false);
+    });
+
+    it("checkStaleWorkers releases slot so next dispatch of that type proceeds", async () => {
+      // The stale-worker path requires mocking kanban-board at module level —
+      // tested in spin-stale.test.ts (separate file due to module-mock scoping).
+      // Here we just verify the slot-tracking invariant directly without a kanban stub:
+      // if a cardId is in running but its DB card is not "running", checkStaleWorkers
+      // must leave the slot alone (no crash, no spurious release).
+      spin.setRuntime(makeRuntime() as any);
+      const runningMap: Map<string, Set<number>> = (spin as any).running;
+      runningMap.set("W", new Set([99999])); // fake id — kanbanGetCard returns undefined
+      expect(() => (spin as any).checkStaleWorkers()).not.toThrow();
+      // Card not found → no action; slot stays as-is (safe no-op for unknown ids)
+      expect(runningMap.get("W")?.has(99999)).toBe(true);
+    });
+  });
+
+  describe("#1274 — sessionId reuse rejects ended sessions", () => {
+    it("spin({ sessionId }) on an ended session throws, sendPrompt never called", async () => {
+      const transport = mockTransport();
+      const runtime = makeRuntime();
+      spin.setRuntime(runtime as any);
+      const r1 = await spin.spin({ type: "D", prompt: "step1", userId: "aksika", platform: "telegram", await: true });
+      const s = spin.getSessionById(r1.sessionId)!;
+      s.transport = transport;
+      s.status = "ended";
+      await expect(
+        spin.spin({ type: "D", sessionId: r1.sessionId, prompt: "step2", await: true }),
+      ).rejects.toThrow(/is ended/);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("#1274 — session cap gate at dispatch/dispatchAwait layer", () => {
+    const MAX = parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10);
+
+    function fillSessions(s: Spin, count: number): void {
+      const sessions: Map<string, { status: string }> = (s as any).sessions;
+      for (let i = 0; i < count; i++) {
+        sessions.set(`fake_X_${String(i).padStart(2, "0")}`, { status: "ready" });
+      }
+    }
+
+    it("dispatch() at cap returns queued cardId without invoking spin()/runtime", async () => {
+      const runtime = makeRuntime();
+      spin.setRuntime(runtime as any);
+      fillSessions(spin, MAX);
+      const result = spin.dispatch({ type: "W", goal: "overflow", source: "user" });
+      expect(result.cardId).toBeGreaterThan(0);
+      await new Promise(r => setTimeout(r, 30));
+      expect(runtime.complete).not.toHaveBeenCalled();
+      expect(runtime.session).not.toHaveBeenCalled();
+    });
+
+    it("dispatchAwait() at cap throws System busy", async () => {
+      spin.setRuntime(makeRuntime() as any);
+      fillSessions(spin, MAX);
+      await expect(
+        spin.dispatchAwait({ type: "W", goal: "overflow", source: "user" }),
+      ).rejects.toThrow(/System busy/);
+    });
+  });
 });

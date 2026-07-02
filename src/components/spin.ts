@@ -341,6 +341,7 @@ export class Spin {
     if (spec.sessionId) {
       const found = this.sessions.get(spec.sessionId);
       if (!found) throw new Error(`Spin: sessionId ${spec.sessionId} not found`);
+      if (found.status === "ended") throw new Error(`Spin: sessionId ${spec.sessionId} is ended`);
       session = found;
     } else if (spec.active || profile.resolution === "active") {
       session = this.getActiveSession(userId, platform);
@@ -367,46 +368,54 @@ export class Spin {
       this.markRunning(spec.type, cardId); kanbanRunning(cardId);
     }
 
-    // 4. before-hook
-    await profile.beforePrompt?.(session, cardId);
-
-    // 5. Resolve the execution transport. Reuse the session's OWN transport if it
-    //    already has one (A per-user main turn, D step N, O reuse). Only
-    //    create+attach for a NEW persistent session.
-    let sessionTransport = session.transport as IKiroTransport | undefined;
-    if (persistent && !sessionTransport) {
-      const agentSession = await this.runtime.session(agent, profile.resolution === "active" ? userId : undefined);
-      sessionTransport = agentSession.transport as IKiroTransport;
-      session.transport = sessionTransport;
-      session.status = "ready";
-    }
-
-    // 6. Build prompt via decorators
-    let prompt = spec.prompt ?? spec.goal ?? "";
-    for (const decorate of profile.decorators) {
-      prompt = await decorate(prompt, { session, cardId, parentCardId: spec.parentCardId });
-    }
-    pushLog(session, `spin type=${spec.type} agent=${agent} step=${stepIndex}`);
-
-    // 7. Execute — persistent/continuation sends via the session's own transport
-    //    (key = session.id preserves the Orc sneak-in); oneshot uses runtime.complete.
+    // 4-7. Single try/catch so EVERY exit path (pre-exec throws included) flows
+    //       through failSpin, which owns markDone + drainQueued. Without this,
+    //       a throw from beforePrompt / transport creation / a decorator leaves
+    //       the cardId in this.running forever, wedging single-slot types
+    //       (O/T/B/D/H) until bridge restart. (#1274)
     const started = Date.now();
-    const exec = sessionTransport
-      ? sessionTransport.sendPrompt(session.id, prompt, spec.imageContent as { mime: string; base64: string } | undefined, spec.userId ?? userId)
-      : this.runtime.complete(agent, prompt, { timeoutMs, session: "fresh" });
-
-    if (!spec.await) {
-      exec.then(r => this.finishSpin(spec, profile, session, cardId, stepIndex, started, r || "(no output)", terminate))
-          .catch(e => this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate));
-      return { sessionId: session.id, cardId };
-    }
     try {
+      // 4. before-hook
+      await profile.beforePrompt?.(session, cardId);
+
+      // 5. Resolve the execution transport. Reuse the session's OWN transport if it
+      //    already has one (A per-user main turn, D step N, O reuse). Only
+      //    create+attach for a NEW persistent session.
+      let sessionTransport = session.transport as IKiroTransport | undefined;
+      if (persistent && !sessionTransport) {
+        const agentSession = await this.runtime.session(agent, profile.resolution === "active" ? userId : undefined);
+        sessionTransport = agentSession.transport as IKiroTransport;
+        session.transport = sessionTransport;
+        session.status = "ready";
+      }
+
+      // 6. Build prompt via decorators
+      let prompt = spec.prompt ?? spec.goal ?? "";
+      for (const decorate of profile.decorators) {
+        prompt = await decorate(prompt, { session, cardId, parentCardId: spec.parentCardId });
+      }
+      pushLog(session, `spin type=${spec.type} agent=${agent} step=${stepIndex}`);
+
+      // 7. Execute — persistent/continuation sends via the session's own transport
+      //    (key = session.id preserves the Orc sneak-in); oneshot uses runtime.complete.
+      const exec = sessionTransport
+        ? sessionTransport.sendPrompt(session.id, prompt, spec.imageContent as { mime: string; base64: string } | undefined, spec.userId ?? userId)
+        : this.runtime.complete(agent, prompt, { timeoutMs, session: "fresh" });
+
+      if (!spec.await) {
+        exec.then(r => this.finishSpin(spec, profile, session, cardId, stepIndex, started, r || "(no output)", terminate))
+            .catch(e => this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate));
+        return { sessionId: session.id, cardId };
+      }
       const result = (await exec) || "(no output)";
       await this.finishSpin(spec, profile, session, cardId, stepIndex, started, result, terminate);
       return { sessionId: session.id, cardId, result };
     } catch (err) {
+      // Covers: pre-exec throws (steps 4-6) AND awaited execution failures (step 7).
+      // failSpin calls markDone + drainQueued — concurrency slot always released.
       await this.failSpin(spec, profile, session, cardId, stepIndex, started, err, terminate);
-      throw err;
+      if (spec.await) throw err;                    // awaited callers still see the error
+      return { sessionId: session.id, cardId };     // fire-and-forget: recorded, no unhandled rejection
     }
   }
 
@@ -532,8 +541,12 @@ export class Spin {
     });
 
     // Concurrency gate: blocked cards stay queued for drainQueued() to pick up.
-    if (!this.canDispatch(request.type, cardId)) {
-      logInfo(TAG, `${request.type} card:${cardId} queued (concurrency gate)`);
+    // Session cap: also gate here so a full Map never generates a void-spin
+    // unhandled rejection (step-2 throws in spin() are outside the try/catch). (#1274)
+    const aliveSessions = [...this.sessions.values()].filter(s => s.status !== "ended").length;
+    if (aliveSessions >= MAX_TOTAL_SESSIONS || !this.canDispatch(request.type, cardId)) {
+      const reason = aliveSessions >= MAX_TOTAL_SESSIONS ? "session cap" : "concurrency gate";
+      logInfo(TAG, `${request.type} card:${cardId} queued (${reason})`);
       return { cardId };
     }
 
@@ -562,6 +575,11 @@ export class Spin {
    */
   async dispatchAwait(request: SpinRequest): Promise<{ cardId: number; result: string }> {
     // #987: enforce concurrency + cooldown gates
+    // #1274: also enforce session cap (await:true — throw is safe, caller awaits)
+    const aliveSessions = [...this.sessions.values()].filter(s => s.status !== "ended").length;
+    if (aliveSessions >= MAX_TOTAL_SESSIONS) {
+      throw new Error("System busy — max sessions reached.");
+    }
     if (!this.canDispatch(request.type, 0)) {
       throw new Error(`${request.type} session busy or in cooldown — skipping`);
     }
@@ -619,17 +637,21 @@ export class Spin {
   private checkStaleWorkers(): void {
     const STALE_MS = parseInt(process.env["WORKER_STALE_MS"] || "300000", 10);
     const now = Date.now();
-    for (const [, cardIds] of this.running) {
-      for (const cardId of cardIds) {
+    let freed = false;
+    for (const [type, cardIds] of this.running) {
+      for (const cardId of [...cardIds]) {           // snapshot — markDone mutates the Set
         const card = kanbanGetCard(cardId);
         if (!card || card.status !== "running") continue;
         const lastActivity = new Date(card.updated_at + "Z").getTime();
         if (now - lastActivity > STALE_MS) {
           logWarn(TAG, `Stale card ${cardId} (${Math.round((now - lastActivity) / 1000)}s no activity) — failing`);
           kanbanFail(cardId, "stale — no activity");
+          this.markDone(type, cardId);               // release in-memory slot (#1274)
+          freed = true;
         }
       }
     }
+    if (freed) this.drainQueued();                   // reuse freed slot without waiting a tick
   }
 
   /** #613: Prune .trash/ entries older than 7 days (~hourly). */
