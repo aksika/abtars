@@ -16,6 +16,7 @@ import { abmind } from "../../utils/abmind-lazy.js";
 import type { SleepRuntime } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { readEnv, readEnvWithDefault } from "../../components/env.js";
+import { startSleepCard, type SleepCard } from "./sleep-card.js";
 
 export interface SleepOpts {
   sleepHour: number;
@@ -121,10 +122,20 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       catch (err) { logWarn("sleep", `Invalid SLEEP_QUALITY='${raw}', using ${abmind()!.DEFAULT_LEVEL}: ${err instanceof Error ? err.message : String(err)}`); return abmind()!.DEFAULT_LEVEL; }
     })();
 
-    abmind()!.runSleepCycle({ runtime: opts.runtime, level, fresh: forced && !!forceSleep?.includes("fresh") })
+    let sleepCard: SleepCard | null = null;
+    abmind()!.runSleepCycle({
+      runtime: opts.runtime,
+      level,
+      fresh: forced && !!forceSleep?.includes("fresh"),
+      // #895: stepped card — created when the orchestrator commits to running steps,
+      // ticked per step, completed once at cycle end (both success and failure paths).
+      onCycleStart: () => { sleepCard = startSleepCard(); },
+      onStep: (e) => sleepCard?.onStep(e),
+    })
       .then(async (result: { ok: boolean; failCount: number }) => {
         running = false;
         progress = null;
+        sleepCard?.complete();
         logInfo("sleep", `😴 Sleep finished (ok=${result.ok}, failCount=${result.failCount}, attempt ${attempts})`);
         writeSleepStatus("awake");
         if (!result.ok) {
@@ -165,6 +176,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       .catch((err: unknown) => {
         running = false;
         progress = null;
+        sleepCard?.complete();
         writeSleepStatus("awake");
         const msg = err instanceof Error ? err.message : String(err);
         if (attempts < MAX_RETRIES) {
