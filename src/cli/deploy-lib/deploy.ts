@@ -170,10 +170,14 @@ async function deployActivation(args: { staged: StagedRelease; channel: SourceNa
   // cleanStaleStaging on the next bootstrap.
   cpSync(staged.stagedPath, releaseDir, { recursive: true });
 
-  // Update history.json (ordered array, max 4)
+  // Update history.json (ordered array, max 4, deduped)
+  // Dedup ensures history[1] is always a DIFFERENT commit than history[0],
+  // so the circuit-breaker rollback target is never the just-deployed version.
   let history: string[] = [];
   try { history = JSON.parse(readFileSync(paths.releasesHistory, "utf-8")); } catch {}
-  history.unshift(staged.commit || staged.version);
+  const newRef = staged.commit || staged.version;
+  history = history.filter(h => h !== newRef);
+  history.unshift(newRef);
   if (history.length > 4) {
     const dropped = history.pop()!;
     rmSync(join(paths.releasesDir, dropped), { recursive: true, force: true });

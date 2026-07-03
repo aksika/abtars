@@ -423,6 +423,131 @@ export async function handleWhoami(_text: string, ctx: CommandContext): Promise<
   return true;
 }
 
+// ── /update dev routine (#1277) ──────────────────────────────────────────────
+// Extracted so it can be unit-tested with an injected exec helper.
+//
+// Safety contract: this function MUST NOT stop the running bridge unless
+// build.ok === true. On any pre-deploy failure → report + return, bridge untouched.
+// DO NOT re-add auto-invocation of emergency-update.sh here — that script stops the
+// watchdog and must only be called manually.
+export type ExecHelper = (cmd: string, args: string[], opts: { cwd?: string; timeout: number }) => Promise<{ stdout: string; stderr: string; ok: boolean }>;
+
+export function makeExecHelper(spawnFn: typeof import("node:child_process").spawn): ExecHelper {
+  return (cmd, args, opts) =>
+    new Promise((resolve) => {
+      let stdout = "", stderr = "";
+      const proc = spawnFn(cmd, args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });
+      proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+      proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+      const timer = setTimeout(() => {
+        proc.kill("SIGKILL");
+        resolve({ stdout, stderr: stderr + "\n[timed out]", ok: false });
+      }, opts.timeout);
+      proc.on("close", (code) => { clearTimeout(timer); resolve({ stdout, stderr, ok: code === 0 }); });
+      proc.on("error", (e) => { clearTimeout(timer); resolve({ stdout, stderr: String(e), ok: false }); });
+    });
+}
+
+export async function runDevUpdate(
+  ctx: CommandContext,
+  spawnFn: typeof import("node:child_process").spawn,
+  execHelper?: ExecHelper,
+): Promise<void> {
+  const { existsSync: fsExistsSync } = await import("node:fs");
+  const releasesRoot = join(process.env["HOME"] ?? "", ".abtars-releases", "src");
+  const abtarsDir = join(releasesRoot, "abtars");
+  const abmindDir = join(releasesRoot, "abmind");
+  const execP = execHelper ?? makeExecHelper(spawnFn);
+
+  // ── 1. Fetch ──────────────────────────────────────────────────────────────
+  await ctx.reply("Checking for updates...");
+  const fetchResult = await execP("git", ["-C", abtarsDir, "fetch", "origin", "dev"], { timeout: 30_000 });
+  if (!fetchResult.ok) {
+    const detail = (fetchResult.stderr || fetchResult.stdout).slice(-300);
+    logWarn("update", `git fetch failed: ${detail}`);
+    await ctx.reply(`x git fetch failed — bridge left running. Retry /update dev.\n${detail}`);
+    return;
+  }
+
+  // ── 2. Up-to-date check vs DEPLOYED commit (not source HEAD) (#1277 3b) ───
+  // gate on manifest.json.commit vs origin/dev to stay correct even when a
+  // prior failed build advanced HEAD without deploying anything.
+  const originSha = (await execP("git", ["-C", abtarsDir, "rev-parse", "--short", "origin/dev"], { timeout: 5_000 })).stdout.trim();
+  let deployedCommit = "";
+  try {
+    const mf = JSON.parse(readFileSync(join(abtarsHome(), "manifest.json"), "utf-8")) as { commit?: string };
+    deployedCommit = mf.commit ?? "";
+  } catch { /* first install or missing manifest — treat as needs-update */ }
+
+  if (originSha && deployedCommit && originSha === deployedCommit) {
+    await ctx.reply("Already up to date.");
+    return;
+  }
+
+  // Show commit range relative to deployed version
+  const range = deployedCommit ? `${deployedCommit}..origin/dev` : "HEAD..origin/dev";
+  const logResult = await execP("git", ["-C", abtarsDir, "log", "--oneline", range], { timeout: 5_000 });
+  const commits = logResult.stdout.trim();
+  const header = commits
+    ? `${commits.split("\n").length} new commit(s):\n${commits.slice(0, 300)}\n\n`
+    : "";
+  await ctx.reply(`${header}Deploying...`);
+  logInfo("update", "git update requested");
+
+  // ── 3. Checkout + build ───────────────────────────────────────────────────
+  // On any failure: report error, leave the running bridge untouched.
+  // Timeout raised to 180s (#1277): cold esbuild on WSL can exceed 60s.
+  try {
+    const co = await execP("git", ["-C", abtarsDir, "checkout", "origin/dev"], { timeout: 10_000 });
+    if (!co.ok) throw new Error(`checkout failed: ${co.stderr.slice(-300) || co.stdout.slice(-300)}`);
+
+    // Always ensure abmind source exists (#1268: clone if missing)
+    const abmindGit = join(abmindDir, ".git");
+    if (!fsExistsSync(abmindGit)) {
+      const cloneResult = await execP("git", ["clone", "--depth", "1", "-b", "dev", "https://github.com/aksika/abmind.git", abmindDir], { timeout: 120_000 });
+      if (!cloneResult.ok) logWarn("update", "abmind clone failed — skipping abmind update");
+    }
+    if (fsExistsSync(abmindGit)) {
+      await execP("git", ["-C", abmindDir, "fetch", "origin", "dev"], { timeout: 30_000 });
+      await execP("git", ["-C", abmindDir, "checkout", "origin/dev"], { timeout: 10_000 });
+    }
+
+    const build = await execP("node", ["esbuild.config.js"], { cwd: abtarsDir, timeout: 180_000 });
+    if (!build.ok) throw new Error(`build failed: ${build.stderr.slice(-400) || build.stdout.slice(-400)}`);
+
+    // Conditionally update abmind (#1268 channel-mixing logic)
+    const abmindGit2 = join(abmindDir, ".git");
+    if (ctx.memoryConfig.memoryEnabled && fsExistsSync(abmindGit2)) {
+      let needAbmindUpdate = false;
+      try {
+        const manifestRaw = readFileSync(join(homedir(), ".abmind", "manifest.json"), "utf-8");
+        const mf = JSON.parse(manifestRaw) as { source?: string; commit?: string };
+        if (!mf.source || mf.source === "npm") {
+          needAbmindUpdate = true;
+        } else {
+          const headCommit = (await execP("git", ["-C", abmindDir, "rev-parse", "--short", "HEAD"], { timeout: 5_000 })).stdout.trim();
+          if (!headCommit || headCommit !== (mf.commit ?? "")) needAbmindUpdate = true;
+        }
+      } catch {
+        needAbmindUpdate = true;
+      }
+      if (needAbmindUpdate) {
+        spawnFn("abmind", ["update", "--dev", abmindDir], { detached: true, stdio: "ignore" }).unref();
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logWarn("update", `update aborted: ${msg}`);
+    await ctx.reply(`x Update aborted — bridge left running (old build still active). Retry /update dev.\n${msg.slice(-400)}`);
+    return;
+  }
+
+  // ── 4. Deploy from fresh bundle (detached — survives bridge restart) ──────
+  // Only reached when build.ok === true.
+  const bundleCli = join(abtarsDir, "bundle", "abtars-cli.js");
+  spawnFn("node", [bundleCli, "update", "--dev", abtarsDir], { detached: true, stdio: "ignore" }).unref();
+}
+
 export async function handleSoftware(_text: string, ctx: CommandContext): Promise<boolean> {
   const { existsSync } = await import("node:fs");
   const { abtarsHome } = await import("../../paths.js");
@@ -482,92 +607,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
 
     if (channel === "dev") {
       const { spawn } = await import("node:child_process");
-      const releasesRoot = join(process.env["HOME"] ?? "", ".abtars-releases", "src");
-      const abtarsDir = join(releasesRoot, "abtars");
-      const abmindDir = join(releasesRoot, "abmind");
-
-      // Async helper — never blocks the event loop
-      const execP = (cmd: string, args: string[], opts: { cwd?: string; timeout: number }): Promise<{ stdout: string; ok: boolean }> =>
-        new Promise((resolve) => {
-          const { spawn: sp } = require("node:child_process") as typeof import("node:child_process");
-          let stdout = "";
-          const proc = sp(cmd, args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });
-          proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
-          const timer = setTimeout(() => { proc.kill("SIGKILL"); resolve({ stdout, ok: false }); }, opts.timeout);
-          proc.on("close", (code) => { clearTimeout(timer); resolve({ stdout, ok: code === 0 }); });
-          proc.on("error", () => { clearTimeout(timer); resolve({ stdout, ok: false }); });
-        });
-
-      const emergencyScript = join(abtarsDir, "scripts", "emergency-update.sh");
-
-      // Show incoming commits (async, non-blocking)
-      await ctx.reply("Checking for updates...");
-      const fetchResult = await execP("git", ["-C", abtarsDir, "fetch", "origin", "dev"], { timeout: 30_000 });
-      if (!fetchResult.ok) {
-        await ctx.reply("git fetch timed out — running emergency update.");
-        spawn("bash", [emergencyScript], { detached: true, stdio: "ignore" }).unref();
-        return true;
-      }
-
-      const logResult = await execP("git", ["-C", abtarsDir, "log", "--oneline", "HEAD..origin/dev"], { timeout: 5_000 });
-      const commits = logResult.stdout.trim();
-      if (!commits) {
-        await ctx.reply("Already up to date.");
-        return true;
-      }
-      const lines = commits.split("\n");
-      await ctx.reply(`${lines.length} new commit(s):\n${commits.slice(0, 300)}\n\nDeploying...`);
-      logInfo("update", "git update requested");
-
-      // Checkout + build (async, with timeout fallback)
-      try {
-        const co = await execP("git", ["-C", abtarsDir, "checkout", "origin/dev"], { timeout: 10_000 });
-        if (!co.ok) throw new Error("checkout failed");
-
-        // Always ensure abmind source exists (#1268: clone if missing)
-        const abmindGit = join(abmindDir, ".git");
-        if (!existsSync(abmindGit)) {
-          const cloneResult = await execP("git", ["clone", "--depth", "1", "-b", "dev", "https://github.com/aksika/abmind.git", abmindDir], { timeout: 120_000 });
-          if (!cloneResult.ok) logWarn("update", "abmind clone failed — skipping abmind update");
-        }
-        if (existsSync(abmindGit)) {
-          await execP("git", ["-C", abmindDir, "fetch", "origin", "dev"], { timeout: 30_000 });
-          await execP("git", ["-C", abmindDir, "checkout", "origin/dev"], { timeout: 10_000 });
-        }
-
-        const build = await execP("node", ["esbuild.config.js"], { cwd: abtarsDir, timeout: 60_000 });
-        if (!build.ok) throw new Error("build failed");
-
-        // Conditionally update abmind via #1268 channel-mixing logic
-        if (ctx.memoryConfig.memoryEnabled && existsSync(abmindGit)) {
-          let needAbmindUpdate = false;
-          try {
-            const manifestRaw = readFileSync(join(homedir(), ".abmind", "manifest.json"), "utf-8");
-            const mf = JSON.parse(manifestRaw) as { source?: string; commit?: string };
-            if (!mf.source) {
-              needAbmindUpdate = true;
-            } else if (mf.source === "npm") {
-              needAbmindUpdate = true;
-            } else {
-              const headCommit = (await execP("git", ["-C", abmindDir, "rev-parse", "--short", "HEAD"], { timeout: 5_000 })).stdout.trim();
-              if (!headCommit || headCommit !== (mf.commit ?? "")) needAbmindUpdate = true;
-            }
-          } catch {
-            needAbmindUpdate = true;
-          }
-          if (needAbmindUpdate) {
-            spawn("abmind", ["update", "--dev", abmindDir], { detached: true, stdio: "ignore" }).unref();
-          }
-        }
-      } catch {
-        await ctx.reply("Build/checkout failed — running emergency update.");
-        spawn("bash", [emergencyScript], { detached: true, stdio: "ignore" }).unref();
-        return true;
-      }
-
-      // Deploy from fresh bundle (detached — survives bridge restart)
-      const bundleCli = join(abtarsDir, "bundle", "abtars-cli.js");
-      spawn("node", [bundleCli, "update", "--dev", abtarsDir], { detached: true, stdio: "ignore" }).unref();
+      await runDevUpdate(ctx, spawn);
     } else if (channel === "alpha") {
       await ctx.reply("Updating from npm (alpha)...");
       logInfo("update", "npm alpha update requested");
