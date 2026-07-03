@@ -155,16 +155,45 @@ fi
 step "respawning daemon..."
 echo "deploy-respawn" > "$ABTARS_HOME/.start-reason"
 if [ "$IS_MAC" = "1" ]; then
-  if [ -f "$PLIST" ]; then
-    # bootout->bootstrap can race (launchd tear-down); retry once after a beat
-    launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || { sleep 2; launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || echo "! watchdog bootstrap failed — run: launchctl bootstrap $UID_LABEL \"$PLIST\""; }
-  fi
+  # bootout->bootstrap can race (launchd tear-down); retry once after a beat
+  launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || { sleep 2; launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || true; }
 else
   systemctl --user daemon-reload 2>/dev/null || true
   systemctl --user unmask abtars-watchdog 2>/dev/null || true
   systemctl --user enable abtars-watchdog 2>/dev/null || true
-  systemctl --user start abtars-watchdog 2>/dev/null || true
+  # #1278: atomic restart (no durable stopped window) — NOT the old silent stop+start.
+  systemctl --user restart abtars-watchdog 2>/dev/null || systemctl --user start abtars-watchdog 2>/dev/null || true
 fi
+
+# ── 9b. Verify the watchdog actually came up (#1278) ───────────────────────
+# The old code masked the restart with `|| true` and only probed BRIDGE health.
+# A swallowed watchdog restart left the unit dead with no signal — the 2026-07-03
+# 14.4h outage. Verify the watchdog is alive; loud-fail (exit 1) if not, with a
+# copy-pasteable recovery command. No silent mask on this critical path.
+step "verifying watchdog is alive..."
+wd_ok=""
+WD_NEW=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  WD_NEW="$(jget "$BRIDGE_LOCK" watchdogPid)"
+  if [ -n "$WD_NEW" ] && [ "$WD_NEW" != "0" ] && kill -0 "$WD_NEW" 2>/dev/null; then
+    if [ "$IS_MAC" = "1" ]; then
+      if launchctl print "$UID_LABEL/com.abtars.watchdog" >/dev/null 2>&1; then wd_ok=1; break; fi
+    else
+      if systemctl --user is-active --quiet abtars-watchdog; then wd_ok=1; break; fi
+    fi
+  fi
+  sleep 1
+done
+if [ -z "$wd_ok" ]; then
+  echo "x watchdog did NOT come up after respawn — bridge has NO supervisor." >&2
+  if [ "$IS_MAC" = "1" ]; then
+    echo "  recover: launchctl bootout \"$UID_LABEL/com.abtars.watchdog\" 2>/dev/null; launchctl bootstrap \"$UID_LABEL\" \"$PLIST\"" >&2
+  else
+    echo "  recover: systemctl --user daemon-reload && systemctl --user enable --now abtars-watchdog" >&2
+  fi
+  exit 1
+fi
+step "watchdog alive (pid $WD_NEW)"
 
 # ── 10. Health probe (new pid + fresh lastHeartbeat) ───────────────────────
 step "waiting for bridge health..."
