@@ -132,6 +132,25 @@ done
 [ -n "$WD_PID" ]   && kill -9 "$WD_PID"   2>/dev/null || true
 rm -f "$ABTARS_HOME/.stopped"
 
+# ── 8b. Reconcile watchdog service definition from repo template (#1284) ────
+# MIRROR of deploy.ts deployActivation (the plist/systemd reconcile block).
+# Renders the service definition from the source-of-truth template so we never
+# bootstrap a stale plist left over from an older path scheme. The template
+# points ProgramArguments at the persistent source checkout
+# ($SRC_DIR/scripts/abtars-watchdog.sh), which git pull keeps current — no
+# copy into the release dir, no versioned path, no drift. Fails loudly (set -e)
+# if the template is missing rather than bootstrapping a wrong path.
+step "reconciling watchdog service definition..."
+if [ "$IS_MAC" = "1" ]; then
+  mkdir -p "$HOME/Library/LaunchAgents"
+  # {{HOME}} -> $HOME. Use | as sed delimiter ($HOME contains /).
+  sed "s|{{HOME}}|$HOME|g" "$SRC_DIR/scripts/com.abtars.watchdog.plist" > "$PLIST"
+else
+  mkdir -p "$HOME/.config/systemd/user"
+  cp "$SRC_DIR/scripts/abtars-watchdog.service" "$HOME/.config/systemd/user/abtars-watchdog.service"
+  systemctl --user daemon-reload 2>/dev/null || true
+fi
+
 # ── 9. Respawn ─────────────────────────────────────────────────────────────
 step "respawning daemon..."
 echo "deploy-respawn" > "$ABTARS_HOME/.start-reason"
