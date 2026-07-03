@@ -41,6 +41,7 @@ export class DirectApiTransport implements IKiroTransport {
   private _contextPercent = -1;
   private _lastAnswer = "";
   private _timeoutOverrideMs: number | null = null;
+  private _maxToolRoundsOverride: number | null = null;
   private _toolCallsSucceeded = 0;
   private _intermediateText = "";
   private _promptStartedAt: number | null = null;
@@ -292,7 +293,7 @@ export class DirectApiTransport implements IKiroTransport {
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
       if (signal.aborted) return signal.reason === "timeout" ? "Response timed out." : "Interrupted.";
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
-      if (turn >= (this.config.maxToolRounds ?? 25)) {
+      if (turn >= (this._maxToolRoundsOverride ?? this.config.maxToolRounds ?? 25)) {
         logError(TAG, `Tool loop circuit breaker: ${turn} rounds without final response — aborting`);
         return "[SYSTEM] Tool loop limit reached. Stopped after " + turn + " rounds.";
       }
@@ -664,6 +665,7 @@ export class DirectApiTransport implements IKiroTransport {
   // Watchdog support
   get promptStartedAt(): number | null { return this._promptStartedAt; }
   setTimeoutOverride(ms: number | null): void { this._timeoutOverrideMs = ms; }
+  setMaxToolRoundsOverride(n: number | null): void { this._maxToolRoundsOverride = n; }
 
   get lastActivityAt(): number | null { return this._lastActivityAt; }
 

@@ -24,6 +24,8 @@ export interface AgentOpts {
   timeoutMs?: number;
   /** Override session type (default: derived from agent name). */
   sessionType?: import("./spin-types.js").SessionType;
+  /** Override tool-loop circuit breaker limit for this call. */
+  maxToolRounds?: number;
 }
 
 /** Persistent transport handle for multi-turn callers. */
@@ -114,6 +116,11 @@ export class SubagentRuntime {
       transport.setTimeoutOverride(opts.timeoutMs);
     }
 
+    // Per-call tool-round circuit breaker override (e.g. long-running task agents)
+    if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+      transport.setMaxToolRoundsOverride(opts.maxToolRounds);
+    }
+
     try {
       const response = await transport.sendPrompt(sessionKey, prompt);
       const elapsed = Date.now() - start;
@@ -127,6 +134,9 @@ export class SubagentRuntime {
     } finally {
       if (opts?.timeoutMs && transport.setTimeoutOverride) {
         transport.setTimeoutOverride(null);
+      }
+      if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+        transport.setMaxToolRoundsOverride(null);
       }
     }
   }

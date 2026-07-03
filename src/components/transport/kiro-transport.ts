@@ -70,6 +70,9 @@ export interface IKiroTransport {
   /** Temporarily override model API timeout for next call(s). null resets to default. */
   setTimeoutOverride?(ms: number | null): void;
 
+  /** Temporarily override max tool rounds (circuit breaker) for next call(s). null resets to config default. */
+  setMaxToolRoundsOverride?(n: number | null): void;
+
   /** Token usage from last completed prompt. Returns {input, output} or null if unavailable. */
   lastUsage?(): { input: number; output: number } | null;
 }

@@ -412,7 +412,7 @@ export class Spin {
       //    (key = session.id preserves the Orc sneak-in); oneshot uses runtime.complete.
       const exec = sessionTransport
         ? sessionTransport.sendPrompt(session.id, prompt, spec.imageContent as { mime: string; base64: string } | undefined, spec.userId ?? userId)
-        : this.runtime.complete(agent, prompt, { timeoutMs, session: "fresh" });
+        : this.runtime.complete(agent, prompt, { timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds });
 
       if (!spec.await) {
         exec.then(r => this.finishSpin(spec, profile, session, cardId, stepIndex, started, r || "(no output)", terminate))
@@ -604,6 +604,7 @@ export class Spin {
       deliveryMode: request.deliveryMode,
       agent: request.agent,
       timeoutMs: request.timeoutMs,
+      maxToolRounds: request.maxToolRounds,
       parentCardId: request.parentCardId,
       chatId: request.chatId ? Number(request.chatId) : undefined,
       await: true,

@@ -85,6 +85,7 @@ export interface SpinRequest {
   callbackPeer?: string; // #675: peer to notify on completion
   sourcePeer?: string;   // #949: which peer delegated this task
   chatId?: string;      // #1008: delivery target chat (fallback: masterChatId)
+  maxToolRounds?: number; // #1283: per-task circuit breaker override
 }
 
 // ── #1271: unified session API ──────────────────────────────────────────
@@ -119,6 +120,7 @@ export interface SpinSessionSpec {
   // Execution
   agent?: import("./subagent-runtime.js").AgentName; // override the profile's agent
   timeoutMs?: number;
+  maxToolRounds?: number; // #1283: per-task circuit breaker override
 
   // Delivery (continuation / pipeline)
   deliveryMode?: "deliver" | "silent" | "announce";
