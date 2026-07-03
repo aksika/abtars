@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
+import { spawnDetached } from "../spawn-safe.js";
 import { readEntries as cronReadEntries } from "../tasks/task-store.js";
 import { abtarsHome } from "../../paths.js";
 import type { CommandContext } from "./types.js";
@@ -532,7 +533,9 @@ export async function runDevUpdate(
         needAbmindUpdate = true;
       }
       if (needAbmindUpdate) {
-        spawnFn("abmind", ["update", "--dev", abmindDir], { detached: true, stdio: "ignore" }).unref();
+        const abmindProc = spawnFn("abmind", ["update", "--dev", abmindDir], { detached: true, stdio: "ignore" });
+        abmindProc.on("error", (err) => logWarn("update", `spawn abmind failed (non-fatal): ${err.message}`));
+        abmindProc.unref();
       }
     }
   } catch (err) {
@@ -545,7 +548,9 @@ export async function runDevUpdate(
   // ── 4. Deploy from fresh bundle (detached — survives bridge restart) ──────
   // Only reached when build.ok === true.
   const bundleCli = join(abtarsDir, "bundle", "abtars-cli.js");
-  spawnFn("node", [bundleCli, "update", "--dev", abtarsDir], { detached: true, stdio: "ignore" }).unref();
+  const deployProc = spawnFn("node", [bundleCli, "update", "--dev", abtarsDir], { detached: true, stdio: "ignore" });
+  deployProc.on("error", (err) => logWarn("update", `spawn deploy process failed (non-fatal): ${err.message}`));
+  deployProc.unref();
 }
 
 export async function handleSoftware(_text: string, ctx: CommandContext): Promise<boolean> {
@@ -614,10 +619,11 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       const { spawn } = await import("node:child_process");
       const child = spawn("abtars", ["update", "--source", "npm", "--tag", "alpha"], { stdio: ["ignore", "pipe", "pipe"] });
       let stderr = "";
+      child.on("error", (err) => logWarn("update", `spawn abtars failed (non-fatal): ${err.message}`));
       child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
       child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
       if (ctx.memoryConfig.memoryEnabled) {
-        spawn("abmind", ["update", "--alpha"], { detached: true, stdio: "ignore" }).unref();
+        spawnDetached("abmind", ["update", "--alpha"], "update");
       }
     } else {
       await ctx.reply("Updating from npm (stable)...");
@@ -625,10 +631,11 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       const { spawn } = await import("node:child_process");
       const child = spawn("abtars", ["update", "--source", "npm"], { stdio: ["ignore", "pipe", "pipe"] });
       let stderr = "";
+      child.on("error", (err) => logWarn("update", `spawn abtars failed (non-fatal): ${err.message}`));
       child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
       child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
       if (ctx.memoryConfig.memoryEnabled) {
-        spawn("abmind", ["update", "--stable"], { detached: true, stdio: "ignore" }).unref();
+        spawnDetached("abmind", ["update", "--stable"], "update");
       }
     }
     return true;
@@ -639,8 +646,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     if (!isMaster) { await ctx.reply("Requires master role."); return true; }
     logInfo("update", "npm alpha update (legacy /update npm)");
     await ctx.reply("Updating from npm (alpha)...");
-    const { spawn } = await import("node:child_process");
-    spawn("abtars", ["update", "--source", "npm", "--tag", "alpha"], { detached: true, stdio: "ignore" }).unref();
+    spawnDetached("abtars", ["update", "--source", "npm", "--tag", "alpha"], "update");
     return true;
   }
 

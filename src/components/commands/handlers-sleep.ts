@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, readdirSync, unlinkSync} from "node:fs";
 import { join } from "node:path";
 import { platform } from "node:os";
-import { logInfo} from "../logger.js";
+import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { getEnv } from "../env-schema.js";
 import { writeSleepStatus, readBridgeLockField, writeForceSleep } from "../transport/bridge-lock-transport.js";
@@ -108,8 +108,10 @@ export async function handleWakeup(_text: string, ctx: CommandContext): Promise<
   let child: ReturnType<typeof spawn> | null = null;
   if (os === "darwin") {
     child = spawn("caffeinate", ["-su"], { stdio: "ignore", detached: true });
+    child.on("error", (err) => logWarn("wakeup", `spawn caffeinate failed (non-fatal): ${err.message}`));
   } else if (os === "linux") {
     child = spawn("systemd-inhibit", ["--what=idle:sleep", "sleep", "infinity"], { stdio: "ignore", detached: true });
+    child.on("error", (err) => logWarn("wakeup", `spawn systemd-inhibit failed (non-fatal): ${err.message}`));
   }
   if (child?.pid) {
     child.unref();
