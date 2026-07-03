@@ -84,6 +84,18 @@ export class Spin {
     return r.session;
   }
 
+  /** Allocate a named Dreamy (D) session upfront for the duration of a sleep cycle (#1280).
+   *  Non-active, platform="background" — visible in master /session (showAll) for the full cycle.
+   *  Call at sleep start before the first runtime.complete(); the caller holds the returned id
+   *  and passes it as sessionId to subsequent spin({ type:"D", sessionId }) calls. */
+  allocateDreamySession(name: string): ManagedSession {
+    const userId = getMasterUserId();
+    const r = Sessions.allocateSession(this.sessions, this.nextIndex, "D", userId, "background", 0, { active: false });
+    this.nextIndex = r.nextIndex;
+    r.session.name = name;
+    return r.session;
+  }
+
   switchSession(userId: string, platform: string, index: number): ManagedSession | string {
     return Sessions.switchSession(this.sessions, userId, platform, index);
   }

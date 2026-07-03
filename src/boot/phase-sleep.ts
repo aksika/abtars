@@ -60,6 +60,11 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
     getLastMsgTs: () => memory?.getLastMessageTimestamp(true) ?? 0,
     sendSystemMessage,
     killWakeInhibit,
+    allocateSleepSession: (name: string) => {
+      // Allocate the D session eagerly so it's visible in /session for the full cycle (#1280).
+      const s = sessionManager.allocateDreamySession(name);
+      nightSessionId = s.id;
+    },
   });
   return "ran";
 }

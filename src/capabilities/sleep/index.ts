@@ -29,6 +29,10 @@ export interface SleepOpts {
   getLastMsgTs?: () => number;
   sendSystemMessage?: (prompt: string) => Promise<void>;
   killWakeInhibit?: () => void;
+  /** Allocate a named Dreamy session upfront at sleep start (#1280).
+   *  Called before the first runtime.complete() so the session appears in /session
+   *  for the full duration of the cycle. Optional — sleep still works without it. */
+  allocateSleepSession?: (name: string) => void;
 }
 
 export interface SleepProgress {
@@ -110,6 +114,11 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     if (running) return;
     attempts++;
     progress = null;
+    // Allocate the Dreamy session upfront so it appears in /session for the full cycle (#1280).
+    if (opts.allocateSleepSession) {
+      const dateStr = new Date().toISOString().slice(0, 10);
+      opts.allocateSleepSession(`Sleep ${dateStr}`);
+    }
     running = true;
     writeSleepStatus("sleeping");
     logInfo("sleep", `😴 Sleep started in-process (attempt ${attempts}, model=dreamy)`);
