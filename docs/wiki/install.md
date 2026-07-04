@@ -200,7 +200,7 @@ echo "HA_URL=http://192.168.1.4:8123" >> ~/.abtars/config/.env.skills
 abtars stop --force && abtars start
 ```
 
-Your agent can now control Home Assistant. See [Adding a Service](./add-service.md) for the full guide (including writing skills).
+Your agent can now control Home Assistant. See [Adding a Service](./add-service.md) for the full guide.
 
 ### Removing a key
 
@@ -228,14 +228,8 @@ abtars status    # shows PID, uptime, model
 
 Send a message to your bot on Telegram — it should respond.
 
-## Backup & Restore
+## Next steps
 
-```bash
-abtars backup                    # creates ~/.backup-abtars/abtars-<date>.zip
-abtars restore ~/path/to.zip    # restores config + data
-abmind restore --input ~/path/to.abm --passphrase "X" --username "Y"
-```
-
-## Troubleshooting
-
-See [Health Check](./healthcheck.md) and [Troubleshooting](./troubleshooting.md).
+- [Health Check](./healthcheck.md) — verify everything is running correctly
+- [Upgrading](./upgrade.md) — keep your bridge up to date
+- [Backup & Restore](./backup.md) — protect your data

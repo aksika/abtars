@@ -20,18 +20,12 @@ abtars update
 
 `abtars update` builds from source, stages into `app.staging/`, atomically swaps to `app/`, restarts, and health-verifies. Auto-rolls back if the bridge fails to start.
 
-## macOS (Molty)
+## macOS
 
 From Telegram (remote):
 ```
 /update pull        ← fetches latest code
 /update deploy       ← builds + deploys + restarts
-```
-
-Or via SSH:
-```bash
-cd ~/abmind && git pull --ff-only origin dev && npm run build
-cd ~/abtars && git pull --ff-only origin dev && abtars update --from-local
 ```
 
 ## abmind-only changes
@@ -95,10 +89,7 @@ launchctl/systemd calls. No working deployed binary required.
 bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
 ```
 
-The script reads `HEAD` from `~/.abtars-releases/src/abtars` to determine the
-version, so make sure that checkout is on the commit you want first
-(`cd ~/.abtars-releases/src/abtars && git checkout <sha>` or `git pull`).
-
-This is a manual mirror of the `deploy.ts` activation flow. If you change one,
-update the other. See `scripts/emergency-update.sh` header for the full mirror
-contract.
+Make sure the source checkout is on the commit you want first:
+```bash
+cd ~/.abtars-releases/src/abtars && git pull
+```

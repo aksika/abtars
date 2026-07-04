@@ -136,14 +136,3 @@ abtars restart --cold
 ## Retention
 
 Old backups are auto-pruned after 7 days (configurable with `--prune-days`). For long-term retention, copy backups off-machine or to cloud storage.
-
-## Daily automation
-
-The `scripts/daily-backup.sh` delegates to the CLI:
-
-```bash
-#!/usr/bin/env bash
-exec abtars backup "$@"
-```
-
-Schedule via cron or the bridge's built-in task system. No passphrase needed at runtime — the key file handles encryption.

@@ -25,8 +25,8 @@ Experienced? Jump straight to [Installation](./install.md) for the full technica
 
 | Mode | What it means |
 |------|--------------|
-| **Supervised (recommended)** | Installs as an OS service. Auto-restarts on crash, survives reboots, watchdog monitors health. Your agent is always on. |
-| **Simple** | Runs in the background. If it crashes, you restart manually. Good for trying things out. |
+| **daemon (recommended)** | Installs as an OS service. Auto-restarts on crash, survives reboots, watchdog monitors health. Your agent is always on. |
+| **simple** | Runs in the background. If it crashes, you restart manually. Good for trying things out. |
 
 ### Which model?
 
@@ -90,4 +90,4 @@ See [Health Check](./healthcheck.md) for more.
 
 ## Security
 
-> ⚠️ When creating your bot with @BotFather, keep it **private** (not searchable publicly). abTARS has access to your machine via tools. The built-in allowlist blocks unknown senders, but the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.
+Keep your bot **private** (not searchable publicly) when creating it with @BotFather. abTARS has access to your machine via tools. The built-in allowlist blocks unknown senders, but the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.

@@ -105,8 +105,8 @@ grep "Suspend\|grace\|Killing" ~/.abtars/logs/launchd.log | tail -5
 
 | Problem | Fix |
 |---|---|
-| Bridge dead, service active | `sudo systemctl restart abtars` |
-| Stale PID / EADDRINUSE | `abtars stop --force && sudo systemctl start abtars` |
+| Bridge dead, service active | `abtars restart` |
+| Stale PID / EADDRINUSE | `abtars stop --force && abtars start` |
 | Secrets not decrypting | Check `~/.abmind/secret/abmind.key` exists (run `abmind install`) |
 | Model 404 / demoted | `abtars update` (clears demotions) |
 | Memory unavailable | `abmind install` then restart |
@@ -116,7 +116,7 @@ grep "Suspend\|grace\|Killing" ~/.abtars/logs/launchd.log | tail -5
 ## Full reset (nuclear option)
 
 ```bash
-sudo systemctl stop abtars
+abtars stop --force
 rm -rf ~/.abtars ~/.abmind
 # Then re-install from scratch (see install page)
 ```
