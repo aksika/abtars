@@ -86,7 +86,7 @@ Or at runtime: `/healing` command toggles the self-healer on/off. `/healing rese
 2. SHA fires in an isolated `_S_` (System) session → user sees `🔧 Calling self-healing agent`
 3. SHA diagnoses root cause and attempts programmatic fix
 4. If fixed → task succeeds on next tick
-5. If unfixable → SHA reports "Requires human intervention: <reason>"
+5. If unfixable → SHA reports `"Requires human intervention: <reason>"`
 6. After 3 consecutive failures → task auto-pauses, user sees `⛔ Needs manual fix`
 
 **Three-state concurrency guard:**
