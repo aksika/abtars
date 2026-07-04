@@ -78,10 +78,6 @@ abtars deps install all
 # 1. Install CLI tools
 npm install -g abtars@alpha abmind@alpha
 
-# Ensure abtars is on PATH (nvm-global bin location):
-export PATH="$HOME/.nvm/versions/node/$(node -v | tr -d v)/bin:$HOME/.local/bin:$PATH"
-# Add the line above to ~/.bashrc or ~/.zshrc for persistence.
-
 # 2. Optional deps (recommended before first start)
 abtars deps install all
 
