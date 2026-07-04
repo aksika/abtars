@@ -6,10 +6,23 @@
  * (#1243), abmind() returns null and the bridge runs without persistent
  * memory (nullMemory). A below-floor abmind is rejected loudly — never a
  * silent contract break that would quietly drop memory mid-session.
+ *
+ * #1286: resolution uses active, ordered discovery — NOT passive ancestor-walk
+ * from the bundle path (which never finds the global install). The class of
+ * "ambient/heisenbug" failures is killed by probing real known locations:
+ *   1. ABMIND_PATH env override        — escape hatch + test hook
+ *   2. createRequire (ancestor-walk)   — KP/WSL dev file: link
+ *   3. npm root -g → <root>/abmind     — canonical global install (#1243)
+ *   4. ~/.abtars-releases/src/abmind   — deploy source checkout
+ *   5. ~/.local/lib/node_modules/abmind — legacy install location
+ * First valid, version-floor-passing candidate wins.
  */
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
-import { logDebug, logError, logWarn } from "../components/logger.js";
+import { readFileSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { logInfo, logError, logWarn } from "../components/logger.js";
 
 type AbmindModule = typeof import("abmind");
 
@@ -45,49 +58,167 @@ export function isSupportedVersion(version: string): boolean {
   return !!p && !lt(p, ABMIND_MIN);
 }
 
-/** Read the version of the resolvable abmind package, or null if not resolvable. */
-function readResolvedAbmindVersion(): string | null {
+// ── Discovery helpers ────────────────────────────────────────────────────────
+
+/** Run `npm root -g` and return the trimmed path, or null if npm is absent / errors. */
+export function npmRootG(): string | null {
   try {
-    const req = createRequire(import.meta.url);
-    const pkgPath = req.resolve("abmind/package.json");
-    return (JSON.parse(readFileSync(pkgPath, "utf-8")).version as string) ?? null;
+    const { execSync } = require("node:child_process") as typeof import("node:child_process");
+    const result = execSync("npm root -g", { encoding: "utf-8", timeout: 3000 }).trim();
+    return result || null;
   } catch {
     return null;
   }
 }
 
-/** Call once at boot (phase-memory). Caches the module. Returns null if unavailable or below-floor. */
+/** Read the `version` field from a package.json file, or null if missing/unparseable. */
+export function readVersion(pkgPath: string): string | null {
+  try {
+    const raw = JSON.parse(readFileSync(pkgPath, "utf-8")) as Record<string, unknown>;
+    return typeof raw["version"] === "string" ? raw["version"] : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Dirname of a resolved package.json path (strips the filename). */
+export function dirOfPkg(pkgJsonPath: string): string {
+  return dirname(pkgJsonPath);
+}
+
+/**
+ * Resolve the absolute entry-point path for an abmind package directory.
+ * Reads `main` from package.json (relative to dir); falls back to
+ * `dist/src/index.js` which is the known built output location.
+ */
+export function resolveEntry(dir: string, pkgPath: string): string {
+  try {
+    const raw = JSON.parse(readFileSync(pkgPath, "utf-8")) as Record<string, unknown>;
+    const main = typeof raw["main"] === "string" ? raw["main"] : null;
+    if (main) return join(dir, main);
+  } catch { /* fall through */ }
+  return join(dir, "dist", "src", "index.js");
+}
+
+/** A named discovery strategy: returns a candidate abmind package directory or null. */
+interface Strategy {
+  readonly name: string;
+  resolve(): string | null;
+}
+
+/**
+ * Ordered discovery strategies (#1286). First valid, version-floor-passing
+ * candidate wins. Pure/lazy — each resolve() is only called until one succeeds.
+ *
+ * Exported so tests can exercise individual strategies directly.
+ */
+export function abmindStrategies(): Strategy[] {
+  const req = createRequire(import.meta.url);
+  return [
+    {
+      // 1. Explicit override — escape hatch for custom installs and tests.
+      name: "ABMIND_PATH",
+      resolve(): string | null {
+        return process.env["ABMIND_PATH"]?.trim() || null;
+      },
+    },
+    {
+      // 2. Ancestor-walk from the bundle — covers KP/WSL dev `file:../abmind` link.
+      //    This is the only strategy that uses Node's passive resolution.
+      name: "createRequire",
+      resolve(): string | null {
+        try {
+          return dirOfPkg(req.resolve("abmind/package.json"));
+        } catch {
+          return null;
+        }
+      },
+    },
+    {
+      // 3. Canonical global npm install (#1243). The real location on every
+      //    production host; `npm root -g` is platform-correct regardless of
+      //    whether global prefix is ~/.npm-global, /opt/homebrew, or elsewhere.
+      name: "npm-root-g",
+      resolve(): string | null {
+        const root = npmRootG();
+        return root ? join(root, "abmind") : null;
+      },
+    },
+    {
+      // 4. Deploy source checkout — always present on deploy hosts under
+      //    ~/.abtars-releases/src/abmind. Also the npm-absent fallback.
+      name: "releases-src",
+      resolve(): string | null {
+        return join(homedir(), ".abtars-releases", "src", "abmind");
+      },
+    },
+    {
+      // 5. Legacy install location — for hosts that installed before the npm-global
+      //    convention was adopted. Not present on current Molty/KP but kept for
+      //    back-compat with older setups.
+      name: "legacy-local",
+      resolve(): string | null {
+        return join(homedir(), ".local", "lib", "node_modules", "abmind");
+      },
+    },
+  ];
+}
+
+// ── Loader ───────────────────────────────────────────────────────────────────
+
+/**
+ * Call once at boot (phase-memory). Caches the module.
+ * Returns null if abmind is unavailable or below the supported version floor.
+ *
+ * Resolution strategy (#1286): ordered active discovery — zero dependence on
+ * NODE_PATH, cwd, or launch method. See module-level comment for the strategy list.
+ */
 export async function loadAbmind(): Promise<AbmindModule | null> {
   if (_loaded) return _mod;
   _loaded = true;
 
-  let mod: AbmindModule | null = null;
-  try {
-    const req = createRequire(import.meta.url);
-    const resolvedPath = req.resolve("abmind");
-    mod = await import(resolvedPath);
-  } catch {
-    mod = null;
-  }
-  if (!mod) {
-    logWarn("boot", "abmind not installed — running without persistent memory");
-    _mod = null;
-    return null;
+  for (const strategy of abmindStrategies()) {
+    const dir = strategy.resolve();
+    if (!dir) continue;
+
+    const pkgPath = join(dir, "package.json");
+    if (!existsSync(pkgPath)) continue;
+
+    const ver = readVersion(pkgPath);
+
+    // Below-floor: loud error + stop. Do NOT silently fall through to an older
+    // copy from a lower-priority location — that hides a real misconfig.
+    if (!ver || !isSupportedVersion(ver)) {
+      logError(
+        "boot",
+        `abmind@${ver ?? "?"} at ${dir} is below the supported floor ` +
+        `${ABMIND_MIN.join(".")} (strategy=${strategy.name}) — memory disabled to ` +
+        `avoid a silent contract break. Upgrade: npm install -g abmind@latest`,
+      );
+      _mod = null;
+      return null;
+    }
+
+    const entry = resolveEntry(dir, pkgPath);
+    try {
+      const mod = await import(pathToFileURL(entry).href) as AbmindModule;
+      logInfo("boot", `memory: enabled via abmind@${ver} (via ${strategy.name})`);
+      _mod = mod;
+      return _mod;
+    } catch (err) {
+      // Import failed for this candidate (e.g. native module ABI mismatch, corrupt
+      // dist). Log and try the next strategy — don't give up the whole boot.
+      logWarn(
+        "boot",
+        `abmind@${ver} found at ${dir} (strategy=${strategy.name}) but failed to ` +
+        `import: ${err instanceof Error ? err.message : String(err)} — trying next`,
+      );
+    }
   }
 
-  const ver = readResolvedAbmindVersion();
-  if (!ver || !isSupportedVersion(ver)) {
-    logError(
-      "boot",
-      `abmind@${ver ?? "?"} is below the supported floor ${ABMIND_MIN.join(".")} — memory disabled to avoid a silent contract break. Upgrade: npm install -g abmind@latest`,
-    );
-    _mod = null;
-    return null;
-  }
-
-  logDebug("boot", `memory: enabled via abmind@${ver}`);
-  _mod = mod;
-  return _mod;
+  logWarn("boot", "abmind not found via any discovery strategy — running without persistent memory");
+  _mod = null;
+  return null;
 }
 
 /** Synchronous access after loadAbmind() has been called. Returns null if unavailable. */
