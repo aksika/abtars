@@ -1,4 +1,4 @@
-# Install: Stable — 0.3.3
+# Installation
 
 ## Prerequisites
 
@@ -76,9 +76,7 @@ abtars deps install all
 
 ```bash
 # 1. Install CLI tools
-ABTARS_V=$(npm view abtars@alpha version)
-ABMIND_V=$(npm view abmind@alpha version)
-npm install -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"
+npm install -g abtars@alpha abmind@alpha
 
 # Ensure abtars is on PATH (nvm-global bin location):
 export PATH="$HOME/.nvm/versions/node/$(node -v | tr -d v)/bin:$HOME/.local/bin:$PATH"
@@ -109,7 +107,7 @@ Step 3 automatically clones source, builds, deploys, and starts the bridge (daem
 
 | Step | What happens |
 |------|-------------|
-| `npm install -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"` | Installs CLI tools globally (explicit version avoids npm cache staleness) |
+| `npm install -g abtars@alpha abmind@alpha` | Installs CLI tools globally |
 | `abtars deps install all` | Installs optional npm packages (browser, PDF, YouTube, image) |
 | `abtars install` | Creates config, clones source, builds, deploys release, starts bridge |
 | `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption (discovers user from abtars) |
@@ -133,9 +131,7 @@ Install ollama before `abmind install` if you want local embeddings.
 Omit `--non-interactive` and the wizard will prompt for each value:
 
 ```bash
-ABTARS_V=$(npm view abtars@alpha version)
-ABMIND_V=$(npm view abmind@alpha version)
-npm install -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"
+npm install -g abtars@alpha abmind@alpha
 abtars deps install all
 abtars install
 abmind install
@@ -160,8 +156,8 @@ Daemon mode sets this automatically.
 
 | Channel | Command | Who |
 |---|---|---|
-| **Stable** | `npm install -g abtars abmind` | Normal users |
-| **Alpha** | `npm install -g "abtars@alpha" "abmind@alpha"` | Early adopters |
+| **Stable** | `npm install -g abtars abmind` | Production use |
+| **Alpha** | `npm install -g abtars@alpha abmind@alpha` | Latest features, tested on live instances |
 | **Dev** | `git clone` + `abtars update --dev .` | Contributors |
 
 ## Commands reference
