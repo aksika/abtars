@@ -175,6 +175,20 @@ export function sessionType(session: ManagedSession): SessionType {
   return (type ?? "A") as SessionType;
 }
 
+/** Session type from a raw session-id string (companion to sessionType(session)). */
+export function sessionTypeOf(sessionId: string): SessionType {
+  return (sessionId.split("_")[1] ?? "A") as SessionType;
+}
+
+/**
+ * #1022: compaction fires only for A (main) and C (coding) session types.
+ * Every other type (B, D, O, S, T, P, W, H) is never compacted. Hard requirement.
+ */
+const COMPACTABLE_TYPES: ReadonlySet<SessionType> = new Set<SessionType>(["A", "C"]);
+export function isCompactable(sessionId: string): boolean {
+  return COMPACTABLE_TYPES.has(sessionTypeOf(sessionId));
+}
+
 export function sessionCreatedAt(session: ManagedSession): number {
   return parseInt(session.id.split("_")[0] ?? "0", 10) * 1000;
 }

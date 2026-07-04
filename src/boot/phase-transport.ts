@@ -331,26 +331,24 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       if (mod) {
         const { ContextEngine } = mod;
         const { createContextOrchestrator } = await import("../components/context/index.js");
+        const { spin } = await import("../components/spin.js");
+        const { recordCompaction } = await import("../components/metrics-collector.js");
         const contextEngine = new ContextEngine(db);
+        // Cheap compaction model: route summarization through Spin as an S-type
+        // one-shot (ephemeral, terminateAfter "call") on the dreamy agent. Spin
+        // resolves agent → model/provider/metrics; no raw LLM call, no lingering session.
+        const compactionModel = (tc ? resolveAgent("dreamy", tc) : null)?.model ?? null;
         const orchestrator = createContextOrchestrator(
           contextEngine,
-          async (systemPrompt: string, userPrompt: string) => {
-            const { streamSingleCompletion } = await import("../components/transport/stream-single.js");
-            return streamSingleCompletion({
-              endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
-              apiKey: getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY") ?? undefined,
-              model: resolved.model,
-              systemPrompt,
-              userPrompt,
-              maxTokens: 4096,
-            });
-          },
+          (systemPrompt: string, userPrompt: string) =>
+            spin.dispatchBackground({ agent: "dreamy", prompt: `${systemPrompt}\n\n${userPrompt}` }),
           (_chatId: string) => {
             try { return ctx.memory?.getLastMessageTimestamp(true) ?? null; } catch (err) { logAndSwallow(TAG, "getLastMessageTimestamp", err); return null; }
           },
+          { compactionModel, onCompactionEvent: recordCompaction },
         );
         (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).contextOrchestrator = orchestrator;
-        logInfo("main", "📦 Context engine wired (auto-compaction active)");
+        logInfo("main", `📦 Context engine wired (auto-compaction active, model: ${compactionModel ?? "main"})`);
       }
     }
   }

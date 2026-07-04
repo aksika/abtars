@@ -38,18 +38,31 @@ export async function handleNewReset(text: string, ctx: CommandContext): Promise
 
 export async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
   try {
+    // #1022: compaction only for A/C session types (hard requirement).
+    const { isCompactable } = await import("../spin-types.js");
+    if (!isCompactable(ctx.sessionKey)) {
+      await ctx.reply("Compaction not available for this session.");
+      return true;
+    }
     // Context engine compaction — force compact via transport's orchestrator
-    const transport = ctx.transport as { contextOrchestrator?: { forceCompact(chatId: string, budget: number): Promise<boolean> }; config?: { maxContext: number } };
+    const transport = ctx.transport as { contextOrchestrator?: { forceCompact(chatId: string, budget: number): Promise<import("abmind").CompactionResult> }; config?: { maxContext: number } };
     if (transport.contextOrchestrator) {
       const budget = (transport as any).config?.maxContext ?? 200000;
-      const success = await transport.contextOrchestrator.forceCompact(ctx.sessionKey, budget);
-      await ctx.reply(success ? "📦 Compaction complete." : "📦 Nothing to compact.");
+      const result = await transport.contextOrchestrator.forceCompact(ctx.sessionKey, budget);
+      if (result.skipped) {
+        await ctx.reply("Compaction skipped (recent passes saved little — retry in ~30 min).");
+      } else if (result.ok) {
+        const pct = Math.round(result.savingsPct * 100);
+        await ctx.reply(`Compaction complete. ${result.tokensBefore}→${result.tokensAfter} tokens (${pct}% saved).`);
+      } else {
+        await ctx.reply("Nothing to compact.");
+      }
     } else {
-      await ctx.reply("📦 Context engine not active for this transport.");
+      await ctx.reply("Context engine not active for this transport.");
     }
   } catch (err) {
     logError(TAG, "Manual compaction failed", err);
-    await ctx.reply("❌ Compaction failed.");
+    await ctx.reply("Compaction failed.");
   }
   return true;
 }

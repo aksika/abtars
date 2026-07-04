@@ -823,6 +823,11 @@ export async function handleMetrics(_text: string, ctx: CommandContext): Promise
     lines.push(`\nSleep: ${s.sleep.calls} runs, ${rate}% success`);
   }
 
+  // Compaction (#1022)
+  if (s.compaction) {
+    lines.push(`\nCompaction: ${s.compaction.count} passes (${s.compaction.failures} failed), p50=${s.compaction.p50}ms p95=${s.compaction.p95}ms, avg ${s.compaction.avgSavingsPct}% saved`);
+  }
+
   // Cron
   lines.push(`\nCron depth: avg=${s.cronDepth.avg} max=${s.cronDepth.max}`);
 

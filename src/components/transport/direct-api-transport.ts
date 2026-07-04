@@ -15,6 +15,7 @@ import { normalizeToolCalls, parseErrorStatus, parseRetryAfter, parseUsageLimitC
 import { recordUsage } from "../usage-tracker.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport } from "./kiro-transport.js";
+import { isCompactable } from "../spin-types.js";
 
 const TAG = "direct-api";
 
@@ -308,7 +309,10 @@ export class DirectApiTransport implements IKiroTransport {
         this._contextPercent = session.contextPercent;
         this._lastPromptTokens = usage.prompt_tokens;
         this._lastCompletionTokens = usage.completion_tokens ?? 0;
-        this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
+        // #1022: compaction fires only for A/C session types.
+        if (isCompactable(this._activeSessionKey)) {
+          this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
+        }
         logTrace(TAG, `${this.activeModel} — ${usage.prompt_tokens}→${usage.completion_tokens ?? 0} tokens, ${Date.now() - (this._lastActivityAt ?? Date.now())}ms`);
         recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0, this.agentLabel);
       }
