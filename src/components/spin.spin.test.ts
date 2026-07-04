@@ -168,14 +168,27 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setRuntime(makeRuntime() as any);
       const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
       expect(r.sessionId).toBeTruthy();
-      // The session used by spin() must exist in the Map (auto-created Main).
-      // After spin(), A is "response"-terminated, so getActiveSession would create
-      // a new one — use getSessionById to inspect the one spin() actually used.
       const usedSession = spin.getSessionById(r.sessionId);
       expect(usedSession).toBeDefined();
       expect(usedSession!.userId).toBe("aksika");
       expect(usedSession!.platform).toBe("telegram");
     });
+
+    it("A persists across turns — same active session id, not response-terminated (#1287)", async () => {
+      spin.setRuntime(makeRuntime() as any);
+      const r1 = await spin.spin({ type: "A", prompt: "turn 1", userId: "aksika", platform: "telegram", await: true });
+      const r2 = await spin.spin({ type: "A", prompt: "turn 2", userId: "aksika", platform: "telegram", await: true });
+      // A is external-terminated: the Main session survives a completed turn, so the
+      // second turn reuses the SAME session (stable id → continuous conversation context).
+      expect(r2.sessionId).toBe(r1.sessionId);
+      const s = spin.getSessionById(r1.sessionId);
+      expect(s).toBeDefined();
+      expect(s!.status).not.toBe("ended");
+      expect(s!.active).toBe(true);
+      // getActiveSession must return that same session (not auto-create a new one).
+      expect(spin.getActiveSession("aksika", "telegram").id).toBe(r1.sessionId);
+    });
+
 
     it("O reuses the one visible Orc session (singleton)", async () => {
       spin.setRuntime(makeRuntime() as any);

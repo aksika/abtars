@@ -26,6 +26,10 @@ export interface SleepOpts {
   /** LLM runtime adapter — bridge wraps spin({ type: "D", ... }) (#1271). */
   runtime: SleepRuntime;
   onComplete: () => void;
+  /** Always called once per cycle at the end — success, partial-failure, or throw.
+   *  Tears down the night Dreamy session (#1287). Distinct from onComplete, which
+   *  runs the memory reset only on the success path. Optional — sleep works without it. */
+  onCycleEnd?: () => void;
   getLastMsgTs?: () => number;
   sendSystemMessage?: (prompt: string) => Promise<void>;
   killWakeInhibit?: () => void;
@@ -194,6 +198,12 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         } else {
           logWarn("sleep", `😴 Sleep threw — exhausted ${MAX_RETRIES} attempts: ${msg}`);
         }
+      })
+      .finally(() => {
+        // #1287: tear down the night Dreamy session on EVERY cycle outcome (success,
+        // partial-failure, throw). Retry (if any) re-allocates a fresh D via
+        // allocateSleepSession, so no Dreamy session accumulates.
+        opts.onCycleEnd?.();
       });
   }
 

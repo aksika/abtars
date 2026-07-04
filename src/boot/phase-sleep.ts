@@ -23,8 +23,8 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
   // #1271: SleepRuntime adapter — wraps spin({ type: "D", ... }) for the in-process
   // orchestrator. ONE nightSessionId is held for the whole cycle (set from step 1's
   // result, reused for steps 2+) so D's persistent transport keeps a shared Dreamy
-  // conversation. D profile is external-terminate, so the session stays alive until
-  // the cycle completes (and is ended in onComplete).
+  // conversation. D profile is external-terminate, so the session stays alive across
+  // steps; it is ended in onCycleEnd, which fires on every cycle outcome (#1287).
   let nightSessionId: string | undefined;
   const { getEnv } = await import("../components/env-schema.js");
   const runtime: SleepRuntime = {
@@ -48,14 +48,18 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
     memoryEnabled: memoryConfig.memoryEnabled,
     runtime,
     onComplete: () => {
-      // End the D session at cycle completion so it doesn't accumulate across nights.
-      // Fresh nightSessionId for the next sleep cycle.
+      // Success + memory only: reset per-chat context-window start markers.
+      resetAllCtxStarts(memoryConfig.memoryDir);
+    },
+    onCycleEnd: () => {
+      // #1287: runs on EVERY cycle outcome (success, partial-failure, throw). End the
+      // night Dreamy session so it doesn't accumulate — pruneEndedSessions reaps ended
+      // sessions hourly. Fresh nightSessionId for the next cycle / retry.
       if (nightSessionId) {
         const s = sessionManager.getSessionById(nightSessionId);
         if (s) s.status = "ended";
         nightSessionId = undefined;
       }
-      resetAllCtxStarts(memoryConfig.memoryDir);
     },
     getLastMsgTs: () => memory?.getLastMessageTimestamp(true) ?? 0,
     sendSystemMessage,

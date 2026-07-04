@@ -75,7 +75,7 @@ const orcChannel: PromptDecorator = async (prompt, { cardId }) => {
 // ── The registry ───────────────────────────────────────────────────────
 
 export const SESSION_PROFILES: Record<SessionType, SessionProfile> = {
-  A: { agent: "professor", transportMode: "persistent", resolution: "active",    terminateAfter: "response", decorators: [] },
+  A: { agent: "professor", transportMode: "persistent", resolution: "active",    terminateAfter: "external",  decorators: [] },
   B: { agent: "browsie",   transportMode: "oneshot",    resolution: "transient", terminateAfter: "response", decorators: [soulBundle] },
   C: { agent: "coding",    transportMode: "oneshot",    resolution: "transient", terminateAfter: "response", decorators: [soulBundle] },
   T: { agent: "professor", transportMode: "oneshot",    resolution: "transient", terminateAfter: "response", decorators: [soulBundle, channelMessages] },
