@@ -11,6 +11,8 @@ const mockTransport = {
   isReady: true,
   contextPercent: -1,
   initialize: vi.fn(),
+  // #1290: mirrors DirectApiTransport.agentLabel default (direct-api-transport.ts:59)
+  agentLabel: "professor",
 };
 
 vi.mock("./agent-registry.js", () => ({
@@ -26,6 +28,8 @@ describe("SubagentRuntime", () => {
     runtime = new SubagentRuntime();
     vi.clearAllMocks();
     mockSendPrompt.mockResolvedValue("response text");
+    // #1290: reset to the DirectApiTransport default between tests
+    mockTransport.agentLabel = "professor";
   });
 
   it("complete() returns response from transport", async () => {
@@ -63,6 +67,19 @@ describe("SubagentRuntime", () => {
     mockSendPrompt.mockResolvedValue(null);
     const result = await runtime.complete("browsie", "test");
     expect(result).toBe("");
+  });
+
+  // --- #1290: budget attribution ---
+
+  it("createAgent sets transport.agentLabel to the resolved agent (#1290)", async () => {
+    await runtime.complete("dreamy", "test");
+    expect(mockTransport.agentLabel).toBe("dreamy");
+  });
+
+  it("agentLabel follows the agent type, not the default (#1290)", async () => {
+    await runtime.complete("coding", "test");
+    expect(mockTransport.agentLabel).toBe("coding");
+    expect(mockTransport.agentLabel).not.toBe("professor");
   });
 
   it("shutdown destroys all cached transports", async () => {

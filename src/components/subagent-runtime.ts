@@ -236,6 +236,14 @@ export class SubagentRuntime {
       : undefined;
     const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, mainModel);
 
+    // #1290: attribute per-turn budget to the agent Spin resolved for this session.
+    // DirectApi only — ACP transport uses its own this.agentName. The "professor"
+    // default in direct-api-transport.ts stays correct for the main boot transport
+    // (phase-transport.ts), which bypasses createAgent.
+    if ("agentLabel" in transport) {
+      (transport as { agentLabel: string }).agentLabel = agent;
+    }
+
     // #1012: Track PID so boot-time cleanup finds orphans
     if ((transport as any).agent?.pid) {
       import("./transport/bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid((transport as any).agent.pid)).catch(() => {});
