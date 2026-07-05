@@ -77,10 +77,10 @@ echo "Restarting..."
 if launchctl list 2>/dev/null | grep -q abtars; then
   echo "LaunchAgent manages watchdog — it will restart the bridge."
 elif [ -f "$HOME_DIR/scripts/abtars-watchdog.sh" ]; then
-  nohup bash "$HOME_DIR/scripts/abtars-watchdog.sh" >> "$HOME_DIR/logs/watchdog.log" 2>&1 &
+  nohup bash "$HOME_DIR/scripts/abtars-watchdog.sh" &
   echo "Watchdog restarted (PID $!) — it will start the bridge."
 else
-  nohup node "$HOME_DIR/app/bundle/abtars.js" >> "$HOME_DIR/logs/bridge.log" 2>&1 &
+  nohup node "$HOME_DIR/app/bundle/abtars.js" &
   echo $! > "$HOME_DIR/bridge.pid"
   echo "Bridge started (PID $!)."
 fi

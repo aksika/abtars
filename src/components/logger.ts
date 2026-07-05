@@ -137,7 +137,7 @@ function formatLine(level: string, tag: string, msg: string): string {
 export function logInfo(tag: string, msg: string): void {
   if (!shouldLog("low")) return;
   const line = formatLine("info", tag, msg);
-  console.log(`[${tag}] ${msg}`);
+  if (process.stdout.isTTY) console.log(`[${tag}] ${msg}`);
   writeToFile(line);
 }
 
@@ -145,7 +145,7 @@ export function logInfo(tag: string, msg: string): void {
 export function logWarn(tag: string, msg: string): void {
   if (!shouldLog("low")) return;
   const line = formatLine("warn", tag, msg);
-  console.warn(`[${tag}] ${msg}`);
+  if (process.stdout.isTTY) console.warn(`[${tag}] ${msg}`);
   writeToFile(line);
 }
 
@@ -155,8 +155,8 @@ export function logError(tag: string, msg: string, err?: unknown): void {
   const errStr = err instanceof Error ? err.message : (typeof err === "object" && err !== null ? JSON.stringify(err) : String(err ?? ""));
   const fullMsg = errStr ? `${msg} — ${errStr}` : msg;
   const line = formatLine("error", tag, fullMsg);
-  if (err) console.error(`[${tag}] ${msg}`, err);
-  else console.error(`[${tag}] ${msg}`);
+  if (err) { if (process.stdout.isTTY) console.error(`[${tag}] ${msg}`, err); }
+  else { if (process.stdout.isTTY) console.error(`[${tag}] ${msg}`); }
   writeToFile(line);
 }
 
@@ -164,7 +164,7 @@ export function logError(tag: string, msg: string, err?: unknown): void {
 export function logDebug(tag: string, msg: string): void {
   if (!shouldLog("debug")) return;
   const line = formatLine("debug", tag, msg);
-  console.log(`[${tag}] ${msg}`);
+  if (process.stdout.isTTY) console.log(`[${tag}] ${msg}`);
   writeToFile(line);
 }
 
@@ -172,6 +172,6 @@ export function logDebug(tag: string, msg: string): void {
 export function logTrace(tag: string, msg: string): void {
   if (!shouldLog("trace")) return;
   const line = formatLine("trace", tag, msg);
-  console.log(`[${tag}] ${msg}`);
+  if (process.stdout.isTTY) console.log(`[${tag}] ${msg}`);
   writeToFile(line);
 }
