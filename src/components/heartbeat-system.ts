@@ -9,7 +9,7 @@ export type HeartbeatConfig = {
   bridgeLockPath: string;
   /** When true, skip all heavy tasks (e.g. sleep in progress — avoid model rate limits). */
   sleepActive?: () => boolean;
-  /** Called when standby resume detected (gap > interval×3). Bridge should doctor + exit. */
+  /** Called when standby resume detected (gap > interval×3). Bridge should exit (watchdog respawns). */
   onStandbyResume?: (gapMs: number) => void;
   /** Called after every successful tick — used to kick the watchdog. */
   onTick?: () => void;
