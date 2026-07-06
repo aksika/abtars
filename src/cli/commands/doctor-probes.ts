@@ -295,51 +295,62 @@ async function probeAgentApi(): Promise<ProbeResult> {
 
 async function probePeers(): Promise<ProbeResult> {
   const peersPath = join(configDir, "peers.json");
-  const peers = readJson(peersPath);
+  const peers = readJson(peersPath) as { peers?: Record<string, { verifyKey?: string; trust?: number }>; self?: { signingKey?: string; tribeToken?: string } } | null;
   if (!peers) return { name: "peers", status: "skipped", detail: "peers.json missing" };
-  const peerCount = Object.keys(peers.peers ?? {}).length;
-  if (peerCount === 0) return { name: "peers", status: "ok", detail: "no peers configured" };
+  if (!peers.self?.signingKey) return { name: "peers", status: "failed", detail: "self.signingKey missing — run: abtars install" };
+
+  const peerEntries = Object.entries(peers.peers ?? {});
+  const peerCount = peerEntries.length;
+  if (peerCount === 0) return { name: "peers", status: "ok", detail: "no peers configured (solo tribe)" };
+
+  // Check that all peers have verifyKey
+  const missingKey = peerEntries.filter(([, e]) => !e.verifyKey).map(([n]) => n);
+  if (missingKey.length > 0) return { name: "peers", status: "failed", detail: `missing verifyKey: ${missingKey.join(", ")}` };
 
   const lock = readJson(join(home, "bridge.lock"));
   const gossipAge = lock?.lastGossipBroadcast ? ago(Date.now() - lock.lastGossipBroadcast) : "unknown";
-  return { name: "peers", status: "ok", detail: `${peerCount} configured, gossip: ${gossipAge}` };
+  return { name: "peers", status: "ok", detail: `${peerCount} enrolled, gossip: ${gossipAge}` };
 }
 
 async function probeTls(): Promise<ProbeResult> {
   const env = readEnv();
   if (env.get("ENABLE_AGENT_API") !== "true") return { name: "tls", status: "skipped", detail: "agent-api disabled" };
-  const certExists = existsSync(join(configDir, "identity.crt"));
-  const keyExists = existsSync(join(configDir, "identity.tls.key"));
-  if (certExists && keyExists) return { name: "tls", status: "ok", detail: "certs present" };
-  const missing = [!certExists && "identity.crt", !keyExists && "identity.tls.key"].filter(Boolean);
-  return { name: "tls", status: "failed", detail: `missing: ${missing.join(", ")}` };
+
+  const certPath = join(configDir, "identity.crt");
+  const keyPath = join(configDir, "identity.tls.key");
+  const certExists = existsSync(certPath);
+  const keyExists = existsSync(keyPath);
+  if (!certExists || !keyExists) {
+    const missing = [!certExists && "identity.crt", !keyExists && "identity.tls.key"].filter(Boolean);
+    return { name: "tls", status: "failed", detail: `missing: ${missing.join(", ")}` };
+  }
+
+  // Verify cert public key matches self.signingKey (#1293)
+  try {
+    const { loadPeerConfig, deriveVerifyKey } = require("../../components/peer-config.js") as typeof import("../../components/peer-config.js");
+    const { verifyServerCert } = require("../../components/peer-transport/peer-auth.js") as typeof import("../../components/peer-transport/peer-auth.js");
+    const config = loadPeerConfig();
+    const expectedVerifyKey = deriveVerifyKey(config.self.signingKey);
+    const certPem = readFileSync(certPath, "utf-8");
+    if (!verifyServerCert(certPem, expectedVerifyKey)) {
+      return { name: "tls", status: "failed", detail: "identity.crt pubkey does not match self.signingKey — re-run: abtars install --force" };
+    }
+    return { name: "tls", status: "ok", detail: "cert present + matches identity key" };
+  } catch {
+    return { name: "tls", status: "ok", detail: "certs present (key-match check skipped)" };
+  }
 }
 
 async function probeA2a(): Promise<ProbeResult> {
   const peersPath = join(configDir, "peers.json");
-  const peers = readJson(peersPath) as { gossipSecret?: string; peers?: Record<string, { token?: string }>; self?: { udpPort?: number } } | null;
+  // #1293: gossipSecret and token fields removed — gossip now uses Ed25519
+  const peers = readJson(peersPath) as { self?: { udpPort?: number; signingKey?: string } } | null;
   if (!peers?.self?.udpPort) return { name: "a2a", status: "skipped", detail: "no gossip port configured" };
+  if (!peers.self.signingKey) return { name: "a2a", status: "failed", detail: "self.signingKey missing — Ed25519 gossip requires identity" };
 
   const port = peers.self.udpPort;
-  try {
-    const dgram = await import("node:dgram");
-    const { createHmac } = await import("node:crypto");
-    const key = peers.gossipSecret ?? Object.values(peers.peers ?? {})[0]?.token ?? "default";
-    const payload = JSON.stringify({ type: "ping", name: "__doctor__" });
-    const sig = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
-    const ping = Buffer.from(`${payload}|${sig}`);
-
-    const alive = await new Promise<boolean>((resolve) => {
-      const sock = dgram.createSocket("udp4");
-      const timer = setTimeout(() => { sock.close(); resolve(false); }, 500);
-      sock.on("message", () => { clearTimeout(timer); sock.close(); resolve(true); });
-      sock.on("error", () => { clearTimeout(timer); sock.close(); resolve(false); });
-      sock.send(ping, port, "127.0.0.1");
-    });
-    return { name: "a2a", status: alive ? "ok" : "failed", detail: alive ? `UDP :${port} alive` : `UDP :${port} no response` };
-  } catch {
-    return { name: "a2a", status: "failed", detail: "UDP probe error" };
-  }
+  // Ed25519 gossip doesn't support the old HMAC ping. Just confirm the port config is present.
+  return { name: "a2a", status: "ok", detail: `UDP gossip configured on :${port} (Ed25519 signed)` };
 }
 
 // ── Soul Probes ──────────────────────────────────────────────────────────────
