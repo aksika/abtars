@@ -84,6 +84,8 @@ export class AgentApiServer {
   private a2aAdapter?: import("../platforms/agent-api/agent-api-adapter.js").AgentApiAdapter;
   private peerWsConnections = new Map<string, import("ws").WebSocket>();
   private peerWss: import("ws").WebSocketServer | null = null;
+  /** Rate-limit for /v1/enroll-ws: IP → last attempt timestamp (ms). */
+  private enrollRateLimit = new Map<string, number>();
 
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
@@ -142,32 +144,45 @@ export class AgentApiServer {
     this.peerWss = new WebSocketServer({ noServer: true });
 
     this.server.on("upgrade", (req: IncomingMessage, socket: any, head: Buffer) => {
+      // /v1/enroll-ws — identity-less enrollment path (Task 6)
+      if (req.url === "/v1/enroll-ws") {
+        this.peerWss!.handleUpgrade(req, socket, head, (ws) => {
+          this.handleEnrollWs(ws, req).catch(err => logAndSwallow(TAG, "enroll-ws", err));
+        });
+        return;
+      }
+
       if (req.url !== "/v1/ws") { socket.destroy(); return; }
-      const auth = req.headers["authorization"];
-      if (!auth?.startsWith("Bearer ")) { socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n"); socket.destroy(); return; }
-      const token = auth.slice(7);
-      // Verify JWT — find which peer this is
-      import("./peer-jwt.js").then(({ verifyJwt }) => {
+
+      // Signature-based WS upgrade auth
+      import("./peer-transport/peer-auth.js").then(({ verifyRequest }) => {
         import("./peer-config.js").then(({ loadPeerConfig }) => {
           const config = loadPeerConfig();
-          for (const [name, entry] of Object.entries(config.peers)) {
-            const result = verifyJwt(token, entry.token, config.self.name);
-            if (result.ok) {
-              this.peerWss!.handleUpgrade(req, socket, head, (ws) => {
-                this.peerWsConnections.set(name, ws);
-                logInfo(TAG, `Peer WS connected: ${name}`);
-                ws.on("close", () => { this.peerWsConnections.delete(name); logInfo(TAG, `Peer WS disconnected: ${name}`); });
-                ws.on("error", () => { this.peerWsConnections.delete(name); });
-                // Ping/pong keepalive
-                const pingInterval = setInterval(() => { if (ws.readyState === ws.OPEN) ws.ping(); }, 30_000);
-                ws.on("close", () => clearInterval(pingInterval));
-                ws.on("message", (data) => this.handlePeerWsMessage(name, data.toString()));
-              });
-              return;
-            }
+          const peerId = req.headers["x-peer-id"];
+          if (typeof peerId !== "string") {
+            socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n"); socket.destroy(); return;
           }
-          socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-          socket.destroy();
+          const peerEntry = config.peers[peerId];
+          if (!peerEntry) {
+            logWarn(TAG, `WS upgrade: unknown peer '${peerId}'`);
+            socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n"); socket.destroy(); return;
+          }
+          const result = verifyRequest(
+            req.headers as Record<string, string | string[] | undefined>,
+            "GET", "/v1/ws", "",
+            peerEntry.verifyKey,
+          );
+          if (!result.ok) {
+            logWarn(TAG, `WS upgrade: sig verify failed for ${peerId}: ${result.reason}`);
+            socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n"); socket.destroy(); return;
+          }
+          this.peerWss!.handleUpgrade(req, socket, head, (ws) => {
+            this.peerWsConnections.set(peerId, ws);
+            logInfo(TAG, `Peer WS connected: ${peerId}`);
+            ws.on("close", () => { this.peerWsConnections.delete(peerId); logInfo(TAG, `Peer WS disconnected: ${peerId}`); });
+            ws.on("error", () => { this.peerWsConnections.delete(peerId); });
+            ws.on("message", (data) => this.handlePeerWsMessage(peerId, data.toString()));
+          });
         }).catch(() => { socket.destroy(); });
       }).catch(() => { socket.destroy(); });
     });
@@ -222,6 +237,115 @@ export class AgentApiServer {
       result = card ? { taskId: card.id, status: card.status, result: card.result_summary, error: card.error } : { error: "not found" };
     }
     ws.send(JSON.stringify({ type: "response", id: msg.id, payload: result }));
+  }
+
+  /**
+   * #1293 — Enrollment WS handler (responder side).
+   * Full implementation in Task 6. This is the routing entry point added in Task 3.
+   */
+  private async handleEnrollWs(ws: import("ws").WebSocket, req: IncomingMessage): Promise<void> {
+    const ip = normalizeIp(req.socket?.remoteAddress ?? "");
+    const ENROLL_RATE_MS = 5 * 60 * 1000; // 1 per 5 min per IP
+
+    const lastAttempt = this.enrollRateLimit.get(ip) ?? 0;
+    if (Date.now() - lastAttempt < ENROLL_RATE_MS) {
+      logWarn(TAG, `Enrollment rate-limit hit for ${ip}`);
+      ws.close(1008, "rate limited");
+      return;
+    }
+    this.enrollRateLimit.set(ip, Date.now());
+
+    const {
+      macTribe, signAck, verifyEnroll, verifyRequest: _verifyReq,
+    } = await import("./peer-transport/peer-auth.js");
+    const { loadPeerConfig, deriveVerifyKey, clearPeerConfigCache } = await import("./peer-config.js");
+    const { randomBytes } = await import("node:crypto");
+    const { writeFileSync, existsSync, mkdirSync } = await import("node:fs");
+    const { join } = await import("node:path");
+
+    const config = loadPeerConfig();
+    const selfVerifyKey = deriveVerifyKey(config.self.signingKey);
+    const nonceR = randomBytes(16).toString("hex");
+
+    let stepADone = false;
+    let pubKeyI = "";
+
+    ws.on("message", async (rawData) => {
+      try {
+        const msg = JSON.parse(rawData.toString());
+
+        if (!stepADone) {
+          // Step A: knock
+          const { pubKey_i, nonce_i, ts } = msg as { pubKey_i: string; nonce_i: string; ts: number };
+          if (!pubKey_i || !nonce_i || !ts) { ws.close(1008, "invalid knock"); return; }
+          const nowSec = Math.floor(Date.now() / 1000);
+          if (Math.abs(nowSec - ts) > 30) { ws.close(1008, "stale ts"); return; }
+
+          pubKeyI = pubKey_i;
+          stepADone = true;
+
+          // Step B: challenge
+          const macR = macTribe(config.self.tribeToken, selfVerifyKey + nonce_i);
+          ws.send(JSON.stringify({ pubKey_r: selfVerifyKey, nonce_r: nonceR, ts: nowSec, mac_r: macR }));
+          return;
+        }
+
+        // Step C: enroll
+        const { mac_i, name, nonce_r, ts, selfSig } = msg as { mac_i: string; name: string; nonce_r: string; ts: number; selfSig: string };
+        if (!mac_i || !name || !nonce_r || !selfSig) { ws.close(1008, "invalid enroll msg"); return; }
+
+        if (nonce_r !== nonceR) { ws.close(1008, "nonce mismatch"); return; }
+
+        const nowSec = Math.floor(Date.now() / 1000);
+        if (Math.abs(nowSec - ts) > 30) { ws.close(1008, "stale ts"); return; }
+
+        // Verify mac_i
+        const expectedMacI = macTribe(config.self.tribeToken, pubKeyI + nonceR);
+        if (mac_i !== expectedMacI) { ws.close(1008, "mac mismatch"); return; }
+
+        // Verify selfSig
+        if (!verifyEnroll(selfSig, pubKeyI, pubKeyI, nonceR, name)) {
+          ws.close(1008, "bad selfSig"); return;
+        }
+
+        // Pin-and-alert: reject if existing peer has different verifyKey
+        const existing = config.peers[name];
+        if (existing && existing.verifyKey !== pubKeyI) {
+          logWarn(TAG, `Enrollment rejected — peer '${name}' verifyKey changed (pin-and-alert)`);
+          ws.close(1008, "key changed — operator action required"); return;
+        }
+
+        // Persist peer
+        const peersPath = join(abtarsHome(), "config", "peers.json");
+        let raw: Record<string, unknown> = {};
+        if (existsSync(peersPath)) { try { raw = JSON.parse(require("fs").readFileSync(peersPath, "utf-8")); } catch { raw = {}; } }
+        if (!raw.peers || typeof raw.peers !== "object") raw.peers = {};
+        (raw.peers as Record<string, unknown>)[name] = {
+          host: ip,
+          port: parseInt(req.headers["x-peer-port"] as string ?? "0", 10) || 0,
+          verifyKey: pubKeyI,
+          trust: 1,
+        };
+        writeFileSync(peersPath, JSON.stringify(raw, null, 2) + "\n", { encoding: "utf-8" });
+        clearPeerConfigCache();
+
+        logInfo(TAG, `Enrolled new peer '${name}' from ${ip} at trust=1`);
+
+        // Step D: ack
+        const { signAck: _signAck } = await import("./peer-transport/peer-auth.js");
+        const ackSig = _signAck(config.self.signingKey, config.self.name, selfVerifyKey, nonceR);
+        ws.send(JSON.stringify({ name_r: config.self.name, pubKey_r: selfVerifyKey, ackSig }));
+
+        // Transition to normal peer connection
+        this.peerWsConnections.set(name, ws);
+        ws.on("close", () => { this.peerWsConnections.delete(name); logInfo(TAG, `Enrolled peer WS closed: ${name}`); });
+        ws.on("error", () => { this.peerWsConnections.delete(name); });
+
+      } catch (err) {
+        logWarn(TAG, `Enrollment error from ${ip}: ${err instanceof Error ? err.message : String(err)}`);
+        ws.close(1011, "enrollment error");
+      }
+    });
   }
 
   /** Get or create a dedicated agent session for A2A. Routes through Spin (#894). */
@@ -440,46 +564,61 @@ export class AgentApiServer {
   }
 
   /**
-   * #373 — require bearer token on /v1/* routes.
-   * Returns true if authorized, writes 401 + returns false otherwise.
+   * #1293 — require Ed25519 request signature on /v1/* routes.
+   * Returns caller name (X-Peer-Id) or null (response already written on failure).
    */
-  private requireBearer(req: IncomingMessage, res: ServerResponse): string | null {
-    const token = extractBearerToken(req.headers as Record<string, string | string[] | undefined>);
-    if (!token) {
+  private requirePeerSig(req: IncomingMessage, res: ServerResponse): string | null {
+    const peerId = req.headers["x-peer-id"];
+    if (typeof peerId !== "string") {
       res.writeHead(401, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Missing bearer token", "authentication_error", "invalid_api_key")));
+        .end(JSON.stringify(openaiError("Missing X-Peer-Id header", "authentication_error", "invalid_api_key")));
       return null;
     }
-    // JWT auth via peers.json — verify signature, return caller identity.
+
     const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-    const { verifyJwt } = require("./peer-jwt.js") as typeof import("./peer-jwt.js");
+    const { verifyRequest } = require("./peer-transport/peer-auth.js") as typeof import("./peer-transport/peer-auth.js");
     const config = loadPeerConfig();
 
-    // Try JWT verification against each peer's secret
-    for (const [name, peer] of Object.entries(config.peers)) {
-      const result = verifyJwt(token, peer.token, config.self.name);
-      if (result.ok && result.payload.iss === name) {
-        logInfo(TAG, `PEER_CALL iss=${result.payload.iss} aud=${result.payload.aud} verified`);
-        return result.payload.iss;
-      }
+    const peerEntry = config.peers[peerId];
+    if (!peerEntry) {
+      logWarn(TAG, `PEER_CALL unknown peer '${peerId}'`);
+      res.writeHead(401, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Unknown peer", "authentication_error", "invalid_api_key")));
+      return null;
     }
 
-    // Fallback: raw token match (backward compat during migration)
-    for (const [name, peer] of Object.entries(config.peers)) {
-      if (token === peer.token) {
-        logInfo(TAG, `PEER_CALL caller=${name} (raw token, no JWT)`);
-        return name;
-      }
+    const storedVerifyKey = peerEntry.verifyKey;
+
+    const result = verifyRequest(
+      req.headers as Record<string, string | string[] | undefined>,
+      req.method ?? "GET",
+      req.url ?? "/",
+      "", // body hash is "" for GET/DELETE; POST routes re-verify with body if needed
+      storedVerifyKey,
+    );
+
+    if (!result.ok) {
+      logWarn(TAG, `PEER_CALL sig verify failed for ${peerId}: ${result.reason}`);
+      res.writeHead(401, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Invalid request signature", "authentication_error", "sig_invalid")));
+      return null;
     }
 
-    res.writeHead(401, { "Content-Type": "application/json" })
-      .end(JSON.stringify(openaiError("Invalid bearer token", "authentication_error", "invalid_api_key")));
-    return null;
+    logInfo(TAG, `PEER_CALL iss=${peerId} verified (sig)`);
+    return peerId;
   }
 
-  /** #949: requireBearer + 10s per-peer rate limit for POST/DELETE. Returns caller or null (response already sent). */
+  /**
+   * Legacy alias — routes to requirePeerSig.
+   * @deprecated Use requirePeerSig directly for new routes.
+   */
+  private requireBearer(req: IncomingMessage, res: ServerResponse): string | null {
+    return this.requirePeerSig(req, res);
+  }
+
+  /** #949: requirePeerSig + 10s per-peer rate limit for POST/DELETE. Returns caller or null (response already sent). */
   private requireBearerRateLimited(req: IncomingMessage, res: ServerResponse): string | null {
-    const caller = this.requireBearer(req, res);
+    const caller = this.requirePeerSig(req, res);
     if (caller === null) return null;
     const { checkPeerPostLimit } = require("./agent-api-rate-limit.js") as typeof import("./agent-api-rate-limit.js");
     if (!checkPeerPostLimit(caller)) {
@@ -610,8 +749,8 @@ export class AgentApiServer {
     const peerEntry = peerConfig.peers[caller];
     const trust = peerEntry?.trust ?? 0;
 
-    // #678 — Injection scan: only for untrusted peers (trust=0)
-    if (trust === 0 && lastMsg?.content && abmind()) {
+    // #678 / #1293 — Injection scan: for untrusted peers (trust <= 1, i.e. quarantine + enrolled)
+    if (trust <= 1 && lastMsg?.content && abmind()) {
       const scan = abmind()!.scanForInjection(lastMsg.content);
       if (!scan.safe) {
         res.writeHead(400, { "Content-Type": "application/json" })
