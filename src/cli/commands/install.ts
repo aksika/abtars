@@ -197,32 +197,38 @@ export async function install(opts: InstallOptions): Promise<number> {
 
   // Kiro agent config created on-demand by ACP transport (ensureAgentConfig)
 
-  // Generate Ed25519 identity keypair (skip if already exists)
-  const identityKey = join(paths.config, 'identity.key');
-  const identityPub = join(paths.config, 'identity.pub');
-  if (!opts.dryRun && !(await exists(identityKey))) {
-    const { generateKeyPairSync } = await import('node:crypto');
-    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-    await writeFile(identityKey, privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'));
-    await writeFile(identityPub, publicKey.export({ format: 'der', type: 'spki' }).toString('base64'));
-    const { chmodSync } = await import('node:fs');
-    chmodSync(identityKey, 0o600);
-    process.stdout.write(`✓ identity keypair generated\n`);
+  // Generate Ed25519 identity keypair + tribe token via peer-config bootstrap (#1293)
+  // This replaces the old manual identity.key/identity.pub generation.
+  // bootstrapIdentity() writes signingKey + tribeToken to peers.json.
+  if (!opts.dryRun) {
+    const { bootstrapIdentity, deriveVerifyKey } = await import("../../components/peer-config.js");
+    bootstrapIdentity();
+    const { loadPeerConfig } = await import("../../components/peer-config.js");
+    const peerConfig = loadPeerConfig();
+    const verifyKey = deriveVerifyKey(peerConfig.self.signingKey);
+    process.stderr.write(`Identity public key (share out-of-band for enrollment):\n  ${verifyKey}\n`);
+    process.stdout.write(`+ identity keypair + tribe token ensured\n`);
+  } else {
+    process.stdout.write(`[dry-run] bootstrapIdentity() — generate Ed25519 keypair + tribe token\n`);
   }
 
-  // Generate self-signed Ed25519 TLS certificate (skip if already exists)
+  // Generate self-signed Ed25519 TLS certificate from the identity key (skip if already exists)
   const identityCrt = join(paths.config, 'identity.crt');
   const identityTlsKey = join(paths.config, 'identity.tls.key');
   if (!opts.dryRun && !(await exists(identityCrt))) {
-    const { execSync } = await import('node:child_process');
     const { chmodSync } = await import('node:fs');
-    const agentName = hostname();
     try {
-      execSync(`openssl req -x509 -newkey ed25519 -keyout identity.tls.key -out identity.crt -days 3650 -nodes -subj "/CN=${agentName}"`, { cwd: paths.config, stdio: 'ignore' });
+      // Load the identity signing key and derive TLS cert from it
+      const { loadPeerConfig } = await import("../../components/peer-config.js");
+      const { generateTlsCert } = await import("../../components/peer-transport/peer-auth.js");
+      const peerConfig = loadPeerConfig();
+      const { key: tlsKeyPem, cert: certPem } = generateTlsCert(peerConfig.self.signingKey, peerConfig.self.name || hostname());
+      await writeFile(identityTlsKey, tlsKeyPem, { encoding: 'utf-8' });
+      await writeFile(identityCrt, certPem, { encoding: 'utf-8' });
       chmodSync(identityTlsKey, 0o600);
-      process.stdout.write(`✓ TLS certificate generated (Ed25519, 10yr)\n`);
+      process.stdout.write(`+ TLS certificate derived from Ed25519 identity (10yr)\n`);
     } catch (err) {
-      process.stderr.write(`⚠ TLS cert generation failed (openssl not found?). Agent-api will start without TLS.\n`);
+      process.stderr.write(`[warn] TLS cert generation failed: ${err instanceof Error ? err.message : String(err)}\n`);
     }
   }
 
