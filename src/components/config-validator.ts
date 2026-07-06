@@ -64,6 +64,8 @@ export const IRC_SCHEMA: FieldSpec[] = [
 export const PEERS_SCHEMA: FieldSpec[] = [
   { path: "self", type: "object", required: true },
   { path: "self.name", type: "string", required: true },
+  { path: "self.signingKey", type: "string", required: true },
+  { path: "self.tribeToken", type: "string", required: true },
   { path: "peers", type: "object", required: true },
 ];
 
