@@ -100,6 +100,20 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   heartbeat.start();
   logInfo("main", `💓 Heartbeat started (${Math.round(hbIntervalMs / 1000)}s interval)`);
 
+  // #1293: Per-tick ws-outbound reconnect check (no new timer — driven by HB)
+  heartbeat.registerTask({
+    name: "ws-reconnect-check",
+    execute: async () => {
+      try {
+        const { getPeerTransport } = await import("../components/peer-transport/index.js");
+        const transport = getPeerTransport() as import("../components/peer-transport/http-transport.js").HttpTransport;
+        if (typeof transport.checkWsConnections === "function") {
+          transport.checkWsConnections();
+        }
+      } catch { /* best effort — transport may not be up yet */ }
+    },
+  });
+
   return "ran";
 }
 

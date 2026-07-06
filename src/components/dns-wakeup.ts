@@ -83,7 +83,11 @@ export function startDnsWakeup(
     const tokenBuf = Buffer.from(token10, "hex"); // 5 bytes
 
     for (const [peerName, peer] of Object.entries(config.peers)) {
-      const hmac = createHmac("sha256", peer.token).update(peerName).digest();
+      // #1293: PeerEntry no longer has .token — DNS wakeup is unsupported in Ed25519 model
+      // The receiver path is kept for future use but will never match without a token
+      const peerToken = (peer as Record<string, unknown>)["token"] as string | undefined;
+      if (!peerToken) continue;
+      const hmac = createHmac("sha256", peerToken).update(peerName).digest();
       const decoded = Buffer.alloc(5);
       for (let i = 0; i < 5; i++) decoded[i] = tokenBuf[i]! ^ hmac[i]!;
       const ts = decoded.readUInt32BE(0);
@@ -114,23 +118,9 @@ export function startDnsWakeup(
   return sock;
 }
 
-/** Send a wake-up signal to a peer (mDNS-disguised). */
-export function sendWakeup(peerName: string, peerHost: string, udpPort: number, token: string): void {
-  const ts = Math.floor(Date.now() / 1000);
-  const nonce = randomBytes(1);
-  const hmac = createHmac("sha256", token).update(peerName).digest();
-
-  const plain = Buffer.alloc(5);
-  plain.writeUInt32BE(ts, 0);
-  plain[4] = nonce[0]!;
-
-  const xored = Buffer.alloc(5);
-  for (let i = 0; i < 5; i++) xored[i] = plain[i]! ^ hmac[i]!;
-
-  const queryName = `${PREFIX}${xored.toString("hex")}${SUFFIX}`;
-  const query = buildMdnsQuery(queryName);
-
-  const sock = createSocket("udp4");
-  sock.send(query, udpPort, peerHost, () => sock.close());
-  logDebug(TAG, `Sent wake-up to ${peerName} at ${peerHost}:${udpPort}`);
+/** Send a wake-up signal to a peer (mDNS-disguised). Skips if no token available. */
+export function sendWakeup(peerName: string, peerHost: string, udpPort: number, _token?: string): void {
+  // #1293: PeerEntry no longer has a token field. Wake-up via peer.token is removed.
+  // DNS wakeup is a best-effort legacy feature; with Ed25519 auth there is no per-peer token.
+  logWarn(TAG, `sendWakeup: token-based wakeup not supported in Ed25519 auth model (#1293) — skipping ${peerName}`);
 }

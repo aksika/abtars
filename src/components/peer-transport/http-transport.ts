@@ -60,6 +60,16 @@ export class HttpTransport implements PeerTransport {
     return this.wsClients.get(peer)?.connected ?? false;
   }
 
+  /** #1293 — Called by HB tick to check and reconnect stale ws-outbound connections. */
+  checkWsConnections(): void {
+    for (const [name, client] of this.wsClients) {
+      if (!client.connected) {
+        logDebug(TAG, `HB: ws-outbound ${name} disconnected — scheduling reconnect`);
+        client.connect();
+      }
+    }
+  }
+
   discover(): PeerCard[] {
     return getAlivePeers();
   }
@@ -181,18 +191,25 @@ export class HttpTransport implements PeerTransport {
   }
 
   private async httpCall(entry: PeerEntry, peerName: string, method: string, path: string, body?: string): Promise<string> {
-    const { mintPeerJwt, signBody, tlsOptions } = await import("./peer-auth.js");
-    const jwt = mintPeerJwt(peerName);
-    const finalBody = body ? await signBody(peerName, body) : undefined;
-    const tls = tlsOptions(entry);
+    const { signRequest, verifyServerCert } = await import("./peer-auth.js");
+    const { loadPeerConfig } = await import("../peer-config.js");
+    const config = loadPeerConfig();
+
+    if (!entry.verifyKey) {
+      throw new Error(`Peer ${peerName} has no verifyKey — enroll first before calling`);
+    }
+
+    const bodyStr = body ?? "";
+    const sigHeaders = signRequest(method, path, bodyStr, config.self.signingKey, config.self.name);
+
     const http = await import("node:https");
 
     return new Promise((resolve, reject) => {
       const headers: Record<string, string> = {
-        "Authorization": `Bearer ${jwt}`,
+        ...sigHeaders,
         "Content-Type": "application/json",
       };
-      if (finalBody) headers["Content-Length"] = String(Buffer.byteLength(finalBody));
+      if (body) headers["Content-Length"] = String(Buffer.byteLength(body));
 
       const req = http.request({
         hostname: entry.host,
@@ -201,7 +218,25 @@ export class HttpTransport implements PeerTransport {
         method,
         headers,
         timeout: 60_000,
-        ...tls,
+        minVersion: "TLSv1.3" as const,
+        rejectUnauthorized: true,
+        checkServerIdentity: (_host: string, cert: { raw?: Buffer }) => {
+          if (!cert.raw) return new Error("No cert presented by peer");
+          try {
+            const { createPublicKey } = require("node:crypto") as typeof import("node:crypto");
+            const keyObj = createPublicKey({ key: cert.raw, format: "der", type: "spki" });
+            const certPem = keyObj.export({ type: "spki", format: "pem" }) as string;
+            // Reconstruct as X.509 for verifyServerCert: use the raw DER cert to build PEM
+            const certDerB64 = cert.raw.toString("base64");
+            const certPemBlock = `-----BEGIN CERTIFICATE-----\n${certDerB64.match(/.{1,64}/g)!.join("\n")}\n-----END CERTIFICATE-----\n`;
+            if (!verifyServerCert(certPemBlock, entry.verifyKey)) {
+              return new Error(`Peer ${peerName} cert key does not match enrolled verifyKey`);
+            }
+          } catch (e) {
+            return new Error(`Cert verify error: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          return undefined;
+        },
       } as any, (res: any) => {
         let data = "";
         res.on("data", (c: any) => data += c);
@@ -215,7 +250,7 @@ export class HttpTransport implements PeerTransport {
       });
       req.on("timeout", () => { req.destroy(); reject(new Error(`Peer ${peerName} timeout`)); });
       req.on("error", (err: Error) => reject(new Error(`Peer ${peerName} unreachable: ${err.message}`)));
-      if (finalBody) req.write(finalBody);
+      if (body) req.write(body);
       req.end();
     });
   }
