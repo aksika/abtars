@@ -301,6 +301,13 @@ export async function handleInboundMessage(
       userId,
       await: true,
     }).then(r => r.result ?? "");
+    // #1292: the model call is started early to overlap with the setReaction/sendTyping
+    // round-trips below, but is not awaited until later in this try block. Without this
+    // guard, a fast provider-down rejection (403 / all models exhausted) floats as an
+    // unhandled rejection during those awaits and crashes the bridge. Marking the promise
+    // handled here: the real rejection still propagates when `await responsePromise` runs
+    // and is caught by this try/catch, which renders the graceful error to the user.
+    void responsePromise.catch(() => {});
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {
