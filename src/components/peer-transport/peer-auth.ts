@@ -1,49 +1,255 @@
 /**
- * peer-auth.ts — Shared auth/TLS helpers for peer transport (#972).
- * Used by both HTTP and WebSocket transports.
+ * peer-auth.ts — Ed25519 request signing, gossip, enrollment, and TLS helpers (#1293).
+ *
+ * Auth model (Option A): one Ed25519 keypair per host.
+ * - Request signing: whole-request Ed25519 signature on every inbound/outbound peer route.
+ * - TLS: self-signed cert whose key IS the identity key (confidentiality + server identity).
+ * - Gossip: Ed25519-signed UDP packets.
+ * - Enrollment: HMAC-SHA256 challenge-response using shared tribeToken.
  */
-import { signJwt } from "../peer-jwt.js";
-import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
-import type { TlsOptions } from "node:tls";
 
-/** Mint a short-lived JWT for peer authentication. */
-export function mintPeerJwt(peerName: string): string {
-  const config = loadPeerConfig();
-  const entry = config.peers[peerName];
-  if (!entry) throw new Error(`Unknown peer: ${peerName}`);
-  const now = Math.floor(Date.now() / 1000);
-  return signJwt({ iss: config.self.name, aud: peerName, iat: now, exp: now + 60 }, entry.token);
+import {
+  createPrivateKey,
+  createPublicKey,
+  sign as cryptoSign,
+  verify as cryptoVerify,
+  createHmac,
+  createHash,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
+import { execSync } from "node:child_process";
+import { writeFileSync, readFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// ── Nonce cache (replay prevention) ──────────────────────────────────────────
+
+const nonceCache = new Map<string, number>(); // nonce → timestamp (ms)
+const NONCE_TTL_MS = 60_000; // 60s — must be >= 30s ts window
+
+function pruneNonces(): void {
+  const cutoff = Date.now() - NONCE_TTL_MS;
+  for (const [nonce, ts] of nonceCache) {
+    if (ts < cutoff) nonceCache.delete(nonce);
+  }
 }
 
-/** Sign a JSON body with Ed25519 (returns body with _sig field appended). */
-export async function signBody(peerName: string, body: string, signingKey?: string, selfName?: string): Promise<string> {
-  if (!signingKey || !selfName) {
-    const config = loadPeerConfig();
-    signingKey = signingKey ?? config.self.signingKey;
-    selfName = selfName ?? config.self.name;
-  }
-  if (!signingKey) return body;
-  const { signMessage } = await import("../digital-signature.js");
-  const { tag } = signMessage(signingKey, selfName!, peerName, body);
-  const parsed = JSON.parse(body);
-  parsed._sig = tag;
-  return JSON.stringify(parsed);
+export function isNonceSeen(nonce: string): boolean {
+  pruneNonces();
+  return nonceCache.has(nonce);
 }
 
-/** TLS options for connecting to a peer (cert pinning, TLS 1.3 mandatory). */
-export function tlsOptions(entry: PeerEntry): TlsOptions {
-  if (!entry.certFingerprint && !entry.certPem) {
-    throw new Error(`Peer has no TLS cert configured — refusing connection. Set certFingerprint or certPem in peers.json.`);
+export function recordNonce(nonce: string): void {
+  nonceCache.set(nonce, Date.now());
+}
+
+// ── Key helpers ───────────────────────────────────────────────────────────────
+
+/** Import a base64 PKCS8 DER private key into a KeyObject. */
+function importPrivKey(signingKey: string): ReturnType<typeof createPrivateKey> {
+  return createPrivateKey({ key: Buffer.from(signingKey, "base64"), format: "der", type: "pkcs8" });
+}
+
+/** Import a base64 SPKI DER public key into a KeyObject. */
+function importPubKey(verifyKey: string): ReturnType<typeof createPublicKey> {
+  return createPublicKey({ key: Buffer.from(verifyKey, "base64"), format: "der", type: "spki" });
+}
+
+/** Ed25519 sign: returns base64-encoded signature. */
+function edSign(signingKey: string, message: string): string {
+  // Ed25519 uses null algorithm (prehash-free)
+  return cryptoSign(null, Buffer.from(message, "utf-8"), importPrivKey(signingKey)).toString("base64");
+}
+
+/** Ed25519 verify: returns true if signature is valid. */
+function edVerify(verifyKey: string, message: string, sigBase64: string): boolean {
+  try {
+    return cryptoVerify(null, Buffer.from(message, "utf-8"), importPubKey(verifyKey), Buffer.from(sigBase64, "base64"));
+  } catch {
+    return false;
   }
+}
+
+// ── Request signing ───────────────────────────────────────────────────────────
+
+const TS_WINDOW_MS = 30_000; // reject requests older than 30s
+
+/**
+ * Sign an outbound request. Returns headers to attach.
+ *
+ * Canonical string:
+ *   "abtars-req-v1\n" + method + "\n" + path + "\n" + ts + "\n" + nonce + "\n" + hex(sha256(body))
+ */
+export function signRequest(
+  method: string,
+  path: string,
+  body: string,
+  signingKey: string,
+  selfName: string,
+): Record<string, string> {
+  const ts = String(Math.floor(Date.now() / 1000));
+  const nonce = randomBytes(16).toString("hex");
+  const bodyHash = createHash("sha256").update(body, "utf-8").digest("hex");
+  const canonical = `abtars-req-v1\n${method}\n${path}\n${ts}\n${nonce}\n${bodyHash}`;
+  const sig = edSign(signingKey, canonical);
   return {
-    minVersion: "TLSv1.3",
-    rejectUnauthorized: true,
-    ...(entry.certPem ? { ca: [entry.certPem] } : {}),
-    checkServerIdentity: (_host: string, cert: { fingerprint256?: string }) => {
-      if (entry.certFingerprint && cert.fingerprint256 !== entry.certFingerprint) {
-        return new Error("Cert fingerprint mismatch");
-      }
-      return undefined;
-    },
-  } as TlsOptions;
+    "X-Peer-Id": selfName,
+    "X-Peer-Ts": ts,
+    "X-Peer-Nonce": nonce,
+    "X-Peer-Sig": sig,
+  };
+}
+
+export interface VerifyRequestResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * Verify an inbound request's Ed25519 signature.
+ */
+export function verifyRequest(
+  headers: Record<string, string | string[] | undefined>,
+  method: string,
+  path: string,
+  body: string,
+  verifyKey: string,
+): VerifyRequestResult {
+  // Normalize to lowercase for compatibility with Node.js HTTP (which lowercases headers)
+  const h: Record<string, string | string[] | undefined> = {};
+  for (const [k, v] of Object.entries(headers)) h[k.toLowerCase()] = v;
+
+  const peerId = h["x-peer-id"];
+  const tsHeader = h["x-peer-ts"];
+  const nonce = h["x-peer-nonce"];
+  const sig = h["x-peer-sig"];
+
+  if (
+    typeof peerId !== "string" ||
+    typeof tsHeader !== "string" ||
+    typeof nonce !== "string" ||
+    typeof sig !== "string"
+  ) {
+    return { ok: false, reason: "missing_headers" };
+  }
+
+  const ts = parseInt(tsHeader, 10);
+  if (isNaN(ts)) return { ok: false, reason: "invalid_ts" };
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (Math.abs(nowSec - ts) > 30) return { ok: false, reason: "stale_ts" };
+
+  if (isNonceSeen(nonce)) return { ok: false, reason: "nonce_replay" };
+
+  const bodyHash = createHash("sha256").update(body, "utf-8").digest("hex");
+  const canonical = `abtars-req-v1\n${method}\n${path}\n${tsHeader}\n${nonce}\n${bodyHash}`;
+
+  if (!edVerify(verifyKey, canonical, sig)) return { ok: false, reason: "bad_sig" };
+
+  recordNonce(nonce);
+  return { ok: true };
+}
+
+// ── Tribe HMAC ────────────────────────────────────────────────────────────────
+
+/**
+ * HMAC-SHA256 for tribe enrollment authentication.
+ * Returns lowercase hex digest.
+ */
+export function macTribe(tribeToken: string, ...parts: string[]): string {
+  return createHmac("sha256", Buffer.from(tribeToken, "base64"))
+    .update(parts.join(""))
+    .digest("hex");
+}
+
+// ── Enrollment signatures ─────────────────────────────────────────────────────
+
+/**
+ * Sign enrollment message (initiator).
+ * canonical: "abtars-enroll-v1\n" + pubKey_i + "\n" + nonce_r + "\n" + name
+ */
+export function signEnroll(signingKey: string, pubKeyI: string, nonceR: string, name: string): string {
+  const canonical = `abtars-enroll-v1\n${pubKeyI}\n${nonceR}\n${name}`;
+  return edSign(signingKey, canonical);
+}
+
+/** Verify enrollment signature (responder verifies initiator). */
+export function verifyEnroll(selfSig: string, verifyKey: string, pubKeyI: string, nonceR: string, name: string): boolean {
+  const canonical = `abtars-enroll-v1\n${pubKeyI}\n${nonceR}\n${name}`;
+  return edVerify(verifyKey, canonical, selfSig);
+}
+
+/**
+ * Sign acknowledgment (responder).
+ * canonical: "abtars-enroll-v1\n" + "ack\n" + name_r + "\n" + pubKey_r + "\n" + nonce_r
+ */
+export function signAck(signingKey: string, nameR: string, pubKeyR: string, nonceR: string): string {
+  const canonical = `abtars-enroll-v1\nack\n${nameR}\n${pubKeyR}\n${nonceR}`;
+  return edSign(signingKey, canonical);
+}
+
+/** Verify acknowledgment signature (initiator verifies responder). */
+export function verifyAck(ackSig: string, verifyKey: string, nameR: string, pubKeyR: string, nonceR: string): boolean {
+  const canonical = `abtars-enroll-v1\nack\n${nameR}\n${pubKeyR}\n${nonceR}`;
+  return edVerify(verifyKey, canonical, ackSig);
+}
+
+// ── TLS cert generation ───────────────────────────────────────────────────────
+
+export interface TlsCertResult {
+  key: string;   // PEM — PKCS8 private key
+  cert: string;  // PEM — self-signed X.509 cert
+}
+
+/**
+ * Generate a self-signed Ed25519 TLS cert from the identity signing key.
+ * The private key used in the cert IS the identity key — same keypair.
+ */
+export function generateTlsCert(signingKey: string, cn: string): TlsCertResult {
+  const tmpDir = join(tmpdir(), `abtars-tls-${randomBytes(8).toString("hex")}`);
+  mkdirSync(tmpDir, { recursive: true });
+
+  const keyPemPath = join(tmpDir, "key.pem");
+  const certPath = join(tmpDir, "cert.pem");
+
+  try {
+    // Export private key as PKCS8 PEM
+    const privKeyObj = importPrivKey(signingKey);
+    const keyPem = privKeyObj.export({ type: "pkcs8", format: "pem" }) as string;
+    writeFileSync(keyPemPath, keyPem, { mode: 0o600 });
+
+    // Generate self-signed cert using the identity key
+    const safeCn = cn.replace(/[^A-Za-z0-9_\-.]/g, "_").slice(0, 64);
+    execSync(
+      `openssl req -x509 -key "${keyPemPath}" -out "${certPath}" -days 3650 -nodes -subj "/CN=${safeCn}"`,
+      { stdio: "pipe" },
+    );
+
+    const key = readFileSync(keyPemPath, "utf-8");
+    const cert = readFileSync(certPath, "utf-8");
+    return { key, cert };
+  } finally {
+    try { unlinkSync(keyPemPath); } catch { /* best effort */ }
+    try { unlinkSync(certPath); } catch { /* best effort */ }
+    try { require("node:fs").rmdirSync(tmpDir); } catch { /* best effort */ }
+  }
+}
+
+/**
+ * Verify that the presented TLS cert's SPKI public key matches the enrolled verifyKey.
+ * cert: PEM string. verifyKey: base64 SPKI DER.
+ */
+export function verifyServerCert(cert: string, verifyKey: string): boolean {
+  try {
+    const keyObj = createPublicKey({ key: cert, format: "pem" });
+    const certSpki = (keyObj.export({ type: "spki", format: "der" }) as Buffer).toString("base64");
+    // Timing-safe comparison
+    const expected = Buffer.from(verifyKey, "base64");
+    const actual = Buffer.from(certSpki, "base64");
+    if (expected.length !== actual.length) return false;
+    return timingSafeEqual(expected, actual);
+  } catch {
+    return false;
+  }
 }
