@@ -68,6 +68,9 @@ Usage:
   abtars logs
   abtars config
   abtars deps [list|install|remove]
+  abtars tribe join --peer <host:port>
+  abtars tribe invite --peer <host:port>
+  abtars tribe status
   `,
   );
 }
@@ -208,6 +211,10 @@ export async function main(argv: readonly string[]): Promise<number> {
       case 'config': {
         const { configShow } = await import('./commands/config-show.js');
         return await configShow();
+      }
+      case 'tribe': {
+        const { tribe: tribeCmd } = await import('./commands/tribe.js');
+        return await tribeCmd(argv.slice(1));
       }
       case '':
       case 'help':
