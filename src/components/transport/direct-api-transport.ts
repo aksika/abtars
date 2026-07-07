@@ -50,6 +50,8 @@ export class DirectApiTransport implements IKiroTransport {
   private activeEndpoint: string;
   private activeApiKey?: string;
   private activeModel: string;
+  /** #1295: maxContext of the model currently serving requests. Used for accurate contextPercent. */
+  private _activeMaxContext: number;
   private _lastPromptTokens = 0;
   private _lastCompletionTokens = 0;
   private _activeSessionKey = "";
@@ -101,6 +103,7 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeEndpoint = config.endpoint;
     this.activeApiKey = config.apiKey;
     this.activeModel = config.model;
+    this._activeMaxContext = config.maxContext;
     this.policy = policy ?? null;
   }
 
@@ -177,6 +180,7 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeEndpoint = em.endpoint;
     this.activeApiKey = em.apiKey;
     this.activeModel = em.model;
+    this._activeMaxContext = em.maxContext;
     this._lastActivityAt = Date.now();
     logWarn(TAG, `🚨 Emergency mode: using ${em.model}`);
     const result = await this.agentLoop(session, signal);
@@ -195,6 +199,7 @@ export class DirectApiTransport implements IKiroTransport {
       this.activeEndpoint = candidate.endpoint;
       this.activeApiKey = candidate.apiKey;
       this.activeModel = candidate.model;
+      this._activeMaxContext = candidate.maxContext;
       this._lastActivityAt = Date.now();
       logDebug(TAG, `Trying model: ${candidate.model}`);
 
@@ -268,6 +273,7 @@ export class DirectApiTransport implements IKiroTransport {
       this.activeEndpoint = smallest.endpoint;
       this.activeApiKey = smallest.apiKey;
       this.activeModel = smallest.model;
+      this._activeMaxContext = smallest.maxContext;
       if (this.onFallback) {
         this.onFallback(`${smallest.model} (compacted)`, Math.round((session.estimateTokens() / smallest.maxContext) * 100));
       }
@@ -311,7 +317,9 @@ export class DirectApiTransport implements IKiroTransport {
 
       if (usage) {
         session.updateTokens(usage.prompt_tokens);
-        this._contextPercent = session.contextPercent;
+        this._contextPercent = this._activeMaxContext > 0
+          ? Math.round((usage.prompt_tokens / this._activeMaxContext) * 100)
+          : session.contextPercent;
         this._lastPromptTokens = usage.prompt_tokens;
         this._lastCompletionTokens = usage.completion_tokens ?? 0;
         // #1022: compaction fires only for A/C session types.
@@ -660,6 +668,7 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeEndpoint = opts.endpoint;
     this.activeApiKey = opts.apiKey;
     this.activeModel = opts.model;
+    this._activeMaxContext = opts.maxContext;
     (this.config as { model: string; maxContext: number }).model = opts.model;
     (this.config as { maxContext: number }).maxContext = opts.maxContext;
     this.policy = opts.policy;
