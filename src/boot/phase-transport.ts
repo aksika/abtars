@@ -359,11 +359,19 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       const reasonTag = reason ? ` (${reason})` : "";
       const msg = `⚡ Fallback${reasonTag}: ${model}${ctxPct >= 0 ? ` (ctx: ~${ctxPct}%)` : ""}`;
       logInfo("main", msg);
-      if (model !== lastNotifiedModel || isLogLevel("debug")) {
+      // #1296: notify once per fallback episode. Do NOT bypass on debug — logInfo() above covers
+      // debug logging. Re-armed by onPrimaryRestored when primary recovers.
+      if (model !== lastNotifiedModel) {
         lastNotifiedModel = model;
         import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(err => logAndSwallow(TAG, "sendNotification fallback", err));
       }
     };
+    // #1296: re-arm when primary recovers so the next fallback episode notifies again
+    if ("onPrimaryRestored" in transport) {
+      (transport as unknown as { onPrimaryRestored: () => void }).onPrimaryRestored = () => {
+        lastNotifiedModel = null;
+      };
+    }
   }
   return "ran";
 }

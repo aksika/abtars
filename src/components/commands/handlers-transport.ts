@@ -122,8 +122,8 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
-  // /models health reset — reset model health buckets + clear emergency mode
-  if (arg === "health reset" || arg === "primary") {
+  // /models health reset / primary / reset — reset model health buckets + clear emergency mode
+  if (arg === "health reset" || arg === "primary" || arg === "reset") {
     const t = ctx.transport as unknown as {
       policy?: { registry: { resetAll: () => void } };
       setEmergencyMode?: (o: null) => void;
@@ -134,10 +134,10 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     if (t.policy?.registry) {
       t.policy.registry.resetAll();
       await ctx.reply(wasEmergency
-        ? "🔌 Emergency mode cleared + model health reset — free models active."
-        : "🔌 Model health reset — all models available.");
+        ? "Model health reset + emergency mode cleared — primary model active."
+        : "Model health reset — all models available (sticky credits/auth cleared).");
     } else {
-      await ctx.reply("🔌 No fallback policy configured.");
+      await ctx.reply("No fallback policy configured.");
     }
     return true;
   }

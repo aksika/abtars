@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ModelHealthRegistry, classifyError } from "./model-health-registry.js";
 
 describe("ModelHealthRegistry", () => {
@@ -144,5 +144,40 @@ describe("ModelHealthRegistry demotion (#567)", () => {
     for (let i = 0; i < 10; i++) reg.recordError("kimi", "ep1", "rate_limit");
 
     expect(demoted).toEqual([]);
+  });
+});
+
+describe("ModelHealthRegistry sticky credits (#1296)", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("single credits error fills bucket to 100% immediately", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "credits");
+    expect(reg.getBucketLevel("kimi", "ep1")).toBe(100);
+    expect(reg.shouldSkip("kimi", "ep1")).toBe(true);
+  });
+
+  it("credits bucket does NOT drain over time", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "credits");
+    vi.advanceTimersByTime(60 * 60 * 1000); // 1 hour
+    expect(reg.shouldSkip("kimi", "ep1")).toBe(true);
+    expect(reg.getBucketLevel("kimi", "ep1")).toBe(100);
+  });
+
+  it("credits status shows as exhausted", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "credits");
+    const h = reg.getHealth();
+    expect(h.get("ep1|kimi")?.status).toBe("exhausted");
+  });
+
+  it("resetAll clears sticky credits bucket", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "credits");
+    expect(reg.shouldSkip("kimi", "ep1")).toBe(true);
+    reg.resetAll();
+    expect(reg.shouldSkip("kimi", "ep1")).toBe(false);
   });
 });

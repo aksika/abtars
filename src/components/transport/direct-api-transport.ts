@@ -68,6 +68,9 @@ export class DirectApiTransport implements IKiroTransport {
   sandboxPolicy?: import("../tool-sandbox.js").SandboxPolicy;
   /** Called when fallback model is selected — send notification before response. */
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
+  /** #1296: fired when the primary model succeeds after a fallback episode, so the
+   *  notification layer can re-arm and notify again on the next fallback. */
+  onPrimaryRestored?: () => void;
   /** Cooperative pause check — if returns true, agent loop breaks between tool calls. */
   isPaused?: () => boolean;
   /** Returns a pending instruction from parent, if any. Consumed once. */
@@ -208,6 +211,8 @@ export class DirectApiTransport implements IKiroTransport {
           policy.recordError(candidate, "empty");
         } else {
           policy.recordSuccess(candidate);
+          // #1296: notify the phase-transport layer so it can re-arm the fallback notification
+          if (isPrimary(candidate.model) && this.onPrimaryRestored) this.onPrimaryRestored();
         }
         return result;
       } catch (err) {
