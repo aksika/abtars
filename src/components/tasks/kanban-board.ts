@@ -246,6 +246,13 @@ export function kanbanGetCard(id: number): KanbanCard | undefined {
   return d.prepare(`SELECT * FROM kanban_board WHERE id = ?`).get(id) as KanbanCard | undefined;
 }
 
+/** Test-only: run a raw SQL statement against the kanban DB (avoids direct better-sqlite3 require in tests). */
+export function _kanbanExecForTest(sql: string, params: unknown[] = []): void {
+  const d = dbOrNull();
+  if (!d) throw new Error("kanban DB not initialised");
+  d.prepare(sql).run(...params);
+}
+
 export function kanbanGetChildren(parentId: number): KanbanCard[] {
   const d = dbOrNull();
   if (!d) return [];

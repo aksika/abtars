@@ -140,11 +140,11 @@ describe("kanban-board", () => {
     mod.kanbanSetDelivering(id);
     mod.kanbanMarkDelivered(id);
 
-    // Backdate delivered_at
-    const Database = require("better-sqlite3");
-    const db = new Database(join(TEST_HOME, "kanban", "kanban.db"));
-    db.prepare("UPDATE kanban_board SET delivered_at = datetime('now', '-10 days') WHERE id = ?").run(id);
-    db.close();
+    // Backdate via module's own DB handle — avoids direct better-sqlite3 require in tests
+    mod._kanbanExecForTest(
+      "UPDATE kanban_board SET delivered_at = datetime('now', '-10 days') WHERE id = ?",
+      [id],
+    );
 
     const purged = mod.kanbanCleanup(7);
     expect(purged).toBe(1);

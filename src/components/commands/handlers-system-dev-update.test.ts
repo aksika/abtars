@@ -37,7 +37,8 @@ function makeSpawnStub() {
   const calls: Array<{ cmd: string; args: string[] }> = [];
   const stub = (cmd: string, args: string[]) => {
     calls.push({ cmd, args });
-    return { unref: () => {} } as ReturnType<typeof import("node:child_process").spawn>;
+    // Must include on() and unref() — the deploy path calls both on the returned proc.
+    return { on: () => {}, unref: () => {} } as unknown as ReturnType<typeof import("node:child_process").spawn>;
   };
   return { stub: stub as unknown as typeof import("node:child_process").spawn, calls };
 }
