@@ -10,23 +10,9 @@
  * with `this` rebound.
  */
 
-import { IncomingMessage, ServerResponse } from "node:http";
+import { ServerResponse } from "node:http";
 import type { IMemorySystem } from "abmind";
-import { abmind } from "../utils/abmind-lazy.js";
-import type { AgentSession } from "./subagent-runtime.js";
-import {
-  flattenMessages,
-  composePrompt,
-  buildChatResponse,
-  buildModelsList,
-  extractSessionKey,
-  openaiError,
-  validateChatRequest,
-} from "./openai-compat-translate.js";
-import { bufferedStreamBody } from "./openai-compat-sse.js";
-import { logInfo, logWarn, logDebug } from "./logger.js";
-
-const TAG = "openai-compat";
+import { buildModelsList, openaiError } from "./openai-compat-translate.js";
 
 export interface ModelsResult {
   status: number;
@@ -128,145 +114,9 @@ export async function handleEmbeddings(
   };
 }
 
-// ── Chat completions ────────────────────────────────────────────────────────
-
-export interface ChatCompletionsDeps {
-  session: AgentSession;
-  memory: IMemorySystem | null;
-  agentRules: string;
-  rulesAlreadyInjected: boolean;
-  /** Called when rules get injected so server can flip its state flag. */
-  markRulesInjected: () => void;
-  /** Guest name from auth (A2A code path). */
-  guestName: string;
-  /** #1271: Spin session manager for the unified chokepoint. Optional for back-compat. */
-  sessionManager?: import("./spin.js").Spin;
-}
-
-export interface ChatCompletionsResult {
-  status: number;
-  headers: Record<string, string>;
-  /** For non-streaming, a JSON string. For streaming, a raw SSE body. */
-  body: string;
-  /** True if response should be sent as text/event-stream (SSE). */
-  streaming: boolean;
-}
-
-/** POST /v1/chat/completions — delegates to the agent via AgentSession. */
-export async function handleChatCompletions(
-  rawBody: unknown,
-  req: IncomingMessage,
-  deps: ChatCompletionsDeps,
-): Promise<ChatCompletionsResult> {
-  // Validate untrusted JSON — narrows unknown → OpenAIChatRequest.
-  // Defensive parsing: don't trust the shape,
-  // narrow field-by-field. Downstream code relies on the returned shape.
-  const validation = validateChatRequest(rawBody);
-  if (!validation.ok) {
-    return errorResponse(400, validation.message, "invalid_request_error", validation.code);
-  }
-  const body = validation.value;
-
-  const messages = body.messages;
-  const stream = body.stream === true;
-  const model = body.model; // already defaulted to 'kp/default' in validator
-
-  // Log ignored OpenAI fields at DEBUG so operators know what's getting dropped
-  if (body.tools || body.tool_choice) {
-    logDebug(TAG, `tools[]/tool_choice present in request — ignored in v1`);
-  }
-
-  // Scan every message content for injection; any hit refuses the whole request
-  const flat = flattenMessages(messages);
-  for (let i = 0; i < flat.allContents.length; i++) {
-    const content = flat.allContents[i]!;
-    if (!content.trim()) continue;
-    const scan = abmind()!.scanForInjection(content);
-    if (!scan.safe) {
-      const top = scan.flags[0]!;
-      logWarn(TAG, `BLOCKED /v1/chat/completions — injection in messages[${i}]: ${top.category} (score=${scan.score}) from guest=${deps.guestName}`);
-      const refusal = buildChatResponse({
-        model,
-        content: "I can't process that request — it triggered the injection guard. Please rephrase.",
-      });
-      return {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(refusal),
-        streaming: false,
-      };
-    }
-  }
-
-  if (!flat.prompt.trim()) {
-    return errorResponse(400, "No non-empty user message found", "invalid_request_error", "empty_prompt");
-  }
-
-  // Compose the final prompt (system prefix if client sent one)
-  let fullPrompt = composePrompt(flat);
-
-  // Inject agent rules on first turn (preserves existing A2A behavior)
-  if (deps.agentRules && !deps.rulesAlreadyInjected) {
-    fullPrompt = `[AGENT RULES]\n${deps.agentRules}\n[END AGENT RULES]\n\n${fullPrompt}`;
-    deps.markRulesInjected();
-  }
-
-  const sessionKey = extractSessionKey(req.headers as Record<string, string | string[] | undefined>);
-  const isPeer = !!deps.guestName;
-  const effectiveSessionKey = isPeer ? `${Math.floor(Date.now() / 1000)}_P_01` : sessionKey;
-
-  // Record the NEW user turn only — skip for peer (A2A) sessions
-  const now = Date.now();
-  if (!isPeer) deps.memory?.recordMessage({ role: "user", content: flat.prompt, timestamp: now, userId: "master", sessionId: effectiveSessionKey });
-
-  logInfo(TAG, `/v1/chat/completions guest=${deps.guestName} session=${effectiveSessionKey} promptLen=${flat.prompt.length} stream=${stream}`);
-
-  // Send to the agent — this is the slow bit
-  // #1271: route through spin() (model-call chokepoint). Falls back to legacy
-  // deps.session.sendPrompt when sessionManager is not wired (defensive).
-  let reply: string;
-  if (deps.sessionManager) {
-    const r = await deps.sessionManager.spin({
-      type: "A", sessionId: effectiveSessionKey, prompt: fullPrompt, await: true,
-    });
-    reply = r.result ?? "";
-  } else {
-    reply = await deps.session.sendPrompt(effectiveSessionKey, fullPrompt);
-  }
-
-  // Record the assistant turn — skip for peer (A2A) sessions
-  if (!isPeer) deps.memory?.recordMessage({ role: "assistant", content: reply, timestamp: Date.now(), userId: "master", sessionId: effectiveSessionKey });
-
-  if (stream) {
-    return {
-      status: 200,
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-      },
-      body: bufferedStreamBody(reply, { model }),
-      streaming: true,
-    };
-  }
-
-  const response = buildChatResponse({ model, content: reply });
-  return {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(response),
-    streaming: false,
-  };
-}
-
-function errorResponse(status: number, message: string, type: string, code?: string): ChatCompletionsResult {
-  return {
-    status,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(openaiError(message, type, code)),
-    streaming: false,
-  };
-}
+// ── Chat completions: removed (#1302) ───────────────────────────────────────
+// The peer path routes through AgentApiAdapter → Spin (see agent-api-server.ts).
+// The legacy in-session handleChatCompletions() was the only caller and is gone.
 
 /** Helper for server to write any `ModelsResult` / `ChatCompletionsResult` uniformly. */
 export function writeResult(res: ServerResponse, result: { status: number; headers: Record<string, string>; body: string }): void {
