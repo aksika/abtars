@@ -6,8 +6,17 @@
 # watchdog directly via launchctl/systemd. Result is identical to
 # `abtars update --dev` but needs no working deployed binary.
 #
-# This is a MANUAL MIRROR of src/cli/deploy-lib/deploy.ts (deployActivation).
-# If deploy.ts changes its stop/respawn sequence or path layout, UPDATE THIS.
+# This is a MANUAL MIRROR of src/cli/deploy-lib/deploy.ts (deployActivation),
+# EXCEPT for the stop/respawn sequence, which intentionally diverges (#1299):
+#   - deploy.ts `/update dev` runs INSIDE the abtars-watchdog.service cgroup, so
+#     it must NOT stop the service or kill the watchdog (cgroup suicide under
+#     KillMode=control-group). It kills only the bridge and lets L3 respawn it;
+#     it CANNOT refresh the watchdog.
+#   - THIS script runs OUTSIDE the cgroup (manual login shell), so it CAN and
+#     DOES fully refresh the watchdog via one atomic `systemctl restart`. This is
+#     the foolproof, dependency-free WD-refresh path for when the CLI is broken.
+# If deploy.ts changes its release path layout, UPDATE THIS. Do NOT "re-sync" the
+# stop/respawn sequences — the divergence is deliberate.
 #
 # Usage: bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
 
@@ -112,24 +121,32 @@ node -e '
   fs.writeFileSync(path, JSON.stringify(m, null, 2) + "\n");
 ' "$ABTARS_HOME" "$VERSION" "$COMMIT"
 
-# ── 8. Stop daemon (FROZEN sequence — mirrors deploy.ts deployActivation) ──
+# ── 8. Stop (mirrors deploy.ts, but see #1299 divergence) ──────────────────
 step "stopping daemon..."
 OLD_PID="$(jget "$BRIDGE_LOCK" pid)"
 WD_PID="$(jget "$BRIDGE_LOCK" watchdogPid)"
 if [ "$IS_MAC" = "1" ]; then
+  # macOS: bootout now, bootstrap in step 9. No cgroup teardown, so the detached
+  # deploy survives — the full stop/kill sequence is safe here.
   launchctl bootout "$UID_LABEL/com.abtars.watchdog" 2>/dev/null || true
-else
-  systemctl --user stop abtars-watchdog 2>/dev/null || true
+  echo "update:$VERSION" > "$ABTARS_HOME/.start-reason"
+  [ -n "$OLD_PID" ] && kill "$OLD_PID" 2>/dev/null || true
+  [ -n "$WD_PID" ]  && kill "$WD_PID"  2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do               # wait up to ~5s for bridge to exit
+    if [ -z "$OLD_PID" ] || ! kill -0 "$OLD_PID" 2>/dev/null; then break; fi
+    sleep 0.5
+  done
+  [ -n "$OLD_PID" ] && kill -9 "$OLD_PID" 2>/dev/null || true
+  [ -n "$WD_PID" ]  && kill -9 "$WD_PID"  2>/dev/null || true
 fi
-echo "update:$VERSION" > "$ABTARS_HOME/.start-reason"
-[ -n "$OLD_PID" ] && kill "$OLD_PID" 2>/dev/null || true
-[ -n "$WD_PID" ]   && kill "$WD_PID"   2>/dev/null || true
-for _ in 1 2 3 4 5 6 7 8 9 10; do               # wait up to ~5s for bridge to exit
-  if [ -z "$OLD_PID" ] || ! kill -0 "$OLD_PID" 2>/dev/null; then break; fi
-  sleep 0.5
-done
-[ -n "$OLD_PID" ] && kill -9 "$OLD_PID" 2>/dev/null || true
-[ -n "$WD_PID" ]   && kill -9 "$WD_PID"   2>/dev/null || true
+# Linux (#1299): NO `systemctl stop` and NO manual kill here. An explicit stop
+# opens a durable "stopped" window — if the reconcile in 8b fails under set -e,
+# the watchdog is left dead before the verify in 9b (the 2026-07-03 14.4h outage
+# class). Instead we reconcile while the watchdog is still up, then do ONE atomic
+# `systemctl restart` in step 9: it tears down the old watchdog cgroup (old WD +
+# bridge) and starts a fresh watchdog with the new service def + new
+# abtars-watchdog.sh. This script runs OUTSIDE the service cgroup (manual login
+# shell), so the restart does not kill it — this is the foolproof WD-refresh path.
 rm -f "$ABTARS_HOME/.stopped"
 
 # ── 8b. Reconcile watchdog service definition from repo template (#1284) ────
@@ -161,7 +178,10 @@ else
   systemctl --user daemon-reload 2>/dev/null || true
   systemctl --user unmask abtars-watchdog 2>/dev/null || true
   systemctl --user enable abtars-watchdog 2>/dev/null || true
-  # #1278: atomic restart (no durable stopped window) — NOT the old silent stop+start.
+  # #1278/#1299: single atomic restart is the ONLY teardown+respawn on Linux —
+  # step 8 no longer does an explicit stop, so there is no durable stopped
+  # window. restart tears down the old watchdog cgroup and starts a fresh
+  # watchdog with the reconciled service def + new abtars-watchdog.sh.
   systemctl --user restart abtars-watchdog 2>/dev/null || systemctl --user start abtars-watchdog 2>/dev/null || true
 fi
 

@@ -26,6 +26,28 @@ function readJsonField(file: string, field: string): unknown {
 }
 
 /**
+ * True when THIS process lives inside the abtars-watchdog.service cgroup (Linux).
+ *
+ * The `/update dev` bridge command spawns this deploy process detached — which on
+ * Linux is a new session but the SAME cgroup (detached ≠ new cgroup). The service
+ * runs KillMode=control-group, so `systemctl stop`/restarting the unit or killing
+ * the watchdog (→ systemd restart → cgroup teardown) would SIGTERM this very
+ * process before it finishes → nothing respawns (#1299 cgroup suicide).
+ *
+ * The manual `abtars update --dev` CLI and scripts/emergency-update.sh run from a
+ * login shell (a different cgroup) → returns false → safe to stop/restart the
+ * service (instant, and refreshes the watchdog). macOS has no such cgroup teardown.
+ */
+function inWatchdogServiceCgroup(): boolean {
+  if (process.platform === "darwin") return false;
+  try {
+    return readFileSync("/proc/self/cgroup", "utf-8").includes("abtars-watchdog.service");
+  } catch {
+    return false; // no /proc or unreadable — assume out-of-cgroup (safe path)
+  }
+}
+
+/**
  * Sync source repos into <releasesDir>/src — clone if missing, fetch+reset if
  * present, nuke+reclone on failure. Throws if a required repo (abtars) cannot
  * be synced. Obtain step — fail-safe (no release is swapped here).
@@ -224,70 +246,110 @@ async function deployActivation(args: { staged: StagedRelease; channel: SourceNa
   writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "deploying", version: staged.version, startedAt: new Date().toISOString() }) + "\n");
   process.stdout.write(`✓ manifest updated\n`);
 
-  // ── Step 7: Stop everything (FROZEN — abtars.md watchdog) ────────────
+  // ── Step 7 + 8: Stop + respawn (FROZEN — abtars.md watchdog; #1299) ───
+  // CGROUP DIVERGENCE (#1299): when this deploy process is inside the
+  // abtars-watchdog.service cgroup (the `/update dev` bridge path — spawned
+  // detached but same cgroup, KillMode=control-group), stopping the service or
+  // killing the watchdog would SIGTERM THIS process before it finishes. So on
+  // that path we touch NEITHER the service NOR the watchdog: we kill only the
+  // bridge PID and let the live L3 watchdog (abtars-watchdog.sh poll loop)
+  // detect process-gone and respawn the bridge from the freshly-repointed app/
+  // symlink. Consequence: a changed abtars-watchdog.sh is NOT picked up on this
+  // path — use scripts/emergency-update.sh (runs OUTSIDE the cgroup) or a manual
+  // `abtars update --dev` for a full watchdog refresh.
+  // The out-of-cgroup CLI/emergency path and macOS keep the full stop → kill →
+  // respawn sequence below (instant, and refreshes the watchdog).
+  // DO NOT re-add `systemctl stop`/watchdog-kill to the in-cgroup branch — it
+  // reintroduces the cgroup-suicide bug.
+  const inCgroup = inWatchdogServiceCgroup();
+
   if (!isFirstInstall) {
-    // 7.1 Stop daemon service (tells WD to exit via service manager)
-    if (process.platform === "darwin") {
-      const uid = `gui/${process.getuid?.() ?? 501}`;
-      try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch {}
+    if (inCgroup) {
+      // In-cgroup (Linux `/update dev`): kill ONLY the bridge; L3 respawns it.
+      // No systemctl stop, no watchdog kill, and NO `update:` .start-reason —
+      // that would make the live watchdog exit 0 for a systemd restart that
+      // tears down (and SIGTERMs) our own cgroup.
+      try { rmSync(join(paths.home, ".stopped")); } catch {}
+      const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
+      if (bridgePid && bridgePid > 0) {
+        try { process.kill(bridgePid, "SIGTERM"); } catch {}
+        process.stdout.write(`  x Killing bridge (PID ${bridgePid}) — L3 watchdog will respawn from new release...\n`);
+        for (let i = 0; i < 10; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          try { process.kill(bridgePid, 0); } catch { break; }
+        }
+      }
     } else {
-      try { execSync("systemctl --user stop abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
-    }
-
-    // 7.2 Write .start-reason = "update:X" (safety net if WD survives service stop)
-    writeFileSync(join(paths.home, ".start-reason"), `update:${staged.version}`);
-
-    // 7.3 Kill WD PID explicitly (belt)
-    const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
-    if (wdPid && wdPid > 0) {
-      try { process.kill(wdPid, "SIGTERM"); } catch {}
-    }
-
-    // 7.4 Kill bridge PID
-    const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
-    if (bridgePid && bridgePid > 0) {
-      try { process.kill(bridgePid, "SIGTERM"); } catch {}
-      process.stdout.write(`  x Killing bridge (PID ${bridgePid})...\n`);
-      for (let i = 0; i < 10; i++) {
-        await new Promise(r => setTimeout(r, 500));
-        try { process.kill(bridgePid, 0); } catch { break; }
+      // Out-of-cgroup (macOS, or manual `abtars update --dev` from a login
+      // shell): full stop sequence — safe here, and refreshes the watchdog.
+      // 7.1 Stop daemon service (tells WD to exit via service manager)
+      if (process.platform === "darwin") {
+        const uid = `gui/${process.getuid?.() ?? 501}`;
+        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch {}
+      } else {
+        try { execSync("systemctl --user stop abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
       }
-    }
 
-    // 7.5 Wait for WD to die (flock release). SIGKILL after 3s.
-    if (wdPid && wdPid > 0) {
-      let wdAlive = false;
-      for (let i = 0; i < 6; i++) {
-        try { process.kill(wdPid, 0); wdAlive = true; } catch { wdAlive = false; break; }
-        await new Promise(r => setTimeout(r, 500));
+      // 7.2 Write .start-reason = "update:X" (safety net if WD survives service stop)
+      writeFileSync(join(paths.home, ".start-reason"), `update:${staged.version}`);
+
+      // 7.3 Kill WD PID explicitly (belt)
+      const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
+      if (wdPid && wdPid > 0) {
+        try { process.kill(wdPid, "SIGTERM"); } catch {}
       }
-      if (wdAlive) { try { process.kill(wdPid, "SIGKILL"); } catch {} }
-    }
 
-    // 7.6 Clear .stopped sentinel
-    try { rmSync(join(paths.home, ".stopped")); } catch {}
+      // 7.4 Kill bridge PID
+      const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
+      if (bridgePid && bridgePid > 0) {
+        try { process.kill(bridgePid, "SIGTERM"); } catch {}
+        process.stdout.write(`  x Killing bridge (PID ${bridgePid})...\n`);
+        for (let i = 0; i < 10; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          try { process.kill(bridgePid, 0); } catch { break; }
+        }
+      }
+
+      // 7.5 Wait for WD to die (flock release). SIGKILL after 3s.
+      if (wdPid && wdPid > 0) {
+        let wdAlive = false;
+        for (let i = 0; i < 6; i++) {
+          try { process.kill(wdPid, 0); wdAlive = true; } catch { wdAlive = false; break; }
+          await new Promise(r => setTimeout(r, 500));
+        }
+        if (wdAlive) { try { process.kill(wdPid, "SIGKILL"); } catch {} }
+      }
+
+      // 7.6 Clear .stopped sentinel
+      try { rmSync(join(paths.home, ".stopped")); } catch {}
+    }
   }
 
   // ── Step 8: Respawn ───────────────────────────────────────────────────
-  // 8.1 Write neutral .start-reason — new WD won't match any exit case
-  writeFileSync(join(paths.home, ".start-reason"), "deploy-respawn");
-
   const manifest = await readManifest(paths.manifest);
   const mode = manifest?.installMode ?? "daemon";
 
-  // 8.2 Restart daemon service
   if (mode === "daemon") {
-    if (process.platform === "darwin") {
-      const plistPath = join(homedir(), "Library/LaunchAgents/com.abtars.watchdog.plist");
-      const uid = `gui/${process.getuid?.() ?? 501}`;
-      try { execSync(`launchctl bootstrap ${uid} "${plistPath}"`, { stdio: "ignore", timeout: 5000 }); } catch {}
+    if (inCgroup) {
+      // Nothing to start — the live L3 watchdog respawns the bridge from the
+      // new app/ symlink after the process-gone kill above.
+      process.stdout.write(`  Bridge killed — L3 watchdog respawning from new release\n`);
     } else {
-      try { execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 }); } catch {}
-      try { execSync("systemctl --user unmask abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
-      try { execSync("systemctl --user enable abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
-      try { execSync("systemctl --user start abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+      // 8.1 Write neutral .start-reason — new WD won't match any exit case
+      writeFileSync(join(paths.home, ".start-reason"), "deploy-respawn");
+      // 8.2 Restart daemon service
+      if (process.platform === "darwin") {
+        const plistPath = join(homedir(), "Library/LaunchAgents/com.abtars.watchdog.plist");
+        const uid = `gui/${process.getuid?.() ?? 501}`;
+        try { execSync(`launchctl bootstrap ${uid} "${plistPath}"`, { stdio: "ignore", timeout: 5000 }); } catch {}
+      } else {
+        try { execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync("systemctl --user unmask abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync("systemctl --user enable abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync("systemctl --user start abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+      }
+      process.stdout.write(`  Daemon started\n`);
     }
-    process.stdout.write(`  Daemon started\n`);
   } else {
     process.stdout.write(`  Deployed. Run 'abtars start' to launch the bridge.\n`);
   }
