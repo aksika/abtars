@@ -605,12 +605,11 @@ export async function handleInboundMessage(
 
     // Auto-reset on context window overflow (ValidationException or actual context errors)
     const errStr = String(err instanceof Error ? err.message : JSON.stringify(err));
-    // #1294: A synthetic boot greeting ("[SESSION START] ...") is system-initiated, not a user
-    // request. If it fails (e.g. models exhausted at boot), don't spam the user with an error
-    // reply — the "Back online"/"Degraded boot" notifications already cover status, and the user
-    // sees the real error the moment they send an actual message. This also kills the duplicate
-    // error caused by the greeting retry loop (each retry re-ran this path).
-    const notifyUser = !text.startsWith("[SESSION START]");
+    // #1294 + #1298: Synthetic internal prompts are system-initiated, not user requests.
+    // If they fail (e.g. models exhausted), don't surface an ❌ error reply — the user sees
+    // errors on their own messages, and deliver/announce notifications are queryable via /kanban.
+    const SYNTHETIC_PREFIXES = ["[SESSION START]", "[SYSTEM]", "[TASK COMPLETE]"];
+    const notifyUser = !SYNTHETIC_PREFIXES.some(p => text.startsWith(p));
     const isContextOverflow = errStr.includes("ValidationException")
       || (errStr.includes("context window") || errStr.includes("token limit") || errStr.includes("maximum context"));
     const isTimeout = errStr.includes("timed out") || errStr.includes("Prompt already in progress");

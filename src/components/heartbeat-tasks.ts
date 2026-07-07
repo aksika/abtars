@@ -155,49 +155,6 @@ export function createSkillReloadTask(): HeartbeatTask {
   };
 }
 
-export interface KanbanDeliveryDeps {
-  sendSystemMessage: (prompt: string) => Promise<void>;
-  sendMessage: (chatId: string, text: string) => Promise<void>;
-  sendDocument: (chatId: string, filePath: string, caption: string) => Promise<void>;
-  chatId: () => string;
-}
-
-/** #857/#934: Kanban delivery — routes based on delivery_mode. */
-export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTask {
-  return {
-    name: "kanban-delivery",
-    execute: async () => {
-      try {
-        const { kanbanPending, kanbanSetDelivering, kanbanMarkDelivered, kanbanDeliveryFailed } = await import("./tasks/kanban-board.js");
-        const pending = kanbanPending();
-        if (pending.length === 0) return;
-
-        for (const card of pending) {
-          if (card.delivery_mode === "silent") {
-            kanbanMarkDelivered(card.id);
-            continue;
-          }
-          kanbanSetDelivering(card.id);
-          try {
-            if (card.delivery_mode === "deliver") {
-              if (card.result_path) await deps.sendDocument(deps.chatId(), card.result_path, card.title);
-              await deps.sendSystemMessage(`[SYSTEM] Task "${card.title}" complete. File delivered: ${card.result_path ?? "(no file)"}`);
-            } else {
-              // "announce"
-              await deps.sendSystemMessage(
-                `[TASK COMPLETE] "${card.title}" done.\nResult:\n${card.result_summary ?? "(no output)"}\n\nDeliver this to the user naturally.`
-              );
-            }
-            kanbanMarkDelivered(card.id);
-          } catch (err) {
-            kanbanDeliveryFailed(card.id);
-            logError(TAG, `Kanban delivery failed for card ${card.id}: ${err}`);
-          }
-        }
-      } catch (err) { logAndSwallow(TAG, "kanban-delivery", err); }
-    },
-  };
-}
 
 /** #936: Expire idle user sessions managed by Spin. */
 export function createUserSessionExpiryTask(): HeartbeatTask {

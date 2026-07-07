@@ -255,6 +255,40 @@ describe("handleInboundMessage", () => {
     expect((deps as any)._session.busy).toBe(false);
   });
 
+  // #1298: [SYSTEM] and [TASK COMPLETE] synthetic prompts must also suppress errors
+  it("suppresses user-facing error for [SYSTEM] scheduled messages", async () => {
+    const errorTransport = mockTransport();
+    (errorTransport.sendPrompt as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("All models exhausted"));
+    const adapter = mockAdapter();
+    const deps = mockDeps(errorTransport);
+
+    await handleInboundMessage(makeMsg({ text: "[SYSTEM] Daily briefing failed" }), adapter, deps);
+
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("suppresses user-facing error for [TASK COMPLETE] announce delivery", async () => {
+    const errorTransport = mockTransport();
+    (errorTransport.sendPrompt as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("All models exhausted"));
+    const adapter = mockAdapter();
+    const deps = mockDeps(errorTransport);
+
+    await handleInboundMessage(makeMsg({ text: "[TASK COMPLETE] \"my task\" done.\nResult:\nsome output\n\nDeliver this to the user naturally." }), adapter, deps);
+
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does NOT suppress errors for real user messages", async () => {
+    const errorTransport = mockTransport();
+    (errorTransport.sendPrompt as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("All models exhausted"));
+    const adapter = mockAdapter();
+    const deps = mockDeps(errorTransport);
+
+    await handleInboundMessage(makeMsg({ text: "hello there" }), adapter, deps);
+
+    expect(adapter.sendMessage).toHaveBeenCalled();
+  });
+
   it("handles command and returns early", async () => {
     const adapter = mockAdapter();
     const deps = mockDeps(transport);

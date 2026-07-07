@@ -186,17 +186,20 @@ export function kanbanMarkDelivered(id: number): void {
   nerve.fire("card:delivered", id);
 }
 
-export function kanbanDeliveryFailed(id: number): void {
+
+/** #1298: Cross-field LIKE search across title/status/source/priority/labels/type. */
+export function kanbanSearch(term: string): KanbanCard[] {
   const d = dbOrNull();
-  if (!d) return;
-  const card = d.prepare(`SELECT delivery_attempts FROM kanban_board WHERE id = ?`).get(id) as { delivery_attempts: number } | undefined;
-  const attempts = (card?.delivery_attempts ?? 0) + 1;
-  if (attempts >= 3) {
-    d.prepare(`UPDATE kanban_board SET status = 'failed', error = 'delivery failed after 3 attempts', delivery_attempts = ?, updated_at = datetime('now') WHERE id = ?`).run(attempts, id);
-  } else {
-    d.prepare(`UPDATE kanban_board SET status = 'done', delivery_attempts = ?, updated_at = datetime('now') WHERE id = ?`).run(attempts, id);
-  }
+  if (!d) return [];
+  const safe = term.replace(/[%_]/g, ""); // strip LIKE wildcards to avoid user-controlled patterns
+  const like = `%${safe}%`;
+  return d.prepare(
+    `SELECT * FROM kanban_board
+     WHERE title LIKE ? OR status LIKE ? OR source LIKE ? OR priority LIKE ? OR labels LIKE ? OR type LIKE ?
+     ORDER BY created_at DESC LIMIT 50`
+  ).all(like, like, like, like, like, like) as KanbanCard[];
 }
+
 
 export function kanbanList(filter?: string, filterKey?: string): KanbanCard[] {
   const d = dbOrNull();

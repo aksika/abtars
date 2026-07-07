@@ -10,7 +10,7 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
 import {
   createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask,
-  createKanbanDeliveryTask, createKanbanCleanupTask, createUserSessionExpiryTask, createMetricsTask,
+  createKanbanCleanupTask, createUserSessionExpiryTask, createMetricsTask,
 } from "../components/heartbeat-tasks.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
 import { loadUsers } from "../components/user-registry.js";
@@ -91,54 +91,30 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   heartbeat.registerTask(createDbIntegrityTask(memory));
 
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;
-  heartbeat.registerTask(createKanbanDeliveryTask({
-    sendSystemMessage: ctx.sendSystemMessage!,
-    sendMessage: async (chatId, text) => {
-      if (!ctx.telegramAdapter) return;
-      await ctx.telegramAdapter.sendMessage(chatId, text);
-    },
-    sendDocument: async (chatId, filePath, caption) => {
-      if (!ctx.telegramAdapter) return;
-      await ctx.telegramAdapter.sendDocument(chatId, filePath, caption);
-    },
-    chatId: () => String(masterChatId),
-  }));
 
-  // Nerve-driven instant delivery
+  // Nerve-driven instant delivery — sole delivery trigger (#1298: polling backstop removed)
   import("../components/nerve.js").then(({ nerve }) => {
     nerve.on("card:done", async (cardId: number) => {
       try {
-        const { kanbanPending, kanbanSetDelivering, kanbanMarkDelivered } = await import("../components/tasks/kanban-board.js");
+        const { kanbanPending } = await import("../components/tasks/kanban-board.js");
+        const { deliverCard } = await import("../components/tasks/kanban-delivery.js");
         const pending = kanbanPending();
         const card = pending.find((c: { id: number }) => c.id === cardId);
         if (!card) return;
-
-        kanbanSetDelivering(card.id);
-        const targetChat = card.chat_id || String(masterChatId);
-
-        if (card.delivery_mode === "silent") {
-          kanbanMarkDelivered(card.id);
-          return;
-        }
-
-        if (card.delivery_mode === "deliver") {
-          if (ctx.telegramAdapter) {
-            if (card.result_path) await ctx.telegramAdapter.sendDocument(targetChat, card.result_path, card.title);
-          }
-          if (ctx.sendSystemMessage) {
-            await ctx.sendSystemMessage(`[SYSTEM] Task "${card.title}" complete. File delivered: ${card.result_path ?? "(no file)"}`);
-          }
-          kanbanMarkDelivered(card.id);
-          return;
-        }
-
-        // "announce" — inject into agent for natural delivery
-        if (ctx.sendSystemMessage) {
-          await ctx.sendSystemMessage(
-            `[TASK COMPLETE] "${card.title}" done.\nResult:\n${card.result_summary ?? "(no output)"}\n\nDeliver this to the user naturally.`
-          );
-        }
-        kanbanMarkDelivered(card.id);
+        await deliverCard(card, {
+          sendMessage: async (chatId, text) => {
+            if (!ctx.telegramAdapter) return;
+            await ctx.telegramAdapter.sendMessage(chatId, text);
+          },
+          sendDocument: async (chatId, filePath, caption) => {
+            if (!ctx.telegramAdapter) return;
+            await ctx.telegramAdapter.sendDocument(chatId, filePath, caption);
+          },
+          announce: async (prompt) => {
+            if (ctx.sendSystemMessage) await ctx.sendSystemMessage(prompt);
+          },
+          chatIdFor: (card) => card.chat_id || String(masterChatId),
+        });
       } catch (err) { logAndSwallow(TAG, "nerve:card:done delivery", err); }
     });
 
