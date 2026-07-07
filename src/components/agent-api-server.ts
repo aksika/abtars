@@ -219,11 +219,11 @@ export class AgentApiServer {
     this.enrollRateLimit.set(ip, Date.now());
 
     const {
-      macTribe, signAck, verifyEnroll, verifyRequest: _verifyReq,
+      macTribe, verifyEnroll, verifyRequest: _verifyReq,
     } = await import("./peer-transport/peer-auth.js");
     const { loadPeerConfig, deriveVerifyKey, clearPeerConfigCache } = await import("./peer-config.js");
     const { randomBytes } = await import("node:crypto");
-    const { writeFileSync, existsSync, mkdirSync } = await import("node:fs");
+    const { writeFileSync, existsSync } = await import("node:fs");
     const { join } = await import("node:path");
 
     const config = loadPeerConfig();

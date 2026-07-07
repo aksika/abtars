@@ -528,7 +528,7 @@ const peerWakeupTool: ToolDefinition = {
     const peer = config.peers[peerName];
     if (!peer) return JSON.stringify({ error: `Unknown peer: ${peerName}` });
     const udpPort = peer.udpPort ?? 5353;
-    sendWakeup(config.self.name, peer.host, udpPort, peer.token);
+    sendWakeup(config.self.name, peer.host, udpPort);
     return JSON.stringify({ ok: true, message: `Wake-up sent to ${peerName}. Expect callback within seconds.` });
   },
 };
