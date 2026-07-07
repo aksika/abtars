@@ -605,6 +605,12 @@ export async function handleInboundMessage(
 
     // Auto-reset on context window overflow (ValidationException or actual context errors)
     const errStr = String(err instanceof Error ? err.message : JSON.stringify(err));
+    // #1294: A synthetic boot greeting ("[SESSION START] ...") is system-initiated, not a user
+    // request. If it fails (e.g. models exhausted at boot), don't spam the user with an error
+    // reply — the "Back online"/"Degraded boot" notifications already cover status, and the user
+    // sees the real error the moment they send an actual message. This also kills the duplicate
+    // error caused by the greeting retry loop (each retry re-ran this path).
+    const notifyUser = !text.startsWith("[SESSION START]");
     const isContextOverflow = errStr.includes("ValidationException")
       || (errStr.includes("context window") || errStr.includes("token limit") || errStr.includes("maximum context"));
     const isTimeout = errStr.includes("timed out") || errStr.includes("Prompt already in progress");
@@ -612,10 +618,10 @@ export async function handleInboundMessage(
     if (isContextOverflow) {
       logWarn(TAG, `Context overflow detected — auto-resetting session`);
       await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: `ctx-overflow: ${errStr.slice(0, 100)}` });
-      await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+      if (notifyUser) await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
-      await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+      if (notifyUser) await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else {
       logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
       const reason = errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
@@ -625,7 +631,7 @@ export async function handleInboundMessage(
         : errStr.includes("exhausted") || errStr.includes("no candidates") ? "All models exhausted."
         : errStr.includes("aborted") || errStr.includes("code=20") ? "Request aborted — model connection dropped."
         : `Error: ${errStr.slice(0, 80)}`;
-      await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+      if (notifyUser) await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } finally {
     clearInterval(typingInterval);

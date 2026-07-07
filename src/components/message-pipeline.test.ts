@@ -241,6 +241,20 @@ describe("handleInboundMessage", () => {
     expect((deps as any)._session.busy).toBe(false);
   });
 
+  // #1294: a synthetic boot greeting that fails must NOT send a user-facing error reply.
+  it("suppresses user-facing error for synthetic [SESSION START] greeting failures", async () => {
+    const errorTransport = mockTransport();
+    (errorTransport.sendPrompt as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("All models exhausted:\nno candidates"));
+    const adapter = mockAdapter();
+    const deps = mockDeps(errorTransport);
+
+    await handleInboundMessage(makeMsg({ text: "[SESSION START] You just came online. Greet the user." }), adapter, deps);
+
+    // No error message should reach the user — greeting failures are silent
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
+    expect((deps as any)._session.busy).toBe(false);
+  });
+
   it("handles command and returns early", async () => {
     const adapter = mockAdapter();
     const deps = mockDeps(transport);
