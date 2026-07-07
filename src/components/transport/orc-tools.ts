@@ -20,6 +20,25 @@ export function getActiveOrcCard(): number | null {
   return _activeOrcCardId;
 }
 
+/**
+ * #1301 — true when the Orc is currently processing a peer-originated card.
+ *
+ * Relay tools (peer_session/peer_wakeup/peer_delegate) call this to refuse: a
+ * peer must never be able to make us call a THIRD peer under our identity
+ * (relay/identity-confusion). Keys off the active card's `source` — not the
+ * session — so it stays correct for the shared singleton Orc (owner-initiated
+ * delegation on an owner card is still allowed).
+ */
+export async function isActiveCardPeerSourced(): Promise<boolean> {
+  if (_activeOrcCardId == null) return false;
+  try {
+    const { kanbanGetCard } = await import("../tasks/kanban-board.js");
+    return kanbanGetCard(_activeOrcCardId)?.source === "peer";
+  } catch {
+    return false;
+  }
+}
+
 // ── spawn_worker ─────────────────────────────────────────────────────────────
 
 const spawnWorkerTool: ToolDefinition = {

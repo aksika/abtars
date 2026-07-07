@@ -458,6 +458,11 @@ const peerSessionTool: ToolDefinition = {
     required: ["peer_name", "message"],
   },
   async execute(args) {
+    // #1301 — no relay: a peer-originated request must never make us call a third peer.
+    const { isActiveCardPeerSourced } = await import("./orc-tools.js");
+    if (await isActiveCardPeerSourced()) {
+      return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
+    }
     const { callPeer } = await import("../peer-client.js");
     const { loadPeerConfig } = await import("../peer-config.js");
     const { getOrCreateSession, addTurn, isEnded, destroySession } = await import("../peer-sessions.js");
@@ -510,6 +515,11 @@ const peerWakeupTool: ToolDefinition = {
     required: ["peer_name"],
   },
   async execute(args) {
+    // #1301 — no relay: a peer-originated request must never wake/reach a third peer via us.
+    const { isActiveCardPeerSourced } = await import("./orc-tools.js");
+    if (await isActiveCardPeerSourced()) {
+      return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
+    }
     const { sendWakeup } = await import("../dns-wakeup.js");
     const { loadPeerConfig } = await import("../peer-config.js");
     const peerName = args.peer_name?.trim();
