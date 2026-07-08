@@ -27,10 +27,13 @@ vi.mock("node:child_process", async (importOriginal) => {
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "doctor-test-"));
   mkdirSync(join(tmpDir, "logs"), { recursive: true });
+  process.env["ABTARS_HOME"] = tmpDir;
+  vi.resetModules();
 });
 
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env["ABTARS_HOME"];
 });
 
 describe("doctor probeSingleBridge (#1261)", () => {
@@ -62,5 +65,76 @@ describe("doctor probeSingleBridge (#1261)", () => {
     expect(probe?.detail).toContain("2 bridges");
     expect(probe?.detail).toContain("12345");
     expect(probe?.detail).toContain("67890");
+  });
+});
+
+describe("doctor tribe probes (#1211)", () => {
+  function writeConfig(files: { env?: string; peers?: unknown; lock?: unknown }): void {
+    mkdirSync(join(tmpDir, "config"), { recursive: true });
+    if (files.env !== undefined) writeFileSync(join(tmpDir, "config", ".env"), files.env);
+    if (files.peers !== undefined) writeFileSync(join(tmpDir, "config", "peers.json"), JSON.stringify(files.peers));
+    if (files.lock !== undefined) writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify(files.lock));
+  }
+
+  it("tribe layer uses renamed probes: a2a, peers, identity, gossip", async () => {
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const names = result.layers.tribe.map((r) => r.name).sort();
+    expect(names).toEqual(["a2a", "gossip", "identity", "peers"]);
+  });
+
+  it("a2a/identity/gossip skipped when agent-api disabled", async () => {
+    writeConfig({ env: "ENABLE_AGENT_API=false\n" });
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const byName = Object.fromEntries(result.layers.tribe.map((r) => [r.name, r]));
+    expect(byName["a2a"]?.status).toBe("skipped");
+    expect(byName["identity"]?.status).toBe("skipped");
+    expect(byName["gossip"]?.status).toBe("skipped");
+  });
+
+  it("gossip skipped (solo) when agent-api enabled but no peers", async () => {
+    writeConfig({ env: "ENABLE_AGENT_API=true\n", peers: { self: { signingKey: "x" }, peers: {} } });
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const gossip = result.layers.tribe.find((r) => r.name === "gossip");
+    expect(gossip?.status).toBe("skipped");
+    expect(gossip?.detail).toContain("solo");
+  });
+
+  it("gossip fails when peers exist but self.signingKey missing", async () => {
+    writeConfig({ env: "ENABLE_AGENT_API=true\n", peers: { self: {}, peers: { kp: { verifyKey: "k" } } } });
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const gossip = result.layers.tribe.find((r) => r.name === "gossip");
+    expect(gossip?.status).toBe("failed");
+    expect(gossip?.detail).toContain("signingKey");
+  });
+
+  it("peers reports solo skip when no peers configured", async () => {
+    writeConfig({ peers: { self: { signingKey: "x" }, peers: {} } });
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const peers = result.layers.tribe.find((r) => r.name === "peers");
+    expect(peers?.status).toBe("skipped");
+    expect(peers?.detail).toContain("solo");
+  });
+
+  it("peers reports enrolled count with valid keys", async () => {
+    writeConfig({ peers: { self: { signingKey: "x" }, peers: { kp: { verifyKey: "k1" }, molty: { verifyKey: "k2" } } } });
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const peers = result.layers.tribe.find((r) => r.name === "peers");
+    expect(peers?.status).toBe("ok");
+    expect(peers?.detail).toContain("2 enrolled");
+  });
+
+  it("peers fails when a peer is missing verifyKey", async () => {
+    writeConfig({ peers: { self: { signingKey: "x" }, peers: { kp: { verifyKey: "k1" }, molty: {} } } });
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const peers = result.layers.tribe.find((r) => r.name === "peers");
+    expect(peers?.status).toBe("failed");
+    expect(peers?.detail).toContain("molty");
   });
 });

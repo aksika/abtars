@@ -14,7 +14,7 @@ import { createSocket, type Socket } from "node:dgram";
 import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cpus, loadavg } from "node:os";
-import { loadPeerConfig, deriveVerifyKey } from "../peer-config.js";
+import { loadPeerConfig } from "../peer-config.js";
 import { logInfo, logDebug, logWarn, logTrace } from "../logger.js";
 
 const TAG = "gossip";
@@ -126,6 +126,11 @@ function broadcast(): void {
     });
   }
   logTrace(TAG, `Broadcast to ${Object.keys(config.peers).length} peer(s)`);
+  // Record broadcast time for /status + /doctor gossip freshness (#1211).
+  try {
+    const { updateBridgeLockField } = require("../transport/bridge-lock-transport.js") as typeof import("../transport/bridge-lock-transport.js");
+    updateBridgeLockField("lastGossipBroadcast", Date.now());
+  } catch { /* lock unavailable — non-fatal */ }
   // Expire stale entries
   const now = Date.now();
   for (const [, health] of peerTable) {

@@ -351,7 +351,7 @@ export function renderStatusText(status: SystemStatus): string {
 
   const apiSub = status.subsystems.find(s => s.name === "phaseAgentApi");
   const apiPort = (process.env["AGENT_API_PORT"] ?? "").replace(/^:/, "");
-  lines.push(`  ${subIcon(apiSub)} agent-api${apiPort ? `: ${apiPort}` : ""}`);
+  lines.push(`  ${subIcon(apiSub)} a2a${apiPort ? `: ${apiPort} enabled` : ""}`);
 
   if (status.peersConfigured > 0) {
     lines.push(`  ✓ peers: ${status.peersConfigured} configured`);
@@ -359,8 +359,21 @@ export function renderStatusText(status: SystemStatus): string {
     lines.push("  ○ peers: none configured");
   }
 
-  const a2aSub = status.subsystems.find(s => s.name === "phaseA2a" || s.name === "phaseGossip");
-  lines.push(`  ${subIcon(a2aSub)} a2a${a2aSub?.detail ? `: ${a2aSub.detail}` : ""}`);
+  // Gossip: only runs when peers are configured. Read freshness from bridge.lock.
+  if (status.peersConfigured > 0) {
+    const gossipPort = (process.env["GOSSIP_PORT"] ?? "5355").replace(/^:/, "");
+    let broadcast = "no broadcast yet";
+    try {
+      const lock = JSON.parse(readFileSync(join(homedir(), ".abtars", "bridge.lock"), "utf-8"));
+      if (typeof lock.lastGossipBroadcast === "number") {
+        const agoSec = Math.round((Date.now() - lock.lastGossipBroadcast) / 1000);
+        broadcast = `last broadcast ${agoSec < 60 ? `${agoSec}s ago` : `${Math.round(agoSec / 60)}m ago`}`;
+      }
+    } catch { /* ignore */ }
+    lines.push(`  ✓ gossip: ${gossipPort} / ${broadcast}`);
+  } else {
+    lines.push("  ○ gossip: disabled");
+  }
 
   // ── Footer ────────────────────────────────────────────────────────────
   lines.push("");

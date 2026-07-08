@@ -36,6 +36,7 @@ export interface DoctorOutput {
 
 const home = abtarsHome();
 const configDir = join(home, "config");
+const TTL_MS = 180_000; // gossip: 3 missed 60s broadcasts → stale (matches gossip.ts)
 
 function readJson(path: string): any | null {
   try { return JSON.parse(readFileSync(path, "utf-8")); } catch { return null; }
@@ -276,9 +277,9 @@ async function probeSha(): Promise<ProbeResult> {
 
 // ── Tribe Probes ─────────────────────────────────────────────────────────────
 
-async function probeAgentApi(): Promise<ProbeResult> {
+async function probeA2a(): Promise<ProbeResult> {
   const env = readEnv();
-  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "agent-api", status: "skipped", detail: "not enabled" };
+  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "a2a", status: "skipped", detail: "not enabled" };
   const port = parseInt(env.get("AGENT_API_PORT") || "7100", 10);
   try {
     const { createConnection } = await import("node:net");
@@ -287,9 +288,9 @@ async function probeAgentApi(): Promise<ProbeResult> {
       sock.on("error", reject);
       sock.setTimeout(2000, () => { sock.destroy(); reject(new Error("timeout")); });
     });
-    return { name: "agent-api", status: "ok", detail: `:${port}` };
+    return { name: "a2a", status: "ok", detail: `${port}` };
   } catch {
-    return { name: "agent-api", status: "failed", detail: `:${port} not listening` };
+    return { name: "a2a", status: "failed", detail: `${port} not listening` };
   }
 }
 
@@ -301,20 +302,18 @@ async function probePeers(): Promise<ProbeResult> {
 
   const peerEntries = Object.entries(peers.peers ?? {});
   const peerCount = peerEntries.length;
-  if (peerCount === 0) return { name: "peers", status: "ok", detail: "no peers configured (solo tribe)" };
+  if (peerCount === 0) return { name: "peers", status: "skipped", detail: "no peers (solo)" };
 
   // Check that all peers have verifyKey
   const missingKey = peerEntries.filter(([, e]) => !e.verifyKey).map(([n]) => n);
   if (missingKey.length > 0) return { name: "peers", status: "failed", detail: `missing verifyKey: ${missingKey.join(", ")}` };
 
-  const lock = readJson(join(home, "bridge.lock"));
-  const gossipAge = lock?.lastGossipBroadcast ? ago(Date.now() - lock.lastGossipBroadcast) : "unknown";
-  return { name: "peers", status: "ok", detail: `${peerCount} enrolled, gossip: ${gossipAge}` };
+  return { name: "peers", status: "ok", detail: `${peerCount} enrolled (all keys valid)` };
 }
 
-async function probeTls(): Promise<ProbeResult> {
+async function probeIdentity(): Promise<ProbeResult> {
   const env = readEnv();
-  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "tls", status: "skipped", detail: "agent-api disabled" };
+  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "identity", status: "skipped", detail: "a2a disabled" };
 
   const certPath = join(configDir, "identity.crt");
   const keyPath = join(configDir, "identity.tls.key");
@@ -322,7 +321,7 @@ async function probeTls(): Promise<ProbeResult> {
   const keyExists = existsSync(keyPath);
   if (!certExists || !keyExists) {
     const missing = [!certExists && "identity.crt", !keyExists && "identity.tls.key"].filter(Boolean);
-    return { name: "tls", status: "failed", detail: `missing: ${missing.join(", ")}` };
+    return { name: "identity", status: "failed", detail: `missing: ${missing.join(", ")}` };
   }
 
   // Verify cert public key matches self.signingKey (#1293)
@@ -333,24 +332,43 @@ async function probeTls(): Promise<ProbeResult> {
     const expectedVerifyKey = deriveVerifyKey(config.self.signingKey);
     const certPem = readFileSync(certPath, "utf-8");
     if (!verifyServerCert(certPem, expectedVerifyKey)) {
-      return { name: "tls", status: "failed", detail: "identity.crt pubkey does not match self.signingKey — re-run: abtars install --force" };
+      return { name: "identity", status: "failed", detail: "cert pubkey mismatch — re-run: abtars install --force" };
     }
-    return { name: "tls", status: "ok", detail: "cert present + matches identity key" };
+    return { name: "identity", status: "ok", detail: "cert matches signing key" };
   } catch {
-    return { name: "tls", status: "ok", detail: "certs present (key-match check skipped)" };
+    return { name: "identity", status: "ok", detail: "cert present (key-match skipped)" };
   }
 }
 
-async function probeA2a(): Promise<ProbeResult> {
-  const peersPath = join(configDir, "peers.json");
-  // #1293: gossipSecret and token fields removed — gossip now uses Ed25519
-  const peers = readJson(peersPath) as { self?: { udpPort?: number; signingKey?: string } } | null;
-  if (!peers?.self?.udpPort) return { name: "a2a", status: "skipped", detail: "no gossip port configured" };
-  if (!peers.self.signingKey) return { name: "a2a", status: "failed", detail: "self.signingKey missing — Ed25519 gossip requires identity" };
+async function probeGossip(): Promise<ProbeResult> {
+  const env = readEnv();
+  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "gossip", status: "skipped", detail: "a2a disabled" };
 
-  const port = peers.self.udpPort;
-  // Ed25519 gossip doesn't support the old HMAC ping. Just confirm the port config is present.
-  return { name: "a2a", status: "ok", detail: `UDP gossip configured on :${port} (Ed25519 signed)` };
+  const peers = readJson(join(configDir, "peers.json")) as { peers?: Record<string, unknown>; self?: { signingKey?: string } } | null;
+  const peerCount = Object.keys(peers?.peers ?? {}).length;
+  if (peerCount === 0) return { name: "gossip", status: "skipped", detail: "no peers (solo)" };
+  if (!peers?.self?.signingKey) return { name: "gossip", status: "failed", detail: "self.signingKey missing — Ed25519 gossip requires identity" };
+
+  const port = parseInt(env.get("GOSSIP_PORT") || "5355", 10);
+
+  // Bind-test: if the port is already in use, gossip is live (EADDRINUSE = good).
+  // If we can bind it, nothing is listening → gossip not running.
+  const inUse = await new Promise<boolean>((resolve) => {
+    import("node:dgram").then(({ createSocket }) => {
+      const sock = createSocket("udp4");
+      sock.once("error", (err: NodeJS.ErrnoException) => { sock.close(); resolve(err.code === "EADDRINUSE"); });
+      sock.bind(port, "0.0.0.0", () => { sock.close(); resolve(false); });
+    }).catch(() => resolve(false));
+  });
+  if (!inUse) return { name: "gossip", status: "failed", detail: `${port} not listening` };
+
+  // Live — report broadcast freshness.
+  const lock = readJson(join(home, "bridge.lock"));
+  const last = typeof lock?.lastGossipBroadcast === "number" ? lock.lastGossipBroadcast : 0;
+  if (!last) return { name: "gossip", status: "ok", detail: `${port} / no broadcast yet` };
+  const age = Date.now() - last;
+  if (age > TTL_MS) return { name: "gossip", status: "failed", detail: `${port} / stale (${ago(age)})` };
+  return { name: "gossip", status: "ok", detail: `${port} / last broadcast ${ago(age)}` };
 }
 
 // ── Soul Probes ──────────────────────────────────────────────────────────────
@@ -376,7 +394,7 @@ export async function runAllProbes(): Promise<DoctorOutput> {
     Promise.all([probeHeartbeat()].map(p => timedProbe(() => p))),
     Promise.all([probeTransport(), probeSpin(), probeKanban(), probeSkills(), probeSha()].map(p => timedProbe(() => p))),
     Promise.all([probeMind()].map(p => timedProbe(() => p))),
-    Promise.all([probeAgentApi(), probePeers(), probeTls(), probeA2a()].map(p => timedProbe(() => p))),
+    Promise.all([probeA2a(), probePeers(), probeIdentity(), probeGossip()].map(p => timedProbe(() => p))),
   ]);
 
   return { version: "1.0", totalMs: Date.now() - start, layers: { body, heart, brain, soul, tribe } };
