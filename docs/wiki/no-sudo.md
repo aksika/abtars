@@ -25,6 +25,16 @@ sudo loginctl enable-linger $USER
 
 One-time system admin action. After that: never sudo again.
 
+## Optional system binaries may need a system installer
+
+The optional **system binaries** (`ollama`, `bwrap`, `lightpanda`) are the reason
+`abtars deps` splits its dependencies in two. Npm packages auto-install under `~/`
+with no sudo. System binaries are installed by their own upstream installers, some of
+which touch system paths (`apt install bubblewrap` needs root). That is exactly why
+abtars does **not** auto-install them: `abtars deps install ollama` prints the upstream
+command for you to run (and decide about sudo) rather than running it silently. Nothing
+abtars itself installs requires root.
+
 ## If npm defaults to /usr/local/ (macOS)
 
 macOS ships with npm pointing at `/usr/local/`, which requires sudo for `npm install -g`. Fix with one of:

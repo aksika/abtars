@@ -42,6 +42,22 @@ describe("abtars deps", () => {
     write.mockRestore();
   });
 
+  it("install of a system binary prints its manual hint, not 'Unknown dep'", async () => {
+    const { deps } = await import("./deps.js");
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const code = await deps(["install", "ollama"]);
+    // System binaries are not npm-installable — abtars prints the hint and exits 0.
+    expect(code).toBe(0);
+    const stdout = out.mock.calls.map(c => c[0]).join("");
+    const stderr = err.mock.calls.map(c => c[0]).join("");
+    expect(stdout).toContain("system binary");
+    expect(stdout).toContain("ollama.ai/install.sh");
+    expect(stderr).not.toContain("Unknown dep");
+    out.mockRestore();
+    err.mockRestore();
+  });
+
   it("install with no args defaults to native group", async () => {
     const { deps } = await import("./deps.js");
     const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);

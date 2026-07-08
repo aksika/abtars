@@ -17,7 +17,7 @@ function resolveNmDir(): string {
 }
 
 function list(): number {
-  process.stdout.write("External binaries:\n\n");
+  process.stdout.write("System binaries (install manually — see hint):\n\n");
   for (const [name, dep] of Object.entries(SYSTEM_DEPS)) {
     if (dep.platform && dep.platform !== (process.platform === "darwin" ? "darwin" : "linux")) continue;
     const installed = spawnSync("which", [dep.bin], { stdio: "pipe" }).status === 0;
@@ -26,15 +26,36 @@ function list(): number {
     process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label}${hint}\n`);
   }
 
-  process.stdout.write("\nNpm packages (auto-installable):\n\n");
+  process.stdout.write("\nNpm packages (auto-install via 'abtars deps install <name>'):\n\n");
   for (const [name, dep] of Object.entries(OPTIONAL_DEPS)) {
     const installed = dep.packages.every(p => isInstalled(p));
     const icon = installed ? "✓" : "○";
     process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label} (${dep.packages.join(", ")})\n`);
   }
 
-  process.stdout.write(`\nInstall: abtars deps install [name|all]  (default: native)\nUpdate:  abtars deps update [name|all]   (skip if present)\nRemove:  abtars deps remove <name>\n`);
+  process.stdout.write(
+    `\nNpm packages install automatically. System binaries do NOT — 'install <binary>'\n` +
+    `prints the upstream install command to run yourself.\n\n` +
+    `Install: abtars deps install [name|all]  (default: native)\n` +
+    `Update:  abtars deps update [name|all]   (skip if present)\n` +
+    `Remove:  abtars deps remove <name>\n`,
+  );
   return 0;
+}
+
+/**
+ * If `name` is a system binary (ollama, bwrap, lightpanda), print its manual
+ * install hint and return true. These are NOT npm-auto-installable — abtars
+ * only points at the upstream installer. Returns false if `name` is unknown.
+ */
+function printSystemDepHint(name: string): boolean {
+  const sys = SYSTEM_DEPS[name];
+  if (!sys) return false;
+  process.stdout.write(
+    `${name} is a system binary, not an npm package — abtars can't auto-install it.\n` +
+    `Install it manually:\n  ${sys.installHint}\n`,
+  );
+  return true;
 }
 
 function install(names: string[]): number {
@@ -44,6 +65,9 @@ function install(names: string[]): number {
   for (const name of targets) {
     const dep = OPTIONAL_DEPS[name];
     if (!dep) {
+      // System binaries (ollama, bwrap, lightpanda) aren't npm-installable —
+      // print the manual hint instead of a dead-end "Unknown dep".
+      if (printSystemDepHint(name)) return 0;
       process.stderr.write(`Unknown dep: ${name}. Run 'abtars deps list'.\n`);
       return 1;
     }
@@ -75,6 +99,7 @@ function update(names: string[]): number {
   for (const name of targets) {
     const dep = OPTIONAL_DEPS[name];
     if (!dep) {
+      if (printSystemDepHint(name)) return 0;
       process.stderr.write(`Unknown dep: ${name}. Run 'abtars deps list'.\n`);
       return 1;
     }
