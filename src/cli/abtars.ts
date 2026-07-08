@@ -53,14 +53,14 @@ function printUsage(): void {
     `abtars — install/update CLI (#158)
 
 Usage:
-  abtars install [--force] [--mode=simple|supervised] [--restore <backup.zip>]
+  abtars install [--force] [--mode=simple|daemon] [--restore <backup.zip>]
+  abtars install --non-interactive --accept-risk [onboard flags...]
   abtars uninstall [--yes]
   abtars update  [--dev [DIR] | --alpha | --stable]
   abtars rollback [--to <version>]
   abtars backup [--config] [--encrypt] [--output <dir>] [--prune-days N]
   abtars restore <file.zip|.7z|.abm|.enc> [--config] [--passphrase <p>]
   abtars doctor [--json] [--fix]
-  abtars install [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   abtars restart [--cold]
   abtars start
   abtars stop
@@ -68,7 +68,10 @@ Usage:
   abtars logs
   abtars config
   abtars deps [list|install|remove]
-`,
+  abtars tribe join --peer <host:port>
+  abtars tribe invite --peer <host:port>
+  abtars tribe status
+  `,
   );
 }
 
@@ -92,7 +95,24 @@ export async function main(argv: readonly string[]): Promise<number> {
 
   try {
     switch (command) {
-      case 'install':
+      case 'install': {
+        if (flags.get('help') === true) { printUsage(); return 0; }
+        // Channel: --dev [dir], --alpha, --stable (same as update)
+        let source: 'dev' | 'alpha' | 'stable' = 'alpha';
+        let installLocalDir: string | undefined;
+        if (flags.get('dev') === true || typeof flags.get('dev') === 'string') {
+          source = 'dev';
+          if (typeof flags.get('dev') === 'string') installLocalDir = flags.get('dev') as string;
+        } else if (flags.get('alpha') === true) {
+          source = 'alpha';
+        } else if (flags.get('stable') === true) {
+          source = 'stable';
+        } else if (flags.has('local') || flags.get('source') === 'local') {
+          source = 'dev';
+          if (typeof flags.get('local') === 'string') installLocalDir = flags.get('local') as string;
+        } else if (flags.get('source') === 'npm') {
+          source = 'alpha';
+        }
         return await onboard({
           nonInteractive: flags.get('non-interactive') === true,
           acceptRisk: flags.get('accept-risk') === true,
@@ -106,7 +126,10 @@ export async function main(argv: readonly string[]): Promise<number> {
           instanceName: typeof flags.get('instance-name') === 'string' ? (flags.get('instance-name') as string) : undefined,
           passphrase: typeof flags.get('passphrase') === 'string' ? (flags.get('passphrase') as string) : undefined,
           force: flags.get('force') === true,
+          source,
+          localDir: installLocalDir,
         });
+      }
       case 'uninstall':
         return await uninstall({ yes: flags.get('yes') === true });
       case 'update': {
@@ -134,6 +157,12 @@ export async function main(argv: readonly string[]): Promise<number> {
           skipFreshness: source === 'dev',
           allowAbmindMismatch: flags.get('allow-abmind-mismatch') === true,
         });
+      }
+      case '__deploy': {
+        // Hidden (#1237): activation entry. Run by the freshly-staged bundle;
+        // consumes a StagedRelease produced by the bootstrap. Not user-facing.
+        const { deployActivationCli } = await import('./deploy-lib/deploy.js');
+        return await deployActivationCli(flags);
       }
       case 'rollback':
         return await rollback({ to: typeof flags.get('to') === 'string' ? Number(flags.get('to')) : undefined });
@@ -182,6 +211,10 @@ export async function main(argv: readonly string[]): Promise<number> {
       case 'config': {
         const { configShow } = await import('./commands/config-show.js');
         return await configShow();
+      }
+      case 'tribe': {
+        const { tribe: tribeCmd } = await import('./commands/tribe.js');
+        return await tribeCmd(argv.slice(1));
       }
       case '':
       case 'help':

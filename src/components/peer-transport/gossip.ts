@@ -1,9 +1,13 @@
 /**
- * gossip.ts — Peer health gossip (#971).
+ * gossip.ts — Peer health gossip (#971, #1293).
  *
  * Each peer broadcasts liveness + load + capabilities every 60s via UDP.
- * All peers maintain a live peer table (Map with 90s TTL).
+ * All peers maintain a live peer table (Map with 3× TTL).
  * Orc reads this table for intelligent routing.
+ *
+ * #1293: Packet auth changed from HMAC-SHA256 to Ed25519 signatures.
+ * gossipSecret / token removed. Packet format:
+ *   payloadJson + "|" + base64(sign(privKey, "abtars-gossip-v1\n" + payloadJson))
  */
 
 import { createSocket, type Socket } from "node:dgram";
@@ -12,7 +16,6 @@ import { existsSync } from "node:fs";
 import { cpus, loadavg } from "node:os";
 import { loadPeerConfig } from "../peer-config.js";
 import { logInfo, logDebug, logWarn, logTrace } from "../logger.js";
-import { createHmac } from "node:crypto";
 
 const TAG = "gossip";
 const GOSSIP_PORT = parseInt(process.env["GOSSIP_PORT"] ?? "5355", 10);
@@ -54,12 +57,7 @@ function getLoad(): number {
   return Math.min(1, loadavg()[0]! / cores);
 }
 
-/** Build the gossip packet. */
-function getGossipKey(config: ReturnType<typeof loadPeerConfig>): string | null {
-  if (config.gossipSecret) return config.gossipSecret as string;
-  return null;
-}
-
+/** Build the gossip packet (Ed25519 signed). */
 function buildPacket(): Buffer {
   const config = loadPeerConfig();
   const payload = JSON.stringify({
@@ -70,34 +68,52 @@ function buildPacket(): Buffer {
     capabilities: _capabilities,
     version: process.env["npm_package_version"] ?? "?",
   });
-  const key = getGossipKey(config) ?? Object.values(config.peers)[0]?.token ?? "default";
-  const sig = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
+  // Sign with Ed25519 identity key
+  const { sign: cryptoSign } = require("node:crypto") as typeof import("node:crypto");
+  const { createPrivateKey } = require("node:crypto") as typeof import("node:crypto");
+  const privKey = createPrivateKey({ key: Buffer.from(config.self.signingKey, "base64"), format: "der", type: "pkcs8" });
+  const canonical = `abtars-gossip-v1\n${payload}`;
+  const sig = cryptoSign(null, Buffer.from(canonical, "utf-8"), privKey).toString("base64");
   return Buffer.from(`${payload}|${sig}`);
 }
 
-/** Verify incoming packet HMAC. */
+/** Verify incoming Ed25519-signed gossip packet. */
 function verifyPacket(data: Buffer): Record<string, unknown> | null {
   const str = data.toString("utf8");
   const sepIdx = str.lastIndexOf("|");
   if (sepIdx < 0) return null;
   const payload = str.slice(0, sepIdx);
-  const sig = str.slice(sepIdx + 1);
+  const sigBase64 = str.slice(sepIdx + 1);
+
+  // Parse name from payload to look up verifyKey
+  let parsed: Record<string, unknown>;
+  try { parsed = JSON.parse(payload); } catch { return null; }
+  if (typeof parsed.name !== "string") return null;
+
   const config = loadPeerConfig();
-  // Prefer shared gossipSecret
-  const shared = getGossipKey(config);
-  if (shared) {
-    const expected = createHmac("sha256", shared).update(payload).digest("base64url").slice(0, 16);
-    if (sig === expected) { try { return JSON.parse(payload); } catch { return null; } }
+  const name = parsed.name as string;
+
+  // Ignore our own gossip
+  if (name === config.self.name) return null;
+
+  const peerEntry = config.peers[name];
+  if (!peerEntry?.verifyKey) {
+    logTrace(TAG, `Gossip from unknown peer '${name}' — dropped`);
     return null;
   }
-  // Fallback: try all peer tokens
-  for (const peer of Object.values(config.peers)) {
-    const key = peer.token;
-    if (!key) continue;
-    const expected = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
-    if (sig === expected) { try { return JSON.parse(payload); } catch { return null; } }
+
+  const { verify: cryptoVerify } = require("node:crypto") as typeof import("node:crypto");
+  const { createPublicKey } = require("node:crypto") as typeof import("node:crypto");
+  try {
+    const pubKey = createPublicKey({ key: Buffer.from(peerEntry.verifyKey, "base64"), format: "der", type: "spki" });
+    const canonical = `abtars-gossip-v1\n${payload}`;
+    const ok = cryptoVerify(null, Buffer.from(canonical, "utf-8"), pubKey, Buffer.from(sigBase64, "base64"));
+    if (!ok) { logWarn(TAG, `Gossip from ${name}: bad Ed25519 signature — dropped`); return null; }
+  } catch {
+    return null;
   }
-  return null;
+
+  return parsed;
 }
 
 /** Broadcast to all known peers. */
@@ -110,6 +126,11 @@ function broadcast(): void {
     });
   }
   logTrace(TAG, `Broadcast to ${Object.keys(config.peers).length} peer(s)`);
+  // Record broadcast time for /status + /doctor gossip freshness (#1211).
+  try {
+    const { updateBridgeLockField } = require("../transport/bridge-lock-transport.js") as typeof import("../transport/bridge-lock-transport.js");
+    updateBridgeLockField("lastGossipBroadcast", Date.now());
+  } catch { /* lock unavailable — non-fatal */ }
   // Expire stale entries
   const now = Date.now();
   for (const [, health] of peerTable) {
@@ -130,16 +151,6 @@ export function startGossip(): void {
     if (!parsed || typeof parsed.name !== "string") return;
     const name = parsed.name as string;
     const config = loadPeerConfig();
-
-    // Ping/pong: reply with signed PONG, skip peer-table update
-    if (parsed.type === "ping") {
-      const key = getGossipKey(config) ?? Object.values(config.peers)[0]?.token ?? "default";
-      const pong = "PONG";
-      const sig = createHmac("sha256", key).update(pong).digest("base64url").slice(0, 16);
-      const reply = Buffer.from(`${pong}|${sig}`);
-      _socket?.send(reply, 0, reply.length, rinfo.port, rinfo.address);
-      return;
-    }
 
     if (name === config.self.name) return; // ignore own echo
 
@@ -176,9 +187,39 @@ export function stopGossip(): void {
   if (_socket) { _socket.close(); _socket = null; }
 }
 
-/** Get live peer table (alive peers only unless includeAll). */
+/** Get live peer table (alive peers only unless includeAll). Also marks ws-outbound peers as alive if WS is connected. */
 export function getPeerTable(includeAll = false): PeerHealth[] {
   const now = Date.now();
+
+  // Mark ws-outbound peers as alive if they have a live WS connection (even without gossip)
+  try {
+    const { getPeerTransport } = require("./index.js") as typeof import("./index.js");
+    const transport = getPeerTransport() as import("./http-transport.js").HttpTransport;
+    const { loadPeerConfig } = require("../peer-config.js") as typeof import("../peer-config.js");
+    const config = loadPeerConfig();
+    for (const [name, entry] of Object.entries(config.peers)) {
+      if (entry.transport === "ws-outbound" && typeof transport.hasWsConnection === "function" && transport.hasWsConnection(name)) {
+        const existing = peerTable.get(name);
+        if (!existing) {
+          peerTable.set(name, {
+            name,
+            lastSeen: now,
+            load: 0,
+            sessions: 0,
+            capabilities: [],
+            version: "?",
+            alive: true,
+            host: entry.host,
+            port: entry.port,
+          });
+        } else {
+          existing.lastSeen = now;
+          existing.alive = true;
+        }
+      }
+    }
+  } catch { /* best effort — transport may not be up */ }
+
   const results: PeerHealth[] = [];
   for (const health of peerTable.values()) {
     health.alive = (now - health.lastSeen) < TTL_MS;

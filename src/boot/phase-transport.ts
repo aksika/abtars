@@ -13,6 +13,7 @@ import { createAgentTransport } from "../components/agent-registry.js";
 import { logDebug, logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
+import { abmind } from "../utils/abmind-lazy.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 
@@ -318,55 +319,37 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     logDebug("main", "🛡️ Seatbelt wired to tool-registry");
   }
 
-  if (resolved.provider.transport === "api" && (ctx.memory as any)?.available) {
-    const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
-    // #860: Use the SAME MemoryManager instance — don't create a second SqliteBackend.
-    // Two separate DB connections to the same WAL-mode file corrupt each other's handles.
-    const mm = ctx.memory!;
-    const backend = {
-      initialize: async () => {},
-      close: () => {},
-      instantStore: (p: any) => mm.editor.instantStore(p),
-      editMemory: (p: any) => mm.editor.editMemory(p),
-      reclassifyMemory: (id: number, level: number, uo: boolean) => { mm.editor.reclassifyMemory(id, level, uo); return Promise.resolve(); },
-      adjustRelevance: (id: number, delta: number) => { mm.editor.adjustRelevance(id, delta); return Promise.resolve(); },
-      mergeMemories: (a: number, b: number) => mm.editor.mergeMemories(a, b),
-      cascadeDelete: (ids: number[], uid: string) => mm.editor.cascadeDelete(ids, uid),
-      recall: (p: any) => mm.recallSearch(p),
-      rebuildFtsIndexes: () => mm.rebuildFtsIndexes(),
-    };
-    setMemoryBackend(backend as any);
-    logInfo("main", "🧠 In-process memory wired to tool registry (shared handle)");
-
-    // #843: Wire memory to transport for session hydration on restart
+  // #843: Wire memory to DirectApiTransport for session hydration on restart.
+  // Transport-specific — only DirectApiTransport has this field.
+  if (resolved.provider.transport === "api" && ctx.memory) {
     (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).memoryBackend = ctx.memory!;
 
-    // Wire context engine for automatic compaction
+    // Wire context engine for automatic compaction (DirectApiTransport-specific).
     const db = ctx.memory!.getDb?.() ?? ctx.memory!.getDatabase?.();
     if (db && resolved.contextWindow >= 128000) {
-      const { ContextEngine } = await import("abmind");
-      const { createContextOrchestrator } = await import("../components/context/index.js");
-      const contextEngine = new ContextEngine(db);
-      const orchestrator = createContextOrchestrator(
-        contextEngine,
-        async (systemPrompt: string, userPrompt: string) => {
-          // Use the transport itself for summarization (same model, same endpoint)
-          const { streamSingleCompletion } = await import("../components/transport/stream-single.js");
-          return streamSingleCompletion({
-            endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
-            apiKey: getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY") ?? undefined,
-            model: resolved.model,
-            systemPrompt,
-            userPrompt,
-            maxTokens: 4096,
-          });
-        },
-        (_chatId: string) => {
-          try { return ctx.memory?.getLastMessageTimestamp(true) ?? null; } catch (err) { logAndSwallow(TAG, "getLastMessageTimestamp", err); return null; }
-        },
-      );
-      (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).contextOrchestrator = orchestrator;
-      logInfo("main", "📦 Context engine wired (auto-compaction active)");
+      const mod = abmind();
+      if (mod) {
+        const { ContextEngine } = mod;
+        const { createContextOrchestrator } = await import("../components/context/index.js");
+        const { spin } = await import("../components/spin.js");
+        const { recordCompaction } = await import("../components/metrics-collector.js");
+        const contextEngine = new ContextEngine(db);
+        // Cheap compaction model: route summarization through Spin as an S-type
+        // one-shot (ephemeral, terminateAfter "call") on the dreamy agent. Spin
+        // resolves agent → model/provider/metrics; no raw LLM call, no lingering session.
+        const compactionModel = (tc ? resolveAgent("dreamy", tc) : null)?.model ?? null;
+        const orchestrator = createContextOrchestrator(
+          contextEngine,
+          (systemPrompt: string, userPrompt: string) =>
+            spin.dispatchBackground({ agent: "dreamy", prompt: `${systemPrompt}\n\n${userPrompt}` }),
+          (_chatId: string) => {
+            try { return ctx.memory?.getLastMessageTimestamp(true) ?? null; } catch (err) { logAndSwallow(TAG, "getLastMessageTimestamp", err); return null; }
+          },
+          { compactionModel, onCompactionEvent: recordCompaction },
+        );
+        (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).contextOrchestrator = orchestrator;
+        logInfo("main", `📦 Context engine wired (auto-compaction active, model: ${compactionModel ?? "main"})`);
+      }
     }
   }
 
@@ -376,11 +359,19 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       const reasonTag = reason ? ` (${reason})` : "";
       const msg = `⚡ Fallback${reasonTag}: ${model}${ctxPct >= 0 ? ` (ctx: ~${ctxPct}%)` : ""}`;
       logInfo("main", msg);
-      if (model !== lastNotifiedModel || isLogLevel("debug")) {
+      // #1296: notify once per fallback episode. Do NOT bypass on debug — logInfo() above covers
+      // debug logging. Re-armed by onPrimaryRestored when primary recovers.
+      if (model !== lastNotifiedModel) {
         lastNotifiedModel = model;
         import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(err => logAndSwallow(TAG, "sendNotification fallback", err));
       }
     };
+    // #1296: re-arm when primary recovers so the next fallback episode notifies again
+    if ("onPrimaryRestored" in transport) {
+      (transport as unknown as { onPrimaryRestored: () => void }).onPrimaryRestored = () => {
+        lastNotifiedModel = null;
+      };
+    }
   }
   return "ran";
 }

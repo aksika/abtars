@@ -148,7 +148,7 @@ function handleKnownFault(rule: FixRule, _errorKey: string, adapter: TelegramAda
       }
     } else if (rule.verified === false) {
       // Unverified self-rule first success — notify
-      notify(adapter, chatId, `🔧 Self-fix ran: "${rule.pattern}" → ${rule.command.join(" ")} ✓\nRun /healing approve ${rule.pattern.slice(0, 20)} to silence.`);
+      notify(adapter, chatId, `🔧 Self-fix ran: "${rule.pattern}" → ${(rule.command ?? []).join(" ")} ✓\nRun /healing approve ${rule.pattern.slice(0, 20)} to silence.`);
     }
   });
 }

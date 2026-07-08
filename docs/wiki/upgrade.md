@@ -20,18 +20,12 @@ abtars update
 
 `abtars update` builds from source, stages into `app.staging/`, atomically swaps to `app/`, restarts, and health-verifies. Auto-rolls back if the bridge fails to start.
 
-## macOS (Molty)
+## macOS
 
 From Telegram (remote):
 ```
 /update pull        ← fetches latest code
 /update deploy       ← builds + deploys + restarts
-```
-
-Or via SSH:
-```bash
-cd ~/abmind && git pull --ff-only origin dev && npm run build
-cd ~/abtars && git pull --ff-only origin dev && abtars update --from-local
 ```
 
 ## abmind-only changes
@@ -81,3 +75,21 @@ Auto-rollback handles most cases. If both new and rolled-back versions fail:
 2. Restore config: `cp ~/.abtars/config/.pre-update/* ~/.abtars/config/`
 3. Manual start: `node ~/.abtars/app/bundle/abtars.js`
 4. Nuclear: `abtars stop --force && abtars update --from-local`
+
+## If `abtars update` itself is broken (no release staged)
+
+When the deployed CLI is so broken that `abtars update` cannot run — for example
+`abtars: no release staged. Run 'abtars install' first.` because the wrapper
+can't locate the bundle, or the bridge is dead and the watchdog can't respawn
+it — use the emergency script. It does the full deploy (build, stage, swap
+symlinks, restart, health-probe) with plain `npm` + `esbuild` and direct
+launchctl/systemd calls. No working deployed binary required.
+
+```bash
+bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
+```
+
+Make sure the source checkout is on the commit you want first:
+```bash
+cd ~/.abtars-releases/src/abtars && git pull
+```

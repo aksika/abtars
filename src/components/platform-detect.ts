@@ -11,8 +11,27 @@ import { getEnv } from "./env-schema.js";
  * Fallback: OS-specific detection for non-bridge-initiated sleeps (lid close, OS idle).
  */
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { platform } from "node:os";
 import { readBridgeLockField } from "./transport/bridge-lock-transport.js";
+
+/** #1265: WSL detection — cached at module load since the platform never changes at runtime.
+ *  WSL kernels append "microsoft" or "WSL" to /proc/version. */
+let _isWslCache: boolean | null = null;
+export function isWsl(): boolean {
+  if (_isWslCache !== null) return _isWslCache;
+  try {
+    const version = readFileSync("/proc/version", "utf-8").toLowerCase();
+    _isWslCache = version.includes("microsoft") || version.includes("wsl");
+  } catch {
+    _isWslCache = false;
+  }
+  return _isWslCache;
+}
+
+/** #1265: Standby gap threshold for WSL. Below 3h = host-sleep freeze (survived, no restart).
+ *  Above 3h = network state likely stale (DNS, TCP keepalives), restart is justified. */
+export const WSL_STANDBY_THRESHOLD_MS = 180 * 60 * 1000;
 
 export type ResumeKind = "dark" | "full" | "unknown";
 

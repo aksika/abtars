@@ -1,12 +1,12 @@
 {
   "name": "abtars",
-  "version": "0.3.3",
-  "description": "Standalone agent bridging Telegram to Kiro CLI via tmux/ACP",
+  "version": "0.3.4",
+  "description": "Agentic framework for connecting LLMs to messaging platforms, with persistent memory, skills, scheduled tasks, self-healing supervision, and distributed multi-agent collaboration",
   "type": "module",
   "main": "bundle/abtars.js",
   "scripts": {
     "build": "tsc && rm -rf dist/components/dashboard/public && cp -r src/components/dashboard/public dist/components/dashboard/public && git log -1 --format='{\"hash\":\"%h\",\"date\":\"%ci\"}' > dist/build-info.json",
-    "bundle": "rm -rf bundle && cd ../abmind && npm run build && cd ../abtars && node esbuild.config.js && rm -rf bundle/public && cp -r src/components/dashboard/public bundle/public && cp -r agents bundle/agents",
+    "bundle": "rm -rf bundle && node esbuild.config.js && rm -rf bundle/public && cp -r src/components/dashboard/public bundle/public && ([ -d agents ] && cp -r agents bundle/agents || true)",
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
@@ -55,9 +55,5 @@
     "CHANGELOG.md",
     "install-manifest.json",
     "config/"
-  ],
-  "optionalDependencies": {
-    "better-sqlite3": "^12.10.0",
-    "cloakbrowser": "^0.4.3"
-  }
+  ]
 }

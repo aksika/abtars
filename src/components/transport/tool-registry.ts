@@ -14,10 +14,6 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { getMasterUserId } from "../master-user.js";
 
-function getMasterUserId(): string {
-  return getMasterUserId();
-}
-
 const TAG = "tool_registry";
 
 // #449: append-only audit log
@@ -37,6 +33,10 @@ export type ToolDefinition = {
 
 const BASH_TIMEOUT_MS = 300_000;
 const CLI_TIMEOUT_MS = 60_000;
+
+// #1266: when no in-process memory backend is wired, return this error
+// rather than silently shelling out to a CLI on PATH we don't trust.
+const MEMORY_BACKEND_ERROR = "memory backend not initialized — abmind failed to load or below supported floor";
 
 /**
  * Patterns that would spawn or restart a bridge/watchdog process.
@@ -249,12 +249,7 @@ const memoryStoreTool: ToolDefinition = {
         return JSON.stringify({ error: msg });
       }
     }
-    let cmd = `abmind store --translated ${JSON.stringify(args["translated"] ?? "")} --type ${args["type"] ?? "fact"}`;
-    if (args["original"]) cmd += ` --original ${JSON.stringify(args["original"])}`;
-    if (args["emotion"]) cmd += ` --emotion-score ${args["emotion"]}`;
-    if (args["confidence"]) cmd += ` --confidence ${args["confidence"]}`;
-    if (args["classification"]) cmd += ` --classification ${args["classification"]}`;
-    return runBash(cmd, CLI_TIMEOUT_MS);
+    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
   },
 };
 
@@ -289,9 +284,7 @@ const memoryRecallTool: ToolDefinition = {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
       }
     }
-    let cmd = `abmind recall ${JSON.stringify(args["query"] ?? "")}`;
-    if (args["limit"]) cmd += ` --limit ${args["limit"]}`;
-    return runBash(cmd, CLI_TIMEOUT_MS);
+    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
   },
 };
 
@@ -330,15 +323,7 @@ const memoryEditTool: ToolDefinition = {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
       }
     }
-    let cmd = `abmind edit --memory-id ${args["memory_id"] ?? "0"}`;
-    if (args["translated"]) cmd += ` --translated ${JSON.stringify(args["translated"])}`;
-    if (args["original"]) cmd += ` --original ${JSON.stringify(args["original"])}`;
-    if (args["type"]) cmd += ` --type ${args["type"]}`;
-    if (args["emotion"]) cmd += ` --emotion-score ${args["emotion"]}`;
-    if (args["confidence"]) cmd += ` --confidence ${args["confidence"]}`;
-    if (args["classification"]) cmd += ` --classification ${args["classification"]}`;
-    if (args["caller"]) cmd += ` --caller ${args["caller"]}`;
-    return runBash(cmd, CLI_TIMEOUT_MS);
+    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
   },
 };
 
@@ -473,6 +458,11 @@ const peerSessionTool: ToolDefinition = {
     required: ["peer_name", "message"],
   },
   async execute(args) {
+    // #1301 — no relay: a peer-originated request must never make us call a third peer.
+    const { isActiveCardPeerSourced } = await import("./orc-tools.js");
+    if (await isActiveCardPeerSourced()) {
+      return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
+    }
     const { callPeer } = await import("../peer-client.js");
     const { loadPeerConfig } = await import("../peer-config.js");
     const { getOrCreateSession, addTurn, isEnded, destroySession } = await import("../peer-sessions.js");
@@ -525,6 +515,11 @@ const peerWakeupTool: ToolDefinition = {
     required: ["peer_name"],
   },
   async execute(args) {
+    // #1301 — no relay: a peer-originated request must never wake/reach a third peer via us.
+    const { isActiveCardPeerSourced } = await import("./orc-tools.js");
+    if (await isActiveCardPeerSourced()) {
+      return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
+    }
     const { sendWakeup } = await import("../dns-wakeup.js");
     const { loadPeerConfig } = await import("../peer-config.js");
     const peerName = args.peer_name?.trim();
@@ -533,7 +528,7 @@ const peerWakeupTool: ToolDefinition = {
     const peer = config.peers[peerName];
     if (!peer) return JSON.stringify({ error: `Unknown peer: ${peerName}` });
     const udpPort = peer.udpPort ?? 5353;
-    sendWakeup(config.self.name, peer.host, udpPort, peer.token);
+    sendWakeup(config.self.name, peer.host, udpPort);
     return JSON.stringify({ ok: true, message: `Wake-up sent to ${peerName}. Expect callback within seconds.` });
   },
 };
@@ -568,29 +563,9 @@ const secretGetTool: ToolDefinition = {
     const name = args.name?.trim();
     if (!name) return JSON.stringify({ error: "name is required" });
     try {
-      const { join } = await import("node:path");
-      const { homedir } = await import("node:os");
-      const { readFileSync, existsSync } = await import("node:fs");
-      const { createDecipheriv, hkdfSync } = await import("node:crypto");
-      const { loadKey } = await import("abmind");
-
-      const secretPath = join(homedir(), ".abtars", "secret", name);
-      if (!existsSync(secretPath)) return JSON.stringify({ error: `secret '${name}' not found` });
-
-      const raw = readFileSync(secretPath, "utf-8").trim();
-      if (!raw) return JSON.stringify({ error: `secret '${name}' is empty` });
-
-      let value: string;
-      if (raw.startsWith("ENC:")) {
-        const master = loadKey();
-        const key = Buffer.from(hkdfSync("sha256", master, "", "abtars-secrets-files-v1", 32));
-        const buf = Buffer.from(raw.slice(4), "base64");
-        const d = createDecipheriv("aes-256-gcm", key, buf.subarray(1, 13));
-        d.setAuthTag(buf.subarray(buf.length - 16));
-        value = d.update(buf.subarray(13, buf.length - 16), undefined, "utf-8") + d.final("utf-8");
-      } else {
-        value = raw;
-      }
+      const { readSecret } = await import("../../components/secrets.js");
+      const value = readSecret(name);
+      if (value === undefined) return JSON.stringify({ error: `secret '${name}' not found or could not be decrypted` });
 
       // For env-var type (no extension): also inject into process.env
       if (!name.includes(".")) {

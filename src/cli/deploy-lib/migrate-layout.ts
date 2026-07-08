@@ -4,12 +4,12 @@
  */
 
 import { existsSync, lstatSync, mkdirSync, renameSync, symlinkSync, writeFileSync, readFileSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { join } from "node:path";
+import { resolveReleasesDir } from "./paths.js";
 
 export function migrateIfNeeded(home: string): boolean {
   const appDir = join(home, "app");
-  const releasesDir = resolve(homedir(), ".abtars-releases");
+  const releasesDir = resolveReleasesDir();
 
   // Already migrated: app/ is a symlink OR releases/current exists
   if (!existsSync(appDir)) return false;

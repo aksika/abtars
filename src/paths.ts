@@ -1,6 +1,7 @@
 import { resolve, join, relative } from "node:path";
 import { homedir } from "node:os";
 import { mkdirSync, readFileSync, realpathSync, existsSync } from "node:fs";
+import { resolveReleasesDir } from "./cli/deploy-lib/paths.js";
 
 /** Base directory for all Abtars runtime data. Override with ABTARS_HOME env var. */
 export function abtarsHome(): string {
@@ -22,7 +23,7 @@ let _abtarsRootCache: string | null = null;
 export function abtarsRoot(): string {
   if (process.env.ABTARS_ROOT) return process.env.ABTARS_ROOT;
   if (_abtarsRootCache) return _abtarsRootCache;
-  const releasesDir = resolve(homedir(), ".abtars-releases", "current");
+  const releasesDir = join(resolveReleasesDir(), "current");
   if (existsSync(releasesDir)) { _abtarsRootCache = realpathSync(releasesDir); return _abtarsRootCache; }
   // Legacy fallback: app/ inside abtarsHome (pre-#1089)
   const legacyApp = join(abtarsHome(), "app");

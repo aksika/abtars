@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
 import { normalizeToolCalls } from "./transport-utils.js";
@@ -206,5 +206,62 @@ describe("DirectApiTransport — construction and model switching", () => {
       maxTurns: 50,
     }, policy);
     expect(transport.toolCallsSucceeded).toBe(0);
+  });
+});
+
+// #1295: contextPercent must reflect the ACTIVE model's window, not the primary's window.
+describe("DirectApiTransport.contextPercent — active window (#1295)", () => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+  afterEach(() => { fetchSpy.mockReset(); });
+
+  function makeStreamResponse(promptTokens: number): Response {
+    const line = `data: ${JSON.stringify({
+      choices: [{ delta: { content: "hello" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: promptTokens, completion_tokens: 5 },
+    })}\n\ndata: [DONE]\n\n`;
+    return new Response(line, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }) as unknown as Response;
+  }
+
+  it("uses primary model window when primary serves", async () => {
+    const reg = new ModelHealthRegistry();
+    const PRIMARY_CTX = 100_000;
+    const policy = new FallbackPolicy([
+      { model: "primary", endpoint: "http://ep1/v1", maxContext: PRIMARY_CTX },
+    ], reg);
+    const transport = new DirectApiTransport({
+      endpoint: "http://ep1/v1", apiKey: "k", model: "primary",
+      maxContext: PRIMARY_CTX, maxOutput: 1000, maxTurns: 5,
+    }, policy);
+
+    // 10_000 prompt tokens on a 100_000 window = 10%
+    fetchSpy.mockResolvedValue(makeStreamResponse(10_000));
+    await transport.sendPrompt("s1", "hi");
+    expect(transport.contextPercent).toBe(10);
+  });
+
+  it("uses FALLBACK model window when fallback serves (#1295 fix)", async () => {
+    const reg = new ModelHealthRegistry();
+    const PRIMARY_CTX = 1_000_000; // huge primary window
+    const FALLBACK_CTX = 100_000; // smaller fallback window
+    const policy = new FallbackPolicy([
+      { model: "primary", endpoint: "http://ep1/v1", maxContext: PRIMARY_CTX },
+      { model: "fallback", endpoint: "http://ep1/v1", maxContext: FALLBACK_CTX },
+    ], reg);
+    const transport = new DirectApiTransport({
+      endpoint: "http://ep1/v1", apiKey: "k", model: "primary",
+      maxContext: PRIMARY_CTX, maxOutput: 1000, maxTurns: 5,
+    }, policy);
+
+    // Primary fails with credits — sticky skip
+    reg.recordError("primary", "http://ep1/v1", "credits");
+
+    // 10_000 tokens on 100_000 fallback window = 10%, NOT 1% (10_000/1_000_000)
+    fetchSpy.mockResolvedValue(makeStreamResponse(10_000));
+    await transport.sendPrompt("s1", "hi");
+    expect(transport.contextPercent).toBe(10);
   });
 });

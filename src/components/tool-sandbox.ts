@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { abtarsHome } from "../paths.js";
+import { abtarsHome, abmindHome } from "../paths.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 
 export interface SandboxPolicy {
@@ -27,7 +27,7 @@ export interface CheckResult {
 const PATH_BLACKLIST: readonly string[] = [
   resolve(abtarsHome(), "config"),
   resolve(abtarsHome(), "secret"),
-  resolve(homedir(), ".abmind"),
+  resolve(abmindHome()),
 ];
 
 const AUDIT_DIR = join(abtarsHome(), "logs");
@@ -66,7 +66,7 @@ export function checkPath(filePath: string, mode: "read" | "write", policy: Sand
   return { allowed: false, reason: `Path '${filePath}' not in allowed ${mode} paths` };
 }
 
-export function buildPolicy(source: "owner" | "peer" | "guest", config?: Partial<SandboxPolicy>): Readonly<SandboxPolicy> {
+export function buildPolicy(source: "owner" | "peer", config?: Partial<SandboxPolicy>): Readonly<SandboxPolicy> {
   let base: SandboxPolicy;
   switch (source) {
     case "owner":
@@ -74,9 +74,6 @@ export function buildPolicy(source: "owner" | "peer" | "guest", config?: Partial
       break;
     case "peer":
       base = { allowedTools: [], allowedRead: [], allowedWrite: [], canExecuteBash: false };
-      break;
-    case "guest":
-      base = { allowedTools: ["web_fetch"], allowedRead: [], allowedWrite: [], canExecuteBash: false };
       break;
   }
   if (config) base = { ...base, ...config };

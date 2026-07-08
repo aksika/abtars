@@ -1,7 +1,7 @@
 import { printBanner } from './banner.js';
 import { deriveFromPassphrase, writeKeyFile, writeKeyVerify, deriveKey } from '../../utils/crypto.js';
 /**
- * `abtars onboard` — first-time interactive configuration wizard
+ * `abtars install` — first-time interactive configuration wizard
  * (plan #158 Phase 3, subsumes ticket #153).
  *
  * Two modes:
@@ -19,15 +19,13 @@ import { deriveFromPassphrase, writeKeyFile, writeKeyVerify, deriveKey } from '.
  *   - Channel allowlist/users.json multi-user editing (#67 / #204)
  *   - Skills configuration (each skill's .env key)
  *   - Transport provider credentials beyond DEFAULT_PROVIDER (operator
- *     edits config/.env directly post-onboard)
+ *     edits config/.env directly post-install)
  */
 
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
-import { fileURLToPath } from 'node:url';
-import { packagePaths, readManifest } from '../deploy-lib-import.js';
+import { packagePaths, readManifest, resolveReleasesDir } from '../deploy-lib-import.js';
 import { showHintOnce } from '../../components/hints.js';
 
 export interface OnboardOptions {
@@ -43,6 +41,8 @@ export interface OnboardOptions {
   readonly instanceName?: string;
   readonly passphrase?: string;
   readonly force: boolean;
+  readonly source?: 'dev' | 'alpha' | 'stable';
+  readonly localDir?: string;
 }
 
 type ProviderChoice = 'openrouter' | 'anthropic' | 'openai' | 'ollama' | 'kiro' | 'gemini';
@@ -342,7 +342,7 @@ async function validateModelCatalog(model: string, provider: string): Promise<{ 
       join(here, '..', '..', '..', 'templates', 'config', 'models.json'),
       join(here, '..', '..', 'templates', 'config', 'models.json'),
       join(here, '..', 'templates', 'config', 'models.json'),
-      join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'templates', 'config', 'models.json'),
+      join(resolveReleasesDir(), 'src', 'abtars', 'templates', 'config', 'models.json'),
       join(process.env['HOME'] ?? '', '.abtars', 'config', 'models.json'),
     ];
     let catalog: Record<string, { transports?: string[] }> | null = null;
@@ -503,7 +503,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     }
     await chmod(join(paths.home, "secret"), 0o700);
     await chmod(join(paths.home, "config"), 0o700);
-    // Ensure ~/.local/bin/ exists and has our binary (symlink from pnpm bin if needed)
+    // Ensure ~/.local/bin/ exists and has our binary (symlink from global npm bin if needed)
     const { homedir } = await import("node:os");
     const localBin = join(homedir(), ".local", "bin");
     mkdirSync(localBin, { recursive: true });
@@ -511,12 +511,12 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     if (!fileExists(localAbtars)) {
       try {
         const { execSync: ex } = await import("node:child_process");
-        const pnpmBin = ex("pnpm bin -g", { encoding: "utf-8", timeout: 5000 }).trim();
-        const pnpmAbtars = join(pnpmBin, "abtars");
-        if (fileExists(pnpmAbtars)) {
-          symlinkSync(pnpmAbtars, localAbtars);
+        const globalBin = ex("npm root -g", { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "ignore"] }).trim().replace(/\/node_modules$/, "");
+        const npmAbtars = join(globalBin, "abtars");
+        if (fileExists(npmAbtars)) {
+          symlinkSync(npmAbtars, localAbtars);
         }
-      } catch { /* pnpm not available — user installed via npm, binary already in PATH */ }
+      } catch { /* npm not available — binary already in PATH */ }
     }
     const { hostname } = await import("node:os");
     const { emptyManifest, writeManifest: wm } = await import("../deploy-lib-import.js");
@@ -688,7 +688,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       const modelsCandidates = [
         join(here, '..', '..', '..', 'config', 'models.json'),
         join(here, '..', '..', 'config', 'models.json'),
-        join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'config', 'models.json'),
+        join(resolveReleasesDir(), 'src', 'abtars', 'config', 'models.json'),
       ];
       for (const p of modelsCandidates) {
         if (modelsExists(p)) { modelsCopy(p, modelsPath); process.stdout.write(`✓ models.json → ${modelsPath}\n`); break; }
@@ -697,7 +697,8 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 
     // Check abmind encryption compatibility
     try {
-      const manifestPath = join(homedir(), '.abmind', 'manifest.json');
+      const { abmindHome } = await import("../../paths.js");
+      const manifestPath = join(abmindHome(), 'manifest.json');
       const manifest = JSON.parse((await import('node:fs')).readFileSync(manifestPath, 'utf-8'));
       if (manifest.encryptionUser && manifest.encryptionUser !== answers.userName) {
         process.stdout.write(`⚠️  abmind encryption uses name '${manifest.encryptionUser}' but you entered '${answers.userName}'. Backup restore will need the encryption name ('${manifest.encryptionUser}').\n`);
@@ -729,7 +730,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   // Run update (clone source, build, deploy, start bridge)
   process.stdout.write(`\nRunning abtars update...\n`);
   const { update } = await import("./update.js");
-  return await update({ source: "dev", skipFreshness: true, allowAbmindMismatch: false });
+  return await update({ source: opts.source ?? "alpha", localDir: opts.localDir, skipFreshness: true, allowAbmindMismatch: false });
 }
 
 // ── Default task seeding (#383) ─────────────────────────────────────────────
@@ -739,7 +740,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
  * already exists. Called from onboard after .env is persisted so chatId
  * is available.
  */
-async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<void> {
+async function seedDefaultTasks(_chatId: string, abtarsHome: string): Promise<void> {
   const { existsSync, mkdirSync, copyFileSync } = await import('node:fs');
   const tasksJson = join(abtarsHome, 'tasks', 'tasks.json');
   if (existsSync(tasksJson)) {
@@ -752,8 +753,7 @@ async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<voi
   const candidates = [
     join(here, '..', '..', '..', 'config', 'tasks', 'tasks.json'),
     join(here, '..', '..', 'config', 'tasks', 'tasks.json'),
-    join(abtarsHome, '..', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
-    join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
+    join(resolveReleasesDir(), 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
   ];
   let templatePath: string | null = null;
   for (const p of candidates) {

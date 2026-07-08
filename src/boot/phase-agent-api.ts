@@ -30,6 +30,11 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const { AgentApiAdapter } = await import("../platforms/agent-api/agent-api-adapter.js");
   const a2aAdapter = new AgentApiAdapter();
 
+  // Ensure Ed25519 identity + TLS cert exist before AgentApiServer constructor reads them.
+  // bootstrapIdentity() is idempotent — no-op when files already present.
+  const { bootstrapIdentity } = await import("../components/peer-config.js");
+  bootstrapIdentity();
+
   registry.register("agent-api", {
     configured: Boolean(agentConfig.port),
     async create() {
@@ -39,6 +44,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         workingDir: config.transport.workingDir,
         memory,
         runtime,
+        sessionManager: ctx.sessionManager,
         onPeerActivity: notifyPeer,
         a2aAdapter,
       });

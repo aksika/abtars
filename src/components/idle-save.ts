@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn, logDebug } from "./logger.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { localDate } from "../utils/date.js";
 
@@ -36,12 +36,12 @@ export class IdleSave {
   }
 
   async save(sessionKey: string, chatId: number): Promise<void> {
-    if (!this.enabled) return;
+    if (!this.enabled || !this.memoryDir) return;
     // /chat save only works on tmux transport, not ACP
     if (!("sendKeys" in this.transport)) return;
     const today = localDate();
     const dir = join(this.memoryDir, "working", today);
-    mkdirSync(dir, { recursive: true });
+    try { mkdirSync(dir, { recursive: true }); } catch { logDebug("idle-save", `Cannot create ${dir} — skipping`); return; }
     const dest = join(dir, `transcript_${chatId}.chat`);
     try {
       await this.transport.sendPrompt(sessionKey, `/chat save ${dest}`);

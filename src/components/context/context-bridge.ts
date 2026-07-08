@@ -6,7 +6,7 @@
 
 import type { ContextEngine } from "abmind";
 import { abmind } from "../../utils/abmind-lazy.js";
-import type { SummarizeFn } from "abmind";
+import type { SummarizeFn, CompactionEvent } from "abmind";
 
 const SUMMARIZER_SYSTEM = `You are a summarization agent creating a context checkpoint.
 Your output will be injected as reference material for a DIFFERENT assistant that continues the conversation.
@@ -66,11 +66,14 @@ export function createContextOrchestrator(
   contextEngine: ContextEngine,
   llmCall: (systemPrompt: string, userPrompt: string) => Promise<string>,
   getLastAssistantTimestamp: (chatId: string) => number | null,
+  options?: { compactionModel?: string | null; onCompactionEvent?: (event: CompactionEvent) => void },
 ): any {
   const CO = abmind()!.ContextOrchestrator;
   return new CO({
     contextEngine,
     summarize: createSummarizeFn(llmCall),
     getLastAssistantTimestamp,
+    compactionModel: options?.compactionModel ?? null,
+    onCompactionEvent: options?.onCompactionEvent,
   });
 }

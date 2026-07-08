@@ -1,19 +1,21 @@
 /**
  * secrets.ts — Read/write secrets from ~/.abtars/secrets/ directory (#597, #598).
  * One file per secret. Supports plaintext (legacy) and encrypted (ENC: prefix).
+ * Encryption uses abtars's own abtars.key via crypto.ts — no abmind dependency.
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
+import { randomBytes, createCipheriv } from "node:crypto";
 import { abtarsHome } from "../paths.js";
+import { loadKey, deriveKey } from "../utils/crypto.js";
 
 const SECRETS_DIR = join(abtarsHome(), "secret");
 const cache = new Map<string, string>();
 const ALGO = "aes-256-gcm";
 const IV_LEN = 12;
 const TAG_LEN = 16;
-const VERSION = 0x01; // AES-256-GCM with HKDF purpose "abtars-secrets-files-v1"
+const VERSION = 0x01;
 
 // Ensure secrets dir exists on first import
 if (!existsSync(SECRETS_DIR)) {
@@ -23,23 +25,27 @@ if (!existsSync(SECRETS_DIR)) {
 // Lazy-init: derived key cached for process lifetime
 let cachedKey: Buffer | null = null;
 
-async function getSecretsKey(): Promise<Buffer> {
+function getSecretsKey(): Buffer | null {
   if (cachedKey) return cachedKey;
-  const abmind = await import("abmind");
-  cachedKey = abmind.deriveKey("abtars-secrets-files-v1");
-  return cachedKey!;
+  const master = loadKey(join(abtarsHome(), "config", "abtars.key"));
+  if (!master) return null;
+  cachedKey = deriveKey(master, "abtars-secrets-v1");
+  return cachedKey;
 }
 
-function decryptSecret(blob: string, key: Buffer): string {
-  const buf = Buffer.from(blob, "base64");
-  const version = buf[0];
-  if (version !== VERSION) throw new Error(`Unknown secret encryption version: ${version}`);
-  const iv = buf.subarray(1, 1 + IV_LEN);
-  const tag = buf.subarray(buf.length - TAG_LEN);
-  const ciphertext = buf.subarray(1 + IV_LEN, buf.length - TAG_LEN);
-  const decipher = createDecipheriv(ALGO, key, iv);
-  decipher.setAuthTag(tag);
-  return decipher.update(ciphertext, undefined, "utf-8") + decipher.final("utf-8");
+function decryptSecret(blob: string, key: Buffer): string | null {
+  try {
+    const buf = Buffer.from(blob, "base64");
+    const version = buf[0];
+    if (version !== VERSION) return null;
+    const iv = buf.subarray(1, 1 + IV_LEN);
+    const tag = buf.subarray(buf.length - TAG_LEN);
+    const ciphertext = buf.subarray(1 + IV_LEN, buf.length - TAG_LEN);
+    const { createDecipheriv } = require("node:crypto");
+    const decipher = createDecipheriv(ALGO, key, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf-8");
+  } catch { return null; }
 }
 
 function encryptSecret(plaintext: string, key: Buffer): string {
@@ -58,9 +64,10 @@ export function readSecret(name: string): string | undefined {
     const raw = readFileSync(join(SECRETS_DIR, name), "utf-8").trim();
     if (!raw) return undefined;
     if (raw.startsWith("ENC:")) {
-      // Encrypted — need sync key access. Use cached key or fail.
-      if (!cachedKey) throw new Error(`Encrypted secret ${name} but key not initialized. Call initSecretsKey() at boot.`);
-      const value = decryptSecret(raw.slice(4), cachedKey);
+      const key = getSecretsKey();
+      if (!key) return undefined;
+      const value = decryptSecret(raw.slice(4), key);
+      if (value === null) return undefined;
       cache.set(name, value);
       return value;
     }
@@ -69,17 +76,16 @@ export function readSecret(name: string): string | undefined {
   } catch { return undefined; }
 }
 
-/** Initialize the secrets encryption key. Call once at boot (async). */
-export async function initSecretsKey(): Promise<void> {
+/** Initialize the secrets encryption key. Call once at boot. */
+export function initSecretsKey(): void {
   if (cachedKey) return;
-  try {
-    cachedKey = await getSecretsKey();
-  } catch { /* key not available — plaintext-only mode */ }
+  cachedKey = getSecretsKey();
 }
 
 /** Write an encrypted secret to ~/.abtars/secrets/<name>. */
-export async function writeSecret(name: string, value: string): Promise<void> {
-  const key = await getSecretsKey();
+export function writeSecret(name: string, value: string): void {
+  const key = getSecretsKey();
+  if (!key) throw new Error("Cannot encrypt secret: abtars.key not found. Run abtars install.");
   const encrypted = "ENC:" + encryptSecret(value, key);
   writeFileSync(join(SECRETS_DIR, name), encrypted, { mode: 0o600 });
   cache.set(name, value);

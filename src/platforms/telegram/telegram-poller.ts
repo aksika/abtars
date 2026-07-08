@@ -55,7 +55,23 @@ export class TelegramPoller {
 
   /** Inject a synthetic update into the handler (used for queued messages after sleep). */
   injectUpdate(update: TelegramUpdate): void {
-    void this.onUpdate(update);
+    this.dispatch(update);
+  }
+
+  /**
+   * Dispatch one update to the handler with a rejection guard. Fire-and-forget:
+   * the handler runs in the background so /stop stays responsive; a rejection is
+   * logged, never allowed to float into an unhandled rejection. (#1292)
+   */
+  private dispatch(update: TelegramUpdate): void {
+    try {
+      const result = this.onUpdate(update);
+      if (result instanceof Promise) {
+        result.catch((err: unknown) => logError("poller", "Error in update handler", err));
+      }
+    } catch (err) {
+      logError("poller", "Error in update handler (sync)", err);
+    }
   }
 
   private async poll(): Promise<void> {
@@ -82,14 +98,7 @@ export class TelegramPoller {
 
           for (const update of sorted) {
             if (update.update_id <= this.lastProcessedId) continue;
-            try {
-              const result = this.onUpdate(update);
-              if (result instanceof Promise) {
-                result.catch((err: unknown) => logError("poller", "Error in update handler", err));
-              }
-            } catch (err) {
-              logError("poller", "Error in update handler (sync)", err);
-            }
+            this.dispatch(update);
           }
 
           this.lastProcessedId = sorted[sorted.length - 1]!.update_id;

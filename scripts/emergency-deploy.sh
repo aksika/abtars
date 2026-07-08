@@ -51,17 +51,20 @@ else
 fi
 sleep 2
 
-# 5. Atomic swap (no gap where app/ is missing)
+# 5. Build into releasesDir staging, then swap app/ symlink
+RELEASES_DIR="${ABTARS_RELEASES:-$HOME/.abtars-releases}"
 echo "Deploying..."
-rm -rf "$HOME_DIR/app.staging"
-mkdir -p "$HOME_DIR/app.staging/bundle"
-cp -r "$SRC_DIR/bundle/"* "$HOME_DIR/app.staging/bundle/"
-mkdir -p "$HOME_DIR/app.staging/bundle/node_modules/abmind"
-cp -r "$ABMIND_SRC/dist" "$HOME_DIR/app.staging/bundle/node_modules/abmind/"
-cp "$ABMIND_SRC/package.json" "$HOME_DIR/app.staging/bundle/node_modules/abmind/"
+rm -rf "$RELEASES_DIR/app.staging"
+mkdir -p "$RELEASES_DIR/app.staging/bundle"
+cp -r "$SRC_DIR/bundle/"* "$RELEASES_DIR/app.staging/bundle/"
+mkdir -p "$RELEASES_DIR/app.staging/bundle/node_modules/abmind"
+cp -r "$ABMIND_SRC/dist" "$RELEASES_DIR/app.staging/bundle/node_modules/abmind/"
+cp "$ABMIND_SRC/package.json" "$RELEASES_DIR/app.staging/bundle/node_modules/abmind/"
 rm -rf "$HOME_DIR/app.prev"
 [ -d "$HOME_DIR/app" ] && mv "$HOME_DIR/app" "$HOME_DIR/app.prev"
-mv "$HOME_DIR/app.staging" "$HOME_DIR/app"
+# cp+rm instead of mv: staging is in releasesDir, app/ stays in HOME_DIR (cross-fs safe)
+cp -r "$RELEASES_DIR/app.staging" "$HOME_DIR/app"
+rm -rf "$RELEASES_DIR/app.staging"
 [ -d "$HOME_DIR/app.prev/bundle/node_modules" ] && mv "$HOME_DIR/app.prev/bundle/node_modules" "$HOME_DIR/app/bundle/node_modules"
 
 # 6. Write minimal manifest
@@ -74,10 +77,10 @@ echo "Restarting..."
 if launchctl list 2>/dev/null | grep -q abtars; then
   echo "LaunchAgent manages watchdog — it will restart the bridge."
 elif [ -f "$HOME_DIR/scripts/abtars-watchdog.sh" ]; then
-  nohup bash "$HOME_DIR/scripts/abtars-watchdog.sh" >> "$HOME_DIR/logs/watchdog.log" 2>&1 &
+  nohup bash "$HOME_DIR/scripts/abtars-watchdog.sh" &
   echo "Watchdog restarted (PID $!) — it will start the bridge."
 else
-  nohup node "$HOME_DIR/app/bundle/abtars.js" >> "$HOME_DIR/logs/bridge.log" 2>&1 &
+  nohup node "$HOME_DIR/app/bundle/abtars.js" &
   echo $! > "$HOME_DIR/bridge.pid"
   echo "Bridge started (PID $!)."
 fi

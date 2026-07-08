@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { abmindHome } from "../../paths.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import type { HookConfig, HookEntry, HookEvent, HookInput, HookOutput } from "./types.js";
 
@@ -82,7 +83,7 @@ function runOne(hook: HookEntry, input: HookInput): Promise<HookOutput | null> {
       timeout,
       env: {
         ABTARS_HOME: join(homedir(), ".abtars"),
-        ABMIND_HOME: join(homedir(), ".abmind"),
+        ABMIND_HOME: abmindHome(),
         PATH: process.env["PATH"] ?? "",
       },
     });

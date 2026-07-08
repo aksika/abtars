@@ -79,7 +79,7 @@ export function createModelHealthTask(ctx: BootCtx): { task: HeartbeatTask; runN
 
     if (warnings.length > 0) {
       const { sendNotification } = await import("../components/notification.js");
-      sendNotification(ctx, `🏥 Model health check:\n${warnings.join("\n")}\nSubagents will fall back to main model.`);
+      sendNotification(ctx, `Model health check:\n${warnings.join("\n")}\nSubagents will fall back to main model.`);
     }
   };
 

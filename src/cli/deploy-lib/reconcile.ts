@@ -6,8 +6,8 @@
 
 import { existsSync, mkdirSync, rmSync, cpSync, copyFileSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname, relative } from "node:path";
-import { homedir } from "node:os";
 import { logInfo } from "../../components/logger.js";
+import { resolveReleasesDir } from "./paths.js";
 
 const TAG = "reconcile";
 
@@ -31,7 +31,7 @@ const LEGACY_CLEANUP = ["core/prompts", "core"];
 export function reconcile(templatesSrc: string, home: string): void {
   if (!existsSync(templatesSrc)) {
     // Fallback: try source checkout
-    const fallback = join(homedir(), ".abtars-releases", "src", "abtars", "templates");
+    const fallback = join(resolveReleasesDir(), "src", "abtars", "templates");
     if (existsSync(fallback)) {
       return reconcile(fallback, home);
     }

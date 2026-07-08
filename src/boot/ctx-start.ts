@@ -7,24 +7,26 @@
  */
 
 import { logAndSwallow } from "../components/log-and-swallow.js";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Update context-window-start timestamp for a chat. */
 export function updateCtxStart(memoryDir: string, userId: string, ts = Date.now()): void {
+  if (!memoryDir || !existsSync(memoryDir)) return; // expected: abmind absent
   const p = join(memoryDir, "context-window-start.json");
   let data: Record<string, number> = {};
-  try { data = JSON.parse(readFileSync(p, "utf-8")); } catch (err) { logAndSwallow("ctx_start", "op", err); }
+  try { data = JSON.parse(readFileSync(p, "utf-8")); } catch (err) { logAndSwallow("ctx_start", "read ctx-start json", err); }
   data[userId] = ts;
-  writeFileSync(p, JSON.stringify(data), "utf-8");
+  try { writeFileSync(p, JSON.stringify(data), "utf-8"); } catch (err) { logAndSwallow("ctx_start", "write ctx-start json", err); }
 }
 
 /** Set all context-window-start entries to now (called after sleep). */
 export function resetAllCtxStarts(memoryDir: string): void {
+  if (!memoryDir || !existsSync(memoryDir)) return; // expected: abmind absent
   const p = join(memoryDir, "context-window-start.json");
   let data: Record<string, number> = {};
   try { data = JSON.parse(readFileSync(p, "utf-8")); } catch (err) { logAndSwallow("ctx_start", "read ctx-start json", err); return; }
   const now = Date.now();
   for (const key of Object.keys(data)) data[key] = now;
-  writeFileSync(p, JSON.stringify(data), "utf-8");
+  try { writeFileSync(p, JSON.stringify(data), "utf-8"); } catch (err) { logAndSwallow("ctx_start", "write ctx-start json", err); }
 }

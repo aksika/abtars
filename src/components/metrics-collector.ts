@@ -5,6 +5,8 @@
 import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
+import type { CompactionEvent } from "abmind";
+
 const RING_SIZE = 100;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -22,6 +24,7 @@ interface DailyCounter {
 const latencies = new Map<string, LatencyBucket>();
 const counters = new Map<string, DailyCounter>();
 let cronDepthSamples: number[] = [];
+let compactionSavings: number[] = [];
 let metricsPath = "";
 
 export function initMetrics(home: string): void {
@@ -54,6 +57,23 @@ export function recordCronDepth(depth: number): void {
   cronDepthSamples.push(depth);
 }
 
+/**
+ * Record a compaction pass (#1022). Always persists the full event to metrics.jsonl
+ * (audit trail). Skipped passes are audit-only — they do no work, so they don't
+ * enter the latency/savings/call aggregates.
+ */
+export function recordCompaction(event: CompactionEvent): void {
+  if (metricsPath) {
+    try { appendFileSync(metricsPath, JSON.stringify({ type: "compaction", ...event }) + "\n"); }
+    catch { /* non-fatal */ }
+  }
+  if (event.level === "skipped") return;
+  recordLatency("compaction", event.durationMs);
+  recordCall("compaction", event.level !== "failed" && !event.failureReason);
+  if (compactionSavings.length >= RING_SIZE) compactionSavings.shift();
+  compactionSavings.push(event.savingsPct);
+}
+
 function percentile(sorted: number[], pct: number): number {
   if (sorted.length === 0) return 0;
   const idx = Math.min(Math.floor(sorted.length * pct), sorted.length - 1);
@@ -65,6 +85,7 @@ export interface MetricsSummary {
   recall: { p50: number; p95: number; calls: number } | null;
   cronDepth: { avg: number; max: number };
   sleep: { calls: number; failures: number } | null;
+  compaction: { count: number; failures: number; p50: number; p95: number; avgSavingsPct: number } | null;
 }
 
 export function getMetricsSummary(): MetricsSummary {
@@ -102,7 +123,24 @@ export function getMetricsSummary(): MetricsSummary {
   const sleepCounter = counters.get("sleep");
   const sleep = sleepCounter ? { calls: sleepCounter.calls, failures: sleepCounter.failures } : null;
 
-  return { llm, recall, cronDepth: { avg: cronAvg, max: cronMax }, sleep };
+  let compaction: MetricsSummary["compaction"] = null;
+  const compactionBucket = latencies.get("compaction");
+  if (compactionBucket && compactionBucket.samples.length > 0) {
+    const sorted = [...compactionBucket.samples].sort((a, b) => a - b);
+    const counter = counters.get("compaction");
+    const avgSavings = compactionSavings.length > 0
+      ? compactionSavings.reduce((a, b) => a + b, 0) / compactionSavings.length
+      : 0;
+    compaction = {
+      count: counter?.calls ?? sorted.length,
+      failures: counter?.failures ?? 0,
+      p50: Math.round(percentile(sorted, 0.5)),
+      p95: Math.round(percentile(sorted, 0.95)),
+      avgSavingsPct: Math.round(avgSavings * 100),
+    };
+  }
+
+  return { llm, recall, cronDepth: { avg: cronAvg, max: cronMax }, sleep, compaction };
 }
 
 export function flushToFile(): void {

@@ -123,23 +123,37 @@ function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } 
   return { prompt, dodPaths };
 }
 
-/** Check DoD: each path must exist and be >= DOD_MIN_BYTES. Returns pass/fail + details. */
+/** Check DoD: each path must exist and be >= DOD_MIN_BYTES. Returns pass/fail + details.
+ *  Re-stats once after a short delay if a file appears missing — tool calls that write files
+ *  (send_document, execute_bash) may still be completing when the circuit breaker fires. (#1282)
+ */
 function checkDoD(paths: string[]): { passed: boolean; details: string } {
   if (paths.length === 0) return { passed: true, details: "no DoD defined" };
   const results: string[] = [];
   let allPassed = true;
   for (const p of paths) {
-    if (!existsSync(p)) {
+    let size: number | null = null;
+    if (existsSync(p)) {
+      size = statSync(p).size;
+    } else {
+      // Re-stat after 1.5s — file may be written by a tool call that completed just as the
+      // agent loop was aborted by the circuit breaker.
+      const deadline = Date.now() + 1500;
+      while (Date.now() < deadline) {
+        // Synchronous spin — this runs in the task callback, not on the main event loop hot path.
+        const remaining = deadline - Date.now();
+        if (remaining > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(remaining, 200));
+        if (existsSync(p)) { size = statSync(p).size; break; }
+      }
+    }
+    if (size === null) {
       results.push(`✗ missing: ${p}`);
       allPassed = false;
+    } else if (size < DOD_MIN_BYTES) {
+      results.push(`✗ too small (${size}B): ${p}`);
+      allPassed = false;
     } else {
-      const size = statSync(p).size;
-      if (size < DOD_MIN_BYTES) {
-        results.push(`✗ too small (${size}B): ${p}`);
-        allPassed = false;
-      } else {
-        results.push(`✓ ${p} (${size}B)`);
-      }
+      results.push(`✓ ${p} (${size}B)`);
     }
   }
   return { passed: allPassed, details: results.join("\n") };
@@ -379,6 +393,16 @@ export class CronQueue {
       const idleMs = Date.now() - readLastPromptAt();
       if (idleMs < 90_000) {
         logInfo(TAG, `⏸ Deferring agent task "${entry.id}" — user active ${Math.round(idleMs / 1000)}s ago`);
+        entry.consecutiveFails = (entry.consecutiveFails ?? 0) + 1;
+        if (entry.consecutiveFails >= 3) {
+          entry.paused = true;
+          logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${entry.consecutiveFails} idle-gate deferrals`);
+          this.onTaskPaused?.(entry.chatId, entry.title ?? entry.message.slice(0, 60), `idle-gate hit ${entry.consecutiveFails}× in a row`);
+        }
+        writeEntry(entry);
+        scheduleRetry(entry, !!entry._retrying);
+        this.clearCurrent();
+        this.processNext();
         return;
       }
     }
@@ -468,7 +492,7 @@ export class CronQueue {
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
     const sessionType = (AGENT_SESSION[entry.agent ?? ""] ?? "T") as import("../spin-types.js").SessionType;
 
-    spin.dispatchAwait({ type: sessionType, title: entry.title ?? entry.message.slice(0, 80), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM", chatId: String(entry.chatId), deliveryMode: entry.deliveryMode })
+    spin.dispatchAwait({ type: sessionType, title: entry.title ?? entry.message.slice(0, 80), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM", chatId: String(entry.chatId), deliveryMode: entry.deliveryMode, maxToolRounds: entry.maxToolRounds })
       .then(({ cardId: boardId, result: response }) => {
         // Guard: if model returned raw JSON tool output ({"stdout":...,"exit_code":...}),
         // extract just the meaningful content. This happens when the model echoes its last
@@ -508,7 +532,7 @@ export class CronQueue {
         if (exitCode === 0) {
           // #1118: inline tasks store full response as summary (delivered as chat message)
           const kanbanSummary = isReport ? summary : cleaned;
-          kanbanComplete(boardId, resultPath, kanbanSummary);
+          kanbanComplete(boardId, resultPath ?? null, kanbanSummary);
         } else {
           kanbanFail(boardId, `${summary}${dodResult}`);
         }

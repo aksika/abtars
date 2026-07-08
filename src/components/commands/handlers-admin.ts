@@ -206,6 +206,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/software update npm — Update from npm registry",
     "/software rollback <version|slot> — Roll back to previous version or slot (1-3)",
     "/update — Alias for /software update pull",
+    "/update abmind — Update abmind from dev (pull + build + install)",
     "/model — Model configuration (provider, context, fallbacks)",
     "/model set <name> — Switch model",
     "/doctor — Deep probe all subsystems",

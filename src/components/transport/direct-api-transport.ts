@@ -15,6 +15,7 @@ import { normalizeToolCalls, parseErrorStatus, parseRetryAfter, parseUsageLimitC
 import { recordUsage } from "../usage-tracker.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport } from "./kiro-transport.js";
+import { isCompactable } from "../spin-types.js";
 
 const TAG = "direct-api";
 
@@ -41,6 +42,7 @@ export class DirectApiTransport implements IKiroTransport {
   private _contextPercent = -1;
   private _lastAnswer = "";
   private _timeoutOverrideMs: number | null = null;
+  private _maxToolRoundsOverride: number | null = null;
   private _toolCallsSucceeded = 0;
   private _intermediateText = "";
   private _promptStartedAt: number | null = null;
@@ -48,6 +50,8 @@ export class DirectApiTransport implements IKiroTransport {
   private activeEndpoint: string;
   private activeApiKey?: string;
   private activeModel: string;
+  /** #1295: maxContext of the model currently serving requests. Used for accurate contextPercent. */
+  private _activeMaxContext: number;
   private _lastPromptTokens = 0;
   private _lastCompletionTokens = 0;
   private _activeSessionKey = "";
@@ -66,6 +70,9 @@ export class DirectApiTransport implements IKiroTransport {
   sandboxPolicy?: import("../tool-sandbox.js").SandboxPolicy;
   /** Called when fallback model is selected — send notification before response. */
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
+  /** #1296: fired when the primary model succeeds after a fallback episode, so the
+   *  notification layer can re-arm and notify again on the next fallback. */
+  onPrimaryRestored?: () => void;
   /** Cooperative pause check — if returns true, agent loop breaks between tool calls. */
   isPaused?: () => boolean;
   /** Returns a pending instruction from parent, if any. Consumed once. */
@@ -96,6 +103,7 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeEndpoint = config.endpoint;
     this.activeApiKey = config.apiKey;
     this.activeModel = config.model;
+    this._activeMaxContext = config.maxContext;
     this.policy = policy ?? null;
   }
 
@@ -172,6 +180,7 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeEndpoint = em.endpoint;
     this.activeApiKey = em.apiKey;
     this.activeModel = em.model;
+    this._activeMaxContext = em.maxContext;
     this._lastActivityAt = Date.now();
     logWarn(TAG, `🚨 Emergency mode: using ${em.model}`);
     const result = await this.agentLoop(session, signal);
@@ -190,6 +199,7 @@ export class DirectApiTransport implements IKiroTransport {
       this.activeEndpoint = candidate.endpoint;
       this.activeApiKey = candidate.apiKey;
       this.activeModel = candidate.model;
+      this._activeMaxContext = candidate.maxContext;
       this._lastActivityAt = Date.now();
       logDebug(TAG, `Trying model: ${candidate.model}`);
 
@@ -206,6 +216,8 @@ export class DirectApiTransport implements IKiroTransport {
           policy.recordError(candidate, "empty");
         } else {
           policy.recordSuccess(candidate);
+          // #1296: notify the phase-transport layer so it can re-arm the fallback notification
+          if (isPrimary(candidate.model) && this.onPrimaryRestored) this.onPrimaryRestored();
         }
         return result;
       } catch (err) {
@@ -261,6 +273,7 @@ export class DirectApiTransport implements IKiroTransport {
       this.activeEndpoint = smallest.endpoint;
       this.activeApiKey = smallest.apiKey;
       this.activeModel = smallest.model;
+      this._activeMaxContext = smallest.maxContext;
       if (this.onFallback) {
         this.onFallback(`${smallest.model} (compacted)`, Math.round((session.estimateTokens() / smallest.maxContext) * 100));
       }
@@ -292,7 +305,7 @@ export class DirectApiTransport implements IKiroTransport {
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
       if (signal.aborted) return signal.reason === "timeout" ? "Response timed out." : "Interrupted.";
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
-      if (turn >= (this.config.maxToolRounds ?? 25)) {
+      if (turn >= (this._maxToolRoundsOverride ?? this.config.maxToolRounds ?? 25)) {
         logError(TAG, `Tool loop circuit breaker: ${turn} rounds without final response — aborting`);
         return "[SYSTEM] Tool loop limit reached. Stopped after " + turn + " rounds.";
       }
@@ -304,10 +317,15 @@ export class DirectApiTransport implements IKiroTransport {
 
       if (usage) {
         session.updateTokens(usage.prompt_tokens);
-        this._contextPercent = session.contextPercent;
+        this._contextPercent = this._activeMaxContext > 0
+          ? Math.round((usage.prompt_tokens / this._activeMaxContext) * 100)
+          : session.contextPercent;
         this._lastPromptTokens = usage.prompt_tokens;
         this._lastCompletionTokens = usage.completion_tokens ?? 0;
-        this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
+        // #1022: compaction fires only for A/C session types.
+        if (isCompactable(this._activeSessionKey)) {
+          this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
+        }
         logTrace(TAG, `${this.activeModel} — ${usage.prompt_tokens}→${usage.completion_tokens ?? 0} tokens, ${Date.now() - (this._lastActivityAt ?? Date.now())}ms`);
         recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0, this.agentLabel);
       }
@@ -419,7 +437,7 @@ export class DirectApiTransport implements IKiroTransport {
     const timeoutMs = this._timeoutOverrideMs ?? getEnv().modelApiTimeoutMs;
     this._lastActivityAt = Date.now();
     const timer = setInterval(() => {
-      if (Date.now() - this._lastActivityAt > timeoutMs) {
+      if (Date.now() - (this._lastActivityAt ?? 0) > timeoutMs) {
         clearInterval(timer);
         timeoutCtrl.abort(new Error("model API timeout"));
       }
@@ -650,6 +668,7 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeEndpoint = opts.endpoint;
     this.activeApiKey = opts.apiKey;
     this.activeModel = opts.model;
+    this._activeMaxContext = opts.maxContext;
     (this.config as { model: string; maxContext: number }).model = opts.model;
     (this.config as { maxContext: number }).maxContext = opts.maxContext;
     this.policy = opts.policy;
@@ -664,6 +683,7 @@ export class DirectApiTransport implements IKiroTransport {
   // Watchdog support
   get promptStartedAt(): number | null { return this._promptStartedAt; }
   setTimeoutOverride(ms: number | null): void { this._timeoutOverrideMs = ms; }
+  setMaxToolRoundsOverride(n: number | null): void { this._maxToolRoundsOverride = n; }
 
   get lastActivityAt(): number | null { return this._lastActivityAt; }
 

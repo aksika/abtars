@@ -140,6 +140,28 @@ abtars rollback
 
 Always works — `app.prev/` is a full copy of the previous working version. No "pruned release" edge cases.
 
+## Manual recovery (when `abtars update` itself is broken)
+
+If the deployed CLI is in a state where it cannot run the update flow at all
+— typically `abtars: no release staged. Run 'abtars install' first.` from the
+wrapper, with a dead bridge the watchdog cannot respawn — use
+`scripts/emergency-update.sh`. It is a manual mirror of the `deploy.ts`
+activation flow that uses plain `npm` + `esbuild` and direct
+launchctl/systemd calls. No working deployed binary is required.
+
+```bash
+bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
+```
+
+Source HEAD determines the deployed version. Pull or check out the commit you
+want first if needed. The script updates `manifest.json`, `history.json`, and
+the `app@` / `current@` symlinks, then restarts the watchdog. A 60-attempt
+health probe confirms the new bridge is alive.
+
+This script must stay in sync with `src/cli/deploy-lib/deploy.ts`. If the
+activation flow changes (path layout, stop/respawn sequence), update both. See
+the script's header comment for the full mirror contract.
+
 ## Doctor on every boot
 
 The watchdog runs `doctor.sh --fix` before every bridge spawn:

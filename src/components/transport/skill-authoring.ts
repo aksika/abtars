@@ -94,7 +94,7 @@ export const skillCreateTool: ToolDefinition = {
   parameters: {
     type: "object",
     properties: {
-      name: { type: "string", description: "Skill identifier, kebab-case, e.g. 'fix-pnpm-workspace-drift'. 3-64 chars, [a-z0-9-]+." },
+      name: { type: "string", description: "Skill identifier, kebab-case, e.g. 'fix-stale-node-modules'. 3-64 chars, [a-z0-9-]+." },
       description: { type: "string", description: "One-line description, max 120 chars. Shown in skills_catalog." },
       content: { type: "string", description: "Skill body in Markdown. Starts with # <Title>. No frontmatter — the tool writes it." },
       tags: { type: "array", items: { type: "string" }, description: "Optional tags for categorization (max 5). E.g. ['tools', 'browser', 'debugging']." },

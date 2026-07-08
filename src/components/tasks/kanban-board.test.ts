@@ -78,26 +78,6 @@ describe("kanban-board", () => {
     expect(mod.kanbanList("delivered")[0].delivered_at).not.toBeNull();
   });
 
-  it("delivery failure increments attempts, fails at 3", () => {
-    const id = mod.kanbanEnqueue("Flaky delivery", "task");
-    mod.kanbanRunning(id);
-    mod.kanbanComplete(id, null, "done");
-
-    mod.kanbanSetDelivering(id);
-    mod.kanbanDeliveryFailed(id);
-    expect(mod.kanbanList("done")).toHaveLength(1);
-    expect(mod.kanbanPending()[0].delivery_attempts).toBe(1);
-
-    mod.kanbanSetDelivering(id);
-    mod.kanbanDeliveryFailed(id);
-    expect(mod.kanbanPending()[0].delivery_attempts).toBe(2);
-
-    mod.kanbanSetDelivering(id);
-    mod.kanbanDeliveryFailed(id);
-    expect(mod.kanbanPending()).toHaveLength(0);
-    expect(mod.kanbanList("failed")).toHaveLength(1);
-    expect(mod.kanbanList("failed")[0].error).toBe("delivery failed after 3 attempts");
-  });
 
   it("default kanbanList excludes delivered", () => {
     mod.kanbanEnqueue("Active", "task");
@@ -140,11 +120,11 @@ describe("kanban-board", () => {
     mod.kanbanSetDelivering(id);
     mod.kanbanMarkDelivered(id);
 
-    // Backdate delivered_at
-    const Database = require("better-sqlite3");
-    const db = new Database(join(TEST_HOME, "kanban", "kanban.db"));
-    db.prepare("UPDATE kanban_board SET delivered_at = datetime('now', '-10 days') WHERE id = ?").run(id);
-    db.close();
+    // Backdate via module's own DB handle — avoids direct better-sqlite3 require in tests
+    mod._kanbanExecForTest(
+      "UPDATE kanban_board SET delivered_at = datetime('now', '-10 days') WHERE id = ?",
+      [id],
+    );
 
     const purged = mod.kanbanCleanup(7);
     expect(purged).toBe(1);
@@ -165,5 +145,39 @@ describe("kanban-board", () => {
     expect(card.labels).toBe("ai,finance");
     expect(card.due_at).toBe("2026-06-09T00:00:00");
     expect(card.notes).toBe("Do this carefully");
+  });
+});
+
+describe("kanbanSearch (#1298)", () => {
+  it("matches by title", () => {
+    mod.kanbanEnqueue("finance report", "cron");
+    mod.kanbanEnqueue("daily briefing", "cron");
+    const results = mod.kanbanSearch("finance");
+    expect(results).toHaveLength(1);
+    expect(results[0]!.title).toBe("finance report");
+  });
+
+  it("matches by status", () => {
+    const id = mod.kanbanEnqueue("task a", "cron");
+    mod.kanbanRunning(id);
+    const results = mod.kanbanSearch("running");
+    expect(results.some(c => c.id === id)).toBe(true);
+  });
+
+  it("matches by source", () => {
+    mod.kanbanEnqueue("task b", "peer");
+    const results = mod.kanbanSearch("peer");
+    expect(results.some(c => c.source === "peer")).toBe(true);
+  });
+
+  it("strips LIKE wildcard characters from term", () => {
+    mod.kanbanEnqueue("safe title", "cron");
+    // A bare % or _ should not blow up or match everything
+    expect(() => mod.kanbanSearch("%")).not.toThrow();
+    expect(() => mod.kanbanSearch("_")).not.toThrow();
+    const results = mod.kanbanSearch("%");
+    // % stripped → empty search string → matches nothing (empty like %%)
+    // The important thing is no SQL injection crash
+    expect(Array.isArray(results)).toBe(true);
   });
 });

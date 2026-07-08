@@ -38,18 +38,31 @@ export async function handleNewReset(text: string, ctx: CommandContext): Promise
 
 export async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
   try {
+    // #1022: compaction only for A/C session types (hard requirement).
+    const { isCompactable } = await import("../spin-types.js");
+    if (!isCompactable(ctx.sessionKey)) {
+      await ctx.reply("Compaction not available for this session.");
+      return true;
+    }
     // Context engine compaction — force compact via transport's orchestrator
-    const transport = ctx.transport as { contextOrchestrator?: { forceCompact(chatId: string, budget: number): Promise<boolean> }; config?: { maxContext: number } };
+    const transport = ctx.transport as { contextOrchestrator?: { forceCompact(chatId: string, budget: number): Promise<import("abmind").CompactionResult> }; config?: { maxContext: number } };
     if (transport.contextOrchestrator) {
       const budget = (transport as any).config?.maxContext ?? 200000;
-      const success = await transport.contextOrchestrator.forceCompact(ctx.sessionKey, budget);
-      await ctx.reply(success ? "📦 Compaction complete." : "📦 Nothing to compact.");
+      const result = await transport.contextOrchestrator.forceCompact(ctx.sessionKey, budget);
+      if (result.skipped) {
+        await ctx.reply("Compaction skipped (recent passes saved little — retry in ~30 min).");
+      } else if (result.ok) {
+        const pct = Math.round(result.savingsPct * 100);
+        await ctx.reply(`Compaction complete. ${result.tokensBefore}→${result.tokensAfter} tokens (${pct}% saved).`);
+      } else {
+        await ctx.reply("Nothing to compact.");
+      }
     } else {
-      await ctx.reply("📦 Context engine not active for this transport.");
+      await ctx.reply("Context engine not active for this transport.");
     }
   } catch (err) {
     logError(TAG, "Manual compaction failed", err);
-    await ctx.reply("❌ Compaction failed.");
+    await ctx.reply("Compaction failed.");
   }
   return true;
 }
@@ -109,8 +122,8 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
-  // /models health reset — reset model health buckets + clear emergency mode
-  if (arg === "health reset" || arg === "primary") {
+  // /models health reset / primary / reset — reset model health buckets + clear emergency mode
+  if (arg === "health reset" || arg === "primary" || arg === "reset") {
     const t = ctx.transport as unknown as {
       policy?: { registry: { resetAll: () => void } };
       setEmergencyMode?: (o: null) => void;
@@ -121,10 +134,10 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     if (t.policy?.registry) {
       t.policy.registry.resetAll();
       await ctx.reply(wasEmergency
-        ? "🔌 Emergency mode cleared + model health reset — free models active."
-        : "🔌 Model health reset — all models available.");
+        ? "Model health reset + emergency mode cleared — primary model active."
+        : "Model health reset — all models available (sticky credits/auth cleared).");
     } else {
-      await ctx.reply("🔌 No fallback policy configured.");
+      await ctx.reply("No fallback policy configured.");
     }
     return true;
   }
@@ -351,12 +364,12 @@ export async function handleReasoning(text: string, ctx: CommandContext): Promis
 }
 
 export async function handleContinue(_text: string, ctx: CommandContext): Promise<boolean> {
-  const response = await ctx.transport.sendPrompt(
-    ctx.sessionKey,
-    "[SYSTEM] Something went wrong during your previous response. Continue from where you left off.",
-    undefined,
-    ctx.userId,
-  );
+  // #1271: /continue goes through spin() continuation (model-call chokepoint)
+  const { result: response } = await ctx.sessionManager.spin({
+    type: "A", sessionId: ctx.sessionKey,
+    prompt: "[SYSTEM] Something went wrong during your previous response. Continue from where you left off.",
+    userId: ctx.userId, await: true,
+  });
   if (response) await ctx.reply(response);
   return true;
 }

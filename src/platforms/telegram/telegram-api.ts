@@ -23,6 +23,15 @@ interface FetchRetryOpts {
   outerSignal?: AbortSignal;
   /** Retry on 4xx responses. Default false — 4xx usually permanent (404 expired, 403 auth). */
   retryable4xx?: boolean;
+  /**
+   * #1294: Retry when OUR response-wait timeout fires. Default true (safe for idempotent reads
+   * like getUpdates long-poll). Set false for non-idempotent writes (sendMessage/sendDocument):
+   * a response-wait timeout means Telegram may have already accepted the request, so retrying
+   * would double-deliver. We accept an occasional lost message over a visible duplicate.
+   * Note: this ONLY gates our own "telegram timeout" abort — hard network errors (ETIMEDOUT
+   * connect, ECONNRESET, ECONNREFUSED, 5xx, 429) still retry, since nothing was delivered.
+   */
+  retryOnTimeout?: boolean;
 }
 
 /**
@@ -74,7 +83,9 @@ export class TelegramApi {
     options?: SendMessageOptions,
   ): Promise<number> {
     const body: Record<string, unknown> = { chat_id: chatId, text, ...options };
-    const res = await this.call("sendMessage", body);
+    // #1294: non-idempotent write — longer timeout + never retry on response-wait timeout
+    // (a retry after ambiguous delivery would double-send).
+    const res = await this.call("sendMessage", body, undefined, TelegramApi.WRITE_TIMEOUT_MS, false);
     return (res as { message_id: number }).message_id;
   }
 
@@ -158,7 +169,7 @@ export class TelegramApi {
     };
     const response = await this.fetchWithRetry(
       (signal) => fetch(`${this.baseUrl}/sendDocument`, { method: "POST", body: makeForm(), signal }),
-      { method: "sendDocument", timeoutMs: getEnv().telegramFileTimeoutMs },
+      { method: "sendDocument", timeoutMs: getEnv().telegramFileTimeoutMs, retryOnTimeout: false },
     );
     const json = (await response.json()) as { ok: boolean; result: { message_id: number } };
     if (!json.ok) throw new Error("Telegram API sendDocument returned ok=false");
@@ -191,6 +202,13 @@ export class TelegramApi {
 
   private static readonly MAX_ATTEMPTS = 3;
   private static readonly BACKOFF = [1000, 3000, 9000];
+
+  /**
+   * #1294: Longer response-wait budget for non-idempotent writes. The global timeout (10s) was
+   * tripping on slow-but-successful sends during boot, causing a retry that double-delivered.
+   * A generous 30s lets slow sends complete instead of falsely timing out.
+   */
+  private static readonly WRITE_TIMEOUT_MS = 30_000;
 
   private static readonly PERMANENT_ERRORS = [
     /chat not found/i, /bot was blocked/i, /user is deactivated/i,
@@ -239,6 +257,12 @@ export class TelegramApi {
         if (TelegramApi.isPermanent(msg) || opts.outerSignal?.aborted) throw err;
         // Non-retryable 4xx (when retryable4xx is false) — already thrown above with status code
         if (!opts.retryable4xx && /failed \([4]\d\d\)/.test(msg)) throw err;
+        // #1294: OUR response-wait timeout ("telegram timeout" abort) means delivery is
+        // ambiguous — the request may have already been accepted. For non-idempotent writes
+        // (retryOnTimeout=false) we give up instead of double-delivering. Hard network errors
+        // (ETIMEDOUT, ECONNRESET, 5xx, 429) do NOT match this and still retry below.
+        const isResponseWaitTimeout = /telegram timeout/i.test(msg);
+        if (isResponseWaitTimeout && opts.retryOnTimeout === false) throw err;
         if (attempt < TelegramApi.MAX_ATTEMPTS - 1 && TelegramApi.isTransient(msg)) {
           logDebug(TAG, `${opts.method} attempt ${attempt + 1}/${TelegramApi.MAX_ATTEMPTS} — ${msg.slice(0, 80)}`);
           await new Promise(r => setTimeout(r, TelegramApi.BACKOFF[attempt]!));
@@ -257,6 +281,7 @@ export class TelegramApi {
     body: Record<string, unknown>,
     signal?: AbortSignal,
     timeoutMs?: number,
+    retryOnTimeout?: boolean,
   ): Promise<unknown> {
     const response = await this.fetchWithRetry(
       (composed) => fetch(`${this.baseUrl}/${method}`, {
@@ -265,7 +290,7 @@ export class TelegramApi {
         body: JSON.stringify(body),
         signal: composed,
       }),
-      { method, timeoutMs, outerSignal: signal },
+      { method, timeoutMs, outerSignal: signal, ...(retryOnTimeout === false ? { retryOnTimeout: false } : {}) },
     );
     const json = (await response.json()) as { ok: boolean; result: unknown };
     if (!json.ok) throw new Error(`Telegram API ${method} returned ok=false`);

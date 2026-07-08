@@ -99,6 +99,17 @@ function makeDeps(transport: IKiroTransport, memory: MemoryManager | null, sessi
       getActiveSessionId: () => "test_A_01",
       getActiveSession: () => session,
       getSessionById: (id: string) => id === "test_A_01" ? session : undefined,
+      spin: async (spec: any) => {
+        // #1271: smoke tests stub spin() to call the transport directly.
+        // Streaming/tool callbacks are set on the transport by the pipeline.
+        const result = await transport.sendPrompt(
+          spec.sessionId ?? "test_A_01",
+          spec.prompt,
+          spec.imageContent,
+          spec.userId,
+        );
+        return { sessionId: spec.sessionId ?? "test_A_01", result: result ?? "" };
+      },
     } as any,
     updateCtxStart: vi.fn(),
   };
@@ -172,6 +183,15 @@ describe("Smoke: bridge lifecycle", () => {
         getActiveSessionId: () => "test_A_01",
         getActiveSession: () => session,
         getSessionById: (id: string) => id === "test_A_01" ? session : undefined,
+        spin: async (spec: any) => {
+          const result = await transport.sendPrompt(
+            spec.sessionId ?? "test_A_01",
+            spec.prompt,
+            spec.imageContent,
+            spec.userId,
+          );
+          return { sessionId: spec.sessionId ?? "test_A_01", result: result ?? "" };
+        },
       } as any,
       updateCtxStart: vi.fn(),
     };

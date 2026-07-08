@@ -33,18 +33,18 @@ Examples:
 ## Good skill content
 
 ```markdown
-# Fix pnpm workspace drift
+# Clear stale Node modules after upgrade
 
 ## When to use
-pnpm install fails with "workspace protocol" errors after adding a new package.
+Node app fails to start with "Cannot find module" errors after upgrading a dependency.
 
 ## How
-1. Delete node_modules and pnpm-lock.yaml
-2. Run `pnpm install --no-frozen-lockfile`
-3. Commit the updated lockfile
+1. Delete node_modules and package-lock.json
+2. Run `npm install`
+3. Restart the affected service
 
 ## Why
-pnpm workspace protocol (`workspace:*`) resolves at install time. Stale lockfiles reference old resolutions.
+Stale lockfiles reference module versions that no longer exist. A clean install resolves current versions.
 ```
 
 ## Bad skill content (use memory_store instead)

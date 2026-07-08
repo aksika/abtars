@@ -70,7 +70,12 @@ export async function bootGraph(nodes: BootNode[], ctx: BootCtx): Promise<BootRe
 
   await Promise.allSettled(nodes.map(n => resolve(n)));
   logTrace("boot", `bootGraph: complete in ${Date.now() - t0Global}ms — ${[...report].filter(([,v]) => v.status === "ok").length} ok, ${[...report].filter(([,v]) => v.status === "failed").length} failed, ${[...report].filter(([,v]) => v.status === "skipped").length} skipped`);
-  ctx.phaseHealth = new Map([...report].map(([k, v]) => [k, { status: v.status === "ok" ? "ok" : v.status, error: v.error ?? v.blockedBy }]));
+  // Mutate in place — DO NOT reassign ctx.phaseHealth. PipelineDeps captures the reference at
+  // boot time; reassigning here would leave all command handlers reading the original empty Map.
+  ctx.phaseHealth.clear();
+  for (const [k, v] of report) {
+    ctx.phaseHealth.set(k, { status: v.status === "ok" ? "ok" : v.status, error: v.error ?? v.blockedBy });
+  }
   return report;
 }
 

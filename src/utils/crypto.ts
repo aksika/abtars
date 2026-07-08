@@ -15,8 +15,6 @@ const IV_LEN = 12;
 const TAG_LEN = 16;
 const PURPOSE = "abtars-secrets-v1";
 
-let _cachedKey: Buffer | null = null;
-
 /** Load master key from file. Returns null if file doesn't exist. */
 export function loadKey(keyPath: string): Buffer | null {
   try {

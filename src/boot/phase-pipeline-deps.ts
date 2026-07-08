@@ -25,7 +25,6 @@ import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { TaskCompleteCallback } from "../components/tasks/task-queue.js";
-import { sanitizeOutbound } from "../components/sanitize-outbound.js";
 import { getEnv } from "../components/env-schema.js";
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
@@ -61,10 +60,13 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       const msg = `[System] You ARE the self-healing agent. A scheduled task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}${pending}\n\nDiagnose the root cause. If you can fix it programmatically (script fix, token refresh, pause task), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.\n\nFORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:\n- transport.json\n- .env / .env.skills\n- peers.json\n- users.json\nException: fixing JSON structural corruption (invalid syntax, parse errors) is always allowed.\n\nA single task failure is NOT grounds for config changes. Investigate root cause, report findings.`;
       void (async () => {
         try {
-          const { SubagentRuntime } = await import("../components/subagent-runtime.js");
-          const runtime = new SubagentRuntime();
-          await runtime.complete("coding", msg, { sessionType: "S" });
-          await runtime.shutdown();
+          // #1271: SHA goes through the unified spin() chokepoint (S profile =
+          // coding agent, call-terminate — session is created and deleted).
+          await ctx.sessionManager.spin({
+            type: "S",
+            prompt: msg,
+            await: true,
+          });
         } catch (err) {
           logWarn("main", `SHA session failed: ${err}`);
         } finally {
@@ -186,58 +188,14 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   };
   ctx.pipelineDeps = pipelineDeps;
 
-  // #944 Step C: Wire full message handler on already-connected platforms
-  const { handleInboundMessage } = await import("../components/message-pipeline.js");
-  if (ctx.telegramAdapter) {
-    ctx.telegramAdapter.setMessageHandler({ pipeline: pipelineDeps, conversationBuffer: ctx.conversationBuffer, transport, memory: ctx.memory, sessionManager: ctx.sessionManager, actionGate: ctx.actionGate });
-    logInfo("boot", "Telegram: full pipeline wired");
-  }
-  if (ctx.discordAdapter) {
-    ctx.discordAdapter.setMessageHandler({ pipeline: pipelineDeps, transport, memory: ctx.memory, conversationBuffer: ctx.conversationBuffer });
-    logInfo("boot", "Discord: full pipeline wired");
-  }
-  for (const [name, adapter] of ctx.platformAdapters) {
-    if (name === "irc" && "setMessageHandler" in adapter) {
-      (adapter as any).setMessageHandler((msg: any) => handleInboundMessage(msg, adapter, pipelineDeps));
-      logInfo("boot", "IRC: full pipeline wired");
-    }
-  }
-
-  // Drain recovery queue — messages that arrived before pipeline was ready
-  const recoveryQueue = (ctx as any)._recoveryQueue as Array<{ msg: any; adapter: any }> | undefined;
-  if (recoveryQueue?.length) {
-    logInfo("boot", `Draining ${recoveryQueue.length} queued message(s) from recovery handler`);
-    for (const { msg, adapter } of recoveryQueue) {
-      handleInboundMessage(msg, adapter, pipelineDeps).catch(err => logWarn("boot", `Drain error: ${err}`));
-    }
-    recoveryQueue.length = 0;
-  }
-
-  // Wire send_document tool + ActionGate (moved from phase-platforms)
-  if (ctx.telegramAdapter) {
-    const mainChatId = config.mainChatId;
-    if (mainChatId) {
-      const { setSendDocument } = await import("../components/transport/tool-registry.js");
-      setSendDocument((path, caption) => ctx.telegramAdapter!.sendDocument(String(mainChatId), path, caption));
-      if (ctx.actionGate) {
-        const api = (ctx.telegramAdapter as any).api;
-        const chatId = String(mainChatId);
-        ctx.actionGate.setNotify(async (text: string, buttons: Array<{ text: string; data: string }>) => {
-          const opts: any = {};
-          if (buttons.length > 0) {
-            opts.reply_markup = { inline_keyboard: [buttons.map((b: any) => ({ text: b.text, callback_data: b.data }))] };
-          }
-          await api.sendMessage(chatId, text, opts);
-        });
-      }
-    }
-  }
-  // Wire IRC send tool
-  const ircAdapter = ctx.platformAdapters.get("irc");
-  if (ircAdapter) {
-    const { setIrcSend } = await import("../components/transport/tool-registry.js");
-    setIrcSend((channel, message) => { ircAdapter.sendMessage(channel, message); });
-  }
+  // #944 Step C + #1306: Wire full message handler on already-connected platforms.
+  // Extracted into wire-platform.ts so the retry path in phasePlatformsConnect can
+  // call the same functions when a new adapter is created after this phase completes.
+  const { wireTelegram, wireDiscord, wireIrc, drainRecoveryQueue } = await import("./wire-platform.js");
+  await wireTelegram(ctx);
+  await wireDiscord(ctx);
+  await wireIrc(ctx);
+  await drainRecoveryQueue(ctx);
 
   // #1000: "Back online" notification moved to bridge-app.ts (fires before greeting)
 
@@ -253,7 +211,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 }
 
 /** Export cronCallback factory for phase-heartbeat's age-check task re-enqueue. */
-export function createCronCallback(ctx: BootCtx): TaskCompleteCallback {
+export function createCronCallback(_ctx: BootCtx): TaskCompleteCallback {
   return (_chatId, _message, _result, _dodFiles) => {
     // #857/#1020: delivery handled exclusively by kanban board (phase-heartbeat card:done handler).
   };

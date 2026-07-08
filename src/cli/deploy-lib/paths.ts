@@ -4,7 +4,8 @@
  * Rules:
  *   - abtars runtime root: $ABTARS_HOME ?? ~/.abtars
  *   - abmind runtime root:      $ABMIND_HOME ?? ~/.abmind
- *   - user bin dir:             ~/.local/bin (always, XDG convention)
+ *   - releases dir:            $ABTARS_RELEASES ?? ~/.abtars-releases
+ *   - user bin dir:            $ABTARS_BIN ?? ~/.local/bin
  *
  * All callers use these resolvers — never hardcode paths. Required by
  * plan #158 v7 (Ag2 round-2 nit): cross-repo manifest reads must respect
@@ -28,8 +29,12 @@ export function resolvePackageHome(pkg: PackageName): string {
   return pkg === 'abtars' ? resolveAbtarsHome() : resolveAbmindHome();
 }
 
+export function resolveReleasesDir(): string {
+  return process.env['ABTARS_RELEASES'] ?? join(homedir(), '.abtars-releases');
+}
+
 export function resolveUserBinDir(): string {
-  return join(homedir(), '.local', 'bin');
+  return process.env['ABTARS_BIN'] ?? join(homedir(), '.local', 'bin');
 }
 
 export interface PackagePaths {
@@ -56,7 +61,7 @@ export interface PackagePaths {
 
 export function packagePaths(pkg: PackageName): PackagePaths {
   const home = resolvePackageHome(pkg);
-  const releasesDir = join(homedir(), '.abtars-releases');
+  const releasesDir = resolveReleasesDir();
   return {
     home,
     config: join(home, 'config'),
@@ -65,7 +70,7 @@ export function packagePaths(pkg: PackageName): PackagePaths {
     appPrev1: join(home, 'app.prev.1'),
     appPrev2: join(home, 'app.prev.2'),
     appPrev3: join(home, 'app.prev.3'),
-    appStaging: join(home, 'app.staging'),
+    appStaging: join(releasesDir, 'app.staging'),
     bin: resolveUserBinDir(),
     manifest: join(home, 'manifest.json'),
     lock: join(home, '.update.lock'),

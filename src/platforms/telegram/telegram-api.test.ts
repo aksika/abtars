@@ -162,4 +162,31 @@ describe("TelegramApi.fetchWithRetry (retry paths)", () => {
     // First attempt runs; after abort no further retries
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
+
+  // #1294: sendMessage is a non-idempotent write. On OUR response-wait timeout, delivery is
+  // ambiguous — retrying would double-send. It must give up (at-most-once), not retry.
+  it("sendMessage: does NOT retry on response-wait timeout (at-most-once)", async () => {
+    fetchSpy.mockRejectedValue(new Error("telegram timeout"));
+
+    const api = new TelegramApi("t");
+    await expect(api.sendMessage(1, "hi")).rejects.toThrow(/telegram timeout/);
+    // Exactly one attempt — no retry on the ambiguous timeout
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // #1294: a hard network failure (ECONNRESET) means nothing was delivered, so sendMessage
+  // still retries — "never lose" holds for failures we know didn't reach Telegram.
+  it("sendMessage: DOES retry on ECONNRESET (hard failure, safe)", async () => {
+    const econnreset = Object.assign(new Error("socket hang up ECONNRESET"), { code: "ECONNRESET" });
+    fetchSpy
+      .mockRejectedValueOnce(econnreset)
+      .mockRejectedValueOnce(econnreset)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, result: { message_id: 5 } }) } as unknown as Response);
+
+    const api = new TelegramApi("t");
+    const id = await api.sendMessage(1, "hi");
+
+    expect(id).toBe(5);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  }, 20_000);
 });

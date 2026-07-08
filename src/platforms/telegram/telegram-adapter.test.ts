@@ -78,13 +78,36 @@ function makeDeps(transport: IKiroTransport): TelegramAdapterDeps {
       startedAt: Date.now(),
       sttConfig: null,
       ttsConfig: null,
-      sessionManager: { getActiveSessionId: () => "1_A_01", getActiveSession: () => ({ id: "1_A_01", type: "A", paused: false }) } as any,
+      sessionManager: {
+        getActiveSessionId: () => "1_A_01",
+        getActiveSession: () => ({ id: "1_A_01", type: "A", paused: false }),
+        spin: async (spec: any) => {
+          const result = await transport.sendPrompt(
+            spec.sessionId ?? "1_A_01",
+            spec.prompt,
+            spec.imageContent,
+            spec.userId,
+          );
+          return { sessionId: spec.sessionId ?? "1_A_01", result: result ?? "" };
+        },
+      } as any,
       updateCtxStart: vi.fn(),
     } as PipelineDeps,
     conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() } as any,
     transport,
     memory: null,
-    sessionManager: { getActiveSessionId: () => "1_A_01" } as any,
+    sessionManager: {
+      getActiveSessionId: () => "1_A_01",
+      spin: async (spec: any) => {
+        const result = await transport.sendPrompt(
+          spec.sessionId ?? "1_A_01",
+          spec.prompt,
+          spec.imageContent,
+          spec.userId,
+        );
+        return { sessionId: spec.sessionId ?? "1_A_01", result: result ?? "" };
+      },
+    } as any,
   };
 }
 

@@ -1,9 +1,8 @@
 /**
  * peer-client.ts — HTTP client for peer_session tool (#392).
- * POST /v1/chat/completions with bearer + X-Peer-Hops.
+ * POST /v1/chat/completions with Ed25519 sig auth + TLS cert verify (#1293).
  */
 
-import { request as httpsRequest } from "node:https";
 import { loadPeerConfig, type PeerEntry } from "./peer-config.js";
 import { logInfo } from "./logger.js";
 
@@ -62,7 +61,7 @@ export async function callPeer(peerName: string, prompt: string, hops: number, o
       const { registerPending, rejectPending } = await import("./pending-callback.js");
       const { sendWakeup } = await import("./dns-wakeup.js");
       const resultPromise = registerPending(peerKey!, signedPrompt);
-      sendWakeup(peerKey!, peer.host, peer.udpPort, peer.token);
+      sendWakeup(peerKey!, peer.host, peer.udpPort);
       // Wait up to 60s for the peer to call back with the answer
       const timeout = setTimeout(() => rejectPending(peerKey!, "callback timeout (60s)"), 60000);
       try {
@@ -80,31 +79,37 @@ export async function callPeer(peerName: string, prompt: string, hops: number, o
 }
 
 function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops: number, timeoutMs: number, selfName: string): Promise<string> {
-  const { signJwt } = require("./peer-jwt.js") as typeof import("./peer-jwt.js");
-  const now = Math.floor(Date.now() / 1000);
-  const jwt = signJwt({ iss: selfName, aud: peerName, iat: now, exp: now + 60 }, peer.token);
+  const { signRequest, verifyServerCert } = require("./peer-transport/peer-auth.js") as typeof import("./peer-transport/peer-auth.js");
+  const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+  const config = loadPeerConfig();
 
   const body = JSON.stringify({
     model: "default",
     messages: [{ role: "user", content: prompt }],
   });
 
+  const sigHeaders = signRequest("POST", "/v1/chat/completions", body, config.self.signingKey, selfName);
+
+  const useTls = !!(peer.verifyKey);
+  const requestFn = useTls
+    ? (require("node:https") as typeof import("node:https")).request
+    : require("node:http").request;
+
+  const tlsOpts = useTls ? {
+    minVersion: "TLSv1.3" as const,
+    rejectUnauthorized: true,
+    checkServerIdentity: (_hostname: string, cert: { raw?: Buffer }) => {
+      if (!cert.raw) return new Error("No cert from peer");
+      const certDerB64 = cert.raw.toString("base64");
+      const certPemBlock = `-----BEGIN CERTIFICATE-----\n${certDerB64.match(/.{1,64}/g)!.join("\n")}\n-----END CERTIFICATE-----\n`;
+      if (!verifyServerCert(certPemBlock, peer.verifyKey)) {
+        return new Error(`Cert key != enrolled verifyKey for ${peerName}`);
+      }
+      return undefined;
+    },
+  } : {};
+
   return new Promise((resolve, reject) => {
-    const useTls = !!(peer.certFingerprint || peer.certPem);
-    const requestFn = useTls ? httpsRequest : require("node:http").request;
-
-    const tlsOpts = useTls ? {
-      minVersion: "TLSv1.3" as const,
-      rejectUnauthorized: true,
-      ...(peer.certPem ? { ca: [peer.certPem] } : {}),
-      checkServerIdentity: (_hostname: string, cert: { fingerprint256?: string }) => {
-        if (peer.certFingerprint && cert.fingerprint256 !== peer.certFingerprint) {
-          return new Error(`Cert fingerprint mismatch: expected ${peer.certFingerprint}, got ${cert.fingerprint256}`);
-        }
-        return undefined;
-      },
-    } : {};
-
     const req = requestFn({
       hostname: peer.host,
       port: peer.port,
@@ -113,7 +118,7 @@ function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops:
       headers: {
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(body),
-        "Authorization": `Bearer ${jwt}`,
+        ...sigHeaders,
         "X-Peer-Hops": String(hops),
       },
       timeout: timeoutMs,

@@ -1,4 +1,5 @@
 import { logInfo, logWarn, logDebug } from "./logger.js";
+import { isWsl, WSL_STANDBY_THRESHOLD_MS } from "./platform-detect.js";
 import { updateLastHeartbeat, updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import type { HeartbeatTask } from "../types/index.js";
 
@@ -8,7 +9,7 @@ export type HeartbeatConfig = {
   bridgeLockPath: string;
   /** When true, skip all heavy tasks (e.g. sleep in progress — avoid model rate limits). */
   sleepActive?: () => boolean;
-  /** Called when standby resume detected (gap > interval×3). Bridge should doctor + exit. */
+  /** Called when standby resume detected (gap > interval×3). Bridge should exit (watchdog respawns). */
   onStandbyResume?: (gapMs: number) => void;
   /** Called after every successful tick — used to kick the watchdog. */
   onTick?: () => void;
@@ -112,8 +113,11 @@ export class HeartbeatSystem implements ITaskSlot {
     const gap = now - this.lastTickAt;
     this.lastTickAt = now;
 
-    // Standby detection: gap > interval × 3 means process was suspended
-    if (gap > this.config.intervalMs * 3) {
+    // Standby detection: gap > threshold means process was suspended
+    // #1265: on WSL, use 180min threshold (VM freeze from host sleep ≠ real suspend).
+    // On real Linux/Mac, 3× interval (180s) is sufficient.
+    const standbyThresholdMs = isWsl() ? WSL_STANDBY_THRESHOLD_MS : this.config.intervalMs * 3;
+    if (gap > standbyThresholdMs) {
       const gapMin = Math.round(gap / 60000);
       logInfo(TAG, `Standby resume detected — suspended ${gapMin}min`);
       // Immediately update lastHeartbeat so external watchdog doesn't kill us

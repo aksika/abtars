@@ -8,7 +8,6 @@ import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
-import { tryReaction } from "./reactions.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
@@ -39,10 +38,10 @@ import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, 
 import { releaseBusy } from "./pipeline/busy-guard.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
 import { buildPrompt } from "./pipeline/prompt-builder.js";
-import { sessionType } from "./spin-types.js";
 
 import { getEnv } from "./env-schema.js";
 import { sanitizeOutbound } from "./sanitize-outbound.js";
+import { abmind } from "../utils/abmind-lazy.js";
 
 const TAG = "pipeline";
 const PRIMING_MAX = 8;
@@ -291,7 +290,24 @@ export async function handleInboundMessage(
       };
     }
 
-    const responsePromise = sessionTransport.sendPrompt(activeSessionId, prompt, imageContent, userId);
+    // #1271: pipeline main turn goes through spin(spec) (model-call chokepoint).
+    // Streaming/tool callbacks remain pipeline-owned (set on the transport before,
+    // reset in the finally below). spin() sends via the session's own transport.
+    const responsePromise = deps.sessionManager.spin({
+      type: sessionType(activeSession),
+      sessionId: activeSessionId,
+      prompt,
+      imageContent,
+      userId,
+      await: true,
+    }).then(r => r.result ?? "");
+    // #1292: the model call is started early to overlap with the setReaction/sendTyping
+    // round-trips below, but is not awaited until later in this try block. Without this
+    // guard, a fast provider-down rejection (403 / all models exhausted) floats as an
+    // unhandled rejection during those awaits and crashes the bridge. Marking the promise
+    // handled here: the real rejection still propagates when `await responsePromise` runs
+    // and is caught by this try/catch, which renders the graceful error to the user.
+    void responsePromise.catch(() => {});
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {
@@ -538,18 +554,21 @@ export async function handleInboundMessage(
     activeSession.toolCallCount = (activeSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
 
     // --- #824: Citation detection — did the agent use the recalled memories? ---
-    if (recalledHits && recalledHits.length > 0 && memory) {
+    if (recalledHits && recalledHits.length > 0 && memoryConfig.memoryEnabled && memory) {
       try {
-        const { detectCitations } = await import("abmind");
-        const citedIds = detectCitations(userResponse, recalledHits);
-        if (citedIds.length > 0) memory.bumpCitedCount(citedIds);
-        logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
-        // Track recalledIds for emoji reaction feedback (1h TTL)
-        if (lastSentMsgId != null) {
-          recalledIdsPerMessage.set(Number(lastSentMsgId), recalledHits.map(h => h.id));
+        const mod = abmind();
+        if (mod) {
+          const { detectCitations } = mod;
+          const citedIds = detectCitations(userResponse, recalledHits);
+          if (citedIds.length > 0) memory.bumpCitedCount(citedIds);
+          logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
+          // Track recalledIds for emoji reaction feedback (1h TTL)
+          if (lastSentMsgId != null) {
+            recalledIdsPerMessage.set(Number(lastSentMsgId), recalledHits.map(h => h.id));
+          }
         }
       } catch (err) {
-        logDebug(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`);
+        logWarn(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -586,6 +605,11 @@ export async function handleInboundMessage(
 
     // Auto-reset on context window overflow (ValidationException or actual context errors)
     const errStr = String(err instanceof Error ? err.message : JSON.stringify(err));
+    // #1294 + #1298: Synthetic internal prompts are system-initiated, not user requests.
+    // If they fail (e.g. models exhausted), don't surface an ❌ error reply — the user sees
+    // errors on their own messages, and deliver/announce notifications are queryable via /kanban.
+    const SYNTHETIC_PREFIXES = ["[SESSION START]", "[SYSTEM]", "[TASK COMPLETE]"];
+    const notifyUser = !SYNTHETIC_PREFIXES.some(p => text.startsWith(p));
     const isContextOverflow = errStr.includes("ValidationException")
       || (errStr.includes("context window") || errStr.includes("token limit") || errStr.includes("maximum context"));
     const isTimeout = errStr.includes("timed out") || errStr.includes("Prompt already in progress");
@@ -593,10 +617,10 @@ export async function handleInboundMessage(
     if (isContextOverflow) {
       logWarn(TAG, `Context overflow detected — auto-resetting session`);
       await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: `ctx-overflow: ${errStr.slice(0, 100)}` });
-      await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+      if (notifyUser) await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
-      await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+      if (notifyUser) await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else {
       logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
       const reason = errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
@@ -606,7 +630,7 @@ export async function handleInboundMessage(
         : errStr.includes("exhausted") || errStr.includes("no candidates") ? "All models exhausted."
         : errStr.includes("aborted") || errStr.includes("code=20") ? "Request aborted — model connection dropped."
         : `Error: ${errStr.slice(0, 80)}`;
-      await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+      if (notifyUser) await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } finally {
     clearInterval(typingInterval);

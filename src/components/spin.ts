@@ -3,14 +3,16 @@
  * Single flat Map<sessionId, ManagedSession>. No bucketing. No PlatformState.
  */
 
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn, logDebug } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, kanbanGetCard, isUnblocked } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
-import type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
-import { typeAgent, sessionType } from "./spin-types.js";
+import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions } from "./spin-types.js";
+import { sessionType } from "./spin-types.js";
+import { profileFor, type SessionProfile } from "./spin-profiles.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
 
@@ -37,6 +39,7 @@ export class Spin {
   private memory: { recordMessage(opts: { role: string; content: string; timestamp: number; userId: string; sessionId: string }): void } | null = null;
   private orcSession: AgentSession | null = null;
   private _lastHealerDoneAt = 0;
+  private _housekeepCounter = 0;
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
   setMemory(memory: Spin["memory"]): void { this.memory = memory; }
@@ -78,6 +81,18 @@ export class Spin {
     const r = Sessions.createHollowSession(this.sessions, this.nextIndex, userId, platform, type, 0, peer, remoteSessionId, MAX_TOTAL_SESSIONS);
     if (typeof r === "string") return r;
     this.nextIndex = r.nextIndex;
+    return r.session;
+  }
+
+  /** Allocate a named Dreamy (D) session upfront for the duration of a sleep cycle (#1280).
+   *  Non-active, platform="background" — visible in master /session (showAll) for the full cycle.
+   *  Call at sleep start before the first runtime.complete(); the caller holds the returned id
+   *  and passes it as sessionId to subsequent spin({ type:"D", sessionId }) calls. */
+  allocateDreamySession(name: string): ManagedSession {
+    const userId = getMasterUserId();
+    const r = Sessions.allocateSession(this.sessions, this.nextIndex, "D", userId, "background", 0, { active: false });
+    this.nextIndex = r.nextIndex;
+    r.session.name = name;
     return r.session;
   }
 
@@ -253,7 +268,7 @@ export class Spin {
       if (s.userId !== userId) continue;
       if (sessionId && s.id !== sessionId) continue;
       if (s.idleTimeoutMs === Infinity) continue;
-      if (s.transport) { try { s.transport.destroy(); } catch {} s.transport = undefined; }
+      if (s.transport) { try { s.transport.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } s.transport = undefined; }
       s.status = "ended";
       s.active = false;
       pushLog(s, "destroyed");
@@ -263,38 +278,19 @@ export class Spin {
 
   destroyAll(): void {
     for (const s of this.sessions.values()) {
-      if (s.transport) { try { s.transport.destroy(); } catch {} }
+      if (s.transport) { try { s.transport.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } }
     }
-    if (this.orcSession) { try { this.orcSession.destroy(); } catch {} this.orcSession = null; }
+    if (this.orcSession) { try { this.orcSession.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } this.orcSession = null; }
     this.sessions.clear();
     this.nextIndex = 0;
     logInfo(TAG, "All sessions destroyed (shutdown)");
   }
 
-  // ── inject() ───────────────────────────────────────────────────────────
-
-  async inject(userId: string, prompt: string, opts?: { deliver?: boolean }): Promise<string | null> {
-    const registry = loadUsers();
-    const user = registry.byUserId.get(userId);
-    if (!user) { logWarn(TAG, `inject: unknown user ${userId}`); return null; }
-    const chatId = user.platforms.telegram ?? user.platforms.discord;
-    if (!chatId) { logWarn(TAG, `inject: no chatId for ${userId}`); return null; }
-    const platform = user.platforms.telegram ? "telegram" : "discord";
-    const numericChatId = typeof chatId === "number" ? chatId : parseInt(String(chatId), 10);
-
-    try {
-      const session = await this.resolveSession(userId, platform, numericChatId);
-      if (!session.transport) { logWarn(TAG, `inject: no transport for ${userId}`); return null; }
-      const response = await session.transport.sendPrompt(`${userId}:inject`, prompt, undefined, userId);
-      session.messageCount++;
-      pushLog(session, `inject (deliver=${opts?.deliver ?? true})`);
-      logInfo(TAG, `inject delivered to ${userId} (${response.length} chars, deliver=${opts?.deliver ?? true})`);
-      return (opts?.deliver ?? true) ? response : null;
-    } catch (err) {
-      logWarn(TAG, `inject failed for ${userId}: ${err instanceof Error ? err.message : String(err)}`);
-      return null;
-    }
-  }
+  // ── injectGreeting() ───────────────────────────────────────────────────
+  // #1106: replaced inject() (which generated a model response but never
+  // delivered to the user). injectGreeting routes a synthetic message
+  // through the normal pipeline — the model responds AND the response is
+  // delivered to the user via the standard adapter.sendMessage path.
 
   async injectGreeting(userId: string, prompt: string): Promise<string | null> {
     if (!this._greetingAdapter) { logWarn(TAG, "injectGreeting: no adapter"); return null; }
@@ -323,21 +319,212 @@ export class Spin {
 
   getOrcSession(): AgentSession | null { return this.orcSession?.isReady ? this.orcSession : null; }
 
+  /** @deprecated Use `spin({ type:"O", sessionId, prompt:"[USER] "+msg, await:true })`. */
   async sendUserToOrc(message: string): Promise<string | null> {
-    const orc = this.getOrcSession();
-    if (!orc) return null;
-    const response = await orc.sendPrompt("orc:user", `[USER] ${message}`);
-    return response;
+    const orcSession = [...this.sessions.values()].find(s => s.id.includes("_O_") && s.status !== "ended");
+    if (!orcSession) return null;
+    const { result } = await this.spin({ type: "O", sessionId: orcSession.id, prompt: `[USER] ${message}`, await: true });
+    return result ?? null;
   }
 
-  private async getOrCreateOrc(): Promise<AgentSession> {
-    if (this.orcSession?.isReady) return this.orcSession;
-    logInfo(TAG, "Spawning persistent Orc session");
-    this.orcSession = await this.runtime!.session("browsie");
-    return this.orcSession;
+
+  // ── #1271: unified session API ────────────────────────────────────────
+  //
+  // spin(spec) is the single chokepoint for issuing a model prompt. Per-type
+  // behavior lives in SESSION_PROFILES (spin-profiles.ts) — no `type === "…"`
+  // branches here. Continuation (pipeline main turn, sleep step N) is just
+  // spin() with a sessionId.
+
+  async spin(spec: SpinSessionSpec): Promise<SpinResult> {
+    if (!this.runtime) throw new Error("Spin: runtime not set");
+    const profile = profileFor(spec.type);
+
+    // 1. Defaults
+    const userId   = spec.userId ?? getMasterUserId();
+    const platform = spec.platform ?? "background";
+    const chatId   = spec.chatId ?? 0;
+    const agent    = spec.agent ?? profile.agent;
+    const timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const terminate = spec.terminateAfter ?? profile.terminateAfter;
+    const persistent = spec.persistent ?? (profile.transportMode === "persistent");
+
+    // 2. Resolve session (reuse | active | singleton | transient) — driven by profile, no type branches
+    let session: ManagedSession;
+    if (spec.sessionId) {
+      const found = this.sessions.get(spec.sessionId);
+      if (!found) throw new Error(`Spin: sessionId ${spec.sessionId} not found`);
+      if (found.status === "ended") throw new Error(`Spin: sessionId ${spec.sessionId} is ended`);
+      session = found;
+    } else if (spec.active || profile.resolution === "active") {
+      session = this.getActiveSession(userId, platform);
+    } else if (profile.resolution === "singleton") {
+      session = this.getOrCreateVisibleSession(userId, spec.type)!;
+    } else {
+      const r = Sessions.allocateSession(this.sessions, this.nextIndex, spec.type, userId, platform, chatId);
+      this.nextIndex = r.nextIndex; session = r.session;
+      if (spec.metadata) session.metadata = { ...spec.metadata };
+    }
+    const stepIndex = (session.messageCount >> 1) + 1;
+
+    // 3. Kanban card (user-facing work only)
+    let cardId = spec.cardId;
+    if (cardId === undefined && spec.goal !== undefined) {
+      cardId = kanbanEnqueue(spec.title ?? spec.goal.slice(0, 80), spec.source ?? "user", undefined, {
+        priority: spec.priority ?? "MEDIUM", type: spec.type, parent_id: spec.parentCardId,
+        deliveryMode: spec.deliveryMode, chatId: chatId ? String(chatId) : undefined,
+        notes: spec.callbackPeer ? JSON.stringify({ callback_peer: spec.callbackPeer }) : undefined,
+        sourcePeer: spec.sourcePeer,
+      });
+    }
+    if (cardId !== undefined && this.canDispatch(spec.type, cardId)) {
+      this.markRunning(spec.type, cardId); kanbanRunning(cardId);
+    }
+
+    // 4-7. Single try/catch so EVERY exit path (pre-exec throws included) flows
+    //       through failSpin, which owns markDone + drainQueued. Without this,
+    //       a throw from beforePrompt / transport creation / a decorator leaves
+    //       the cardId in this.running forever, wedging single-slot types
+    //       (O/T/B/D/H) until bridge restart. (#1274)
+    const started = Date.now();
+    try {
+      // 4. before-hook
+      await profile.beforePrompt?.(session, cardId);
+
+      // 5. Resolve the execution transport. Reuse the session's OWN transport if it
+      //    already has one (A per-user main turn, D step N, O reuse). Only
+      //    create+attach for a NEW persistent session.
+      let sessionTransport = session.transport as IKiroTransport | undefined;
+      if (persistent && !sessionTransport) {
+        const agentSession = await this.runtime.session(agent, profile.resolution === "active" ? userId : undefined);
+        sessionTransport = agentSession.transport as IKiroTransport;
+        session.transport = sessionTransport;
+        session.status = "ready";
+      }
+
+      // 6. Build prompt via decorators
+      let prompt = spec.prompt ?? spec.goal ?? "";
+      for (const decorate of profile.decorators) {
+        prompt = await decorate(prompt, { session, cardId, parentCardId: spec.parentCardId });
+      }
+      pushLog(session, `spin type=${spec.type} agent=${agent} step=${stepIndex}`);
+
+      // 7. Execute — persistent/continuation sends via the session's own transport
+      //    (key = session.id preserves the Orc sneak-in); oneshot uses runtime.complete.
+      const exec = sessionTransport
+        ? sessionTransport.sendPrompt(session.id, prompt, spec.imageContent as { mime: string; base64: string } | undefined, spec.userId ?? userId)
+        : this.runtime.complete(agent, prompt, { timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds });
+
+      if (!spec.await) {
+        exec.then(r => this.finishSpin(spec, profile, session, cardId, stepIndex, started, r || "(no output)", terminate))
+            .catch(e => this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate));
+        return { sessionId: session.id, cardId };
+      }
+      const result = (await exec) || "(no output)";
+      await this.finishSpin(spec, profile, session, cardId, stepIndex, started, result, terminate);
+      return { sessionId: session.id, cardId, result };
+    } catch (err) {
+      // Covers: pre-exec throws (steps 4-6) AND awaited execution failures (step 7).
+      // failSpin calls markDone + drainQueued — concurrency slot always released.
+      await this.failSpin(spec, profile, session, cardId, stepIndex, started, err, terminate);
+      if (spec.await) throw err;                    // awaited callers still see the error
+      return { sessionId: session.id, cardId };     // fire-and-forget: recorded, no unhandled rejection
+    }
   }
 
-  // ── Dispatch ───────────────────────────────────────────────────────────
+  private async finishSpin(
+    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession,
+    cardId: number | undefined, stepIndex: number, started: number, result: string,
+    terminate: "call" | "response" | "external",
+  ): Promise<void> {
+    // Persistent sends go through session.transport (runtime.lastUsage is only
+    // updated by runtime.complete). Prefer the transport's own usage; fall back
+    // to runtime for oneshot.
+    const usage = (session.transport as { lastUsage?: () => { input: number; output: number } | null } | undefined)?.lastUsage?.()
+      ?? this.runtime?.lastUsage ?? null;
+    session.messageCount += 2;
+    session.lastActiveAt = Date.now();
+    session.tokenCount = usage ? usage.input + usage.output : session.tokenCount;
+    pushLog(session, "complete");
+
+    if (this.memory) {
+      const sid = cardId !== undefined ? `${spec.type}_card${cardId}` : `${spec.type}_${session.id}`;
+      this.memory.recordMessage({ role: "user", content: spec.goal ?? spec.prompt ?? "", timestamp: Date.now(), userId: "system", sessionId: sid });
+      this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
+    }
+    if (cardId !== undefined) {
+      // drainArtifacts lives in transport/artifact-tools — wrapped in try/catch
+      // for test envs where the module's transitive deps (artifact-store) may not
+      // resolve. In production this always succeeds.
+      let artifacts: Array<{ name: string; content: string }> = [];
+      try {
+        const { drainArtifacts } = require("./transport/artifact-tools.js") as typeof import("./transport/artifact-tools.js");
+        artifacts = drainArtifacts(cardId) ?? [];
+      } catch { /* artifact-tools unavailable (e.g. test env) — skip */ }
+      kanbanComplete(cardId, null, result.slice(0, 500));
+      if (spec.callbackPeer) {
+        const card = kanbanGetCard(cardId);
+        fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
+      }
+    }
+
+    await profile.afterPrompt?.(session, cardId);
+    const stepEvent: StepEvent = {
+      sessionId: session.id, cardId, stepIndex, result,
+      durationMs: Date.now() - started,
+      inputTokens: usage?.input, outputTokens: usage?.output,
+    };
+    await spec.onStepComplete?.(stepEvent);
+
+    this.applyTerminate(session, terminate);
+    if (cardId !== undefined) { this.markDone(spec.type, cardId); this.drainQueued(); }
+  }
+
+  private async failSpin(
+    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession,
+    cardId: number | undefined, stepIndex: number, started: number, err: unknown,
+    terminate: "call" | "response" | "external",
+  ): Promise<void> {
+    const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
+    logWarn(TAG, `${spec.type} spin failed: ${msg}`);
+    pushLog(session, `failed: ${msg.slice(0, 80)}`);
+    if (cardId !== undefined) {
+      kanbanRetryOrFail(cardId, msg);
+      if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
+    }
+    await profile.afterPrompt?.(session, cardId);
+    const stepEvent: StepEvent = {
+      sessionId: session.id, cardId, stepIndex,
+      error: err instanceof Error ? err : new Error(msg),
+      durationMs: Date.now() - started,
+    };
+    await spec.onStepComplete?.(stepEvent);
+
+    this.applyTerminate(session, terminate);
+    if (cardId !== undefined) { this.markDone(spec.type, cardId); this.drainQueued(); }
+  }
+
+  private applyTerminate(session: ManagedSession, terminate: "call" | "response" | "external"): void {
+    if (terminate === "call") this.sessions.delete(session.id);
+    else if (terminate === "response") { session.status = "ended"; session.active = false; }
+    // "external" → stays alive (Orc, persistent D); 1hr housekeeping prunes ended ones
+  }
+
+  /** #1271: Background one-shot (e.g. compaction summary). Returns the result string. */
+  async dispatchBackground(opts: DispatchBackgroundOptions): Promise<string> {
+    const { result } = await this.spin({
+      type: opts.type ?? "S",
+      prompt: opts.prompt,
+      timeoutMs: opts.timeoutMs,
+      agent: opts.agent,
+      await: true,
+    });
+    return result ?? "";
+  }
+
+  // ── Dispatch (legacy wrappers, #1271) ───────────────────────────────────
+  // dispatch / dispatchAwait / getOrCreateOrc / sendUserToOrc are thin wrappers
+  // around the unified spin(spec) chokepoint. dispatchBackground is the new
+  // background-only entry point.
 
   /** #1010: O-type reuses existing session (one Orc). All others create new. */
   private getOrCreateVisibleSession(userId: string, type: SessionType): ManagedSession | undefined {
@@ -350,7 +537,13 @@ export class Spin {
     return typeof sub === "string" ? undefined : sub;
   }
 
+  /**
+   * @deprecated Use `spin({ type, goal, …, await: false })` instead.
+   * Backward-compat wrapper: creates a kanban card, then dispatches via spin().
+   * Returns the cardId synchronously; the model call runs in the background.
+   */
   dispatch(request: SpinRequest): { cardId: number; sessionId?: string } {
+    // Pre-create the card (matches old behavior — card exists even if blocked)
     const cardTitle = request.title ?? request.goal.slice(0, 80);
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
       priority: request.priority ?? "MEDIUM", type: request.type,
@@ -359,74 +552,64 @@ export class Spin {
       chatId: request.chatId, sourcePeer: request.sourcePeer,
     });
 
-    if (!this.canDispatch(request.type, cardId)) {
-      logInfo(TAG, `${request.type} card:${cardId} queued (concurrency gate)`);
+    // Concurrency gate: blocked cards stay queued for drainQueued() to pick up.
+    // Session cap: also gate here so a full Map never generates a void-spin
+    // unhandled rejection (step-2 throws in spin() are outside the try/catch). (#1274)
+    const aliveSessions = [...this.sessions.values()].filter(s => s.status !== "ended").length;
+    if (aliveSessions >= MAX_TOTAL_SESSIONS || !this.canDispatch(request.type, cardId)) {
+      const reason = aliveSessions >= MAX_TOTAL_SESSIONS ? "session cap" : "concurrency gate";
+      logInfo(TAG, `${request.type} card:${cardId} queued (${reason})`);
       return { cardId };
     }
 
-    this.markRunning(request.type, cardId);
-    kanbanRunning(cardId);
-
-    const masterUserId = getMasterUserId();
-    const session = this.getOrCreateVisibleSession(masterUserId, request.type);
-    if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatch card:${cardId}`); }
-
-    const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.execute(request, cardId, timeout)
-      .then(result => {
-        const { drainArtifacts } = require("./transport/artifact-tools.js") as typeof import("./transport/artifact-tools.js");
-        const artifacts = drainArtifacts(cardId);
-        kanbanComplete(cardId, null, result.slice(0, 500));
-        if (request.callbackPeer) {
-          const card = kanbanGetCard(cardId);
-          fireCallback(request.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
-        }
-      })
-      .catch(err => {
-        const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
-        logWarn(TAG, `${request.type} card:${cardId} failed: ${msg}`);
-        kanbanRetryOrFail(cardId, msg);
-        if (request.callbackPeer) fireCallback(request.callbackPeer, cardId, "failed", undefined, msg);
-      })
-      .finally(() => {
-        this.markDone(request.type, cardId);
-        if (session) { session.status = "ended"; session.active = false; pushLog(session, "completed"); }
-        this.drainQueued();
-      });
-
-    return { cardId, sessionId: session?.id };
+    void this.spin({
+      type: request.type,
+      goal: request.goal,
+      cardId,
+      parentCardId: request.parentCardId,
+      title: request.title,
+      priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
+      source: request.source,
+      deliveryMode: request.deliveryMode,
+      agent: request.agent,
+      timeoutMs: request.timeoutMs,
+      callbackPeer: request.callbackPeer,
+      sourcePeer: request.sourcePeer,
+      chatId: request.chatId ? Number(request.chatId) : undefined,
+      await: false,
+    });
+    return { cardId };
   }
 
+  /**
+   * @deprecated Use `spin({ type, goal, …, await: true })` instead.
+   * Backward-compat wrapper: synchronously dispatches and returns the result.
+   */
   async dispatchAwait(request: SpinRequest): Promise<{ cardId: number; result: string }> {
-    // #987: enforce concurrency + cooldown gates (same as dispatch)
+    // #987: enforce concurrency + cooldown gates
+    // #1274: also enforce session cap (await:true — throw is safe, caller awaits)
+    const aliveSessions = [...this.sessions.values()].filter(s => s.status !== "ended").length;
+    if (aliveSessions >= MAX_TOTAL_SESSIONS) {
+      throw new Error("System busy — max sessions reached.");
+    }
     if (!this.canDispatch(request.type, 0)) {
       throw new Error(`${request.type} session busy or in cooldown — skipping`);
     }
-
-    const cardTitle = request.title ?? request.goal.slice(0, 80);
-    const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
-      priority: request.priority ?? "MEDIUM", type: request.type,
-      parent_id: request.parentCardId, deliveryMode: request.deliveryMode,
-      chatId: request.chatId,
+    const { cardId, result } = await this.spin({
+      type: request.type,
+      goal: request.goal,
+      title: request.title,
+      priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
+      source: request.source,
+      deliveryMode: request.deliveryMode,
+      agent: request.agent,
+      timeoutMs: request.timeoutMs,
+      maxToolRounds: request.maxToolRounds,
+      parentCardId: request.parentCardId,
+      chatId: request.chatId ? Number(request.chatId) : undefined,
+      await: true,
     });
-
-    this.markRunning(request.type, cardId);
-    kanbanRunning(cardId);
-
-    const masterUserId = getMasterUserId();
-    const session = this.getOrCreateVisibleSession(masterUserId, request.type);
-    if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatchAwait card:${cardId}`); }
-
-    const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    try {
-      const result = await this.execute(request, cardId, timeout);
-      return { cardId, result };
-    } finally {
-      this.markDone(request.type, cardId);
-      // O-type: session stays alive until Orc idle timeout (visible in /session)
-      if (session && request.type !== "O") { session.status = "ended"; session.active = false; pushLog(session, "completed"); }
-      this.drainQueued();
-    }
+    return { cardId: cardId!, result: result! };
   }
 
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {
@@ -456,20 +639,94 @@ export class Spin {
     this.drainQueued();
     this.checkStaleWorkers();
     await this.pollRemoteCards();
+    this._housekeepCounter++;
+    if (this._housekeepCounter % 72 === 0) {
+      this.pruneSkillTrash();
+      this.rotateAuditLog();
+      this.pruneEndedSessions();
+    }
   }
 
   private checkStaleWorkers(): void {
     const STALE_MS = parseInt(process.env["WORKER_STALE_MS"] || "300000", 10);
     const now = Date.now();
-    for (const [, cardIds] of this.running) {
-      for (const cardId of cardIds) {
+    let freed = false;
+    for (const [type, cardIds] of this.running) {
+      for (const cardId of [...cardIds]) {           // snapshot — markDone mutates the Set
         const card = kanbanGetCard(cardId);
         if (!card || card.status !== "running") continue;
         const lastActivity = new Date(card.updated_at + "Z").getTime();
         if (now - lastActivity > STALE_MS) {
           logWarn(TAG, `Stale card ${cardId} (${Math.round((now - lastActivity) / 1000)}s no activity) — failing`);
           kanbanFail(cardId, "stale — no activity");
+          this.markDone(type, cardId);               // release in-memory slot (#1274)
+          freed = true;
         }
+      }
+    }
+    if (freed) this.drainQueued();                   // reuse freed slot without waiting a tick
+  }
+
+  /** #613: Prune .trash/ entries older than 7 days (~hourly). */
+  private pruneSkillTrash(): void {
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    const { existsSync, readdirSync, rmSync, statSync } = require("node:fs") as typeof import("node:fs");
+    const { join } = require("node:path") as typeof import("node:path");
+    const { abtarsHome } = require("../paths.js") as typeof import("../paths.js");
+    const trashPath = join(abtarsHome(), "skills", ".trash");
+    if (!existsSync(trashPath)) return;
+    const now = Date.now();
+    for (const entry of readdirSync(trashPath)) {
+      try {
+        const full = join(trashPath, entry);
+        const stat = statSync(full);
+        if (now - stat.mtimeMs > SEVEN_DAYS_MS) {
+          rmSync(full, { recursive: true });
+          logInfo("skill-trash-prune", `Pruned: ${entry}`);
+        }
+      } catch (err) { logAndSwallow(TAG, "prune entry", err); }
+    }
+  }
+
+  /** #681: Rotate audit.jsonl when > 10MB, prune files older than 30 days (~hourly). */
+  private rotateAuditLog(): void {
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    const { existsSync, statSync, renameSync, readdirSync, unlinkSync } = require("node:fs") as typeof import("node:fs");
+    const { join } = require("node:path") as typeof import("node:path");
+    const { abtarsHome } = require("../paths.js") as typeof import("../paths.js");
+    const logsDir = join(abtarsHome(), "logs");
+    const auditPath = join(logsDir, "audit.jsonl");
+    if (!existsSync(auditPath)) return;
+    try {
+      const stat = statSync(auditPath);
+      if (stat.size > 10 * 1024 * 1024) {
+        const date = new Date().toISOString().slice(0, 10);
+        renameSync(auditPath, join(logsDir, `audit-${date}.jsonl`));
+        logInfo("audit-rotation", `Rotated audit.jsonl (${(stat.size / 1024 / 1024).toFixed(1)}MB)`);
+      }
+    } catch (err) { logAndSwallow(TAG, "audit rotate", err); }
+    const now = Date.now();
+    try {
+      for (const f of readdirSync(logsDir)) {
+        if (!f.startsWith("audit-") || !f.endsWith(".jsonl")) continue;
+        const full = join(logsDir, f);
+        const stat = statSync(full);
+        if (now - stat.mtimeMs > THIRTY_DAYS_MS) {
+          unlinkSync(full);
+          logInfo("audit-rotation", `Pruned: ${f}`);
+        }
+      }
+    } catch (err) { logAndSwallow(TAG, "audit prune", err); }
+  }
+
+  /** #1248: Prune ended sessions older than 1 hour (~hourly). Prevents unbounded Map growth. */
+  private pruneEndedSessions(): void {
+    const ONE_HOUR_MS = 60 * 60 * 1000;
+    const now = Date.now();
+    for (const [id, s] of this.sessions) {
+      if (s.status === "ended" && now - s.lastActiveAt > ONE_HOUR_MS) {
+        this.sessions.delete(id);
+        logDebug(TAG, `Pruned ended session: ${s.userId} id=${id}`);
       }
     }
   }
@@ -492,7 +749,7 @@ export class Spin {
         const result = await transport.checkTask(meta.peer, meta.remote_task_id);
         if (result.status === "done") kanbanComplete(card.id, null, result.result?.slice(0, 500) ?? "completed");
         else if (result.status === "failed") kanbanFail(card.id, result.error ?? "remote task failed");
-      } catch {}
+      } catch (err) { logAndSwallow(TAG, "pollRemote", err); }
     }
   }
 
@@ -512,105 +769,6 @@ export class Spin {
   private markDone(type: SessionType, cardId: number): void {
     this.running.get(type)?.delete(cardId);
     if (type === "H") this._lastHealerDoneAt = Date.now();
-  }
-
-  private async execute(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
-    if (!this.runtime) throw new Error("Spin: runtime not set");
-    if (request.type === "O") return this.executeOrc(request, cardId, timeoutMs);
-
-    const agentName = request.agent ?? typeAgent(request.type);
-    logInfo(TAG, `▶ ${request.type} card:${cardId} agent=${agentName}`);
-
-    const staleMs = parseInt(process.env["WORKER_STALE_MS"] ?? "300000", 10);
-    let lastActivityAt = Date.now();
-
-    const timer = setTimeout(() => {
-      logWarn(TAG, `⏱️ ${request.type} card:${cardId} timed out`);
-      this.runtime?.interruptSpawn(`spin-${cardId}`);
-    }, timeoutMs);
-
-    const staleCheck = setInterval(() => {
-      if (Date.now() - lastActivityAt > staleMs) {
-        clearInterval(staleCheck);
-        logWarn(TAG, `⏱️ ${request.type} card:${cardId} stale (no activity ${staleMs / 1000}s)`);
-        this.runtime?.interruptSpawn(`spin-${cardId}`);
-      }
-    }, 60_000);
-
-    try {
-      const { buildSoulBundle } = await import("./soul-bundle.js");
-      const bundle = buildSoulBundle(request.type);
-      let fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
-
-      // #891: auto-inject channel messages for W/O sessions
-      if (request.type === "W" || request.type === "T") {
-        const { channelUnread } = await import("./tasks/kanban-channel.js");
-        const workerName = `Worker-${String(cardId).padStart(2, "0")}`;
-        const parentCard = request.parentCardId ?? cardId;
-        const msgs = channelUnread(parentCard, workerName);
-        if (msgs.length > 0) {
-          const lines = msgs.map(m => `[${m.from_agent}→${m.to_agent}]${m.directive ? " ⚡" : ""} ${m.message}`);
-          fullPrompt = `[CHANNEL — ${msgs.length} message(s) for ${workerName}]\n${lines.join("\n")}\n[/CHANNEL]\n\n${fullPrompt}`;
-        }
-      }
-
-      const result = (await this.runtime.complete(agentName, fullPrompt, { timeoutMs, session: "fresh" })) || "(no output)";
-      if (this.memory) {
-        const sid = `${request.type}_card${cardId}`;
-        this.memory.recordMessage({ role: "user", content: request.goal, timestamp: Date.now(), userId: "system", sessionId: sid });
-        this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
-      }
-      return result;
-    } finally { clearTimeout(timer); clearInterval(staleCheck); }
-  }
-
-  private async executeOrc(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
-    const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
-    const { setActiveOrcCard } = await import("./transport/orc-tools.js");
-    updateBridgeLockField("orc_active", cardId);
-    setActiveOrcCard(cardId);
-    const orc = await this.getOrCreateOrc();
-    logInfo(TAG, `▶ O card:${cardId} (persistent Orc)`);
-
-    // #993: Attach Orc transport to visible session — user can sneak in
-    let orcSessionKey = "orc:project"; // fallback
-    for (const [, s] of this.sessions) {
-      if (s.id.includes("_O_") && s.status !== "ended") {
-        s.transport = orc.transport as any;
-        s.status = "ready";
-        orcSessionKey = s.id; // use proper ManagedSession ID as ACP session key
-        break;
-      }
-    }
-    const timer = setTimeout(() => { logWarn(TAG, `⏱️ O card:${cardId} timed out`); }, timeoutMs);
-    try {
-      const { buildSoulBundle } = await import("./soul-bundle.js");
-      const bundle = buildSoulBundle("O");
-
-      // #1005: CONTEXT wrapper (same pattern as Main)
-      const { localDateTime } = await import("../utils/local-time.js");
-      const context = `[CONTEXT — do not respond to this section]\n[PROJECT] card #${cardId}\n[CURRENT TIME] ${localDateTime()}\n[/CONTEXT]\n\n`;
-
-      let fullPrompt = context + (bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal);
-      const { drainOrcNotifications } = await import("./spin-notifications.js");
-      const notifications = drainOrcNotifications(cardId);
-      if (notifications.length) fullPrompt = notifications.join("\n") + "\n\n" + fullPrompt;
-
-      // #891: Orc sees ALL channel messages on its card
-      const { channelUnread } = await import("./tasks/kanban-channel.js");
-      const orcMsgs = channelUnread(cardId, "Orc");
-      if (orcMsgs.length > 0) {
-        const lines = orcMsgs.map(m => `[${m.from_agent}→${m.to_agent}]${m.directive ? " ⚡" : ""} ${m.message}`);
-        fullPrompt = `[CHANNEL — ${orcMsgs.length} message(s)]\n${lines.join("\n")}\n[/CHANNEL]\n\n${fullPrompt}`;
-      }
-
-      const result = (await orc.sendPrompt(orcSessionKey, fullPrompt)) || "(no output)";
-      if (this.memory) {
-        this.memory.recordMessage({ role: "user", content: request.goal, timestamp: Date.now(), userId: "system", sessionId: orcSessionKey });
-        this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: orcSessionKey });
-      }
-      return result;
-    } finally { clearTimeout(timer); updateBridgeLockField("orc_active", null); setActiveOrcCard(null); }
   }
 }
 

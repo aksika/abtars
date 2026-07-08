@@ -1,74 +1,40 @@
 # Do I Need sudo? No.
 
-abtars and abmind install, update, and run entirely in user space. No root access required at any point.
+abtars and abmind install, update, and run entirely in user space. No root access required.
 
-## Prerequisites
+## Everything lives under ~/
 
-```bash
-# Install pnpm (one-time) — no sudo
-curl -fsSL https://get.pnpm.io/install.sh | sh -
-pnpm setup
-# Restart your shell or: source ~/.bashrc (or ~/.zshrc)
-```
+| Component | Location |
+|-----------|----------|
+| Node + npm packages | `~/.nvm/versions/node/...` (nvm) or `~/.npm-global/` |
+| abtars releases | `~/.abtars-releases/` |
+| abtars runtime | `~/.abtars/` |
+| abmind data | `~/.abmind/` |
+| Watchdog service | `~/Library/LaunchAgents/` (macOS) or `~/.config/systemd/user/` (Linux) |
+| Native deps | `~/.local/lib/node_modules/` |
 
-## Install (3 steps)
+No system paths. No `/usr/local/`. No `/etc/`. No root.
 
-```bash
-pnpm install -g abtars abmind    # 1. CLI on PATH
-abmind install                    # 2. memory system
-abtars install                    # 3. bridge setup → starts running
-```
+## One exception: systemd linger (Linux only)
 
-pnpm installs global packages to your home directory:
-- Linux: `~/.local/share/pnpm/`
-- macOS: `~/Library/pnpm/`
-
-## Update
-
-```bash
-abtars update    # pulls, builds, deploys — no sudo
-```
-
-## Run as a service (survives reboot)
-
-### macOS — launchd
-
-User-level plist. No sudo.
-
-```bash
-abtars install --daemon    # creates ~/Library/LaunchAgents/com.abtars.watchdog.plist
-```
-
-### Linux — systemd user service
-
-```bash
-abtars install --daemon    # creates ~/.config/systemd/user/abtars-watchdog.service
-loginctl enable-linger $USER   # service survives reboot without sudo
-```
-
-`enable-linger` may require sudo on some distros. If it does, it's a one-time system admin action — not an abtars requirement. Ask your sysadmin or run:
+For the bridge to survive reboot as a user systemd service, you may need to enable linger once:
 
 ```bash
 sudo loginctl enable-linger $USER
 ```
 
-After that: never sudo again.
+One-time system admin action. After that: never sudo again.
 
-## Why no sudo?
+## If npm defaults to /usr/local/ (macOS)
 
-| Component | Location | Owner |
-|-----------|----------|-------|
-| pnpm + packages | `~/.local/share/pnpm/` | user |
-| abtars releases | `~/.abtars-releases/` | user |
-| abtars runtime | `~/.abtars/` | user |
-| abmind data | `~/.abmind/` | user |
-| Watchdog service | `~/Library/LaunchAgents/` or `~/.config/systemd/user/` | user |
-| Source (optional) | `~/.abtars-releases/src/` | user |
+macOS ships with npm pointing at `/usr/local/`, which requires sudo for `npm install -g`. Fix with one of:
 
-Everything lives under `~/`. No system paths touched. No `/usr/local/`. No `/etc/`. No root.
+**Option A — redirect npm globals to your home dir:**
+```bash
+npm config set prefix ~/.npm-global
+echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
 
-## What about npm?
-
-If you installed with npm and npm's prefix is `/usr/local/` (macOS default), you may have needed sudo for `npm install -g`. Switching to pnpm eliminates this — pnpm never uses system paths.
-
-If you're stuck with npm: `npm config set prefix ~/.npm-global` moves the global dir to user space. Then no sudo needed for npm either.
+**Option B — use nvm (recommended):**
+nvm installs Node + npm under `~/.nvm/` — no sudo, multiple Node versions, no config needed.
+See [Prerequisites](./prerequisites.md) for install instructions.

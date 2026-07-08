@@ -17,7 +17,7 @@ import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
 const DEFAULT_PRUNE_DAYS = 7;
 
 const ABTARS_EXCLUDE = [
-  "src", "logs", "overflow", "browser-socket", "app", "bin", "bridge.lock",
+  "src", "logs", "overflow", "browser-socket", "app", "app.staging", "bin", "bridge.lock",
   "deploy.state", ".bridge.flock", "state", "lib", "scripts", "skills/core", "core",
   "*.sock", "*.db-wal", "*.db-shm",
 ];

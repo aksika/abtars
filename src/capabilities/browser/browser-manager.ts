@@ -1,7 +1,7 @@
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { logInfo, logWarn } from "../../components/logger.js";
 import { getEnv } from "../../components/env-schema.js";
-import type { Browser, BrowserContext, Page } from "cloakbrowser";
+import type { Browser, BrowserContext, Page } from "../../types/browser.js";
 import { execFileSync } from "node:child_process";
 import type { BrowserSession } from "../../types/browser.js";
 
@@ -118,15 +118,15 @@ export class BrowserManager {
   }
 
   private async _launchPatchright(): Promise<Browser> {
-    const { chromium } = await import("cloakbrowser");
+    const { launch } = await import("cloakbrowser");
     const headed = getEnv().browserHeaded;
     const args = headed ? [] : ["--headless=new"];
     if (getEnv().browserNoSandbox) args.push("--no-sandbox");
-    return chromium.launch({
+    return launch({
       headless: !headed,
-      channel: getEnv().browserChannel,
+      channel: getEnv().browserChannel, // #1203: cloakbrowser LaunchOptions omits 'channel'; passed through to Playwright
       args,
-    });
+    } as Parameters<typeof launch>[0]);
   }
 
   // -------------------------------------------------------------------------

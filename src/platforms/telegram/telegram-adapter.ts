@@ -474,7 +474,11 @@ export class TelegramAdapter implements PlatformAdapter {
         logDebug(TAG, `Queued reaction signal for busy ${activeId} (${entry.queue.length} pending)`);
       } else {
         try {
-          const response = await this.deps.transport.sendPrompt(activeId, signal, undefined, reactionUser);
+          // #1271: reaction signal goes through spin() (model-call chokepoint)
+          const { result: response } = await spin.spin({
+            type: "A", sessionId: activeId, prompt: signal,
+            userId: reactionUser, await: true,
+          });
           logDebug(TAG, `Sent reaction signal to transport for chat ${chatId}`);
           if (response) {
             const { text, reactionEmoji, noReply } = cleanResponse(response);

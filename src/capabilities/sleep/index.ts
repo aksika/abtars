@@ -16,18 +16,27 @@ import { abmind } from "../../utils/abmind-lazy.js";
 import type { SleepRuntime } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { readEnv, readEnvWithDefault } from "../../components/env.js";
+import { startSleepCard, type SleepCard } from "./sleep-card.js";
 
 export interface SleepOpts {
   sleepHour: number;
   sleepAuditDir: string;
   memoryEnabled: boolean;
   memoryDir?: string;
-  /** LLM runtime adapter — bridge wraps its SubagentRuntime.complete("dreamy", ...). */
+  /** LLM runtime adapter — bridge wraps spin({ type: "D", ... }) (#1271). */
   runtime: SleepRuntime;
   onComplete: () => void;
+  /** Always called once per cycle at the end — success, partial-failure, or throw.
+   *  Tears down the night Dreamy session (#1287). Distinct from onComplete, which
+   *  runs the memory reset only on the success path. Optional — sleep works without it. */
+  onCycleEnd?: () => void;
   getLastMsgTs?: () => number;
   sendSystemMessage?: (prompt: string) => Promise<void>;
   killWakeInhibit?: () => void;
+  /** Allocate a named Dreamy session upfront at sleep start (#1280).
+   *  Called before the first runtime.complete() so the session appears in /session
+   *  for the full duration of the cycle. Optional — sleep still works without it. */
+  allocateSleepSession?: (name: string) => void;
 }
 
 export interface SleepProgress {
@@ -109,6 +118,11 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     if (running) return;
     attempts++;
     progress = null;
+    // Allocate the Dreamy session upfront so it appears in /session for the full cycle (#1280).
+    if (opts.allocateSleepSession) {
+      const dateStr = new Date().toISOString().slice(0, 10);
+      opts.allocateSleepSession(`Sleep ${dateStr}`);
+    }
     running = true;
     writeSleepStatus("sleeping");
     logInfo("sleep", `😴 Sleep started in-process (attempt ${attempts}, model=dreamy)`);
@@ -121,10 +135,20 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       catch (err) { logWarn("sleep", `Invalid SLEEP_QUALITY='${raw}', using ${abmind()!.DEFAULT_LEVEL}: ${err instanceof Error ? err.message : String(err)}`); return abmind()!.DEFAULT_LEVEL; }
     })();
 
-    abmind()!.runSleepCycle({ runtime: opts.runtime, level, fresh: forced && !!forceSleep?.includes("fresh") })
+    let sleepCard: SleepCard | null = null;
+    abmind()!.runSleepCycle({
+      runtime: opts.runtime,
+      level,
+      fresh: forced && !!forceSleep?.includes("fresh"),
+      // #895: stepped card — created when the orchestrator commits to running steps,
+      // ticked per step, completed once at cycle end (both success and failure paths).
+      onCycleStart: () => { sleepCard = startSleepCard(); },
+      onStep: (e) => sleepCard?.onStep(e),
+    })
       .then(async (result: { ok: boolean; failCount: number }) => {
         running = false;
         progress = null;
+        sleepCard?.complete();
         logInfo("sleep", `😴 Sleep finished (ok=${result.ok}, failCount=${result.failCount}, attempt ${attempts})`);
         writeSleepStatus("awake");
         if (!result.ok) {
@@ -165,6 +189,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       .catch((err: unknown) => {
         running = false;
         progress = null;
+        sleepCard?.complete();
         writeSleepStatus("awake");
         const msg = err instanceof Error ? err.message : String(err);
         if (attempts < MAX_RETRIES) {
@@ -173,6 +198,12 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         } else {
           logWarn("sleep", `😴 Sleep threw — exhausted ${MAX_RETRIES} attempts: ${msg}`);
         }
+      })
+      .finally(() => {
+        // #1287: tear down the night Dreamy session on EVERY cycle outcome (success,
+        // partial-failure, throw). Retry (if any) re-allocates a fresh D via
+        // allocateSleepSession, so no Dreamy session accumulates.
+        opts.onCycleEnd?.();
       });
   }
 

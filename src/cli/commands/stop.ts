@@ -59,7 +59,7 @@ function removeLock(path: string): void {
   catch (err) { logAndSwallow("stop", "op", err); }
 }
 
-export async function stop(opts: {}): Promise<number> {
+export async function stop(_opts: {}): Promise<number> {
   await printBanner("stop");
   const home = abtarsHome();
   const manifestPath = join(home, "manifest.json");

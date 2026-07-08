@@ -30,6 +30,7 @@ export interface CronEntry {
   agent?: string; // #935: session type — professor, browsie, coding, dreamy
   deliveryMethod?: "inline" | "report"; // #1118: inline = chat message, report = file document
   deliveryMode?: "silent" | "deliver" | "announce"; // #1193: silent = no output, deliver = drop to chat, announce = agent speaks
+  maxToolRounds?: number; // #1283: per-task circuit breaker override (default: 25)
   paused?: boolean;
   maxRunsPerDay?: number;
   consecutiveFails?: number;

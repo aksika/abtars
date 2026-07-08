@@ -70,7 +70,7 @@ Memory database, encryption key, core files — all gone. **Back up `~/.abmind/s
 ### 5. Remove global CLI
 
 ```bash
-pnpm uninstall -g abtars abmind
+npm uninstall -g abtars abmind
 ```
 
 ### 6. Remove daemon config (if supervised-daemon mode)
@@ -96,6 +96,6 @@ Nothing remains. No system files touched. No root-owned artifacts. Clean machine
 
 To reinstall later:
 ```bash
-pnpm install -g abtars abmind
+npm install -g abtars abmind
 abtars update
 ```

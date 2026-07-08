@@ -10,7 +10,7 @@ Experienced? Jump straight to [Installation](./install.md) for the full technica
 
 2. **Node.js 22+** — the runtime (recommended: Node 24). Install via [Homebrew](https://brew.sh) (`brew install node@24`) on macOS or [NodeSource](https://github.com/nodesource/distributions) on Linux/WSL.
 
-3. **pnpm** — the package manager. Install with `npm install -g pnpm`.
+3. **npm** — the package manager. Comes with Node.js.
 
 4. **A Telegram bot token** — create one via [@BotFather](https://t.me/BotFather) on Telegram. This is how you'll talk to your agent.
 
@@ -25,8 +25,8 @@ Experienced? Jump straight to [Installation](./install.md) for the full technica
 
 | Mode | What it means |
 |------|--------------|
-| **Supervised (recommended)** | Installs as an OS service. Auto-restarts on crash, survives reboots, watchdog monitors health. Your agent is always on. |
-| **Simple** | Runs in the background. If it crashes, you restart manually. Good for trying things out. |
+| **daemon (recommended)** | Installs as an OS service. Auto-restarts on crash, survives reboots, watchdog monitors health. Your agent is always on. |
+| **simple** | Runs in the background. If it crashes, you restart manually. Good for trying things out. |
 
 ### Which model?
 
@@ -90,4 +90,4 @@ See [Health Check](./healthcheck.md) for more.
 
 ## Security
 
-> ⚠️ When creating your bot with @BotFather, keep it **private** (not searchable publicly). abTARS has access to your machine via tools. The built-in allowlist blocks unknown senders, but the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.
+Keep your bot **private** (not searchable publicly) when creating it with @BotFather. abTARS has access to your machine via tools. The built-in allowlist blocks unknown senders, but the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.

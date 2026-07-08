@@ -24,6 +24,8 @@ export interface AgentOpts {
   timeoutMs?: number;
   /** Override session type (default: derived from agent name). */
   sessionType?: import("./spin-types.js").SessionType;
+  /** Override tool-loop circuit breaker limit for this call. */
+  maxToolRounds?: number;
 }
 
 /** Persistent transport handle for multi-turn callers. */
@@ -114,6 +116,11 @@ export class SubagentRuntime {
       transport.setTimeoutOverride(opts.timeoutMs);
     }
 
+    // Per-call tool-round circuit breaker override (e.g. long-running task agents)
+    if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+      transport.setMaxToolRoundsOverride(opts.maxToolRounds);
+    }
+
     try {
       const response = await transport.sendPrompt(sessionKey, prompt);
       const elapsed = Date.now() - start;
@@ -127,6 +134,9 @@ export class SubagentRuntime {
     } finally {
       if (opts?.timeoutMs && transport.setTimeoutOverride) {
         transport.setTimeoutOverride(null);
+      }
+      if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+        transport.setMaxToolRoundsOverride(null);
       }
     }
   }
@@ -225,6 +235,14 @@ export class SubagentRuntime {
       ? (this._mainTransport as unknown as { currentModel: string }).currentModel
       : undefined;
     const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, mainModel);
+
+    // #1290: attribute per-turn budget to the agent Spin resolved for this session.
+    // DirectApi only — ACP transport uses its own this.agentName. The "professor"
+    // default in direct-api-transport.ts stays correct for the main boot transport
+    // (phase-transport.ts), which bypasses createAgent.
+    if ("agentLabel" in transport) {
+      (transport as { agentLabel: string }).agentLabel = agent;
+    }
 
     // #1012: Track PID so boot-time cleanup finds orphans
     if ((transport as any).agent?.pid) {

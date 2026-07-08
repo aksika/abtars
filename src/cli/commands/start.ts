@@ -1,5 +1,5 @@
 import { printBanner } from './banner.js';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -61,7 +61,9 @@ export async function start(): Promise<number> {
   const { spawn } = await import("node:child_process");
   const { openSync, closeSync, mkdirSync } = await import("node:fs");
   mkdirSync(join(home, "logs"), { recursive: true });
-  const logFd = openSync(join(home, "logs", "bridge.log"), "a");
+  const d = new Date();
+  const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const logFd = openSync(join(home, "logs", `bridge-${dateStr}.log`), "a");
   const br = spawn("node", ["--max-old-space-size=1024", entryPoint], {
     detached: true,
     stdio: ["ignore", logFd, logFd],

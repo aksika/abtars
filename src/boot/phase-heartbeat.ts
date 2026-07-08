@@ -82,17 +82,15 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     },
   });
 
-  // sendSystemMessage — uses spin.inject() (singleton, no transport dep)
+  // sendSystemMessage — #1106: use injectGreeting (routes through pipeline,
+  // model response is delivered to master user via standard adapter path).
+  // Replaces spin.inject() which generated a response but never delivered it.
   const { spin } = await import("../components/spin.js");
   const masterUser = loadUsers().users.find(u => u.role === "master");
   const masterUserId = masterUser?.userId ?? "master";
   ctx.sendSystemMessage = async (prompt: string): Promise<void> => {
     try {
-      const response = await spin.inject(masterUserId, `[SYSTEM] ${prompt}`, { deliver: true });
-      if (response) {
-        const { sendNotification } = await import("../components/notification.js");
-        sendNotification(ctx, response);
-      }
+      await spin.injectGreeting(masterUserId, `[SYSTEM] ${prompt}`);
     } catch (err) {
       logWarn("main", `System message failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -101,6 +99,20 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   // Start heartbeat immediately — watchdog kick from tick 1 (Tier 1)
   heartbeat.start();
   logInfo("main", `💓 Heartbeat started (${Math.round(hbIntervalMs / 1000)}s interval)`);
+
+  // #1293: Per-tick ws-outbound reconnect check (no new timer — driven by HB)
+  heartbeat.registerTask({
+    name: "ws-reconnect-check",
+    execute: async () => {
+      try {
+        const { getPeerTransport } = await import("../components/peer-transport/index.js");
+        const transport = getPeerTransport() as import("../components/peer-transport/http-transport.js").HttpTransport;
+        if (typeof transport.checkWsConnections === "function") {
+          transport.checkWsConnections();
+        }
+      } catch { /* best effort — transport may not be up yet */ }
+    },
+  });
 
   return "ran";
 }

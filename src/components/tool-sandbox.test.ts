@@ -26,9 +26,9 @@ describe("checkTool", () => {
     expect(checkTool("execute_bash", policy).allowed).toBe(false);
   });
 
-  it("guest policy allows web_fetch only", () => {
-    const policy = buildPolicy("guest");
-    expect(checkTool("web_fetch", policy).allowed).toBe(true);
+  it("peer policy allows no tools by default", () => {
+    const policy = buildPolicy("peer");
+    expect(checkTool("web_fetch", policy).allowed).toBe(false);
     expect(checkTool("execute_bash", policy).allowed).toBe(false);
     expect(checkTool("memory_store", policy).allowed).toBe(false);
   });

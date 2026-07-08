@@ -29,6 +29,11 @@ export const peerDelegateTool: ToolDefinition = {
     required: ["goal"],
   },
   async execute(args: Record<string, string>): Promise<string> {
+    // #1301 — no relay: a peer-originated request must never delegate onward to a third peer via us.
+    const { isActiveCardPeerSourced } = await import("./orc-tools.js");
+    if (await isActiveCardPeerSourced()) {
+      return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
+    }
     const { goal, priority, context } = args;
     let peer = args.peer;
     const requires: string[] = args.requires ? (typeof args.requires === "string" ? JSON.parse(args.requires) : args.requires) : [];
@@ -78,7 +83,7 @@ export const peerDelegateTool: ToolDefinition = {
       // #949: Create hollow session to track remote worker locally
       if (remoteSessionId) {
         const { spin } = await import("../spin.js");
-        const { getMasterUserId } = await import("../../boot/phase-config.js");
+        const { getMasterUserId } = await import("../master-user.js");
         spin.createHollowSession(getMasterUserId(), "telegram", "W", peer, remoteSessionId);
       }
 

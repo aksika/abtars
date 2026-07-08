@@ -39,6 +39,13 @@ try {
 } catch { /* lock missing, corrupt, or PID dead — proceed */ }
 
 process.on("uncaughtException", (err) => {
+  // Narrow guard: spawn ENOENT means a child-process binary was not found.
+  // The child failing to start is non-fatal — log and continue (#1281).
+  const e = err as NodeJS.ErrnoException;
+  if (e.code === "ENOENT" && typeof e.syscall === "string" && e.syscall.startsWith("spawn")) {
+    console.error(`[WARN] Suppressed spawn ENOENT (binary not found, bridge continues): ${e.syscall} — ${e.message}`);
+    return;
+  }
   console.error(`[FATAL] Uncaught exception: ${err.stack ?? err.message ?? err}`);
   process.exit(1);
 });

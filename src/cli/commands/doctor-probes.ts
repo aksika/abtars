@@ -5,6 +5,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -35,6 +36,7 @@ export interface DoctorOutput {
 
 const home = abtarsHome();
 const configDir = join(home, "config");
+const TTL_MS = 180_000; // gossip: 3 missed 60s broadcasts → stale (matches gossip.ts)
 
 function readJson(path: string): any | null {
   try { return JSON.parse(readFileSync(path, "utf-8")); } catch { return null; }
@@ -75,20 +77,70 @@ async function timedProbe(fn: () => Promise<ProbeResult>): Promise<ProbeResult> 
 // ── Body Probes ──────────────────────────────────────────────────────────────
 
 async function probePlatforms(): Promise<ProbeResult> {
-  const env = readEnv();
-  const parts: string[] = [];
-  if (env.get("TELEGRAM_BOT_TOKEN") || env.get("TELEGRAM_TOKEN")) parts.push("telegram");
-  if (env.get("DISCORD_TOKEN") || env.get("DISCORD_BOT_TOKEN")) parts.push("discord");
-  if (env.get("IRC_SERVER")) parts.push("irc");
+  const { readSecret, initSecretsKey } = await import("../../components/secrets.js");
+  initSecretsKey();
 
-  if (parts.length === 0) return { name: "platforms", status: "failed", detail: "no platform configured" };
+  const results: Array<{ name: string; status: "ok" | "failed" | "skipped"; detail: string }> = [];
 
-  // Check bridge.lock for running status
-  const lock = readJson(join(home, "bridge.lock"));
-  if (lock?.pid && pidAlive(lock.pid)) {
-    return { name: "platforms", status: "ok", detail: parts.map(p => `${p} ✓`).join(", ") };
+  // Telegram: read token, call getMe
+  const telegramToken = readSecret("TELEGRAM_BOT_TOKEN") ?? readSecret("TELEGRAM_TOKEN");
+  if (telegramToken) {
+    const r = await verifyTelegram(telegramToken);
+    results.push({ name: "telegram", ...r });
   }
-  return { name: "platforms", status: "ok", detail: `configured: ${parts.join(", ")} (bridge not running)` };
+
+  // Discord: read token, call gateway
+  const discordToken = readSecret("DISCORD_BOT_TOKEN") ?? readSecret("DISCORD_TOKEN");
+  if (discordToken) {
+    const r = await verifyDiscord(discordToken);
+    results.push({ name: "discord", ...r });
+  }
+
+  // IRC: skip real verification (connection-based), just check if configured
+  const ircServer = readSecret("IRC_SERVER");
+  if (ircServer) {
+    results.push({ name: "irc", status: "ok", detail: "server configured (connection not verified)" });
+  }
+
+  if (results.length === 0) return { name: "platforms", status: "skipped", detail: "no platform configured" };
+
+  const failed = results.filter(r => r.status === "failed");
+  const skipped = results.filter(r => r.status === "skipped");
+  const allOk = failed.length === 0 && skipped.length === 0;
+  const status = allOk ? "ok" : failed.length > 0 ? "failed" : "ok";
+  const detail = results.map(r => `${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`).join(", ");
+  return { name: "platforms", status, detail };
+}
+
+async function verifyTelegram(token: string): Promise<{ status: "ok" | "failed" | "skipped"; detail: string }> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (res.ok) return { status: "ok", detail: "getMe ok" };
+    if (res.status === 401 || res.status === 403) return { status: "failed", detail: "invalid token" };
+    return { status: "skipped", detail: `http ${res.status}` };
+  } catch {
+    return { status: "skipped", detail: "unreachable" };
+  }
+}
+
+async function verifyDiscord(token: string): Promise<{ status: "ok" | "failed" | "skipped"; detail: string }> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch("https://discord.com/api/v10/users/@me", {
+      headers: { "Authorization": `Bot ${token}` },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (res.ok) return { status: "ok", detail: "gateway ok" };
+    if (res.status === 401 || res.status === 403) return { status: "failed", detail: "invalid token" };
+    return { status: "skipped", detail: `http ${res.status}` };
+  } catch {
+    return { status: "skipped", detail: "unreachable" };
+  }
 }
 
 async function probeDashboard(): Promise<ProbeResult> {
@@ -150,6 +202,17 @@ async function probeHeartbeat(): Promise<ProbeResult> {
   return { name: "heartbeat", status: "ok", detail: ago(ageMs) };
 }
 
+// #1261: single-bridge invariant — catches duplicate-bridge regressions at runtime.
+// pgrep counts the bridge processes. >1 means a second bridge is running (likely orphaned).
+async function probeSingleBridge(): Promise<ProbeResult> {
+  const { spawnSync } = await import("node:child_process");
+  const pgrep = spawnSync("pgrep", ["-f", "app/bundle/abtars.js"], { encoding: "utf-8" });
+  const pids = pgrep.stdout ? pgrep.stdout.trim().split("\n").filter(Boolean) : [];
+  if (pids.length === 0) return { name: "single-bridge", status: "skipped", detail: "no bridge running" };
+  if (pids.length === 1) return { name: "single-bridge", status: "ok", detail: `pid:${pids[0]}` };
+  return { name: "single-bridge", status: "failed", detail: `${pids.length} bridges running: ${pids.join(",")}` };
+}
+
 // ── Brain Probes ─────────────────────────────────────────────────────────────
 
 async function probeTransport(): Promise<ProbeResult> {
@@ -170,16 +233,25 @@ async function probeSpin(): Promise<ProbeResult> {
 async function probeKanban(): Promise<ProbeResult> {
   const dbPath = join(home, "kanban", "kanban.db");
   if (!existsSync(dbPath)) return { name: "kanban", status: "skipped", detail: "kanban.db not found" };
+  const sharedNm = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
+  if (!existsSync(sharedNm)) return { name: "kanban", status: "skipped", detail: "better-sqlite3 not installed (run: abtars deps install)" };
+  let Db: any;
   try {
-    const Db = require("better-sqlite3");
+    const { createRequire } = await import("node:module");
+    const _require = createRequire(import.meta.url);
+    Db = _require(sharedNm);
+  } catch (err) {
+    return { name: "kanban", status: "skipped", detail: `better-sqlite3 not loadable: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  try {
     const db = new Db(dbPath, { readonly: true });
-    const row = db.prepare("SELECT COUNT(*) as cnt FROM cards").get() as { cnt: number };
-    const stuck = db.prepare("SELECT COUNT(*) as cnt FROM cards WHERE status='running' AND updated_at < datetime('now', '-10 minutes')").get() as { cnt: number };
+    const row = db.prepare("SELECT COUNT(*) as cnt FROM kanban_board").get() as { cnt: number };
+    const stuck = db.prepare("SELECT COUNT(*) as cnt FROM kanban_board WHERE status='running' AND updated_at < datetime('now', '-10 minutes')").get() as { cnt: number };
     db.close();
     const detail = stuck.cnt > 0 ? `${row.cnt} cards, ${stuck.cnt} stuck` : `${row.cnt} cards`;
     return { name: "kanban", status: stuck.cnt > 0 ? "failed" : "ok", detail };
-  } catch {
-    return { name: "kanban", status: "skipped", detail: "better-sqlite3 not available" };
+  } catch (err) {
+    return { name: "kanban", status: "skipped", detail: `kanban.db query failed: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
@@ -205,9 +277,9 @@ async function probeSha(): Promise<ProbeResult> {
 
 // ── Tribe Probes ─────────────────────────────────────────────────────────────
 
-async function probeAgentApi(): Promise<ProbeResult> {
+async function probeA2a(): Promise<ProbeResult> {
   const env = readEnv();
-  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "agent-api", status: "skipped", detail: "not enabled" };
+  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "a2a", status: "skipped", detail: "not enabled" };
   const port = parseInt(env.get("AGENT_API_PORT") || "7100", 10);
   try {
     const { createConnection } = await import("node:net");
@@ -216,78 +288,99 @@ async function probeAgentApi(): Promise<ProbeResult> {
       sock.on("error", reject);
       sock.setTimeout(2000, () => { sock.destroy(); reject(new Error("timeout")); });
     });
-    return { name: "agent-api", status: "ok", detail: `:${port}` };
+    return { name: "a2a", status: "ok", detail: `${port}` };
   } catch {
-    return { name: "agent-api", status: "failed", detail: `:${port} not listening` };
+    return { name: "a2a", status: "failed", detail: `${port} not listening` };
   }
 }
 
 async function probePeers(): Promise<ProbeResult> {
   const peersPath = join(configDir, "peers.json");
-  const peers = readJson(peersPath);
+  const peers = readJson(peersPath) as { peers?: Record<string, { verifyKey?: string; trust?: number }>; self?: { signingKey?: string; tribeToken?: string } } | null;
   if (!peers) return { name: "peers", status: "skipped", detail: "peers.json missing" };
-  const peerCount = Object.keys(peers.peers ?? {}).length;
-  if (peerCount === 0) return { name: "peers", status: "ok", detail: "no peers configured" };
+  if (!peers.self?.signingKey) return { name: "peers", status: "failed", detail: "self.signingKey missing — run: abtars install" };
 
-  const lock = readJson(join(home, "bridge.lock"));
-  const gossipAge = lock?.lastGossipBroadcast ? ago(Date.now() - lock.lastGossipBroadcast) : "unknown";
-  return { name: "peers", status: "ok", detail: `${peerCount} configured, gossip: ${gossipAge}` };
+  const peerEntries = Object.entries(peers.peers ?? {});
+  const peerCount = peerEntries.length;
+  if (peerCount === 0) return { name: "peers", status: "skipped", detail: "no peers (solo)" };
+
+  // Check that all peers have verifyKey
+  const missingKey = peerEntries.filter(([, e]) => !e.verifyKey).map(([n]) => n);
+  if (missingKey.length > 0) return { name: "peers", status: "failed", detail: `missing verifyKey: ${missingKey.join(", ")}` };
+
+  return { name: "peers", status: "ok", detail: `${peerCount} enrolled (all keys valid)` };
 }
 
-async function probeTls(): Promise<ProbeResult> {
+async function probeIdentity(): Promise<ProbeResult> {
   const env = readEnv();
-  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "tls", status: "skipped", detail: "agent-api disabled" };
-  const certExists = existsSync(join(configDir, "identity.crt"));
-  const keyExists = existsSync(join(configDir, "identity.tls.key"));
-  if (certExists && keyExists) return { name: "tls", status: "ok", detail: "certs present" };
-  const missing = [!certExists && "identity.crt", !keyExists && "identity.tls.key"].filter(Boolean);
-  return { name: "tls", status: "failed", detail: `missing: ${missing.join(", ")}` };
+  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "identity", status: "skipped", detail: "a2a disabled" };
+
+  const certPath = join(configDir, "identity.crt");
+  const keyPath = join(configDir, "identity.tls.key");
+  const certExists = existsSync(certPath);
+  const keyExists = existsSync(keyPath);
+  if (!certExists || !keyExists) {
+    const missing = [!certExists && "identity.crt", !keyExists && "identity.tls.key"].filter(Boolean);
+    return { name: "identity", status: "failed", detail: `missing: ${missing.join(", ")}` };
+  }
+
+  // Verify cert public key matches self.signingKey (#1293)
+  try {
+    const { loadPeerConfig, deriveVerifyKey } = require("../../components/peer-config.js") as typeof import("../../components/peer-config.js");
+    const { verifyServerCert } = require("../../components/peer-transport/peer-auth.js") as typeof import("../../components/peer-transport/peer-auth.js");
+    const config = loadPeerConfig();
+    const expectedVerifyKey = deriveVerifyKey(config.self.signingKey);
+    const certPem = readFileSync(certPath, "utf-8");
+    if (!verifyServerCert(certPem, expectedVerifyKey)) {
+      return { name: "identity", status: "failed", detail: "cert pubkey mismatch — re-run: abtars install --force" };
+    }
+    return { name: "identity", status: "ok", detail: "cert matches signing key" };
+  } catch {
+    return { name: "identity", status: "ok", detail: "cert present (key-match skipped)" };
+  }
 }
 
-async function probeA2a(): Promise<ProbeResult> {
-  const peersPath = join(configDir, "peers.json");
-  const peers = readJson(peersPath);
-  if (!peers?.self?.udpPort) return { name: "a2a", status: "skipped", detail: "no gossip port configured" };
+async function probeGossip(): Promise<ProbeResult> {
+  const env = readEnv();
+  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "gossip", status: "skipped", detail: "a2a disabled" };
 
-  const port = peers.self.udpPort;
-  try {
-    const dgram = await import("node:dgram");
-    const { createHmac } = await import("node:crypto");
-    const key = peers.gossipSecret ?? Object.values(peers.peers ?? {})[0]?.token ?? "default";
-    const payload = JSON.stringify({ type: "ping", name: "__doctor__" });
-    const sig = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
-    const ping = Buffer.from(`${payload}|${sig}`);
+  const peers = readJson(join(configDir, "peers.json")) as { peers?: Record<string, unknown>; self?: { signingKey?: string } } | null;
+  const peerCount = Object.keys(peers?.peers ?? {}).length;
+  if (peerCount === 0) return { name: "gossip", status: "skipped", detail: "no peers (solo)" };
+  if (!peers?.self?.signingKey) return { name: "gossip", status: "failed", detail: "self.signingKey missing — Ed25519 gossip requires identity" };
 
-    const alive = await new Promise<boolean>((resolve) => {
-      const sock = dgram.createSocket("udp4");
-      const timer = setTimeout(() => { sock.close(); resolve(false); }, 500);
-      sock.on("message", () => { clearTimeout(timer); sock.close(); resolve(true); });
-      sock.on("error", () => { clearTimeout(timer); sock.close(); resolve(false); });
-      sock.send(ping, port, "127.0.0.1");
-    });
-    return { name: "a2a", status: alive ? "ok" : "failed", detail: alive ? `UDP :${port} alive` : `UDP :${port} no response` };
-  } catch {
-    return { name: "a2a", status: "failed", detail: "UDP probe error" };
-  }
+  const port = parseInt(env.get("GOSSIP_PORT") || "5355", 10);
+
+  // Bind-test: if the port is already in use, gossip is live (EADDRINUSE = good).
+  // If we can bind it, nothing is listening → gossip not running.
+  const inUse = await new Promise<boolean>((resolve) => {
+    import("node:dgram").then(({ createSocket }) => {
+      const sock = createSocket("udp4");
+      sock.once("error", (err: NodeJS.ErrnoException) => { sock.close(); resolve(err.code === "EADDRINUSE"); });
+      sock.bind(port, "0.0.0.0", () => { sock.close(); resolve(false); });
+    }).catch(() => resolve(false));
+  });
+  if (!inUse) return { name: "gossip", status: "failed", detail: `${port} not listening` };
+
+  // Live — report broadcast freshness.
+  const lock = readJson(join(home, "bridge.lock"));
+  const last = typeof lock?.lastGossipBroadcast === "number" ? lock.lastGossipBroadcast : 0;
+  if (!last) return { name: "gossip", status: "ok", detail: `${port} / no broadcast yet` };
+  const age = Date.now() - last;
+  if (age > TTL_MS) return { name: "gossip", status: "failed", detail: `${port} / stale (${ago(age)})` };
+  return { name: "gossip", status: "ok", detail: `${port} / last broadcast ${ago(age)}` };
 }
 
 // ── Soul Probes ──────────────────────────────────────────────────────────────
 
 async function probeMind(): Promise<ProbeResult> {
   try {
-    const { spawnSync } = await import("node:child_process");
-    const r = spawnSync("abmind", ["doctor", "--json"], { encoding: "utf-8", timeout: 10_000 });
-    if (r.status === null || r.error) return { name: "mind", status: "skipped", detail: "abmind not on PATH" };
-    const data = JSON.parse(r.stdout);
-    const checks: Array<{ name: string; status: string }> = data.checks ?? [];
-    const total = checks.length;
-    const ok = checks.filter(c => c.status === "ok").length;
-    const warnings = checks.filter(c => c.status === "warn" || c.status === "error");
-    if (warnings.length === 0) return { name: "mind", status: "ok", detail: `abmind: ${ok}/${total} ok` };
-    const names = warnings.slice(0, 3).map(w => w.name).join(", ");
-    return { name: "mind", status: "failed", detail: `abmind: ${ok}/${total} (${warnings.length} issues: ${names})` };
+    const { loadAbmind } = await import("../../utils/abmind-lazy.js");
+    const mod = await loadAbmind();
+    if (!mod) return { name: "mind", status: "skipped", detail: "abmind not installed" };
+    return { name: "mind", status: "ok", detail: "abmind loaded (in-process)" };
   } catch {
-    return { name: "mind", status: "skipped", detail: "abmind doctor failed" };
+    return { name: "mind", status: "skipped", detail: "abmind load failed" };
   }
 }
 
@@ -297,11 +390,11 @@ export async function runAllProbes(): Promise<DoctorOutput> {
   const start = Date.now();
 
   const [body, heart, brain, soul, tribe] = await Promise.all([
-    Promise.all([probePlatforms(), probeDashboard(), probeSecurity(), probeWatchdog()].map(p => timedProbe(() => p))),
+    Promise.all([probePlatforms(), probeDashboard(), probeSecurity(), probeWatchdog(), probeSingleBridge()].map(p => timedProbe(() => p))),
     Promise.all([probeHeartbeat()].map(p => timedProbe(() => p))),
     Promise.all([probeTransport(), probeSpin(), probeKanban(), probeSkills(), probeSha()].map(p => timedProbe(() => p))),
     Promise.all([probeMind()].map(p => timedProbe(() => p))),
-    Promise.all([probeAgentApi(), probePeers(), probeTls(), probeA2a()].map(p => timedProbe(() => p))),
+    Promise.all([probeA2a(), probePeers(), probeIdentity(), probeGossip()].map(p => timedProbe(() => p))),
   ]);
 
   return { version: "1.0", totalMs: Date.now() - start, layers: { body, heart, brain, soul, tribe } };
@@ -311,7 +404,7 @@ export async function runAllProbes(): Promise<DoctorOutput> {
 
 export async function runFixes(): Promise<FixResult[]> {
   const { chmodSync, unlinkSync, mkdirSync, existsSync: ex, readdirSync: rd, statSync: st, readFileSync: rf, writeFileSync: wf } = await import("node:fs");
-  const { execSync, spawnSync } = await import("node:child_process");
+  const { spawnSync } = await import("node:child_process");
   const fixes: FixResult[] = [];
 
   function fix(probe: string, action: string, fn: () => void): void {

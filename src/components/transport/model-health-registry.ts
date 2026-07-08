@@ -41,6 +41,8 @@ interface Bucket {
   consecutiveErrors: number;
   cooldownUntil?: number;
   authFailed?: boolean;
+  /** #1296: credits (402) errors are sticky — bucket stays full until resetAll(). */
+  creditsFailed?: boolean;
   demoted?: boolean;
 }
 
@@ -87,6 +89,8 @@ export class ModelHealthRegistry {
 
   private drain(b: Bucket, now: number): void {
     if (this.authSticky && b.authFailed) return;
+    // #1296: credits exhaustion is sticky — no drain until resetAll()
+    if (b.creditsFailed) return;
     const elapsed = now - b.lastUpdate;
     b.level = Math.max(0, b.level - elapsed * this.leakPerMs);
     b.lastUpdate = now;
@@ -138,6 +142,11 @@ export class ModelHealthRegistry {
         b.level = Math.min(1.0, b.level + this.rateLimitFill);
         if (retryAfterMs && retryAfterMs > 0) b.cooldownUntil = now + retryAfterMs;
         break;
+      case "credits":
+        // #1296: credits exhaustion is sticky — stays full until resetAll() (manual /model reset)
+        b.level = 1.0;
+        b.creditsFailed = true;
+        break;
       case "weak":
         b.level = Math.min(1.0, b.level + this.weakFill);
         break;
@@ -161,6 +170,7 @@ export class ModelHealthRegistry {
       this.drain(b, now);
       let status: ModelStatus = "healthy";
       if (b.authFailed) status = "auth_failed";
+      else if (b.creditsFailed) status = "exhausted";
       else if (b.level > this.skipThreshold) status = "exhausted";
       else if (b.level > 0.3) status = "degraded";
       result.set(key, { level: Math.round(b.level * 100), consecutiveErrors: b.consecutiveErrors, cooldownUntil: b.cooldownUntil, status });

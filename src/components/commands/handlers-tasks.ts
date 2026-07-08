@@ -60,7 +60,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   if (ctx.cronCurrentJob) {
     const j = ctx.cronCurrentJob;
     const ago = Math.round((Date.now() - j.startedAt) / 1000);
-    const name = j.message.split("\n")[0].slice(0, 30);
+    const name = (j.message.split("\n")[0] ?? "").slice(0, 30);
     running = `\n~ Running: ${name} (${ago}s)`;
   }
   await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "HTML" });
@@ -90,7 +90,7 @@ export async function handleTasksTrigger(text: string, ctx: CommandContext): Pro
   let name = id;
   try {
     const entry = readEntry(id);
-    if (entry) name = entry.title || entry.message.split("\n")[0].slice(0, 30);
+    if (entry) name = entry.title || (entry.message.split("\n")[0] ?? "").slice(0, 30);
   } catch { /* fallback to id */ }
   await ctx.reply(`Running task: ${name}`);
   return true;
@@ -140,56 +140,93 @@ export async function handleTaskPause(text: string, ctx: CommandContext): Promis
 
 export async function handleKanban(text: string, ctx: CommandContext): Promise<boolean> {
   try {
-    const { kanbanList } = await import("../tasks/kanban-board.js");
-    const arg = text.replace(/^\/kanban\s*/, "").trim();
+    const { kanbanList, kanbanGetCard, kanbanSearch } = await import("../tasks/kanban-board.js");
 
-    // Parse filter: "all", "status=done", "source=cron", "priority=HIGH", "labels=finance"
-    const ALLOWED_FILTERS = new Set(["status", "source", "priority", "labels", "type"]);
-    let filterVal: string | undefined;
-    let filterKey: string | undefined;
-    let showAll = false;
+    // Normalize curly quotes → straight (mobile keyboards autocorrect)
+    const arg = text.replace(/^\/kanban\s*/i, "").trim()
+      .replace(/[\u201C\u201D\u201E\u201F]/g, '"');
 
-    if (arg === "all") {
-      showAll = true;
-    } else if (arg && arg.includes("=")) {
-      const [key, val] = arg.split("=", 2);
-      if (!key || !val || !ALLOWED_FILTERS.has(key)) {
-        await ctx.reply(`❌ Invalid filter. Use: /kanban [all | status=X | source=X | priority=X | labels=X | type=X]`);
-        return true;
-      }
-      filterKey = key;
-      filterVal = val.replace(/[^a-zA-Z0-9_,-]/g, "").slice(0, 30);
-    } else if (arg) {
-      // Bare word = status filter
-      filterVal = arg.replace(/[^a-zA-Z0-9_,-]/g, "").slice(0, 30);
-    }
-
-    const cards = showAll ? kanbanList("*") : kanbanList(filterVal, filterKey);
-    if (cards.length === 0) {
-      await ctx.reply("📋 Kanban board is empty.");
+    // /kanban — default list (active cards)
+    if (!arg) {
+      const cards = kanbanList();
+      if (cards.length === 0) { await ctx.reply("Kanban board is empty."); return true; }
+      await ctx.reply(renderList(cards));
       return true;
     }
-    const lines = cards.map((c: { id: number; title: string; status: string; source: string; priority: string; due_at: string | null; delivered_at: string | null }) => {
-      const icon = c.status === "delivered" ? "✓" : c.status === "done" ? "+" : c.status === "running" ? "~" : c.status === "failed" ? "✗" : "-";
-      const due = c.due_at ? ` due:${c.due_at.slice(0, 10)}` : "";
-      const doneAt = c.delivered_at ? ` ${c.delivered_at.slice(2, 10).replace(/-/g, "")}:${c.delivered_at.slice(11, 16).replace(":", "")}` : "";
-      const title = c.title.length > 20 ? c.title.slice(0, 17) + "…" : c.title;
-      return `${icon} #${c.id} ${title} (${c.source}/${c.priority})${doneAt}${due}`;
-    });
-    const header = `📋 Kanban Board (${cards.length}):\n`;
-    let body = "";
-    for (const line of lines) {
-      if (header.length + body.length + line.length + 1 > 3900) {
-        body += `\n… +${cards.length - body.split("\n").length} more`;
-        break;
-      }
-      body += (body ? "\n" : "") + line;
+
+    // /kanban all — everything
+    if (arg === "all") {
+      const cards = kanbanList("*");
+      if (cards.length === 0) { await ctx.reply("Kanban board is empty."); return true; }
+      await ctx.reply(renderList(cards));
+      return true;
     }
-    await ctx.reply(header + body);
+
+    // /kanban <id> — full ticket detail
+    if (/^\d+$/.test(arg)) {
+      const card = kanbanGetCard(Number(arg));
+      if (!card) { await ctx.reply(`No card #${arg}.`); return true; }
+      await ctx.reply(renderDetail(card));
+      return true;
+    }
+
+    // /kanban "<term>" — LIKE search (quotes mandatory)
+    if (/^".*"$/.test(arg)) {
+      const term = arg.slice(1, -1).trim();
+      if (!term) { await ctx.reply(`Usage: /kanban "<search term>"`); return true; }
+      const cards = kanbanSearch(term);
+      if (cards.length === 0) { await ctx.reply(`No cards matching "${term}".`); return true; }
+      await ctx.reply(renderList(cards));
+      return true;
+    }
+
+    // Anything else — usage hint
+    await ctx.reply(`Usage:\n  /kanban          — active cards\n  /kanban all      — all cards\n  /kanban <id>     — ticket detail\n  /kanban "<term>" — search`);
   } catch (err) {
-    await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+    await ctx.reply(`Failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   return true;
+}
+
+function renderList(cards: Awaited<ReturnType<typeof import("../tasks/kanban-board.js").kanbanList>>): string {
+  const lines = cards.map(c => {
+    const icon = c.status === "delivered" ? "✓" : c.status === "done" ? "+" : c.status === "running" ? "~" : c.status === "failed" ? "✗" : "-";
+    const due = c.due_at ? ` due:${c.due_at.slice(0, 10)}` : "";
+    const doneAt = c.delivered_at ? ` ${c.delivered_at.slice(2, 10).replace(/-/g, "")}:${c.delivered_at.slice(11, 16).replace(":", "")}` : "";
+    const title = c.title.length > 20 ? c.title.slice(0, 17) + "…" : c.title;
+    return `${icon} #${c.id} ${title} (${c.source}/${c.priority})${doneAt}${due}`;
+  });
+  const header = `Kanban Board (${cards.length}):\n`;
+  let body = "";
+  for (const line of lines) {
+    if (header.length + body.length + line.length + 1 > 3900) {
+      body += `\n… +${cards.length - body.split("\n").length} more`;
+      break;
+    }
+    body += (body ? "\n" : "") + line;
+  }
+  return header + body;
+}
+
+function renderDetail(c: Awaited<ReturnType<typeof import("../tasks/kanban-board.js").kanbanGetCard>>): string {
+  if (!c) return "(not found)";
+  const icon = c.status === "delivered" ? "✓" : c.status === "done" ? "+" : c.status === "running" ? "~" : c.status === "failed" ? "✗" : "-";
+  const lines = [
+    `${icon} #${c.id}: ${c.title}`,
+    `Status:   ${c.status}  |  Priority: ${c.priority}  |  Source: ${c.source}`,
+  ];
+  if (c.type) lines.push(`Type:     ${c.type}`);
+  if (c.labels) lines.push(`Labels:   ${c.labels}`);
+  if (c.assignee && c.assignee !== "professor") lines.push(`Assignee: ${c.assignee}`);
+  if (c.due_at) lines.push(`Due:      ${c.due_at.slice(0, 10)}`);
+  lines.push(`Created:  ${c.created_at.slice(0, 16)}`);
+  if (c.completed_at) lines.push(`Completed:${c.completed_at.slice(0, 16)}`);
+  if (c.delivered_at) lines.push(`Delivered:${c.delivered_at.slice(0, 16)}`);
+  if (c.result_path) lines.push(`File:     ${c.result_path}`);
+  if (c.result_summary) lines.push(`Result:   ${c.result_summary.slice(0, 300)}${c.result_summary.length > 300 ? "…" : ""}`);
+  if (c.error) lines.push(`Error:    ${c.error.slice(0, 200)}`);
+  if (c.notes) lines.push(`Notes:    ${c.notes.slice(0, 100)}`);
+  return lines.join("\n");
 }
 
 /** /channel command — master visibility into agent discussions (#891). */

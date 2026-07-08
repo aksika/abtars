@@ -7,6 +7,7 @@ export {
   packagePaths,
   resolveAbtarsHome,
   resolveAbmindHome,
+  resolveReleasesDir,
   resolveUserBinDir,
   type PackagePaths,
   readManifest,

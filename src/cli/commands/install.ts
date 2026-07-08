@@ -1,17 +1,17 @@
 /**
- * `abtars install [--force]` — scaffolding utilities.
+ * `abtars install [--force]` — first-time scaffolding + configuration wizard.
  *
  *   Exports writeWrapper (used by deploy.ts) and install() for legacy paths.
- *   The primary install flow is in onboard.ts (called by CLI dispatcher).
+ *   The primary install flow is in onboard.ts (called by CLI dispatcher as `abtars install`).
  */
 
-import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { hostname, homedir as _homedir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { emptyManifest, packagePaths, readManifest, resolveUserBinDir, writeManifest } from '../deploy-lib-import.js';
+import { emptyManifest, packagePaths, readManifest, resolveReleasesDir, writeManifest } from '../deploy-lib-import.js';
 
 /** Resolve real user home even under sudo. */
 function homedir(): string {
@@ -38,34 +38,6 @@ async function exists(p: string): Promise<boolean> {
   try {
     await stat(p);
     return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * True if `p` exists as any filesystem entry — regular file, directory,
- * symlink (including dangling). Use this for collision checks in
- * reconcilePathLink, where a dangling symlink still occupies the inode
- * and would cause EEXIST on symlink(). `exists()` above uses stat() which
- * follows symlinks and returns false on dangling ones; that's wrong for
- * collision detection.
- */
-async function existsAny(p: string): Promise<boolean> {
-  try {
-    const { lstat } = await import('node:fs/promises');
-    await lstat(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function isSymlink(p: string): Promise<boolean> {
-  try {
-    const { lstat } = await import('node:fs/promises');
-    const s = await lstat(p);
-    return s.isSymbolicLink();
   } catch {
     return false;
   }
@@ -105,66 +77,6 @@ async function seedConfig(repoRoot: string, _configDir: string, dryRun: boolean,
   return seeded;
 }
 
-/**
- * Reconcile a single PATH symlink at ~/.local/bin/<name>.
- * Policy (plan §"PATH symlink collision"):
- *   - Missing  → create
- *   - Symlink pointing into our own ~/.abtars/bin/ → overwrite
- *   - Anything else → refuse with message, unless force
- */
-async function reconcilePathLink(
-  binDir: string,
-  userBinDir: string,
-  name: string,
-  force: boolean,
-  dryRun: boolean,
-): Promise<{ action: string; message?: string }> {
-  const linkPath = join(userBinDir, name);
-  const targetPath = join(binDir, name);
-  const linkExists = await existsAny(linkPath);
-  if (!linkExists) {
-    if (dryRun) return { action: `[dry-run] ln -s ${targetPath} ${linkPath}` };
-    await symlink(targetPath, linkPath);
-    return { action: `created ${linkPath}` };
-  }
-  if (await isSymlink(linkPath)) {
-    const { readlink, unlink } = await import('node:fs/promises');
-    const current = await readlink(linkPath);
-    // "We own it" means: points at THIS install's bin dir, not a fuzzy match
-    // on any path containing /.abtars/bin/. A smoke-test install at
-    // ABTARS_HOME=~/.cache/ab-smoke-.../ must not clobber the real
-    // ~/.abtars symlinks. Compare absolute paths directly.
-    const ownsIt = current === targetPath;
-    if (ownsIt) {
-      if (dryRun) return { action: `[dry-run] overwrite ${linkPath} (we own it)` };
-      await unlink(linkPath);
-      await symlink(targetPath, linkPath);
-      return { action: `updated ${linkPath}` };
-    }
-    if (force) {
-      if (dryRun) return { action: `[dry-run] --force overwrite ${linkPath} (currently -> ${current})` };
-      await unlink(linkPath);
-      await symlink(targetPath, linkPath);
-      return { action: `forced overwrite ${linkPath} (was -> ${current})` };
-    }
-    return {
-      action: 'refused',
-      message: `${linkPath} is a symlink to ${current} (not ours). Pass --force to overwrite.`,
-    };
-  }
-  if (force) {
-    if (dryRun) return { action: `[dry-run] --force overwrite ${linkPath} (regular file)` };
-    const { unlink } = await import('node:fs/promises');
-    await unlink(linkPath);
-    await symlink(targetPath, linkPath);
-    return { action: `forced overwrite ${linkPath} (was regular file)` };
-  }
-  return {
-    action: 'refused',
-    message: `${linkPath} exists as a regular file (not our symlink). Pass --force to overwrite.`,
-  };
-}
-
 export async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
   const bundleFile = name === 'abtars' ? 'abtars-cli.js' : `${name}.js`;
   // #912: ensure node is in PATH on macOS (homebrew) and Linux (.local/bin)
@@ -173,18 +85,18 @@ export async function writeWrapper(binDir: string, name: string, currentLink: st
 
   if (name === 'abmind') {
     content = `#!/usr/bin/env bash
-${pathPreamble}# Resolve abmind CLI — no ~/.abmind/current dependency (#863)
-BUNDLE_CLI="$HOME/.abtars/app/node_modules/abmind/dist/cli/abmind.js"
-SRC_CLI="$HOME/.abtars-releases/src/abmind/dist/cli/abmind.js"
+${pathPreamble}# Resolve abmind CLI — global install is canonical under #1243 (no longer bundled in the release)
+LOCAL_CLI="$HOME/.local/lib/node_modules/abmind/dist/cli/abmind.js"
 GLOBAL_CLI="$(npm root -g 2>/dev/null)/abmind/dist/cli/abmind.js"
-if [ -f "$BUNDLE_CLI" ]; then
-  exec node "$BUNDLE_CLI" "$@"
-elif [ -f "$SRC_CLI" ]; then
-  exec node "$SRC_CLI" "$@"
+SRC_CLI="$HOME/.abmind/src/abmind/dist/cli/abmind.js"
+if [ -f "$LOCAL_CLI" ]; then
+  exec node "$LOCAL_CLI" "$@"
 elif [ -f "$GLOBAL_CLI" ]; then
   exec node "$GLOBAL_CLI" "$@"
+elif [ -f "$SRC_CLI" ]; then
+  exec node "$SRC_CLI" "$@"
 else
-  echo "abmind: not found. Install via npm or deploy via abtars update." >&2
+  echo "abmind: not found. Install via: npm install -g abmind" >&2
   exit 1
 fi
 `;
@@ -224,7 +136,6 @@ function isPathOnPATH(userBinDir: string): boolean {
 export async function install(opts: InstallOptions): Promise<number> {
   const paths = packagePaths('abtars');
   const home = paths.home;
-  const userBinDir = resolveUserBinDir();
   const repoRoot = join(dirname(realpathSync(process.argv[1] ?? fileURLToPath(import.meta.url))), "..");
 
   // Install log (#718)
@@ -275,38 +186,30 @@ export async function install(opts: InstallOptions): Promise<number> {
   await createSkeleton(home, opts.dryRun);
   process.stdout.write(`✓ skeleton at ${home}\n`);
 
+  // Install native deps (better-sqlite3, sqlite-vec) — required for kanban
+  if (!opts.dryRun) {
+    const deps = await import('./deps.js');
+    await deps.deps(['install', 'native']);
+  }
+
   // Core templates: abmind seeds its own on first boot (#427 ensureInitialized).
   // No longer seeded by abtars install.
 
   // Kiro agent config created on-demand by ACP transport (ensureAgentConfig)
 
-  // Generate Ed25519 identity keypair (skip if already exists)
-  const identityKey = join(paths.config, 'identity.key');
-  const identityPub = join(paths.config, 'identity.pub');
-  if (!opts.dryRun && !(await exists(identityKey))) {
-    const { generateKeyPairSync } = await import('node:crypto');
-    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-    await writeFile(identityKey, privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'));
-    await writeFile(identityPub, publicKey.export({ format: 'der', type: 'spki' }).toString('base64'));
-    const { chmodSync } = await import('node:fs');
-    chmodSync(identityKey, 0o600);
-    process.stdout.write(`✓ identity keypair generated\n`);
-  }
-
-  // Generate self-signed Ed25519 TLS certificate (skip if already exists)
-  const identityCrt = join(paths.config, 'identity.crt');
-  const identityTlsKey = join(paths.config, 'identity.tls.key');
-  if (!opts.dryRun && !(await exists(identityCrt))) {
-    const { execSync } = await import('node:child_process');
-    const { chmodSync } = await import('node:fs');
-    const agentName = hostname();
-    try {
-      execSync(`openssl req -x509 -newkey ed25519 -keyout identity.tls.key -out identity.crt -days 3650 -nodes -subj "/CN=${agentName}"`, { cwd: paths.config, stdio: 'ignore' });
-      chmodSync(identityTlsKey, 0o600);
-      process.stdout.write(`✓ TLS certificate generated (Ed25519, 10yr)\n`);
-    } catch (err) {
-      process.stderr.write(`⚠ TLS cert generation failed (openssl not found?). Agent-api will start without TLS.\n`);
-    }
+  // Generate Ed25519 identity keypair + tribe token via peer-config bootstrap (#1293)
+  // This replaces the old manual identity.key/identity.pub generation.
+  // bootstrapIdentity() writes signingKey + tribeToken to peers.json.
+  if (!opts.dryRun) {
+    const { bootstrapIdentity, deriveVerifyKey } = await import("../../components/peer-config.js");
+    bootstrapIdentity();
+    const { loadPeerConfig } = await import("../../components/peer-config.js");
+    const peerConfig = loadPeerConfig();
+    const verifyKey = deriveVerifyKey(peerConfig.self.signingKey);
+    process.stderr.write(`Identity public key (share out-of-band for enrollment):\n  ${verifyKey}\n`);
+    process.stdout.write(`+ identity keypair + tribe token ensured\n`);
+  } else {
+    process.stdout.write(`[dry-run] bootstrapIdentity() — generate Ed25519 keypair + tribe token\n`);
   }
 
   // Seed config from examples (only missing ones)
@@ -417,7 +320,7 @@ export async function install(opts: InstallOptions): Promise<number> {
         process.stdout.write(`✓ watchdog LaunchAgent loaded\n`);
       }
     } else if (process.platform === 'linux') {
-      const releaseSrc = join(homedir(), '.abtars-releases', 'src', 'abtars', 'scripts', 'abtars-watchdog.service');
+      const releaseSrc = join(resolveReleasesDir(), 'src', 'abtars', 'scripts', 'abtars-watchdog.service');
       const unitSrc = existsSync(releaseSrc) ? releaseSrc : join(home, 'scripts', 'abtars-watchdog.service');
       const unitDir = join(homedir(), '.config', 'systemd', 'user');
       if (existsSync(unitSrc)) {

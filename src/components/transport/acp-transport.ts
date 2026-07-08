@@ -77,6 +77,8 @@ export class AcpTransport implements IKiroTransport {
   private static _rawMode = false;
   private _rawClient: import("./acp-raw-client.js").AcpRawClient | null = null;
   private _promptSuccessCount = 0;
+  /** Optional ready-hook (fired after the ACP session is established). */
+  onReady?: () => void;
 
   /** Optional callback for streaming intermediate responses. */
   onIntermediateResponse?: (text: string) => void;

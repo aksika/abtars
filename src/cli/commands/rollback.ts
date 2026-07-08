@@ -5,14 +5,30 @@ import { printBanner } from './banner.js';
  */
 
 import { existsSync, readFileSync, writeFileSync, unlinkSync, symlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
-import { acquireLock, packagePaths } from '../deploy-lib-import.js';
+import { join } from 'node:path';
+import { hostname } from 'node:os';
+import { acquireLock, packagePaths, readManifest, writeManifest, emptyManifest } from '../deploy-lib-import.js';
+
+/**
+ * Derive {version, commit} for a history entry. History entries are either a
+ * git short SHA (dev builds, e.g. "3aebb9d") or a version string (npm builds,
+ * e.g. "0.3.4-alpha.8"). The release dir's package.json holds the full version.
+ */
+function resolveReleaseIdentity(releaseDir: string, target: string): { version: string; commit: string | null } {
+  let version = target;
+  try {
+    const pkg = JSON.parse(readFileSync(join(releaseDir, 'package.json'), 'utf-8')) as { version?: string };
+    if (typeof pkg.version === 'string' && pkg.version) version = pkg.version;
+  } catch { /* fall back to target as version */ }
+  // Git short SHA: 7-40 hex chars. npm versions contain dots/dashes.
+  const commit = /^[0-9a-f]{7,40}$/.test(target) ? target : null;
+  return { version, commit };
+}
 
 export async function rollback(opts?: { to?: number }): Promise<number> {
   await printBanner("rollback");
   const paths = packagePaths('abtars');
-  const releasesDir = resolve(homedir(), '.abtars-releases');
+  const releasesDir = paths.releasesDir;
   const historyFile = join(releasesDir, 'history.json');
   const currentLink = join(releasesDir, 'current');
   const slot = opts?.to ?? 1;
@@ -47,13 +63,35 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
     try { unlinkSync(paths.app); } catch {}
     try { symlinkSync(targetDir, paths.app); } catch {}
 
-    process.stdout.write(`✓ rolled back to ${target} (slot ${slot})\n`);
+    // #1291: update manifest.json + deploy.state so the respawned bridge (which
+    // reads its version from manifest via getDeployedVersion()) reports the
+    // rolled-back release, not the stale pre-rollback one. Without this,
+    // /software and bridge.lock keep showing the old version even though the
+    // symlink + code were swapped correctly.
+    const priorManifest = await readManifest(paths.manifest);
+    const { version: targetVersion, commit: targetCommit } = resolveReleaseIdentity(targetDir, target);
+    await writeManifest(paths.manifest, {
+      ...(priorManifest ?? emptyManifest('abtars', hostname())),
+      version: targetVersion,
+      commit: targetCommit,
+      activatedAt: new Date().toISOString(),
+      previousVersion: priorManifest?.version ?? null,
+      previousCommit: priorManifest?.commit ?? null,
+      // source intentionally preserved from prior manifest — rollback does not
+      // change release provenance, and Manifest.source has no 'rollback' variant.
+    });
 
-    // Reset circuit breaker counter
+    process.stdout.write(`✓ rolled back to ${target} (slot ${slot}) — manifest updated to ${targetVersion}\n`);
+
+    // Reset circuit breaker counter + mark deploy.state so /software deploy-state line is accurate
     try {
-      const state = JSON.parse(readFileSync(join(paths.home, 'deploy.state'), 'utf-8'));
+      const statePath = join(paths.home, 'deploy.state');
+      const state: Record<string, unknown> = JSON.parse(readFileSync(statePath, 'utf-8') || '{}');
+      state.status = 'rollback';
+      state.version = targetVersion;
+      state.completedAt = new Date().toISOString();
       state.restartCount = 0;
-      writeFileSync(join(paths.home, 'deploy.state'), JSON.stringify(state) + '\n');
+      writeFileSync(statePath, JSON.stringify(state) + '\n');
     } catch {}
 
     // Write start reason + restart

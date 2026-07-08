@@ -150,7 +150,7 @@ export class BrowserTool {
       // Use Promise.race to detect if click triggers navigation
       const navigationPromise = session.page
         .waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 })
-        .catch(err => { logAndSwallow(TAG, "waitForNavigation click", err); return null; });
+        .catch((err: unknown) => { logAndSwallow(TAG, "waitForNavigation click", err); return null; });
 
       await session.page.click(selector);
 

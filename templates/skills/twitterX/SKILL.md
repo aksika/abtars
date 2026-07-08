@@ -61,6 +61,15 @@ node {baseDir}/scripts/abtars-tweet.js --user <handle>
 - **Follows:** `~/.abtars/workspace/twitterX/base.follows.json` + `agent.follows.json`
 - **Cookies:** `~/.abtars/secret/x-cookies.json` (encrypted at rest, required for full mode)
 - **Output:** `~/.abtars/workspace/twitterX/output/` (daily JSON reports)
+- **Newsletter:** `~/.abtars/workspace/twitterX/newsletter/AI-Daily-{date}.md` (passed via `--output` when running `--format md`)
+
+### Newsletter mode
+
+The script does NOT decide where to write the newsletter. The SKILL.md is the source of truth for the output path. When running `--format md`, you MUST pass `--output`:
+
+```bash
+node {baseDir}/scripts/abtars-tweet.js --feed --format md --output ~/.abtars/workspace/twitterX/newsletter/AI-Daily-$(date +%F).md
+```
 
 ### Accessing cookies (encrypted)
 

@@ -11,7 +11,6 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, basename } from "node:path";
-import { homedir } from "node:os";
 import { abtarsHome } from "../paths.js";
 
 interface FeedConfig {
