@@ -101,6 +101,26 @@ export function bootstrapIdentity(): void {
     writeFileSync(p, serialized, { encoding: "utf-8" });
     try { chmodSync(p, 0o600); } catch { /* best effort */ }
   }
+
+  // Lazy-generate TLS cert from identity key if missing (idempotent).
+  // Must run AFTER signingKey is ensured so the cert derives from the stable key.
+  const certPath = join(abtarsHome(), "config", "identity.crt");
+  const keyPath = join(abtarsHome(), "config", "identity.tls.key");
+  if (!existsSync(certPath) || !existsSync(keyPath)) {
+    try {
+      const { hostname } = require("node:os") as typeof import("node:os");
+      const { generateTlsCert } = require("./peer-transport/peer-auth.js") as typeof import("./peer-transport/peer-auth.js");
+      const cn = (typeof self.name === "string" && self.name) ? self.name : hostname();
+      const signingKey = self.signingKey as string;
+      const { key: tlsKeyPem, cert: certPem } = generateTlsCert(signingKey, cn);
+      writeFileSync(keyPath, tlsKeyPem, { encoding: "utf-8" });
+      writeFileSync(certPath, certPem, { encoding: "utf-8" });
+      try { chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+      logInfo(TAG, "Generated TLS identity cert (10yr self-signed)");
+    } catch (err) {
+      logWarn(TAG, `TLS cert generation failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 }
 
 export function loadPeerConfig(): PeerConfig {

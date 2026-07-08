@@ -212,26 +212,6 @@ export async function install(opts: InstallOptions): Promise<number> {
     process.stdout.write(`[dry-run] bootstrapIdentity() — generate Ed25519 keypair + tribe token\n`);
   }
 
-  // Generate self-signed Ed25519 TLS certificate from the identity key (skip if already exists)
-  const identityCrt = join(paths.config, 'identity.crt');
-  const identityTlsKey = join(paths.config, 'identity.tls.key');
-  if (!opts.dryRun && !(await exists(identityCrt))) {
-    const { chmodSync } = await import('node:fs');
-    try {
-      // Load the identity signing key and derive TLS cert from it
-      const { loadPeerConfig } = await import("../../components/peer-config.js");
-      const { generateTlsCert } = await import("../../components/peer-transport/peer-auth.js");
-      const peerConfig = loadPeerConfig();
-      const { key: tlsKeyPem, cert: certPem } = generateTlsCert(peerConfig.self.signingKey, peerConfig.self.name || hostname());
-      await writeFile(identityTlsKey, tlsKeyPem, { encoding: 'utf-8' });
-      await writeFile(identityCrt, certPem, { encoding: 'utf-8' });
-      chmodSync(identityTlsKey, 0o600);
-      process.stdout.write(`+ TLS certificate derived from Ed25519 identity (10yr)\n`);
-    } catch (err) {
-      process.stderr.write(`[warn] TLS cert generation failed: ${err instanceof Error ? err.message : String(err)}\n`);
-    }
-  }
-
   // Seed config from examples (only missing ones)
   const seeded = await seedConfig(repoRoot, paths.config, opts.dryRun, home);
   if (seeded.length > 0) {
