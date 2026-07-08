@@ -99,68 +99,110 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     // Use main transport's active model if available, else static config
     const startModel = currentModel ?? agent.model;
 
+    /**
+     * Resolve the correct endpoint + apiKey for a given model by scanning the full
+     * transport.json candidate space: all agents' primary + fallback entries.
+     * This is needed when startModel was inherited from Main and may belong to a
+     * different provider than agent.provider (e.g. Main fell back to Ollama while
+     * the task agent's primary provider is OpenRouter).
+     */
+    function resolveModelEndpoint(model: string): { endpoint: string; apiKey: string | undefined } | null {
+      if (!tc) return null;
+      for (const [, agentEntry] of Object.entries(tc.agents)) {
+        // Check primary
+        const primaryProvider = tc.providers[agentEntry.provider];
+        if (primaryProvider?.transport === "api" && agentEntry.model === model && primaryProvider.endpoint) {
+          return {
+            endpoint: primaryProvider.endpoint,
+            apiKey: primaryProvider.apiKeyEnv ? getEnv().getApiKey(primaryProvider.apiKeyEnv) : undefined,
+          };
+        }
+        // Check fallbacks
+        for (const fb of agentEntry.fallbacks ?? []) {
+          if (fb.model !== model) continue;
+          const fbProvider = tc.providers[fb.provider];
+          if (fbProvider?.transport === "api" && fbProvider.endpoint) {
+            return {
+              endpoint: fbProvider.endpoint,
+              apiKey: fbProvider.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : undefined,
+            };
+          }
+        }
+      }
+      return null;
+    }
+
+    // Resolve the correct endpoint for startModel. When startModel was inherited
+    // from Main and belongs to a different provider, this finds the right endpoint
+    // instead of blindly using agent.provider.endpoint (#1307).
+    const startModelResolved = startModel !== agent.model ? resolveModelEndpoint(startModel) : null;
+    const startEndpoint = startModelResolved?.endpoint ?? agent.provider.endpoint ?? "http://localhost:11434/v1";
+    const startApiKey = startModelResolved?.apiKey ?? apiKey;
+
     // Build per-agent candidate list
-    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number }> = [
-      { endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: startModel, maxContext: agent.contextWindow },
-    ];
+    // Dedup key is model+endpoint pair — same model on different providers is a distinct candidate.
+    const candidateKey = (model: string, endpoint: string): string => `${model}@${endpoint}`;
+    const seenCandidates = new Set<string>();
+    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number }> = [];
+
+    const addCandidate = (model: string, endpoint: string, candidateApiKey: string | undefined, maxContext: number): void => {
+      const key = candidateKey(model, endpoint);
+      if (seenCandidates.has(key)) return;
+      seenCandidates.add(key);
+      candidates.push({ model, endpoint, apiKey: candidateApiKey, maxContext });
+    };
+
+    addCandidate(startModel, startEndpoint, startApiKey, agent.contextWindow);
 
     // Add static config model if different from startModel
-    if (agent.model !== startModel && !candidates.some(c => c.model === agent.model)) {
-      candidates.push({ endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: agent.model, maxContext: agent.contextWindow });
+    if (agent.model !== startModel) {
+      addCandidate(agent.model, agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, agent.contextWindow);
     }
 
     // Add professor's model as fallback if different and transport-compatible
     const profAgent = tc ? resolveAgent("professor", tc) : null;
     const agentTransport = agent.provider.transport ?? "api";
-    if (profAgent && profAgent.model !== startModel && !candidates.some(c => c.model === profAgent.model)) {
+    if (profAgent && profAgent.model !== startModel) {
       const profTransport = profAgent.provider.transport ?? "api";
       if (profTransport === agentTransport && profAgent.provider.endpoint) {
-        candidates.push({
-          endpoint: profAgent.provider.endpoint,
-          apiKey: profAgent.provider.apiKeyEnv ? getEnv().getApiKey(profAgent.provider.apiKeyEnv) : apiKey,
-          model: profAgent.model,
-          maxContext: profAgent.contextWindow,
-        });
+        addCandidate(
+          profAgent.model,
+          profAgent.provider.endpoint,
+          profAgent.provider.apiKeyEnv ? getEnv().getApiKey(profAgent.provider.apiKeyEnv) : apiKey,
+          profAgent.contextWindow,
+        );
       }
     }
 
     // Inherit professor's full fallback chain (fb1→fb2→fb3)
     if (profAgent) {
       for (const fb of profAgent.fallbacks ?? []) {
-        if (candidates.some(c => c.model === fb.model)) continue;
         const fbProvider = tc?.providers[fb.provider];
         const fbEndpoint = fbProvider?.endpoint ?? profAgent.provider.endpoint;
         if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
         const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
-        candidates.push({ endpoint: fbEndpoint, apiKey: fbApiKey, model: fb.model, maxContext: profAgent.contextWindow });
+        addCandidate(fb.model, fbEndpoint, fbApiKey, profAgent.contextWindow);
       }
       for (const chainModel of profAgent.provider.fallbackChain ?? []) {
-        if (candidates.some(c => c.model === chainModel)) continue;
         if (!profAgent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
-        candidates.push({ endpoint: profAgent.provider.endpoint, apiKey, model: chainModel, maxContext: profAgent.contextWindow });
+        addCandidate(chainModel, profAgent.provider.endpoint, apiKey, profAgent.contextWindow);
       }
     }
 
     // Append agent-level cross-provider fallbacks
     for (const fb of agent.fallbacks) {
-      if (candidates.some(c => c.model === fb.model)) continue;
       const fbProvider = tc?.providers[fb.provider];
       const fbEndpoint = fbProvider?.endpoint ?? agent.provider.endpoint;
       if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
       const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
-      candidates.push({ endpoint: fbEndpoint, apiKey: fbApiKey, model: fb.model, maxContext: agent.contextWindow });
+      addCandidate(fb.model, fbEndpoint, fbApiKey, agent.contextWindow);
     }
 
     // Append fallbackChain entries as last-resort candidates
     const chain = agent.provider.fallbackChain ?? [];
     for (const chainModel of chain) {
-      if (!candidates.some(c => c.model === chainModel)) {
-        if (!agent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
-        candidates.push({
-          endpoint: agent.provider.endpoint,
-          apiKey, model: chainModel, maxContext: agent.contextWindow,
-        });
-      }
+      if (!agent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
+      addCandidate(chainModel, agent.provider.endpoint, apiKey, agent.contextWindow);
     }
 
     // Use shared registry if provided, otherwise create isolated one
@@ -168,8 +210,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const policy = new FallbackPolicy(candidates, registry ?? new ModelHealthRegistry());
 
     const transport = new DirectApiTransport({
-      endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1",
-      apiKey, model: startModel,
+      endpoint: startEndpoint,
+      apiKey: startApiKey, model: startModel,
       maxContext: agent.contextWindow, maxOutput: agent.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
       maxToolRounds: tc?.maxToolRounds ?? 25,
