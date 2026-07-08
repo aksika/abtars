@@ -84,6 +84,13 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
       );
       ctx.telegramAdapter = adapter;
       platformAdapters.set("telegram", adapter);
+      // Retry path (#1306): if phasePipelineDeps already ran, wire the full pipeline
+      // onto this new instance now — the boot path won't run again.
+      if (ctx.pipelineDeps) {
+        const { wireTelegram, drainRecoveryQueue } = await import("./wire-platform.js");
+        await wireTelegram(ctx);
+        await drainRecoveryQueue(ctx);
+      }
       return {
         async start() { await adapter.start(); },
         stop() { adapter.stop(); platformAdapters.delete("telegram"); ctx.telegramAdapter = null; },
@@ -113,6 +120,12 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
       );
       ctx.discordAdapter = adapter;
       platformAdapters.set("discord", adapter);
+      // Retry path (#1306): wire full pipeline if phasePipelineDeps already ran.
+      if (ctx.pipelineDeps) {
+        const { wireDiscord, drainRecoveryQueue } = await import("./wire-platform.js");
+        await wireDiscord(ctx);
+        await drainRecoveryQueue(ctx);
+      }
       return {
         async start() { await adapter.start(); },
         stop() { adapter.stop(); platformAdapters.delete("discord"); ctx.discordAdapter = null; },
@@ -138,6 +151,12 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
       if (!ircConfig) throw new Error("irc.json missing or empty");
       const adapter = new IrcAdapter(ircConfig, { onMessage: (msg) => recovery.handle(msg, adapter) });
       platformAdapters.set("irc", adapter);
+      // Retry path (#1306): wire full pipeline if phasePipelineDeps already ran.
+      if (ctx.pipelineDeps) {
+        const { wireIrc, drainRecoveryQueue } = await import("./wire-platform.js");
+        await wireIrc(ctx);
+        await drainRecoveryQueue(ctx);
+      }
       return {
         async start() { await adapter.start(); },
         stop() { adapter.stop(); platformAdapters.delete("irc"); },
