@@ -88,7 +88,7 @@ export async function writeWrapper(binDir: string, name: string, currentLink: st
 ${pathPreamble}# Resolve abmind CLI — global install is canonical under #1243 (no longer bundled in the release)
 LOCAL_CLI="$HOME/.local/lib/node_modules/abmind/dist/cli/abmind.js"
 GLOBAL_CLI="$(npm root -g 2>/dev/null)/abmind/dist/cli/abmind.js"
-SRC_CLI="$HOME/.abtars-releases/src/abmind/dist/cli/abmind.js"
+SRC_CLI="$HOME/.abmind/src/abmind/dist/cli/abmind.js"
 if [ -f "$LOCAL_CLI" ]; then
   exec node "$LOCAL_CLI" "$@"
 elif [ -f "$GLOBAL_CLI" ]; then

@@ -111,10 +111,10 @@ If the npm global install is broken beyond repair, install manually from source:
 ```bash
 # 1. Clone the source
 git clone https://github.com/aksika/abtars.git ~/.abtars-releases/src/abtars
-git clone https://github.com/aksika/abmind.git ~/.abtars-releases/src/abmind
+git clone https://github.com/aksika/abmind.git ~/.abmind/src/abmind
 
 # 2. Build abmind first (abtars links it)
-cd ~/.abtars-releases/src/abmind
+cd ~/.abmind/src/abmind
 npm install && npm run build
 
 # 3. Build abtars

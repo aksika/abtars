@@ -454,10 +454,8 @@ export async function runDevUpdate(
   spawnFn: typeof import("node:child_process").spawn,
   execHelper?: ExecHelper,
 ): Promise<void> {
-  const { existsSync: fsExistsSync } = await import("node:fs");
   const releasesRoot = join(process.env["HOME"] ?? "", ".abtars-releases", "src");
   const abtarsDir = join(releasesRoot, "abtars");
-  const abmindDir = join(releasesRoot, "abmind");
   const execP = execHelper ?? makeExecHelper(spawnFn);
 
   // ── 1. Fetch ──────────────────────────────────────────────────────────────
@@ -502,42 +500,8 @@ export async function runDevUpdate(
     const co = await execP("git", ["-C", abtarsDir, "checkout", "origin/dev"], { timeout: 10_000 });
     if (!co.ok) throw new Error(`checkout failed: ${co.stderr.slice(-300) || co.stdout.slice(-300)}`);
 
-    // Always ensure abmind source exists (#1268: clone if missing)
-    const abmindGit = join(abmindDir, ".git");
-    if (!fsExistsSync(abmindGit)) {
-      const cloneResult = await execP("git", ["clone", "--depth", "1", "-b", "dev", "https://github.com/aksika/abmind.git", abmindDir], { timeout: 120_000 });
-      if (!cloneResult.ok) logWarn("update", "abmind clone failed — skipping abmind update");
-    }
-    if (fsExistsSync(abmindGit)) {
-      await execP("git", ["-C", abmindDir, "fetch", "origin", "dev"], { timeout: 30_000 });
-      await execP("git", ["-C", abmindDir, "checkout", "origin/dev"], { timeout: 10_000 });
-    }
-
     const build = await execP("node", ["esbuild.config.js"], { cwd: abtarsDir, timeout: 180_000 });
     if (!build.ok) throw new Error(`build failed: ${build.stderr.slice(-400) || build.stdout.slice(-400)}`);
-
-    // Conditionally update abmind (#1268 channel-mixing logic)
-    const abmindGit2 = join(abmindDir, ".git");
-    if (ctx.memoryConfig.memoryEnabled && fsExistsSync(abmindGit2)) {
-      let needAbmindUpdate = false;
-      try {
-        const manifestRaw = readFileSync(join(homedir(), ".abmind", "manifest.json"), "utf-8");
-        const mf = JSON.parse(manifestRaw) as { source?: string; commit?: string };
-        if (!mf.source || mf.source === "npm") {
-          needAbmindUpdate = true;
-        } else {
-          const headCommit = (await execP("git", ["-C", abmindDir, "rev-parse", "--short", "HEAD"], { timeout: 5_000 })).stdout.trim();
-          if (!headCommit || headCommit !== (mf.commit ?? "")) needAbmindUpdate = true;
-        }
-      } catch {
-        needAbmindUpdate = true;
-      }
-      if (needAbmindUpdate) {
-        const abmindProc = spawnFn("abmind", ["update", "--dev", abmindDir], { detached: true, stdio: "ignore" });
-        abmindProc.on("error", (err) => logWarn("update", `spawn abmind failed (non-fatal): ${err.message}`));
-        abmindProc.unref();
-      }
-    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logWarn("update", `update aborted: ${msg}`);
@@ -592,6 +556,26 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     return true;
   }
 
+  // /update abmind — pull + build + install abmind from dev (#1308)
+  if (arg === "abmind" || arg === "update abmind") {
+    if (!isMaster) { await ctx.reply("Requires master role."); return true; }
+    await ctx.reply("Updating abmind from dev (pull + build + install)...");
+    logInfo("update", "abmind dev update requested");
+    const { spawn } = await import("node:child_process");
+    // Non-detached spawn + piped stderr + on("close") reply — mirrors the
+    // alpha/stable branches. Non-blocking (event-driven), and the reply is
+    // what surfaces failure to chat (the silent-failure gap #1308 closes).
+    const child = spawn("abmind", ["update", "--dev"], { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.on("error", (err) => logWarn("update", `spawn abmind failed (non-fatal): ${err.message}`));
+    child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+    child.on("close", (code) => {
+      if (code !== 0 && code !== null) ctx.reply(`x abmind update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {});
+      else ctx.reply("+ abmind update complete — check /software").catch(() => {});
+    });
+    return true;
+  }
+
   // /update dev | alpha | stable
   if (arg === "update" || arg === "update dev" || arg === "dev" ||
       arg === "update git" || arg === "git" ||
@@ -622,9 +606,6 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       child.on("error", (err) => logWarn("update", `spawn abtars failed (non-fatal): ${err.message}`));
       child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
       child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
-      if (ctx.memoryConfig.memoryEnabled) {
-        spawnDetached("abmind", ["update", "--alpha"], "update");
-      }
     } else {
       await ctx.reply("Updating from npm (stable)...");
       logInfo("update", "npm stable update requested");
@@ -634,9 +615,6 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       child.on("error", (err) => logWarn("update", `spawn abtars failed (non-fatal): ${err.message}`));
       child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
       child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
-      if (ctx.memoryConfig.memoryEnabled) {
-        spawnDetached("abmind", ["update", "--stable"], "update");
-      }
     }
     return true;
   }

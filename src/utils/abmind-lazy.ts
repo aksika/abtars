@@ -13,7 +13,7 @@
  *   1. ABMIND_PATH env override        — escape hatch + test hook
  *   2. createRequire (ancestor-walk)   — KP/WSL dev file: link
  *   3. npm root -g → <root>/abmind     — canonical global install (#1243)
- *   4. ~/.abtars-releases/src/abmind   — deploy source checkout
+ *   4. ~/.abmind/src/abmind   — dev source checkout (`abmind update --dev`)
  *   5. ~/.local/lib/node_modules/abmind — legacy install location
  * First valid, version-floor-passing candidate wins.
  */
@@ -145,11 +145,11 @@ export function abmindStrategies(): Strategy[] {
       },
     },
     {
-      // 4. Deploy source checkout — always present on deploy hosts under
-      //    ~/.abtars-releases/src/abmind. Also the npm-absent fallback.
+      // 4. Dev source checkout owned by abmind (#1308) at ~/.abmind/src/abmind.
+      //    Populated by `abmind update --dev` (no dir). Also the npm-absent fallback.
       name: "releases-src",
       resolve(): string | null {
-        return join(homedir(), ".abtars-releases", "src", "abmind");
+        return join(homedir(), ".abmind", "src", "abmind");
       },
     },
     {

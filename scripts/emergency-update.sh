@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # emergency-update.sh — fully-manual deploy when the abtars CLI cannot update itself.
 #
-# Builds the fresh dev bundle with plain npm + esbuild (NO abtars/abmind CLI
+# Builds the fresh dev bundle with plain npm + esbuild (NO abtars CLI
 # invocation), stages a release, repoints the symlinks, and restarts the
 # watchdog directly via launchctl/systemd. Result is identical to
 # `abtars update --dev` but needs no working deployed binary.
@@ -23,7 +23,6 @@
 set -euo pipefail
 
 SRC_DIR="${ABTARS_SRC:-$HOME/.abtars-releases/src/abtars}"
-ABMIND_DIR="${ABMIND_SRC:-$HOME/.abtars-releases/src/abmind}"
 RELEASES_DIR="$HOME/.abtars-releases"
 ABTARS_HOME="${ABTARS_HOME:-$HOME/.abtars}"
 PLIST="$HOME/Library/LaunchAgents/com.abtars.watchdog.plist"
@@ -42,10 +41,6 @@ jget() { node -e 'const fs=require("fs");try{const v=JSON.parse(fs.readFileSync(
 step "bypassing dev branch fetch/reset..."
 # git -C "$SRC_DIR" fetch --depth 1 origin dev
 # git -C "$SRC_DIR" reset --hard origin/dev
-# if [ -d "$ABMIND_DIR/.git" ]; then
-#   git -C "$ABMIND_DIR" fetch --depth 1 origin dev
-#   git -C "$ABMIND_DIR" reset --hard origin/dev
-# fi
 
 
 COMMIT="$(git -C "$SRC_DIR" rev-parse --short HEAD)"
@@ -66,22 +61,6 @@ fi
 if [ -d "$SRC_DIR/agents" ]; then
   rm -rf "$SRC_DIR/bundle/agents"
   cp -r "$SRC_DIR/agents" "$SRC_DIR/bundle/agents"
-fi
-
-# ── 3. Build abmind + copy into bundle ─────────────────────────────────────
-if [ -f "$ABMIND_DIR/package.json" ]; then
-  step "building abmind..."
-  ( cd "$ABMIND_DIR" && npm install --ignore-scripts && npm run build )
-  if [ -f "$ABMIND_DIR/dist/cli/abmind.js" ]; then
-    ABMIND_DEST="$SRC_DIR/bundle/node_modules/abmind"
-    rm -rf "$ABMIND_DEST"
-    mkdir -p "$ABMIND_DEST"
-    cp -r "$ABMIND_DIR/." "$ABMIND_DEST/"
-    rm -rf "$ABMIND_DEST/node_modules" "$ABMIND_DEST/.git"
-    chmod +x "$ABMIND_DEST/dist/cli/abmind.js" 2>/dev/null || true
-  else
-    echo "! abmind build produced no dist — bundle will fall back to global abmind"
-  fi
 fi
 
 # ── 4. Stage release ───────────────────────────────────────────────────────
