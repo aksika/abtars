@@ -164,6 +164,31 @@ export function abmindStrategies(): Strategy[] {
   ];
 }
 
+// ── Package-dir resolver (used by both loadAbmind and resolveAbmindBin) ──────
+
+/**
+ * Walk the discovery strategies and return the first candidate abmind package
+ * directory whose `package.json` exists and is at or above the supported
+ * version floor. Returns null if no candidate qualifies.
+ *
+ * Unlike `loadAbmind()`, this does NOT cache and does NOT import the module —
+ * it just returns the directory. The same per-candidate guards (existsSync,
+ * version-floor) apply, so a below-floor candidate is a hard stop (not a
+ * fall-through to a lower-priority stale copy). #1308 follow-up.
+ */
+export function resolveAbmindPackageDir(): string | null {
+  for (const strategy of abmindStrategies()) {
+    const dir = strategy.resolve();
+    if (!dir) continue;
+    const pkgPath = join(dir, "package.json");
+    if (!existsSync(pkgPath)) continue;
+    const ver = readVersion(pkgPath);
+    if (!ver || !isSupportedVersion(ver)) return null; // hard stop — matches loadAbmind
+    return dir;
+  }
+  return null;
+}
+
 // ── Loader ───────────────────────────────────────────────────────────────────
 
 /**

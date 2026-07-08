@@ -17,6 +17,7 @@ import { createDecipheriv, hkdfSync } from "node:crypto";
 import { reconcile } from "../deploy-lib/reconcile.js";
 import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
 import { resolveReleasesDir } from "../deploy-lib/paths.js";
+import { resolveAbmindBin } from "../../utils/abmind-bin.js";
 
 export interface RestoreOpts {
   config?: boolean;
@@ -107,7 +108,7 @@ function restoreAbmind(abmPath: string, passphrase?: string): number {
     env["ABMIND_BACKUP_PASSPHRASE"] = envPassphrase;
   }
 
-  const result = spawnSync("abmind", args, { encoding: "utf-8", stdio: "inherit", env });
+  const result = spawnSync(resolveAbmindBin() ?? "abmind", args, { encoding: "utf-8", stdio: "inherit", env });
   if (result.status !== 0) {
     process.stderr.write("abmind restore failed\n");
     return 1;

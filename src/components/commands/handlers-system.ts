@@ -562,16 +562,28 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     await ctx.reply("Updating abmind from dev (pull + build + install)...");
     logInfo("update", "abmind dev update requested");
     const { spawn } = await import("node:child_process");
-    // Non-detached spawn + piped stderr + on("close") reply — mirrors the
-    // alpha/stable branches. Non-blocking (event-driven), and the reply is
-    // what surfaces failure to chat (the silent-failure gap #1308 closes).
-    const child = spawn("abmind", ["update", "--dev"], { stdio: ["ignore", "pipe", "pipe"] });
+    const { resolveAbmindBin } = await import("../../utils/abmind-bin.js");
+    // Absolute bin path (#1308 follow-up): bridge PATH doesn't include the nvm
+    // bin dir, so bare "abmind" ENOENTs. Resolver reuses abmind-lazy's discovery.
+    // Fallback to bare name keeps behaviour for callers that set PATH; the new
+    // close handler turns the eventual ENOENT into a clear diagnostic.
+    const abmindCmd = resolveAbmindBin() ?? "abmind";
+    const child = spawn(abmindCmd, ["update", "--dev"], { stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
     child.on("error", (err) => logWarn("update", `spawn abmind failed (non-fatal): ${err.message}`));
     child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     child.on("close", (code) => {
-      if (code !== 0 && code !== null) ctx.reply(`x abmind update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {});
-      else ctx.reply("+ abmind update complete — check /software").catch(() => {});
+      // Three-arm close handler — the actual silent-success fix (#1308 follow-up):
+      // code===0 → success; code===null with empty stderr → binary not found;
+      // else → exit code + stderr tail. Closes the class where ENOENT used to
+      // route to the success branch.
+      if (code === 0) {
+        ctx.reply("+ abmind update complete — check /software").catch(() => {});
+      } else if (code === null && !stderr) {
+        ctx.reply("x abmind update failed: binary not found. Check `abmind --version` on this host, or set ABMIND_PATH.").catch(() => {});
+      } else {
+        ctx.reply(`x abmind update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {});
+      }
     });
     return true;
   }
