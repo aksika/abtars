@@ -9,7 +9,7 @@ vi.mock("../utils/abmind-lazy.js", () => ({
   abmind: () => abmindReturn,
   loadAbmind: vi.fn(),
   resetAbmindCache: vi.fn(),
-  ABMIND_MIN: [0, 3, 0],
+  ABMIND_MIN: [0, 2, 6],
   isSupportedVersion: vi.fn().mockReturnValue(true),
   parseSemver: vi.fn(),
 }));

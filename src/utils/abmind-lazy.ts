@@ -31,7 +31,7 @@ type AbmindModule = typeof import("abmind");
  * (abmind SUPPORTED-SURFACE.md, #1243). Below this → memory disabled loudly.
  * Bump only when abtars starts relying on newer surface.
  */
-export const ABMIND_MIN: readonly [number, number, number] = [0, 3, 0];
+export const ABMIND_MIN: readonly [number, number, number] = [0, 2, 6];
 
 let _mod: AbmindModule | null = null;
 let _loaded = false;
