@@ -1,23 +1,26 @@
 /**
- * secrets.ts — Read/write secrets from ~/.abtars/secrets/ directory (#597, #598).
+ * secrets.ts — Read/write secrets from ~/.abtars/secret/ directory (#597, #598).
  * One file per secret. Supports plaintext (legacy) and encrypted (ENC: prefix).
- * Encryption uses abtars's own abtars.key via crypto.ts — no abmind dependency.
+ *
+ * #1216: the AES-256-GCM crypto (encrypt/decrypt + constants) is delegated to
+ * utils/crypto.ts. This module is the persistence + policy layer:
+ *   - directory ensure, per-process value cache
+ *   - plaintext vs ENC: routing
+ *   - cached derived key (loadKey + deriveKey, both from utils/crypto.ts)
+ *   - public API: readSecret / writeSecret / initSecretsKey / clearSecretCache
+ *
+ * Wire-format must remain byte-identical to the previous implementation so
+ * existing ENC: files on KP/Molty decrypt unchanged. Verified in secrets.test.ts.
  */
-
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { randomBytes, createCipheriv } from "node:crypto";
 import { abtarsHome } from "../paths.js";
-import { loadKey, deriveKey } from "../utils/crypto.js";
+import { loadKey, deriveKey, encrypt, decrypt } from "../utils/crypto.js";
 
 const SECRETS_DIR = join(abtarsHome(), "secret");
 const cache = new Map<string, string>();
-const ALGO = "aes-256-gcm";
-const IV_LEN = 12;
-const TAG_LEN = 16;
-const VERSION = 0x01;
 
-// Ensure secrets dir exists on first import
+// Ensure secret dir exists on first import
 if (!existsSync(SECRETS_DIR)) {
   mkdirSync(SECRETS_DIR, { recursive: true, mode: 0o700 });
 }
@@ -33,31 +36,7 @@ function getSecretsKey(): Buffer | null {
   return cachedKey;
 }
 
-function decryptSecret(blob: string, key: Buffer): string | null {
-  try {
-    const buf = Buffer.from(blob, "base64");
-    const version = buf[0];
-    if (version !== VERSION) return null;
-    const iv = buf.subarray(1, 1 + IV_LEN);
-    const tag = buf.subarray(buf.length - TAG_LEN);
-    const ciphertext = buf.subarray(1 + IV_LEN, buf.length - TAG_LEN);
-    const { createDecipheriv } = require("node:crypto");
-    const decipher = createDecipheriv(ALGO, key, iv);
-    decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf-8");
-  } catch { return null; }
-}
-
-function encryptSecret(plaintext: string, key: Buffer): string {
-  const iv = randomBytes(IV_LEN);
-  const cipher = createCipheriv(ALGO, key, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, "utf-8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  const blob = Buffer.concat([Buffer.from([VERSION]), iv, encrypted, tag]);
-  return blob.toString("base64");
-}
-
-/** Read a secret from ~/.abtars/secrets/<name>. Cached per process. */
+/** Read a secret from ~/.abtars/secret/<name>. Cached per process. */
 export function readSecret(name: string): string | undefined {
   if (cache.has(name)) return cache.get(name);
   try {
@@ -66,7 +45,8 @@ export function readSecret(name: string): string | undefined {
     if (raw.startsWith("ENC:")) {
       const key = getSecretsKey();
       if (!key) return undefined;
-      const value = decryptSecret(raw.slice(4), key);
+      // crypto.decrypt expects the full "ENC:..." string and strips the prefix itself.
+      const value = decrypt(raw, key);
       if (value === null) return undefined;
       cache.set(name, value);
       return value;
@@ -82,12 +62,12 @@ export function initSecretsKey(): void {
   cachedKey = getSecretsKey();
 }
 
-/** Write an encrypted secret to ~/.abtars/secrets/<name>. */
+/** Write an encrypted secret to ~/.abtars/secret/<name>. */
 export function writeSecret(name: string, value: string): void {
   const key = getSecretsKey();
   if (!key) throw new Error("Cannot encrypt secret: abtars.key not found. Run abtars install.");
-  const encrypted = "ENC:" + encryptSecret(value, key);
-  writeFileSync(join(SECRETS_DIR, name), encrypted, { mode: 0o600 });
+  // crypto.encrypt already prefixes "ENC:" — pass the value directly.
+  writeFileSync(join(SECRETS_DIR, name), encrypt(value, key), { mode: 0o600 });
   cache.set(name, value);
 }
 
