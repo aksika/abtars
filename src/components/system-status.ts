@@ -222,7 +222,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
 /** Map phase names to ServiceRegistry service names (for live state merge). */
 function phaseToService(phaseName: string): string | null {
   switch (phaseName) {
-    case "phaseAgentApi": return "agent-api";
+    case "agentApi": return "agent-api";
     default: return null;
   }
 }
@@ -349,7 +349,7 @@ export function renderStatusText(status: SystemStatus): string {
   // ── Tribe ─────────────────────────────────────────────────────────────
   lines.push("", "Tribe:");
 
-  const apiSub = status.subsystems.find(s => s.name === "phaseAgentApi");
+  const apiSub = status.subsystems.find(s => s.name === "agentApi");
   const apiPort = (process.env["AGENT_API_PORT"] ?? "").replace(/^:/, "");
   lines.push(`  ${subIcon(apiSub)} a2a${apiPort ? `: ${apiPort} enabled` : ""}`);
 
