@@ -29,6 +29,8 @@ export interface DirectApiConfig {
   maxTurns: number;
   maxToolRounds?: number;
   apiFormat?: "chat" | "responses" | "anthropic";
+  /** #1311: route DirectApi through the pi-ai provider engine (L1) when installed. Default off — L0 reptile floor otherwise. */
+  useProviderLib?: boolean;
   thinking?: { style: "effort"; default: string } | { style: "extended"; default: number };
   fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
 }
@@ -52,8 +54,12 @@ export class DirectApiTransport implements IKiroTransport {
   private activeModel: string;
   /** #1295: maxContext of the model currently serving requests. Used for accurate contextPercent. */
   private _activeMaxContext: number;
+  private readonly useProviderLib: boolean;
   private _lastPromptTokens = 0;
   private _lastCompletionTokens = 0;
+  /** #1311: prompt-cache token totals from the pi-ai path (null on L0 — reptile adapters don't report cache). */
+  private _lastCacheRead: number | null = null;
+  private _lastCacheWrite: number | null = null;
   private _activeSessionKey = "";
   private _activeUserId = "master";
 
@@ -104,6 +110,7 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeApiKey = config.apiKey;
     this.activeModel = config.model;
     this._activeMaxContext = config.maxContext;
+    this.useProviderLib = config.useProviderLib ?? false;
     this.policy = policy ?? null;
   }
 
@@ -142,6 +149,8 @@ export class DirectApiTransport implements IKiroTransport {
     this._lastAnswer = "";
     this._toolCallsSucceeded = 0;
     this._intermediateText = "";
+    this._lastCacheRead = null;
+    this._lastCacheWrite = null;
     this._promptStartedAt = Date.now();
     this._lastActivityAt = Date.now();
 
@@ -445,6 +454,22 @@ export class DirectApiTransport implements IKiroTransport {
     const composed = AbortSignal.any([signal, timeoutCtrl.signal]);
 
     try {
+    // #1311 — L1: pi-ai provider engine. Flag on + non-emergency only.
+    // Load failure (pi absent/broken) → fall through to the L0 reptile floor.
+    // Request failure → propagate to L2 (sendWithPolicy) for rotation, unchanged.
+    if (this.useProviderLib && !this.emergencyOverride) {
+      try {
+        return await this.consumePiAi(session, composed);
+      } catch (err) {
+        if (err instanceof Error && err.name === "PiAiUnavailableError") {
+          logWarn(TAG, `pi-ai unavailable — using L0 reptile floor: ${err.message}`);
+          // fall through to L0 branches below
+        } else {
+          throw err;
+        }
+      }
+    }
+
     // Responses API format (#465, streaming #472)
     if (this.config.apiFormat === "responses") {
       const { toResponsesRequest } = await import("./responses-adapter.js");
@@ -586,6 +611,55 @@ export class DirectApiTransport implements IKiroTransport {
     }
   }
 
+  /**
+   * #1311 — L1 execution: stream one completion through pi-ai, translating events
+   * into the same internal contract the L0 branches produce. Throws
+   * PiAiUnavailableError on load failure (→ L0 fallback) or Error("API error …")
+   * on request failure (→ L2 rotation). See pi-ai-adapter.ts.
+   */
+  private async consumePiAi(
+    session: ConversationSession,
+    signal: AbortSignal,
+  ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
+    const { streamPiAiCompletion } = await import("./pi-ai-adapter.js");
+    const events = streamPiAiCompletion(
+      {
+        model: this.activeModel,
+        endpoint: this.activeEndpoint,
+        apiKey: this.activeApiKey,
+        apiFormat: this.config.apiFormat,
+        maxOutput: this.config.maxOutput,
+        thinking: this.config.thinking,
+        reasoningEffort: session.reasoningEffort,
+        sessionId: this._activeSessionKey,
+      },
+      { messages: session.messages, tools: getToolSchemas(this.sandboxPolicy) },
+      signal,
+    );
+
+    let content = "";
+    let usage: { prompt_tokens: number; completion_tokens: number } | null = null;
+    const toolCallAcc = new Map<string, { id: string; name: string; arguments: string }>();
+    for await (const event of events) {
+      this._lastActivityAt = Date.now();
+      if (event.type === "chunk") {
+        content += event.content;
+        this._intermediateText += event.content;
+        this.onIntermediateResponse?.(event.content);
+      } else if (event.type === "thinking") {
+        // Reasoning streams to the user but is never folded into the final answer.
+        this.onIntermediateResponse?.(event.content);
+      } else if (event.type === "tool_call_delta") {
+        this.accumulateToolCall(toolCallAcc, event);
+      } else if (event.type === "done") {
+        usage = event.usage;
+        this._lastCacheRead = event.cacheRead ?? null;
+        this._lastCacheWrite = event.cacheWrite ?? null;
+      }
+    }
+    return { content: content || null, toolCalls: this.finalizeToolCalls(toolCallAcc), usage };
+  }
+
   /** Accumulate streaming tool call deltas by ID (Ollama-safe: tracks by ID not index). */
   private accumulateToolCall(
     acc: Map<string, { id: string; name: string; arguments: string }>,
@@ -647,10 +721,14 @@ export class DirectApiTransport implements IKiroTransport {
   getActiveSession(): ConversationSession | null { return this.sessions.get(this._activeSessionKey) ?? null; }
   get toolCallsSucceeded(): number { return this._toolCallsSucceeded; }
 
-  lastUsage(): { input: number; output: number } | null {
-    return this._lastPromptTokens || this._lastCompletionTokens
-      ? { input: this._lastPromptTokens, output: this._lastCompletionTokens }
-      : null;
+  lastUsage(): { input: number; output: number; cacheRead?: number; cacheWrite?: number } | null {
+    if (!this._lastPromptTokens && !this._lastCompletionTokens) return null;
+    const out: { input: number; output: number; cacheRead?: number; cacheWrite?: number } = {
+      input: this._lastPromptTokens, output: this._lastCompletionTokens,
+    };
+    if (this._lastCacheRead != null) out.cacheRead = this._lastCacheRead;
+    if (this._lastCacheWrite != null) out.cacheWrite = this._lastCacheWrite;
+    return out;
   }
 
   /** Hot-swap the active model. Takes effect on next API call. */

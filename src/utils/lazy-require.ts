@@ -25,6 +25,7 @@ export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
   pdf:     { packages: ["pdf-parse"], label: "PDF reading" },
   youtube: { packages: ["youtube-transcript"], label: "YouTube transcripts" },
   image:   { packages: ["jimp"], label: "Image processing" },
+  provider: { packages: ["@earendil-works/pi-ai"], label: "pi-ai unified provider layer (~36 providers + prompt caching)" },
 };
 
 export interface SystemDep {

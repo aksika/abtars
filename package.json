@@ -17,7 +17,7 @@
     "test:integration": "vitest --run --dir src/tests/integration"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.19.0"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "^0.25.0",

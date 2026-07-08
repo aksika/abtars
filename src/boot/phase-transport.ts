@@ -221,6 +221,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       maxTurns: tc?.maxTurns ?? 50,
       maxToolRounds: tc?.maxToolRounds ?? 25,
       apiFormat: resolved.provider.apiFormat,
+      useProviderLib: resolved.provider.useProviderLib,
       thinking: resolved.provider.thinking,
     }, policy);
     logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);

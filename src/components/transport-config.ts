@@ -44,6 +44,8 @@ export type ProviderConfig = {
   endpoint?: string;
   apiKeyEnv?: string;
   apiFormat?: "chat" | "responses" | "anthropic";
+  /** #1311: route this provider's DirectApi through the pi-ai provider engine when installed (default off). */
+  useProviderLib?: boolean;
   thinking?: { style: "effort"; default: string } | { style: "extended"; default: number };
   defaults?: Record<string, { model: string; fallbacks?: string[] }>;
   fallbackChain?: string[];
