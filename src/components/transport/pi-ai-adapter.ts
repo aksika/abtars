@@ -321,7 +321,11 @@ export async function* translatePiAiEvents(
           if (e.name) yield { type: "tool_call_delta", index: idx, id: e.id, name: e.name, arguments: e.args };
         }
         const u = ev.message.usage;
-        yield { type: "done", usage: { prompt_tokens: u.input, completion_tokens: u.output }, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite };
+        // #1311/R1: pi's usage.input EXCLUDES cache (totalTokens = input+output+cacheRead+cacheWrite).
+        // prompt_tokens must be total input-side (incl cache): it matches L0 (OpenAI's prompt_tokens
+        // already includes cached) for context-% parity AND makes recordUsage→budget = totalTokens
+        // (cache is additive, not a subset of input).
+        yield { type: "done", usage: { prompt_tokens: u.input + u.cacheRead + u.cacheWrite, completion_tokens: u.output }, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite };
         return;
       }
       case "error":

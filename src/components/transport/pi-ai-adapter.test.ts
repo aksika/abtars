@@ -150,8 +150,19 @@ describe("translatePiAiEvents", () => {
     expect(out).toEqual<SSEEvent[]>([
       { type: "chunk", content: "Hel" },
       { type: "chunk", content: "lo" },
-      { type: "done", usage: { prompt_tokens: 12, completion_tokens: 2 }, cacheRead: 5, cacheWrite: 3 },
+      { type: "done", usage: { prompt_tokens: 20, completion_tokens: 2 }, cacheRead: 5, cacheWrite: 3 },
     ]);
+  });
+
+  it("R1 — done prompt_tokens = input + cacheRead + cacheWrite (cache is ADDITIVE, not a subset of input)", async () => {
+    // pi's usage.input excludes cache; totalTokens = input+output+cacheRead+cacheWrite.
+    // prompt_tokens must be total input-side so context-% parity holds and budget = totalTokens.
+    const out = await collect(translatePiAiEvents(fakeAsync([
+      { type: "done", reason: "stop", message: assistant({ usage: { input: 100, output: 4, cacheRead: 60, cacheWrite: 40 } }) },
+    ])));
+    const done = out[0]!;
+    expect(done.type).toBe("done");
+    expect((done as { usage: { prompt_tokens: number } }).usage.prompt_tokens).toBe(200); // 100 + 60 + 40
   });
 
   it("routes thinking deltas to 'thinking' events (never chunks)", async () => {
