@@ -79,7 +79,7 @@ function install(names: string[]): number {
     }
     process.stdout.write(`→ Installing ${dep.label} (${dep.packages.join(", ")})...\n`);
     try {
-      installPackages(dep.packages);
+      installPackages(dep.packages.map(p => `${p}${dep.version ? "@" + dep.version : ""}`));
       if (dep.postInstall) {
         process.stdout.write(`  post-install: ${dep.postInstall}\n`);
         spawnSync("npx", ["--prefix", join(resolveReleasesDir(), "deps"), ...dep.postInstall.split(" ")], { stdio: "inherit" });
@@ -109,7 +109,7 @@ function update(names: string[]): number {
     }
     process.stdout.write(`→ Installing ${dep.label} (${dep.packages.join(", ")})...\n`);
     try {
-      installPackages(dep.packages);
+      installPackages(dep.packages.map(p => `${p}${dep.version ? "@" + dep.version : ""}`));
       if (dep.postInstall) {
         process.stdout.write(`  post-install: ${dep.postInstall}\n`);
         spawnSync("npx", ["--prefix", join(resolveReleasesDir(), "deps"), ...dep.postInstall.split(" ")], { stdio: "inherit" });

@@ -16,6 +16,8 @@ export interface OptionalDep {
   readonly packages: readonly string[];
   readonly label: string;
   readonly postInstall?: string;
+  /** #1311 C7: pin spec (e.g. "~0.80"). When set, installs `pkg@version` for reproducibility. */
+  readonly version?: string;
 }
 
 export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
@@ -25,7 +27,7 @@ export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
   pdf:     { packages: ["pdf-parse"], label: "PDF reading" },
   youtube: { packages: ["youtube-transcript"], label: "YouTube transcripts" },
   image:   { packages: ["jimp"], label: "Image processing" },
-  provider: { packages: ["@earendil-works/pi-ai"], label: "pi-ai unified provider layer (~36 providers + prompt caching)" },
+  provider: { packages: ["@earendil-works/pi-ai"], label: "pi-ai unified provider layer (~36 providers + prompt caching)", version: "~0.80" },
 };
 
 export interface SystemDep {
@@ -63,6 +65,14 @@ export function installPackages(packages: readonly string[]): void {
   execSync(`npm install --prefix "${dir}" ${packages.join(" ")} --no-audit --no-fund`, { stdio: "pipe" });
 }
 
+/** #1311 C7: append the pinned version (if any) from OPTIONAL_DEPS so auto-installs are reproducible. */
+function versionedSpec(pkg: string): string {
+  for (const dep of Object.values(OPTIONAL_DEPS)) {
+    if (dep.packages.includes(pkg) && dep.version) return `${pkg}@${dep.version}`;
+  }
+  return pkg;
+}
+
 /**
  * Lazy import — tries normal import, falls back to ~/.local/lib/node_modules/, auto-installs if missing.
  */
@@ -80,7 +90,7 @@ export async function lazyRequire<T = any>(pkg: string, label?: string): Promise
   // Auto-install
   logInfo(TAG, `Installing ${label ?? pkg}...`);
   try {
-    installPackages([pkg]);
+    installPackages([versionedSpec(pkg)]);
     return await import(join(libNm, pkg));
   } catch (err) {
     logWarn(TAG, `Failed to install ${pkg}: ${err instanceof Error ? err.message : String(err)}`);
