@@ -22,6 +22,14 @@ const TAG = "transport";
 export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
   const { memoryConfig } = ctx;
 
+  // #1311 C8: warm pi-ai's catalog before buildTransport() resolves agents — resolveAgent is a
+  // sync hot path that reads the warmed cache. Skipped entirely when no provider opts in.
+  const { anyProviderUseProviderLib } = await import("../components/transport-config.js");
+  if (anyProviderUseProviderLib()) {
+    const { loadPiModels } = await import("../components/transport/pi-catalog.js");
+    await loadPiModels();
+  }
+
   await buildTransport(ctx);
 
   // Docker detection (#478)

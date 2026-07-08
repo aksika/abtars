@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 import { readEnvWithDefault } from "./env.js";
 import { logInfo, logWarn, logError } from "./logger.js";
+import { resolveModelMeta, mapProviderName } from "./transport/pi-catalog.js";
 
 const TAG = "transport-config";
 
@@ -247,12 +248,21 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
     logWarn(TAG, `Model "${effectiveModel}" not in models.json — using defaults`);
   }
 
+  // #1311 C1: pi catalog precedence — when this provider opts into pi-ai AND the model resolves
+  // in pi's warmed catalog, pi metadata (contextWindow/maxOutput) wins over models.json.
+  let contextWindow = modelEntry?.contextWindow ?? 128000;
+  let maxOutput = modelEntry?.maxOutput ?? 8192;
+  if (resolvedProvider.useProviderLib) {
+    const piMeta = resolveModelMeta(effectiveModel, effectiveProvider);
+    if (piMeta) { contextWindow = piMeta.contextWindow; maxOutput = piMeta.maxOutput; }
+  }
+
   return {
     model: effectiveModel,
     provider: resolvedProvider,
     providerName: effectiveProvider,
-    contextWindow: modelEntry?.contextWindow ?? 128000,
-    maxOutput: modelEntry?.maxOutput ?? 8192,
+    contextWindow,
+    maxOutput,
     fallbacks: (assignment.fallbacks ?? []).filter((fb: any) => !fb.demoted && fb.model !== effectiveModel),
   };
 }
@@ -301,6 +311,20 @@ export function validateAtStartup(): void {
       logWarn(TAG, `Agent "${role}": model "${assignment.model}" not listed for provider "${assignment.provider}" in models.json`);
     }
   }
+
+  // #1311: warn when a provider opts into pi-ai but has no pi mapping (→ stays on models.json).
+  for (const [name, provider] of Object.entries(tc.providers)) {
+    if (provider.useProviderLib && !mapProviderName(name)) {
+      logWarn(TAG, `Provider "${name}" has useProviderLib but no pi-ai mapping — metadata stays on models.json`);
+    }
+  }
+}
+
+/** #1311 C8: true if any provider opts into the pi-ai engine (gates the boot warm). */
+export function anyProviderUseProviderLib(tc?: TransportConfig | null): boolean {
+  const config = tc ?? loadTransport();
+  if (!config) return false;
+  return Object.values(config.providers).some(p => p.useProviderLib);
 }
 
 // ── Write ───────────────────────────────────────────────────────────────────
