@@ -2,7 +2,7 @@
  * lazy-require.ts — Install optional deps on first use.
  * Installs into ~/.local/lib/node_modules/. Falls back gracefully.
  */
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createRequire } from "node:module";
@@ -74,6 +74,33 @@ function versionedSpec(pkg: string): string {
 }
 
 /**
+ * Resolve a package directory to its main ESM entry file by reading its package.json.
+ * ESM can't import a directory path; we need a concrete `.js` file. Honors the modern
+ * `exports` field (with conditional `import`) first, then falls back to `main`/`module`.
+ * Returns the package directory path itself if no entry can be determined (caller
+ * will then surface the same "directory import" error).
+ */
+function resolvePackageEntry(pkgDir: string): string {
+  const pkgJsonPath = join(pkgDir, "package.json");
+  if (!existsSync(pkgJsonPath)) return pkgDir;
+  let meta: { main?: string; module?: string; exports?: unknown; type?: string };
+  try { meta = JSON.parse(readFileSync(pkgJsonPath, "utf-8")) as typeof meta; }
+  catch { return pkgDir; }
+
+  // `exports: { ".": { "import": "./dist/index.js" } }` — pick the ESM import target.
+  const exp = meta.exports as Record<string, unknown> | undefined;
+  const dot = exp?.["."] as Record<string, unknown> | undefined;
+  const importTarget = (dot?.["import"] ?? dot?.["default"]) as string | undefined;
+  if (typeof importTarget === "string") return join(pkgDir, importTarget);
+  if (dot && typeof dot === "string") return join(pkgDir, dot);
+
+  // CJS / fallback
+  const main = meta.main ?? meta.module;
+  if (typeof main === "string") return join(pkgDir, main);
+  return pkgDir;
+}
+
+/**
  * Lazy import — tries normal import, falls back to ~/.local/lib/node_modules/, auto-installs if missing.
  */
 export async function lazyRequire<T = any>(pkg: string, label?: string): Promise<T> {
@@ -84,14 +111,18 @@ export async function lazyRequire<T = any>(pkg: string, label?: string): Promise
   const libNm = libNodeModules();
   const pkgPath = join(libNm, pkg);
   if (existsSync(pkgPath)) {
-    try { return await import(pkgPath); } catch { /* broken install */ }
+    // #1311: ESM can't import a directory — resolve the package's main entry via
+    // package.json (honors `exports` / `main` / `module`) before importing.
+    const entry = resolvePackageEntry(pkgPath);
+    try { return await import(entry); } catch { /* broken install */ }
   }
 
   // Auto-install
   logInfo(TAG, `Installing ${label ?? pkg}...`);
   try {
     installPackages([versionedSpec(pkg)]);
-    return await import(join(libNm, pkg));
+    const entry = resolvePackageEntry(join(libNm, pkg));
+    return await import(entry);
   } catch (err) {
     logWarn(TAG, `Failed to install ${pkg}: ${err instanceof Error ? err.message : String(err)}`);
     throw new Error(`Optional dependency "${pkg}" not available. Install with: abtars deps install ${label ?? pkg}`);
