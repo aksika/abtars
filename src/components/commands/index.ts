@@ -12,7 +12,7 @@ import {
   handleFull, handleShort, handleHealing, handleFacts,
   handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleKanban,
   handleChannel, handleTodo,
-  handleEmergencyAlias, handleModels, handleHeartbeat, handleReasoning, handleContinue,
+  handleEmergencyAlias, handleModels, handleHeartbeat, handleEffort, handleContinue,
   handleMemory, handleNlm, handleWakeup,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
   handleHooks, handleMcp, handleUsers, handleUsage, handleOpenRouter, handleWhoami,
@@ -50,7 +50,8 @@ registerExact("/heartbeat", handleHeartbeat);
 registerExact("/models", handleModels);
 registerExact("/model", handleModels);
 registerExact("/change", (_, ctx) => handleModels("/model change", ctx));
-registerExact("/reasoning", handleReasoning);
+registerExact("/effort", handleEffort);
+registerExact("/thinking", handleEffort);
 registerExact("/continue", handleContinue);
 registerExact("/emergency", handleEmergencyAlias);
 registerExact("/help", handleHelp);
