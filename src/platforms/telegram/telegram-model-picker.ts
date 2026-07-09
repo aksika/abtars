@@ -25,6 +25,23 @@ export function isModelPickerCallback(data: string): boolean {
   return MODEL_PREFIXES.some(p => data.startsWith(p));
 }
 
+/**
+ * Build the normalized model list for a provider's picker page. When the provider opts into
+ * pi-ai (#1311 C5) and the catalog is warmed, the list comes from pi (cost only, no auth
+ * filtering — deferred to #1316); otherwise from models.json (today's behavior).
+ */
+async function buildModelEntries(providerName: string, providerConfig: { transport?: string; useProviderLib?: boolean } | undefined): Promise<Array<{ id: string; label: string }>> {
+  const { getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
+  if (providerConfig?.useProviderLib) {
+    const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
+    const pi = modelsForProviderSync(providerName);
+    if (pi && pi.length > 0) return pi.map(m => ({ id: m.id, label: `${m.id} (${formatCost(m.cost)})` }));
+  }
+  const mj = getModelsForProvider(providerName);
+  const filtered = providerConfig?.transport === "api" ? mj.filter(m => !m.entry.status || m.entry.status === "alive") : mj;
+  return filtered.map(m => ({ id: m.id, label: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})` }));
+}
+
 export async function handleModelPickerCallback(
   data: string, chatId: number, api: TelegramApi, state: PickerState, deps: PickerDeps,
 ): Promise<void> {
@@ -117,15 +134,14 @@ export async function handleModelPickerCallback(
 
   } else if (data.startsWith("mprov:")) {
     const [, agent, providerName] = data.split(":");
-    const { loadTransport, getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
+    const { loadTransport } = await import("../../components/transport-config.js");
     const tc = loadTransport();
-    let models = getModelsForProvider(providerName!);
     const providerConfig = tc?.providers[providerName!];
-    if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
-    if (models.length === 0) { await api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
+    const entries = await buildModelEntries(providerName!, providerConfig);
+    if (entries.length === 0) { await api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
     state._pendingSlot = agent;
-    state._modelPickerCache = models.map(m => m.id);
-    const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
+    state._modelPickerCache = entries.map(e => e.id);
+    const buttons = entries.map((e, i) => [{ text: e.label, callback_data: `mset:${providerName}:${i}` }]);
     buttons.push([{ text: "← Back", callback_data: `mb:p:${agent}` }]);
     await api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
 
@@ -154,16 +170,15 @@ export async function handleModelPickerCallback(
 
   } else if (data.startsWith("mprov2:")) {
     const [, slot, providerName] = data.split(":");
-    const { getModelsForProvider, formatRank, formatCost, loadTransport } = await import("../../components/transport-config.js");
+    const { loadTransport } = await import("../../components/transport-config.js");
     const tc = loadTransport();
     const providerConfig = tc?.providers[providerName!];
-    let models = getModelsForProvider(providerName!);
-    if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
-    if (models.length === 0) { await api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
+    const entries = await buildModelEntries(providerName!, providerConfig);
+    if (entries.length === 0) { await api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
     state._pendingSlot = slot;
     const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
-    state._modelPickerCache = models.map(m => m.id);
-    const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
+    state._modelPickerCache = entries.map(e => e.id);
+    const buttons = entries.map((e, i) => [{ text: e.label, callback_data: `mset:${providerName}:${i}` }]);
     buttons.push([{ text: "← Back", callback_data: `mb:s:${slot}` }]);
     await api.sendMessage(chatId, `📋 Pick model for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
@@ -181,11 +196,13 @@ export async function handleModelPickerCallback(
     const tc = loadTransport();
     if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
 
-    const validModels = getModelsForProvider(providerName);
-    if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
-
     const providerConfig = tc.providers[providerName];
     if (!providerConfig) { await api.sendMessage(chatId, `❌ Provider ${providerName} not found`); return; }
+    // #1311: pi-sourced models aren't in models.json — trust the picker cache for pi providers.
+    if (!providerConfig.useProviderLib) {
+      const validModels = getModelsForProvider(providerName);
+      if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
+    }
     const validation = validateProviderReady(providerName, providerConfig, getEnv());
     if (!validation.ok) { await api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
 

@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 vi.mock("../../utils/lazy-require.js", () => ({ lazyRequire: vi.fn() }));
 
 import {
-  mapProviderName, resolveModelMeta, modelsForProvider,
+  mapProviderName, resolveModelMeta, modelsForProvider, modelsForProviderSync,
   loadPiModels, getWarmedModels, isWarmed,
   _resetForTest, _setWarmedForTest,
   type PiModels,
@@ -82,6 +82,23 @@ describe("modelsForProvider (C5)", () => {
   it("returns null when the provider is unmapped", async () => {
     _setWarmedForTest(fakeModels());
     expect(await modelsForProvider("ollama")).toBeNull();
+  });
+});
+
+describe("modelsForProviderSync (C5 picker)", () => {
+  it("lists pi models with cost when warmed (no auth filtering)", () => {
+    _setWarmedForTest(fakeModels({
+      list: [fakeModel({ id: "glm-4.6", cost: { input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0 } }), fakeModel({ id: "glm-4.5" })],
+    }));
+    const out = modelsForProviderSync("zai");
+    expect(out?.map(m => m.id)).toEqual(["glm-4.6", "glm-4.5"]);
+    expect(out?.[0]?.cost).toEqual({ input: 0.6, output: 2.2 });
+  });
+  it("returns null for an unmapped provider or cold cache", () => {
+    _setWarmedForTest(fakeModels());
+    expect(modelsForProviderSync("ollama")).toBeNull();
+    _resetForTest();
+    expect(modelsForProviderSync("zai")).toBeNull();
   });
 });
 

@@ -183,6 +183,23 @@ export async function modelsForProvider(providerName: string): Promise<PiPickerM
 
 // ── test-only ────────────────────────────────────────────────────────────────
 
+/**
+ * SYNC. Picker list for Phase 2: pi models for a provider with cost (no auth filtering).
+ * Returns null when pi isn't resolvable for this provider → caller renders the models.json list.
+ *
+ * Auth-status filtering is deliberately deferred: pi's getAuth resolves API-key providers from
+ * env var names that may differ from abtars's `apiKeyEnv`, so filtering would mislabel usable
+ * models as unconfigured. Selection still goes through abtars's validateProviderReady (apiKeyEnv).
+ * The auth-aware (getAuth) list is modelsForProvider() above, used by #1316.
+ */
+export function modelsForProviderSync(providerName: string): Array<{ id: string; cost: { input: number; output: number }; contextWindow: number }> | null {
+  const models = getWarmedModels();
+  if (!models) return null;
+  const piProvider = mapProviderName(providerName);
+  if (!piProvider) return null;
+  return models.getModels(piProvider).map(m => ({ id: m.id, cost: { input: m.cost.input, output: m.cost.output }, contextWindow: m.contextWindow }));
+}
+
 /** @internal Reset the warm cache between unit tests. */
 export function _resetForTest(): void {
   _warmed = null;
