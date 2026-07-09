@@ -74,30 +74,76 @@ function versionedSpec(pkg: string): string {
 }
 
 /**
- * Resolve a package directory to its main ESM entry file by reading its package.json.
- * ESM can't import a directory path; we need a concrete `.js` file. Honors the modern
- * `exports` field (with conditional `import`) first, then falls back to `main`/`module`.
- * Returns the package directory path itself if no entry can be determined (caller
- * will then surface the same "directory import" error).
+ * Resolve a package specifier (e.g. "@earendil-works/pi-ai" or
+ * "@earendil-works/pi-ai/api/openai-completions") to a concrete ESM file path on
+ * disk under ~/.local/lib/node_modules/. ESM can't import a directory; we have to
+ * find the entry file. Honors the modern `exports` field (conditional `import` /
+ * `default`, wildcard `./api/*` → `./dist/api/*.js`) first, then falls back to
+ * `main` / `module`. Returns the spec-joined path on miss (caller surfaces the
+ * real error).
  */
-function resolvePackageEntry(pkgDir: string): string {
+function resolvePackageFile(spec: string): string {
+  const libNm = libNodeModules();
+  // Split into pkgName + subpath. Handle scoped names (@scope/name[/sub]).
+  let pkgName: string; let subpath: string;
+  if (spec.startsWith("@")) {
+    const parts = spec.split("/");
+    pkgName = parts.slice(0, 2).join("/");
+    subpath = parts.slice(2).join("/");
+  } else {
+    const slash = spec.indexOf("/");
+    if (slash === -1) { pkgName = spec; subpath = ""; }
+    else { pkgName = spec.slice(0, slash); subpath = spec.slice(slash + 1); }
+  }
+  const pkgDir = join(libNm, pkgName);
+  if (!existsSync(pkgDir)) return join(libNm, spec);
+
   const pkgJsonPath = join(pkgDir, "package.json");
-  if (!existsSync(pkgJsonPath)) return pkgDir;
-  let meta: { main?: string; module?: string; exports?: unknown; type?: string };
+  if (!existsSync(pkgJsonPath)) return join(libNm, spec);
+  let meta: { main?: string; module?: string; exports?: unknown };
   try { meta = JSON.parse(readFileSync(pkgJsonPath, "utf-8")) as typeof meta; }
-  catch { return pkgDir; }
+  catch { return join(libNm, spec); }
 
-  // `exports: { ".": { "import": "./dist/index.js" } }` — pick the ESM import target.
   const exp = meta.exports as Record<string, unknown> | undefined;
-  const dot = exp?.["."] as Record<string, unknown> | undefined;
-  const importTarget = (dot?.["import"] ?? dot?.["default"]) as string | undefined;
-  if (typeof importTarget === "string") return join(pkgDir, importTarget);
-  if (dot && typeof dot === "string") return join(pkgDir, dot);
+  if (exp) {
+    const wantKey = subpath ? `./${subpath}` : ".";
+    // Prefer exact key match; fall back to a wildcard key (`./api/*`) that covers
+    // the requested subpath. The wildcard form is what pi-ai uses for subpath
+    // exports like `"./api/*": { "import": "./dist/api/*.js" }`.
+    let target: unknown = exp[wantKey];
+    let wildcardSuffix: string | null = null;
+    if (target === undefined && subpath) {
+      for (const k of Object.keys(exp)) {
+        if (k.endsWith("/*") && wantKey.startsWith(k.slice(0, -1))) {
+          target = exp[k];
+          wildcardSuffix = wantKey.slice(k.length - 1); // the part after the prefix
+          break;
+        }
+      }
+    }
+    if (target === undefined) target = exp["."];
 
-  // CJS / fallback
-  const main = meta.main ?? meta.module;
-  if (typeof main === "string") return join(pkgDir, main);
-  return pkgDir;
+    if (typeof target === "string") {
+      if (wildcardSuffix !== null) return join(pkgDir, target.replace(/\*/g, wildcardSuffix));
+      return join(pkgDir, target);
+    }
+    if (target && typeof target === "object") {
+      const obj = target as Record<string, unknown>;
+      const cond = obj["import"] ?? obj["default"] ?? obj["node"];
+      if (typeof cond === "string") {
+        if (wildcardSuffix !== null) return join(pkgDir, cond.replace(/\*/g, wildcardSuffix));
+        return join(pkgDir, cond);
+      }
+    }
+  }
+
+  // No exports match (or no exports field). For "." (no subpath) use main/module;
+  // for a subpath, join the literal path under the package dir.
+  if (!subpath) {
+    const main = meta.main ?? meta.module;
+    if (typeof main === "string") return join(pkgDir, main);
+  }
+  return join(libNm, spec);
 }
 
 /**
@@ -109,11 +155,8 @@ export async function lazyRequire<T = any>(pkg: string, label?: string): Promise
 
   // Try from ~/.local/lib/node_modules/
   const libNm = libNodeModules();
-  const pkgPath = join(libNm, pkg);
-  if (existsSync(pkgPath)) {
-    // #1311: ESM can't import a directory — resolve the package's main entry via
-    // package.json (honors `exports` / `main` / `module`) before importing.
-    const entry = resolvePackageEntry(pkgPath);
+  const entry = resolvePackageFile(pkg);
+  if (existsSync(entry) || entry !== join(libNm, pkg)) {
     try { return await import(entry); } catch { /* broken install */ }
   }
 
@@ -121,8 +164,7 @@ export async function lazyRequire<T = any>(pkg: string, label?: string): Promise
   logInfo(TAG, `Installing ${label ?? pkg}...`);
   try {
     installPackages([versionedSpec(pkg)]);
-    const entry = resolvePackageEntry(join(libNm, pkg));
-    return await import(entry);
+    return await import(resolvePackageFile(pkg));
   } catch (err) {
     logWarn(TAG, `Failed to install ${pkg}: ${err instanceof Error ? err.message : String(err)}`);
     throw new Error(`Optional dependency "${pkg}" not available. Install with: abtars deps install ${label ?? pkg}`);
