@@ -147,24 +147,31 @@ function resolvePackageFile(spec: string): string {
 }
 
 /**
- * Lazy import — tries normal import, falls back to ~/.local/lib/node_modules/, auto-installs if missing.
+ * Lazy import — tries normal resolution first, falls back to ~/.local/lib/node_modules/, auto-installs if missing.
+ *
+ * Implementation note: we use CJS `require()` (via createRequire) rather than
+ * dynamic `import()`. The bundle lives at ~/.abtars-releases/<commit>/bundle/,
+ * which has no node_modules/ of its own. ESM `import(absPath)` would resolve
+ * the imported file's OWN deps (e.g. pi-ai → openai) from the bundle's location
+ * and fail. CJS `require(absPath)` resolves the imported file's deps from the
+ * file's own location — which is ~/.local/lib/node_modules/@earendil-works/pi-ai/
+ * — and finds its sibling `openai`, `zod`, etc. there. Node 22's CJS-from-ESM
+ * interop returns the ESM module's named exports directly.
  */
 export async function lazyRequire<T = any>(pkg: string, label?: string): Promise<T> {
   // Try normal resolution first (globally installed or in bundle)
-  try { return await import(pkg); } catch { /* not found normally */ }
+  try { return _require(pkg) as T; } catch { /* not found normally */ }
 
-  // Try from ~/.local/lib/node_modules/
-  const libNm = libNodeModules();
+  // Try from ~/.local/lib/node_modules/ — resolve the entry file via the
+  // package's exports field (handles bare main + subpath wildcards like ./api/*).
   const entry = resolvePackageFile(pkg);
-  if (existsSync(entry) || entry !== join(libNm, pkg)) {
-    try { return await import(entry); } catch { /* broken install */ }
-  }
+  try { return _require(entry) as T; } catch { /* broken install */ }
 
   // Auto-install
   logInfo(TAG, `Installing ${label ?? pkg}...`);
   try {
     installPackages([versionedSpec(pkg)]);
-    return await import(resolvePackageFile(pkg));
+    return _require(resolvePackageFile(pkg)) as T;
   } catch (err) {
     logWarn(TAG, `Failed to install ${pkg}: ${err instanceof Error ? err.message : String(err)}`);
     throw new Error(`Optional dependency "${pkg}" not available. Install with: abtars deps install ${label ?? pkg}`);
