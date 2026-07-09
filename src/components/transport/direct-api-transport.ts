@@ -336,7 +336,8 @@ export class DirectApiTransport implements IKiroTransport {
           this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
         }
         logTrace(TAG, `${this.activeModel} — ${usage.prompt_tokens}→${usage.completion_tokens ?? 0} tokens, ${Date.now() - (this._lastActivityAt ?? Date.now())}ms`);
-        recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0, this.agentLabel);
+        recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0, this.agentLabel,
+          { cacheRead: this._lastCacheRead ?? undefined, cacheWrite: this._lastCacheWrite ?? undefined });
       }
 
       if (toolCalls.length > 0) {

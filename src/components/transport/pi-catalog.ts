@@ -200,6 +200,21 @@ export function modelsForProviderSync(providerName: string): Array<{ id: string;
   return models.getModels(piProvider).map(m => ({ id: m.id, cost: { input: m.cost.input, output: m.cost.output }, contextWindow: m.contextWindow }));
 }
 
+/**
+ * Cost rates keyed by model id, from the warmed pi catalog — 4 components (cache-aware).
+ * First match wins on id collision across providers (acceptable for /usage display cost; the
+ * configured candidate's provider is not stored per usage entry). null if not warmed.
+ */
+export function piCostRatesByModel(): Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> | null {
+  const models = getWarmedModels();
+  if (!models) return null;
+  const map = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }>();
+  for (const m of models.getModels()) {
+    if (!map.has(m.id)) map.set(m.id, { input: m.cost.input, output: m.cost.output, cacheRead: m.cost.cacheRead, cacheWrite: m.cost.cacheWrite });
+  }
+  return map;
+}
+
 /** @internal Reset the warm cache between unit tests. */
 export function _resetForTest(): void {
   _warmed = null;

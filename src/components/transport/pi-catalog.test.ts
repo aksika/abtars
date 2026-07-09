@@ -5,6 +5,7 @@ vi.mock("../../utils/lazy-require.js", () => ({ lazyRequire: vi.fn() }));
 
 import {
   mapProviderName, resolveModelMeta, modelsForProvider, modelsForProviderSync,
+  piCostRatesByModel,
   loadPiModels, getWarmedModels, isWarmed,
   _resetForTest, _setWarmedForTest,
   type PiModels,
@@ -99,6 +100,25 @@ describe("modelsForProviderSync (C5 picker)", () => {
     expect(modelsForProviderSync("ollama")).toBeNull();
     _resetForTest();
     expect(modelsForProviderSync("zai")).toBeNull();
+  });
+});
+
+describe("piCostRatesByModel (C6)", () => {
+  it("returns null on a cold cache", () => {
+    _resetForTest();
+    expect(piCostRatesByModel()).toBeNull();
+  });
+  it("maps model id → 4-component rates; first id wins on collision", () => {
+    _setWarmedForTest(fakeModels({
+      list: [
+        fakeModel({ id: "glm-4.6", cost: { input: 0.6, output: 2.2, cacheRead: 0.11, cacheWrite: 1.1 } }),
+        fakeModel({ id: "glm-4.6", cost: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 } }), // dup id ignored
+        fakeModel({ id: "glm-4.5", cost: { input: 0.3, output: 1.1, cacheRead: 0.05, cacheWrite: 0.5 } }),
+      ],
+    }));
+    const map = piCostRatesByModel();
+    expect(map?.get("glm-4.6")).toEqual({ input: 0.6, output: 2.2, cacheRead: 0.11, cacheWrite: 1.1 });
+    expect(map?.get("glm-4.5")).toEqual({ input: 0.3, output: 1.1, cacheRead: 0.05, cacheWrite: 0.5 });
   });
 });
 
