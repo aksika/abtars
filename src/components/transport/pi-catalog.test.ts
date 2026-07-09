@@ -139,7 +139,10 @@ describe("loadPiModels (C8)", () => {
 
   it("warms and caches the catalog on success", async () => {
     const fm = fakeModels({ list: [fakeModel({ id: "glm-4.6" })] });
-    mocked.mockResolvedValueOnce({ createModels: () => fm } as never);
+    // The catalog bridge imports `@earendil-works/pi-ai/providers/all` (subpath)
+    // and calls `builtinModels()` on it — the convenience that creates a Models
+    // collection AND registers every built-in provider.
+    mocked.mockResolvedValueOnce({ builtinModels: () => fm } as never);
     const out = await loadPiModels();
     expect(out).toBe(fm);
     expect(getWarmedModels()).toBe(fm);
@@ -147,7 +150,7 @@ describe("loadPiModels (C8)", () => {
 
   it("is idempotent — a second call does not re-load", async () => {
     const fm = fakeModels();
-    mocked.mockResolvedValueOnce({ createModels: () => fm } as never);
+    mocked.mockResolvedValueOnce({ builtinModels: () => fm } as never);
     await loadPiModels();
     await loadPiModels(); // second call must not touch lazyRequire again
     expect(mocked).toHaveBeenCalledTimes(1);

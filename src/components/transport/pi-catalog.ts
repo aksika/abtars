@@ -49,6 +49,12 @@ interface PiAiRoot {
   createModels(options?: Record<string, unknown>): PiModels;
 }
 
+/** Shape of the `@earendil-works/pi-ai/providers/all` subpath module. */
+interface PiAiProvidersAll {
+  builtinModels(options?: Record<string, unknown>): PiModels;
+  builtinProviders(): unknown[];
+}
+
 // ── C2: provider-id mapping (identity for known pi providers) ────────────────
 
 /** pi-ai's built-in provider ids (KnownProvider). abtars provider names map by identity. */
@@ -88,16 +94,25 @@ export function isWarmed(): boolean {
  * Warm + cache pi's catalog at boot (C8). Idempotent. Best-effort: returns null on any failure
  * (pi absent/broken) — callers fall to models.json. Dynamic providers get one refresh() so
  * getModels() is populated; static providers are always current. Never throws.
+ *
+ * #1311: `createModels()` on the root returns an empty collection — the built-in
+ * provider list lives behind the `@earendil-works/pi-ai/providers/all` subpath
+ * (the package's `exports["./providers/*"]` maps to `dist/providers/*.js`).
+ * `builtinModels()` constructs `createModels()` AND registers every built-in
+ * provider (1029 static models across 35+ providers as of pi-ai 0.80.3).
  */
 export async function loadPiModels(): Promise<PiModels | null> {
   if (_warmAttempted) return _warmed;
   _warmAttempted = true;
   try {
-    const pi = await lazyRequire<PiAiRoot>("@earendil-works/pi-ai", "pi-ai provider engine");
-    // #1311: pi-ai's actual API is `createModels()`, not `builtinModels()`. The
-    // returned Models instance is a mutable collection — getProviders/getModels/
-    // getAuth are sync reads against the last-known lists.
-    const models = pi.createModels();
+    // `builtinModels` is the convenience that returns a fully-populated Models
+    // collection. The lazy-require resolves the subpath via the package's
+    // `exports` field (./providers/* → ./dist/providers/*.js).
+    const { builtinModels } = await lazyRequire<{ builtinModels: (opts?: Record<string, unknown>) => PiModels }>(
+      "@earendil-works/pi-ai/providers/all",
+      "pi-ai provider engine",
+    );
+    const models = builtinModels();
     try {
       await models.refresh?.();
     } catch (err) {
