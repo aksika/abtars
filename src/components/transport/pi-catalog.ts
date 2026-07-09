@@ -46,7 +46,7 @@ export interface PiModels {
   refresh?(provider?: string): Promise<void>;
 }
 interface PiAiRoot {
-  builtinModels(options?: Record<string, unknown>): PiModels;
+  createModels(options?: Record<string, unknown>): PiModels;
 }
 
 // ── C2: provider-id mapping (identity for known pi providers) ────────────────
@@ -94,7 +94,10 @@ export async function loadPiModels(): Promise<PiModels | null> {
   _warmAttempted = true;
   try {
     const pi = await lazyRequire<PiAiRoot>("@earendil-works/pi-ai", "pi-ai provider engine");
-    const models = pi.builtinModels();
+    // #1311: pi-ai's actual API is `createModels()`, not `builtinModels()`. The
+    // returned Models instance is a mutable collection — getProviders/getModels/
+    // getAuth are sync reads against the last-known lists.
+    const models = pi.createModels();
     try {
       await models.refresh?.();
     } catch (err) {
