@@ -10,7 +10,7 @@ import { getEnv } from "../components/env-schema.js";
 import { execSync } from "node:child_process";
 import { TmuxClient } from "../components/transport/tmux-client.js";
 import { createAgentTransport } from "../components/agent-registry.js";
-import { logDebug, logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
+import { logDebug, logInfo, logWarn, logError } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
 import { abmind } from "../utils/abmind-lazy.js";
@@ -232,6 +232,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       useProviderLib: resolved.provider.useProviderLib,
       thinking: resolved.provider.thinking,
     }, policy);
+    // #1318: debug line showing the L1/L0 route decision at transport-construction time.
+    logDebug("boot", `DirectApiTransport: provider=${resolved.providerName} model=${resolved.model} useProviderLib=${resolved.provider.useProviderLib ?? false}`);
     logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {
     // Kill stale ACP processes from previous run (#921, #1012)

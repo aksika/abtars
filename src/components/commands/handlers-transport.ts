@@ -253,7 +253,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       // List models for a specific provider
       const models = getModels(providerArg);
       if (models.length === 0) { await ctx.reply(`❌ No models found for provider "${providerArg}"`); return true; }
-      const lines = [`📋 Models on ${providerArg}:`];
+      const lines = [`Models on ${providerArg}:`];
       for (const m of models) {
         const current = m.id === currentModel ? " ✓" : "";
         lines.push(`  • ${m.id}${current}`);
@@ -309,18 +309,25 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   }
 
   // /models (no arg) — merged status: model + transport + agents
-  const transportStatus = ctx.transport.isReady ? "✓ Connected" : "❌ Disconnected";
+  // #1318: ONE consistent transport route line. <route> ✓|✗; 🔌 is the only emoji retained.
+  // route is "pi-ai / <provider>" | "API / <provider>" | "ACP"; mark is ✓ ready / ✗ not ready.
   const ctxPct = ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a";
   const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
   const provider = prof?.providerName ?? "unknown";
   const isEmergency = (ctx.transport as unknown as { isEmergencyMode?: boolean }).isEmergencyMode === true;
+  const piActive = prof?.provider.useProviderLib === true;
+  const route =
+    mode === "ACP" ? "ACP"
+    : piActive ? `pi-ai / ${provider}`
+    : `API / ${provider}`;
+  const statusMark = ctx.transport.isReady ? "✓" : "✗";
 
   const lines = [
-    `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`,
-    isEmergency ? `🚨 EMERGENCY MODE: ${currentModel} (paid)` : `🤖 Model: ${currentModel}`,
-    `📊 Context: ${ctxPct}`,
+    `🔌 Transport: ${route} ${statusMark}`,
+    isEmergency ? `EMERGENCY MODE: ${currentModel} (paid)` : `Model: ${currentModel}`,
+    `Context: ${ctxPct}`,
     "",
-    "📋 Agents:",
+    "Agents:",
   ];
   const agents = ["professor", "dreamy", "browsie", "coding"] as const;
   const names: Record<string, string> = { professor: "Professor", dreamy: "Dreamy", browsie: "Browsie", coding: "Cody" };
@@ -333,10 +340,10 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     lines.push(line);
   }
   if (prof?.provider.fallbackChain?.length) {
-    lines.push(`\n🛟 Fallback chain: ${prof.provider.fallbackChain.join(" → ")}`);
+    lines.push(`\nFallback chain: ${prof.provider.fallbackChain.join(" → ")}`);
   }
   if (ctx.hailMary) {
-    lines.push(`🚨 hailMary: ${ctx.hailMary.model} `);
+    lines.push(`hailMary: ${ctx.hailMary.model} `);
   }
   lines.push("\nUse /models change to switch.");
   await ctx.reply(lines.join("\n"));

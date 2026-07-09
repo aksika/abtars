@@ -20,7 +20,7 @@
  */
 
 import { lazyRequire } from "../../utils/lazy-require.js";
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
 
 const TAG = "pi-catalog";
 
@@ -108,6 +108,7 @@ export async function loadPiModels(): Promise<PiModels | null> {
     // `builtinModels` is the convenience that returns a fully-populated Models
     // collection. The lazy-require resolves the subpath via the package's
     // `exports` field (./providers/* → ./dist/providers/*.js).
+    const t0 = Date.now();
     const { builtinModels } = await lazyRequire<{ builtinModels: (opts?: Record<string, unknown>) => PiModels }>(
       "@earendil-works/pi-ai/providers/all",
       "pi-ai provider engine",
@@ -120,7 +121,19 @@ export async function loadPiModels(): Promise<PiModels | null> {
       logWarn(TAG, `catalog refresh failed (static providers still usable): ${err instanceof Error ? err.message : String(err)}`);
     }
     _warmed = models;
-    logInfo(TAG, `pi-ai catalog warmed (${models.getModels().length} models)`);
+    const all = models.getModels();
+    logInfo(TAG, `pi-ai catalog warmed (${all.length} models)`);
+    // #1318: per-provider breakdown on warm — debug-level detail.
+    const byProvider: Record<string, number> = {};
+    for (const m of all) {
+      const p = (m as { provider?: string }).provider ?? "?";
+      byProvider[p] = (byProvider[p] ?? 0) + 1;
+    }
+    logDebug(TAG, `catalog breakdown: ${Object.entries(byProvider).map(([p, n]) => `${p}:${n}`).join(", ")}`);
+    // #1318: trace the raw fetch timing + first/last model ids as a sanity probe.
+    const elapsedMs = Date.now() - t0;
+    const sample = all.slice(0, 3).map(m => m.id).join(",");
+    logTrace(TAG, `catalog fetch: ${all.length} models in ${elapsedMs}ms; sample=${sample}`);
   } catch (err) {
     logWarn(TAG, `pi-ai catalog unavailable — using models.json floor: ${err instanceof Error ? err.message : String(err)}`);
     _warmed = null;

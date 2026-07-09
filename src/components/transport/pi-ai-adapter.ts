@@ -23,7 +23,7 @@
  */
 
 import { lazyRequire } from "../../utils/lazy-require.js";
-import { logWarn } from "../logger.js";
+import { logDebug, logWarn, logTrace, isLogLevel } from "../logger.js";
 import { parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
 import type { ErrorKind } from "./model-health-registry.js";
 import type { SSEEvent } from "./sse-parser.js";
@@ -150,11 +150,16 @@ export interface PiAiModule {
 /**
  * Tagged load failure. The gate catches this (by name) and falls through to L0.
  * Request errors are NOT this — they throw a plain Error with "API error <status>".
+ *
+ * #1318: `piFunction` is the throwing step (loadPi | loadApi) — the consumer
+ * surfaces it in the WARN so debug logs identify the load step at a glance.
  */
 export class PiAiUnavailableError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  piFunction?: string;
+  constructor(message: string, options?: { cause?: unknown; piFunction?: string }) {
     super(message, options);
     this.name = "PiAiUnavailableError";
+    this.piFunction = options?.piFunction;
   }
 }
 
@@ -313,8 +318,14 @@ export async function* translatePiAiEvents(
 ): AsyncGenerator<SSEEvent> {
   // contentIndex → accumulated delta-only tool call (fallback when no toolcall_end)
   const partialArgs = new Map<number, { id?: string; name?: string; args: string }>();
+  // #1318: TRACE guard for the per-event flood path — only emit raw-event lines at trace.
+  const traceRaw = isLogLevel("trace");
 
   for await (const ev of events) {
+    if (traceRaw) {
+      // #1318: raw pi event trace (BEFORE translation) — one line per event.
+      logTrace(TAG, `pi raw ev: ${ev.type}${"contentIndex" in ev ? ` idx=${ev.contentIndex}` : ""}${ev.type === "text_delta" || ev.type === "thinking_delta" ? ` Δ=${ev.delta.length}ch` : ""}${ev.type === "toolcall_end" ? ` tool=${ev.toolCall.name} id=${ev.toolCall.id}` : ""}${ev.type === "done" ? ` reason=${ev.reason}` : ""}${ev.type === "error" ? ` reason=${ev.reason}` : ""}`);
+    }
     switch (ev.type) {
       case "text_delta":
         yield { type: "chunk", content: ev.delta };
@@ -340,6 +351,9 @@ export async function* translatePiAiEvents(
       case "done": {
         // Flush any tool calls that arrived only as deltas (no toolcall_end) first,
         // so 'done' stays the terminal event.
+        if (partialArgs.size > 0 && traceRaw) {
+          logTrace(TAG, `flushing ${partialArgs.size} delta-only toolCall(s) at done`);
+        }
         for (const [idx, e] of partialArgs) {
           if (e.name) yield { type: "tool_call_delta", index: idx, id: e.id, name: e.name, arguments: e.args };
         }
@@ -348,6 +362,8 @@ export async function* translatePiAiEvents(
         // prompt_tokens must be total input-side (incl cache): it matches L0 (OpenAI's prompt_tokens
         // already includes cached) for context-% parity AND makes recordUsage→budget = totalTokens
         // (cache is additive, not a subset of input).
+        // #1318: stream-complete debug line — concise view of the terminal usage.
+        logDebug(TAG, `stream complete: input=${u.input} output=${u.output} cacheRead=${u.cacheRead} cacheWrite=${u.cacheWrite}`);
         yield { type: "done", usage: { prompt_tokens: u.input + u.cacheRead + u.cacheWrite, completion_tokens: u.output }, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite };
         return;
       }
@@ -391,6 +407,8 @@ export function mapPiAiError(message: PiAssistantMessage, isRetryable: boolean):
     status = parsedStatus || 429;
   }
 
+  // #1318: error-map trace (BEFORE returning) — surfaces classifier decisions.
+  logTrace(TAG, `error map: detail="${detail.slice(0, 120)}" → status=${status} kind=${kind} retryAfterMs=${retryAfterMs ?? "none"} isRetryable=${isRetryable}`);
   return { status, kind, retryAfterMs, text: `API error ${status}: ${detail}` };
 }
 
@@ -439,18 +457,31 @@ export async function* streamPiAiCompletion(
   let apiMod: PiProviderStreams;
   try {
     pi = await (deps.loadPi ?? defaultLoadPi)();
-    apiMod = deps.loadApi ? await deps.loadApi(api) : await defaultLoadApi(api);
   } catch (err) {
+    // #1318: never log the candidate's apiKey — only presence.
+    if (isLogLevel("trace")) logTrace(TAG, `pi-ai load failed for api=${api} (loadPi): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
     throw new PiAiUnavailableError(
       `pi-ai (${api}) could not be loaded: ${err instanceof Error ? err.message : String(err)}`,
-      { cause: err },
+      { cause: err, piFunction: "loadPi" },
     );
   }
-
+  try {
+    apiMod = deps.loadApi ? await deps.loadApi(api) : await defaultLoadApi(api);
+  } catch (err) {
+    if (isLogLevel("trace")) logTrace(TAG, `pi-ai load failed for api=${api} (loadApi): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+    throw new PiAiUnavailableError(
+      `pi-ai (${api}) could not be loaded: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err, piFunction: "loadApi" },
+    );
+  }
+  // #1318: resolution + provider-construction trace — one line per major step.
   const hasImage = conversationHasImage(conv.messages);
+  logTrace(TAG, `resolve: apiFormat=${candidate.apiFormat ?? "chat"} → piApi=${api} providerId=${providerId} hasImage=${hasImage}`);
   const model = buildPiModel(candidate, api, hasImage, providerId);
+  const { reasoning, level: reasoningLevel } = resolveReasoning(candidate);
+  logTrace(TAG, `piModel: id=${model.id} baseUrl=${model.baseUrl} reasoning=${reasoning} maxTokens=${model.maxTokens} reasoningLevel=${reasoningLevel ?? "none"}`);
   const context = buildPiContext(conv);
-  const { level: reasoningLevel } = resolveReasoning(candidate);
+  logTrace(TAG, `piContext: systemPromptLen=${context.systemPrompt?.length ?? 0} messages=${context.messages.length} tools=${context.tools?.length ?? 0}`);
 
   // Build a Provider FROM the candidate (single Model + api-key auth + this api's
   // streams). This is the Phase 1 boundary: pi's catalog is never consulted.
@@ -479,6 +510,11 @@ export async function* streamPiAiCompletion(
   };
   if (candidate.sessionId) options.sessionId = candidate.sessionId;
   if (reasoningLevel) options.reasoning = reasoningLevel;
+
+  // #1318: option dump just before streamSimple — apiKey presence ONLY (never the value).
+  // #1318: resolved-model debug line — concise view of what the candidate resolved to.
+  logDebug(TAG, `resolved: piModelId=${model.id} endpoint=${candidate.endpoint} reasoning=${JSON.stringify(reasoning)}`);
+  logTrace(TAG, `streamSimple options: maxTokens=${options.maxTokens} maxRetries=${options.maxRetries} cacheRetention=${options.cacheRetention} sessionId=${options.sessionId ?? "none"} reasoning=${options.reasoning ?? "none"} apiKey=${candidate.apiKey ? "***set***" : "none"}`);
 
   const eventStream = provider.streamSimple(model, context, options);
   yield* translatePiAiEvents(eventStream, pi.isRetryableAssistantError.bind(pi));

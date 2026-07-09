@@ -120,7 +120,8 @@ export class DirectApiTransport implements IKiroTransport {
   async initialize(): Promise<void> {
     const count = this.policy ? this.policy.candidates.length : (this.config.fallbacks?.length ?? 0) + 1;
     const fb = count > 1 ? ` (+${count - 1} fallback${count > 2 ? "s" : ""})` : "";
-    logInfo(TAG, `🔌 Direct API transport (${this.config.endpoint}, model: ${this.config.model}${fb})`);
+    // #1318: include [pi-ai] tag when the L1 provider engine is the active route.
+    logInfo(TAG, `🔌 Direct API transport (${this.config.endpoint}, model: ${this.config.model}${fb}${this.useProviderLib ? " [pi-ai]" : ""})`);
   }
 
   setSystemPrompt(prompt: string): void {
@@ -466,7 +467,9 @@ export class DirectApiTransport implements IKiroTransport {
         return await this.consumePiAi(session, composed);
       } catch (err) {
         if (err instanceof Error && err.name === "PiAiUnavailableError") {
-          logWarn(TAG, `pi-ai unavailable — using L0 reptile floor: ${err.message}`);
+          // #1318: include the throwing function name from the adapter (if it tagged the error).
+          const fn = (err as Error & { piFunction?: string }).piFunction;
+          logWarn(TAG, `pi-ai unavailable — using L0 reptile floor: ${err.message}${fn ? ` [from ${fn}]` : ""}`);
           // fall through to L0 branches below
         } else {
           throw err;
@@ -629,18 +632,23 @@ export class DirectApiTransport implements IKiroTransport {
     signal: AbortSignal,
   ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
     const { streamPiAiCompletion } = await import("./pi-ai-adapter.js");
+    const candidate = {
+      model: this.activeModel,
+      endpoint: this.activeEndpoint,
+      apiKey: this.activeApiKey,
+      apiFormat: this.config.apiFormat,
+      maxOutput: this.config.maxOutput,
+      thinking: this.config.thinking,
+      reasoningEffort: session.reasoningEffort,
+      sessionId: this._activeSessionKey,
+    };
+    const toolSchemas = getToolSchemas(this.sandboxPolicy);
+    // #1318: dispatch entry — debug noise at LOG_LEVEL=debug, full candidate detail at trace.
+    logDebug(TAG, `pi-ai dispatch: model=${this.activeModel} endpoint=${this.activeEndpoint}`);
+    logTrace(TAG, `pi-ai candidate: model=${this.activeModel} endpoint=${this.activeEndpoint} apiFormat=${this.config.apiFormat ?? "chat"} maxOutput=${this.config.maxOutput} reasoningEffort=${session.reasoningEffort ?? "none"} thinking=${JSON.stringify(this.config.thinking)} sessionId=${this._activeSessionKey} msgs=${session.messages.length} tools=${toolSchemas.length}`);
     const events = streamPiAiCompletion(
-      {
-        model: this.activeModel,
-        endpoint: this.activeEndpoint,
-        apiKey: this.activeApiKey,
-        apiFormat: this.config.apiFormat,
-        maxOutput: this.config.maxOutput,
-        thinking: this.config.thinking,
-        reasoningEffort: session.reasoningEffort,
-        sessionId: this._activeSessionKey,
-      },
-      { messages: session.messages, tools: getToolSchemas(this.sandboxPolicy) },
+      candidate,
+      { messages: session.messages, tools: toolSchemas },
       signal,
     );
 
@@ -649,6 +657,8 @@ export class DirectApiTransport implements IKiroTransport {
     const toolCallAcc = new Map<string, { id: string; name: string; arguments: string }>();
     for await (const event of events) {
       this._lastActivityAt = Date.now();
+      // #1318: per-event trace — TRACE only; this is the flood path. One line per event.
+      logTrace(TAG, `pi-ai event: ${event.type}${event.type === "chunk" ? ` +${event.content.length}ch` : event.type === "thinking" ? ` +${event.content.length}ch(think)` : event.type === "tool_call_delta" ? ` tool=${event.name ?? "?"} argsΔ=${(event.arguments ?? "").length}` : event.type === "done" ? ` usage=${JSON.stringify(event.usage)} cacheR=${event.cacheRead ?? 0} cacheW=${event.cacheWrite ?? 0}` : ""}`);
       if (event.type === "chunk") {
         content += event.content;
         this._intermediateText += event.content;
@@ -664,6 +674,9 @@ export class DirectApiTransport implements IKiroTransport {
         this._lastCacheWrite = event.cacheWrite ?? null;
       }
     }
+    // #1318: stream-drained trace (terminal) + done debug line.
+    logTrace(TAG, `pi-ai stream drained: contentLen=${content.length} toolCalls=${toolCallAcc.size} usage=${JSON.stringify(usage)}`);
+    if (usage) logDebug(TAG, `pi-ai done: input=${usage.prompt_tokens} output=${usage.completion_tokens} cacheRead=${this._lastCacheRead ?? 0} cacheWrite=${this._lastCacheWrite ?? 0}`);
     return { content: content || null, toolCalls: this.finalizeToolCalls(toolCallAcc), usage };
   }
 
