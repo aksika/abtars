@@ -9,6 +9,15 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => tmpDir };
 });
 
+// Mock installPackages so "install" tests don't shell out to a real `npm install`
+// (native modules like better-sqlite3 + sqlite-vec compile from source and trip the
+// test timeout under load). Other tests use the real installPackages via the other
+// "no-op" branches (unknown dep, system binary, remove), which never reach it.
+vi.mock("../../utils/lazy-require.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/lazy-require.js")>();
+  return { ...actual, installPackages: vi.fn() };
+});
+
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "deps-test-"));
   mkdirSync(join(tmpDir, ".local", "lib", "node_modules"), { recursive: true });

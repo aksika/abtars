@@ -80,6 +80,16 @@ describe("buildPiModel", () => {
     const m = buildPiModel({ model: "m", endpoint: "https://x/v1", maxOutput: 512 }, "openai-completions", true, "x");
     expect(m.input).toEqual(["text", "image"]);
   });
+  // #1311 W2 — abtars gateway wins when declared: pi's Model.baseUrl is overridden by the
+  // abtars candidate's endpoint, so custom gateways (9Router, OpenRouter-gateway, Ollama)
+  // route over the abtars endpoint, not pi's catalog baseUrl.
+  it("W2 — Model.baseUrl is the candidate's endpoint (abtars gateway wins)", () => {
+    const m = buildPiModel(
+      { model: "gpt-4o", endpoint: "https://9router.example.com/v1", maxOutput: 2048, apiFormat: "chat" },
+      "openai-completions", false, "9router-example-com",
+    );
+    expect(m.baseUrl).toBe("https://9router.example.com/v1");
+  });
 });
 
 // ── buildPiContext ───────────────────────────────────────────────────────────
@@ -204,6 +214,30 @@ describe("translatePiAiEvents", () => {
     ]), () => true); // pi says retryable
     await expect(collect(gen)).rejects.toThrow(/API error 529/);
   });
+
+  // #1311 W4 — a mid-stream throw (after at least one successful chunk) must surface as
+  // an 'API error <status>' Error so L2 (sendWithPolicy) can classify + rotate. A bare
+  // throw with no status would be parsed as status 0 → classifyError(0) = "transient" →
+  // recordError → still rotates, but the L2 contract is "API error <status>".
+  it("W4 — a mid-stream throw (after chunks) surfaces as an 'API error <status>' Error", async () => {
+    // Build an async iterable that yields one text chunk, then throws a tagged error.
+    // (Real pi providers do this when the SSE stream dies mid-response.)
+    const stream: AsyncIterable<PiAssistantMessageEvent> = {
+      [Symbol.asyncIterator]() {
+        let i = 0;
+        return {
+          async next() {
+            if (i++ === 0) return { value: { type: "text_delta", contentIndex: 0, delta: "Hel", partial: assistant() } as PiAssistantMessageEvent, done: false };
+            throw new Error("API error 502: bad gateway mid-stream");
+          },
+        };
+      },
+    };
+    const out: SSEEvent[] = [];
+    await expect((async () => { for await (const e of translatePiAiEvents(stream)) out.push(e); })()).rejects.toThrow(/API error 502/);
+    // The chunk before the throw was still delivered.
+    expect(out[0]).toMatchObject({ type: "chunk", content: "Hel" });
+  });
 });
 
 // ── mapPiAiError ─────────────────────────────────────────────────────────────
@@ -285,6 +319,58 @@ describe("streamPiAiCompletion", () => {
       loadApi: async () => api,
     });
     await expect(collect(gen)).rejects.toThrow(/API error 429/);
+  });
+
+  // #1311 W2 — abtars's activeEndpoint must be the createProvider baseUrl. Captures the
+  // createProvider input and asserts it matches the candidate's custom endpoint. This is
+  // what makes 9Router/OpenRouter-gateway/Ollama route over the abtars endpoint, not pi's
+  // catalog baseUrl. Pairs with the buildPiModel.baseUrl assertion.
+  it("W2 — createProvider is called with candidate.endpoint as baseUrl", async () => {
+    const customCandidate: PiAiCandidate = { model: "gpt-4o", endpoint: "https://9router.example.com/v1", apiKey: "k", apiFormat: "chat", maxOutput: 1024 };
+    const events: PiAssistantMessageEvent[] = [
+      { type: "text_delta", contentIndex: 0, delta: "ok", partial: assistant() },
+      { type: "done", reason: "stop", message: assistant() },
+    ];
+    const api: PiProviderStreams = { stream: fakeEventStream(events), streamSimple: fakeEventStream(events) };
+    let captured: Record<string, unknown> | null = null;
+    const piModule: PiAiModule = {
+      createProvider: (input) => {
+        captured = input;
+        const a = input.api as PiProviderStreams;
+        return { streamSimple: (model, ctx, opts) => a.streamSimple(model, ctx, opts) };
+      },
+      isRetryableAssistantError: () => false,
+    };
+    await collect(streamPiAiCompletion(customCandidate, conv, new AbortController().signal, {
+      loadPi: async () => piModule,
+      loadApi: async () => api,
+    }));
+    expect(captured).not.toBeNull();
+    expect(captured!.baseUrl).toBe("https://9router.example.com/v1");
+    expect((captured!.models as Array<{ id: string; baseUrl: string }>)[0]!.baseUrl).toBe("https://9router.example.com/v1");
+  });
+
+  // #1311 / L1 single call — verify the adapter does not engage the L2 fallback policy
+  // for a single successful call. streamSimple is called exactly once.
+  it("L1 single call invokes streamSimple exactly once (L2 fallback policy not engaged)", async () => {
+    let streamCount = 0;
+    const events: PiAssistantMessageEvent[] = [
+      { type: "text_delta", contentIndex: 0, delta: "single", partial: assistant() },
+      { type: "done", reason: "stop", message: assistant() },
+    ];
+    const api: PiProviderStreams = {
+      stream: fakeEventStream(events),
+      streamSimple: (() => {
+        const inner = fakeEventStream(events);
+        return (model, ctx, opts) => { streamCount++; return inner(model, ctx, opts); };
+      })(),
+    };
+    const out = await collect(streamPiAiCompletion(candidate, conv, new AbortController().signal, {
+      loadPi: async () => fakePi(api.streamSimple),
+      loadApi: async () => api,
+    }));
+    expect(out.map(e => e.type)).toEqual(["chunk", "done"]);
+    expect(streamCount).toBe(1);
   });
 });
 
