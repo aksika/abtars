@@ -24,7 +24,9 @@ export type ToolCall = {
 export class ConversationSession {
   messages: ChatMessage[] = [];
   totalPromptTokens = 0;
-  reasoningEffort: "low" | "medium" | "high" | null = null;
+  // #1276: align with pi-ai's effort level set (off|low|medium|high|xhigh). "off"
+  // disables reasoning for the session; "xhigh" is pi-ai's max level.
+  reasoningEffort: "off" | "low" | "medium" | "high" | "xhigh" | null = null;
   showReasoning = false;
   private readonly maxContext: number;
 

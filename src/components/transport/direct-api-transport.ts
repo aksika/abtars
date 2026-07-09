@@ -31,7 +31,10 @@ export interface DirectApiConfig {
   apiFormat?: "chat" | "responses" | "anthropic";
   /** #1311: route DirectApi through the pi-ai provider engine (L1) when installed. Default off — L0 reptile floor otherwise. */
   useProviderLib?: boolean;
-  thinking?: { style: "effort"; default: string } | { style: "extended"; default: number };
+  thinking?:
+    | { style: "default" }
+    | { style: "effort"; default: "off" | "low" | "medium" | "high" | "xhigh" }
+    | { style: "extended"; default: number };
   fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
 }
 
@@ -534,16 +537,19 @@ export class DirectApiTransport implements IKiroTransport {
     };
 
     // #466: inject thinking/reasoning parameters
+    // #1311 + #1276: "default" style → don't set reasoning_effort (model default).
     if (this.config.thinking) {
       if (this.config.thinking.style === "effort") {
         body.reasoning_effort = this.config.thinking.default;
       } else if (this.config.thinking.style === "extended") {
         body.thinking = { type: "enabled", budget_tokens: this.config.thinking.default };
       }
+      // "default" falls through — no reasoning_effort in body → model uses its own default.
     }
-    // #869: session-level reasoning override (from /reasoning command)
-    if (session.reasoningEffort) {
-      const BUDGET_MAP: Record<string, number> = { low: 1024, medium: 4096, high: 16384 };
+    // #869 / #1276: session-level reasoning override (from /effort or /thinking).
+    // BUDGET_MAP matches pi-ai's per-level token hints (see pi-ai-adapter.ts EFFORT_LEVELS).
+    if (session.reasoningEffort && session.reasoningEffort !== "off") {
+      const BUDGET_MAP: Record<string, number> = { low: 1024, medium: 4096, high: 16384, xhigh: 32768 };
       if ((this.config.apiFormat as string) === "anthropic") {
         body.thinking = { type: "enabled", budget_tokens: BUDGET_MAP[session.reasoningEffort] ?? 4096 };
       } else {

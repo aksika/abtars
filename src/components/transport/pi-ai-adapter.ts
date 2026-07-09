@@ -48,9 +48,19 @@ export interface PiAiCandidate {
   apiKey?: string;
   apiFormat?: ApiFormat;
   maxOutput: number;
-  thinking?: { style: "effort"; default: string } | { style: "extended"; default: number };
-  /** Session-level reasoning override (from /reasoning). */
-  reasoningEffort?: "low" | "medium" | "high" | null;
+  // #1311 + #1276: thinking config — three styles.
+  //   "default"  → use the model's own default reasoning level (no override, no force).
+  //                pi-ai doesn't get a `reasoning` option → no `reasoning_effort` in body
+  //                for openrouter/chat-completions → model uses its own default.
+  //   "effort"   → force a specific effort level (pi-ai's level set, off|low|medium|high|xhigh).
+  //   "extended" → Anthropic extended-budget style; `default` is the budget_tokens value.
+  //                Reasoning is enabled but no level is passed to pi-ai for openrouter.
+  thinking?:
+    | { style: "default" }
+    | { style: "effort"; default: "off" | "low" | "medium" | "high" | "xhigh" }
+    | { style: "extended"; default: number };
+  /** Session-level reasoning override (from /effort or /thinking command). */
+  reasoningEffort?: "off" | "low" | "medium" | "high" | "xhigh" | null;
   /** Session key — used as pi's sessionId for prompt-cache affinity. */
   sessionId?: string;
 }
@@ -65,7 +75,7 @@ export interface PiAiConversation {
 /** The pi Api families abtars's DirectApi path can target. */
 export type PiApi = "openai-completions" | "openai-responses" | "anthropic-messages" | (string & {});
 
-export type PiThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
+export type PiThinkingLevel = "off" | "low" | "medium" | "high" | "xhigh";
 
 interface PiUsage {
   input: number;
@@ -157,7 +167,12 @@ export function pickPiApi(apiFormat?: ApiFormat): PiApi {
   return "openai-completions";
 }
 
-const EFFORT_LEVELS: readonly string[] = ["minimal", "low", "medium", "high", "xhigh"];
+// #1276: align with pi-ai's effort level set verbatim. The abtars-side config, the
+// /effort + /thinking commands, and pi-ai's clampThinkingLevel / thinkingLevelMap
+// all speak the same vocabulary. (We drop "minimal" from the prior list — pi-ai
+// doesn't ship a minimal level that openai-completions understands; users wanting
+// light reasoning pick "low".)
+const EFFORT_LEVELS: readonly string[] = ["off", "low", "medium", "high", "xhigh"];
 
 function mapEffortLevel(s: string | undefined): PiThinkingLevel | undefined {
   if (!s) return undefined;
@@ -189,6 +204,14 @@ function conversationHasImage(messages: ChatMessage[]): boolean {
  * the responses/anthropic paths defer reasoning to the bake (later task).
  */
 export function resolveReasoning(candidate: PiAiCandidate): { reasoning: boolean; level: PiThinkingLevel | undefined } {
+  // #1311 + #1276: `style: "default"` — use the model's own default reasoning level.
+  // We return `reasoning: true, level: undefined` so the adapter knows reasoning is
+  // wanted, but it does NOT pass a `reasoning` option to pi-ai → pi-ai sends no
+  // `reasoning_effort` to the openrouter/chat-completions body → the model uses its
+  // own default. The L0 path's `if (this.config.thinking.style === ...)` chain
+  // falls through for "default" and likewise doesn't set `reasoning_effort`.
+  if (candidate.thinking?.style === "default") return { reasoning: true, level: undefined };
+
   const level = candidate.reasoningEffort
     ?? (candidate.thinking?.style === "effort" ? mapEffortLevel(candidate.thinking.default) : undefined);
   return { reasoning: level !== undefined, level };

@@ -61,6 +61,21 @@ describe("resolveReasoning", () => {
   it("disables reasoning when nothing is configured", () => {
     expect(resolveReasoning(base)).toEqual({ reasoning: false, level: undefined });
   });
+  // #1311 + #1276: `style: "default"` means "use the model's own default reasoning
+  // level" — reasoning is wanted (true) but no level override is passed. The
+  // adapter's `if (reasoningLevel) options.reasoning = reasoningLevel` leaves the
+  // option unset → pi-ai sends no `reasoning_effort` to the openrouter body → the
+  // upstream model uses its own default. Test pins the contract.
+  it('thinking.style: "default" → reasoning: true, level: undefined (no override)', () => {
+    expect(resolveReasoning({ ...base, thinking: { style: "default" } })).toEqual({ reasoning: true, level: undefined });
+  });
+  it('thinking.style: "default" wins over a stale session.reasoningEffort (default takes precedence for the agent\'s mode)', () => {
+    // The agent config ("default" mode) is the structural choice; session override
+    // is the runtime knob. They don't combine — the agent-level style is the mode,
+    // and the session override only applies when the agent opted into a forced
+    // level. resolveReasoning implements the agent's choice first.
+    expect(resolveReasoning({ ...base, thinking: { style: "default" }, reasoningEffort: "high" })).toEqual({ reasoning: true, level: undefined });
+  });
 });
 
 // ── buildPiModel ─────────────────────────────────────────────────────────────
