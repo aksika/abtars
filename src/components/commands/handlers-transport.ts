@@ -253,7 +253,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       // List models for a specific provider
       const models = getModels(providerArg);
       if (models.length === 0) { await ctx.reply(`❌ No models found for provider "${providerArg}"`); return true; }
-      const lines = [`📋 Models on ${providerArg}:`];
+      const lines = [`Models on ${providerArg}:`];
       for (const m of models) {
         const current = m.id === currentModel ? " ✓" : "";
         lines.push(`  • ${m.id}${current}`);
@@ -309,18 +309,25 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   }
 
   // /models (no arg) — merged status: model + transport + agents
-  const transportStatus = ctx.transport.isReady ? "✓ Connected" : "❌ Disconnected";
+  // #1318: ONE consistent transport route line. <route> ✓|✗; 🔌 is the only emoji retained.
+  // route is "pi-ai / <provider>" | "API / <provider>" | "ACP"; mark is ✓ ready / ✗ not ready.
   const ctxPct = ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a";
   const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
   const provider = prof?.providerName ?? "unknown";
   const isEmergency = (ctx.transport as unknown as { isEmergencyMode?: boolean }).isEmergencyMode === true;
+  const piActive = prof?.provider.useProviderLib === true;
+  const route =
+    mode === "ACP" ? "ACP"
+    : piActive ? `pi-ai / ${provider}`
+    : `API / ${provider}`;
+  const statusMark = ctx.transport.isReady ? "✓" : "✗";
 
   const lines = [
-    `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`,
-    isEmergency ? `🚨 EMERGENCY MODE: ${currentModel} (paid)` : `🤖 Model: ${currentModel}`,
-    `📊 Context: ${ctxPct}`,
+    `🔌 Transport: ${route} ${statusMark}`,
+    isEmergency ? `EMERGENCY MODE: ${currentModel} (paid)` : `Model: ${currentModel}`,
+    `Context: ${ctxPct}`,
     "",
-    "📋 Agents:",
+    "Agents:",
   ];
   const agents = ["professor", "dreamy", "browsie", "coding"] as const;
   const names: Record<string, string> = { professor: "Professor", dreamy: "Dreamy", browsie: "Browsie", coding: "Cody" };
@@ -333,29 +340,45 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     lines.push(line);
   }
   if (prof?.provider.fallbackChain?.length) {
-    lines.push(`\n🛟 Fallback chain: ${prof.provider.fallbackChain.join(" → ")}`);
+    lines.push(`\nFallback chain: ${prof.provider.fallbackChain.join(" → ")}`);
   }
   if (ctx.hailMary) {
-    lines.push(`🚨 hailMary: ${ctx.hailMary.model} `);
+    lines.push(`hailMary: ${ctx.hailMary.model} `);
   }
   lines.push("\nUse /models change to switch.");
   await ctx.reply(lines.join("\n"));
   return true;
 }
 
-export async function handleReasoning(text: string, ctx: CommandContext): Promise<boolean> {
-  const arg = text.replace(/^\/(reasoning)\s*/i, "").trim().toLowerCase();
-  const session = ctx.transport.getActiveSession?.();
+// #1276: /effort (primary) + /thinking (alias). Both names route here via
+// registerExact in commands/index.ts. The arg regex strips the command word
+// for either name. The level set is pi-ai's verbatim (off|low|medium|high|xhigh)
+// — see #1311 for the transport-side wiring.
+//
+// `off` is an effort level, NOT a display-toggle alias. We dropped the prior
+// `on`/`off` display aliases (frees `off` for the effort branch) — bare
+// `/effort` still echoes current state, `/effort show`/`/effort hide` toggle
+// the display only.
+export async function handleEffort(text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = text.replace(/^\/(?:effort|thinking)\s*/i, "").trim().toLowerCase();
+  // #1276: ACP transport doesn't implement getActiveSession — reply with the
+  // accurate "not supported" message rather than the generic "No active
+  // session." fallback. This check is structural (capability-based), not state.
+  if (!ctx.transport.getActiveSession) {
+    await ctx.reply("not supported on this transport");
+    return true;
+  }
+  const session = ctx.transport.getActiveSession();
   if (!session) { await ctx.reply("No active session."); return true; }
 
-  if (arg === "show" || arg === "on") {
+  if (arg === "show") {
     session.showReasoning = true;
     await ctx.reply("Reasoning display: on");
-  } else if (arg === "hide" || arg === "off") {
+  } else if (arg === "hide") {
     session.showReasoning = false;
     await ctx.reply("Reasoning display: off");
-  } else if (["none", "low", "medium", "high"].includes(arg)) {
-    session.reasoningEffort = arg === "none" ? null : arg as "low" | "medium" | "high";
+  } else if (["off", "low", "medium", "high", "xhigh"].includes(arg)) {
+    session.reasoningEffort = arg as "off" | "low" | "medium" | "high" | "xhigh";
     await ctx.reply(`Reasoning effort: ${arg}`);
   } else {
     await ctx.reply(`Reasoning: effort=${session.reasoningEffort ?? "default"}, display=${session.showReasoning ? "show" : "hide"}`);

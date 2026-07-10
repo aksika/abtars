@@ -105,8 +105,7 @@
       "output": 0.6
     },
     "transports": [
-      "gemini",
-      "openrouter"
+      "gemini"
     ]
   },
   "gemini-2.5-pro": {
@@ -115,7 +114,7 @@
     "rank": 2,
     "cost": {
       "input": 1.25,
-      "output": 10.0
+      "output": 10
     },
     "transports": [
       "gemini"
@@ -126,12 +125,11 @@
     "maxOutput": 16384,
     "rank": 2,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
-      "ollama",
-      "openrouter"
+      "ollama"
     ]
   },
   "minimax-m2.5:cloud": {
@@ -139,12 +137,11 @@
     "maxOutput": 8192,
     "rank": 3,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
-      "ollama",
-      "openrouter"
+      "ollama"
     ]
   },
   "qwen3.5:cloud": {
@@ -152,12 +149,11 @@
     "maxOutput": 8192,
     "rank": 3,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
-      "ollama",
-      "openrouter"
+      "ollama"
     ]
   },
   "google/gemma-4-26b-a4b-it:free": {
@@ -165,8 +161,8 @@
     "maxOutput": 16384,
     "rank": 2,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
       "openrouter"
@@ -179,28 +175,13 @@
     "maxOutput": 16384,
     "rank": 2,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
-      "ollama",
-      "openrouter"
+      "ollama"
     ],
     "description": "Nvidia Nemotron 3 Super 120B MoE. Free Ollama cloud + OpenRouter.",
-    "validatedAt": "2026-04-24"
-  },
-  "inclusionai/ling-2.6-1t:free": {
-    "contextWindow": 262144,
-    "maxOutput": 16384,
-    "rank": 2,
-    "cost": {
-      "input": 0.0,
-      "output": 0.0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "InclusionAI Ling 2.6 1T. Free OpenRouter. 262K context.",
     "validatedAt": "2026-04-24"
   },
   "google/gemini-2.5-flash": {
@@ -210,30 +191,6 @@
     "cost": {
       "input": 0.15,
       "output": 0.6
-    },
-    "transports": [
-      "openrouter"
-    ]
-  },
-  "moonshotai/kimi-k2.5:cloud": {
-    "contextWindow": 262144,
-    "maxOutput": 16384,
-    "rank": 2,
-    "cost": {
-      "input": 0.0,
-      "output": 0.0
-    },
-    "transports": [
-      "openrouter"
-    ]
-  },
-  "minimax/minimax-m2.5:cloud": {
-    "contextWindow": 128000,
-    "maxOutput": 8192,
-    "rank": 3,
-    "cost": {
-      "input": 0.0,
-      "output": 0.0
     },
     "transports": [
       "openrouter"
@@ -274,5 +231,43 @@
     "transports": [
       "openrouter"
     ]
+  },
+  "moonshotai/kimi-k2.5": {
+    "contextWindow": 262144,
+    "maxOutput": 16384,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ]
+  },
+  "minimax/minimax-m2.5": {
+    "contextWindow": 128000,
+    "maxOutput": 8192,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ]
+  },
+  "inclusionai/ling-2.6-1t": {
+    "contextWindow": 262144,
+    "maxOutput": 16384,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "InclusionAI Ling 2.6 1T. Free OpenRouter. 262K context.",
+    "validatedAt": "2026-04-24"
   }
 }

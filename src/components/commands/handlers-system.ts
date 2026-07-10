@@ -329,21 +329,32 @@ export async function handleUsage(_text: string, ctx: CommandContext): Promise<b
   }
 
   const models = loadModels();
-  const costTable = new Map<string, { input: number; output: number }>();
-  for (const [id, entry] of Object.entries(models)) {
-    costTable.set(id, entry.cost);
-  }
+  // #1311 C6: cache-aware cost resolver. Pi catalog rates (4-component) when warmed; else models.json.
+  // `e.in` is cache-inclusive (R1: prompt_tokens = uncached input + cacheRead + cacheWrite), so on the
+  // pi path we price the UNCACHED remainder at input rate + cacheRead/cacheWrite at their own rates.
+  const { piCostRatesByModel } = await import("../transport/pi-catalog.js");
+  const piRates = piCostRatesByModel();
+  const costOf = (e: { model: string; in: number; out: number; cacheRead?: number; cacheWrite?: number }): number => {
+    const pi = piRates?.get(e.model);
+    if (pi) {
+      const uncachedIn = Math.max(0, e.in - (e.cacheRead ?? 0) - (e.cacheWrite ?? 0));
+      return (uncachedIn * pi.input + e.out * pi.output
+        + (e.cacheRead ?? 0) * pi.cacheRead + (e.cacheWrite ?? 0) * pi.cacheWrite) / 1_000_000;
+    }
+    const mj = models[e.model]?.cost;
+    return mj ? (e.in * mj.input + e.out * mj.output) / 1_000_000 : 0;
+  };
 
   const now = Date.now();
   const startOfToday = new Date().setHours(0, 0, 0, 0);
   const startOfYesterday = startOfToday - 86_400_000;
   const startOfDayBefore = startOfYesterday - 86_400_000;
 
-  const today = readUsage(startOfToday, costTable);
-  const yesterday = readUsage(startOfYesterday, costTable);
-  const dayBefore = readUsage(startOfDayBefore, costTable);
-  const week = readUsage(now - 7 * 86_400_000, costTable);
-  const month = readUsage(now - 30 * 86_400_000, costTable);
+  const today = readUsage(startOfToday, costOf);
+  const yesterday = readUsage(startOfYesterday, costOf);
+  const dayBefore = readUsage(startOfDayBefore, costOf);
+  const week = readUsage(now - 7 * 86_400_000, costOf);
+  const month = readUsage(now - 30 * 86_400_000, costOf);
 
   // Subtract to get single-day values
   const yIn = yesterday.inputTokens - today.inputTokens;
@@ -362,11 +373,15 @@ export async function handleUsage(_text: string, ctx: CommandContext): Promise<b
   msg += `Day before: ${fmt(dbIn)} / ${fmt(dbOut)} — ${fmtCost(dbCost)}\n`;
   msg += `Last 7d:    ${fmt(week.inputTokens)} / ${fmt(week.outputTokens)} — ${fmtCost(week.cost)}\n`;
   msg += `Last 30d:   ${fmt(month.inputTokens)} / ${fmt(month.outputTokens)} — ${fmtCost(month.cost)}\n`;
+  if (today.cacheRead || today.cacheWrite) {
+    msg += `Cache today: ${fmt(today.cacheRead)} read / ${fmt(today.cacheWrite)} write\n`;
+  }
 
   if (arg === "detail") {
     msg += `\n📋 Today by model:\n`;
     for (const [model, stats] of today.byModel) {
-      msg += `  ${model}: ${fmt(stats.in)}/${fmt(stats.out)} — ${fmtCost(stats.cost)}\n`;
+      const cacheStr = (stats.cacheRead || stats.cacheWrite) ? ` [cache ${fmt(stats.cacheRead)}r/${fmt(stats.cacheWrite)}w]` : "";
+      msg += `  ${model}: ${fmt(stats.in)}/${fmt(stats.out)} — ${fmtCost(stats.cost)}${cacheStr}\n`;
     }
   }
 

@@ -215,6 +215,7 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       maxContext: agent.contextWindow, maxOutput: agent.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
       maxToolRounds: tc?.maxToolRounds ?? 25,
+      useProviderLib: agent.provider.useProviderLib,
     }, policy);
     await transport.initialize();
     logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${startModel}, ${candidates.length} candidates, shared registry: ${!!registry})`);

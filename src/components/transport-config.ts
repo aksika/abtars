@@ -11,12 +11,20 @@ import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 import { readEnvWithDefault } from "./env.js";
 import { logInfo, logWarn, logError } from "./logger.js";
+import { resolveModelMeta, mapProviderName } from "./transport/pi-catalog.js";
 
 const TAG = "transport-config";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export type ModelCost = { input: number; output: number };
+export type ModelCost = {
+  /** $/token — accurate, used for arithmetic (sort, usage accounting, pi-catalog copy). */
+  input: number;
+  /** $/token — accurate, used for arithmetic. */
+  output: number;
+  /** Picker-facing, derived from input/output at load time. Never written to models.json. */
+  display?: { inputPer1M: string; outputPer1M: string };
+};
 
 export type ModelEntry = {
   contextWindow: number;
@@ -44,7 +52,12 @@ export type ProviderConfig = {
   endpoint?: string;
   apiKeyEnv?: string;
   apiFormat?: "chat" | "responses" | "anthropic";
-  thinking?: { style: "effort"; default: string } | { style: "extended"; default: number };
+  /** #1311: route this provider's DirectApi through the pi-ai provider engine when installed (default off). */
+  useProviderLib?: boolean;
+  thinking?:
+    | { style: "default" }
+    | { style: "effort"; default: "off" | "low" | "medium" | "high" | "xhigh" }
+    | { style: "extended"; default: number };
   defaults?: Record<string, { model: string; fallbacks?: string[] }>;
   fallbackChain?: string[];
 };
@@ -86,11 +99,25 @@ export function configDir(): string {
 export function loadModels(): ModelCatalog {
   const p = join(configDir(), getEnv().modelsConfig);
   try {
-    return JSON.parse(readFileSync(p, "utf-8")) as ModelCatalog;
+    const raw = JSON.parse(readFileSync(p, "utf-8")) as ModelCatalog;
+    for (const entry of Object.values(raw)) {
+      if (entry.cost && (entry.cost.input != null || entry.cost.output != null)) {
+        entry.cost.display = computeCostDisplay(entry.cost);
+      }
+    }
+    return raw;
   } catch (err) {
     logWarn(TAG, `Failed to load models.json: ${err instanceof Error ? err.message : String(err)}`);
     return {};
   }
+}
+
+export function computeCostDisplay(cost: ModelCost): { inputPer1M: string; outputPer1M: string } {
+  const fmt = (perToken: number): string => {
+    if (!perToken) return "0.0000";
+    return (perToken * 1_000_000).toFixed(4);
+  };
+  return { inputPer1M: fmt(cost.input), outputPer1M: fmt(cost.output) };
 }
 
 export function loadTransport(): TransportConfig | null {
@@ -245,12 +272,21 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
     logWarn(TAG, `Model "${effectiveModel}" not in models.json — using defaults`);
   }
 
+  // #1311 C1: pi catalog precedence — when this provider opts into pi-ai AND the model resolves
+  // in pi's warmed catalog, pi metadata (contextWindow/maxOutput) wins over models.json.
+  let contextWindow = modelEntry?.contextWindow ?? 128000;
+  let maxOutput = modelEntry?.maxOutput ?? 8192;
+  if (resolvedProvider.useProviderLib) {
+    const piMeta = resolveModelMeta(effectiveModel, effectiveProvider);
+    if (piMeta) { contextWindow = piMeta.contextWindow; maxOutput = piMeta.maxOutput; }
+  }
+
   return {
     model: effectiveModel,
     provider: resolvedProvider,
     providerName: effectiveProvider,
-    contextWindow: modelEntry?.contextWindow ?? 128000,
-    maxOutput: modelEntry?.maxOutput ?? 8192,
+    contextWindow,
+    maxOutput,
     fallbacks: (assignment.fallbacks ?? []).filter((fb: any) => !fb.demoted && fb.model !== effectiveModel),
   };
 }
@@ -299,6 +335,20 @@ export function validateAtStartup(): void {
       logWarn(TAG, `Agent "${role}": model "${assignment.model}" not listed for provider "${assignment.provider}" in models.json`);
     }
   }
+
+  // #1311: warn when a provider opts into pi-ai but has no pi mapping (→ stays on models.json).
+  for (const [name, provider] of Object.entries(tc.providers)) {
+    if (provider.useProviderLib && !mapProviderName(name)) {
+      logWarn(TAG, `Provider "${name}" has useProviderLib but no pi-ai mapping — metadata stays on models.json`);
+    }
+  }
+}
+
+/** #1311 C8: true if any provider opts into the pi-ai engine (gates the boot warm). */
+export function anyProviderUseProviderLib(tc?: TransportConfig | null): boolean {
+  const config = tc ?? loadTransport();
+  if (!config) return false;
+  return Object.values(config.providers).some(p => p.useProviderLib);
 }
 
 // ── Write ───────────────────────────────────────────────────────────────────
@@ -436,8 +486,9 @@ export function formatRank(rank: number): string {
 
 export function formatCost(cost: ModelCost): string {
   if (cost.input === 0 && cost.output === 0) return "free";
-  const inp = `$${cost.input}`;
-  const out = cost.output != null ? `$${cost.output}` : "$???";
+  const d = cost.display ?? computeCostDisplay(cost);
+  const inp = `$${d.inputPer1M}`;
+  const out = d.outputPer1M ? `$${d.outputPer1M}` : "$???";
   return `${inp}/${out}`;
 }
 

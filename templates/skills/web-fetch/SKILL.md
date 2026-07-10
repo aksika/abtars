@@ -45,22 +45,27 @@ Use when:
 
 10x faster than Chrome. Handles most JS-rendered pages. No login/interaction.
 
-## Level 4 — Browsie (full Chrome session, interaction)
+## Level 4 — CloakBrowser (full browser, interaction)
+
+Use the **browser skill**. Two modes — pick based on the task shape:
+
+**Mode A — Interactive session** (`abtars-browser`): synchronous, stepwise control.
+Use when: login flows, form fills, click sequences, visual verification, screenshot needed.
 
 ```bash
-# Via tool call:
-web_browse(task="description of what to do", chat_id="CHAT_ID")
+abtars-browser --action navigate --url "URL" --session-id my-session
+abtars-browser --action extract_text --session-id my-session
+abtars-browser --action close_session --session-id my-session
 ```
 
-Spawns a dedicated Chrome session (patchright). Use when ANY of:
-- Levels 1-3 all failed or returned garbage
-- Need to authenticate / log in
-- Need to interact (click buttons, fill forms, scroll to load)
-- Multi-page navigation (follow links, paginate)
-- Research task requiring correlating multiple pages
-- Need screenshots or visual verification
+**Mode B — Background research** (`abtars-browse`): fire-and-forget, report delivered to chat.
+Use when: multi-page research, data gathering, task takes >30s, no step-by-step control needed.
 
-Handoff: describe the goal + starting URL(s) + what to extract.
+```bash
+abtars-browse --task "description + starting URL + what to extract" --chat-id <CHAT_ID>
+```
+
+See the browser skill for full action reference, session management, and architecture.
 
 ## Decision summary
 
@@ -69,5 +74,6 @@ Handoff: describe the goal + starting URL(s) + what to extract.
 | Single URL, open site | 1 (curl) |
 | Single URL, CF-protected | 2 (Jina) |
 | Single URL, JS-rendered | 3 (lightpanda) |
-| Login, forms, multi-page, interaction | 4 (Browsie) |
+| Login / forms / interaction | 4A (abtars-browser interactive) |
+| Multi-page research / async | 4B (abtars-browse background) |
 | Previous level failed | Try next level up |

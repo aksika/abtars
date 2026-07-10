@@ -25,6 +25,44 @@ export function isModelPickerCallback(data: string): boolean {
   return MODEL_PREFIXES.some(p => data.startsWith(p));
 }
 
+/**
+ * Build the normalized model list for a provider's picker page.
+ *
+ * Tiered (#1320):
+ * - When the provider opts into pi-ai and the catalog is small (≤ PICKER_MAX), use the live
+ *   pi-catalog directly (most accurate, includes models not yet in models.json).
+ * - When the pi-catalog is large (> PICKER_MAX) or the provider doesn't opt in / catalog is
+ *   cold, fall back to the curated `models.json` list. We DO NOT validate curated ids
+ *   against the live pi-catalog: pi-ai passes through any model id we build into our
+ *   `Model` object directly to the upstream provider, so a curated id missing from
+ *   pi-ai's snapshot is still a valid call. model-scout's invariant ("Professor only puts
+ *   working models into models.json") is the safety net. If a curated id is wrong, use
+ *   `/model doctor` to find it.
+ * - Always cap at PICKER_MAX as a hard backstop against the Telegram inline-keyboard size
+ *   limit (~80 buttons, ~9KB markup JSON). Empty result is the caller's problem.
+ */
+const PICKER_MAX = 50;
+
+async function buildModelEntries(providerName: string, providerConfig: { transport?: string; useProviderLib?: boolean } | undefined): Promise<Array<{ id: string; label: string }>> {
+  const { getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
+
+  // Tier 1: pi-catalog (small list → use directly)
+  let pi: Array<{ id: string; cost: { input: number; output: number } }> | null = null;
+  if (providerConfig?.useProviderLib) {
+    const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
+    pi = modelsForProviderSync(providerName);
+  }
+  if (pi && pi.length > 0 && pi.length <= PICKER_MAX) {
+    return pi.map(m => ({ id: m.id, label: `${m.id} (${formatCost(m.cost)})` }));
+  }
+
+  // Tier 2: curated models.json, alive-filtered. No catalog validation — pi-ai passes
+  // through whatever model id we hand it. (See function header.)
+  const curated = getModelsForProvider(providerName);
+  const filtered = providerConfig?.transport === "api" ? curated.filter(m => !m.entry.status || m.entry.status === "alive") : curated;
+  return filtered.slice(0, PICKER_MAX).map(m => ({ id: m.id, label: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})` }));
+}
+
 export async function handleModelPickerCallback(
   data: string, chatId: number, api: TelegramApi, state: PickerState, deps: PickerDeps,
 ): Promise<void> {
@@ -117,15 +155,18 @@ export async function handleModelPickerCallback(
 
   } else if (data.startsWith("mprov:")) {
     const [, agent, providerName] = data.split(":");
-    const { loadTransport, getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
+    const { loadTransport } = await import("../../components/transport-config.js");
     const tc = loadTransport();
-    let models = getModelsForProvider(providerName!);
     const providerConfig = tc?.providers[providerName!];
-    if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
-    if (models.length === 0) { await api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
+    const entries = await buildModelEntries(providerName!, providerConfig);
+    if (entries.length === 0) {
+      // #1320: big un-curated pi-ai provider — defer to the modern TUI switcher + text escape.
+      await api.sendMessage(chatId, `📋 No curated models for ${providerName} yet. Use the TUI to browse the full catalog, or \`/models quick <id>\`.`);
+      return;
+    }
     state._pendingSlot = agent;
-    state._modelPickerCache = models.map(m => m.id);
-    const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
+    state._modelPickerCache = entries.map(e => e.id);
+    const buttons = entries.map((e, i) => [{ text: e.label, callback_data: `mset:${providerName}:${i}` }]);
     buttons.push([{ text: "← Back", callback_data: `mb:p:${agent}` }]);
     await api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
 
@@ -154,16 +195,19 @@ export async function handleModelPickerCallback(
 
   } else if (data.startsWith("mprov2:")) {
     const [, slot, providerName] = data.split(":");
-    const { getModelsForProvider, formatRank, formatCost, loadTransport } = await import("../../components/transport-config.js");
+    const { loadTransport } = await import("../../components/transport-config.js");
     const tc = loadTransport();
     const providerConfig = tc?.providers[providerName!];
-    let models = getModelsForProvider(providerName!);
-    if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
-    if (models.length === 0) { await api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
+    const entries = await buildModelEntries(providerName!, providerConfig);
+    if (entries.length === 0) {
+      // #1320: big un-curated pi-ai provider — defer to the modern TUI switcher + text escape.
+      await api.sendMessage(chatId, `📋 No curated models for ${providerName} yet. Use the TUI to browse the full catalog, or \`/models quick <id>\`.`);
+      return;
+    }
     state._pendingSlot = slot;
     const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
-    state._modelPickerCache = models.map(m => m.id);
-    const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
+    state._modelPickerCache = entries.map(e => e.id);
+    const buttons = entries.map((e, i) => [{ text: e.label, callback_data: `mset:${providerName}:${i}` }]);
     buttons.push([{ text: "← Back", callback_data: `mb:s:${slot}` }]);
     await api.sendMessage(chatId, `📋 Pick model for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
@@ -181,11 +225,13 @@ export async function handleModelPickerCallback(
     const tc = loadTransport();
     if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
 
-    const validModels = getModelsForProvider(providerName);
-    if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
-
     const providerConfig = tc.providers[providerName];
     if (!providerConfig) { await api.sendMessage(chatId, `❌ Provider ${providerName} not found`); return; }
+    // #1311: pi-sourced models aren't in models.json — trust the picker cache for pi providers.
+    if (!providerConfig.useProviderLib) {
+      const validModels = getModelsForProvider(providerName);
+      if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
+    }
     const validation = validateProviderReady(providerName, providerConfig, getEnv());
     if (!validation.ok) { await api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
 

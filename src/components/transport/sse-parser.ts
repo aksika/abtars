@@ -9,8 +9,11 @@ const TAG = "sse_parser";
 
 export type SSEChunkEvent = { type: "chunk"; content: string };
 export type SSEToolCallDelta = { type: "tool_call_delta"; index: number; id?: string; name?: string; arguments?: string };
-export type SSEDoneEvent = { type: "done"; usage: { prompt_tokens: number; completion_tokens: number } | null };
-export type SSEEvent = SSEChunkEvent | SSEToolCallDelta | SSEDoneEvent;
+/** Prompt-cache token totals. Only populated by providers that report them (pi-ai path); L0 leaves these undefined. */
+export type SSEDoneEvent = { type: "done"; usage: { prompt_tokens: number; completion_tokens: number } | null; cacheRead?: number; cacheWrite?: number };
+/** Reasoning/thinking delta. Routed to intermediate output but never folded into the final answer. (pi-ai path only.) */
+export type SSEThinkingEvent = { type: "thinking"; content: string };
+export type SSEEvent = SSEChunkEvent | SSEToolCallDelta | SSEDoneEvent | SSEThinkingEvent;
 
 const STALE_TIMEOUT_MS = 90_000;
 

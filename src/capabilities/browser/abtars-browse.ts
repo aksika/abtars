@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * abtars-browse — spawn a browser subagent for autonomous web tasks.
  *

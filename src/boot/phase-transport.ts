@@ -10,7 +10,7 @@ import { getEnv } from "../components/env-schema.js";
 import { execSync } from "node:child_process";
 import { TmuxClient } from "../components/transport/tmux-client.js";
 import { createAgentTransport } from "../components/agent-registry.js";
-import { logDebug, logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
+import { logDebug, logInfo, logWarn, logError } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
 import { abmind } from "../utils/abmind-lazy.js";
@@ -21,6 +21,14 @@ const TAG = "transport";
 
 export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
   const { memoryConfig } = ctx;
+
+  // #1311 C8: warm pi-ai's catalog before buildTransport() resolves agents — resolveAgent is a
+  // sync hot path that reads the warmed cache. Skipped entirely when no provider opts in.
+  const { anyProviderUseProviderLib } = await import("../components/transport-config.js");
+  if (anyProviderUseProviderLib()) {
+    const { loadPiModels } = await import("../components/transport/pi-catalog.js");
+    await loadPiModels();
+  }
 
   await buildTransport(ctx);
 
@@ -221,8 +229,11 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       maxTurns: tc?.maxTurns ?? 50,
       maxToolRounds: tc?.maxToolRounds ?? 25,
       apiFormat: resolved.provider.apiFormat,
+      useProviderLib: resolved.provider.useProviderLib,
       thinking: resolved.provider.thinking,
     }, policy);
+    // #1318: debug line showing the L1/L0 route decision at transport-construction time.
+    logDebug("boot", `DirectApiTransport: provider=${resolved.providerName} model=${resolved.model} useProviderLib=${resolved.provider.useProviderLib ?? false}`);
     logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {
     // Kill stale ACP processes from previous run (#921, #1012)

@@ -39,6 +39,27 @@ vi.mock("./tasks/kanban-channel.js", () => ({
   channelUnread: () => [],
 }));
 
+// Mock kanban-board so spin() tests never write to the real ~/.abtars/kanban/kanban.db.
+// Without this mock, every test that calls spin({ type:"O"/"T", goal, source:"user" }) enqueues
+// real cards into the production DB, which the running bridge reconciler then delivers to
+// Telegram as `Task "X" complete.` spam (boom×60, first×60, init×140, …).
+let _nextId = 1;
+const _cards = new Map<number, { id: number; title: string; source: string; status: string; type: string }>();
+vi.mock("./tasks/kanban-board.js", () => ({
+  kanbanEnqueue: (title: string, source: string) => {
+    const id = _nextId++;
+    _cards.set(id, { id, title, source, status: "queued", type: "task" });
+    return id;
+  },
+  kanbanRunning: (id: number) => { const c = _cards.get(id); if (c) c.status = "running"; },
+  kanbanComplete: (id: number) => { const c = _cards.get(id); if (c) c.status = "done"; },
+  kanbanFail: (id: number) => { const c = _cards.get(id); if (c) c.status = "failed"; },
+  kanbanRetryOrFail: (id: number) => { const c = _cards.get(id); if (c) c.status = "failed"; return "failed"; },
+  kanbanList: () => [],
+  kanbanGetCard: (id: number) => _cards.get(id) ?? null,
+  isUnblocked: () => true,
+}));
+
 vi.mock("../utils/local-time.js", () => ({
   localDateTime: () => "2026-07-01 12:00",
 }));

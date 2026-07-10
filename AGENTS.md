@@ -71,3 +71,13 @@ adding a row, not a new method or branch.
 - Exit code 0 from `startBridge()` means "restart requested"; non-zero means "die".
 - When `SUPERVISION` env is set, the internal restart loop is disabled — OS supervisor handles restarts.
 - `esbuild.config.js` externalizes `better-sqlite3`, `cloakbrowser`, `abmind`, `pdf-parse`, `jimp`, `youtube-transcript`, `rettiwt-api` — they must be available at runtime but are not bundled.
+
+## Project Governance
+
+This repo is governed by **abproject** (`../abproject/` — private repo `github.com/aksika/abproject`).
+
+- **Ways of working** (planning tiers, approval gates, branching, deployment): `abproject/steering/`
+- **Backlog**: `abproject/backlog.db` — SQLite, source of truth for all tickets
+- **Specs**: `abproject/specs/NNN/` (Tier 3) and `abproject/docs/plans/NNN-slug.md` (legacy)
+
+Read `abproject/steering/000-start-here.md` first when onboarding.

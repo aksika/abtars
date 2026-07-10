@@ -239,7 +239,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/wakeup — Wake Mac from sleep",
     "/sleep — Sleep status / /sleep resume / /sleep now",
     "/whoami — Your user info & clearance",
-    "/reasoning — Reasoning effort (low/medium/high/none) + show/hide thinking",
+    "/effort (alias /thinking) — Reasoning effort (off/low/medium/high/xhigh) + show/hide thinking",
     "/kanban — Kanban board",
   ];
   if (ctx.platform === "telegram") {

@@ -29,7 +29,12 @@ export interface DirectApiConfig {
   maxTurns: number;
   maxToolRounds?: number;
   apiFormat?: "chat" | "responses" | "anthropic";
-  thinking?: { style: "effort"; default: string } | { style: "extended"; default: number };
+  /** #1311: route DirectApi through the pi-ai provider engine (L1) when installed. Default off — L0 reptile floor otherwise. */
+  useProviderLib?: boolean;
+  thinking?:
+    | { style: "default" }
+    | { style: "effort"; default: "off" | "low" | "medium" | "high" | "xhigh" }
+    | { style: "extended"; default: number };
   fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
 }
 
@@ -52,8 +57,12 @@ export class DirectApiTransport implements IKiroTransport {
   private activeModel: string;
   /** #1295: maxContext of the model currently serving requests. Used for accurate contextPercent. */
   private _activeMaxContext: number;
+  private readonly useProviderLib: boolean;
   private _lastPromptTokens = 0;
   private _lastCompletionTokens = 0;
+  /** #1311: prompt-cache token totals from the pi-ai path (null on L0 — reptile adapters don't report cache). */
+  private _lastCacheRead: number | null = null;
+  private _lastCacheWrite: number | null = null;
   private _activeSessionKey = "";
   private _activeUserId = "master";
 
@@ -104,13 +113,15 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeApiKey = config.apiKey;
     this.activeModel = config.model;
     this._activeMaxContext = config.maxContext;
+    this.useProviderLib = config.useProviderLib ?? false;
     this.policy = policy ?? null;
   }
 
   async initialize(): Promise<void> {
     const count = this.policy ? this.policy.candidates.length : (this.config.fallbacks?.length ?? 0) + 1;
     const fb = count > 1 ? ` (+${count - 1} fallback${count > 2 ? "s" : ""})` : "";
-    logInfo(TAG, `🔌 Direct API transport (${this.config.endpoint}, model: ${this.config.model}${fb})`);
+    // #1318: include [pi-ai] tag when the L1 provider engine is the active route.
+    logInfo(TAG, `🔌 Direct API transport (${this.config.endpoint}, model: ${this.config.model}${fb}${this.useProviderLib ? " [pi-ai]" : ""})`);
   }
 
   setSystemPrompt(prompt: string): void {
@@ -142,6 +153,8 @@ export class DirectApiTransport implements IKiroTransport {
     this._lastAnswer = "";
     this._toolCallsSucceeded = 0;
     this._intermediateText = "";
+    this._lastCacheRead = null;
+    this._lastCacheWrite = null;
     this._promptStartedAt = Date.now();
     this._lastActivityAt = Date.now();
 
@@ -327,7 +340,8 @@ export class DirectApiTransport implements IKiroTransport {
           this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
         }
         logTrace(TAG, `${this.activeModel} — ${usage.prompt_tokens}→${usage.completion_tokens ?? 0} tokens, ${Date.now() - (this._lastActivityAt ?? Date.now())}ms`);
-        recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0, this.agentLabel);
+        recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0, this.agentLabel,
+          { cacheRead: this._lastCacheRead ?? undefined, cacheWrite: this._lastCacheWrite ?? undefined });
       }
 
       if (toolCalls.length > 0) {
@@ -445,6 +459,24 @@ export class DirectApiTransport implements IKiroTransport {
     const composed = AbortSignal.any([signal, timeoutCtrl.signal]);
 
     try {
+    // #1311 — L1: pi-ai provider engine. Flag on + non-emergency only.
+    // Load failure (pi absent/broken) → fall through to the L0 reptile floor.
+    // Request failure → propagate to L2 (sendWithPolicy) for rotation, unchanged.
+    if (this.useProviderLib && !this.emergencyOverride) {
+      try {
+        return await this.consumePiAi(session, composed);
+      } catch (err) {
+        if (err instanceof Error && err.name === "PiAiUnavailableError") {
+          // #1318: include the throwing function name from the adapter (if it tagged the error).
+          const fn = (err as Error & { piFunction?: string }).piFunction;
+          logWarn(TAG, `pi-ai unavailable — using L0 reptile floor: ${err.message}${fn ? ` [from ${fn}]` : ""}`);
+          // fall through to L0 branches below
+        } else {
+          throw err;
+        }
+      }
+    }
+
     // Responses API format (#465, streaming #472)
     if (this.config.apiFormat === "responses") {
       const { toResponsesRequest } = await import("./responses-adapter.js");
@@ -508,16 +540,19 @@ export class DirectApiTransport implements IKiroTransport {
     };
 
     // #466: inject thinking/reasoning parameters
+    // #1311 + #1276: "default" style → don't set reasoning_effort (model default).
     if (this.config.thinking) {
       if (this.config.thinking.style === "effort") {
         body.reasoning_effort = this.config.thinking.default;
       } else if (this.config.thinking.style === "extended") {
         body.thinking = { type: "enabled", budget_tokens: this.config.thinking.default };
       }
+      // "default" falls through — no reasoning_effort in body → model uses its own default.
     }
-    // #869: session-level reasoning override (from /reasoning command)
-    if (session.reasoningEffort) {
-      const BUDGET_MAP: Record<string, number> = { low: 1024, medium: 4096, high: 16384 };
+    // #869 / #1276: session-level reasoning override (from /effort or /thinking).
+    // BUDGET_MAP matches pi-ai's per-level token hints (see pi-ai-adapter.ts EFFORT_LEVELS).
+    if (session.reasoningEffort && session.reasoningEffort !== "off") {
+      const BUDGET_MAP: Record<string, number> = { low: 1024, medium: 4096, high: 16384, xhigh: 32768 };
       if ((this.config.apiFormat as string) === "anthropic") {
         body.thinking = { type: "enabled", budget_tokens: BUDGET_MAP[session.reasoningEffort] ?? 4096 };
       } else {
@@ -586,6 +621,65 @@ export class DirectApiTransport implements IKiroTransport {
     }
   }
 
+  /**
+   * #1311 — L1 execution: stream one completion through pi-ai, translating events
+   * into the same internal contract the L0 branches produce. Throws
+   * PiAiUnavailableError on load failure (→ L0 fallback) or Error("API error …")
+   * on request failure (→ L2 rotation). See pi-ai-adapter.ts.
+   */
+  private async consumePiAi(
+    session: ConversationSession,
+    signal: AbortSignal,
+  ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
+    const { streamPiAiCompletion } = await import("./pi-ai-adapter.js");
+    const candidate = {
+      model: this.activeModel,
+      endpoint: this.activeEndpoint,
+      apiKey: this.activeApiKey,
+      apiFormat: this.config.apiFormat,
+      maxOutput: this.config.maxOutput,
+      thinking: this.config.thinking,
+      reasoningEffort: session.reasoningEffort,
+      sessionId: this._activeSessionKey,
+    };
+    const toolSchemas = getToolSchemas(this.sandboxPolicy);
+    // #1318: dispatch entry — debug noise at LOG_LEVEL=debug, full candidate detail at trace.
+    logDebug(TAG, `pi-ai dispatch: model=${this.activeModel} endpoint=${this.activeEndpoint}`);
+    logTrace(TAG, `pi-ai candidate: model=${this.activeModel} endpoint=${this.activeEndpoint} apiFormat=${this.config.apiFormat ?? "chat"} maxOutput=${this.config.maxOutput} reasoningEffort=${session.reasoningEffort ?? "none"} thinking=${JSON.stringify(this.config.thinking)} sessionId=${this._activeSessionKey} msgs=${session.messages.length} tools=${toolSchemas.length}`);
+    const events = streamPiAiCompletion(
+      candidate,
+      { messages: session.messages, tools: toolSchemas },
+      signal,
+    );
+
+    let content = "";
+    let usage: { prompt_tokens: number; completion_tokens: number } | null = null;
+    const toolCallAcc = new Map<string, { id: string; name: string; arguments: string }>();
+    for await (const event of events) {
+      this._lastActivityAt = Date.now();
+      // #1318: per-event trace — TRACE only; this is the flood path. One line per event.
+      logTrace(TAG, `pi-ai event: ${event.type}${event.type === "chunk" ? ` +${event.content.length}ch` : event.type === "thinking" ? ` +${event.content.length}ch(think)` : event.type === "tool_call_delta" ? ` tool=${event.name ?? "?"} argsΔ=${(event.arguments ?? "").length}` : event.type === "done" ? ` usage=${JSON.stringify(event.usage)} cacheR=${event.cacheRead ?? 0} cacheW=${event.cacheWrite ?? 0}` : ""}`);
+      if (event.type === "chunk") {
+        content += event.content;
+        this._intermediateText += event.content;
+        this.onIntermediateResponse?.(event.content);
+      } else if (event.type === "thinking") {
+        // Reasoning streams to the user but is never folded into the final answer.
+        this.onIntermediateResponse?.(event.content);
+      } else if (event.type === "tool_call_delta") {
+        this.accumulateToolCall(toolCallAcc, event);
+      } else if (event.type === "done") {
+        usage = event.usage;
+        this._lastCacheRead = event.cacheRead ?? null;
+        this._lastCacheWrite = event.cacheWrite ?? null;
+      }
+    }
+    // #1318: stream-drained trace (terminal) + done debug line.
+    logTrace(TAG, `pi-ai stream drained: contentLen=${content.length} toolCalls=${toolCallAcc.size} usage=${JSON.stringify(usage)}`);
+    if (usage) logDebug(TAG, `pi-ai done: input=${usage.prompt_tokens} output=${usage.completion_tokens} cacheRead=${this._lastCacheRead ?? 0} cacheWrite=${this._lastCacheWrite ?? 0}`);
+    return { content: content || null, toolCalls: this.finalizeToolCalls(toolCallAcc), usage };
+  }
+
   /** Accumulate streaming tool call deltas by ID (Ollama-safe: tracks by ID not index). */
   private accumulateToolCall(
     acc: Map<string, { id: string; name: string; arguments: string }>,
@@ -647,10 +741,14 @@ export class DirectApiTransport implements IKiroTransport {
   getActiveSession(): ConversationSession | null { return this.sessions.get(this._activeSessionKey) ?? null; }
   get toolCallsSucceeded(): number { return this._toolCallsSucceeded; }
 
-  lastUsage(): { input: number; output: number } | null {
-    return this._lastPromptTokens || this._lastCompletionTokens
-      ? { input: this._lastPromptTokens, output: this._lastCompletionTokens }
-      : null;
+  lastUsage(): { input: number; output: number; cacheRead?: number; cacheWrite?: number } | null {
+    if (!this._lastPromptTokens && !this._lastCompletionTokens) return null;
+    const out: { input: number; output: number; cacheRead?: number; cacheWrite?: number } = {
+      input: this._lastPromptTokens, output: this._lastCompletionTokens,
+    };
+    if (this._lastCacheRead != null) out.cacheRead = this._lastCacheRead;
+    if (this._lastCacheWrite != null) out.cacheWrite = this._lastCacheWrite;
+    return out;
   }
 
   /** Hot-swap the active model. Takes effect on next API call. */
