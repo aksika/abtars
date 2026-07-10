@@ -32,9 +32,12 @@ export function isModelPickerCallback(data: string): boolean {
  * - When the provider opts into pi-ai and the catalog is small (≤ PICKER_MAX), use the live
  *   pi-catalog directly (most accurate, includes models not yet in models.json).
  * - When the pi-catalog is large (> PICKER_MAX) or the provider doesn't opt in / catalog is
- *   cold, fall back to the curated `models.json` list. If the pi-catalog IS warmed, filter
- *   the curated list to ids that actually exist in the live catalog (Set intersection) —
- *   this is the validation guard against the "stale curated id → 404" failure mode.
+ *   cold, fall back to the curated `models.json` list. We DO NOT validate curated ids
+ *   against the live pi-catalog: pi-ai passes through any model id we build into our
+ *   `Model` object directly to the upstream provider, so a curated id missing from
+ *   pi-ai's snapshot is still a valid call. model-scout's invariant ("Professor only puts
+ *   working models into models.json") is the safety net. If a curated id is wrong, use
+ *   `/model doctor` to find it.
  * - Always cap at PICKER_MAX as a hard backstop against the Telegram inline-keyboard size
  *   limit (~80 buttons, ~9KB markup JSON). Empty result is the caller's problem.
  */
@@ -53,19 +56,11 @@ async function buildModelEntries(providerName: string, providerConfig: { transpo
     return pi.map(m => ({ id: m.id, label: `${m.id} (${formatCost(m.cost)})` }));
   }
 
-  // Tier 2: curated models.json, validated against pi-catalog when available
-  const catalogIds = pi ? new Set(pi.map(m => m.id)) : null;
+  // Tier 2: curated models.json, alive-filtered. No catalog validation — pi-ai passes
+  // through whatever model id we hand it. (See function header.)
   const curated = getModelsForProvider(providerName);
   const filtered = providerConfig?.transport === "api" ? curated.filter(m => !m.entry.status || m.entry.status === "alive") : curated;
-  const validated = catalogIds
-    ? filtered.filter(m => {
-        if (catalogIds.has(m.id)) return true;
-        // #1320: drop curated ids not in the live catalog — prevents 404s on stale entries.
-        logAndSwallow(TAG, `curated id not in <${providerName}> catalog — skipped`, new Error(m.id));
-        return false;
-      })
-    : filtered;
-  return validated.slice(0, PICKER_MAX).map(m => ({ id: m.id, label: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})` }));
+  return filtered.slice(0, PICKER_MAX).map(m => ({ id: m.id, label: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})` }));
 }
 
 export async function handleModelPickerCallback(

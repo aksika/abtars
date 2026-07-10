@@ -99,11 +99,12 @@ describe("telegram-model-picker (#1320)", () => {
       expect(labels.some((l: string) => l.startsWith("← Back"))).toBe(true);
     });
 
-    it("large pi-catalog (>20) → use curated models.json, validated against catalog", async () => {
+    it("large pi-catalog (>20) → use curated models.json, NO catalog validation (pi-ai passes through)", async () => {
       MOCK_modelsForProviderSync.mockReturnValue(CATALOG_OR_LARGE);
       MOCK_getModelsForProvider.mockReturnValue([
         { id: "vendor/cat-model-5", entry: { rank: 1, cost: { input: 1, output: 2 } } },
         { id: "vendor/cat-model-3", entry: { rank: 2, cost: { input: 0, output: 0 } } },
+        // Curated id missing from pi-ai's catalog snapshot — must still be shown.
         { id: "stale-id-not-in-catalog", entry: { rank: 1, cost: { input: 0, output: 0 } } },
       ]);
       const api = makeApi();
@@ -115,8 +116,9 @@ describe("telegram-model-picker (#1320)", () => {
       const labels = buttons.flat().map((b: { text: string }) => b.text);
       expect(labels).toContain("vendor/cat-model-5 (★★★★★, $1/$2)");
       expect(labels).toContain("vendor/cat-model-3 (★★★★☆, free)");
-      // Validation guard: stale curated id must be dropped, not shown.
-      expect(labels.some((l: string) => l.includes("stale-id-not-in-catalog"))).toBe(false);
+      // #1320: no validation guard — curated id missing from pi-ai's catalog is still shown.
+      // pi-ai passes whatever model id we hand it; model-scout's invariant is the safety net.
+      expect(labels).toContain("stale-id-not-in-catalog (★★★★★, free)");
     });
 
     it("non-pi provider (useProviderLib:false) → curated list unvalidated", async () => {
