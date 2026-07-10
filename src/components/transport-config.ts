@@ -17,7 +17,14 @@ const TAG = "transport-config";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export type ModelCost = { input: number; output: number };
+export type ModelCost = {
+  /** $/token — accurate, used for arithmetic (sort, usage accounting, pi-catalog copy). */
+  input: number;
+  /** $/token — accurate, used for arithmetic. */
+  output: number;
+  /** Picker-facing, derived from input/output at load time. Never written to models.json. */
+  display?: { inputPer1M: string; outputPer1M: string };
+};
 
 export type ModelEntry = {
   contextWindow: number;
@@ -92,11 +99,25 @@ export function configDir(): string {
 export function loadModels(): ModelCatalog {
   const p = join(configDir(), getEnv().modelsConfig);
   try {
-    return JSON.parse(readFileSync(p, "utf-8")) as ModelCatalog;
+    const raw = JSON.parse(readFileSync(p, "utf-8")) as ModelCatalog;
+    for (const entry of Object.values(raw)) {
+      if (entry.cost && (entry.cost.input != null || entry.cost.output != null)) {
+        entry.cost.display = computeCostDisplay(entry.cost);
+      }
+    }
+    return raw;
   } catch (err) {
     logWarn(TAG, `Failed to load models.json: ${err instanceof Error ? err.message : String(err)}`);
     return {};
   }
+}
+
+export function computeCostDisplay(cost: ModelCost): { inputPer1M: string; outputPer1M: string } {
+  const fmt = (perToken: number): string => {
+    if (!perToken) return "0.0000";
+    return (perToken * 1_000_000).toFixed(4);
+  };
+  return { inputPer1M: fmt(cost.input), outputPer1M: fmt(cost.output) };
 }
 
 export function loadTransport(): TransportConfig | null {
@@ -465,8 +486,9 @@ export function formatRank(rank: number): string {
 
 export function formatCost(cost: ModelCost): string {
   if (cost.input === 0 && cost.output === 0) return "free";
-  const inp = `$${cost.input}`;
-  const out = cost.output != null ? `$${cost.output}` : "$???";
+  const d = cost.display ?? computeCostDisplay(cost);
+  const inp = `$${d.inputPer1M}`;
+  const out = d.outputPer1M ? `$${d.outputPer1M}` : "$???";
   return `${inp}/${out}`;
 }
 
