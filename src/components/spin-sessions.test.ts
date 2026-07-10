@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { ManagedSession } from "./spin-types.js";
+import type { ManagedSession, SessionType } from "./spin-types.js";
+import { sessionType } from "./spin-types.js";
 import * as Sessions from "./spin-sessions.js";
 
 function makeTestSessions(): Map<string, ManagedSession> {
@@ -223,16 +224,280 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     });
   });
 
-  describe("Telegram and TUI retain independent active sessions", () => {
-    it("both platforms have independent active sessions", () => {
-      const sessions = makeTestSessions();
-      const tgActive = Sessions.getActiveSession(sessions, "aksika", "telegram");
-      const tuiActive = Sessions.getActiveSession(sessions, "aksika", "tui");
-      expect(tgActive).toBeDefined();
-      expect(tgActive!.platform).toBe("telegram");
-      expect(tuiActive).toBeDefined();
-      expect(tuiActive!.platform).toBe("tui");
-      expect(tgActive!.id).not.toBe(tuiActive!.id);
+  describe("endSession — local active/Main reconciliation (#1331)", () => {
+  function snapshot(sessions: Map<string, ManagedSession>) {
+    return [...sessions.values()].sort((a, b) => a.shortIndex - b.shortIndex).map(s => ({
+      id: s.id, userId: s.userId, platform: s.platform,
+      type: sessionType(s), active: s.active, status: s.status,
+    }));
+  }
+
+  function activeIds(sessions: Map<string, ManagedSession>, userId: string, platform: string): string[] {
+    return [...sessions.values()].filter(s => s.userId === userId && s.platform === platform && s.status !== "ended" && s.active).map(s => s.id);
+  }
+
+  function mainIds(sessions: Map<string, ManagedSession>, userId: string, platform: string): string[] {
+    return [...sessions.values()].filter(s => s.userId === userId && s.platform === platform && s.status !== "ended" && sessionType(s) === "A").map(s => s.id);
+  }
+
+  /** Build a minimal set of sessions for one test case. Returns {sessions, nextIndex}. */
+  function buildSessions(...specs: Array<{ userId: string; platform: string; type: SessionType; active?: boolean; ended?: boolean }>): { sessions: Map<string, ManagedSession>; nextIndex: number } {
+    const sessions = new Map<string, ManagedSession>();
+    let next = 0;
+    for (const spec of specs) {
+      const r = Sessions.allocateSession(sessions, next, spec.type, spec.userId, spec.platform, 100);
+      next = r.nextIndex;
+      r.session.active = spec.active ?? false;
+      if (spec.ended) { r.session.status = "ended"; r.session.active = false; }
+    }
+    return { sessions, nextIndex: next };
+  }
+
+  // ── Active Code ended, local Main exists ──
+  it("active Code end activates local Main", () => {
+    const { sessions, nextIndex } = buildSessions(
+      { userId: "aksika", platform: "telegram", type: "A", active: true },
+      { userId: "aksika", platform: "telegram", type: "C", active: true },
+    );
+    const codeSessions = [...sessions.values()].filter(s => sessionType(s) === "C");
+    expect(codeSessions).toHaveLength(1);
+    const codeIdx = codeSessions[0].shortIndex;
+
+    const result = Sessions.endSession(sessions, nextIndex, "aksika", "telegram", codeIdx);
+    expect(typeof result).not.toBe("string");
+    if (typeof result === "string") return;
+
+    // Code ended
+    const code = sessions.get(result.ended.id)!;
+    expect(code.status).toBe("ended");
+    expect(code.active).toBe(false);
+
+    // Exactly one active session on telegram — the Main
+    const active = activeIds(sessions, "aksika", "telegram");
+    expect(active).toHaveLength(1);
+    const mains = mainIds(sessions, "aksika", "telegram");
+    expect(mains).toContain(active[0]);
+  });
+
+  // ── Inactive Code ended ──
+  it("inactive Code end preserves active Main", () => {
+    const { sessions, nextIndex } = buildSessions(
+      { userId: "aksika", platform: "telegram", type: "A", active: true },
+      { userId: "aksika", platform: "telegram", type: "C", active: false },
+    );
+    const codeSessions = [...sessions.values()].filter(s => sessionType(s) === "C");
+    const codeIdx = codeSessions[0].shortIndex;
+
+    const beforeActive = activeIds(sessions, "aksika", "telegram");
+    expect(beforeActive).toHaveLength(1);
+
+    const result = Sessions.endSession(sessions, nextIndex, "aksika", "telegram", codeIdx);
+    expect(typeof result).not.toBe("string");
+    if (typeof result === "string") return;
+
+    const afterActive = activeIds(sessions, "aksika", "telegram");
+    expect(afterActive).toEqual(beforeActive);
+  });
+
+  // ── Active Main ended, another Main exists ──
+  it("active Main end activates remaining Main", () => {
+    const { sessions, nextIndex } = buildSessions(
+      { userId: "aksika", platform: "telegram", type: "A", active: true },
+      { userId: "aksika", platform: "telegram", type: "A", active: false },
+    );
+    const endTarget = [...sessions.values()].find(s => s.active)!;
+    const main2 = [...sessions.values()].find(s => !s.active && sessionType(s) === "A")!;
+
+    const result = Sessions.endSession(sessions, nextIndex, "aksika", "telegram", endTarget.shortIndex);
+    expect(typeof result).not.toBe("string");
+    if (typeof result === "string") return;
+
+    expect(endTarget.status).toBe("ended");
+    expect(main2.active).toBe(true);
+    const active = activeIds(sessions, "aksika", "telegram");
+    expect(active).toHaveLength(1);
+    expect(active[0]).toBe(main2.id);
+  });
+
+  // ── Inactive Main ended, another Main exists ──
+  it("inactive Main end preserves active Main", () => {
+    const { sessions, nextIndex } = buildSessions(
+      { userId: "aksika", platform: "telegram", type: "A", active: true },
+      { userId: "aksika", platform: "telegram", type: "A", active: false },
+    );
+    const inactiveMain = [...sessions.values()].find(s => !s.active && sessionType(s) === "A")!;
+    const activeMain = [...sessions.values()].find(s => s.active && sessionType(s) === "A")!;
+
+    const beforeActive = activeIds(sessions, "aksika", "telegram");
+    const result = Sessions.endSession(sessions, nextIndex, "aksika", "telegram", inactiveMain.shortIndex);
+    expect(typeof result).not.toBe("string");
+    if (typeof result === "string") return;
+
+    expect(inactiveMain.status).toBe("ended");
+    expect(activeMain.active).toBe(true);
+    const afterActive = activeIds(sessions, "aksika", "telegram");
+    expect(afterActive).toEqual(beforeActive);
+  });
+
+  // ── Last active Main ended ──
+  it("last active Main end creates active replacement", () => {
+    const { sessions, nextIndex } = buildSessions(
+      { userId: "aksika", platform: "telegram", type: "A", active: true },
+    );
+    const main = [...sessions.values()][0];
+
+    const result = Sessions.endSession(sessions, nextIndex, "aksika", "telegram", main.shortIndex);
+    expect(typeof result).not.toBe("string");
+    if (typeof result === "string") return;
+
+    expect(main.status).toBe("ended");
+
+    // Replacement created
+    const live = [...sessions.values()].filter(s => s.userId === "aksika" && s.platform === "telegram" && s.status !== "ended");
+    expect(live).toHaveLength(1);
+    expect(live[0].id).not.toBe(main.id);
+    expect(sessionType(live[0])).toBe("A");
+    expect(live[0].active).toBe(true);
+  });
+
+  // ── Last inactive Main ended, Code is active ──
+  it("last inactive Main end while Code active creates inactive replacement", () => {
+    const { sessions, nextIndex } = buildSessions(
+      { userId: "aksika", platform: "telegram", type: "A", active: false },
+      { userId: "aksika", platform: "telegram", type: "C", active: true },
+    );
+    const main = [...sessions.values()].find(s => sessionType(s) === "A")!;
+    const code = [...sessions.values()].find(s => sessionType(s) === "C")!;
+
+    const result = Sessions.endSession(sessions, nextIndex, "aksika", "telegram", main.shortIndex);
+    expect(typeof result).not.toBe("string");
+    if (typeof result === "string") return;
+
+    expect(main.status).toBe("ended");
+
+    // Code unchanged, replacement Main exists and is inactive
+    expect(code.status).toBe("ready");
+    expect(code.active).toBe(true);
+
+    const liveMains = mainIds(sessions, "aksika", "telegram");
+    const replacement = liveMains.find(id => id !== code.id);
+    expect(replacement).toBeDefined();
+    const replacementSession = sessions.get(replacement!)!;
+    expect(replacementSession.active).toBe(false);
+
+    // Exactly one active — the Code session
+    const active = activeIds(sessions, "aksika", "telegram");
+    expect(active).toHaveLength(1);
+    expect(active[0]).toBe(code.id);
+  });
+
+  // ── Last inactive Main ended, no active ──
+  it("last inactive Main end with no local active creates active replacement", () => {
+    const { sessions, nextIndex } = buildSessions(
+      { userId: "aksika", platform: "telegram", type: "A", active: false },
+    );
+    const main = [...sessions.values()][0];
+
+    const result = Sessions.endSession(sessions, nextIndex, "aksika", "telegram", main.shortIndex);
+    expect(typeof result).not.toBe("string");
+    if (typeof result === "string") return;
+
+    expect(main.status).toBe("ended");
+
+    const live = [...sessions.values()].filter(s => s.userId === "aksika" && s.platform === "telegram" && s.status !== "ended");
+    expect(live).toHaveLength(1);
+    expect(live[0].active).toBe(true);
+  });
+
+  // ── Foreign namespace unchanged ──
+  it("does not affect foreign platforms or users", () => {
+    const { sessions, nextIndex } = buildSessions(
+      { userId: "aksika", platform: "telegram", type: "A", active: true },
+      { userId: "aksika", platform: "telegram", type: "C", active: false },
+      { userId: "aksika", platform: "tui", type: "A", active: true },
+      { userId: "bob", platform: "telegram", type: "A", active: true },
+    );
+    const beforeForeign = snapshot(sessions).filter(s => s.userId !== "aksika" || s.platform !== "telegram");
+
+    const code = [...sessions.values()].find(s => sessionType(s) === "C")!;
+    Sessions.endSession(sessions, nextIndex, "aksika", "telegram", code.shortIndex);
+
+    const afterForeign = snapshot(sessions).filter(s => s.userId !== "aksika" || s.platform !== "telegram");
+    expect(afterForeign).toEqual(beforeForeign);
+  });
+
+  // ── nextIndex only changes with replacement allocation ──
+  it("nextIndex increments only when replacement Main is created", () => {
+    const { sessions, nextIndex } = buildSessions(
+      { userId: "aksika", platform: "telegram", type: "A", active: true },
+      { userId: "aksika", platform: "telegram", type: "A", active: false },
+    );
+
+    // End inactive Main (no replacement needed — another Main exists)
+    const inactiveMain = [...sessions.values()].find(s => !s.active && sessionType(s) === "A")!;
+    const r1 = Sessions.endSession(sessions, nextIndex, "aksika", "telegram", inactiveMain.shortIndex);
+    expect(typeof r1).not.toBe("string");
+    if (typeof r1 === "string") return;
+    expect(r1.nextIndex).toBe(nextIndex);
+
+    // End the last active Main (replacement created)
+    const activeMain = [...sessions.values()].find(s => sessionType(s) === "A" && s.status !== "ended")!;
+    const r2 = Sessions.endSession(sessions, r1.nextIndex, "aksika", "telegram", activeMain.shortIndex);
+    expect(typeof r2).not.toBe("string");
+    if (typeof r2 === "string") return;
+    expect(r2.nextIndex).toBeGreaterThan(r1.nextIndex);
+  });
+
+  // ── Ended log exists exactly once ──
+  it("adds exactly one 'ended' log entry", () => {
+    const { sessions, nextIndex } = buildSessions(
+      { userId: "aksika", platform: "telegram", type: "A", active: true },
+    );
+    const main = [...sessions.values()][0];
+    expect(main.log.filter(l => l.includes("ended"))).toHaveLength(0);
+
+    Sessions.endSession(sessions, nextIndex, "aksika", "telegram", main.shortIndex);
+    expect(main.log.filter(l => l.includes("ended"))).toHaveLength(1);
+  });
+
+  describe("explicit vs implicit end equivalence (#1331)", () => {
+    it("produces identical state for the same active target", () => {
+      const { sessions: s1, nextIndex: ni1 } = buildSessions(
+        { userId: "aksika", platform: "telegram", type: "A", active: true },
+        { userId: "aksika", platform: "telegram", type: "C", active: false },
+      );
+      const { sessions: s2, nextIndex: ni2 } = buildSessions(
+        { userId: "aksika", platform: "telegram", type: "A", active: true },
+        { userId: "aksika", platform: "telegram", type: "C", active: false },
+      );
+
+      const activeMain = Sessions.getActiveSession(s1, "aksika", "telegram")!;
+      const implicit = Sessions.endSession(s1, ni1, "aksika", "telegram");
+      expect(typeof implicit).not.toBe("string");
+      const explicit = Sessions.endSession(s2, ni2, "aksika", "telegram", activeMain.shortIndex);
+      expect(typeof explicit).not.toBe("string");
+
+      if (typeof implicit === "string" || typeof explicit === "string") return;
+
+      expect(sessionType(implicit.ended)).toBe("A");
+      expect(sessionType(explicit.ended)).toBe("A");
+
+      const state1 = snapshot(s1);
+      const state2 = snapshot(s2);
+      expect(state1).toEqual(state2);
     });
   });
+
+  // ── Independent active sessions per platform ──
+  it("Telegram and TUI retain independent active sessions", () => {
+    const sessions = makeTestSessions();
+    const tgActive = Sessions.getActiveSession(sessions, "aksika", "telegram");
+    const tuiActive = Sessions.getActiveSession(sessions, "aksika", "tui");
+    expect(tgActive).toBeDefined();
+    expect(tgActive!.platform).toBe("telegram");
+    expect(tuiActive).toBeDefined();
+    expect(tuiActive!.platform).toBe("tui");
+    expect(tgActive!.id).not.toBe(tuiActive!.id);
+  });
+});
 });
