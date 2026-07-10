@@ -212,6 +212,10 @@ export async function main(argv: readonly string[]): Promise<number> {
         const { configShow } = await import('./commands/config-show.js');
         return await configShow();
       }
+      case 'tui': {
+        const { tui: tuiCmd } = await import('./commands/tui.js');
+        return await tuiCmd(argv.slice(1));
+      }
       case 'tribe': {
         const { tribe: tribeCmd } = await import('./commands/tribe.js');
         return await tribeCmd(argv.slice(1));
