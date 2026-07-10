@@ -69,8 +69,9 @@ vi.mock("./soul-bundle.js", () => ({
 }));
 
 import { Spin } from "./spin.js";
+import { kanbanEnqueue } from "./tasks/kanban-board.js";
 import { setUserRegistryOverride, type UserRegistry, type UserEntry } from "./user-registry.js";
-import { profileFor, SESSION_PROFILES } from "./spin-profiles.js";
+import { profileFor, isValidSessionType, SESSION_PROFILES } from "./spin-profiles.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { AgentSession } from "./subagent-runtime.js";
 
@@ -148,18 +149,18 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
 
     it("O profile uses browsie (not professor)", () => {
-      expect(profileFor("O").agent).toBe("browsie");
+      expect(profileFor("O")!.agent).toBe("browsie");
     });
 
     it("A profile is active + persistent + no decorators", () => {
-      const p = profileFor("A");
+      const p = profileFor("A")!;
       expect(p.resolution).toBe("active");
       expect(p.transportMode).toBe("persistent");
       expect(p.decorators).toEqual([]);
     });
 
     it("O profile is singleton with bridge-lock hooks", () => {
-      const p = profileFor("O");
+      const p = profileFor("O")!;
       expect(p.resolution).toBe("singleton");
       expect(p.transportMode).toBe("persistent");
       expect(p.terminateAfter).toBe("external");
@@ -168,19 +169,74 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
 
     it("D profile is external (multi-step persistent)", () => {
-      const p = profileFor("D");
+      const p = profileFor("D")!;
       expect(p.terminateAfter).toBe("external");
       expect(p.transportMode).toBe("persistent");
     });
 
     it("S profile is call-terminate (deleted from Map after)", () => {
-      const p = profileFor("S");
+      const p = profileFor("S")!;
       expect(p.terminateAfter).toBe("call");
       expect(p.transportMode).toBe("oneshot");
     });
 
     it("T profile gets channel decorator", () => {
-      expect(profileFor("T").decorators.length).toBeGreaterThanOrEqual(2);
+      expect(profileFor("T")!.decorators.length).toBeGreaterThanOrEqual(2);
+    });
+
+    // #1327: profileFor is now type-safe — returns undefined for unknown types.
+    it("profileFor returns undefined for unknown SessionType (#1327)", () => {
+      expect(profileFor("bug" as any)).toBeUndefined();
+      expect(profileFor("Z" as any)).toBeUndefined();
+      expect(profileFor("" as any)).toBeUndefined();
+    });
+
+    it("isValidSessionType accepts every registered SessionType (#1327)", () => {
+      const valid = ["A", "B", "C", "T", "P", "S", "O", "W", "D", "H"];
+      for (const t of valid) {
+        expect(isValidSessionType(t)).toBe(true);
+      }
+    });
+
+    it("isValidSessionType rejects ticket categories and garbage (#1327)", () => {
+      expect(isValidSessionType("bug")).toBe(false);
+      expect(isValidSessionType("feature")).toBe(false);
+      expect(isValidSessionType("task")).toBe(false);
+      expect(isValidSessionType("")).toBe(false);
+      expect(isValidSessionType(undefined)).toBe(false);
+      expect(isValidSessionType(null)).toBe(false);
+      expect(isValidSessionType(42)).toBe(false);
+    });
+  });
+
+  // #1327: spin() with an unknown type used to throw TypeError on
+  // `profile.agent` and crash the bridge via unhandledRejection. Now it
+  // returns a sensible SpinResult with an error message and (if cardId is
+  // provided) marks the card failed.
+  describe("defensive guards (Layer A in spin) — #1327", () => {
+    it("spin with unknown type returns a fail-soft SpinResult (no crash, no unhandled rejection)", async () => {
+      spin.setRuntime(makeRuntime() as any);
+      const r = await spin.spin({ type: "bug" as any, prompt: "anything", await: true, userId: "aksika", platform: "telegram", source: "user" });
+      expect(r.sessionId).toBe("");
+      expect(r.result).toMatch(/\[SYSTEM BUG\] invalid type for Spin dispatch: "bug" is not a SessionType/);
+    });
+
+    it("spin with unknown type and a cardId marks the card failed in kanban", async () => {
+      spin.setRuntime(makeRuntime() as any);
+      // Enqueue a card with a bad type (the mock stores it with type="task" by default;
+      // we re-mutate to simulate the real-world "type=bug" card that was the trigger).
+      const cardId = kanbanEnqueue("stale card", "agent");
+      _cards.get(cardId)!.type = "bug";
+      const r = await spin.spin({ type: "bug" as any, goal: "stale", cardId, await: true });
+      expect(r.result).toMatch(/invalid type for Spin dispatch/);
+      expect(_cards.get(cardId)!.status).toBe("failed");
+    });
+
+    it("spin with valid type still works (regression guard)", async () => {
+      spin.setRuntime(makeRuntime() as any);
+      const r = await spin.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+      expect(r.sessionId).toBeTruthy();
+      expect(r.result).not.toMatch(/\[SYSTEM BUG\]/);
     });
   });
 

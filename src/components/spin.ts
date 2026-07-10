@@ -12,7 +12,7 @@ import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
 import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions } from "./spin-types.js";
 import { sessionType } from "./spin-types.js";
-import { profileFor, type SessionProfile } from "./spin-profiles.js";
+import { profileFor, isValidSessionType, type SessionProfile } from "./spin-profiles.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
 
@@ -339,6 +339,25 @@ export class Spin {
     if (!this.runtime) throw new Error("Spin: runtime not set");
     const profile = profileFor(spec.type);
 
+    // #1327: defensive against an unknown SessionType. A kanban card with
+    // type="bug" (a ticket category, not a SessionType) used to crash the
+    // bridge on `spec.agent ?? profile.agent` because profile was undefined
+    // — the unhandled rejection killed the process. Now: log + mark the
+    // card failed (if from kanban) + return a sensible empty result. The
+    // crash no longer reaches main.ts's unhandledRejection handler.
+    if (!profile) {
+      const note = `invalid type for Spin dispatch: "${spec.type}" is not a SessionType (#1327)`;
+      logWarn(TAG, `spin: no profile for type "${spec.type}" (cardId=${spec.cardId ?? "n/a"}, source=${spec.source ?? "n/a"}) — failing soft`);
+      if (spec.cardId !== undefined) {
+        try { kanbanFail(spec.cardId, note); } catch { /* best effort */ }
+      }
+      return {
+        sessionId: spec.sessionId ?? "",
+        cardId: spec.cardId,
+        result: `[SYSTEM BUG] ${note}`,
+      };
+    }
+
     // 1. Defaults
     const userId   = spec.userId ?? getMasterUserId();
     const platform = spec.platform ?? "background";
@@ -627,7 +646,18 @@ export class Spin {
       if ((card as any).next_retry_at && (card as any).next_retry_at > now) continue;
       // #677: respect DAG dependencies
       if (!isUnblocked(card)) continue;
-      const type = (card.type as SessionType) ?? "T";
+      // #1327: validate card.type is a real SessionType BEFORE dispatching.
+      // Without this, an unknown type (e.g. ticket category "bug") reaches
+      // spin() and crashes the bridge on profile.agent access. Fail the card
+      // with a clear note instead — Layer A in spin() is the second line of
+      // defense if this ever regresses.
+      const type = card.type as string;
+      if (!isValidSessionType(type)) {
+        const note = `invalid type for Spin dispatch: "${type}" is not a SessionType (#1327)`;
+        logWarn(TAG, `drainQueued: card ${card.id} has invalid type "${type}" — failing (Layer B)`);
+        kanbanFail(card.id, note);
+        continue;
+      }
       if (this.canDispatch(type, card.id)) {
         this.dispatch({ type, goal: card.title, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id });
       }

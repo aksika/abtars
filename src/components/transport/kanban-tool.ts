@@ -4,6 +4,7 @@
 
 import type { ToolDefinition } from "./tool-registry.js";
 import { kanbanEnqueue, kanbanUpdate, kanbanList, type KanbanCard } from "../tasks/kanban-board.js";
+import { isValidSessionType } from "../spin-profiles.js";
 
 function formatCard(c: KanbanCard): string {
   const icon = c.status === "delivered" ? "*" : c.status === "done" ? "*" : c.status === "running" ? "~" : c.status === "failed" ? "x" : "+";
@@ -20,6 +21,17 @@ async function execute(args: Record<string, string>): Promise<string> {
 
   if (action === "create") {
     if (!args.title) return "[err] title required";
+    // #1327: validate card.type at write time. kanban cards go into the
+    // "queued" status by default, and drainQueued() dispatches them via
+    // spin() using card.type as a SessionType. A ticket category like
+    // "bug" or "feature" would crash the bridge on profile.agent access.
+    // The schema documentation ("task, bug, feature, research, report,
+    // etc.") is misleading — those are NOT valid for dispatchable cards.
+    // Valid: any SessionType (A/B/C/T/P/S/O/W/D/H). Omit the field for
+    // non-dispatchable tickets (e.g. a human-readable note for later).
+    if (args.type && !isValidSessionType(args.type)) {
+      return `[err] invalid card.type "${args.type}" (#1327): must be a SessionType (A/B/C/T/P/S/O/W/D/H) for dispatchable work, or omit the field for non-dispatchable tickets. Ticket categories (task/bug/feature/...) are not valid SessionTypes.`;
+    }
     const id = kanbanEnqueue(args.title, args.source || "agent", undefined, {
       priority: args.priority,
       type: args.type,

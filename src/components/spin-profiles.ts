@@ -103,6 +103,21 @@ export const SESSION_PROFILES: Record<SessionType, SessionProfile> = {
   },
 };
 
-export function profileFor(type: SessionType): SessionProfile {
+/** #1327: defensive — the only valid SessionTypes are the keys of SESSION_PROFILES.
+ *  Used by drainQueued, the kanban_manage tool, and anywhere a runtime value
+ *  (card.type, query param) needs to be checked against the type system.
+ *  `card.type` is documented as "task, bug, feature, ..." in the kanban schema
+ *  (a ticket category) but is ALSO used as the SessionType for Spin dispatch
+ *  in drainQueued. This guard is the runtime boundary that keeps the two
+ *  semantics separate. */
+export function isValidSessionType(t: unknown): t is SessionType {
+  return typeof t === "string" && (SESSION_PROFILES as Record<string, unknown>)[t] !== undefined;
+}
+
+/** #1327: returns undefined for unknown types (was previously a silent
+ *  `Record<K,V>` access that returned undefined for any string, but the
+ *  TypeScript signature lied and callers didn't handle it). Now the return
+ *  type is explicit; spin() and drainQueued both check + handle undefined. */
+export function profileFor(type: SessionType): SessionProfile | undefined {
   return SESSION_PROFILES[type];
 }
