@@ -208,6 +208,88 @@ describe("TuiSocketAdapter — new-attach-wins", () => {
     // Cleanup
     second.conn.destroy();
   });
+
+  // ── #1334: decoder state must be per-connection ───────────────────
+  // Before the fix, the adapter held one frame decoder for its whole
+  // lifetime. Bytes A left buffered (e.g. a partial attach frame without
+  // a trailing newline) were concatenated with B's first frame, which
+  // produced malformed JSON that the decoder silently dropped — so B
+  // never received `ready`. After the fix, each connection owns its own
+  // decoder; A's leftovers can never contaminate B.
+  it("A's partial frame is NOT combined with B's first frame — B still receives `ready`", async () => {
+    // First conn: connect, write a half-attach frame (no trailing \n).
+    // The server's data handler reads it and the decoder buffers the
+    // remainder. Pre-fix, this remainder is the adapter's singleton
+    // decoder's state and will be combined with the next conn's bytes.
+    const first = await new Promise<{ conn: net.Socket; frames: TuiServerFrame[] }>((resolve, reject) => {
+      const frames: TuiServerFrame[] = [];
+      const dec = createFrameDecoder<TuiServerFrame>();
+      const c = net.createConnection(sockPath);
+      c.once("connect", () => {
+        // Build a half-attach frame: complete JSON, NO trailing \n.
+        const halfAttach = JSON.stringify({ t: "attach", mode: { kind: "resume" }, cols: 80, rows: 24 }).slice(0, 35);
+        c.write(halfAttach);
+        resolve({ conn: c, frames });
+      });
+      c.once("error", reject);
+      c.on("data", (buf: Buffer) => {
+        for (const f of dec(buf.toString())) frames.push(f);
+      });
+    });
+
+    // Give the server time to read & buffer A's partial.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Second conn: complete attach frame (with \n). Pre-fix the adapter's
+    // decoder has A's partial buffered; combining yields malformed JSON
+    // that the decoder drops, so B never gets `ready`.
+    const second = await attachAndCollect(sockPath, { kind: "resume" });
+    expect(second.frames.map((f) => f.t)).toContain("ready");
+
+    // A is superseded — should see the error and close.
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 500);
+      first.conn.once("close", () => { clearTimeout(timer); resolve(); });
+    });
+    expect(first.frames.filter((f) => f.t === "error").length).toBe(1);
+
+    second.conn.destroy();
+    first.conn.destroy();
+  });
+
+  // Identity guard: data arriving from a socket that has been replaced
+  // (new-attach-wins) must not act on the current connection. A late data
+  // event from a destroyed conn can be triggered by the OS delivering a
+  // final read after close, so we exercise the path with a still-alive
+  // conn that is no longer `this.conn` (its close was already handled).
+  it("a superseded conn's late close does not clear the current conn's state", async () => {
+    const first = await attachAndCollect(sockPath, { kind: "resume" });
+    expect(first.frames.map((f) => f.t)).toContain("ready");
+
+    // A second client attaches — evicts the first.
+    const second = await attachAndCollect(sockPath, { kind: "resume" });
+    expect(second.frames.map((f) => f.t)).toContain("ready");
+
+    // Wait for A's close to fully land on the server side.
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 500);
+      first.conn.once("close", () => { clearTimeout(timer); resolve(); });
+    });
+
+    // A's close handler ran while B was current. Verify B is still
+    // attached and can still receive server-pushed frames.
+    expect(adapter.hasClient).toBe(true);
+    await expect(adapter.sendMessage("tui:local", "still here")).resolves.toBeUndefined();
+    // The push should have reached B.
+    await new Promise((r) => setTimeout(r, 30));
+    const msgFrame = second.frames.find((f) => f.t === "message");
+    expect(msgFrame).toBeDefined();
+    if (msgFrame && msgFrame.t === "message") {
+      expect(msgFrame.markdown).toBe("still here");
+    }
+
+    second.conn.destroy();
+  });
 });
 
 // ── Attach selector resolution + type gating (Task 4) ────────────────

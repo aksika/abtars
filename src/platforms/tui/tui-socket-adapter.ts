@@ -75,7 +75,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private mode: "pipeline" | "orc" = "pipeline";
   private deps: TuiAdapterDeps;
   private readonly socketPath: string;
-  private readonly decoder = createFrameDecoder<TuiClientFrame>();
   /** True between `start()` and `stop()` — guards re-entrant close. */
   private started = false;
 
@@ -159,6 +158,14 @@ export class TuiSocketAdapter implements PlatformAdapter {
   // ── Connection handling ──────────────────────────────────────────────
 
   private _onConnection(conn: net.Socket): void {
+    // #1334: one decoder per connection. A stateful frame decoder buffers
+    // a trailing partial JSONL line. Adapter-scoped, that buffer was
+    // shared across every connection's bytes — so when new-attach-wins
+    // evicted the old client, the old client's leftover bytes combined
+    // with the new client's first frame and dropped it (malformed JSON).
+    // Per-connection, the buffer dies with its socket.
+    const decode = createFrameDecoder<TuiClientFrame>();
+
     // New-attach-wins: send a "superseded" error to the existing client and
     // destroy it. We write directly to `old` — not via this._push, which now
     // targets the new conn. The evicted client sees post-`ready` error →
@@ -177,7 +184,13 @@ export class TuiSocketAdapter implements PlatformAdapter {
     }
 
     conn.on("data", (buf: Buffer) => {
-      const frames = this.decoder(buf.toString());
+      // Identity guard: a superseded socket may still deliver a final
+      // data event after new-attach-wins replaced `this.conn`. Drop any
+      // bytes that don't belong to the current connection so a late
+      // complete frame from the evicted client cannot act on the new
+      // attachment.
+      if (this.conn !== conn) return;
+      const frames = decode(buf.toString());
       for (const f of frames) {
         if (isClientFrame(f)) {
           // Best-effort: handler errors are logged via logAndSwallow where
