@@ -1,28 +1,85 @@
 ---
 name: model-scout
-description: Find the best free cloud models and propose top 3 candidates
+description: Find the best free cloud models and update models.json from OpenRouter leaderboard
 user-invocable: true
 ---
 
 # Model Scout
 
-Find the best free cloud models and propose the top 3 candidates.
+Scout OpenRouter models — free tier, leaderboard top N, single model inspection.
 
-## When to use
-User asks about model recommendations, best deals, or you need to evaluate if a better model is available.
+## Scripts
 
-## Config files
+- `scout-openrouter.py` — free model scan, single model inspection, leaderboard fetch
+- `scout-leaderboard.py` — dedicated leaderboard fetcher (top N by popularity)
+- `scout-ollama.py` — Ollama cloud models
+- `scout-add-model.py` — manual model addition
 
-- **models.json** — `~/.abtars/config/models.json` (hot-reloaded)
-- **transport.json** — `~/.abtars/config/transport.json` (lists providers, defaults, fallbackChain)
+## Usage
 
-## transport.json provider fields (relevant to scouting)
+### 1. Scan free models (original behavior)
 
-Each provider in `transport.json` may have:
-- **`defaults`** — `Record<agent, { model, fallbacks? }>` — preset models loaded on `/model change → provider`. Professor is required; missing subagents inherit professor's model.
-- **`fallbackChain`** — `string[]` — ordered list of always-available models tried when the configured model fails. Used by subagent runtime (not professor).
+```bash
+# List free models vs catalog
+python3 {baseDir}/scout-openrouter.py
 
-When proposing new models, consider whether they should be added to a provider's `defaults` or `fallbackChain`.
+# List + liveness test + write status to models.json
+python3 {baseDir}/scout-openrouter.py --test
+```
+
+### 2. Fetch leaderboard top N and add to models.json
+
+```bash
+# Print top 20 (no changes)
+python3 {baseDir}/scout-leaderboard.py 20
+
+# Add/update top 20 in models.json (no liveness test)
+python3 {baseDir}/scout-leaderboard.py 20 --update
+
+# Test each model + update
+python3 {baseDir}/scout-leaderboard.py 20 --test
+```
+
+Also available via `scout-openrouter.py`:
+```bash
+python3 {baseDir}/scout-openrouter.py --leaderboard 20
+```
+
+### 3. Inspect + test a single model
+
+```bash
+python3 {baseDir}/scout-openrouter.py --model tencent/hy3:free
+```
+
+This fetches model metadata from `/api/v1/models/{id}` and provider endpoints from `/api/v1/models/{id}/endpoints`, tests liveness, and updates models.json.
+
+### 4. Ollama cloud models
+
+```bash
+python3 {baseDir}/scout-ollama.py
+```
+
+## What the scripts store
+
+Each model entry in `models.json` gets:
+- `contextWindow`, `maxOutput` — from API `context_length` and `top_provider.max_completion_tokens`
+- `rank` — 1 (≥500K ctx), 2 (≥200K), 3 (smaller)
+- `cost` — per token, raw OpenRouter pricing (from `pricing.prompt` / `pricing.completion`). Accurate for calculations; picker display converts to $/1M via the `display` field derived in transport-config.ts.
+- `transports` — `["openrouter"]`
+- `status` — `"alive"` or `"dead"` (from liveness test)
+- `providers` — dict of provider_name → `{status, uptime_30m, latency_p50, throughput_p50, quant, max_completion_tokens}`
+- `validatedAt` — ISO date
+
+## OpenRouter API sort options
+
+Pass `?sort=` to `/api/v1/models`:
+- `most-popular` — default leaderboard order (usage-based)
+- `top-weekly` — weekly usage
+- `intelligence-high-to-low` — benchmark scores
+- `pricing-low-to-high` — cheapest first
+- `context-high-to-low` — largest context first
+- `throughput-high-to-low` — fastest first
+- `latency-low-to-high` — lowest latency first
 
 ## models.json schema
 
@@ -33,106 +90,34 @@ When proposing new models, consider whether they should be added to a provider's
     "maxOutput": 16384,
     "rank": 2,
     "cost": { "input": 0.0, "output": 0.0 },
-    "transports": ["ollama", "openrouter"],
-    "description": "High IQ free model, top Intelligence Index score",
-    "validatedAt": "2026-04-13"
+    "transports": ["openrouter"],
+    "description": "Why this model was added",
+    "validatedAt": "2026-07-10",
+    "status": "alive",
+    "providers": {
+      "Novita": {
+        "status": 0,
+        "uptime_30m": 99.91,
+        "latency_p50": 2756,
+        "throughput_p50": 44,
+        "quant": "unknown",
+        "max_completion_tokens": 262144
+      }
+    }
   }
 }
 ```
 
-- **rank**: 1 = frontier, 2 = strong, 3 = good, 4 = basic, 5 = minimal
-- **cost**: per million tokens in USD. `0.0` = free
-- **transports**: provider names from transport.json that can serve this model
-- **description**: why this model was added (scout writes this)
-- **validatedAt**: date when last verified alive (auto-set by script)
-
-## Scouting workflow
-
-### 1. Scan available free models
-
-```bash
-# OpenRouter free tier
-python3 {baseDir}/scout-openrouter.py
-
-# Ollama cloud models (no local, cloud only)
-python3 {baseDir}/scout-ollama.py
-```
-
-### 2. Research quality
-
-Browse leaderboards to get Intelligence Index scores:
-```bash
-abtars-browser --action navigate --url "https://artificialanalysis.ai/leaderboards/models"
-abtars-browser --action extract_text --max-chars 5000
-```
-
-Search for new cloud models on Ollama:
-```bash
-abtars-browser --action navigate --url "https://ollama.com/search?q=cloud"
-abtars-browser --action extract_text --max-chars 5000
-```
-
-### 3. Propose top 3
-
-After scanning and researching, propose exactly 3 candidates ranked by:
-
-1. **Intelligence Index** (higher = better) → determines rank
-2. **Context window** (bigger = fewer compactions)
-3. **Tool calling** (required — model must support function calling)
-4. **Throughput** (tokens/sec, matters for interactive use)
-
-Format:
-```
-🏆 Top 3 free cloud models:
-
-1. model-name (provider) — Intelligence: XX, Context: XXK
-   Why: [one sentence reason]
-
-2. model-name (provider) — Intelligence: XX, Context: XXK
-   Why: [one sentence reason]
-
-3. model-name (provider) — Intelligence: XX, Context: XXK
-   Why: [one sentence reason]
-```
-
-### 4. Add approved models
-
-After user approves, add with description explaining why:
-
-```bash
-python3 {baseDir}/scout-add-model.py \
-  "model-id" contextWindow maxOutput rank input_cost output_cost \
-  "Why this model: Intelligence XX, free, large context" \
-  ollama openrouter
-```
-
-The script automatically:
-- Backs up models.json to `.old`
-- Sets `validatedAt` to today's date
-- Validates all entries after write
-- Restores from backup if validation fails
-
-### 5. Test
-
-```
-/model change → pick provider → verify defaults loaded
-/model (check fallback chain displayed)
-```
-
 ## Liveness test
 
-Before proposing, verify the model actually responds:
-
 ```bash
-# Ollama cloud
-curl -s http://localhost:11434/v1/chat/completions -d '{
-  "model": "model-name",
-  "messages": [{"role":"user","content":"Say hi"}],
-  "max_tokens": 5
-}'
-
-# OpenRouter
 curl -s https://openrouter.ai/api/v1/chat/completions \
   -H "Authorization: Bearer $OPENROUTER_API_KEY" \
-  -d '{"model":"model-id","messages":[{"role":"user","content":"Say hi"}],"max_tokens":5}'
+  -H "Content-Type: application/json" \
+  -d '{"model":"model-id","messages":[{"role":"user","content":"Say OK"}],"max_tokens":50}'
 ```
+
+## Config files
+
+- **models.json** — `~/.abtars/config/models.json` (hot-reloaded)
+- **transport.json** — `~/.abtars/config/transport.json`
