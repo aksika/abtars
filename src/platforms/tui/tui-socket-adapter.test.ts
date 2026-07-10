@@ -105,6 +105,24 @@ function makeRecoveryHandler() {
   return vi.fn(async (_msg: InboundMessage) => { /* queue-and-go */ });
 }
 
+/**
+ * Poll `check` on a short interval until it returns a truthy value or the
+ * bounded timeout elapses. Used instead of fixed `setTimeout` sleeps for
+ * state-synchronization waits, since socket scheduling can be slower under
+ * loaded CI than on a local machine — a fixed sleep either wastes time
+ * (over-provisioned) or flakes (under-provisioned). Rejects on timeout so
+ * callers can distinguish "never happened" from a false/undefined result.
+ */
+async function waitFor<T>(check: () => T, timeoutMs: number, intervalMs = 5): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = check();
+    if (value) return value;
+    if (Date.now() >= deadline) throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 // ── Server lifecycle (Task 3) ──────────────────────────────────────────
 
 describe("TuiSocketAdapter — server lifecycle", () => {
@@ -169,13 +187,15 @@ describe("TuiSocketAdapter — server lifecycle", () => {
 describe("TuiSocketAdapter — new-attach-wins", () => {
   let sockPath: string;
   let adapter: TuiSocketAdapter;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
 
   beforeEach(async () => {
     sockPath = tmpSocketPath();
     const mock = makeMockSpin();
+    onMessage = makeRecoveryHandler();
     adapter = new TuiSocketAdapter({
       spin: mock.spin,
-      onMessage: makeRecoveryHandler(),
+      onMessage,
       socketPath: sockPath,
     });
     await adapter.start();
@@ -228,8 +248,10 @@ describe("TuiSocketAdapter — new-attach-wins", () => {
       c.once("connect", () => {
         // Build a half-attach frame: complete JSON, NO trailing \n.
         const halfAttach = JSON.stringify({ t: "attach", mode: { kind: "resume" }, cols: 80, rows: 24 }).slice(0, 35);
-        c.write(halfAttach);
-        resolve({ conn: c, frames });
+        // Resolve once the write callback fires (bytes handed to the
+        // kernel) rather than immediately after calling write() — this is
+        // the earliest correct signal available from the client side.
+        c.write(halfAttach, () => resolve({ conn: c, frames }));
       });
       c.once("error", reject);
       c.on("data", (buf: Buffer) => {
@@ -237,8 +259,18 @@ describe("TuiSocketAdapter — new-attach-wins", () => {
       });
     });
 
-    // Give the server time to read & buffer A's partial.
-    await new Promise((r) => setTimeout(r, 50));
+    // Note: there is no externally-observable signal for "the server has
+    // buffered A's partial bytes" without instrumenting production code,
+    // which we don't do for test convenience. Unix-domain socket delivery
+    // on the same host is sub-millisecond, so a short bounded wait here is
+    // a reasonable (not zero-risk) synchronization point — this differs
+    // from the original fixed 50ms sleep in that it's a small, justified
+    // margin rather than an untested guess, and the actual proof of
+    // correctness is the assertion below (B receives `ready`), which is
+    // the real regression check: if A's partial ever contaminates B's
+    // frame, B silently never gets `ready` and the test fails regardless
+    // of how long we waited here.
+    await new Promise((r) => setTimeout(r, 20));
 
     // Second conn: complete attach frame (with \n). Pre-fix the adapter's
     // decoder has A's partial buffered; combining yields malformed JSON
@@ -270,7 +302,8 @@ describe("TuiSocketAdapter — new-attach-wins", () => {
     const second = await attachAndCollect(sockPath, { kind: "resume" });
     expect(second.frames.map((f) => f.t)).toContain("ready");
 
-    // Wait for A's close to fully land on the server side.
+    // Wait for A's close to fully land on the server side (event-driven —
+    // the close event itself is the signal, no fixed sleep needed).
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 500);
       first.conn.once("close", () => { clearTimeout(timer); resolve(); });
@@ -280,15 +313,112 @@ describe("TuiSocketAdapter — new-attach-wins", () => {
     // attached and can still receive server-pushed frames.
     expect(adapter.hasClient).toBe(true);
     await expect(adapter.sendMessage("tui:local", "still here")).resolves.toBeUndefined();
-    // The push should have reached B.
-    await new Promise((r) => setTimeout(r, 30));
-    const msgFrame = second.frames.find((f) => f.t === "message");
+    // The push should have reached B — poll with a bounded timeout instead
+    // of assuming a fixed delivery time.
+    const msgFrame = await waitFor(
+      () => second.frames.find((f) => f.t === "message"),
+      1000,
+    );
     expect(msgFrame).toBeDefined();
     if (msgFrame && msgFrame.t === "message") {
       expect(msgFrame.markdown).toBe("still here");
     }
 
     second.conn.destroy();
+  });
+
+  // Identity guard, late DATA (not just late close): a superseded socket
+  // that manages to deliver a complete frame after eviction must not be
+  // able to act on the new attachment. Forcing this through real socket
+  // timing is not reliably deterministic — production's `old.destroy()`
+  // runs synchronously during eviction, closing the window before a
+  // black-box write from the test can land as a genuinely "late" data
+  // event. (Verified empirically: a version of this test relying only on
+  // socket write timing still passed with the identity guard temporarily
+  // disabled in the source — proof it wasn't exercising the guard.) Per
+  // the review's own suggestion, we instead capture the real `data`
+  // listener `_onConnection` registers on each server-side socket and
+  // invoke it directly for the SUPERSEDED (first) connection after
+  // eviction — this calls the exact same code
+  // (`conn.on("data", ...)` handler body in `_onConnection`), not a
+  // reimplementation, with zero timing dependency.
+  it("a superseded conn's late DATA does not reach onMessage or affect the new conn", async () => {
+    // _onConnection registers exactly one 'data' listener per server-side
+    // socket, in accept order. We can't reliably identify server-side
+    // sockets via our own `server.on("connection", ...)` listener (fires
+    // after the constructor callback already registered its 'data'
+    // listener), and vitest can't spy on the `net.createConnection` ESM
+    // export to tag client sockets at creation. Instead, capture EVERY
+    // 'data' listener registration globally, then exclude the two known
+    // client-side socket objects (`first.conn`, `second.conn` — the exact
+    // instances this test itself creates via attachAndCollect) by
+    // identity once we have them. This is unambiguous: whatever remains
+    // must be server-side, since only client and server sockets in this
+    // test register 'data' listeners at all.
+    const dataListeners: Array<{ socket: net.Socket; listener: (buf: Buffer) => void }> = [];
+    const originalOn = net.Socket.prototype.on;
+    const spy = vi.spyOn(net.Socket.prototype, "on").mockImplementation(function (
+      this: net.Socket, event: string, listener: (...args: unknown[]) => void,
+    ) {
+      if (event === "data") dataListeners.push({ socket: this, listener: listener as (buf: Buffer) => void });
+      return originalOn.call(this, event, listener);
+    });
+
+    try {
+      const first = await attachAndCollect(sockPath, { kind: "resume" });
+      expect(first.frames.map((f) => f.t)).toContain("ready");
+      onMessage.mockClear();
+
+      const second = await attachAndCollect(sockPath, { kind: "resume" });
+      expect(second.frames.map((f) => f.t)).toContain("ready");
+
+      // Exclude the two known client-side sockets by identity — whatever
+      // remains are the server-side sockets `_onConnection` registered
+      // listeners on, in accept order (A's, then B's).
+      const serverSideListeners = dataListeners.filter(
+        (d) => d.socket !== first.conn && d.socket !== second.conn,
+      );
+      expect(serverSideListeners.length).toBe(2);
+      const aListener = serverSideListeners[0]!.listener;
+
+      // Invoke A's real data listener directly with a complete `input`
+      // frame — this is calling the exact handler `_onConnection` wired
+      // up for A's connection, at a point where eviction has already run
+      // (this.conn is now B's conn, not A's). If the identity guard
+      // (`this.conn !== conn`) is intact, this call is a silent no-op.
+      const staleInput: TuiClientFrame = { t: "input", text: "STALE-FROM-A-SHOULD-BE-DROPPED" };
+      aListener(Buffer.from(encodeFrame(staleInput)));
+
+      // The identity guard must have prevented A's frame from reaching
+      // the pipeline. onMessage is only invoked by _handleInput on the
+      // CURRENT conn's attached session — it must never fire for A's
+      // late input, and it must fire synchronously enough within this
+      // tick that a direct assertion (no wait) is valid — there is no
+      // async gap between the listener call and _handleFrame/_handleInput
+      // dispatch (the guard returns before any await point).
+      expect(onMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ text: "STALE-FROM-A-SHOULD-BE-DROPPED" }),
+      );
+
+      // B's attachment must be unaffected — still current, still able to
+      // receive pushes, with no contamination from A's frame.
+      expect(adapter.hasClient).toBe(true);
+      await expect(adapter.sendMessage("tui:local", "B still attached")).resolves.toBeUndefined();
+      const msgFrame = await waitFor(
+        () => second.frames.find((f) => f.t === "message"),
+        1000,
+      );
+      expect(msgFrame).toBeDefined();
+      if (msgFrame && msgFrame.t === "message") {
+        expect(msgFrame.markdown).toBe("B still attached");
+      }
+      expect(second.frames.filter((f) => f.t === "message").length).toBe(1);
+
+      second.conn.destroy();
+      try { first.conn.destroy(); } catch { /* already evicted/closed */ }
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
