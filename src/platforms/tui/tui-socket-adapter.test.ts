@@ -48,7 +48,8 @@ function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActive
   // The orc ManagedSession is what listAllSessions().find(...) returns and
   // what carries the busy flag.
   const orcManagedEntry: ManagedSession | undefined = opts.orcSession
-    ? ({ id: opts.orcSession.id, busy: opts.orcBusy ?? false } as unknown as ManagedSession)
+    ? ({ id: opts.orcSession.id, busy: opts.orcBusy ?? false,
+        instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined } as unknown as ManagedSession)
     : undefined;
   const spin: Partial<Spin> = {
     getActiveSessionId: vi.fn((userId: string, platform: string) => {
@@ -66,7 +67,7 @@ function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActive
     getOrcSession: vi.fn(() => opts.orcSession ?? null),
     getSessionById: vi.fn((id: string) => {
       if (!opts.orcSession || id !== opts.orcSession.id) return undefined;
-      return { id, busy: opts.orcBusy ?? false } as unknown as ManagedSession;
+      return { id, busy: opts.orcBusy ?? false, instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined } as unknown as ManagedSession;
     }),
     listAllSessions: vi.fn(() => orcManagedEntry ? [orcManagedEntry] : []),
     spin: vi.fn(async (spec: unknown) => {
@@ -634,6 +635,122 @@ describe("TuiSocketAdapter — orc mode", () => {
       expect(assistantMsg.markdown).toBe("yes, alive");
     }
     expect(onMessage).not.toHaveBeenCalled();
+
+    conn.destroy(); adapter.stop();
+  });
+});
+
+// ── #1332: steering in orc mode ──────────────────────────────────────
+
+describe("TuiSocketAdapter — steer mode", () => {
+  let sockPath: string;
+  let mock: ReturnType<typeof makeMockSpin>;
+  let onMessage: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    sockPath = tmpSocketPath();
+    onMessage = makeRecoveryHandler();
+  });
+
+  it("steer client frame on busy Orc queues the instruction and returns steer-ack queued", async () => {
+    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    mock = makeMockSpin({ orcSession: orc, orcBusy: true });
+    const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    expect(frames.find((f) => f.t === "ready")).toBeDefined();
+
+    conn.write(encodeFrame({ t: "steer", sessionId: "1749563282_O_01", instructionId: "cid1", text: "focus on memory" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const ack = frames.find((f) => f.t === "steer-ack");
+    expect(ack).toBeDefined();
+    if (ack && ack.t === "steer-ack") {
+      expect(ack.status).toBe("queued");
+      expect(ack.message).toMatch(/queued/i);
+    }
+    expect(onMessage).not.toHaveBeenCalled();
+
+    conn.destroy(); adapter.stop();
+  });
+
+  it("steer client frame on pipeline mode returns rejected steer-ack", async () => {
+    mock = makeMockSpin();
+    const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    expect(frames.find((f) => f.t === "ready")).toBeDefined();
+
+    conn.write(encodeFrame({ t: "steer", sessionId: "", instructionId: "cid2", text: "focus" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const ack = frames.find((f) => f.t === "steer-ack");
+    expect(ack).toBeDefined();
+    if (ack && ack.t === "steer-ack") {
+      expect(ack.status).toBe("rejected");
+    }
+
+    conn.destroy(); adapter.stop();
+  });
+
+  it("/steer prefix in plain input on busy Orc queues the instruction", async () => {
+    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    mock = makeMockSpin({ orcSession: orc, orcBusy: true });
+    const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    expect(frames.find((f) => f.t === "ready")).toBeDefined();
+
+    conn.write(encodeFrame({ t: "input", text: "/steer focus on memory" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const ack = frames.find((f) => f.t === "steer-ack");
+    expect(ack).toBeDefined();
+    if (ack && ack.t === "steer-ack") {
+      expect(ack.status).toBe("queued");
+    }
+    expect(mock.calls.spin).toEqual([]);
+    expect(onMessage).not.toHaveBeenCalled();
+
+    conn.destroy(); adapter.stop();
+  });
+
+  it("plain text on idle Orc still routes through spin (no steer)", async () => {
+    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    mock = makeMockSpin({
+      orcSession: orc, orcBusy: false,
+      spinResult: { sessionId: "1749563282_O_01", cardId: 1, result: "ok" },
+    });
+    const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    expect(frames.find((f) => f.t === "ready")).toBeDefined();
+
+    conn.write(encodeFrame({ t: "input", text: "hello?" }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(mock.calls.spin.length).toBe(1);
+    expect(onMessage).not.toHaveBeenCalled();
+
+    conn.destroy(); adapter.stop();
+  });
+
+  it("steer on non-busy Orc returns rejected steer-ack", async () => {
+    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    mock = makeMockSpin({ orcSession: orc, orcBusy: false });
+    const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+
+    conn.write(encodeFrame({ t: "steer", sessionId: "1749563282_O_01", instructionId: "cid3", text: "focus" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const ack = frames.find((f) => f.t === "steer-ack");
+    expect(ack).toBeDefined();
+    if (ack && ack.t === "steer-ack") {
+      expect(ack.status).toBe("rejected");
+      expect(ack.message).toMatch(/not busy/i);
+    }
 
     conn.destroy(); adapter.stop();
   });

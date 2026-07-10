@@ -10,6 +10,31 @@ import { logError } from "./logger.js";
 
 export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H";
 
+export interface QueuedSessionInstruction {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly source: "tui" | "platform" | "system";
+  readonly text: string;
+  readonly createdAt: number;
+}
+
+export type QueueInstructionResult =
+  | { ok: true; instruction: QueuedSessionInstruction }
+  | { ok: false; reason: "not_found" | "not_orc" | "not_busy" |
+      "stale_execution" | "too_large" | "queue_full" };
+
+export type SteerEventType = "steer.queued" | "steer.consumed" | "steer.rejected" | "steer.expired" | "steer.failed";
+
+export interface SteerEvent {
+  type: SteerEventType;
+  instructionIds: string[];
+  sessionId: string;
+  executionId: string;
+  timestamp: number;
+  description: string;
+}
+
 export interface ManagedSession {
   id: string;                    // "1749563282_A_01"
   userId: string;
@@ -68,6 +93,10 @@ export interface ManagedSession {
   // `SpinSessionSpec.metadata`; never merged on `sessionId` reuse. Use
   // `onStepComplete`'s event for per-step data.
   metadata?: Record<string, unknown>;
+
+  // #1332: Cooperative steering queue for busy Orc session
+  instructionQueue: QueuedSessionInstruction[];
+  activeExecutionId?: string;
 }
 
 export interface SpinRequest {

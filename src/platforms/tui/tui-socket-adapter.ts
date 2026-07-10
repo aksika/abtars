@@ -35,6 +35,7 @@ import type { Spin } from "../../components/spin.js";
 import type { SessionType } from "../../components/spin-types.js";
 import { typeLabel, sessionTypeOf } from "../../components/spin-types.js";
 import { getMasterUserId } from "../../components/master-user.js";
+import { queueInstruction, onSteerEvent } from "../../components/session-instruction-queue.js";
 import {
   encodeFrame,
   createFrameDecoder,
@@ -81,6 +82,18 @@ export class TuiSocketAdapter implements PlatformAdapter {
   constructor(deps: TuiAdapterDeps) {
     this.deps = deps;
     this.socketPath = deps.socketPath ?? join(abtarsHome(), "tui.sock");
+    // #1332: Subscribe to async steer lifecycle events to push ack frames
+    onSteerEvent((event) => {
+      const status = event.type === "steer.queued" ? "queued" as const
+        : event.type === "steer.consumed" ? "consumed" as const
+        : event.type === "steer.rejected" ? "rejected" as const
+        : event.type === "steer.expired" ? "expired" as const
+        : event.type === "steer.failed" ? "failed" as const
+        : null;
+      if (!status || status === "queued") return;
+      const id = event.instructionIds[0] ?? "";
+      this._push({ t: "steer-ack", status, instructionId: id, message: event.description });
+    });
   }
 
   /** Late-bind: replace onMessage callback after construction. Mirrors IrcAdapter. */
@@ -222,6 +235,9 @@ export class TuiSocketAdapter implements PlatformAdapter {
         // re-render could be wired here. For now, the terminal client
         // handles its own redraw on SIGWINCH.
         return;
+      case "steer":
+        await this._handleSteer(frame);
+        return;
     }
   }
 
@@ -286,18 +302,19 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
   private async _handleInput(text: string): Promise<void> {
     if (!this.attachedSessionId) {
-      // No attach yet — input is a no-op. (The client shouldn't send input
-      // before receiving ready. A post-ready re-attach that races a still-
-      // open conn could land here; the close handler will clear it.)
       return;
     }
     if (this.mode === "orc") {
+      if (text.startsWith("/steer ")) {
+        const body = text.slice("/steer ".length).trim();
+        if (body) {
+          await this._queueAndAck(body);
+          return;
+        }
+      }
       await this._routeToOrc(text);
       return;
     }
-    // Pipeline mode: synthesize an InboundMessage and hand to the standard
-    // pipeline. handleInboundMessage resolves the active (master,"tui")
-    // session (which attach just set) and runs the full path.
     const master = getMasterUserId();
     const msg: InboundMessage = {
       platform: "tui",
@@ -313,11 +330,45 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this.deps.onMessage(msg);
   }
 
+  /** #1332: Handle an explicit steer client frame. Validates and queues. */
+  private async _handleSteer(frame: TuiClientFrame & { t: "steer" }): Promise<void> {
+    if (!this.attachedSessionId) return;
+    if (this.mode !== "orc") {
+      this._push({ t: "steer-ack", status: "rejected", instructionId: frame.instructionId, message: "Steer is only available in Orc mode." });
+      return;
+    }
+    await this._queueAndAck(frame.text);
+  }
+
+  /** #1332: Queue a steering instruction and push the acknowledgement frame. */
+  private async _queueAndAck(text: string): Promise<void> {
+    const spin = this.deps.spin;
+    if (!this.attachedSessionId) return;
+
+    const session = spin.getSessionById(this.attachedSessionId);
+    if (!session) {
+      this._push({ t: "steer-ack", status: "rejected", instructionId: "", message: "Session not found." });
+      return;
+    }
+
+    const result = queueInstruction(session, { text, source: "tui" });
+    if (result.ok) {
+      this._push({ t: "steer-ack", status: "queued", instructionId: result.instruction.id, message: "Steering queued." });
+    } else {
+      const reasonMap: Record<string, string> = {
+        not_found: "Session not found.",
+        not_orc: "Steering is only available for the Orc session.",
+        not_busy: "Orc is not busy — use plain text to send a query.",
+        stale_execution: "Orc execution has changed — steering rejected.",
+        too_large: "Steering text too large (max 4 KiB).",
+        queue_full: "Steering queue is full (max 20 items or 32 KiB).",
+      };
+      this._push({ t: "steer-ack", status: "rejected", instructionId: "", message: reasonMap[result.reason] ?? "Steering rejected." });
+    }
+  }
+
   private async _routeToOrc(text: string): Promise<void> {
     const spin = this.deps.spin;
-    // getOrcSession() returns null when Orc is absent OR not isReady
-    // (warming/paused). We surface a distinct "not available" message
-    // rather than the busy message.
     if (!spin.getOrcSession()) {
       return void this._push({
         t: "message",
@@ -325,17 +376,15 @@ export class TuiSocketAdapter implements PlatformAdapter {
         markdown: "Orc is not available (not running or still warming up).",
       });
     }
-    // Busy-guard: read the REAL per-session flag — ManagedSession.busy
-    // (spin-types.ts:53), set true at message-pipeline.ts:222, cleared at
-    // :93. Do NOT interrupt.
     const orcEntry = spin.listAllSessions().find(
       s => s.id.includes("_O_") && s.status !== "ended",
     );
+    // #1332: When busy, suggest /steer instead of rejecting
     if (orcEntry?.busy) {
       return void this._push({
         t: "message",
         role: "system",
-        markdown: "Orc is busy — try again when idle. (Live steering: #1319.)",
+        markdown: `Orc is busy — use /steer <text> to queue a steering instruction, or wait until idle.\n\nExisting steering: try \`/steer ${text.slice(0, 80)}\` to queue this as a steering instruction.`,
       });
     }
     if (!orcEntry) {

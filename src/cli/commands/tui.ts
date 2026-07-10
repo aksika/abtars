@@ -318,10 +318,15 @@ export async function tui(args: string[]): Promise<number> {
   editor.onSubmit = (text: string) => {
     if (!ready) return;        // can't send before attach accepted
     if (text.length === 0) return;
-    // Mirror the user's input into the log so the line stays visible after
-    // the editor clears on submit. In a "normal terminal" the user's own
-    // message is part of the conversation history, not just an input box.
     appendMessage("user", text);
+    // #1332: Detect /steer prefix and send a steer frame in orc mode
+    if (text.startsWith("/steer ") && mode.kind === "orc") {
+      const body = text.slice("/steer ".length).trim();
+      if (body) {
+        conn.write(encodeFrame({ t: "steer", sessionId: "", instructionId: `client_${Date.now()}`, text: body }));
+        return;
+      }
+    }
     conn.write(encodeFrame({ t: "input", text }));
   };
 
@@ -332,11 +337,9 @@ export async function tui(args: string[]): Promise<number> {
         return;
       case "error":
         if (!ready) {
-          // Pre-`ready` error: attach failed. Fatal — exit 1.
           stderr(`Attach failed: ${frame.message}`);
           stop(1);
         } else {
-          // Post-`ready` error: a new-attach-wins eviction. Clean detach, exit 0.
           stop(0);
         }
         return;
@@ -345,10 +348,13 @@ export async function tui(args: string[]): Promise<number> {
         return;
       case "chunk":
       case "chunk-end":
-        // RESERVED — see "Streaming (v1)" in design.md. Never emitted in v1.
         return;
       case "typing":
-        // Reserved for v1+ — render a transient indicator. For now, ignore.
+        return;
+      case "steer-ack":
+        // #1332: Render steer acknowledgement in the message log
+        const label = frame.status === "queued" ? "Steer queued" : `Steer ${frame.status}`;
+        appendMessage("system", `${label}: ${frame.message}`);
         return;
     }
   }

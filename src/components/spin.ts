@@ -10,11 +10,12 @@ import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
-import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions } from "./spin-types.js";
+import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, QueuedSessionInstruction } from "./spin-types.js";
 import { sessionType } from "./spin-types.js";
 import { profileFor, isValidSessionType, type SessionProfile } from "./spin-profiles.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
+import { drainInstructionBatch, expireInstructions } from "./session-instruction-queue.js";
 
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
@@ -26,6 +27,8 @@ const GUEST_SESSION_IDLE_MS = parseInt(process.env["GUEST_SESSION_IDLE_MS"] ?? "
 const MAX_TOTAL_SESSIONS = parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10);
 const SESSION_CREATE_TIMEOUT_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 30 * 60_000;
+
+const MAX_STEER_ROUNDS = 10;
 
 const MAX_CONCURRENT: Partial<Record<SessionType, number>> = {
   T: 1, O: 1, B: 1, D: 1, H: 1, W: 3,
@@ -385,6 +388,9 @@ export class Spin {
     }
     const stepIndex = (session.messageCount >> 1) + 1;
 
+    // #1332: Assign execution generation for steering continuity
+    session.activeExecutionId = `${session.id}_${stepIndex}_${Date.now()}`;
+
     // 3. Kanban card (user-facing work only)
     let cardId = spec.cardId;
     if (cardId === undefined && spec.goal !== undefined) {
@@ -432,21 +438,28 @@ export class Spin {
       //    #1329: thread the just-persisted raw user message ID through as the
       //    beforeMessageId cursor so DirectApiTransport can bound its DB-backed
       //    context assembly to history only.
-      const exec = sessionTransport
-        ? sessionTransport.sendPrompt(
-            session.id,
-            prompt,
-            spec.imageContent as { mime: string; base64: string } | undefined,
-            { userId: spec.userId ?? userId, beforeMessageId: spec.currentMessageId },
-          )
-        : this.runtime.complete(agent, prompt, { timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds });
+      //    #1332: wrap with steering continuation loop for persistent sessions.
+      const promptContext = { userId: spec.userId ?? userId, beforeMessageId: spec.currentMessageId };
+      const executeWithSteering = async (): Promise<string> => {
+        if (!sessionTransport) {
+          return (await this.runtime!.complete(agent, prompt, { timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds })) || "(no output)";
+        }
+        let result = (await sessionTransport.sendPrompt(session.id, prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
+        for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
+          const batch = drainInstructionBatch(session);
+          if (batch.length === 0) break;
+          result = (await sessionTransport.sendPrompt(session.id, renderSteeringContinuation(batch), undefined, { userId: spec.userId ?? userId })) || "(no output)";
+        }
+        if (session.instructionQueue.length > 0) expireInstructions(session, "round_limit");
+        return result;
+      };
 
       if (!spec.await) {
-        exec.then(r => this.finishSpin(spec, profile, session, cardId, stepIndex, started, r || "(no output)", terminate))
+        executeWithSteering().then(r => this.finishSpin(spec, profile, session, cardId, stepIndex, started, r, terminate))
             .catch(e => this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate));
         return { sessionId: session.id, cardId };
       }
-      const result = (await exec) || "(no output)";
+      const result = await executeWithSteering();
       await this.finishSpin(spec, profile, session, cardId, stepIndex, started, result, terminate);
       return { sessionId: session.id, cardId, result };
     } catch (err) {
@@ -463,6 +476,9 @@ export class Spin {
     cardId: number | undefined, stepIndex: number, started: number, result: string,
     terminate: "call" | "response" | "external",
   ): Promise<void> {
+    // #1332: Clear execution generation — steering no longer targets this run
+    session.activeExecutionId = undefined;
+
     // Persistent sends go through session.transport (runtime.lastUsage is only
     // updated by runtime.complete). Prefer the transport's own usage; fall back
     // to runtime for oneshot.
@@ -511,6 +527,10 @@ export class Spin {
     cardId: number | undefined, stepIndex: number, started: number, err: unknown,
     terminate: "call" | "response" | "external",
   ): Promise<void> {
+    // #1332: Expire remaining queued instructions when execution fails
+    if (session.instructionQueue.length > 0) expireInstructions(session, "execution_failed");
+    session.activeExecutionId = undefined;
+
     const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
     logWarn(TAG, `${spec.type} spin failed: ${msg}`);
     pushLog(session, `failed: ${msg.slice(0, 80)}`);
@@ -808,6 +828,15 @@ export class Spin {
     this.running.get(type)?.delete(cardId);
     if (type === "H") this._lastHealerDoneAt = Date.now();
   }
+}
+
+/**
+ * #1332: Render a steering continuation prompt from a batch of instructions.
+ * Non-deceptive — the model sees these as user input received while it was busy.
+ */
+export function renderSteeringContinuation(batch: QueuedSessionInstruction[]): string {
+  const items = batch.map((i, idx) => `${idx + 1}. ${i.text}`).join("\n");
+  return `[USER STEERING — received while you were working]\n${items}\n[/USER STEERING]\n\nIncorporate this direction into the current project. Do not restart completed work unnecessarily. Report the updated result.`;
 }
 
 /** #675: Fire result callback to the delegating peer. Fire-and-forget. */

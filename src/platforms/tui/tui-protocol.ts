@@ -19,7 +19,8 @@ export type TuiAttachMode =
 export type TuiClientFrame =
   | { t: "attach"; mode: TuiAttachMode; cols: number; rows: number }
   | { t: "input"; text: string }
-  | { t: "resize"; cols: number; rows: number };
+  | { t: "resize"; cols: number; rows: number }
+  | { t: "steer"; sessionId: string; instructionId: string; text: string };  // #1332: explicit steer intent
 
 export type TuiServerFrame =
   | { t: "ready"; sessionLabel: string; sessionId: string }              // attach accepted
@@ -27,7 +28,8 @@ export type TuiServerFrame =
   | { t: "message"; role: "assistant" | "system"; markdown: string }     // v1: whole response
   | { t: "chunk"; id: string; delta: string }                             // RESERVED — see Streaming (v1)
   | { t: "chunk-end"; id: string }                                        // RESERVED — not emitted in v1
-  | { t: "typing" };
+  | { t: "typing" }
+  | { t: "steer-ack"; status: "queued" | "rejected" | "consumed" | "expired" | "failed"; instructionId: string; message: string };  // #1332: steer lifecycle
 
 export function encodeFrame(f: TuiServerFrame | TuiClientFrame): string {
   return JSON.stringify(f) + "\n";
@@ -71,12 +73,12 @@ export function isServerFrame(x: unknown): x is TuiServerFrame {
   if (typeof x !== "object" || x === null) return false;
   const t = (x as { t?: unknown }).t;
   return t === "ready" || t === "error" || t === "message" ||
-         t === "chunk" || t === "chunk-end" || t === "typing";
+         t === "chunk" || t === "chunk-end" || t === "typing" || t === "steer-ack";
 }
 
 /** True if the parsed frame looks like a TuiClientFrame (narrowing helper). */
 export function isClientFrame(x: unknown): x is TuiClientFrame {
   if (typeof x !== "object" || x === null) return false;
   const t = (x as { t?: unknown }).t;
-  return t === "attach" || t === "input" || t === "resize";
+  return t === "attach" || t === "input" || t === "resize" || t === "steer";
 }
