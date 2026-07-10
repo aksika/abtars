@@ -6,6 +6,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { spawnDetached } from "../spawn-safe.js";
 import { readEntries as cronReadEntries } from "../tasks/task-store.js";
 import { abtarsHome } from "../../paths.js";
+import { versionBadge } from "../../utils/version-compare.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd";
@@ -692,7 +693,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       const { execFileSync } = await import("node:child_process");
       const raw = execFileSync("npm", ["view", "abtars", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
       const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
-      if (latest) lines.push(`  npm latest: abtars@${latest} ${latest === ver.version || ver.version.startsWith(latest) ? "✓" : "⚠️"}`);
+      if (latest) lines.push(`  npm latest: abtars@${latest} ${versionBadge(ver.version, latest)}`);
     } catch { /* timeout or offline — skip */ }
   } catch {
     lines.push("  abtars: unknown");
@@ -722,7 +723,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const { execFileSync } = await import("node:child_process");
         const raw = execFileSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
         const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
-        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === pkg.version || pkg.version.startsWith(latest) ? "✓" : "⚠️"}`);
+        if (latest) lines.push(`  npm latest: abmind@${latest} ${versionBadge(pkg.version, latest)}`);
       } catch { /* timeout or offline — skip */ }
     } catch { lines.push("  abmind: installed (version unknown)"); }
   } else if (existsSync(abmindManifest)) {
@@ -735,7 +736,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const { execFileSync } = await import("node:child_process");
         const raw = execFileSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
         const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
-        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === m.version || m.version.startsWith(latest) ? "✓" : "⚠️"}`);
+        if (latest) lines.push(`  npm latest: abmind@${latest} ${versionBadge(m.version, latest)}`);
       } catch { /* timeout or offline — skip */ }
     } catch { lines.push("  abmind: installed (version unknown)"); }
   } else {
