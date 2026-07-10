@@ -77,6 +77,24 @@ export function createSubSession(
   return allocateSession(sessions, nextIndex, type, userId, platform, chatId, { active: false, motherId: active?.id });
 }
 
+/**
+ * #1330: Find a session addressable by the owner of (userId, platform).
+ * All indexed lifecycle commands (switch, end, kill, pause, resume) must
+ * select a target within the caller's platform scope. A globally visible
+ * index does not authorize another platform to mutate or attach to a session.
+ */
+function findAddressableSession(
+  sessions: Map<string, ManagedSession>,
+  userId: string, platform: string, index: number,
+): ManagedSession | undefined {
+  return [...sessions.values()].find(s =>
+    s.shortIndex === index &&
+    s.userId === userId &&
+    s.platform === platform &&
+    s.status !== "ended",
+  );
+}
+
 export function isHollow(session: ManagedSession): boolean { return !!session.peer; }
 
 export function createHollowSession(
@@ -95,10 +113,10 @@ export function createHollowSession(
 }
 
 export function switchSession(sessions: Map<string, ManagedSession>, userId: string, platform: string, index: number): ManagedSession | string {
-  const target = [...sessions.values()].find(s => s.shortIndex === index && s.status !== "ended" && s.userId === userId);
-  if (!target) return `Session #${index} not found or not switchable.`;
+  const target = findAddressableSession(sessions, userId, platform, index);
+  if (!target) return `Session #${index} not found on ${platform}.`;
   const cur = getActiveSession(sessions, userId, platform);
-  if (cur) cur.active = false;
+  if (cur && cur.id !== target.id) cur.active = false;
   target.active = true;
   return target;
 }
@@ -106,8 +124,8 @@ export function switchSession(sessions: Map<string, ManagedSession>, userId: str
 export function endSession(sessions: Map<string, ManagedSession>, nextIndex: number, userId: string, platform: string, index?: number): { ended: ManagedSession; nextIndex: number } | string {
   const targetIdx = index ?? getActiveSession(sessions, userId, platform)?.shortIndex;
   if (!targetIdx) return `No active session found.`;
-  const target = [...sessions.values()].find(s => s.shortIndex === targetIdx && s.status !== "ended" && s.userId === userId);
-  if (!target) return `Session #${targetIdx} not found.`;
+  const target = findAddressableSession(sessions, userId, platform, targetIdx);
+  if (!target) return `Session #${targetIdx} not found on ${platform}.`;
 
   const aliveMains = [...sessions.values()].filter(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
 
@@ -131,8 +149,8 @@ export function endSession(sessions: Map<string, ManagedSession>, nextIndex: num
 }
 
 export function killSession(sessions: Map<string, ManagedSession>, nextIndex: number, userId: string, platform: string, index: number): { killed: ManagedSession; nextIndex: number } | string {
-  const target = [...sessions.values()].find(s => s.shortIndex === index && s.status !== "ended" && s.userId === userId);
-  if (!target) return `Session #${index} not found.`;
+  const target = findAddressableSession(sessions, userId, platform, index);
+  if (!target) return `Session #${index} not found on ${platform}.`;
 
   target.status = "ended";
   target.active = false;
@@ -157,8 +175,8 @@ export function killSession(sessions: Map<string, ManagedSession>, nextIndex: nu
 export function pauseSession(sessions: Map<string, ManagedSession>, userId: string, platform: string, index?: number): ManagedSession | string {
   const targetIdx = index ?? getActiveSession(sessions, userId, platform)?.shortIndex;
   if (!targetIdx) return `No active session found.`;
-  const target = [...sessions.values()].find(s => s.shortIndex === targetIdx && s.status !== "ended" && s.userId === userId);
-  if (!target) return `Session #${targetIdx} not found.`;
+  const target = findAddressableSession(sessions, userId, platform, targetIdx);
+  if (!target) return `Session #${targetIdx} not found on ${platform}.`;
   if (target.status === "paused") return `Session #${targetIdx} is already paused.`;
   target.status = "paused";
   pushLog(target, "paused");
@@ -168,8 +186,8 @@ export function pauseSession(sessions: Map<string, ManagedSession>, userId: stri
 export function resumeSession(sessions: Map<string, ManagedSession>, userId: string, platform: string, index?: number): ManagedSession | string {
   const targetIdx = index ?? getActiveSession(sessions, userId, platform)?.shortIndex;
   if (!targetIdx) return `No active session found.`;
-  const target = [...sessions.values()].find(s => s.shortIndex === targetIdx && s.status !== "ended" && s.userId === userId);
-  if (!target) return `Session #${targetIdx} not found.`;
+  const target = findAddressableSession(sessions, userId, platform, targetIdx);
+  if (!target) return `Session #${targetIdx} not found on ${platform}.`;
   if (target.status !== "paused") return `Session #${targetIdx} is not paused.`;
   target.status = "ready";
   pushLog(target, "resumed");
