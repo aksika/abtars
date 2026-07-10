@@ -340,10 +340,8 @@ export function renderChatStatus(view: StatusView): string {
   // Brain
   lines.push("", "Brain:");
   const modelShort = r.transport.model.split("/").pop() ?? r.transport.model;
-  lines.push(`  ✓ model: ${modelShort}`);
-  if (r.contextPercent !== null) {
-    lines.push(`  📊 context: ${r.contextPercent}%`);
-  }
+  const ctxStr = r.contextPercent !== null ? ` (${r.contextPercent}%)` : "";
+  lines.push(`  ✓ model: ${modelShort}${ctxStr}`);
   lines.push(
     `  ✓ spin: ${r.activeSessions} active session${r.activeSessions !== 1 ? "s" : ""}`,
   );

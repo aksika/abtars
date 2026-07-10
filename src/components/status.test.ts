@@ -203,6 +203,33 @@ describe("renderChatStatus", () => {
     );
     expect(out).toContain("✓ model: claude-sonnet-4-6");
   });
+
+  it("includes context % inline with model line when contextPercent is set", () => {
+    const out = renderChatStatus(
+      makeOperatorView({
+        runtime: makeRuntimeView({
+          transport: { ready: true, type: "Direct", provider: "openrouter", model: "hy3:free" },
+          contextPercent: 6,
+        }),
+      }),
+    );
+    expect(out).toContain("✓ model: hy3:free (6%)");
+    expect(out).not.toMatch(/📊 context:/);
+  });
+
+  it("omits context % entirely when contextPercent is null", () => {
+    const out = renderChatStatus(
+      makeOperatorView({
+        runtime: makeRuntimeView({
+          transport: { ready: true, type: "Direct", provider: "openrouter", model: "hy3:free" },
+          contextPercent: null,
+        }),
+      }),
+    );
+    expect(out).toContain("✓ model: hy3:free");
+    expect(out).not.toMatch(/📊 context:/);
+    expect(out).not.toMatch(/hy3:free \(/);
+  });
 });
 
 // ── TUI bridge-tty parsing (/proc/<pid>/stat) ────────────────────────────────
