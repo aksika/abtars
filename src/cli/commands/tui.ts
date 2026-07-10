@@ -158,12 +158,22 @@ export async function tui(args: string[]): Promise<number> {
   let shouldExitCode: number | null = null;
   let stopping = false;
 
+  // pi-tui's TUI.start() is NON-BLOCKING (event-driven: it sets up stdin/stdout
+  // and returns). We need a promise to await so the process stays alive until
+  // ui.stop() is called. Without this, tui() returns, Node exits 0, and the
+  // user sees init→cleanup escape sequences with no actual TUI session.
+  let resolveStopped: () => void = () => {};
+  const stopped = new Promise<void>((resolve) => {
+    resolveStopped = resolve;
+  });
+
   const stop = (code: number): void => {
     if (stopping) return;
     stopping = true;
     shouldExitCode = code;
     try { ui.stop(); } catch { /* best effort */ }
     try { conn.destroy(); } catch { /* best effort */ }
+    resolveStopped();
     // Defer the actual exit to the next tick so any in-flight renders finish.
     setImmediate(() => process.exit(code));
   };
@@ -223,6 +233,10 @@ export async function tui(args: string[]): Promise<number> {
   editor.onSubmit = (text: string) => {
     if (!ready) return;        // can't send before attach accepted
     if (text.length === 0) return;
+    // Mirror the user's input into the log so the line stays visible after
+    // the editor clears on submit. In a "normal terminal" the user's own
+    // message is part of the conversation history, not just an input box.
+    appendMessage("user", text);
     conn.write(encodeFrame({ t: "input", text }));
   };
 
@@ -254,9 +268,10 @@ export async function tui(args: string[]): Promise<number> {
     }
   }
 
-  function appendMessage(_role: "assistant" | "system", markdown: string): void {
-    // pi-tui's Markdown requires a theme; we use a minimal no-op theme.
-    const mdTheme: import("@earendil-works/pi-tui").MarkdownTheme = {
+  function appendMessage(role: "user" | "assistant" | "system", markdown: string): void {
+    // pi-tui's Markdown requires a theme; we use a minimal no-op theme for
+    // assistant/system, and a dim "you" prefix for the user's own echoed line.
+    const baseTheme: import("@earendil-works/pi-tui").MarkdownTheme = {
       heading: (s: string) => s,
       link: (s: string) => s,
       linkUrl: (s: string) => s,
@@ -265,16 +280,17 @@ export async function tui(args: string[]): Promise<number> {
       codeBlockBorder: (s: string) => s,
     };
     const style: import("@earendil-works/pi-tui").DefaultTextStyle = {};
-    const md = new pit.Markdown(markdown, 0, 0, mdTheme, style);
+    const body = role === "user" ? `\u001b[2m> ${markdown}\u001b[0m` : markdown;
+    const md = new pit.Markdown(body, 0, 0, baseTheme, style);
     log.addChild(md);
     ui.requestRender();
   }
 
   // Hand the terminal over to pi-tui. From this point on, raw mode is
-  // managed by the library. ui.start() blocks until ui.stop().
+  // managed by the library. ui.start() itself is non-blocking; we await
+  // the `stopped` promise which resolves in `stop()` (above) when the
+  // session ends (Ctrl-C, Ctrl-D, detach, or error).
   ui.start();
-
-  // Defensive: ui.start() is supposed to block. If we reach here, the
-  // library returned unexpectedly. Return whatever exit code we picked.
+  await stopped;
   return shouldExitCode ?? 0;
 }
