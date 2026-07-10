@@ -429,8 +429,16 @@ export class Spin {
 
       // 7. Execute — persistent/continuation sends via the session's own transport
       //    (key = session.id preserves the Orc sneak-in); oneshot uses runtime.complete.
+      //    #1329: thread the just-persisted raw user message ID through as the
+      //    beforeMessageId cursor so DirectApiTransport can bound its DB-backed
+      //    context assembly to history only.
       const exec = sessionTransport
-        ? sessionTransport.sendPrompt(session.id, prompt, spec.imageContent as { mime: string; base64: string } | undefined, spec.userId ?? userId)
+        ? sessionTransport.sendPrompt(
+            session.id,
+            prompt,
+            spec.imageContent as { mime: string; base64: string } | undefined,
+            { userId: spec.userId ?? userId, beforeMessageId: spec.currentMessageId },
+          )
         : this.runtime.complete(agent, prompt, { timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds });
 
       if (!spec.await) {

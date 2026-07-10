@@ -1,13 +1,24 @@
 /**
- * #1329 — Lock the duplicate-current-turn bug with a failing integration test.
+ * #1329 — Direct API does not duplicate the current user turn.
  *
- * Pre-fix, the DB-backed Direct API path makes the just-persisted raw user
- * message visible to context assembly and then appends the augmented form
- * of the same turn, so the provider sees the current turn twice.
+ * Pipeline ordering under test:
+ *   1. recordMessage() persists the raw current row and returns its ID.
+ *   2. buildPrompt() augments the user input and exposes the ID as
+ *      `currentMessageId`.
+ *   3. The chokepoint at spin.ts#sendPrompt converts it into
+ *      `PromptRequestContext.beforeMessageId`.
+ *   4. DirectApiTransport passes the cursor into
+ *      ContextOrchestrator.getContext(); the raw current row is excluded
+ *      from the historical snapshot.
+ *   5. The transport appends the augmented current turn exactly once.
  *
- * This test asserts the GOOD behavior (one current user turn, exactly once
- * in the captured request). It will fail on pre-fix code; the failure names
- * the duplicate, which is the bug. After Tasks 2-4 it turns green.
+ * The captured provider request must therefore contain historical turns
+ * plus ONE augmented current user turn — never the raw current row.
+ *
+ * Originally written as a RED test (pre-fix) that failed with
+ * "expected 3 to be 2" — three user messages in the request instead
+ * of two. After Tasks 2-4 it passes; the reproduction lives in the
+ * commit log of task 1.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { createHarness, type IntegrationHarness } from "./harness.js";
@@ -43,7 +54,7 @@ describe("#1329 — Direct API does not duplicate current user turn", () => {
     }) as unknown as Response;
   }
 
-  it("captured request contains the current user turn exactly once (RED on pre-fix)", async () => {
+  it("captured request contains the current user turn exactly once", async () => {
     const db = h.memory.getDatabase()!;
     const engine = new ContextEngine(db);
 
@@ -80,11 +91,13 @@ describe("#1329 — Direct API does not duplicate current user turn", () => {
     });
 
     // Pipeline persists the CURRENT raw user row before sendPrompt.
-    // (#1329 Task 4 will route this ID through to the orchestrator.)
-    h.memory.recordMessage({
+    // #1329 Task 2 returns the inserted ID; the pipeline carries it
+    // through to the transport as the exclusive beforeMessageId cursor.
+    const currentId = h.memory.recordMessage({
       role: "user", content: "current question beta", timestamp: 3000,
       userId: "u1", sessionId: "sess_1", platformMessageId: 3,
     });
+    expect(currentId).toBeTypeOf("number");
 
     fetchSpy.mockImplementation((input, init) => {
       const i = init as RequestInit | undefined;
@@ -96,8 +109,11 @@ describe("#1329 — Direct API does not duplicate current user turn", () => {
 
     // The pipeline hands the AUGMENTED current prompt to the transport
     // (timestamp/recall/session-start context injected by buildPrompt).
+    // The 4th arg mirrors the post-Task-4 chokepoint: PromptRequestContext
+    // carries the just-persisted message ID as the exclusive cursor so
+    // DB-backed context assembly excludes the raw current row.
     const augmented = "[2026-07-10 21:00] current question beta\n<recall>none</recall>";
-    await transport.sendPrompt("sess_1", augmented);
+    await transport.sendPrompt("sess_1", augmented, undefined, { beforeMessageId: currentId as number });
 
     // Exactly one provider request was made.
     expect(captured.length).toBe(1);

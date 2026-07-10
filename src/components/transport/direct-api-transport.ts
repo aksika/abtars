@@ -15,7 +15,7 @@ import { normalizeToolCalls, parseErrorStatus, parseRetryAfter, parseUsageLimitC
 import { recordUsage } from "../usage-tracker.js";
 import { clampMaxOutputTokens, estimateTokensFromChars } from "./token-budget.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
-import type { IKiroTransport } from "./kiro-transport.js";
+import type { IKiroTransport, PromptRequestContext } from "./kiro-transport.js";
 import { isCompactable } from "../spin-types.js";
 
 const TAG = "direct-api";
@@ -129,15 +129,29 @@ export class DirectApiTransport implements IKiroTransport {
     this.systemPrompt = prompt;
   }
 
-  async sendPrompt(sessionKey: string, message: string, image?: { mime: string; base64: string }, userId?: string): Promise<string> {
+  async sendPrompt(
+    sessionKey: string,
+    message: string,
+    image?: { mime: string; base64: string },
+    context?: PromptRequestContext,
+  ): Promise<string> {
     const session = this.getOrCreateSession(sessionKey);
     this._activeSessionKey = sessionKey;
-    this._activeUserId = userId || "master";
+    this._activeUserId = context?.userId || "master";
 
-    // If context orchestrator is active, rebuild messages from DB
+    // If context orchestrator is active, rebuild messages from DB.
+    // #1329: when the pipeline hands us the just-inserted current message
+    // ID, pass it as the exclusive upper bound so the augmented current
+    // turn is appended exactly once (the raw current row in the DB is
+    // excluded from the historical snapshot). When absent, behavior
+    // matches the pre-fix full-snapshot path.
     if (this.contextOrchestrator) {
       try {
-        const ctx = await this.contextOrchestrator.getContext(sessionKey, this.config.maxContext);
+        const ctx = await this.contextOrchestrator.getContext(
+          sessionKey,
+          this.config.maxContext,
+          { beforeMessageId: context?.beforeMessageId },
+        );
         // Replace session messages with DB-backed context + system prompt
         session.messages = [
           { role: "system" as const, content: this.systemPrompt },

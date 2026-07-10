@@ -127,10 +127,15 @@ export interface SpinSessionSpec {
   imageContent?: unknown;   // → sendPrompt arg 3 (image passthrough)
   callbackPeer?: string;
   sourcePeer?: string;
+  // #1329: just-persisted raw user message ID (from BuildPromptResult.currentMessageId).
+  // Carried through to DirectApiTransport.sendPrompt as the exclusive
+  // `beforeMessageId` cursor so the augmented current turn is appended
+  // exactly once. Undefined on no-write paths (memory disabled, etc.).
+  currentMessageId?: number;
   // NOTE: no `stream` field. Streaming is a transport property
   // (transport.onIntermediateResponse / onToolCallStart / onSegmentBreak) that the
   // PIPELINE sets before calling spin() and resets in its finally — Spin never touches it.
-  // sendPrompt is (sessionKey, message, image?, userId?) — 4 args, no stream.
+  // sendPrompt is (sessionKey, message, image?, context?: PromptRequestContext) — 4 args, no stream.
 
   // Extension / future-proofing
   metadata?: Record<string, unknown>;  // session-scoped initial data, set ONCE at allocation

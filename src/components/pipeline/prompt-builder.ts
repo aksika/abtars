@@ -36,6 +36,15 @@ export interface BuildPromptResult {
   isSessionStart: boolean;
   imageContent?: { mime: string; base64: string; path: string };
   recalledHits?: Array<{ id: number; contentEn: string }>;
+  /**
+   * #1329: the SQLite message ID assigned to the just-persisted raw
+   * user row, or `undefined` when no row was written (memory disabled,
+   * guest user, system-start tag, or the store rejected the record).
+   * The pipeline carries it through to the Direct API transport as
+   * the exclusive `beforeMessageId` cursor so the augmented current
+   * turn is appended exactly once.
+   */
+  currentMessageId?: number;
 }
 
 export async function buildPrompt(
@@ -110,9 +119,16 @@ export async function buildPrompt(
   // Record user message to memory
   const userRole = registry.byUserId.get(userId)?.role;
   logTrace(TAG, `recordMessage gate: memory=${!!memory} userId=${userId} userRole=${userRole}`);
+  // #1329: capture the inserted ID for the Direct API cursor. Null on any
+  // no-write path (memory disabled, store unavailable, store-internal
+  // filter/rejection/error) — see MessageStore.recordMessage. The pipeline
+  // propagates this to the transport as `beforeMessageId`; the transport
+  // only forwards it when the ID is a real number.
+  let currentMessageId: number | undefined;
   if (memory && userRole !== "guest" && !text.startsWith("[SESSION START]")) {
     const numericMsgId = typeof msg.messageId === "number" ? msg.messageId : undefined;
-    memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId: numericMsgId });
+    const id = memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId: numericMsgId });
+    if (typeof id === "number") currentMessageId = id;
   }
 
   // --- Active recall ---
@@ -182,12 +198,12 @@ export async function buildPrompt(
       if (!scan.safe) {
         logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map((f: { category: string }) => f.category).join(", ")}`);
       // Return a sentinel — caller checks and sends the block message
-      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined };
+      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined, currentMessageId: undefined };
     }
     }
   }
 
-  return { prompt, isSessionStart, imageContent, recalledHits };
+  return { prompt, isSessionStart, imageContent, recalledHits, currentMessageId };
 }
 
 /** Single path for session-start injection: SOUL + memory wake-up + context + user identity + restart reason. */

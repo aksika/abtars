@@ -326,7 +326,19 @@ export class AcpTransport implements IKiroTransport {
   private _pendingPrompt?: { sessionKey: string; message: string; resolve: (r: string) => void; reject: (e: Error) => void };
   private _processDeadRetries = 0;
 
-  async sendPrompt(sessionKey: string, message: string, _image?: { mime: string; base64: string }, _userId?: string): Promise<string> {
+  /**
+   * ACP rebuilds context from its own internal history (CLI-owned
+   * window), so `beforeMessageId` is unused here. `userId` is
+   * accepted for interface conformance with the chokepoint at
+   * `IKiroTransport.sendPrompt` but the ACP transport doesn't yet
+   * deliver it to tool execution.
+   */
+  async sendPrompt(
+    sessionKey: string,
+    message: string,
+    _image?: { mime: string; base64: string },
+    _context?: { userId?: string; beforeMessageId?: number },
+  ): Promise<string> {
     if (!this.client && !(AcpTransport._rawMode && this._rawClient?.alive)) {
       logWarn(this.tag, "ACP client dead — reinitializing");
       await Promise.race([

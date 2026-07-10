@@ -2,6 +2,21 @@
  * Common interface for communicating with kiro-cli.
  * Both ACP and tmux transports implement this contract.
  */
+
+/**
+ * Per-call request metadata threaded from the pipeline through to the
+ * transport. #1329: `beforeMessageId` is the exclusive upper bound for
+ * DB-backed context assembly; the transport appends the augmented
+ * current turn on top of the bounded historical context exactly once.
+ *
+ * `userId` replaces the previous positional 4th argument so call-site
+ * readability and tool-execution delivery are preserved.
+ */
+export interface PromptRequestContext {
+  userId?: string;
+  beforeMessageId?: number;
+}
+
 export interface IKiroTransport {
   /** Initialize the transport (spawn process, verify tmux session, etc.) */
   initialize(): Promise<void>;
@@ -10,8 +25,16 @@ export interface IKiroTransport {
    * Send a prompt to Kiro and return the complete response text.
    * For ACP: sends session/prompt and collects streaming chunks.
    * For tmux: sends via send-keys and polls capture-pane for output.
+   * For DirectApi: rebuilds context from DB (bounded by
+   * `context.beforeMessageId` when set) and appends the current
+   * augmented turn on top exactly once (#1329).
    */
-  sendPrompt(sessionKey: string, message: string, image?: { mime: string; base64: string }, userId?: string): Promise<string>;
+  sendPrompt(
+    sessionKey: string,
+    message: string,
+    image?: { mime: string; base64: string },
+    context?: PromptRequestContext,
+  ): Promise<string>;
 
   /** Reset/recreate the session for a given chat. */
   resetSession(sessionKey: string): Promise<void>;

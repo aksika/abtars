@@ -227,7 +227,11 @@ export async function handleInboundMessage(
     // No queueing needed
 
     // --- Build prompt ---
-    const { prompt: builtPrompt, imageContent, recalledHits } = await buildPrompt(msg, text, {
+    // #1329: currentMessageId is the just-persisted raw user row ID (or
+    // undefined on a no-write path). We forward it to spin as part of
+    // the spec, and the chokepoint at spin.ts#sendPrompt carries it
+    // through to DirectApiTransport.sendPrompt as `beforeMessageId`.
+    const { prompt: builtPrompt, imageContent, recalledHits, currentMessageId } = await buildPrompt(msg, text, {
       memory, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: !("agentLoop" in transport),
     }, registry);
@@ -299,6 +303,7 @@ export async function handleInboundMessage(
       prompt,
       imageContent,
       userId,
+      currentMessageId,
       await: true,
     }).then(r => r.result ?? "");
     // #1292: the model call is started early to overlap with the setReaction/sendTyping

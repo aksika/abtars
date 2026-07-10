@@ -55,7 +55,13 @@ export class TmuxClient implements IKiroTransport {
 
   readonly transportCommands: string[] = [];
 
-  async sendPrompt(_sessionKey: string, message: string): Promise<string> {
+  /** tmux rebuilds context from its own capture pane; no cursor needed. */
+  async sendPrompt(
+    _sessionKey: string,
+    message: string,
+    _image?: { mime: string; base64: string },
+    _context?: { userId?: string; beforeMessageId?: number },
+  ): Promise<string> {
     if (!this.isReady) {
       throw new Error("tmux session not available");
     }
