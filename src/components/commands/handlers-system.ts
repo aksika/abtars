@@ -37,16 +37,16 @@ export async function handleDoctor(_text: string, ctx: CommandContext): Promise<
 
 export async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.phaseHealth && ctx.registry) {
-    const { getSystemStatus, renderStatusText } = await import("../system-status.js");
-    const status = await getSystemStatus({
+    const { getStatus, renderChatStatus } = await import("../status.js");
+    const view = await getStatus({
       phaseHealth: ctx.phaseHealth,
       registry: ctx.registry,
       transport: ctx.transport,
       startedAt: ctx.startedAt,
       bridgeLockPath: ctx.bridgeLockPath ?? "",
-      heartbeat: { intervalMs: Math.max(60, parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "60", 10)) * 1000 },
+      heartbeatIntervalMs: Math.max(60, parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "60", 10)) * 1000,
     });
-    let text = renderStatusText(status);
+    let text = renderChatStatus(view);
     // #255: append sanitized env dump on /status full
     if (_text.trim().toLowerCase() === "full") {
       const { envDump } = await import("../env-schema.js");

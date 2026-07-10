@@ -111,7 +111,6 @@ Manage the systemd/launchd service.
 | `daemon start` | Start the service |
 | `daemon stop` | Stop the service |
 | `daemon restart` | Restart the service |
-| `daemon status` | Show service state |
 
 ### deps
 

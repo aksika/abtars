@@ -31,8 +31,9 @@ For a warm restart (no process kill, in-process reload): send `/restart` in Tele
 ## Status
 
 ```bash
-abtars daemon status    # shows service state, PIDs, uptime
-abtars status           # send /status to the bot (via Telegram)
+abtars status              # operator view: bridge, manifest, daemon, TUI, ports
+/status                    # in chat: same operator view + runtime (model, platforms, kanban, etc.)
+abtars status --json       # machine-readable; pipe to python3 for healthchecks
 ```
 
 ## Uninstall

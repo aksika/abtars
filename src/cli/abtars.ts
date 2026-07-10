@@ -183,7 +183,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       case 'doctor':
         return await doctor(argv.slice(1).filter((a) => a !== ''));
       case 'status':
-        return await status();
+        return await status(argv.slice(1));
       case 'restart':
         return await restart({ cold: flags.get('cold') === true });
       case 'stop':

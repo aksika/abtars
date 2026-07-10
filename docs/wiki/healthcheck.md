@@ -5,15 +5,20 @@ Quick commands to verify your bridge is healthy and troubleshoot common issues.
 ## Is it running?
 
 ```bash
-abtars status           # shows bridge state, version, mode
-abtars daemon status    # shows systemd service state (daemon mode)
+abtars status           # shows bridge state, version, mode, daemon, TUI
 ```
 
-Expected:
+Expected (daemon install):
 ```
-  mode:          supervised-daemon
+  mode:          daemon
   bridge:        ● running (pid 1234)
+  daemon:        abtars (system)
+                 ● active (running) since ...
+                 pid: 1230
+  tui:           ✓ present (enabled=true, branch=yes, bridge tty=none)
 ```
+
+In chat: `/status` returns the same operator view + runtime (transport, model, context%, platforms, etc.) — see `managing.md`.
 
 ## Doctor
 
