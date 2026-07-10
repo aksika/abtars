@@ -171,5 +171,38 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
     else logError("main", `IRC connect failed: ${result.error}`);
   }
 
+  // --- TUI (#1315) ---
+  // Bridge-side socket adapter for the abtars tui client. The daemon never
+  // imports pi-tui — only the foreground client does. The adapter is a
+  // thin pipe: socket frames ⇄ InboundMessage / response frames, routed
+  // through the standard message pipeline. Spin owns the session.
+  registry.register("tui", {
+    configured: platforms.tui,
+    async create() {
+      const { TuiSocketAdapter } = await import("../platforms/tui/tui-socket-adapter.js");
+      const adapter = new TuiSocketAdapter({
+        spin: ctx.sessionManager,
+        onMessage: (msg) => recovery.handle(msg, adapter),
+      });
+      platformAdapters.set("tui", adapter);
+      // Retry path (#1306): wire full pipeline if phasePipelineDeps already ran.
+      if (ctx.pipelineDeps) {
+        const { wireTui, drainRecoveryQueue } = await import("./wire-platform.js");
+        await wireTui(ctx);
+        await drainRecoveryQueue(ctx);
+      }
+      return {
+        async start() { await adapter.start(); },
+        stop() { adapter.stop(); platformAdapters.delete("tui"); },
+      };
+    },
+  });
+
+  if (platforms.tui) {
+    const result = await registry.start("tui", { backgroundRetry: true });
+    if (result.ok) logInfo("main", "🖥️  TUI socket server listening (recovery handler active)");
+    else logError("main", `TUI socket server failed: ${result.error}`);
+  }
+
   return "ran";
 }

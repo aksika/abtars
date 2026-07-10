@@ -191,10 +191,11 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // #944 Step C + #1306: Wire full message handler on already-connected platforms.
   // Extracted into wire-platform.ts so the retry path in phasePlatformsConnect can
   // call the same functions when a new adapter is created after this phase completes.
-  const { wireTelegram, wireDiscord, wireIrc, drainRecoveryQueue } = await import("./wire-platform.js");
+  const { wireTelegram, wireDiscord, wireIrc, wireTui, drainRecoveryQueue } = await import("./wire-platform.js");
   await wireTelegram(ctx);
   await wireDiscord(ctx);
   await wireIrc(ctx);
+  await wireTui(ctx);
   await drainRecoveryQueue(ctx);
 
   // #1000: "Back online" notification moved to bridge-app.ts (fires before greeting)

@@ -45,6 +45,12 @@ function makeIrcAdapter() {
   };
 }
 
+function makeTuiAdapter() {
+  return {
+    setMessageHandler: vi.fn(),
+  };
+}
+
 // ── wireTelegram ───────────────────────────────────────────────────────────
 
 describe("wireTelegram (#1306)", () => {
@@ -138,6 +144,42 @@ describe("wireIrc (#1306)", () => {
 
     const { wireIrc } = await import("./wire-platform.js");
     await wireIrc(ctx);
+
+    expect(adapter.setMessageHandler).toHaveBeenCalledOnce();
+  });
+});
+
+// ── wireTui (#1315) ───────────────────────────────────────────────────
+
+describe("wireTui (#1315)", () => {
+  it("is a no-op when no TUI adapter is registered", async () => {
+    const ctx = createBootCtx();
+    ctx.pipelineDeps = makeMockPipelineDeps();
+
+    const { wireTui } = await import("./wire-platform.js");
+    await wireTui(ctx); // should not throw
+  });
+
+  it("is a no-op when ctx.pipelineDeps is null", async () => {
+    const ctx = createBootCtx();
+    const adapter = makeTuiAdapter();
+    ctx.platformAdapters.set("tui", adapter as unknown as import("../types/platform.js").PlatformAdapter);
+    ctx.pipelineDeps = null;
+
+    const { wireTui } = await import("./wire-platform.js");
+    await wireTui(ctx);
+
+    expect(adapter.setMessageHandler).not.toHaveBeenCalled();
+  });
+
+  it("wires handler on retry path", async () => {
+    const ctx = createBootCtx();
+    const adapter = makeTuiAdapter();
+    ctx.platformAdapters.set("tui", adapter as unknown as import("../types/platform.js").PlatformAdapter);
+    ctx.pipelineDeps = makeMockPipelineDeps();
+
+    const { wireTui } = await import("./wire-platform.js");
+    await wireTui(ctx);
 
     expect(adapter.setMessageHandler).toHaveBeenCalledOnce();
   });

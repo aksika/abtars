@@ -28,6 +28,12 @@ export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
   youtube: { packages: ["youtube-transcript"], label: "YouTube transcripts" },
   image:   { packages: ["jimp"], label: "Image processing" },
   provider: { packages: ["@earendil-works/pi-ai"], label: "pi-ai unified provider layer (~36 providers + prompt caching)", version: "~0.80" },
+  // #1315: CLIENT-ONLY dep. The bridge daemon never imports pi-tui — only
+  // `abtars tui` (the foreground client) does. Installed via
+  // `abtars deps install tui` into the shared ~/.local/lib/node_modules/
+  // the same place the daemon reads from, so a single install surfaces to
+  // both. Do NOT add as a package.json dependency — esbuild will reject it.
+  tui:     { packages: ["@earendil-works/pi-tui"], label: "pi-tui terminal UI (client-only, abtars tui command)", version: "~0.80" },
 };
 
 export interface SystemDep {

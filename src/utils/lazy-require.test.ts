@@ -60,6 +60,13 @@ describe("OPTIONAL_DEPS registry", () => {
     expect(OPTIONAL_DEPS.image).toBeDefined();
     expect(OPTIONAL_DEPS.browser.packages).toContain("cloakbrowser");
   });
+
+  it("includes the TUI entry (#1315) with a pinned version", async () => {
+    const { OPTIONAL_DEPS } = await import("./lazy-require.js");
+    expect(OPTIONAL_DEPS.tui).toBeDefined();
+    expect(OPTIONAL_DEPS.tui!.packages).toContain("@earendil-works/pi-tui");
+    expect(OPTIONAL_DEPS.tui!.version).toMatch(/~\d+\.\d+/);
+  });
 });
 
 // #1311: ESM can't import a directory path — lazy-require resolves the package's main
