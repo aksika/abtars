@@ -13,6 +13,7 @@ import { getToolSchemas, executeToolCall } from "./tool-registry.js";
 import { classifyError } from "./model-health-registry.js";
 import { normalizeToolCalls, parseErrorStatus, parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
 import { recordUsage } from "../usage-tracker.js";
+import { clampMaxOutputTokens, estimateTokensFromChars } from "./token-budget.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { isCompactable } from "../spin-types.js";
@@ -459,12 +460,23 @@ export class DirectApiTransport implements IKiroTransport {
     const composed = AbortSignal.any([signal, timeoutCtrl.signal]);
 
     try {
+    // #1326: clamp maxOutput so input + output fits the model's context window.
+    // Computed ONCE per request — do not re-serialize messages/tools at each
+    // body builder. `_activeMaxContext` reflects the actual serving model
+    // (updated by L2 fallback / setEmergencyMode), so the clamp targets the
+    // model that's actually running, not the original config's primary model.
+    const _toolSchemas = getToolSchemas(this.sandboxPolicy);
+    const estimatedInputTokens = estimateTokensFromChars(
+      JSON.stringify(session.messages).length + JSON.stringify(_toolSchemas).length,
+    );
+    const clampedMaxOutput = clampMaxOutputTokens(this.config.maxOutput, this._activeMaxContext, estimatedInputTokens);
+
     // #1311 — L1: pi-ai provider engine. Flag on + non-emergency only.
     // Load failure (pi absent/broken) → fall through to the L0 reptile floor.
     // Request failure → propagate to L2 (sendWithPolicy) for rotation, unchanged.
     if (this.useProviderLib && !this.emergencyOverride) {
       try {
-        return await this.consumePiAi(session, composed);
+        return await this.consumePiAi(session, composed, clampedMaxOutput);
       } catch (err) {
         if (err instanceof Error && err.name === "PiAiUnavailableError") {
           // #1318: include the throwing function name from the adapter (if it tagged the error).
@@ -482,7 +494,7 @@ export class DirectApiTransport implements IKiroTransport {
       const { toResponsesRequest } = await import("./responses-adapter.js");
       const { parseResponsesSSE } = await import("./sse-parser-responses.js");
       const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" as string | ContentPart[] }));
-      const reqBody = { ...toResponsesRequest(this.activeModel, msgs, getToolSchemas(this.sandboxPolicy), this.config.maxOutput), stream: true };
+      const reqBody = { ...toResponsesRequest(this.activeModel, msgs, _toolSchemas, clampedMaxOutput), stream: true };
       const hdrs: Record<string, string> = { "Content-Type": "application/json" };
       if (this.activeApiKey) hdrs["Authorization"] = `Bearer ${this.activeApiKey}`;
       const res = await fetch(`${this.activeEndpoint}/responses`, {
@@ -509,7 +521,7 @@ export class DirectApiTransport implements IKiroTransport {
       const { toAnthropicRequest, buildAnthropicHeaders } = await import("./anthropic-adapter.js");
       const { parseAnthropicSSE } = await import("./sse-parser-anthropic.js");
       const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" as string | ContentPart[], tool_call_id: m.tool_call_id }));
-      const reqBody = { ...toAnthropicRequest(this.activeModel, msgs, this.config.maxOutput, getToolSchemas(this.sandboxPolicy)), stream: true };
+      const reqBody = { ...toAnthropicRequest(this.activeModel, msgs, clampedMaxOutput, _toolSchemas), stream: true };
       const hdrs = buildAnthropicHeaders(this.activeApiKey ?? "");
       const res = await fetch(`${this.activeEndpoint}/messages`, {
         method: "POST", headers: hdrs, body: JSON.stringify(reqBody), signal: composed,
@@ -533,8 +545,8 @@ export class DirectApiTransport implements IKiroTransport {
     const body: Record<string, unknown> = {
       model: this.activeModel,
       messages: session.messages,
-      tools: getToolSchemas(this.sandboxPolicy),
-      max_tokens: this.config.maxOutput,
+      tools: _toolSchemas,
+      max_tokens: clampedMaxOutput,
       stream: true,
       stream_options: { include_usage: true },
     };
@@ -630,6 +642,7 @@ export class DirectApiTransport implements IKiroTransport {
   private async consumePiAi(
     session: ConversationSession,
     signal: AbortSignal,
+    clampedMaxOutput?: number,
   ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
     const { streamPiAiCompletion } = await import("./pi-ai-adapter.js");
     const candidate = {
@@ -637,15 +650,19 @@ export class DirectApiTransport implements IKiroTransport {
       endpoint: this.activeEndpoint,
       apiKey: this.activeApiKey,
       apiFormat: this.config.apiFormat,
-      maxOutput: this.config.maxOutput,
+      maxOutput: clampedMaxOutput ?? this.config.maxOutput,
+      contextWindow: this._activeMaxContext,
       thinking: this.config.thinking,
       reasoningEffort: session.reasoningEffort,
       sessionId: this._activeSessionKey,
     };
     const toolSchemas = getToolSchemas(this.sandboxPolicy);
     // #1318: dispatch entry — debug noise at LOG_LEVEL=debug, full candidate detail at trace.
+    // #1326: trace the *actual* maxOutput being sent (post-clamp), not the original
+    // config value — the clamp may have reduced it from 262144 to a sane number,
+    // and a future debugger needs to see what was actually emitted.
     logDebug(TAG, `pi-ai dispatch: model=${this.activeModel} endpoint=${this.activeEndpoint}`);
-    logTrace(TAG, `pi-ai candidate: model=${this.activeModel} endpoint=${this.activeEndpoint} apiFormat=${this.config.apiFormat ?? "chat"} maxOutput=${this.config.maxOutput} reasoningEffort=${session.reasoningEffort ?? "none"} thinking=${JSON.stringify(this.config.thinking)} sessionId=${this._activeSessionKey} msgs=${session.messages.length} tools=${toolSchemas.length}`);
+    logTrace(TAG, `pi-ai candidate: model=${this.activeModel} endpoint=${this.activeEndpoint} apiFormat=${this.config.apiFormat ?? "chat"} maxOutput=${candidate.maxOutput} contextWindow=${candidate.contextWindow ?? 0} reasoningEffort=${session.reasoningEffort ?? "none"} thinking=${JSON.stringify(this.config.thinking)} sessionId=${this._activeSessionKey} msgs=${session.messages.length} tools=${toolSchemas.length}`);
     const events = streamPiAiCompletion(
       candidate,
       { messages: session.messages, tools: toolSchemas },

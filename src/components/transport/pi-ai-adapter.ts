@@ -48,6 +48,10 @@ export interface PiAiCandidate {
   apiKey?: string;
   apiFormat?: ApiFormat;
   maxOutput: number;
+  /** Model's context window in tokens. #1326: propagated from DirectApiConfig
+   *  so `buildPiModel` carries a real value and pi-ai's own
+   *  `clampMaxTokensToContext` guard becomes functional as a second layer. */
+  contextWindow?: number;
   // #1311 + #1276: thinking config — three styles.
   //   "default"  → use the model's own default reasoning level (no override, no force).
   //                pi-ai doesn't get a `reasoning` option → no `reasoning_effort` in body
@@ -224,8 +228,12 @@ export function resolveReasoning(candidate: PiAiCandidate): { reasoning: boolean
 
 /**
  * Construct a single pi Model FROM the abtars candidate (not from pi's catalog).
- * contextWindow is unknown to abtars at the transport seam — compaction math
- * stays with L2 (agent-registry), so 0 here is correct for the motor path.
+ * #1326: contextWindow is now sourced from `candidate.contextWindow` (the L0
+ * caller has already clamped maxOutput against it) — this enables pi-ai's own
+ * `clampMaxTokensToContext` client-side guard as a belt-and-suspenders second
+ * layer. `?? 0` preserves the prior behavior for legacy test fixtures that
+ * don't set the field (pi-ai's guard no-ops when contextWindow <= 0, matching
+ * its own convention for "unknown" windows).
  */
 export function buildPiModel(candidate: PiAiCandidate, api: PiApi, hasImage: boolean, providerId: string): PiModel {
   const { reasoning } = resolveReasoning(candidate);
@@ -238,7 +246,7 @@ export function buildPiModel(candidate: PiAiCandidate, api: PiApi, hasImage: boo
     reasoning,
     input: hasImage ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 0,
+    contextWindow: candidate.contextWindow ?? 0,
     maxTokens: candidate.maxOutput,
   };
 }
@@ -390,7 +398,16 @@ export function mapPiAiError(message: PiAssistantMessage, isRetryable: boolean):
 
   let status: number;
   let kind: ErrorKind;
-  if (isRetryable) {
+  // #1326: context-length check runs FIRST (before isRetryable) so a context-length
+  // 400 — whether the provider marks it retryable or not — classifies as
+  // `context_exceeded` rather than transient/rate_limit. The check describes a
+  // static misconfiguration (maxOutput oversized for the model's context window),
+  // not the model's live health; recordError's case for this kind does NOT fill
+  // the health bucket, so a healthy model isn't degraded by a config bug.
+  if (/maximum context length|context_length_exceeded/i.test(detail)) {
+    kind = "context_exceeded";
+    status = parsedStatus || 400;
+  } else if (isRetryable) {
     // Transient (overloaded / 503 / stream-ended / http2) → retry-friendly bucket.
     kind = "transient";
     status = parsedStatus || 500;

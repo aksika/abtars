@@ -105,6 +105,24 @@ describe("buildPiModel", () => {
     );
     expect(m.baseUrl).toBe("https://9router.example.com/v1");
   });
+  // #1326 — contextWindow is propagated from the candidate so pi-ai's own
+  // `clampMaxTokensToContext` guard becomes functional (was hardcoded to 0
+  // before, which no-op'd the guard). Legacy fixtures that don't set the
+  // field keep getting contextWindow: 0 (pi's no-op convention).
+  it("#1326 — Model.contextWindow reflects candidate.contextWindow when present", () => {
+    const m = buildPiModel(
+      { model: "m", endpoint: "https://x/v1", maxOutput: 1024, contextWindow: 262144 },
+      "openai-completions", false, "x",
+    );
+    expect(m.contextWindow).toBe(262144);
+  });
+  it("#1326 — Model.contextWindow defaults to 0 when candidate omits the field (legacy fixtures)", () => {
+    const m = buildPiModel(
+      { model: "m", endpoint: "https://x/v1", maxOutput: 1024 },
+      "openai-completions", false, "x",
+    );
+    expect(m.contextWindow).toBe(0);
+  });
 });
 
 // ── buildPiContext ───────────────────────────────────────────────────────────
@@ -277,6 +295,32 @@ describe("mapPiAiError", () => {
   it("non-retryable generic → rate_limit (safe rotate default)", () => {
     expect(mapPiAiError(assistant({ errorMessage: "something broke" }), false))
       .toMatchObject({ status: 429, kind: "rate_limit" });
+  });
+  // #1326 — context-length 400 is a static misconfiguration (maxOutput oversized
+  // for the model's context window), NOT the model's live health. Classifier
+  // must surface it as `context_exceeded` so recordError can leave the health
+  // bucket untouched instead of poisoning it as a `rate_limit`.
+  it("non-retryable context-length 400 → context_exceeded (NOT rate_limit)", () => {
+    const m = mapPiAiError(
+      assistant({ errorMessage: "400: {\"message\":\"This endpoint's maximum context length is 262144 tokens. However, you requested about 277597 tokens (11...\"" }),
+      false,
+    );
+    expect(m.kind).toBe("context_exceeded");
+    expect(m.status).toBe(400);
+  });
+  // #1326 — order matters: context-length regex must run BEFORE the isRetryable
+  // branch. A provider that hypothetically marks a context-length error as
+  // retryable must still classify as context_exceeded, not transient.
+  it("context-length 400 with isRetryable=true → still context_exceeded (regex wins over isRetryable)", () => {
+    const m = mapPiAiError(
+      assistant({ errorMessage: "maximum context length exceeded" }),
+      true,
+    );
+    expect(m.kind).toBe("context_exceeded");
+  });
+  it("context_length_exceeded (snake_case variant) → context_exceeded", () => {
+    expect(mapPiAiError(assistant({ errorMessage: "context_length_exceeded" }), false))
+      .toMatchObject({ kind: "context_exceeded" });
   });
   it("detects a retry-after cooldown from the message text", () => {
     const m = mapPiAiError(assistant({ errorMessage: "rate limited; retry_after: 12 daily limit" }), true);
