@@ -84,6 +84,10 @@ declare module "@earendil-works/pi-tui" {
     strikethrough?: boolean;
     underline?: boolean;
   }
+  // Pinned to pi-tui 0.80.6 — every key Markdown.render() may invoke is
+  // declared explicitly. Drop the previous open index signature so a
+  // missing required method (e.g. forgetting `bold` or `listBullet`)
+  // surfaces at typecheck time instead of crashing the TUI at runtime.
   export interface MarkdownTheme {
     heading: (text: string) => string;
     link: (text: string) => string;
@@ -91,7 +95,20 @@ declare module "@earendil-works/pi-tui" {
     code: (text: string) => string;
     codeBlock: (text: string) => string;
     codeBlockBorder: (text: string) => string;
-    [k: string]: (text: string) => string;
+    quote: (text: string) => string;
+    quoteBorder: (text: string) => string;
+    hr: (text: string) => string;
+    listBullet: (text: string) => string;
+    bold: (text: string) => string;
+    italic: (text: string) => string;
+    strikethrough: (text: string) => string;
+    underline: (text: string) => string;
+    highlightCode?: (code: string, lang?: string) => string[];
+    codeBlockIndent?: string;
+  }
+  export interface MarkdownOptions {
+    preserveOrderedListMarkers?: boolean;
+    preserveBackslashEscapes?: boolean;
   }
   export class Markdown implements Component {
     constructor(
@@ -100,7 +117,7 @@ declare module "@earendil-works/pi-tui" {
       paddingY: number,
       theme: MarkdownTheme,
       defaultTextStyle?: DefaultTextStyle,
-      options?: Record<string, unknown>,
+      options?: MarkdownOptions,
     );
   }
   export class Text implements Component {

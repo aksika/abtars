@@ -103,6 +103,79 @@ export function parseAttachMode(args: string[]): TuiAttachMode {
   return { kind: "resume" };
 }
 
+// ── #1333: Markdown theme + message construction ────────────────────
+
+/** Roles passed to `appendMessage` and the message factory. */
+export type MessageRole = "user" | "assistant" | "system";
+
+/** Identity function reused across every theme key. */
+const passthrough = (text: string): string => text;
+
+/**
+ * Complete no-op Markdown theme for pi-tui 0.80.6.
+ *
+ * Every key that `Markdown.render()` may invoke is present as the identity
+ * function so a non-trivial response (bold, list, quote, hr, italic, etc.)
+ * does not throw. Exported for direct contract testing — see tui.test.ts.
+ */
+export const TUI_MARKDOWN_THEME: import("@earendil-works/pi-tui").MarkdownTheme = {
+  heading: passthrough,
+  link: passthrough,
+  linkUrl: passthrough,
+  code: passthrough,
+  codeBlock: passthrough,
+  codeBlockBorder: passthrough,
+  quote: passthrough,
+  quoteBorder: passthrough,
+  hr: passthrough,
+  listBullet: passthrough,
+  bold: passthrough,
+  italic: passthrough,
+  strikethrough: passthrough,
+  underline: passthrough,
+};
+
+/**
+ * Build a pi-tui `Markdown` component for a given role and content.
+ * For "user" we wrap the text in a dim ANSI `> ` prefix so locally
+ * echoed input stays visible after the editor clears on submit.
+ * Throws if the underlying Markdown constructor throws — callers
+ * are expected to wrap the call in the render error boundary.
+ */
+export function createMarkdownMessage(
+  pit: Pick<typeof import("@earendil-works/pi-tui"), "Markdown">,
+  role: MessageRole,
+  markdown: string,
+): import("@earendil-works/pi-tui").Markdown {
+  const style: import("@earendil-works/pi-tui").DefaultTextStyle = {};
+  const body = role === "user" ? `\u001b[2m> ${markdown}\u001b[0m` : markdown;
+  return new pit.Markdown(body, 0, 0, TUI_MARKDOWN_THEME, style);
+}
+
+/**
+ * Testable seam for the server-frame render path. If `frame.t` is not
+ * "message" the call is a no-op. Otherwise the Markdown is constructed
+ * inside a try/catch and any throw routes through `onRenderError` so
+ * the TUI client can recover (terminal restore + stderr + exit 1) instead
+ * of becoming an uncaught exception.
+ */
+export function processMessageFrame(
+  pit: Pick<typeof import("@earendil-works/pi-tui"), "Markdown">,
+  frame: TuiServerFrame,
+  onRenderError: (err: Error) => void,
+):
+  | { ok: true; component: import("@earendil-works/pi-tui").Markdown | null }
+  | { ok: false } {
+  if (frame.t !== "message") return { ok: true, component: null };
+  try {
+    const component = createMarkdownMessage(pit, frame.role, frame.markdown);
+    return { ok: true, component };
+  } catch (err) {
+    onRenderError(err instanceof Error ? err : new Error(String(err)));
+    return { ok: false };
+  }
+}
+
 /** Entry point for the `abtars tui` subcommand. */
 export async function tui(args: string[]): Promise<number> {
   let mode: TuiAttachMode;
@@ -220,6 +293,18 @@ export async function tui(args: string[]): Promise<number> {
     stop(0);
   });
 
+  // ── #1333: render error boundary ──────────────────────────────────
+  // Stop the client when a Markdown render fails. Idempotent — reuses
+  // the existing `stop()` lifecycle so terminal cleanup runs exactly once.
+  // Prints a concise stderr line AFTER ui.stop() so the message is not
+  // hidden behind the terminal's restore escape sequences.
+  const stopForRenderError = (err: Error): void => {
+    try { ui.stop(); } catch { /* best effort */ }
+    try { conn.destroy(); } catch { /* best effort */ }
+    process.stderr.write(`TUI render error: ${err.message}\n`);
+    stop(1);
+  };
+
   // Input handling — Ctrl-C / Ctrl-D → detach+exit. Editor onSubmit → input frame.
   ui.addInputListener((data: string) => {
     if (pit.matchesKey(data, "ctrl+c") || pit.matchesKey(data, "ctrl+d")) {
@@ -268,22 +353,19 @@ export async function tui(args: string[]): Promise<number> {
     }
   }
 
-  function appendMessage(role: "user" | "assistant" | "system", markdown: string): void {
-    // pi-tui's Markdown requires a theme; we use a minimal no-op theme for
-    // assistant/system, and a dim "you" prefix for the user's own echoed line.
-    const baseTheme: import("@earendil-works/pi-tui").MarkdownTheme = {
-      heading: (s: string) => s,
-      link: (s: string) => s,
-      linkUrl: (s: string) => s,
-      code: (s: string) => s,
-      codeBlock: (s: string) => s,
-      codeBlockBorder: (s: string) => s,
-    };
-    const style: import("@earendil-works/pi-tui").DefaultTextStyle = {};
-    const body = role === "user" ? `\u001b[2m> ${markdown}\u001b[0m` : markdown;
-    const md = new pit.Markdown(body, 0, 0, baseTheme, style);
-    log.addChild(md);
-    ui.requestRender();
+  function appendMessage(role: MessageRole, markdown: string): void {
+    // #1333: any failure during Markdown construction or addChild is
+    // contained here so a renderer regression (e.g. a future pi-tui theme
+    // method we forgot) cannot crash the whole client. On error we route
+    // through `stopForRenderError` which restores the terminal, prints
+    // a concise stderr line, and exits 1.
+    try {
+      const md = createMarkdownMessage(pit, role, markdown);
+      log.addChild(md);
+      ui.requestRender();
+    } catch (err) {
+      stopForRenderError(err instanceof Error ? err : new Error(String(err)));
+    }
   }
 
   // Hand the terminal over to pi-tui. From this point on, raw mode is
