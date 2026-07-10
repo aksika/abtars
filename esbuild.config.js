@@ -71,6 +71,7 @@ const result = await esbuild.build({
     "abtars-cli": "src/cli/abtars.ts",
     "abtars-task": "src/cli/abtars-task.ts",
     "abtars-browser": "src/cli/abtars-browser.ts",
+    "abtars-browse": "src/capabilities/browser/abtars-browse.ts",
     "abtars-restart": "src/cli/commands/restart.ts",
     "abtars-rss": "src/cli/abtars-rss.ts",
     "abtars-todo": "src/cli/abtars-todo.ts",

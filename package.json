@@ -43,6 +43,7 @@
   "bin": {
     "abtars": "bundle/abtars-cli.js",
     "abtars-browser": "bundle/abtars-browser.js",
+    "abtars-browse": "bundle/abtars-browse.js",
     "abtars-restart": "bundle/abtars-restart.js"
   },
   "license": "Apache-2.0",
