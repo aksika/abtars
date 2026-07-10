@@ -38,7 +38,7 @@ export function isModelPickerCallback(data: string): boolean {
  * - Always cap at PICKER_MAX as a hard backstop against the Telegram inline-keyboard size
  *   limit (~80 buttons, ~9KB markup JSON). Empty result is the caller's problem.
  */
-const PICKER_MAX = 20;
+const PICKER_MAX = 50;
 
 async function buildModelEntries(providerName: string, providerConfig: { transport?: string; useProviderLib?: boolean } | undefined): Promise<Array<{ id: string; label: string }>> {
   const { getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");

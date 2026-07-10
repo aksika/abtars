@@ -149,9 +149,9 @@ describe("telegram-model-picker (#1320)", () => {
       expect(opts).toBeUndefined();
     });
 
-    it("hard cap: even if curated has 50 entries, picker shows <=20", async () => {
+    it("hard cap: even if curated has 60 entries, picker shows <=50", async () => {
       MOCK_modelsForProviderSync.mockReturnValue(null);
-      const many = Array.from({ length: 50 }, (_, i) => ({
+      const many = Array.from({ length: 60 }, (_, i) => ({
         id: `curated-${i}`,
         entry: { rank: 1, cost: { input: 0, output: 0 } },
       }));
@@ -162,8 +162,8 @@ describe("telegram-model-picker (#1320)", () => {
       await handleModelPickerCallback("mprov:professor:openrouter", 1, api as never, state, deps);
       const [, , opts] = api.sendMessage.mock.calls[0]!;
       const buttons = (opts as { reply_markup: { inline_keyboard: unknown[][] } }).reply_markup.inline_keyboard;
-      // 20 model buttons + 1 back button = 21 rows.
-      expect(buttons.length).toBe(21);
+      // 50 model buttons + 1 back button = 51 rows.
+      expect(buttons.length).toBe(51);
     });
   });
 
