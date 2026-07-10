@@ -122,3 +122,21 @@ Manage optional runtime dependencies (jimp, pdf-parse, youtube-transcript).
 | `deps list` | List optional deps and install status |
 | `deps install` | Install all optional deps |
 | `deps check` | Check which are missing |
+
+### tui
+
+Attach a terminal UI to a running bridge over a unix-domain socket (#1315).
+The bridge must have been started with `TUI_ENABLED=true` (or `--tui`).
+
+```bash
+abtars deps install tui                # one-time: install the pi-tui client dep
+abtars tui                              # attach to the active tui session (auto-creates Main if none)
+abtars tui --session 2                  # switch to existing tui session #2
+abtars tui --new C                      # create a new Code session and attach
+abtars tui --orc                        # attach to the Orc session (query-only, busy-guard)
+```
+
+Detach with `Ctrl-C` or `Ctrl-D` — the bridge keeps running. A second
+`abtars tui` evicts the first (the evicted client sees a clean detach,
+not an error). The terminal client owns the PTY in raw mode; the
+bridge is unchanged.
