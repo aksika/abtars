@@ -97,6 +97,10 @@ export interface ManagedSession {
   // #1332: Cooperative steering queue for busy Orc session
   instructionQueue: QueuedSessionInstruction[];
   activeExecutionId?: string;
+
+  // #1319: Orc activity correlation
+  activeCardId?: number;
+  activeRootCardId?: number;
 }
 
 export interface SpinRequest {

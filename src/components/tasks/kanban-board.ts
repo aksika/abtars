@@ -319,3 +319,49 @@ export function cascadeFail(failedId: number, projectCards: KanbanCard[]): void 
     }
   }
 }
+
+const MAX_ANCESTOR_DEPTH = 100;
+
+/**
+ * #1319: Walk parent_id chain to find the root card. Returns undefined if the
+ * chain exceeds MAX_ANCESTOR_DEPTH or contains a cycle (detected via visited set).
+ */
+export function resolveRootId(cardId: number): number | undefined {
+  const visited = new Set<number>();
+  let current: number | undefined = cardId;
+  for (let i = 0; i < MAX_ANCESTOR_DEPTH; i++) {
+    if (current === undefined || current === null) return undefined;
+    if (visited.has(current)) return undefined; // cycle
+    visited.add(current);
+    const card = kanbanGetCard(current);
+    if (!card) return current;
+    if (card.parent_id === undefined || card.parent_id === null) return current;
+    current = card.parent_id;
+  }
+  return undefined; // depth exceeded
+}
+
+/**
+ * #1319: List active (queued/running) direct children of a card, up to `maxCount`.
+ * Multi-level descendant resolution is not needed for v1 — Orc's project hierarchy
+ * is one level deep (root → direct child cards).
+ */
+export function resolveActiveDescendants(rootId: number, maxCount = 50): KanbanCard[] {
+  const d = dbOrNull();
+  if (!d) return [];
+  return d.prepare(
+    `SELECT * FROM kanban_board WHERE parent_id = ? AND status IN ('queued', 'running') ORDER BY id LIMIT ?`,
+  ).all(rootId, maxCount) as KanbanCard[];
+}
+
+/**
+ * #1319: Get the most recent direct children with terminal states,
+ * at most `maxCount`.
+ */
+export function resolveRecentDirectChildren(parentId: number, maxCount = 20): KanbanCard[] {
+  const d = dbOrNull();
+  if (!d) return [];
+  return d.prepare(
+    `SELECT * FROM kanban_board WHERE parent_id = ? AND status IN ('done', 'failed', 'delivered') ORDER BY updated_at DESC LIMIT ?`,
+  ).all(parentId, maxCount) as KanbanCard[];
+}

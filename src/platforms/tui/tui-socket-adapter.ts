@@ -36,6 +36,8 @@ import type { SessionType } from "../../components/spin-types.js";
 import { typeLabel, sessionTypeOf } from "../../components/spin-types.js";
 import { getMasterUserId } from "../../components/master-user.js";
 import { queueInstruction, onSteerEvent } from "../../components/session-instruction-queue.js";
+import type { OrcActivityFeed } from "../../components/orc-activity-feed.js";
+import { buildOrcActivitySnapshot } from "../../components/orc-activity-snapshot.js";
 import {
   encodeFrame,
   createFrameDecoder,
@@ -49,6 +51,8 @@ const TAG = "tui";
 
 export interface TuiAdapterDeps {
   spin: Spin;
+  /** #1319: Activity feed for Orc execution events. */
+  orcActivityFeed?: OrcActivityFeed;
   /** Set to the recovery handler at construction; swapped to handleInboundMessage by wireTui. */
   onMessage: (msg: InboundMessage) => void;
   /** Override the default socket path (~/.abtars/tui.sock). */
@@ -78,6 +82,10 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private readonly socketPath: string;
   /** True between `start()` and `stop()` — guards re-entrant close. */
   private started = false;
+  /** #1319: Activity subscription cleanup, set on orc attach, cleared on detach. */
+  private _unsubActivity: (() => void) | null = null;
+  /** #1319: Cached activity sequence for subscriber scoping. */
+  private _activitySequence = 0;
 
   constructor(deps: TuiAdapterDeps) {
     this.deps = deps;
@@ -137,6 +145,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
   stop(): void {
     if (!this.started) return;
     this.started = false;
+    if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
     if (this.conn) {
       try { this.conn.destroy(); } catch { /* best effort */ }
       this.conn = null;
@@ -218,6 +227,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
         this.conn = null;
         this.attachedSessionId = null;
         this.mode = "pipeline";
+        if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
       }
     });
   }
@@ -244,6 +254,9 @@ export class TuiSocketAdapter implements PlatformAdapter {
   // ── Attach + input routing (filled in by Tasks 4 + 5) ───────────────
 
   private async _handleAttach(mode: TuiAttachMode): Promise<void> {
+    // Clean up any previous activity subscription
+    if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
+
     const master = getMasterUserId();
     const spin = this.deps.spin;
 
@@ -264,8 +277,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
         break;
       }
       case "new": {
-        // Defense in depth: client validates too, but the bridge is authoritative.
-        // Reject internal/system types — only interactive A/B/C are user-selectable.
         if (!["A", "B", "C"].includes(mode.sessionType)) {
           return this._reject(`Session type ${mode.sessionType} is not selectable from the terminal.`);
         }
@@ -275,11 +286,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
         break;
       }
       case "orc": {
-        // The Orc is tracked both as an AgentSession (transport handle,
-        // with isReady) and a ManagedSession (in the sessions Map, with
-        // id + busy). getOrcSession() returns the AgentSession for the
-        // ready check; we walk the sessions Map to find the ManagedSession
-        // — same pattern as sendUserToOrc.
         if (!spin.getOrcSession()) return this._reject("No Orc session is running.");
         const orcEntry = spin.listAllSessions().find(
           s => s.id.includes("_O_") && s.status !== "ended",
@@ -287,6 +293,21 @@ export class TuiSocketAdapter implements PlatformAdapter {
         if (!orcEntry) return this._reject("No Orc session is running.");
         sessionId = orcEntry.id;
         nextMode = "orc";
+
+        // #1319: Subscribe to activity feed before snapshot to close the race
+        const feed = this.deps.orcActivityFeed;
+        if (feed) {
+          this._activitySequence = 0;
+          const filter = {
+            sessionId,
+            executionId: orcEntry.activeExecutionId,
+          };
+          this._unsubActivity = feed.subscribe(filter, (event) => {
+            if (event.sequence <= this._activitySequence) return;
+            this._activitySequence = event.sequence;
+            this._push({ t: "activity", event });
+          });
+        }
         break;
       }
     }
@@ -298,6 +319,15 @@ export class TuiSocketAdapter implements PlatformAdapter {
     const index = parseInt(sessionId.split("_")[2] ?? "0", 10);
     const label = `${typeLabel(type as SessionType)} #${index}`;
     this._push({ t: "ready", sessionLabel: label, sessionId });
+
+    // #1319: Send activity snapshot after ready
+    if (nextMode === "orc" && this.deps.orcActivityFeed) {
+      const orcSession = spin.getSessionById(sessionId);
+      if (orcSession) {
+        const snapshot = buildOrcActivitySnapshot(orcSession, spin.getSessions(), this._activitySequence);
+        this._push({ t: "activity-snapshot", sequence: this._activitySequence, snapshot });
+      }
+    }
   }
 
   private async _handleInput(text: string): Promise<void> {

@@ -29,7 +29,10 @@ export type TuiServerFrame =
   | { t: "chunk"; id: string; delta: string }                             // RESERVED — see Streaming (v1)
   | { t: "chunk-end"; id: string }                                        // RESERVED — not emitted in v1
   | { t: "typing" }
-  | { t: "steer-ack"; status: "queued" | "rejected" | "consumed" | "expired" | "failed"; instructionId: string; message: string };  // #1332: steer lifecycle
+  | { t: "steer-ack"; status: "queued" | "rejected" | "consumed" | "expired" | "failed"; instructionId: string; message: string }  // #1332: steer lifecycle
+  // #1319: Orc activity
+  | { t: "activity-snapshot"; sequence: number; snapshot: import("../components/orc-activity-snapshot.js").OrcActivitySnapshot }
+  | { t: "activity"; sequence: number; event: import("../components/orc-activity-feed.js").OrcActivityEvent };
 
 export function encodeFrame(f: TuiServerFrame | TuiClientFrame): string {
   return JSON.stringify(f) + "\n";
@@ -73,7 +76,8 @@ export function isServerFrame(x: unknown): x is TuiServerFrame {
   if (typeof x !== "object" || x === null) return false;
   const t = (x as { t?: unknown }).t;
   return t === "ready" || t === "error" || t === "message" ||
-         t === "chunk" || t === "chunk-end" || t === "typing" || t === "steer-ack";
+         t === "chunk" || t === "chunk-end" || t === "typing" || t === "steer-ack" ||
+         t === "activity-snapshot" || t === "activity";
 }
 
 /** True if the parsed frame looks like a TuiClientFrame (narrowing helper). */

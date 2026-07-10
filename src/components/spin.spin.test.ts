@@ -58,6 +58,12 @@ vi.mock("./tasks/kanban-board.js", () => ({
   kanbanList: () => [],
   kanbanGetCard: (id: number) => _cards.get(id) ?? null,
   isUnblocked: () => true,
+  resolveRootId: (id: number) => id,
+  resolveActiveDescendants: () => [],
+  resolveRecentDirectChildren: () => [],
+  kanbanGetChildren: () => [],
+  kanbanAddTokens: () => {},
+  kanbanProgress: () => {},
 }));
 
 vi.mock("../utils/local-time.js", () => ({

@@ -110,6 +110,16 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   spin.setRuntime(ctx.runtime);
   if (ctx.memory) spin.setMemory(ctx.memory as any);
 
+  // #1319: Create Orc activity feed and wire Spin producer + Nerve bridge
+  const { OrcActivityFeed } = await import("../components/orc-activity-feed.js");
+  const feed = new OrcActivityFeed();
+  spin.setOrcActivityFeed(feed);
+  ctx.orcActivityFeed = feed;
+  const { bridgeNerveToFeed } = await import("../components/orc-activity-bridge.js");
+  ctx._orcActivityBridgeCleanup = bridgeNerveToFeed(feed, () =>
+    spin.listAllSessions().filter(s => s.id.includes("_O_") && s.status !== "ended"),
+  );
+
   // #936: Register master session in Spin
   const { loadUsers } = await import("../components/user-registry.js");
   const registry = loadUsers();

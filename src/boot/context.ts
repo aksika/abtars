@@ -110,6 +110,11 @@ export interface BootCtx {
   modelName: string;
   modelProvider: string;
   fallbackChain: string[];
+
+  // ── #1319: Orc activity feed ──────────────────────────────────────────
+  orcActivityFeed?: import("../components/orc-activity-feed.js").OrcActivityFeed;
+  /** Cleanup function returned by bridgeNerveToFeed — called on shutdown. */
+  _orcActivityBridgeCleanup?: () => void;
 }
 
 /**

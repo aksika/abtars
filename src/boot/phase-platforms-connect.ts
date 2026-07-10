@@ -183,6 +183,7 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
       const adapter = new TuiSocketAdapter({
         spin: ctx.sessionManager,
         onMessage: (msg) => recovery.handle(msg, adapter),
+        orcActivityFeed: ctx.orcActivityFeed,
       });
       platformAdapters.set("tui", adapter);
       // Retry path (#1306): wire full pipeline if phasePipelineDeps already ran.

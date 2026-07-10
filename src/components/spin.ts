@@ -5,7 +5,7 @@
 
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, kanbanGetCard, isUnblocked } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, kanbanGetCard, isUnblocked, resolveRootId } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
@@ -16,6 +16,7 @@ import { profileFor, isValidSessionType, type SessionProfile } from "./spin-prof
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
 import { drainInstructionBatch, expireInstructions } from "./session-instruction-queue.js";
+import type { OrcActivityFeed } from "./orc-activity-feed.js";
 
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
@@ -43,9 +44,11 @@ export class Spin {
   private orcSession: AgentSession | null = null;
   private _lastHealerDoneAt = 0;
   private _housekeepCounter = 0;
+  private orcActivityFeed?: OrcActivityFeed;
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
   setMemory(memory: Spin["memory"]): void { this.memory = memory; }
+  setOrcActivityFeed(feed: OrcActivityFeed): void { this.orcActivityFeed = feed; }
 
   // ── Session CRUD ───────────────────────────────────────────────────────
 
@@ -137,6 +140,11 @@ export class Spin {
 
   getSessionById(sessionId: string): ManagedSession | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  /** #1319: Expose session map for snapshot builder. */
+  getSessions(): Map<string, ManagedSession> {
+    return this.sessions;
   }
 
   formatList(userId: string, platform: string, showAll = false): string {
@@ -405,6 +413,19 @@ export class Spin {
       this.markRunning(spec.type, cardId); kanbanRunning(cardId);
     }
 
+    // #1319: Track card association and publish execution.started for Orc
+    if (cardId !== undefined && spec.type === "O") {
+      session.activeCardId = cardId;
+      session.activeRootCardId = resolveRootId(cardId);
+      this.orcActivityFeed?.publish({
+        kind: "execution.started",
+        sessionId: session.id,
+        executionId: session.activeExecutionId!,
+        rootCardId: session.activeRootCardId,
+        cardId,
+      });
+    }
+
     // 4-7. Single try/catch so EVERY exit path (pre-exec throws included) flows
     //       through failSpin, which owns markDone + drainQueued. Without this,
     //       a throw from beforePrompt / transport creation / a decorator leaves
@@ -476,9 +497,6 @@ export class Spin {
     cardId: number | undefined, stepIndex: number, started: number, result: string,
     terminate: "call" | "response" | "external",
   ): Promise<void> {
-    // #1332: Clear execution generation — steering no longer targets this run
-    session.activeExecutionId = undefined;
-
     // Persistent sends go through session.transport (runtime.lastUsage is only
     // updated by runtime.complete). Prefer the transport's own usage; fall back
     // to runtime for oneshot.
@@ -495,9 +513,6 @@ export class Spin {
       this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
     }
     if (cardId !== undefined) {
-      // drainArtifacts lives in transport/artifact-tools — wrapped in try/catch
-      // for test envs where the module's transitive deps (artifact-store) may not
-      // resolve. In production this always succeeds.
       let artifacts: Array<{ name: string; content: string }> = [];
       try {
         const { drainArtifacts } = require("./transport/artifact-tools.js") as typeof import("./transport/artifact-tools.js");
@@ -509,6 +524,21 @@ export class Spin {
         fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
       }
     }
+
+    // #1319: Publish execution.completed before clearing association
+    if (spec.type === "O" && session.activeExecutionId) {
+      this.orcActivityFeed?.publish({
+        kind: "execution.completed",
+        summary: result.slice(0, 200),
+        sessionId: session.id,
+        executionId: session.activeExecutionId,
+        rootCardId: session.activeRootCardId,
+        cardId: session.activeCardId,
+      });
+    }
+    session.activeExecutionId = undefined;
+    session.activeCardId = undefined;
+    session.activeRootCardId = undefined;
 
     await profile.afterPrompt?.(session, cardId);
     const stepEvent: StepEvent = {
@@ -529,7 +559,6 @@ export class Spin {
   ): Promise<void> {
     // #1332: Expire remaining queued instructions when execution fails
     if (session.instructionQueue.length > 0) expireInstructions(session, "execution_failed");
-    session.activeExecutionId = undefined;
 
     const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
     logWarn(TAG, `${spec.type} spin failed: ${msg}`);
@@ -538,6 +567,22 @@ export class Spin {
       kanbanRetryOrFail(cardId, msg);
       if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
     }
+
+    // #1319: Publish execution.failed before clearing association
+    if (spec.type === "O" && session.activeExecutionId) {
+      this.orcActivityFeed?.publish({
+        kind: "execution.failed",
+        error: msg,
+        sessionId: session.id,
+        executionId: session.activeExecutionId,
+        rootCardId: session.activeRootCardId,
+        cardId: session.activeCardId,
+      });
+    }
+    session.activeExecutionId = undefined;
+    session.activeCardId = undefined;
+    session.activeRootCardId = undefined;
+
     await profile.afterPrompt?.(session, cardId);
     const stepEvent: StepEvent = {
       sessionId: session.id, cardId, stepIndex,
