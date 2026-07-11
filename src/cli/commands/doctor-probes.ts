@@ -186,10 +186,10 @@ async function probeWatchdog(): Promise<ProbeResult> {
   const bridgeAlive = bridgePid > 0 && pidAlive(bridgePid);
   const wdAlive = wdPid > 0 && pidAlive(wdPid);
 
-  if (bridgeAlive && wdAlive) return { name: "watchdog", status: "ok", detail: `bridge:${bridgePid}, wd:${wdPid}` };
-  if (!bridgeAlive && !wdAlive) return { name: "watchdog", status: "failed", detail: `bridge:${bridgePid} dead, wd:${wdPid} dead` };
-  if (!wdAlive) return { name: "watchdog", status: "failed", detail: `bridge:${bridgePid} alive, wd:${wdPid} dead (unprotected)` };
-  return { name: "watchdog", status: "failed", detail: `bridge:${bridgePid} dead, wd:${wdPid} alive (will restart)` };
+  if (bridgeAlive && wdAlive) return { name: "watchdog", status: "ok", detail: `${bridgePid}, wd:${wdPid}` };
+  if (!bridgeAlive && !wdAlive) return { name: "watchdog", status: "failed", detail: `${bridgePid} dead, wd:${wdPid} dead` };
+  if (!wdAlive) return { name: "watchdog", status: "failed", detail: `${bridgePid} alive, wd:${wdPid} dead (unprotected)` };
+  return { name: "watchdog", status: "failed", detail: `${bridgePid} dead, wd:${wdPid} alive (will restart)` };
 }
 
 // ── Heart Probes ─────────────────────────────────────────────────────────────
@@ -202,15 +202,31 @@ async function probeHeartbeat(): Promise<ProbeResult> {
   return { name: "heartbeat", status: "ok", detail: ago(ageMs) };
 }
 
-// #1261: single-bridge invariant — catches duplicate-bridge regressions at runtime.
+// #1261: bridge invariant — catches duplicate-bridge regressions at runtime.
 // pgrep counts the bridge processes. >1 means a second bridge is running (likely orphaned).
-async function probeSingleBridge(): Promise<ProbeResult> {
+async function probeBridge(): Promise<ProbeResult> {
   const { spawnSync } = await import("node:child_process");
   const pgrep = spawnSync("pgrep", ["-f", "app/bundle/abtars.js"], { encoding: "utf-8" });
   const pids = pgrep.stdout ? pgrep.stdout.trim().split("\n").filter(Boolean) : [];
-  if (pids.length === 0) return { name: "single-bridge", status: "skipped", detail: "no bridge running" };
-  if (pids.length === 1) return { name: "single-bridge", status: "ok", detail: `pid:${pids[0]}` };
-  return { name: "single-bridge", status: "failed", detail: `${pids.length} bridges running: ${pids.join(",")}` };
+  if (pids.length === 0) return { name: "bridge", status: "skipped", detail: "no bridge running" };
+  if (pids.length === 1) return { name: "bridge", status: "ok", detail: `pid:${pids[0]}` };
+  return { name: "bridge", status: "failed", detail: `${pids.length} bridges running: ${pids.join(",")}` };
+}
+
+async function probeTui(): Promise<ProbeResult> {
+  const sockPath = join(home, "tui.sock");
+  if (!existsSync(sockPath)) return { name: "tui", status: "skipped", detail: "no tui.sock" };
+  try {
+    const { connect } = await import("node:net");
+    await new Promise<void>((resolve, reject) => {
+      const s = connect(sockPath, () => { s.end(); resolve(); });
+      s.on("error", (e) => { s.destroy(); reject(e); });
+      s.on("timeout", () => { s.destroy(); reject(new Error("connect timeout")); });
+    });
+    return { name: "tui", status: "ok", detail: "socket responding" };
+  } catch {
+    return { name: "tui", status: "failed", detail: "socket exists but not responding" };
+  }
 }
 
 // ── Brain Probes ─────────────────────────────────────────────────────────────
@@ -390,7 +406,7 @@ export async function runAllProbes(): Promise<DoctorOutput> {
   const start = Date.now();
 
   const [body, heart, brain, soul, tribe] = await Promise.all([
-    Promise.all([probePlatforms(), probeDashboard(), probeSecurity(), probeWatchdog(), probeSingleBridge()].map(p => timedProbe(() => p))),
+    Promise.all([probePlatforms(), probeDashboard(), probeSecurity(), probeWatchdog(), probeBridge(), probeTui()].map(p => timedProbe(() => p))),
     Promise.all([probeHeartbeat()].map(p => timedProbe(() => p))),
     Promise.all([probeTransport(), probeSpin(), probeKanban(), probeSkills(), probeSha()].map(p => timedProbe(() => p))),
     Promise.all([probeMind()].map(p => timedProbe(() => p))),

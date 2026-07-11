@@ -36,12 +36,12 @@ afterEach(() => {
   delete process.env["ABTARS_HOME"];
 });
 
-describe("doctor probeSingleBridge (#1261)", () => {
+describe("doctor probeBridge (#1261)", () => {
   it("reports skipped when no bridge is running", async () => {
     mockPgrepOutput = "";
     const { runAllProbes } = await import("./doctor-probes.js");
     const result = await runAllProbes();
-    const probe = result.layers.body.flat().find((r) => r.name === "single-bridge");
+    const probe = result.layers.body.flat().find((r) => r.name === "bridge");
     expect(probe).toBeDefined();
     expect(probe?.status).toBe("skipped");
     expect(probe?.detail).toContain("no bridge running");
@@ -51,7 +51,7 @@ describe("doctor probeSingleBridge (#1261)", () => {
     mockPgrepOutput = "12345\n";
     const { runAllProbes } = await import("./doctor-probes.js");
     const result = await runAllProbes();
-    const probe = result.layers.body.flat().find((r) => r.name === "single-bridge");
+    const probe = result.layers.body.flat().find((r) => r.name === "bridge");
     expect(probe?.status).toBe("ok");
     expect(probe?.detail).toBe("pid:12345");
   });
@@ -60,7 +60,7 @@ describe("doctor probeSingleBridge (#1261)", () => {
     mockPgrepOutput = "12345\n67890\n";
     const { runAllProbes } = await import("./doctor-probes.js");
     const result = await runAllProbes();
-    const probe = result.layers.body.flat().find((r) => r.name === "single-bridge");
+    const probe = result.layers.body.flat().find((r) => r.name === "bridge");
     expect(probe?.status).toBe("failed");
     expect(probe?.detail).toContain("2 bridges");
     expect(probe?.detail).toContain("12345");
