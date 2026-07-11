@@ -119,24 +119,28 @@ describe("handleInboundMessage", () => {
   beforeEach(async () => {
     transport = mockTransport();
     setUserRegistryOverride(MASTER_REGISTRY);
-    // Mock spin.getSessionById so pipeline can resolve sessions for any session ID
+    // Mock spin methods so pipeline can resolve sessions for any session ID
     const spinMod = await import("./spin.js");
-    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
-      id, userId: "master", platform: "telegram", chatId: 100,
-      delivery: "simple", active: true, status: "ready",
-      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
-      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
-    }));
-    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
+    const mockSession: ManagedSession = {
       id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
       delivery: "simple", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    };
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
+      ...mockSession, id,
     }));
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => mockSession);
+    // resolveSession mock returns a routable session with streaming delivery.
+    // The transport field is intentionally omitted so the pipeline falls through
+    // to deps.transport (each test supplies its own transport to mockDeps).
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+      async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
+        ...mockSession, delivery: "streaming",
+      }),
+    );
   });
 
   afterEach(() => {
@@ -372,6 +376,16 @@ describe("citation detection (#1270)", () => {
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
     }));
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+      async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
+        id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+        delivery: "streaming", active: true, status: "ready",
+        idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+        log: [], shortIndex: 1,
+        busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      }),
+    );
     const pipelineMod = await import("./pipeline/prompt-builder.js");
     buildPromptSpy = vi.spyOn(pipelineMod, "buildPrompt").mockResolvedValue({
       prompt: "hello",

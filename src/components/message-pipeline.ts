@@ -34,7 +34,7 @@ import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
-import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
+import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
 import { releaseBusy } from "./pipeline/busy-guard.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
 import { buildPrompt } from "./pipeline/prompt-builder.js";
@@ -154,7 +154,7 @@ export async function handleInboundMessage(
 ): Promise<void> {
   // Run early middleware (voice → commands → busy guard)
   const ctx = createMessageContext(msg, adapter, deps);
-  await runPipeline(ctx, [voiceMiddleware, commandMiddleware, busyGuardMiddleware]);
+  await runPipeline(ctx, [voiceMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware]);
   if (ctx.handled) return;
 
   // --- BeforeMessage hook ---
@@ -191,6 +191,8 @@ export async function handleInboundMessage(
       }
     } catch (err) {
       logWarn(TAG, `resolveSession failed for ${msg.userId}: ${err instanceof Error ? err.message : String(err)}`);
+      await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(() => {});
+      return;
     }
   }
 

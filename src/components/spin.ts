@@ -233,11 +233,13 @@ export class Spin {
   async resolveSession(userId: string, platform: string, chatId: number): Promise<ManagedSession> {
     const session = this.getActiveSession(userId, platform);
 
+    if (session.status === "paused") throw new Error("Session is paused — use /session resume");
+    if (session.status === "ended") throw new Error("Session ended — use /session new");
+
     if (session.transport) {
       session.lastActiveAt = Date.now();
       return session;
     }
-    if (session.status === "ended") throw new Error("Session ended — use /session new");
 
     const total = this.listAllSessions().filter(s => s.transport).length;
     if (total >= MAX_TOTAL_SESSIONS) throw new Error("System busy, try again in a few minutes.");
