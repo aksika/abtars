@@ -54,9 +54,9 @@ describe("parsePlatformFlags — TUI (#1315)", () => {
     expect(result.tui).toBe(true);
   });
 
-  it("TUI is off by default (no env, no CLI flag)", () => {
+  it("TUI is on by default (no env, no CLI flag)", () => {
     const result = parsePlatformFlags([]);
-    expect(result.tui).toBe(false);
+    expect(result.tui).toBe(true);
   });
 
   it("any platform CLI flag forces the explicit-CLI branch (TUI off unless --tui)", () => {

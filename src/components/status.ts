@@ -568,13 +568,14 @@ function collectDaemon(
 }
 
 function collectTui(branch: string | null, bridgePid: number | null): TuiInfo {
-  // TUI_ENABLED from .env (read by readPorts path-adjacent, but kept inline for clarity)
-  let tuiEnabled = false;
+  // #1352: TUI enabled by default. Only explicit TUI_ENABLED=false/0 disables it.
+  let tuiEnabled = true;
   try {
     const { abtarsHome } = require("../paths.js") as typeof import("../paths.js");
     const envPath = join(abtarsHome(), "config", ".env");
     const envContent = readFileSync(envPath, "utf-8");
-    tuiEnabled = /^TUI_ENABLED=(true|1)$/m.test(envContent);
+    const tuiLine = envContent.split("\n").find(l => l.startsWith("TUI_ENABLED="));
+    if (tuiLine) tuiEnabled = !/=(false|0)$/i.test(tuiLine.trim());
   } catch {}
 
   const onTuiBranch = branch !== null && /tui/i.test(branch);

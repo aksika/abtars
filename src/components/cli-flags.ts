@@ -38,9 +38,8 @@ export function parsePlatformFlags(args?: string[]): { telegram: boolean; discor
   const telegram = envBool("TELEGRAM_ENABLED") ?? !!process.env["TELEGRAM_BOT_TOKEN"];
   const discord = envBool("DISCORD_ENABLED") ?? !!process.env["DISCORD_TOKEN"];
   const irc = envBool("IRC_ENABLED") ?? existsSync(join(configDir, "irc.json"));
-  // #1315: TUI is opt-in. No token/config fallback — the socket is always
-  // creatable (no external dep), so presence of TUI_ENABLED is the gate.
-  const tui = envBool("TUI_ENABLED") ?? false;
+  // #1315, #1352: TUI is enabled by default. Set TUI_ENABLED=false to disable.
+  const tui = envBool("TUI_ENABLED") ?? true;
   const web = envBool("ENABLE_DASHBOARD") ?? false;
   const agent = envBool("ENABLE_AGENT_API") ?? false;
 
