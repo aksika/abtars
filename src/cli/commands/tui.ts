@@ -31,6 +31,7 @@ import {
   type TuiClientFrame,
   type TuiServerFrame,
 } from "../../platforms/tui/tui-protocol.js";
+import type { TuiRuntimeStatus, TuiUsageSnapshot } from "../../platforms/tui/runtime-status.js";
 
 /** Pretty stderr writer (no colorful emoji per abtars.md). */
 function stderr(line: string): void {
@@ -152,6 +153,39 @@ export function createMarkdownMessage(
   return new pit.Markdown(body, 0, 0, TUI_MARKDOWN_THEME, style);
 }
 
+function formatTokens(value: number): string {
+  if (value < 1000) return String(value);
+  if (value < 10000) return `${(value / 1000).toFixed(1)}k`;
+  if (value < 1_000_000) return `${Math.round(value / 1000)}k`;
+  if (value < 10_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  return `${Math.round(value / 1_000_000)}M`;
+}
+
+function formatUsage(usage?: TuiUsageSnapshot): string[] {
+  if (!usage) return [];
+  const parts = [`↑${formatTokens(usage.input)}`, `↓${formatTokens(usage.output)}`];
+  if (usage.cacheRead !== undefined) parts.push(`R${formatTokens(usage.cacheRead)}`);
+  if (usage.cacheWrite !== undefined) parts.push(`W${formatTokens(usage.cacheWrite)}`);
+  if (usage.cacheHitPercent !== undefined) parts.push(`CH${usage.cacheHitPercent.toFixed(1)}%`);
+  return parts;
+}
+
+/** Pure, width-aware footer formatting; unknown metrics are never shown as zero. */
+export function formatRuntimeStatus(status: TuiRuntimeStatus, width: number): string {
+  const ctx = status.contextPercent !== undefined
+    ? `${status.contextPercent.toFixed(1)}%/${status.contextWindow !== undefined ? formatTokens(status.contextWindow) : "?"}`
+    : `?/${status.contextWindow !== undefined ? formatTokens(status.contextWindow) : "?"}`;
+  const left = [...formatUsage(status.sessionUsage ?? status.lastTurnUsage), `${ctx}${status.autoCompaction ? " (auto)" : ""}`];
+  const model = status.model ?? "model ?";
+  const provider = status.provider ? `(${status.provider}) ` : "";
+  const reasoning = status.reasoning ? ` • ${status.reasoning}` : "";
+  const right = `${provider}${model}${reasoning}`;
+  const raw = `${left.join(" ")}    ${right}`.trim();
+  if (width <= 0 || raw.length <= width) return raw;
+  if (width <= right.length) return right.slice(0, Math.max(0, width - 1)) + (width > 0 ? "…" : "");
+  return raw.slice(0, Math.max(0, width - 1)) + "…";
+}
+
 /**
  * Testable seam for the server-frame render path. If `frame.t` is not
  * "message" the call is a no-op. Otherwise the Markdown is constructed
@@ -220,7 +254,9 @@ export async function tui(args: string[]): Promise<number> {
     },
   };
   const editor = new pit.Editor(ui, editorTheme);
+  const footer = new pit.Text("", 0, 0);
   ui.addChild(log);
+  ui.addChild(footer);
   ui.addChild(editor);
   ui.setFocus(editor);
 
@@ -230,6 +266,7 @@ export async function tui(args: string[]): Promise<number> {
   let ready = false;             // pre-`ready` errors = startup failure (exit 1)
   let shouldExitCode: number | null = null;
   let stopping = false;
+  let latestStatus: TuiRuntimeStatus | undefined;
 
   // pi-tui's TUI.start() is NON-BLOCKING (event-driven: it sets up stdin/stdout
   // and returns). We need a promise to await so the process stays alive until
@@ -345,6 +382,12 @@ export async function tui(args: string[]): Promise<number> {
         return;
       case "message":
         appendMessage(frame.role, frame.markdown);
+        return;
+      case "status":
+        if (latestStatus && frame.status.revision <= latestStatus.revision) return;
+        latestStatus = frame.status;
+        footer.setText(formatRuntimeStatus(frame.status, terminal.columns));
+        ui.requestRender();
         return;
       case "chunk":
       case "chunk-end":

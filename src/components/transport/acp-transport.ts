@@ -54,7 +54,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
-import type { IKiroTransport } from "./kiro-transport.js";
+import type { IKiroTransport, RuntimeStatusSnapshot } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn, logError, logTrace } from "../logger.js";
 import { writeRestartReason } from "../transport/bridge-lock-transport.js";
 import { TransportStateMachine } from "./transport-state.js";
@@ -620,6 +620,10 @@ export class AcpTransport implements IKiroTransport {
   }
 
   getModel(): string { return this.modelId ?? "unknown"; }
+
+  getRuntimeStatus(): RuntimeStatusSnapshot {
+    return { model: this.getModel(), contextPercent: this.contextPercent >= 0 ? this.contextPercent : undefined };
+  }
 
   private handleSessionUpdate(params: SessionNotification): void {
     const update = params.update;

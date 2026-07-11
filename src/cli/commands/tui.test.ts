@@ -18,8 +18,10 @@ import {
   TUI_MARKDOWN_THEME,
   createMarkdownMessage,
   processMessageFrame,
+  formatRuntimeStatus,
   type MessageRole,
 } from "./tui.js";
+import type { TuiRuntimeStatus } from "../../platforms/tui/runtime-status.js";
 
 describe("parseAttachMode", () => {
   it("default is resume (no args)", () => {
@@ -74,6 +76,39 @@ describe("parseAttachMode", () => {
   it("--new with an invalid type throws", () => {
     expect(() => parseAttachMode(["--new", "O"])).toThrow(/A, B, or C/);
     expect(() => parseAttachMode(["--new=t"])).toThrow(/A, B, or C/);
+  });
+});
+
+describe("formatRuntimeStatus (#1355)", () => {
+  const rich: TuiRuntimeStatus = {
+    sessionId: "s1",
+    revision: 1,
+    provider: "zai",
+    model: "glm-5.2",
+    contextPercent: 0,
+    contextWindow: 1_000_000,
+    autoCompaction: true,
+    reasoning: "low",
+    sessionUsage: { input: 12_000, output: 2_100, cacheRead: 8_000, cacheWrite: 900, cacheHitPercent: 66.7 },
+  };
+
+  it("renders model/context/compaction/reasoning and cache-aware totals", () => {
+    const line = formatRuntimeStatus(rich, 160);
+    expect(line).toContain("↑12k ↓2.1k R8.0k W900 CH66.7%");
+    expect(line).toContain("0.0%/1.0M (auto)");
+    expect(line).toContain("(zai) glm-5.2 • low");
+  });
+
+  it("uses unknown markers instead of inventing zero context", () => {
+    const line = formatRuntimeStatus({ sessionId: "s1", revision: 1, model: "m" }, 100);
+    expect(line).toContain("?/?");
+    expect(line).not.toContain("0.0%/");
+  });
+
+  it("truncates to narrow terminal width", () => {
+    const line = formatRuntimeStatus(rich, 24);
+    expect(line.length).toBe(24);
+    expect(line.endsWith("…")).toBe(true);
   });
 });
 

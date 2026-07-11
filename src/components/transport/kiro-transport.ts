@@ -17,6 +17,23 @@ export interface PromptRequestContext {
   beforeMessageId?: number;
 }
 
+export interface RuntimeUsageSnapshot {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
+
+export interface RuntimeStatusSnapshot {
+  provider?: string;
+  model?: string;
+  contextPercent?: number;
+  contextWindow?: number;
+  autoCompaction?: boolean;
+  reasoning?: "off" | "low" | "medium" | "high" | "xhigh" | "default";
+  lastTurnUsage?: RuntimeUsageSnapshot;
+}
+
 export interface IKiroTransport {
   /** Initialize the transport (spawn process, verify tmux session, etc.) */
   initialize(): Promise<void>;
@@ -96,6 +113,9 @@ export interface IKiroTransport {
   /** Temporarily override max tool rounds (circuit breaker) for next call(s). null resets to config default. */
   setMaxToolRoundsOverride?(n: number | null): void;
 
-  /** Token usage from last completed prompt. Returns {input, output} or null if unavailable. */
-  lastUsage?(): { input: number; output: number } | null;
+  /** Token usage from the last completed provider call (legacy consumers). */
+  lastUsage?(): RuntimeUsageSnapshot | null;
+
+  /** Read-only status projection for operator-facing surfaces such as TUI. */
+  getRuntimeStatus?(): RuntimeStatusSnapshot;
 }

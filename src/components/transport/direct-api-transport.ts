@@ -15,13 +15,14 @@ import { normalizeToolCalls, parseErrorStatus, parseRetryAfter, parseUsageLimitC
 import { recordUsage } from "../usage-tracker.js";
 import { clampMaxOutputTokens, estimateTokensFromChars } from "./token-budget.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
-import type { IKiroTransport, PromptRequestContext } from "./kiro-transport.js";
+import type { IKiroTransport, PromptRequestContext, RuntimeStatusSnapshot, RuntimeUsageSnapshot } from "./kiro-transport.js";
 import { isCompactable } from "../spin-types.js";
 
 const TAG = "direct-api";
 
 
 export interface DirectApiConfig {
+  provider?: string;
   endpoint: string;
   apiKey?: string;
   model: string;
@@ -64,6 +65,7 @@ export class DirectApiTransport implements IKiroTransport {
   /** #1311: prompt-cache token totals from the pi-ai path (null on L0 — reptile adapters don't report cache). */
   private _lastCacheRead: number | null = null;
   private _lastCacheWrite: number | null = null;
+  private _lastTurnUsage: RuntimeUsageSnapshot | null = null;
   private _activeSessionKey = "";
   private _activeUserId = "master";
 
@@ -170,6 +172,7 @@ export class DirectApiTransport implements IKiroTransport {
     this._intermediateText = "";
     this._lastCacheRead = null;
     this._lastCacheWrite = null;
+    this._lastTurnUsage = null;
     this._promptStartedAt = Date.now();
     this._lastActivityAt = Date.now();
 
@@ -350,6 +353,12 @@ export class DirectApiTransport implements IKiroTransport {
           : session.contextPercent;
         this._lastPromptTokens = usage.prompt_tokens;
         this._lastCompletionTokens = usage.completion_tokens ?? 0;
+        const turn = this._lastTurnUsage ?? { input: 0, output: 0 };
+        turn.input += usage.prompt_tokens;
+        turn.output += usage.completion_tokens ?? 0;
+        if (this._lastCacheRead != null) turn.cacheRead = (turn.cacheRead ?? 0) + this._lastCacheRead;
+        if (this._lastCacheWrite != null) turn.cacheWrite = (turn.cacheWrite ?? 0) + this._lastCacheWrite;
+        this._lastTurnUsage = turn;
         // #1022: compaction fires only for A/C session types.
         if (isCompactable(this._activeSessionKey)) {
           this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
@@ -780,6 +789,19 @@ export class DirectApiTransport implements IKiroTransport {
     if (this._lastCacheRead != null) out.cacheRead = this._lastCacheRead;
     if (this._lastCacheWrite != null) out.cacheWrite = this._lastCacheWrite;
     return out;
+  }
+
+  getRuntimeStatus(): RuntimeStatusSnapshot {
+    const session = this.sessions.get(this._activeSessionKey);
+    return {
+      provider: this.config.provider,
+      model: this.activeModel,
+      contextPercent: this._contextPercent >= 0 ? this._contextPercent : undefined,
+      contextWindow: this._activeMaxContext > 0 ? this._activeMaxContext : undefined,
+      autoCompaction: !!this.contextOrchestrator,
+      reasoning: session?.reasoningEffort && session.reasoningEffort !== "off" ? session.reasoningEffort : "off",
+      lastTurnUsage: this._lastTurnUsage ? { ...this._lastTurnUsage } : undefined,
+    };
   }
 
   /** Hot-swap the active model. Takes effect on next API call. */

@@ -32,7 +32,8 @@ export type TuiServerFrame =
   | { t: "steer-ack"; status: "queued" | "rejected" | "consumed" | "expired" | "failed"; instructionId: string; message: string }  // #1332: steer lifecycle
   // #1319: Orc activity
   | { t: "activity-snapshot"; sequence: number; snapshot: import("../components/orc-activity-snapshot.js").OrcActivitySnapshot }
-  | { t: "activity"; sequence: number; event: import("../components/orc-activity-feed.js").OrcActivityEvent };
+  | { t: "activity"; sequence: number; event: import("../components/orc-activity-feed.js").OrcActivityEvent }
+  | { t: "status"; status: import("./runtime-status.js").TuiRuntimeStatus };
 
 export function encodeFrame(f: TuiServerFrame | TuiClientFrame): string {
   return JSON.stringify(f) + "\n";
@@ -77,7 +78,7 @@ export function isServerFrame(x: unknown): x is TuiServerFrame {
   const t = (x as { t?: unknown }).t;
   return t === "ready" || t === "error" || t === "message" ||
          t === "chunk" || t === "chunk-end" || t === "typing" || t === "steer-ack" ||
-         t === "activity-snapshot" || t === "activity";
+         t === "activity-snapshot" || t === "activity" || t === "status";
 }
 
 /** True if the parsed frame looks like a TuiClientFrame (narrowing helper). */

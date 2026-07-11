@@ -5,7 +5,7 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import type { IKiroTransport } from "./transport/kiro-transport.js";
+import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import { logInfo, logWarn } from "./logger.js";
 import { randomBytes } from "node:crypto";
 
@@ -68,10 +68,10 @@ export class SubagentRuntime {
   private readonly activeSpawns = new Map<string, { abort: AbortController; startedAt: number }>();
   private _registry: ModelHealthRegistry | null = null;
   private _mainTransport: IKiroTransport | null = null;
-  private _lastUsage: { input: number; output: number } | null = null;
+  private _lastUsage: RuntimeUsageSnapshot | null = null;
 
   /** Token usage from last complete() call. */
-  get lastUsage(): { input: number; output: number } | null { return this._lastUsage; }
+  get lastUsage(): RuntimeUsageSnapshot | null { return this._lastUsage; }
   private _sessionManager: import("./spin.js").Spin | null = null;
   private _sandboxEnabled = false;
 

@@ -4,7 +4,7 @@
  */
 
 import type { AgentName } from "./subagent-runtime.js";
-import type { IKiroTransport } from "./transport/kiro-transport.js";
+import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
 import { logError } from "./logger.js";
 
@@ -68,6 +68,10 @@ export interface ManagedSession {
   // Metrics
   messageCount: number;
   tokenCount: number;
+  /** Usage for the most recently completed sendPrompt turn, when reported. */
+  lastTurnUsage?: RuntimeUsageSnapshot;
+  /** In-memory usage total for this managed session. Not persisted. */
+  sessionUsage?: RuntimeUsageSnapshot;
   toolCallCount: number;
 
   // Session event log (last 5 events)

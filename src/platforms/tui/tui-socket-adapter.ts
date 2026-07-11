@@ -38,6 +38,7 @@ import { getMasterUserId } from "../../components/master-user.js";
 import { queueInstruction, onSteerEvent } from "../../components/session-instruction-queue.js";
 import type { OrcActivityFeed } from "../../components/orc-activity-feed.js";
 import { buildOrcActivitySnapshot } from "../../components/orc-activity-snapshot.js";
+import { buildTuiRuntimeStatus } from "./runtime-status.js";
 import {
   encodeFrame,
   createFrameDecoder,
@@ -86,6 +87,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private _unsubActivity: (() => void) | null = null;
   /** #1319: Cached activity sequence for subscriber scoping. */
   private _activitySequence = 0;
+  /** Monotonic status revision for the current socket/attachment. */
+  private _statusRevision = 0;
 
   constructor(deps: TuiAdapterDeps) {
     this.deps = deps;
@@ -169,6 +172,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
   async sendMessage(_channelId: string, text: string, _opts?: SendOpts): Promise<undefined> {
     this._push({ t: "message", role: "assistant", markdown: text });
+    this._pushStatus();
     return undefined;
   }
 
@@ -329,11 +333,13 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
     this.attachedSessionId = sessionId;
     this.mode = nextMode;
+    this._statusRevision = 0;
 
     const type = sessionTypeOf(sessionId);
     const index = parseInt(sessionId.split("_")[2] ?? "0", 10);
     const label = `${typeLabel(type as SessionType)} #${index}`;
     this._push({ t: "ready", sessionLabel: label, sessionId });
+    this._pushStatus();
 
     // #1319: Send activity snapshot after ready
     if (nextMode === "orc" && this.deps.orcActivityFeed) {
@@ -343,6 +349,14 @@ export class TuiSocketAdapter implements PlatformAdapter {
         this._push({ t: "activity-snapshot", sequence: this._activitySequence, snapshot });
       }
     }
+  }
+
+  private _pushStatus(): void {
+    if (!this.attachedSessionId) return;
+    const session = this.deps.spin.getSessionById(this.attachedSessionId);
+    if (!session) return;
+    this._statusRevision++;
+    this._push({ t: "status", status: buildTuiRuntimeStatus(session, this._statusRevision) });
   }
 
   private async _handleInput(text: string): Promise<void> {
@@ -399,6 +413,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
       const index2 = parseInt(r.id.split("_")[2] ?? "0", 10);
       const label = `${typeLabel(type as SessionType)} #${index2}`;
       this._push({ t: "ready", sessionLabel: label, sessionId: r.id });
+      this._pushStatus();
       return;
     }
 
@@ -466,10 +481,12 @@ export class TuiSocketAdapter implements PlatformAdapter {
       return;
     }
     this.attachedSessionId = target.id;
+    this._statusRevision = 0;
     const type = sessionTypeOf(target.id);
     const idx = parseInt(target.id.split("_")[2] ?? "0", 10);
     const label = `${typeLabel(type as SessionType)} #${idx}`;
     this._push({ t: "ready", sessionLabel: label, sessionId: target.id });
+    this._pushStatus();
   }
 
   /** #1332: Handle an explicit steer client frame. Validates and queues. */

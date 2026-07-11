@@ -210,6 +210,7 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const policy = new FallbackPolicy(candidates, registry ?? new ModelHealthRegistry());
 
     const transport = new DirectApiTransport({
+      provider: agent.providerName,
       endpoint: startEndpoint,
       apiKey: startApiKey, model: startModel,
       maxContext: agent.contextWindow, maxOutput: agent.maxOutput,

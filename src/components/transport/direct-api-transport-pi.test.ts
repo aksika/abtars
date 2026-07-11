@@ -84,6 +84,7 @@ describe("DirectApiTransport — pi-ai gate (#1311)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     // cache totals plumbed through lastUsage (Task 3)
     expect(t.lastUsage()).toMatchObject({ input: 3, output: 2, cacheRead: 7, cacheWrite: 1 });
+    expect(t.getRuntimeStatus()).toMatchObject({ model: "m", contextWindow: 8000, lastTurnUsage: { input: 3, output: 2, cacheRead: 7, cacheWrite: 1 } });
   });
 
   it("flag on + pi request error → propagates as 'API error <status>' to L2 (no L0 fetch)", async () => {

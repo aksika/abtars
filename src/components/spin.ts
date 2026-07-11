@@ -7,7 +7,7 @@ import { logInfo, logWarn, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, kanbanGetCard, isUnblocked, resolveRootId } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
-import type { IKiroTransport } from "./transport/kiro-transport.js";
+import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
 import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, QueuedSessionInstruction } from "./spin-types.js";
@@ -549,11 +549,24 @@ export class Spin {
     // Persistent sends go through session.transport (runtime.lastUsage is only
     // updated by runtime.complete). Prefer the transport's own usage; fall back
     // to runtime for oneshot.
-    const usage = (session.transport as { lastUsage?: () => { input: number; output: number } | null } | undefined)?.lastUsage?.()
+    const status = (session.transport as { getRuntimeStatus?: () => { lastTurnUsage?: RuntimeUsageSnapshot } } | undefined)?.getRuntimeStatus?.();
+    const usage = status?.lastTurnUsage
+      ?? (session.transport as { lastUsage?: () => RuntimeUsageSnapshot | null } | undefined)?.lastUsage?.()
       ?? this.runtime?.lastUsage ?? null;
     session.messageCount += 2;
     session.lastActiveAt = Date.now();
-    session.tokenCount = usage ? usage.input + usage.output : session.tokenCount;
+    if (usage) {
+      session.lastTurnUsage = { ...usage };
+      session.sessionUsage = {
+        input: (session.sessionUsage?.input ?? 0) + usage.input,
+        output: (session.sessionUsage?.output ?? 0) + usage.output,
+        cacheRead: session.sessionUsage?.cacheRead !== undefined || usage.cacheRead !== undefined
+          ? (session.sessionUsage?.cacheRead ?? 0) + (usage.cacheRead ?? 0) : undefined,
+        cacheWrite: session.sessionUsage?.cacheWrite !== undefined || usage.cacheWrite !== undefined
+          ? (session.sessionUsage?.cacheWrite ?? 0) + (usage.cacheWrite ?? 0) : undefined,
+      };
+      session.tokenCount = usage.input + usage.output;
+    }
     pushLog(session, "complete");
 
     if (this.memory) {
