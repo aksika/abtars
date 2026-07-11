@@ -43,7 +43,6 @@ export interface DaemonInfo {
 export interface TuiInfo {
   present: boolean;
   enabled: boolean;
-  onTuiBranch: boolean;
   bridgeTty: string;
   clientsAttached: number;
 }
@@ -173,7 +172,7 @@ export async function getStatus(ctx?: BridgeStatusCtx): Promise<StatusView> {
   );
 
   // TUI section
-  const tui = collectTui(branch, bridgeState.pid);
+  const tui = collectTui(bridgeState.pid);
 
   // Runtime (only if ctx)
   const runtime = ctx ? await collectRuntime(ctx, warnings) : undefined;
@@ -265,7 +264,7 @@ export function renderOperatorStatus(view: StatusView): string {
   const tuiIcon = view.tui.present ? "✓" : "○";
   const tuiState = view.tui.present ? "present" : "not present";
   lines.push(
-    `  tui:           ${tuiIcon} ${tuiState} (enabled=${view.tui.enabled}, branch=${view.tui.onTuiBranch ? "yes" : "no"}, bridge tty=${view.tui.bridgeTty})`,
+    `  tui:           ${tuiIcon} ${tuiState} (enabled=${view.tui.enabled}, bridge tty=${view.tui.bridgeTty})`,
   );
   lines.push(`                 clients attached: ${view.tui.clientsAttached}`);
 
@@ -567,7 +566,7 @@ function collectDaemon(
   };
 }
 
-function collectTui(branch: string | null, bridgePid: number | null): TuiInfo {
+function collectTui(bridgePid: number | null): TuiInfo {
   // #1352: TUI enabled by default. Only explicit TUI_ENABLED=false/0 disables it.
   let tuiEnabled = true;
   try {
@@ -578,8 +577,8 @@ function collectTui(branch: string | null, bridgePid: number | null): TuiInfo {
     if (tuiLine) tuiEnabled = !/=(false|0)$/i.test(tuiLine.trim());
   } catch {}
 
-  const onTuiBranch = branch !== null && /tui/i.test(branch);
-  const present = tuiEnabled && onTuiBranch;
+  // #1352: removed onTuiBranch gate — TUI is stable, no need to restrict to dev branches.
+  const present = tuiEnabled;
 
   // Bridge tty from /proc/<pid>/stat field 7
   let bridgeTty = "—";
@@ -599,7 +598,6 @@ function collectTui(branch: string | null, bridgePid: number | null): TuiInfo {
   return {
     present,
     enabled: tuiEnabled,
-    onTuiBranch,
     bridgeTty,
     clientsAttached: 0, // stub: future #1315 writes ~/.abtars/tui/clients.json
   };

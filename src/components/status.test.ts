@@ -41,7 +41,7 @@ function makeOperatorView(overrides: Partial<StatusView> = {}): StatusView {
       startReason: "watchdog-respawn",
       heartbeatStaleSeconds: 5,
     },
-    tui: { present: true, enabled: true, onTuiBranch: true, bridgeTty: "none", clientsAttached: 0 },
+    tui: { present: true, enabled: true, bridgeTty: "none", clientsAttached: 0 },
     warnings: [],
     ...overrides,
   };
@@ -124,15 +124,15 @@ describe("renderOperatorStatus", () => {
 
   it("renders the TUI block with all flags visible", () => {
     const out = renderOperatorStatus(makeOperatorView());
-    expect(out).toContain("  tui:           ✓ present (enabled=true, branch=yes, bridge tty=none)");
+    expect(out).toContain("  tui:           ✓ present (enabled=true, bridge tty=none)");
     expect(out).toContain("                 clients attached: 0");
   });
 
-  it("shows TUI as not-present when not on TUI branch", () => {
+  it("shows TUI as not-present when disabled", () => {
     const out = renderOperatorStatus(
-      makeOperatorView({ tui: { present: false, enabled: true, onTuiBranch: false, bridgeTty: "—", clientsAttached: 0 } }),
+      makeOperatorView({ tui: { present: false, enabled: false, bridgeTty: "—", clientsAttached: 0 } }),
     );
-    expect(out).toContain("  tui:           ○ not present (enabled=true, branch=no, bridge tty=—)");
+    expect(out).toContain("  tui:           ○ not present (enabled=false, bridge tty=—)");
   });
 
   it("shows bridge as stopped when pid is null", () => {
