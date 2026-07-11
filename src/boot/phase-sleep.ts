@@ -1,24 +1,40 @@
 /**
- * phase-sleep — boot phase 10: create SleepHandle.
+ * phase-sleep — boot phase: create SleepHandle + register the `sleep-cycle`
+ * system action (#1321).
  *
- * Must run after phase-heartbeat (consumes ctx.sendSystemMessage).
+ * Must run after phase-heartbeat (consumes ctx.sendSystemMessage) and phase-memory.
+ *
+ * Scheduling is owned by the `sleep-cycle` task entry in tasks.json; this phase
+ * owns cycle *execution*. The system handler registered here is dispatched
+ * in-process by CronQueue.runSystem — no shell, no PATH lookup, no force flag.
  *
  * Populates ctx: sleepHandle.
  */
 
 import { resetAllCtxStarts } from "./ctx-start.js";
-import { logWarn } from "../components/logger.js";
+import { logInfo, logWarn } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { SleepRuntime } from "abmind";
-import { readEnvWithDefault } from "../components/env.js";
+import { getSystemTaskRegistry } from "../components/tasks/system-task-registry.js";
 
 export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
-  const { memoryConfig, memory, sendSystemMessage, sessionManager } = ctx;
-  if (!sendSystemMessage) { ctx.phaseHealth.set(phaseSleep.name, { status: "skipped", error: "no sendSystemMessage" }); logWarn("boot", `${phaseSleep.name}: skipping — heartbeat not available`); return "skipped"; }
+  const { memoryConfig, sendSystemMessage, sessionManager } = ctx;
+
+  const registry = getSystemTaskRegistry();
+
+  // Unavailable path: no sendSystemMessage means heartbeat isn't up. Register a
+  // handler that fails visibly so the scheduled task follows ordinary
+  // failure/auto-pause policy rather than becoming an unknown action (#1321).
+  if (!sendSystemMessage) {
+    ctx.phaseHealth.set(phaseSleep.name, { status: "skipped", error: "no sendSystemMessage" });
+    logWarn("boot", `${phaseSleep.name}: skipping — heartbeat not available`);
+    if (!registry.has("sleep-cycle")) {
+      registry.register("sleep-cycle", () => ({ status: "failed", error: "sleep unavailable: heartbeat/memory not initialized" }));
+    }
+    return "skipped";
+  }
 
   const { createSleepHandle } = await import("../capabilities/sleep/index.js");
-  const { killWakeInhibit } = await import("../components/commands/index.js");
-  const SLEEP_HOUR = parseInt(readEnvWithDefault("BED_TIME", "2", "bedtime hour").split(":")[0] ?? "2", 10);
 
   // #1271: SleepRuntime adapter — wraps spin({ type: "D", ... }) for the in-process
   // orchestrator. ONE nightSessionId is held for the whole cycle (set from step 1's
@@ -42,8 +58,7 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
     },
   };
 
-  ctx.sleepHandle = createSleepHandle({
-    sleepHour: SLEEP_HOUR,
+  const handle = createSleepHandle({
     sleepAuditDir: ctx.sleepAuditDir,
     memoryEnabled: memoryConfig.memoryEnabled,
     runtime,
@@ -61,14 +76,30 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
         nightSessionId = undefined;
       }
     },
-    getLastMsgTs: () => memory?.getLastMessageTimestamp(true) ?? 0,
-    sendSystemMessage,
-    killWakeInhibit,
     allocateSleepSession: (name: string) => {
       // Allocate the D session eagerly so it's visible in /session for the full cycle (#1280).
       const s = sessionManager.allocateDreamySession(name);
       nightSessionId = s.id;
     },
   });
+  ctx.sleepHandle = handle;
+
+  // Register the allowlisted in-process sleep-cycle action. Dispatch returns
+  // promptly; the long-running cycle continues asynchronously (#1321 req 6/8).
+  if (!registry.has("sleep-cycle")) {
+    registry.register("sleep-cycle", () => {
+      const result = handle.startScheduled();
+      if (result.status === "already_running") {
+        // Idempotent successful no-op — does not create another Dreamy session/card.
+        return { status: "noop" as const, detail: "already running" };
+      }
+      if (result.status === "unavailable") {
+        return { status: "failed" as const, error: result.reason };
+      }
+      return { status: "accepted" as const, detail: "sleep cycle started" };
+    });
+    logInfo("boot", "registered system action sleep-cycle");
+  }
+
   return "ran";
 }

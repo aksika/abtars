@@ -24,6 +24,26 @@ const SEED = ["config", "tasks"];
 const LEGACY_CLEANUP = ["core/prompts", "core"];
 
 /**
+ * Canonical in-process system tasks that must exist in every tasks.json (#1321).
+ * Reconciliation appends an entry only when its stable id is absent — it never
+ * overwrites a user's schedule, pause state, or other edits.
+ */
+const CANONICAL_SYSTEM_TASKS: object[] = [
+  {
+    id: "sleep-cycle",
+    title: "Nightly memory consolidation",
+    type: "task",
+    executor: "system",
+    action: "sleep-cycle",
+    schedule: "0 2 * * *",
+    catchUp: 6,
+    maxRunsPerDay: 1,
+    deliveryMode: "silent",
+    paused: false,
+  },
+];
+
+/**
  * Reconcile runtime tree from templates source.
  * @param templatesSrc - Path to templates/ (from deployed release or source checkout)
  * @param home - Path to ~/.abtars/
@@ -70,12 +90,44 @@ export function reconcile(templatesSrc: string, home: string): void {
   }
   if (seeded > 0) logInfo(TAG, `Seeded ${seeded} missing config/task file(s)`);
 
+  // --- Canonical system tasks: append by stable id if absent (#1321) ---
+  seedCanonicalSystemTasks(home);
+
   // --- Legacy cleanup (remove old paths, idempotent) ---
   for (const rel of LEGACY_CLEANUP) {
     const p = join(home, rel);
     if (!existsSync(p)) continue;
     rmSync(p, { recursive: true, force: true });
     logInfo(TAG, `Removed legacy: ${rel}`);
+  }
+}
+
+/** Append canonical system task entries to tasks.json only when their stable id is absent. */
+function seedCanonicalSystemTasks(home: string): void {
+  const tasksPath = join(home, "tasks", "tasks.json");
+  let entries: unknown[] = [];
+  try {
+    if (existsSync(tasksPath)) {
+      const raw = JSON.parse(readFileSync(tasksPath, "utf-8"));
+      if (Array.isArray(raw)) entries = raw;
+    }
+  } catch (err) {
+    logInfo(TAG, `tasks.json unreadable — skipping canonical seed: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  let appended = 0;
+  for (const canonical of CANONICAL_SYSTEM_TASKS) {
+    const id = (canonical as { id?: string }).id;
+    const exists = entries.some(e => typeof e === "object" && e !== null && (e as { id?: string }).id === id);
+    if (exists) continue;
+    entries.push(canonical);
+    appended++;
+  }
+  if (appended > 0) {
+    mkdirSync(dirname(tasksPath), { recursive: true });
+    writeFileSync(tasksPath, JSON.stringify(entries, null, 2), "utf-8");
+    logInfo(TAG, `Seeded ${appended} canonical system task(s) by stable id`);
   }
 }
 

@@ -129,6 +129,8 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   enqueueCron?: (entryId: string, manual?: boolean) => string | null;
   requestShutdown?: (code?: number) => void;
   sleepProgress?: () => { percent: number; step: string } | null;
+  /** Admit a manual sleep run directly (/sleep now | /sleep resume). #1321. */
+  startSleep?: (opts: { fresh: boolean; resume: boolean }) => "accepted" | "already_running" | "unavailable";
   loadedCapabilities?: string[];
   selfHealerTask?: { enabled: boolean } | null;
   hailMary?: { model: string; endpoint: string; apiKey?: string } | null;

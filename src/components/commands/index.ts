@@ -4,7 +4,7 @@
  */
 
 export type { Reply, CommandContext, CommandHandler, Platform } from "./types.js";
-export { registerCommand, handleCommand, triggerNewSession, triggerResetSession, killWakeInhibit } from "./registry.js";
+export { registerCommand, handleCommand, triggerNewSession, triggerResetSession } from "./registry.js";
 import { registerExact, registerPrefix } from "./registry.js";
 import {
   handleNewReset, handleCompact,
@@ -13,7 +13,7 @@ import {
   handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleKanban,
   handleChannel, handleTodo,
   handleEmergencyAlias, handleModels, handleHeartbeat, handleEffort, handleContinue,
-  handleMemory, handleNlm, handleWakeup,
+  handleMemory, handleNlm,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
   handleHooks, handleMcp, handleUsers, handleUsage, handleOpenRouter, handleWhoami,
   handleSoftware, handlePeers, handleMetrics,
@@ -58,7 +58,6 @@ registerExact("/help", handleHelp);
 registerExact("/users", handleUsers);
 registerExact("/skills", handleSkills);
 registerExact("/skill", handleSkills);
-registerExact("/wakeup", handleWakeup);
 registerExact("/sleep", handleSleep);
 registerExact("/mcp", handleMcp);
 registerExact("/hooks", handleHooks);

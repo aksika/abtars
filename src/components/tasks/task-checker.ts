@@ -12,7 +12,7 @@ import { abtarsHome } from "../../paths.js";
 import { logInfo } from "../logger.js";
 import { CronExpressionParser } from "cron-parser";
 import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./task-store.js";
-import type { CronEntry } from "../../cli/abtars-task.js";
+import type { CronEntry } from "../../components/tasks/task-types.js";
 
 const TAG = "cron-checker";
 const memoryDir = (): string => join(abtarsHome(), "state");

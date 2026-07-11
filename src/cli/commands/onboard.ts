@@ -100,8 +100,6 @@ interface WizardAnswers {
   readonly defaultModel: string;
   readonly providerApiKey: string;
   readonly hailMaryModel: string;
-  readonly bedTime: string;
-  readonly wakeTime: string;
   readonly groqApiKey: string;
   readonly securityMode: string;
   readonly trustMode: boolean;
@@ -308,8 +306,6 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     defaultModel: modelStr,
     providerApiKey,
     hailMaryModel: modelStr,
-    bedTime: '',
-    wakeTime: '',
     groqApiKey: existing?.groqApiKey ?? '',
     securityMode: String(securityMode ?? 'guardrails'),
     trustMode: true,
@@ -392,8 +388,6 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     defaultModel: opts.defaultModel ?? DEFAULT_MODELS[provider],
     providerApiKey: opts.apiKey ?? '',
     hailMaryModel: '',
-    bedTime: '',
-    wakeTime: '',
     groqApiKey: '',
     securityMode: 'guardrails',
     trustMode: true,
@@ -425,8 +419,6 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       defaultModel: kv.get('DEFAULT_MODEL') ?? DEFAULT_MODELS[provider],
       providerApiKey: apiKeyEnv ? (kv.get(apiKeyEnv) ?? '') : '',
       hailMaryModel: '',
-      bedTime: kv.get('BED_TIME') ?? '',
-      wakeTime: kv.get('WAKE_TIME') ?? '',
       groqApiKey: kv.get('GROQ_API_KEY') ?? '',
       securityMode: kv.get('SECURITY_MODE') ?? 'guardrails',
       trustMode: kv.get('TRUST_MODE') === 'true',
@@ -441,7 +433,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'MAIN_CHAT_ID',
     'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
-    'BED_TIME', 'WAKE_TIME', 'HEARTBEAT_INTERVAL_SEC', 'TRUST_MODE',
+    'HEARTBEAT_INTERVAL_SEC', 'TRUST_MODE',
     'TELEGRAM_ENABLED', 'DISCORD_ENABLED', 'IRC_ENABLED',
     'LOG_LEVEL', 'ACTIVE_MEMORY', 'ENABLE_AGENT_API', 'SELFHEAL_ENABLED',
   ]);
@@ -463,8 +455,6 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   else if (answers.discordA2aChannel) newBlock.push(`MAIN_CHAT_ID=${answers.discordA2aChannel}`);
   if (answers.discordAppId) newBlock.push(`DISCORD_APP_ID=${answers.discordAppId}`);
   if (answers.discordA2aChannel) newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);
-  if (answers.bedTime) newBlock.push(`BED_TIME=${answers.bedTime}`);
-  if (answers.wakeTime) newBlock.push(`WAKE_TIME=${answers.wakeTime}`);
   newBlock.push(`HEARTBEAT_INTERVAL_SEC=60`);
   newBlock.push(`SECURITY_MODE=${answers.securityMode}`);
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
@@ -751,9 +741,10 @@ async function seedDefaultTasks(_chatId: string, abtarsHome: string): Promise<vo
   const { fileURLToPath } = await import('node:url');
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
-    join(here, '..', '..', '..', 'config', 'tasks', 'tasks.json'),
-    join(here, '..', '..', 'config', 'tasks', 'tasks.json'),
-    join(resolveReleasesDir(), 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
+    join(here, '..', '..', '..', 'templates', 'tasks', 'tasks.json'),
+    join(here, '..', '..', 'templates', 'tasks', 'tasks.json'),
+    join(resolveReleasesDir(), 'src', 'abtars', 'templates', 'tasks', 'tasks.json'),
+    join(resolveReleasesDir(), 'templates', 'tasks', 'tasks.json'),
   ];
   let templatePath: string | null = null;
   for (const p of candidates) {

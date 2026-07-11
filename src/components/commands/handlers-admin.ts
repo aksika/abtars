@@ -236,7 +236,6 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/session <#> — Switch / /session end [#] — End / /session kill <#> — Kill",
     "/nlm — Knowledge base (list/create/sources/query)",
     "/restart — Restart bridge",
-    "/wakeup — Wake Mac from sleep",
     "/sleep — Sleep status / /sleep resume / /sleep now",
     "/whoami — Your user info & clearance",
     "/effort (alias /thinking) — Reasoning effort (off/low/medium/high/xhigh) + show/hide thinking",

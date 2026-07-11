@@ -9,7 +9,6 @@ import { setIdleCompactReset } from "./message-pipeline.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind";
 import type { HeartbeatTask } from "../types/index.js";
-import { isDailyCycleDue, type DailyCycleDeps } from "./daily-cycle.js";
 
 const TAG = "heartbeat_tasks";
 export interface IdleCompactDeps {
@@ -30,22 +29,18 @@ export function createIdleCompactTask(_deps: IdleCompactDeps): HeartbeatTask {
   };
 }
 
-export type AgeCheckDeps = DailyCycleDeps & { startSleep?: () => void; checkHwSleep?: () => void; checkStaleSleep?: () => void; cronBusy?: () => boolean };
-
-/** Daily cycle — spawn Dreamy after BED_TIME + quiet ticks, then hw sleep after more quiet ticks. */
-export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
+/** #1321: sleep is scheduled by tasks.json. The legacy bedtime/quiet-tick scheduler
+ *  and hardware-sleep coupling were deleted. What remains is a periodic in-cycle
+ *  stuck-run guard (not a scheduler): if a sleep run appears stuck, force-clear
+ *  isActive so the next scheduled dispatch can admit a fresh attempt. */
+export function createSleepStaleCheckTask(checkStaleSleep?: () => void): HeartbeatTask {
   let counter = 0;
   return {
-    name: "age-check",
+    name: "sleep-stale",
     execute: async () => {
       counter++;
       if (counter % 5 !== 0) return; // every 5 ticks (~5 min)
-      if (deps.checkStaleSleep) deps.checkStaleSleep();
-      if (deps.checkHwSleep && !deps.cronBusy?.()) deps.checkHwSleep();
-      if (!isDailyCycleDue(deps)) return;
-      logInfo("age-check", `😴 BED_TIME (${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}) — spawning Dreamy`);
-      try { import("../cli/commands/doctor-probes.js").then(m => m.runFixes()).catch(() => {}); } catch (err) { logAndSwallow("heartbeat_tasks", "op", err); }
-      if (deps.startSleep) { deps.startSleep(); }
+      try { checkStaleSleep?.(); } catch (err) { logAndSwallow("sleep-stale", "op", err); }
     },
   };
 }

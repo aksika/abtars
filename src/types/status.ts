@@ -25,7 +25,7 @@ export type CronEntryStatus = {
   id: string;
   label: string;
   schedule: string;
-  executor: "agent" | "script" | "orc";
+  executor: "agent" | "script" | "orc" | "system";
   fireAt: number;
   paused: boolean;
   lastRanAt?: number;

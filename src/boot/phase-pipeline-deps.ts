@@ -175,6 +175,11 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     enqueueCron,
     requestShutdown: (code?: number) => ctx.requestShutdownWithCode(code ?? 0),
     sleepProgress: () => ctx.sleepHandle?.progress ?? null,
+    startSleep: (o) => {
+      const r = ctx.sleepHandle?.startManual(o);
+      if (!r) return "unavailable";
+      return r.status;
+    },
     loadedCapabilities: [],
     selfHealerTask: null,
     hailMary: ctx.hailMary,

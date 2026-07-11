@@ -12,7 +12,7 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
 import { HeartbeatSystem, setHeartbeatInstance } from "../components/heartbeat-system.js";
 import { classifyResume } from "../components/platform-detect.js";
 import {
-  writeRestartReason, readAndClearRestartRequested, readBridgeLockField, updateBridgeLockField, writeSleepStatus,
+  writeRestartReason, readAndClearRestartRequested, updateBridgeLockField,
 } from "../components/transport/bridge-lock-transport.js";
 import { createUpdateCheckTask, createSkillStatsFlushTask, createSkillReloadTask } from "../components/heartbeat-tasks.js";
 import { loadUsers } from "../components/user-registry.js";
@@ -54,9 +54,6 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
       }
       // #548: any non-dark resume → restart for clean state
       // In-flight prompts are dead, sessions stuck busy, connections dropped.
-      if (readBridgeLockField("sleepStatus") === "hw_sleep") {
-        writeSleepStatus("awake");
-      }
       writeRestartReason(`resume after ${gapMin}min suspend`);
       logInfo("main", `⏸️ Resume (${gapMin}min, ${resumeKind}) — restarting for clean state`);
       process.exit(0);

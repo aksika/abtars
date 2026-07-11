@@ -15,11 +15,13 @@ import { resolve, join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
-import { readLastPromptAt, readBridgeLockField } from "../transport/bridge-lock-transport.js";
+import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./task-store.js";
 import { recordRun } from "./task-checker.js";
 import { kanbanComplete, kanbanFail } from "./kanban-board.js";
-import type { CronEntry } from "../../cli/abtars-task.js";
+import type { CronEntry } from "../../components/tasks/task-types.js";
+import { isSystemEntry } from "./task-types.js";
+import { getSystemTaskRegistry } from "./system-task-registry.js";
 import { localDate } from "../../utils/date.js";
 
 const TAG = "cron-queue";
@@ -51,9 +53,6 @@ function loadStaleState(): PersistedState | null {
     const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8")) as PersistedState;
     // If PID matches current process, state is ours (not stale)
     if (raw.pid === process.pid) return null;
-    // If bridge was in hw_sleep, don't mark as failed (watchdog-aware)
-    const sleepStatus = readBridgeLockField("sleepStatus");
-    if (sleepStatus === "hw_sleep") return null;
     return raw;
   } catch (err) { logAndSwallow(TAG, "loadStaleState", err); return null; }
 }
@@ -191,7 +190,7 @@ export interface RunningJob {
   message: string;
   pid: number;
   startedAt: number;
-  type: "script" | "agent";
+  type: "script" | "agent" | "system";
 }
 
 export class CronQueue {
@@ -254,16 +253,12 @@ export class CronQueue {
   private processNext(): void {
     if (this.queue.length === 0) return;
 
-    // Skip all tasks during hardware sleep (dark wakes are too brief)
-    if (readBridgeLockField("sleepStatus") === "hw_sleep") {
-      logInfo(TAG, `⏸ Hardware sleep — deferring ${this.queue.length} task(s)`);
-      return;
-    }
-
     const job = this.queue.shift()!;
     const { entry } = job;
 
-    if (entry.executor === "script") {
+    if (isSystemEntry(entry)) {
+      this.runSystem(entry);
+    } else if (entry.executor === "script") {
       this.runScript(entry, job.onComplete);
     } else if (entry.executor === "orc") {
       this.runOrc(entry);
@@ -272,7 +267,7 @@ export class CronQueue {
     }
   }
 
-  private setCurrent(entry: CronEntry, pid: number, type: "script" | "agent"): void {
+  private setCurrent(entry: CronEntry, pid: number, type: "script" | "agent" | "system"): void {
     this._current = {
       entryId: entry.id,
       message: entry.message.slice(0, 80),
@@ -320,6 +315,42 @@ export class CronQueue {
     }
     writeEntry(entry);
     return false;
+  }
+
+  /**
+   * Dispatch a system task to its allowlisted in-process handler (#1321).
+   * Awaits only the short handler result (guards + start the async cycle), records
+   * scheduler history, applies ordinary failure/auto-pause handling, then advances
+   * the queue immediately. The long-running cycle continues asynchronously.
+   * `accepted`/`noop` are successful dispatches; a rejecting/unknown handler is a
+   * visible failure — never a fallthrough to another executor.
+   */
+  private async runSystem(entry: CronEntry): Promise<void> {
+    logInfo(TAG, `▶ System: "${entry.action}" (${entry.id})`);
+    // pid 0 — system actions are in-process; no child to track.
+    this.setCurrent(entry, 0, "system");
+    try {
+      const result = await getSystemTaskRegistry().dispatch(entry);
+      const ok = result.status !== "failed";
+      recordRunToFile(entry.id, ok ? 0 : 1);
+      if (ok) recordRun(entry, 0); // count toward maxRunsPerDay only on success
+      const detail = "detail" in result && result.detail ? result.detail : "error" in result ? result.error : "";
+      logInfo(TAG, `■ System ${ok ? "✓" : "❌"}: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
+      if (!ok) {
+        this.checkAutoPause(entry, 1, detail);
+        scheduleRetry(entry, !!entry._retrying);
+      }
+    } catch (err) {
+      // dispatch() catches handler throws, but guard the await boundary too.
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `System dispatch error for "${entry.action}": ${msg}`);
+      recordRunToFile(entry.id, 1);
+      this.checkAutoPause(entry, 1, msg);
+      scheduleRetry(entry, !!entry._retrying);
+    } finally {
+      this.clearCurrent();
+      this.processNext();
+    }
   }
 
   private runOrc(entry: CronEntry): void {

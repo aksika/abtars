@@ -1,9 +1,8 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { describe, it, expect, beforeEach } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { safeReadJson } from "../components/safe-json.js";
-import { isDailyCycleDue, resetBedtimeCounter, type DailyCycleDeps } from "../components/daily-cycle.js";
 
 // --- safeReadJson ---
 
@@ -43,90 +42,6 @@ describe("safeReadJson", () => {
     // arrays are objects, so this passes through
     const result = safeReadJson(p, []);
     expect(Array.isArray(result)).toBe(true);
-  });
-});
-
-// --- Bedtime quiet tick counter ---
-
-describe("isDailyCycleDue — quiet tick counter", () => {
-  let tmpDir: string;
-
-  function makeDeps(overrides: Partial<DailyCycleDeps> = {}): DailyCycleDeps {
-    return {
-      sleepHour: 2,
-      sleepMinute: 0,
-      bridgeLockPath: join(tmpDir, "bridge.lock"),
-      memory: null,
-      isSleepActive: () => false,
-      ...overrides,
-    };
-  }
-
-  beforeEach(() => {
-    process.env["HEARTBEAT_INTERVAL_SEC"] = "300";
-    tmpDir = mkdtempSync(join(tmpdir(), "bedtime-"));
-    // Bridge started yesterday, lastHeartbeat exists
-    writeFileSync(
-      join(tmpDir, "bridge.lock"),
-      JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }),
-    );
-    resetBedtimeCounter();
-  });
-
-  it("returns false before BED_TIME", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-20T00:15:00")); // 15 min past midnight, within 7h window
-    const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 });
-    // First tick: false (need 2 quiet ticks)
-    expect(isDailyCycleDue(deps)).toBe(false);
-    // 2nd tick: true
-    expect(isDailyCycleDue(deps)).toBe(true);
-    vi.useRealTimers();
-  });
-
-  it("resets counter when resetBedtimeCounter is called", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-20T00:15:00"));
-    const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 });
-    // Accumulate 1 tick
-    isDailyCycleDue(deps);
-    // Reset
-    resetBedtimeCounter();
-    // Need 2 more ticks now
-    expect(isDailyCycleDue(deps)).toBe(false);
-    expect(isDailyCycleDue(deps)).toBe(true);
-    vi.useRealTimers();
-  });
-
-  it("returns false when a session is busy", async () => {
-    const spinMod = await import("../components/spin.js");
-    const origList = spinMod.spin.listAllSessions;
-    (spinMod.spin as any).listAllSessions = () => [{ busy: true, id: "chat:1" }];
-    const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 });
-    for (let i = 0; i < 10; i++) {
-      expect(isDailyCycleDue(deps)).toBe(false);
-    }
-    (spinMod.spin as any).listAllSessions = origList;
-  });
-
-  it("returns false when sleep is active", () => {
-    const deps = makeDeps({ sleepHour: 0, sleepMinute: 0, isSleepActive: () => true });
-    for (let i = 0; i < 10; i++) {
-      expect(isDailyCycleDue(deps)).toBe(false);
-    }
-  });
-
-  it("accumulates quiet ticks when bridge started AFTER BED_TIME (late-restart catch-up, #216)", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-20T00:15:00"));
-    writeFileSync(
-      join(tmpDir, "bridge.lock"),
-      JSON.stringify({ pid: 1, startedAt: Date.now(), lastHeartbeat: Date.now() }),
-    );
-    const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 });
-    expect(isDailyCycleDue(deps)).toBe(false);
-    expect(isDailyCycleDue(deps)).toBe(true);
-    vi.useRealTimers();
   });
 });
 

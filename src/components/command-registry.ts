@@ -33,7 +33,6 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "facts", description: "Core knowledge" },
   { name: "nlm", description: "Knowledge base" },
   { name: "restart", description: "Restart bridge" },
-  { name: "wakeup", description: "Wake Mac from sleep" },
   { name: "sleep", description: "Sleep status / resume / now" },
   { name: "whoami", description: "Your user info & clearance" },
   { name: "effort", description: "Reasoning effort (off/low/medium/high/xhigh) + show/hide" },

@@ -10,40 +10,12 @@
  */
 
 import { localISO } from "../utils/local-time.js";
-import { randomBytes } from "node:crypto";
 import { readEntries as dbReadEntries, readEntry, writeEntry, removeEntry as dbRemoveEntry } from "../components/tasks/task-store.js";
+import { newTaskId, type CronEntry, type SystemTaskAction, SYSTEM_ACTIONS } from "../components/tasks/task-types.js";
 
-
-export interface CronEntry {
-  id: string;
-  title?: string;
-  fireAt: number;
-  message: string;
-  chatId: number;
-  type: "reminder" | "task";
-  executor?: "agent" | "script" | "orc";
-  schedule?: string;
-  catchUp?: number;  // hours: max delay after fireAt before skipping to next. 0 = no catch-up (default).
-  priority?: "high" | "medium" | "low";
-  taskFile?: string;
-  targetUserId?: string; // #936: route task output to this user's session via spin.injectGreeting()
-  agent?: string; // #935: session type — professor, browsie, coding, dreamy
-  deliveryMethod?: "inline" | "report"; // #1118: inline = chat message, report = file document
-  deliveryMode?: "silent" | "deliver" | "announce"; // #1193: silent = no output, deliver = drop to chat, announce = agent speaks
-  maxToolRounds?: number; // #1283: per-task circuit breaker override (default: 25)
-  paused?: boolean;
-  maxRunsPerDay?: number;
-  consecutiveFails?: number;
-  agentFollowUp?: boolean;
-  agentMessage?: string;
-  fired: boolean;
-  createdAt: number;
-  lastRanAt?: number;
-  retryAfter?: number;
-  _prevFireAt?: number;
-  _retrying?: boolean;
-  history?: { ts: number; exitCode?: number }[];
-}
+// Re-export so any external import of `CronEntry` from the CLI still resolves.
+// The canonical home is now src/components/tasks/task-types.ts (#1321).
+export type { CronEntry } from "../components/tasks/task-types.js";
 
 export function readEntries(): CronEntry[] {
   return dbReadEntries();
@@ -56,6 +28,7 @@ interface AddArgs {
   chatId?: string;
   type?: string;
   executor?: string;
+  action?: string;
   schedule?: string;
   title?: string;
   taskFile?: string;
@@ -73,6 +46,7 @@ function parseAddArgs(args: string[]): AddArgs {
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
       case "--type": parsed.type = args[++i] ?? ""; break;
       case "--executor": parsed.executor = args[++i] ?? ""; break;
+      case "--action": parsed.action = args[++i] ?? ""; break;
       case "--schedule": parsed.schedule = args[++i] ?? ""; break;
       case "--title": parsed.title = args[++i] ?? ""; break;
       case "--task-file": parsed.taskFile = args[++i] ?? ""; break;
@@ -89,9 +63,7 @@ function add(args: string[]): void {
   const parsed = parseAddArgs(args);
   if (!parsed.at && !parsed.schedule) { console.log(JSON.stringify({ ok: false, error: "--at or --schedule is required" })); process.exit(1); }
   if (parsed.at && parsed.schedule) { console.log(JSON.stringify({ ok: false, error: "use --at (one-shot) or --schedule (recurring), not both" })); process.exit(1); }
-  if (!parsed.message) { console.log(JSON.stringify({ ok: false, error: "--message is required" })); process.exit(1); }
   if (!parsed.title) { console.log(JSON.stringify({ ok: false, error: "--title is required" })); process.exit(1); }
-  if (!parsed.chatId) { console.log(JSON.stringify({ ok: false, error: "--chat-id is required" })); process.exit(1); }
 
   let fireAt: number;
   let schedule: string | undefined;
@@ -109,23 +81,47 @@ function add(args: string[]): void {
     if (!Number.isFinite(fireAt)) { console.log(JSON.stringify({ ok: false, error: "Invalid --at date" })); process.exit(1); }
   }
 
-  const chatId = parseInt(parsed.chatId, 10);
-  if (!Number.isFinite(chatId)) { console.log(JSON.stringify({ ok: false, error: "Invalid --chat-id" })); process.exit(1); }
-
   const type = (parsed.type ?? "reminder") as CronEntry["type"];
   if (type !== "reminder" && type !== "task") { console.log(JSON.stringify({ ok: false, error: "--type must be reminder or task" })); process.exit(1); }
 
+  // #1321: system executor is an allowlisted in-process action.
   const executor = (parsed.executor ?? "agent") as NonNullable<CronEntry["executor"]>;
-  if (executor !== "agent" && executor !== "script" && executor !== "orc") { console.log(JSON.stringify({ ok: false, error: "--executor must be agent, script, or orc" })); process.exit(1); }
+  const isSystem = executor === "system";
+  if (executor !== "agent" && executor !== "script" && executor !== "orc" && !isSystem) {
+    console.log(JSON.stringify({ ok: false, error: "--executor must be agent, script, orc, or system" })); process.exit(1);
+  }
+
+  let action: SystemTaskAction | undefined;
+  if (isSystem) {
+    if (!parsed.action) { console.log(JSON.stringify({ ok: false, error: "--action is required for system executor (allowlist: " + SYSTEM_ACTIONS.join(", ") + ")" })); process.exit(1); }
+    if (!SYSTEM_ACTIONS.includes(parsed.action as SystemTaskAction)) {
+      console.log(JSON.stringify({ ok: false, error: `--action must be one of: ${SYSTEM_ACTIONS.join(", ")}` })); process.exit(1);
+    }
+    action = parsed.action as SystemTaskAction;
+  }
+
+  // Non-system entries require message + chatId. System entries are allowlisted
+  // bridge ops; chatId may be resolved to the main chat for notification metadata
+  // but is not an argument to the action.
+  let chatId = 0;
+  if (!isSystem) {
+    if (!parsed.message) { console.log(JSON.stringify({ ok: false, error: "--message is required" })); process.exit(1); }
+    if (!parsed.chatId) { console.log(JSON.stringify({ ok: false, error: "--chat-id is required" })); process.exit(1); }
+    chatId = parseInt(parsed.chatId, 10);
+    if (!Number.isFinite(chatId)) { console.log(JSON.stringify({ ok: false, error: "Invalid --chat-id" })); process.exit(1); }
+  } else if (parsed.chatId) {
+    chatId = parseInt(parsed.chatId, 10);
+  }
 
   const entry: CronEntry = {
-    id: parsed.id || randomBytes(3).toString("hex"),
+    id: parsed.id || newTaskId(),
     title: parsed.title,
     fireAt: fireAt!,
-    message: parsed.message,
+    message: parsed.message ?? "",
     chatId,
     type,
     executor,
+    ...(action ? { action } : {}),
     ...(schedule ? { schedule } : {}),
     ...(parsed.taskFile ? { taskFile: parsed.taskFile } : {}),
     ...(parsed.agent ? { agent: parsed.agent } : {}),
@@ -136,9 +132,12 @@ function add(args: string[]): void {
 
   const entries = dbReadEntries();
 
-  // Dedup: reject if a recurring entry with same schedule+message+chatId already exists
+  // Dedup: recurring entries collide on executor+action/schedule. System tasks
+  // dedup on action+schedule; others on message+schedule+chatId.
   if (schedule) {
-    const dup = entries.find(e => e.schedule === schedule && e.message === entry.message && e.chatId === chatId && !e.paused);
+    const dup = isSystem
+      ? entries.find(e => e.executor === "system" && e.action === action && e.schedule === schedule && !e.paused)
+      : entries.find(e => e.schedule === schedule && e.message === entry.message && e.chatId === chatId && !e.paused);
     if (dup) { console.log(JSON.stringify({ ok: false, error: "duplicate", existing_id: dup.id })); process.exit(1); }
   }
 

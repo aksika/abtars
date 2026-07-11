@@ -18,5 +18,17 @@
     "executor": "script",
     "maxRunsPerDay": 1,
     "deliveryMode": "silent"
+  },
+  {
+    "id": "sleep-cycle",
+    "title": "Nightly memory consolidation",
+    "type": "task",
+    "executor": "system",
+    "action": "sleep-cycle",
+    "schedule": "0 2 * * *",
+    "catchUp": 6,
+    "maxRunsPerDay": 1,
+    "deliveryMode": "silent",
+    "paused": false
   }
 ]

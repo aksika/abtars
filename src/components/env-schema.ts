@@ -16,7 +16,7 @@ import { logInfo, logWarn } from "./logger.js";
 
 // ── Schema definition ───────────────────────────────────────────────────────
 
-type EnvType = "string" | "int" | "bool" | "time";
+type EnvType = "string" | "int" | "bool";
 
 interface EnvVarDef {
   env: string;
@@ -92,10 +92,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "COMPACTION_LLM_ENABLED", type: "bool", default: "false", description: "LLM refinement for middle-tier rendering (#348 Phase 2)" },
 
   // ── Sleep ──
-  { env: "BED_TIME", type: "time", default: "0:30", description: "Daily sleep trigger time (H:MM or HH:MM)" },
-  { env: "WAKE_TIME", type: "time", default: "7:00", description: "Wake time for platform detection" },
-  { env: "BED_QUIET_MIN", type: "int", default: "7", description: "Quiet minutes before sleep (rounds up to nearest heartbeat cycle)" },
-  { env: "HARDWARE_SLEEP_AFTER_DREAMY", type: "bool", default: "false", description: "Enable hardware sleep after Dreamy completes" },
   { env: "SLEEP_MODEL", type: "string", description: "Model override for Dreamy sleep agent" },
   { env: "SLEEP_QUALITY", type: "string", description: "Sleep quality override" },
 
@@ -154,9 +150,6 @@ const SCHEMA: readonly EnvVarDef[] = [
 
 // ── Parsed config type ──────────────────────────────────────────────────────
 
-/** Parsed time value from "H:MM" or "HH:MM" format. */
-export interface TimeValue { hour: number; minute: number; raw: string; }
-
 export interface EnvConfig {
   // Core
   abtarsHome: string;
@@ -211,11 +204,7 @@ export interface EnvConfig {
   activeMemory: boolean;
   primingModelTopics: boolean;
 
-  // Sleep
-  bedTime: TimeValue;
-  wakeTime: TimeValue;
-  bedQuietMin: number;
-  hardwareSleepAfterDreamy: boolean;
+  // Sleep (scheduling is owned by tasks.json #1321; only model/quality remain)
   sleepModel: string | undefined;
   sleepQuality: string | undefined;
 
@@ -265,16 +254,6 @@ export interface EnvConfig {
 }
 
 // ── Parsing helpers ─────────────────────────────────────────────────────────
-
-function parseTime(raw: string, varName: string): TimeValue {
-  const parts = raw.split(":");
-  const hour = parseInt(parts[0] ?? "", 10);
-  const minute = parseInt(parts[1] ?? "0", 10);
-  if (isNaN(hour) || isNaN(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-    throw new Error(`Invalid ${varName}: "${raw}" — expected H:MM or HH:MM (e.g. "0:30", "14:00")`);
-  }
-  return { hour, minute, raw };
-}
 
 function parseIntSafe(raw: string, varName: string): number {
   const n = parseInt(raw, 10);
@@ -387,10 +366,6 @@ export function initEnv(): Readonly<EnvConfig> {
     memory: readOr("MEMORY", "auto"),
     primingModelTopics: read("PRIMING_MODEL_TOPICS") !== "false",
 
-    bedTime: parseTime(readOr("BED_TIME", "0:30"), "BED_TIME"),
-    wakeTime: parseTime(readOr("WAKE_TIME", "7:00"), "WAKE_TIME"),
-    bedQuietMin: parseIntSafe(readOr("BED_QUIET_MIN", "7"), "BED_QUIET_MIN"),
-    hardwareSleepAfterDreamy: parseBool(readOr("HARDWARE_SLEEP_AFTER_DREAMY", "false")),
     sleepModel: read("SLEEP_MODEL"),
     sleepQuality: read("SLEEP_QUALITY"),
 

@@ -2,16 +2,18 @@
  * cycle-end.test.ts — #1287: the night Dreamy session tears down on EVERY cycle
  * outcome. createSleepHandle must invoke opts.onCycleEnd exactly once per cycle on
  * success, partial-failure (!ok), and thrown-error paths — regardless of onComplete.
+ *
+ * #1321: admission is via startManual() (no forceSleep flag, no sleep window).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-const { HOME, BRIDGE_LOCK, SLEEP_DIR } = vi.hoisted(() => {
+const { HOME, SLEEP_DIR } = vi.hoisted(() => {
   const { join } = require("node:path") as typeof import("node:path");
   const { tmpdir } = require("node:os") as typeof import("node:os");
   const HOME = join(tmpdir(), `ab-cycleend-test-${process.pid}`);
-  return { HOME, BRIDGE_LOCK: join(HOME, "bridge.lock"), SLEEP_DIR: join(HOME, "sleep") };
+  return { HOME, SLEEP_DIR: join(HOME, "sleep") };
 });
 
 vi.mock("../../paths.js", () => ({
@@ -38,17 +40,15 @@ vi.mock("../../utils/abmind-lazy.js", () => ({
   loadAbmind: async () => ({}),
 }));
 
+// system-event-buffer is imported lazily on the success path — stub it so no real
+// event is buffered and the dynamic import resolves in tests.
+vi.mock("../../components/system-event-buffer.js", () => ({
+  bufferSystemEvent: vi.fn(),
+}));
+
 import { createSleepHandle } from "./index.js";
 
 const stubRuntime = { complete: async () => "" };
-
-/** Force-sleep bypasses the sleep-window/audit guards so runSleepCycle actually runs. */
-function armForceSleep(): void {
-  const today = new Date();
-  const dateStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
-  writeFileSync(join(SLEEP_DIR, `sleep_${dateStr}_0900.md`), "# Audit");
-  writeFileSync(BRIDGE_LOCK, JSON.stringify({ pid: 1, startedAt: Date.now(), forceSleep: "2026-04-19T12:00:00 test" }));
-}
 
 async function settle(): Promise<void> {
   // Success path awaits a dynamic import() before .finally — needs macrotasks, not
@@ -67,7 +67,6 @@ describe("createSleepHandle — onCycleEnd teardown (#1287)", () => {
 
   function makeHandle(onCycleEnd: () => void) {
     return createSleepHandle({
-      sleepHour: 0,
       sleepAuditDir: SLEEP_DIR,
       memoryEnabled: false,   // onComplete memory path off — teardown must still fire
       runtime: stubRuntime,
@@ -77,28 +76,49 @@ describe("createSleepHandle — onCycleEnd teardown (#1287)", () => {
   }
 
   it("fires onCycleEnd on the success path", async () => {
-    armForceSleep();
+    mockRunSleepCycle.mockImplementation(async () => ({ ok: true, failCount: 0 }));
     const onCycleEnd = vi.fn();
-    makeHandle(onCycleEnd).spawn();
+    const r = makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
+    expect(r.status).toBe("accepted");
     await settle();
     expect(onCycleEnd).toHaveBeenCalledTimes(1);
   });
 
   it("fires onCycleEnd on the partial-failure (!ok) path", async () => {
-    armForceSleep();
     mockRunSleepCycle.mockImplementation(async () => ({ ok: false, failCount: 2 }));
     const onCycleEnd = vi.fn();
-    makeHandle(onCycleEnd).spawn();
+    makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
     await settle();
     expect(onCycleEnd).toHaveBeenCalledTimes(1);
   });
 
   it("fires onCycleEnd on the thrown-error path", async () => {
-    armForceSleep();
     mockRunSleepCycle.mockImplementation(async () => { throw new Error("boom"); });
     const onCycleEnd = vi.fn();
-    makeHandle(onCycleEnd).spawn();
+    makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
     await settle();
     expect(onCycleEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("startScheduled also tears down on success (#1321)", async () => {
+    mockRunSleepCycle.mockImplementation(async () => ({ ok: true, failCount: 0 }));
+    const onCycleEnd = vi.fn();
+    const r = makeHandle(onCycleEnd).startScheduled();
+    expect(r.status).toBe("accepted");
+    await settle();
+    expect(onCycleEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("already_running when a cycle is active (#1321 req 8)", async () => {
+    // Block runSleepCycle so the cycle stays in-flight.
+    let release: () => void = () => {};
+    const gate = new Promise<void>(r => { release = r; });
+    mockRunSleepCycle.mockImplementation(async () => { await gate; return { ok: true, failCount: 0 }; });
+    const handle = makeHandle(vi.fn());
+    expect(handle.startScheduled().status).toBe("accepted");
+    expect(handle.startScheduled().status).toBe("already_running");
+    expect(handle.startManual({ fresh: true, resume: false }).status).toBe("already_running");
+    release();
+    await settle();
   });
 });

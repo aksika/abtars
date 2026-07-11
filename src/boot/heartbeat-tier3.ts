@@ -9,7 +9,7 @@ import { getEnv } from "../components/env-schema.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
 import {
-  createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask,
+  createIdleCompactTask, createSleepStaleCheckTask, createDbIntegrityTask,
   createKanbanCleanupTask, createUserSessionExpiryTask, createMetricsTask,
 } from "../components/heartbeat-tasks.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
@@ -18,7 +18,6 @@ import { logInfo, logWarn } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
 import { createCronCallback } from "./phase-pipeline-deps.js";
 import { createModelHealthTask } from "./heartbeat-model-health.js";
-import { readEnvWithDefault } from "../components/env.js";
 import type { BootCtx } from "./context.js";
 
 const TAG = "heartbeat";
@@ -63,8 +62,10 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     },
   });
 
-  const SLEEP_HOUR = parseInt(readEnvWithDefault("BED_TIME", "2", "bedtime hour").split(":")[0] ?? "2", 10);
-  const SLEEP_MINUTE = parseInt(readEnvWithDefault("BED_TIME", "2", "bedtime hour").split(":")[1] ?? "0", 10);
+  // #1321: sleep scheduling is owned by the tasks.json `sleep-cycle` system task
+  // (dispatched via CronQueue.runSystem → sleepHandle.startScheduled()). Only the
+  // in-cycle stuck-run guard remains here as a periodic heartbeat task.
+  heartbeat.registerTask(createSleepStaleCheckTask(() => ctx.sleepHandle?.checkStale()));
 
   if (getEnv().ctxIdleCompactMin > 0) {
     heartbeat.registerTask(createIdleCompactTask({
@@ -73,20 +74,6 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
       isSleepActive: ctx.isSleepActive,
     }));
   }
-
-  heartbeat.registerTask(createAgeCheckTask({
-    memory,
-    bridgeLockPath: ctx.bridgeLockPath,
-    sleepAuditDir: ctx.sleepAuditDir,
-    sleepHour: SLEEP_HOUR,
-    sleepMinute: SLEEP_MINUTE,
-    isSleepActive: ctx.isSleepActive,
-    // doctorPath removed — runFixes() called directly from heartbeat-tasks.ts
-    startSleep: () => { ctx.sleepHandle?.spawn(); },
-    checkHwSleep: () => { ctx.sleepHandle?.checkHwSleep(); },
-    checkStaleSleep: () => { ctx.sleepHandle?.checkStale(); },
-    cronBusy: () => cronQueue.currentJob !== null || cronQueue.pending > 0,
-  }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
 
