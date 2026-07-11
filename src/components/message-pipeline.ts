@@ -34,7 +34,7 @@ import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
-import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
+import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
 import { releaseBusy } from "./pipeline/busy-guard.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
 import { buildPrompt } from "./pipeline/prompt-builder.js";
@@ -152,16 +152,16 @@ export async function handleInboundMessage(
   adapter: PlatformAdapter,
   deps: PipelineDeps,
 ): Promise<void> {
-  // Run early middleware (voice → commands → busy guard)
+  // Run early middleware (voice → select → commands → paused → busy guard)
   const ctx = createMessageContext(msg, adapter, deps);
-  await runPipeline(ctx, [voiceMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware]);
+  await runPipeline(ctx, [voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware]);
   if (ctx.handled) return;
 
   // --- BeforeMessage hook ---
   if (hasHooks("BeforeMessage")) {
     const result = await fireHook("BeforeMessage", {
       event: "BeforeMessage", timestamp: new Date().toISOString(),
-      sessionKey: "", platform: msg.platform, userId: msg.userId,
+      sessionKey: ctx.sessionId ?? "", platform: msg.platform, userId: msg.userId,
       chatId: String(ctx.chatId), text: ctx.text,
     });
     if (result?.decision === "block") {
@@ -170,33 +170,27 @@ export async function handleInboundMessage(
     }
   }
 
-  // --- #993: If user switched to a non-Main session with live transport, route there directly ---
+  // --- #1336: Ensure transport for the already-selected effective session ---
+  const effectiveSessionId = ctx.sessionId!;
+  const effectiveSession = ctx.session!;
   const { spin } = await import("./spin.js");
-  const { sessionType } = await import("./spin-types.js");
-  const switchedSession = spin.getActiveSession(msg.userId, msg.platform);
-  const switchedToLive = switchedSession?.transport && sessionType(switchedSession) !== "A" && switchedSession.status === "ready";
-  if (switchedToLive) {
-    ctx.transport = switchedSession.transport!;
-    ctx.delivery = switchedSession.delivery;
-    // Mark seen so isSessionStart doesn't inject full soul bundle (Orc already has its context)
-    switchedSession.seen = true;
-    switchedSession.lastActiveAt = Date.now();
-  } else {
-    // --- #936: Resolve session via Spin (sets per-user transport + delivery mode) ---
+  if (!effectiveSession.transport) {
     try {
-      const userSession = await spin.resolveSession(msg.userId, msg.platform, ctx.chatId);
-      if (userSession.status === "ready" && userSession.transport) {
-        ctx.transport = userSession.transport;
-        ctx.delivery = userSession.delivery;
-      }
+      await spin.ensureSessionTransport(effectiveSession);
     } catch (err) {
-      logWarn(TAG, `resolveSession failed for ${msg.userId}: ${err instanceof Error ? err.message : String(err)}`);
+      logWarn(TAG, `ensureSessionTransport failed for ${effectiveSessionId}: ${err instanceof Error ? err.message : String(err)}`);
       await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(() => {});
       return;
     }
   }
+  ctx.transport = effectiveSession.transport!;
+  ctx.delivery = effectiveSession.delivery;
 
-  // --- Core transport/response handling (will become middleware incrementally) ---
+  // Mark seen so isSessionStart doesn't inject full soul bundle
+  effectiveSession.seen = true;
+  effectiveSession.lastActiveAt = Date.now();
+
+  // --- Core transport/response handling ---
   const {
     memory, memoryConfig,
     idleSave, conversationBuffer,
@@ -211,10 +205,8 @@ export async function handleInboundMessage(
   const registry = loadUsers();
   const userId = msg.userId;
 
-  // Resolve active transport session via session manager (#510)
-  const activeSessionId = deps.sessionManager.getActiveSessionId(userId, msg.platform);
-
-  const pSession = spin.getSessionById(activeSessionId)!;
+  const activeSessionId = effectiveSessionId;
+  const pSession = effectiveSession;
   const busyEntry = pSession;
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;
@@ -272,9 +264,9 @@ export async function handleInboundMessage(
     }
 
     // --- Send to transport ---
-    const activeSession = deps.sessionManager.getActiveSession(userId, msg.platform);
-    const sessionTransport = activeSession.transport ?? transport;
-    logDebug(TAG, `Route: session=${activeSessionId} type=${sessionType(activeSession)} transport=${activeSession.transport ? "session" : "main"}`);
+    const { sessionType } = await import("./spin-types.js");
+    const sessionTransport = effectiveSession.transport ?? transport;
+    logDebug(TAG, `Route: session=${activeSessionId} type=${sessionType(effectiveSession)} transport=${effectiveSession.transport ? "session" : "main"}`);
 
     // #681: attach sandbox policy (owner for now — peer/guest in #678)
     if ("sandboxPolicy" in sessionTransport) {
@@ -283,7 +275,7 @@ export async function handleInboundMessage(
     }
     // Wire cooperative pause check (#539) — agent loop checks this between tool calls
     if ("isPaused" in sessionTransport) {
-      (sessionTransport as any).isPaused = () => activeSession.status === "paused";
+      (sessionTransport as any).isPaused = () => effectiveSession.status === "paused";
     }
 
     // Wire /wait steer injection (#655) — agent loop drains this between tool rounds
@@ -300,7 +292,7 @@ export async function handleInboundMessage(
     // Streaming/tool callbacks remain pipeline-owned (set on the transport before,
     // reset in the finally below). spin() sends via the session's own transport.
     const responsePromise = deps.sessionManager.spin({
-      type: sessionType(activeSession),
+      type: sessionType(effectiveSession),
       sessionId: activeSessionId,
       prompt,
       imageContent,
@@ -348,7 +340,7 @@ export async function handleInboundMessage(
       if (!totalToolStartAt) totalToolStartAt = Date.now();
       currentToolName = toolName;
       toolStartAt = Date.now();
-      activeSession.lastActiveAt = Date.now(); // #1198: keep session alive during tool execution
+      effectiveSession.lastActiveAt = Date.now(); // #1198: keep session alive during tool execution
       adapter.sendTyping?.(channelId, msg.threadId).catch(err => logAndSwallow(TAG, "adapter call", err));
 
       // Clear previous elapsed timer
@@ -460,9 +452,9 @@ export async function handleInboundMessage(
       }
       logInfo(TAG, `→ [${msg.platform}] Simple delivery (${userResponse.length} chars)`);
       // #938: Update session metrics
-      activeSession.messageCount = (activeSession.messageCount ?? 0) + 1;
-      activeSession.contextPercent = transport.contextPercent >= 0 ? transport.contextPercent : undefined;
-      activeSession.toolCallCount = (activeSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
+      effectiveSession.messageCount = (effectiveSession.messageCount ?? 0) + 1;
+      effectiveSession.contextPercent = transport.contextPercent >= 0 ? transport.contextPercent : undefined;
+      effectiveSession.toolCallCount = (effectiveSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
       return;
     }
 
@@ -556,9 +548,9 @@ export async function handleInboundMessage(
     updateBridgeLockField("lastPromptAt", Date.now());
 
     // #938: Update session metrics
-    activeSession.messageCount = (activeSession.messageCount ?? 0) + 1;
-    activeSession.contextPercent = ctxAfter >= 0 ? ctxAfter : undefined;
-    activeSession.toolCallCount = (activeSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
+    effectiveSession.messageCount = (effectiveSession.messageCount ?? 0) + 1;
+    effectiveSession.contextPercent = ctxAfter >= 0 ? ctxAfter : undefined;
+    effectiveSession.toolCallCount = (effectiveSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
 
     // --- #824: Citation detection — did the agent use the recalled memories? ---
     if (recalledHits && recalledHits.length > 0 && memoryConfig.memoryEnabled && memory) {

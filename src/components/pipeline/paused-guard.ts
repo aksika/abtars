@@ -1,15 +1,18 @@
 /**
  * Paused session guard middleware — blocks normal inbound messages
- * when the selected session is paused, while commands remain usable.
+ * when the selected effective session is paused, while commands
+ * remain usable via the command middleware that runs before this.
  *
- * Runs after commandMiddleware (so /session resume, /session N, etc.
- * work) and before busyGuardMiddleware.
+ * #1336: reads ctx.session (set by session-selection middleware)
+ * instead of re-resolving by (userId, platform).
  */
 import type { Middleware } from "./middleware.js";
 
 export const pausedGuardMiddleware: Middleware = async (ctx, next) => {
-  const { spin } = await import("../spin.js");
-  const session = spin.getActiveSession(ctx.userId, ctx.msg.platform);
+  // #1336: prefer the effective session from session-selection middleware;
+  // fall back to platform-active resolution for backward compat / tests.
+  const session = ctx.session ?? (await import("../spin.js")).spin.getActiveSession(ctx.userId, ctx.msg.platform);
+  if (!session) { await next(); return; }
 
   if (session.status === "paused") {
     await ctx.reply(`Session #${session.shortIndex} is paused. Use /session resume or switch sessions.`);

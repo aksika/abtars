@@ -144,6 +144,14 @@ export class Spin {
     return this.sessions.get(sessionId);
   }
 
+  /** #1336: Look up a session by global shortIndex across all platforms. Returns undefined if not found or ended. */
+  getSessionByGlobalIndex(index: number): ManagedSession | undefined {
+    for (const s of this.sessions.values()) {
+      if (s.shortIndex === index && s.status !== "ended") return s;
+    }
+    return undefined;
+  }
+
   /** #1319: Expose session map for snapshot builder. */
   getSessions(): Map<string, ManagedSession> {
     return this.sessions;
@@ -259,19 +267,7 @@ export class Spin {
     logInfo(TAG, `Creating transport for ${userId} (${role})`);
 
     try {
-      const agentSession = await Promise.race([
-        this.runtime!.session("professor", userId),
-        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
-      ]);
-      session.transport = agentSession.transport!;
-      session.transportOwner = "runtime";
-      session.releaseTransport = () => agentSession.destroy();
-      session.status = "ready";
-      session.lastActiveAt = Date.now();
-      const t = session.transport as any;
-      session.pid = t?._rawClient?.pid ?? t?.agent?.pid ?? undefined;
-      pushLog(session, "transport ready");
-      logInfo(TAG, `Session ready: ${userId} id=${session.id}${session.pid ? ` pid=${session.pid}` : ""}`);
+      await this._attachRuntimeTransport(session, userId);
       return session;
     } catch (err) {
       session.status = "ended";
@@ -279,6 +275,50 @@ export class Spin {
       logWarn(TAG, `Session creation failed for ${userId}: ${err instanceof Error ? err.message : String(err)}`);
       throw err;
     }
+  }
+
+  /**
+   * #1336: Ensure a transport for an already-selected session by ID.
+   * Unlike resolveSession, this does NOT resolve by platform-active session —
+   * it operates on the exact session passed in. Reuses an existing transport
+   * if present, or creates a new runtime transport for the session.
+   */
+  async ensureSessionTransport(session: ManagedSession): Promise<void> {
+    if (session.transport) {
+      session.lastActiveAt = Date.now();
+      return;
+    }
+    if (session.status === "paused") throw new Error("Session is paused — use /session resume");
+    if (session.status === "ended") throw new Error("Session ended — use /session new");
+
+    const total = this.listAllSessions().filter(s => s.transport).length;
+    if (total >= MAX_TOTAL_SESSIONS) throw new Error("System busy, try again in a few minutes.");
+
+    await this._attachRuntimeTransport(session, session.userId);
+  }
+
+  /** Shared — attach a runtime (SubagentRuntime) transport to a session with #1348 ownership metadata. */
+  private async _attachRuntimeTransport(session: ManagedSession, userId: string): Promise<void> {
+    session.status = "creating";
+    let agentSession: import("./subagent-runtime.js").AgentSession;
+    try {
+      agentSession = await Promise.race([
+        this.runtime!.session("professor", userId),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
+      ]);
+    } catch (err) {
+      session.status = "ended";
+      throw err;
+    }
+    session.transport = agentSession.transport!;
+    session.transportOwner = "runtime";
+    session.releaseTransport = () => agentSession.destroy();
+    session.status = "ready";
+    session.lastActiveAt = Date.now();
+    const t = session.transport as any;
+    session.pid = t?._rawClient?.pid ?? t?.agent?.pid ?? undefined;
+    pushLog(session, "transport ready");
+    logInfo(TAG, `Session ready: ${session.userId} id=${session.id}${session.pid ? ` pid=${session.pid}` : ""}`);
   }
 
   destroySession(userId: string, sessionId?: string): void {

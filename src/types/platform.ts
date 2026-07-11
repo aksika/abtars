@@ -24,6 +24,8 @@ export interface InboundMessage {
   voiceFileId?: string;      // platform file ID for voice download
   mediaPath?: string;         // path to saved media file on disk
   rawPlatformData?: unknown;
+  /** #1336: Internal routing hint — only TuiSocketAdapter sets it. Untrusted routing request. */
+  targetSessionId?: string;
 }
 
 /** What a platform adapter can do — pipeline checks these. */

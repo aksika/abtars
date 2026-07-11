@@ -41,16 +41,19 @@ interface MockSpinOpts {
   orcSession?: AgentSession | null;
   orcBusy?: boolean;
   spinResult?: { sessionId: string; cardId?: number; result?: string };
+  /** #1336: sessions returned by listAllSessions for cross-platform attach. */
+  allSessions?: ManagedSession[];
 }
 
-function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActiveSessionId: Array<[string, string]>; switchSession: Array<[string, string, number]>; createSession: Array<[string, string, SessionType]>; spin: Array<unknown[]> } } {
-  const calls = { getActiveSessionId: [] as Array<[string, string]>, switchSession: [] as Array<[string, string, number]>, createSession: [] as Array<[string, string, SessionType]>, spin: [] as unknown[][] };
+function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActiveSessionId: Array<[string, string]>; switchSession: Array<[string, string, number]>; createSession: Array<[string, string, SessionType]>; getSessionByGlobalIndex: Array<[number]>; spin: Array<unknown[]> } } {
+  const calls = { getActiveSessionId: [] as Array<[string, string]>, switchSession: [] as Array<[string, string, number]>, getSessionByGlobalIndex: [] as Array<[number]>, createSession: [] as Array<[string, string, SessionType]>, spin: [] as unknown[][] };
   // The orc ManagedSession is what listAllSessions().find(...) returns and
   // what carries the busy flag.
   const orcManagedEntry: ManagedSession | undefined = opts.orcSession
     ? ({ id: opts.orcSession.id, busy: opts.orcBusy ?? false,
         instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined } as unknown as ManagedSession)
     : undefined;
+  const allEntries: ManagedSession[] = opts.allSessions ?? (orcManagedEntry ? [orcManagedEntry] : []);
   const spin: Partial<Spin> = {
     getActiveSessionId: vi.fn((userId: string, platform: string) => {
       calls.getActiveSessionId.push([userId, platform]);
@@ -69,7 +72,12 @@ function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActive
       if (!opts.orcSession || id !== opts.orcSession.id) return undefined;
       return { id, busy: opts.orcBusy ?? false, instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined } as unknown as ManagedSession;
     }),
-    listAllSessions: vi.fn(() => orcManagedEntry ? [orcManagedEntry] : []),
+    getSessionByGlobalIndex: vi.fn((index: number) => {
+      calls.getSessionByGlobalIndex.push([index]);
+      if (opts.switchResult && typeof opts.switchResult !== "string") return opts.switchResult;
+      return allEntries.find(s => s.shortIndex === index) ?? null;
+    }),
+    listAllSessions: vi.fn(() => allEntries),
     spin: vi.fn(async (spec: unknown) => {
       calls.spin.push([spec]);
       return opts.spinResult ?? { sessionId: "1749563282_O_01", cardId: 1, result: "orc-reply" };
@@ -442,21 +450,45 @@ describe("TuiSocketAdapter — attach selector resolution", () => {
     }
   });
 
-  it("resume → calls getActiveSessionId(master, 'tui') and emits `ready`", async () => {
+  it("resume → picks newest ready Main across platforms, emits `ready`", async () => {
+    // #1336: no longer calls getActiveSessionId; uses listAllSessions to find
+    // the master's newest ready type-A session. Provide candidates.
+    const sessions = [
+      { id: "1_A_01", userId: "aksika", platform: "telegram", chatId: 100, active: true, status: "ready", shortIndex: 1, lastActiveAt: 1000, delivery: "streaming" },
+      { id: "1_A_02", userId: "aksika", platform: "telegram", chatId: 200, active: false, status: "ready", shortIndex: 2, lastActiveAt: 2000, delivery: "streaming" },
+    ] as ManagedSession[];
+    mock = makeMockSpin({ allSessions: sessions });
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
     await adapter.start();
     const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
-    expect(mock.calls.getActiveSessionId).toEqual([["aksika", "tui"]]);
-    expect(frames.find((f) => f.t === "ready")).toBeDefined();
+    // listAllSessions was called; the newest ready Main (lastActiveAt=2000) is selected
+    const ready = frames.find((f) => f.t === "ready")!;
+    expect(ready.t).toBe("ready");
+    if (ready.t === "ready") expect(ready.sessionId).toBe("1_A_02");
     conn.destroy(); adapter.stop();
   });
 
-  it("--session N → calls switchSession(master, 'tui', N)", async () => {
-    mock = makeMockSpin({ switchResult: { id: "1749563282_C_03" } as ManagedSession });
+  it("resume with no ready Main → creates TUI-born Main and emits `ready`", async () => {
+    // No ready type-A sessions exist → adapter calls createSession for a TUI Main
+    mock = makeMockSpin({ createResult: { id: "1749563282_A_99" } as ManagedSession, allSessions: [] });
+    const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    expect(mock.calls.createSession).toEqual([["aksika", "tui", "A"]]);
+    const ready = frames.find((f) => f.t === "ready")!;
+    expect(ready.t).toBe("ready");
+    if (ready.t === "ready") expect(ready.sessionId).toBe("1749563282_A_99");
+    conn.destroy(); adapter.stop();
+  });
+
+  it("--session N → calls getSessionByGlobalIndex(N), emits ready with its id", async () => {
+    const target = { id: "1749563282_C_03", userId: "aksika", shortIndex: 3, status: "ready", lastActiveAt: Date.now() } as ManagedSession;
+    mock = makeMockSpin({ switchResult: target });
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
     await adapter.start();
     const { conn, frames } = await attachAndCollect(sockPath, { kind: "session", index: 3 });
-    expect(mock.calls.switchSession).toEqual([["aksika", "tui", 3]]);
+    // #1336: getSessionByGlobalIndex is called, not switchSession
+    expect(mock.calls.getSessionByGlobalIndex).toEqual([[3]]);
     const ready = frames.find((f) => f.t === "ready")!;
     expect(ready.t).toBe("ready");
     if (ready.t === "ready") expect(ready.sessionId).toBe("1749563282_C_03");
@@ -494,14 +526,15 @@ describe("TuiSocketAdapter — attach selector resolution", () => {
     conn.destroy(); adapter.stop();
   });
 
-  it("when switchSession returns a string (rejection), adapter sends `error`", async () => {
-    mock = makeMockSpin({ switchResult: "no such session" });
+  it("when getSessionByGlobalIndex returns null, adapter sends `error`", async () => {
+    // No allSessions, no switchResult → getSessionByGlobalIndex returns null
+    mock = makeMockSpin({ allSessions: [] });
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
     await adapter.start();
     const { conn, frames } = await attachAndCollect(sockPath, { kind: "session", index: 99 });
     const err = frames.find((f) => f.t === "error")!;
     expect(err.t).toBe("error");
-    if (err.t === "error") expect(err.message).toBe("no such session");
+    if (err.t === "error") expect(err.message).toMatch(/not found/i);
     conn.destroy(); adapter.stop();
   });
 });
@@ -545,7 +578,12 @@ describe("TuiSocketAdapter — setMessageHandler swap", () => {
     conn.destroy(); adapter.stop();
   });
 
-  it("input frame is synthesized with platform='tui' and channelId='tui:local'", async () => {
+  it("input frame is synthesized with platform='tui', channelId='tui:local', and targetSessionId", async () => {
+    // Provide sessions so resume picks one and attaches
+    const sessions = [
+      { id: "1_A_01", userId: "aksika", platform: "telegram", chatId: 100, active: true, status: "ready", shortIndex: 1, lastActiveAt: 1000, delivery: "streaming" },
+    ] as ManagedSession[];
+    mock = makeMockSpin({ allSessions: sessions });
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage: initialHandler, socketPath: sockPath });
     await adapter.start();
     const { conn } = await attachAndCollect(sockPath, { kind: "resume" });
@@ -556,6 +594,8 @@ describe("TuiSocketAdapter — setMessageHandler swap", () => {
     expect(msg.channelId).toBe("tui:local");
     expect(msg.userId).toBe("aksika");  // master
     expect(msg.isGroup).toBe(false);
+    // #1336: attached session is carried as routing target
+    expect(msg.targetSessionId).toBe("1_A_01");
     conn.destroy(); adapter.stop();
   });
 });

@@ -260,20 +260,35 @@ export class TuiSocketAdapter implements PlatformAdapter {
     const master = getMasterUserId();
     const spin = this.deps.spin;
 
-    // Resume auto-creates a Main (A) session and returns its id directly
-    // (string), not a session object. The other selectors return either
-    // a ManagedSession or a string error code.
     let sessionId: string;
     let nextMode: "pipeline" | "orc" = "pipeline";
 
     switch (mode.kind) {
-      case "resume":
-        sessionId = spin.getActiveSessionId(master, "tui");
+      case "resume": {
+        // #1336: Default to the master's newest ready Main across all platforms.
+        // Sort by lastActiveAt desc, shortIndex desc as tie-breaker.
+        const candidates = spin.listAllSessions().filter(
+          s => s.userId === master && s.id.includes("_A_") && s.status === "ready",
+        );
+        candidates.sort((a, b) => b.lastActiveAt - a.lastActiveAt || b.shortIndex - a.shortIndex);
+        const existing = candidates[0];
+        if (existing) {
+          sessionId = existing.id;
+        } else {
+          // No ready Main anywhere — create a TUI-born one
+          const r = spin.createSession(master, "tui", "A" as SessionType);
+          if (typeof r === "string") return this._reject(r);
+          sessionId = r.id;
+        }
         break;
+      }
       case "session": {
-        const r = spin.switchSession(master, "tui", mode.index);
-        if (typeof r === "string") return this._reject(r);
-        sessionId = r.id;
+        // #1336: global-index lookup — does not call switchSession()
+        const target = spin.getSessionByGlobalIndex(mode.index);
+        if (!target) return this._reject(`Session #${mode.index} not found.`);
+        if (target.userId !== master) return this._reject(`Session #${mode.index} belongs to another user.`);
+        if (target.status === "ended") return this._reject(`Session #${mode.index} is ended.`);
+        sessionId = target.id;
         break;
       }
       case "new": {
@@ -345,6 +360,56 @@ export class TuiSocketAdapter implements PlatformAdapter {
       await this._routeToOrc(text);
       return;
     }
+
+    // #1336: Local view commands before synthesizing an InboundMessage
+    const trimmed = text.trim();
+    const lower = trimmed.toLowerCase();
+
+    // /session — list master's live sessions across platforms
+    if (lower === "/session" || lower === "/sessions") {
+      await this._listSessions();
+      return;
+    }
+
+    // /session N — attach to global short index
+    const sessionMatch = trimmed.match(/^\/session\s+(\d+)$/);
+    if (sessionMatch) {
+      const index = parseInt(sessionMatch[1]!, 10);
+      await this._attachByGlobalIndex(index);
+      return;
+    }
+
+    // /session new [type] — create a TUI-born selectable session and attach
+    const newMatch = trimmed.match(/^\/session\s+new\s+(\w+)$/i);
+    if (newMatch) {
+      const st = newMatch[1]!.toUpperCase();
+      if (!["A", "B", "C"].includes(st)) {
+        this._push({ t: "message", role: "system", markdown: `Session type ${st} is not selectable from the terminal.` });
+        return;
+      }
+      const spin = this.deps.spin;
+      const master = getMasterUserId();
+      const r = spin.createSession(master, "tui", st as SessionType);
+      if (typeof r === "string") {
+        this._push({ t: "message", role: "system", markdown: r });
+        return;
+      }
+      this.attachedSessionId = r.id;
+      const type = sessionTypeOf(r.id);
+      const index2 = parseInt(r.id.split("_")[2] ?? "0", 10);
+      const label = `${typeLabel(type as SessionType)} #${index2}`;
+      this._push({ t: "ready", sessionLabel: label, sessionId: r.id });
+      return;
+    }
+
+    // /session end|kill|pause|resume — reject with home-platform guidance
+    const lifecycleMatch = trimmed.match(/^\/session\s+(end|kill|pause|resume)\b/i);
+    if (lifecycleMatch) {
+      const verb = lifecycleMatch[1]!.toLowerCase();
+      this._push({ t: "message", role: "system", markdown: `Use /session ${verb} on the session's home platform (Telegram/Discord). TUI is a cross-platform view and cannot mutate session lifecycle.` });
+      return;
+    }
+
     const master = getMasterUserId();
     const msg: InboundMessage = {
       platform: "tui",
@@ -356,8 +421,55 @@ export class TuiSocketAdapter implements PlatformAdapter {
       timestamp: Date.now(),
       isGroup: false,
       isVoice: false,
+      // #1336: carry the attached session as the routing target
+      targetSessionId: this.attachedSessionId,
     };
     this.deps.onMessage(msg);
+  }
+
+  /** #1336: Emit a list of the master's live sessions across platforms. */
+  private async _listSessions(): Promise<void> {
+    const master = getMasterUserId();
+    const spin = this.deps.spin;
+    const all = spin.listAllSessions().filter(
+      s => s.userId === master && s.status !== "ended",
+    );
+    all.sort((a, b) => a.shortIndex - b.shortIndex);
+    if (all.length === 0) {
+      this._push({ t: "message", role: "system", markdown: "No live sessions." });
+      return;
+    }
+    const lines = all.map(s => {
+      const type = sessionTypeOf(s.id);
+      const label = typeLabel(type as SessionType);
+      const marker = s.id === this.attachedSessionId ? " ← attached" : "";
+      return `#${s.shortIndex} ${label} (${s.platform}, ${s.status})${marker}`;
+    });
+    this._push({ t: "message", role: "system", markdown: lines.join("\n") });
+  }
+
+  /** #1336: Attach to a session by global shortIndex, emit ready. */
+  private async _attachByGlobalIndex(index: number): Promise<void> {
+    const master = getMasterUserId();
+    const spin = this.deps.spin;
+    const target = spin.getSessionByGlobalIndex(index);
+    if (!target) {
+      this._push({ t: "message", role: "system", markdown: `Session #${index} not found.` });
+      return;
+    }
+    if (target.userId !== master) {
+      this._push({ t: "message", role: "system", markdown: `Session #${index} belongs to another user.` });
+      return;
+    }
+    if (target.status === "ended") {
+      this._push({ t: "message", role: "system", markdown: `Session #${index} is ended.` });
+      return;
+    }
+    this.attachedSessionId = target.id;
+    const type = sessionTypeOf(target.id);
+    const idx = parseInt(target.id.split("_")[2] ?? "0", 10);
+    const label = `${typeLabel(type as SessionType)} #${idx}`;
+    this._push({ t: "ready", sessionLabel: label, sessionId: target.id });
   }
 
   /** #1332: Handle an explicit steer client frame. Validates and queues. */

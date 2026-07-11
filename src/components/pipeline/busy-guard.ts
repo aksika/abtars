@@ -9,11 +9,12 @@ import { logAndSwallow } from "../log-and-swallow.js";
 const MAX_QUEUE_DEPTH = 20;
 
 export const busyGuardMiddleware: Middleware = async (ctx, next) => {
-  const { msg, adapter, deps } = ctx;
-  const userId = msg.userId;
-  const activeId = deps.sessionManager.getActiveSessionId(userId, msg.platform);
+  const { msg, adapter } = ctx;
+  // #1336: prefer the effective session from session-selection middleware;
+  // fall back to platform-active resolution for backward compat / tests.
   const { spin } = await import("../spin.js");
-  const entry = spin.getSessionById(activeId);
+  const entry = ctx.session ?? spin.getSessionById(ctx.deps.sessionManager.getActiveSessionId(ctx.userId, msg.platform));
+  const activeId = entry?.id ?? ctx.sessionId;
   if (!entry) { await next(); return; }
 
   if (entry.busy) {
@@ -31,7 +32,7 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
     // /stop or /ctrlc — hard interrupt
     if (lower === "/stop" || lower === "/ctrlc") {
       logInfo("busy-guard", `STOP interrupt for ${activeId}`);
-      await deps.transport.sendInterrupt();
+      await ctx.deps.transport.sendInterrupt();
       entry.busy = false;
       try { await adapter.sendMessage(msg.channelId, "🛑 Stopped.", { threadId: msg.threadId }); } catch { /* */ }
       ctx.handled = true;
@@ -52,7 +53,7 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
     // Legacy: bare "wait" — treat as /stop for backward compat
     if (lower === "wait") {
       logInfo("busy-guard", `Legacy WAIT interrupt for ${activeId}`);
-      await deps.transport.sendInterrupt();
+      await ctx.deps.transport.sendInterrupt();
       entry.busy = false;
       try { await adapter.sendMessage(msg.channelId, "🛑 Stopped.", { threadId: msg.threadId }); } catch { /* */ }
       ctx.handled = true;
