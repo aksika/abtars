@@ -118,6 +118,8 @@ abtars update    # pulls latest source, rebuilds, deploys, restarts (daemon mode
 
 In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
 
+If `abtars` still behaves like the old version after updating, a stale `npm install -g abtars` may be shadowing the updated wrapper. See [troubleshooting](./troubleshooting.md#abtars-resolves-to-a-stale-version-after-update).
+
 ## What gets created
 
 ```
