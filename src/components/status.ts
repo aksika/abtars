@@ -471,6 +471,7 @@ function readPorts(envPath: string): { dashboardPort: number | null; agentApiPor
 }
 
 function detectScope(): "system" | "user" | null {
+  // Linux: systemd
   if (existsSync("/etc/systemd/system/abtars.service")) return "system";
   const userUnit = join(
     process.env["HOME"] ?? "",
@@ -480,6 +481,9 @@ function detectScope(): "system" | "user" | null {
     "abtars-watchdog.service",
   );
   if (existsSync(userUnit)) return "user";
+  // macOS: launchd
+  if (existsSync("/Library/LaunchDaemons/com.abtars.daemon.plist")) return "system";
+  if (existsSync(join(process.env["HOME"] ?? "", "Library", "LaunchAgents", "com.abtars.watchdog.plist"))) return "user";
   return null;
 }
 
@@ -498,15 +502,19 @@ function collectDaemon(
 
   const scope = detectScope();
   if (!scope) {
-    warnings.push("daemon mode set but no systemd unit installed");
+    warnings.push("daemon mode set but no service unit installed");
     return null;
   }
 
   const unit = unitName(scope);
+  const isMac = process.platform === "darwin";
   const r = (() => {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+      if (isMac) {
+        return spawnSync("launchctl", ["list", unit], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: SYSTEMCTL_TIMEOUT_MS });
+      }
       return spawnSync(
         "systemctl",
         scope === "user" ? ["--user", "status", unit] : ["status", unit],
@@ -518,9 +526,26 @@ function collectDaemon(
   })();
 
   const output = r?.stdout || r?.stderr || "";
-  const activeRaw = output.match(/Active:\s+(.+)/)?.[1]?.trim() ?? "unknown";
-  const pidMatch = output.match(/Main PID:\s+(\d+)/)?.[1];
-  const mainPid = pidMatch ? parseInt(pidMatch, 10) : null;
+  let activeRaw = "unknown";
+  let mainPid: number | null = null;
+  if (isMac) {
+    // launchctl list output: PID\tstatus\tlabel
+    // PID > 0 = running, PID = "-" = loaded but stopped, exit code 3 = not loaded
+    const pidField = output.split("\t")[0]?.trim();
+    if (pidField === "-" || r?.status === 3 || (output === "" && r?.status !== 0)) {
+      activeRaw = "loaded (not running)";
+    } else if (pidField) {
+      const parsed = parseInt(pidField, 10);
+      if (!isNaN(parsed) && parsed > 0) {
+        mainPid = parsed;
+        activeRaw = "running";
+      }
+    }
+  } else {
+    activeRaw = output.match(/Active:\s+(.+)/)?.[1]?.trim() ?? "unknown";
+    const pidMatch = output.match(/Main PID:\s+(\d+)/)?.[1];
+    if (pidMatch) mainPid = parseInt(pidMatch, 10);
+  }
 
   const heartbeatStaleSeconds =
     bridgeLastHeartbeatMs !== null
@@ -866,8 +891,8 @@ function countRuntimeFailures(
 
 function stateIcon(active: string): string {
   const word = active.split(/\s+/)[0] ?? "";
-  if (word === "active") return "●";
-  if (word === "inactive" || word === "deactivating") return "○";
+  if (word === "active" || word === "running") return "●";
+  if (word === "inactive" || word === "deactivating" || word === "loaded") return "○";
   if (word === "failed") return "✗";
   if (word === "activating") return "◐";
   return "○";
