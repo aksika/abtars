@@ -44,6 +44,8 @@ export interface ManagedSession {
 
   // Transport
   transport?: IKiroTransport;
+  transportOwner?: "bridge" | "runtime";
+  releaseTransport?: () => Promise<void>;
   delivery: "streaming" | "simple";
   model?: string;
   provider?: string;

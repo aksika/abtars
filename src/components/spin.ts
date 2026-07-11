@@ -110,6 +110,7 @@ export class Spin {
     const r = Sessions.endSession(this.sessions, this.nextIndex, userId, platform, index);
     if (typeof r === "string") return r;
     this.nextIndex = r.nextIndex;
+    this.releaseSessionTransport(r.ended);
     return r.ended;
   }
 
@@ -117,6 +118,7 @@ export class Spin {
     const r = Sessions.killSession(this.sessions, this.nextIndex, userId, platform, index);
     if (typeof r === "string") return r;
     this.nextIndex = r.nextIndex;
+    this.releaseSessionTransport(r.killed);
     return r.killed;
   }
 
@@ -161,6 +163,7 @@ export class Spin {
   registerMasterSession(opts: { userId: string; chatId: number; platform: string; transport: IKiroTransport }): void {
     const session = this.getActiveSession(opts.userId, opts.platform);
     session.transport = opts.transport;
+    session.transportOwner = "bridge";
     session.delivery = "streaming";
     session.idleTimeoutMs = Infinity;
     session.chatId = opts.chatId;
@@ -261,6 +264,8 @@ export class Spin {
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
       ]);
       session.transport = agentSession.transport!;
+      session.transportOwner = "runtime";
+      session.releaseTransport = () => agentSession.destroy();
       session.status = "ready";
       session.lastActiveAt = Date.now();
       const t = session.transport as any;
@@ -281,7 +286,7 @@ export class Spin {
       if (s.userId !== userId) continue;
       if (sessionId && s.id !== sessionId) continue;
       if (s.idleTimeoutMs === Infinity) continue;
-      if (s.transport) { try { s.transport.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } s.transport = undefined; }
+      this.releaseSessionTransport(s);
       s.status = "ended";
       s.active = false;
       pushLog(s, "destroyed");
@@ -291,7 +296,7 @@ export class Spin {
 
   destroyAll(): void {
     for (const s of this.sessions.values()) {
-      if (s.transport) { try { s.transport.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } }
+      this.releaseSessionTransport(s);
     }
     if (this.orcSession) { try { this.orcSession.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } this.orcSession = null; }
     this.sessions.clear();
@@ -446,6 +451,8 @@ export class Spin {
         const agentSession = await this.runtime.session(agent, profile.resolution === "active" ? userId : undefined);
         sessionTransport = agentSession.transport as IKiroTransport;
         session.transport = sessionTransport;
+        session.transportOwner = "runtime";
+        session.releaseTransport = () => agentSession.destroy();
         session.status = "ready";
       }
 
@@ -597,9 +604,18 @@ export class Spin {
     if (cardId !== undefined) { this.markDone(spec.type, cardId); this.drainQueued(); }
   }
 
+  private releaseSessionTransport(session: ManagedSession): void {
+    if (session.transportOwner === "runtime" && session.releaseTransport) {
+      try { void session.releaseTransport(); } catch (err) { logAndSwallow(TAG, "releaseTransport", err); }
+    }
+    session.transportOwner = undefined;
+    session.releaseTransport = undefined;
+    session.transport = undefined;
+  }
+
   private applyTerminate(session: ManagedSession, terminate: "call" | "response" | "external"): void {
-    if (terminate === "call") this.sessions.delete(session.id);
-    else if (terminate === "response") { session.status = "ended"; session.active = false; }
+    if (terminate === "call") { this.releaseSessionTransport(session); this.sessions.delete(session.id); }
+    else if (terminate === "response") { this.releaseSessionTransport(session); session.status = "ended"; session.active = false; }
     // "external" → stays alive (Orc, persistent D); 1hr housekeeping prunes ended ones
   }
 
