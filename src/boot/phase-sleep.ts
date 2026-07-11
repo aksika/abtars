@@ -1,6 +1,6 @@
 /**
  * phase-sleep — boot phase: create SleepHandle + register the `sleep-cycle`
- * system action (#1321).
+ * system action (#1321, thin-host-supervisor migration #1353).
  *
  * Must run after phase-heartbeat (consumes ctx.sendSystemMessage) and phase-memory.
  *
@@ -14,7 +14,7 @@
 import { resetAllCtxStarts } from "./ctx-start.js";
 import { logInfo, logWarn } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
-import type { SleepRuntime } from "abmind";
+import type { SleepRuntime, SleepCompletionRequest } from "abmind";
 import { getSystemTaskRegistry } from "../components/tasks/system-task-registry.js";
 
 export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
@@ -36,18 +36,24 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
 
   const { createSleepHandle } = await import("../capabilities/sleep/index.js");
 
-  // #1271: SleepRuntime adapter — wraps spin({ type: "D", ... }) for the in-process
-  // orchestrator. ONE nightSessionId is held for the whole cycle (set from step 1's
-  // result, reused for steps 2+) so D's persistent transport keeps a shared Dreamy
-  // conversation. D profile is external-terminate, so the session stays alive across
-  // steps; it is ended in onCycleEnd, which fires on every cycle outcome (#1287).
+  // #1271/#1353: SleepRuntime adapter — wraps spin({ type: "D", ... }) for the
+  // host-neutral orchestrator. ONE nightSessionId is held for the whole cycle
+  // (set from step 1's result, reused for steps 2+) so D's persistent transport
+  // keeps a shared Dreamy conversation. D profile is external-terminate, so the
+  // session stays alive across steps; it is ended in onCycleEnd, which fires on
+  // every cycle outcome (#1287). This adapter does not implement its own
+  // retry; a Spin/transport failure rejects and abmind applies its own
+  // essential-step stop/suspend policy. request.signal (abmind's internal
+  // cancellation/timeout) is not yet threaded into Spin's transport layer —
+  // that would require new Spin API surface out of #1353's scope; abmind's
+  // own timeout still bounds each call from the abmind side.
   let nightSessionId: string | undefined;
   const { getEnv } = await import("../components/env-schema.js");
   const runtime: SleepRuntime = {
-    async complete(prompt: string): Promise<string> {
+    async complete(request: SleepCompletionRequest): Promise<string> {
       const { result, sessionId } = await sessionManager.spin({
         type: "D",
-        prompt,
+        prompt: request.prompt,
         sessionId: nightSessionId, // undefined on step 1 → transient alloc; reused on steps 2+
         timeoutMs: getEnv().modelApiTimeoutMs * 3,
         await: true,
@@ -59,7 +65,6 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
   };
 
   const handle = createSleepHandle({
-    sleepAuditDir: ctx.sleepAuditDir,
     memoryEnabled: memoryConfig.memoryEnabled,
     runtime,
     onComplete: () => {

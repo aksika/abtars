@@ -30,8 +30,8 @@ import {
 // ── Existing version-floor tests (unchanged) ─────────────────────────────────
 
 describe("#1243 abmind version floor", () => {
-  it("ABMIND_MIN is 0.2.6 (current stable line after the 0.3.0 pre-release reset)", () => {
-    expect(ABMIND_MIN).toEqual([0, 2, 6]);
+  it("ABMIND_MIN is 0.2.7 (#1353 host-neutral sleep contract)", () => {
+    expect(ABMIND_MIN).toEqual([0, 2, 7]);
   });
 
   it("parseSemver reads leading major.minor.patch, ignores pre-release/build", () => {
@@ -43,8 +43,8 @@ describe("#1243 abmind version floor", () => {
   });
 
   it("isSupportedVersion accepts the floor and above", () => {
-    expect(isSupportedVersion("0.2.6")).toBe(true);
-    expect(isSupportedVersion("0.2.7-alpha.0")).toBe(true);
+    expect(isSupportedVersion("0.2.7")).toBe(true);
+    expect(isSupportedVersion("0.2.7-alpha.1")).toBe(true);
     expect(isSupportedVersion("0.3.0")).toBe(true);
     expect(isSupportedVersion("0.3.0-alpha.0")).toBe(true);
     expect(isSupportedVersion("0.3.1")).toBe(true);

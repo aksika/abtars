@@ -29,21 +29,9 @@ export function createIdleCompactTask(_deps: IdleCompactDeps): HeartbeatTask {
   };
 }
 
-/** #1321: sleep is scheduled by tasks.json. The legacy bedtime/quiet-tick scheduler
- *  and hardware-sleep coupling were deleted. What remains is a periodic in-cycle
- *  stuck-run guard (not a scheduler): if a sleep run appears stuck, force-clear
- *  isActive so the next scheduled dispatch can admit a fresh attempt. */
-export function createSleepStaleCheckTask(checkStaleSleep?: () => void): HeartbeatTask {
-  let counter = 0;
-  return {
-    name: "sleep-stale",
-    execute: async () => {
-      counter++;
-      if (counter % 5 !== 0) return; // every 5 ticks (~5 min)
-      try { checkStaleSleep?.(); } catch (err) { logAndSwallow("sleep-stale", "op", err); }
-    },
-  };
-}
+/** #1353: the periodic in-cycle stuck-run guard (createSleepStaleCheckTask) was
+ *  removed — abmind's runSleepCycle owns its own wall-clock timeout internally
+ *  and its returned promise always settles. See src/capabilities/sleep/index.ts. */
 
 /** DB integrity check — runs every ~1 hour (time-based, independent of tick interval). */
 export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTask {

@@ -9,7 +9,7 @@ import { getEnv } from "../components/env-schema.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
 import {
-  createIdleCompactTask, createSleepStaleCheckTask, createDbIntegrityTask,
+  createIdleCompactTask, createDbIntegrityTask,
   createKanbanCleanupTask, createUserSessionExpiryTask, createMetricsTask,
 } from "../components/heartbeat-tasks.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
@@ -62,10 +62,12 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     },
   });
 
-  // #1321: sleep scheduling is owned by the tasks.json `sleep-cycle` system task
-  // (dispatched via CronQueue.runSystem → sleepHandle.startScheduled()). Only the
-  // in-cycle stuck-run guard remains here as a periodic heartbeat task.
-  heartbeat.registerTask(createSleepStaleCheckTask(() => ctx.sleepHandle?.checkStale()));
+  // #1353: the in-cycle stuck-run guard was removed. abmind's runSleepCycle
+  // now owns its own wall-clock timeout internally (combined into the
+  // request signal) and its returned promise always settles — the host's
+  // `running` flag can no longer desync from an actually-stuck cycle without
+  // the host reading abmind's private lock-file format, which the contract
+  // forbids. See src/capabilities/sleep/index.ts.
 
   if (getEnv().ctxIdleCompactMin > 0) {
     heartbeat.registerTask(createIdleCompactTask({

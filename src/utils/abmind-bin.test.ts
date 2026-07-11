@@ -69,7 +69,7 @@ describe("resolveAbmindBin — ABMIND_PATH strategy (#1308 follow-up)", () => {
     expect(resolveAbmindBin()).toBeNull();
   });
 
-  it("returns null when the package version is below the supported floor (0.2.6)", () => {
+  it("returns null when the package version is below the supported floor (0.2.7)", () => {
     buildFakeBinPkg(tmp, { version: "0.2.5", binRel: "dist/cli/abmind.js" });
     process.env["ABMIND_PATH"] = tmp;
     expect(resolveAbmindBin()).toBeNull();

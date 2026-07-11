@@ -30,8 +30,14 @@ type AbmindModule = typeof import("abmind");
  * Minimum abmind version that provides the supported contract surface
  * (abmind SUPPORTED-SURFACE.md, #1243). Below this → memory disabled loudly.
  * Bump only when abtars starts relying on newer surface.
+ *
+ * 0.2.7 (#1353): host-neutral sleep contract — SleepCompletionRequest,
+ * SleepRunOptions, SleepRunResult, SleepEvent. abtars' sleep capability
+ * (src/capabilities/sleep/index.ts) requires this surface; an abmind below
+ * this floor does not export it and sleep would fail at runtime rather than
+ * at this boot-time check.
  */
-export const ABMIND_MIN: readonly [number, number, number] = [0, 2, 6];
+export const ABMIND_MIN: readonly [number, number, number] = [0, 2, 7];
 
 let _mod: AbmindModule | null = null;
 let _loaded = false;

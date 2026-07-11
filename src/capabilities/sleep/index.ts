@@ -1,36 +1,38 @@
-import { logAndSwallow } from "../../components/log-and-swallow.js";
 /**
- * Sleep capability — nightly memory consolidation host (#1321).
+ * Sleep capability — thin host supervisor over abmind's host-neutral sleep
+ * contract (#1353, superseding the #1321 cycle-execution shell).
  *
  * Scheduling is owned by the task store (a `sleep-cycle` system task in
- * tasks.json). This capability owns cycle *execution*: it admits one run,
- * allocates a Dreamy session, drives abmind's runSleepCycle asynchronously,
- * reports the result, resets memory on success, and always tears the session
- * down on every terminal path.
+ * tasks.json). This supervisor owns only: admission, allocating one Dreamy
+ * session, translating abmind's neutral SleepEvent stream to one sleep-card,
+ * using the returned SleepRunResult for reset/reporting, and always tearing
+ * the Dreamy session down on every terminal path.
  *
- * startScheduled() / startManual() return a typed result promptly — they only
- * guard and start the async Promise chain. The scheduler, CronQueue, and
- * heartbeat are never blocked. There is no bedtime window, quiet-tick counter,
- * audit-today scheduling gate, hardware-sleep coupling, or bridge-lock force
- * flag (#1321). Cycle retry behavior is preserved.
+ * It does NOT: inspect sleep_*.lock, reconstruct completed/skipped/failed
+ * lists from raw state, run its own MAX_RETRIES/setTimeout cycle-retry loop,
+ * decide watermark success, or know the sleep-step manifest well enough to
+ * execute/resume individual steps. Durable per-step recovery, resume, and
+ * catch-up all belong to abmind; a bounded scheduler-level retry after a
+ * terminal run is an abtars task policy (auto-pause via CronQueue), not an
+ * in-memory timer here.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { getEnv } from "../../components/env-schema.js";
-import type { Level } from "abmind";
+import type { Level, SleepRunResult, SleepEvent } from "abmind";
 import { abmind } from "../../utils/abmind-lazy.js";
-import type { SleepRuntime } from "abmind";
+import type { SleepRuntime, SleepCompletionRequest } from "abmind";
+import { getEnv } from "../../components/env-schema.js";
 import { logInfo, logWarn } from "../../components/logger.js";
 import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
 import { startSleepCard, type SleepCard } from "./sleep-card.js";
 import type { CapabilityApi } from "../capability.js";
 
+/** Host-owned model runtime factory. abtars wraps its Spin/transport policy;
+ *  a rejection here is final for this attempt — abmind does not retry it. */
+export type SleepRuntimeFactory = (request: SleepCompletionRequest) => Promise<string>;
+
 export interface SleepOpts {
-  sleepAuditDir: string;
   memoryEnabled: boolean;
-  memoryDir?: string;
-  /** LLM runtime adapter — bridge wraps spin({ type: "D", ... }) (#1271). */
+  /** Host-owned model runtime — wraps spin({ type: "D", ... }) (#1271, #1353). */
   runtime: SleepRuntime;
   /** Success-only path: reset per-chat context-window start markers. */
   onComplete: () => void;
@@ -60,17 +62,16 @@ export interface SleepHandle {
   startScheduled(): SleepStartResult;
   /** Admit an explicit manual run (`/sleep now` / `/sleep resume`). Returns promptly. */
   startManual(options: { fresh: boolean; resume: boolean }): SleepStartResult;
-  /** Force-clear isActive if a run appears stuck (in-cycle guard, not a scheduler). */
-  checkStale(): void;
 }
-
-const MAX_RETRIES = 3;
-const RETRY_MS = 5 * 60 * 1000;
-const STALE_MS = 30 * 60_000;
 
 export function createSleepHandle(opts: SleepOpts): SleepHandle {
   let running = false;
-  let attempts = 0;
+  let progress: SleepProgress | null = null;
+  // #1353: reserved for host-shutdown cancellation. Wiring an actual bridge
+  // shutdown signal into this controller is out of this ticket's scope (no
+  // existing BootCtx shutdown hook to subscribe to without new boot-lifecycle
+  // API surface) — abmind's own internal timeout still bounds every call.
+  const shutdownController = new AbortController();
 
   /** Resolve the configured sleep quality level from SLEEP_QUALITY env. */
   function scheduledLevel(): Level {
@@ -83,128 +84,94 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
   }
 
-  /** Build a one-line Dreamy report from the authoritative sleep lock (#1321 req 7). */
-  function buildDreamReport(): string {
-    let dreamReport = "Dreamy finished nightly maintenance.";
-    try {
-      const sleepDir = join(opts.memoryDir ?? "", "sleep");
-      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-      const lockPath = join(sleepDir, `sleep_${dateStr}.lock`);
-      if (existsSync(lockPath)) {
-        const lockData = JSON.parse(readFileSync(lockPath, "utf-8")) as { steps: Record<string, { status: string }>; llmCalls?: number };
-        const ok = Object.entries(lockData.steps).filter(([, s]) => s.status === "ok").map(([k]) => k);
-        const skipped = Object.entries(lockData.steps).filter(([, s]) => s.status === "skipped").map(([k]) => k);
-        const failed = Object.entries(lockData.steps).filter(([, s]) => s.status === "failed" || s.status === "timeout").map(([k]) => k);
-        dreamReport = `Dreamy finished nightly maintenance (${lockData.llmCalls ?? "?"} LLM calls). Completed: ${ok.join(", ") || "none"}.`;
-        if (skipped.length > 0) dreamReport += ` Skipped: ${skipped.join(", ")}.`;
-        if (failed.length > 0) dreamReport += ` ⚠️ FAILED: ${failed.join(", ")}. Please review.`;
-      }
-    } catch (err) { logAndSwallow("index", "op", err); }
-    return dreamReport;
-  }
-
   /**
-   * Start (or retry) the async sleep cycle. Never awaited by callers — runs to
-   * terminal in the background. Guards `running` and Dreamy session lifecycle on
-   * every outcome.
+   * Start the async sleep cycle. Never awaited by callers — runs to terminal
+   * in the background. Guards `running` and Dreamy session lifecycle on
+   * every outcome. There is no outer retry loop here — abmind's own bounded
+   * essential-step handling and the task scheduler's auto-pause policy (after
+   * repeated terminal failures) replace the old in-memory MAX_RETRIES/setTimeout.
    */
-  function runCycle(level: Level, fresh: boolean): void {
-    // Allocate the Dreamy session upfront so it appears in /session for the full cycle (#1280).
+  function runCycle(level: Level, fresh: boolean, mode: "scheduled" | "manual" | "resume"): void {
     if (opts.allocateSleepSession) {
       const dateStr = new Date().toISOString().slice(0, 10);
       opts.allocateSleepSession(`Sleep ${dateStr}`);
     }
     running = true;
+    progress = { percent: 0, step: "starting" };
     writeSleepStatus("sleeping");
-    logInfo("sleep", `😴 Sleep started in-process (attempt ${attempts}, model=dreamy)`);
+    logInfo("sleep", `😴 Sleep started in-process (mode=${mode}, model=dreamy)`);
 
     let sleepCard: SleepCard | null = null;
+    let totalSteps = 0;
+    let stepIndex = 0;
+
+    const onEvent = (event: SleepEvent): void => {
+      if (event.type === "cycle_started") {
+        sleepCard = startSleepCard();
+        totalSteps = event.totalSteps;
+      }
+      if (event.type === "step_started") {
+        stepIndex = event.index;
+        progress = { percent: totalSteps > 0 ? Math.round((stepIndex / totalSteps) * 100) : 0, step: event.stepId };
+      }
+      sleepCard?.onEvent(event);
+    };
+
     abmind()!.runSleepCycle({
       runtime: opts.runtime,
       level,
       fresh,
-      // #895: stepped card — created when the orchestrator commits to running steps,
-      // ticked per step, completed once at cycle end (both success and failure paths).
-      onCycleStart: () => { sleepCard = startSleepCard(); },
-      onStep: (e) => sleepCard?.onStep(e),
+      mode,
+      signal: shutdownController.signal,
+      onEvent,
     })
-      .then(async (result: { ok: boolean; failCount: number }) => {
+      .then(async (result: SleepRunResult) => {
         running = false;
+        progress = null;
         sleepCard?.complete();
-        logInfo("sleep", `😴 Sleep finished (ok=${result.ok}, failCount=${result.failCount}, attempt ${attempts})`);
+        logInfo("sleep", `😴 Sleep finished (status=${result.status}, llmCalls=${result.llmCalls})`);
         writeSleepStatus("awake");
-        if (!result.ok) {
-          retryOrGiveUp();
+
+        if (result.status === "completed" && opts.memoryEnabled) opts.onComplete();
+
+        if (result.status === "no_work" || result.status === "already_running" || result.status === "cancelled") {
+          // Nothing new to report to the user for these terminal states.
           return;
         }
 
-        if (opts.memoryEnabled) opts.onComplete();
-
-        const dreamReport = buildDreamReport();
         // #844: buffer silently — don't trigger model response
         const { bufferSystemEvent } = await import("../../components/system-event-buffer.js");
-        bufferSystemEvent(dreamReport);
+        bufferSystemEvent(result.report);
       })
       .catch((err: unknown) => {
         running = false;
+        progress = null;
         sleepCard?.complete();
         writeSleepStatus("awake");
         const msg = err instanceof Error ? err.message : String(err);
-        logWarn("sleep", `😴 Sleep threw (attempt ${attempts}/${MAX_RETRIES}): ${msg}`);
-        retryOrGiveUp();
+        logWarn("sleep", `😴 Sleep threw: ${msg}`);
       })
       .finally(() => {
-        // #1287: tear down the night Dreamy session on EVERY cycle outcome. Retry
-        // re-allocates a fresh Dreamy via allocateSleepSession.
+        // #1287: tear down the night Dreamy session on EVERY cycle outcome.
         opts.onCycleEnd?.();
       });
   }
 
-  /** Existing cycle retry behavior (#1321 preserves this; #1353 may revisit). */
-  function retryOrGiveUp(): void {
-    if (attempts < MAX_RETRIES) {
-      logWarn("sleep", `😴 Sleep failed (attempt ${attempts}/${MAX_RETRIES}) — retry in 5min`);
-      setTimeout(() => runCycle(scheduledLevel(), false), RETRY_MS);
-    } else {
-      logWarn("sleep", `😴 Sleep failures persist — exhausted ${MAX_RETRIES} attempts`);
-    }
-  }
-
-  /** Start a fresh attempt, bumping the attempt counter. */
-  function admit(level: Level, fresh: boolean): SleepStartResult {
-    attempts++;
-    runCycle(level, fresh);
-    return { status: "accepted" };
-  }
-
   return {
     get isActive() { return running; },
-    get progress() { return null; },
+    get progress() { return progress; },
     startScheduled(): SleepStartResult {
       if (running) return { status: "already_running" };
-      return admit(scheduledLevel(), false);
+      if (!abmind()) return { status: "unavailable", reason: "abmind not available" };
+      runCycle(scheduledLevel(), false, "scheduled");
+      return { status: "accepted" };
     },
     startManual({ fresh, resume }): SleepStartResult {
       if (running) return { status: "already_running" };
-      // /sleep now → fresh ultimate run; /sleep resume → fresh:false reuses durable state.
-      void resume;
+      if (!abmind()) return { status: "unavailable", reason: "abmind not available" };
       const level = fresh ? ("ultimate" as Level) : scheduledLevel();
-      return admit(level, fresh);
-    },
-    checkStale(): void {
-      if (!running) return;
-      try {
-        const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-        const lockPath = join(opts.sleepAuditDir, `sleep_${dateStr}.lock`);
-        if (!existsSync(lockPath)) { running = false; logWarn("sleep", "Sleep stuck — no lock file, force-clearing isActive"); return; }
-        const lock = JSON.parse(readFileSync(lockPath, "utf-8")) as { startedAt?: number; steps?: Record<string, { duration?: number }> };
-        const stepTimes = Object.values(lock.steps ?? {}).map(s => (s as any).startedAt ?? (s as any).completedAt ?? 0).filter(Boolean);
-        const lastActivity = Math.max(lock.startedAt ?? 0, ...stepTimes);
-        if (lastActivity > 0 && Date.now() - lastActivity > STALE_MS) {
-          running = false;
-          logWarn("sleep", `Sleep stuck — no progress in 30min (last activity ${Math.round((Date.now() - lastActivity) / 60_000)}min ago), force-clearing isActive`);
-        }
-      } catch { /* lock file unreadable — leave running as-is, next tick retries */ }
+      runCycle(level, fresh, resume ? "resume" : "manual");
+      return { status: "accepted" };
     },
   };
 }
