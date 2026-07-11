@@ -121,6 +121,37 @@ export function switchSession(sessions: Map<string, ManagedSession>, userId: str
   return target;
 }
 
+/**
+ * Post-termination reconciliation — shared by endSession and killSession.
+ * Scope is the target's (userId, platform) only. Maintains exactly one local
+ * Main, activates a replacement when the target was active or no local active
+ * remains, and allocates a new Main only when none exists locally.
+ */
+function reconcileAfterTermination(
+  sessions: Map<string, ManagedSession>,
+  nextIndex: number,
+  userId: string,
+  platform: string,
+  chatId: number,
+  wasActive: boolean,
+): number {
+  const localLive = [...sessions.values()].filter(
+    s => s.userId === userId && s.platform === platform && s.status !== "ended",
+  );
+  const localActive = localLive.find(s => s.active);
+  let localMain = localLive.find(s => sessionType(s) === "A");
+
+  if (!localMain) {
+    const replacementActive = wasActive || !localActive;
+    const result = allocateSession(sessions, nextIndex, "A", userId, platform, chatId, { active: replacementActive });
+    nextIndex = result.nextIndex;
+  } else if ((wasActive || !localActive) && !localMain.active) {
+    localMain.active = true;
+  }
+
+  return nextIndex;
+}
+
 export function endSession(sessions: Map<string, ManagedSession>, nextIndex: number, userId: string, platform: string, index?: number): { ended: ManagedSession; nextIndex: number } | string {
   const targetIdx = index ?? getActiveSession(sessions, userId, platform)?.shortIndex;
   if (!targetIdx) return `No active session found.`;
@@ -132,22 +163,7 @@ export function endSession(sessions: Map<string, ManagedSession>, nextIndex: num
   target.active = false;
   pushLog(target, "ended");
 
-  // Scope to caller's (userId, platform) only — foreign Mains must not affect counting
-  const localLive = [...sessions.values()].filter(
-    s => s.userId === userId && s.platform === platform && s.status !== "ended",
-  );
-  const localActive = localLive.find(s => s.active);
-  let localMain = localLive.find(s => sessionType(s) === "A");
-
-  if (!localMain) {
-    const replacementActive = wasActive || !localActive;
-    const result = allocateSession(sessions, nextIndex, "A", userId, platform, target.chatId, { active: replacementActive });
-    nextIndex = result.nextIndex;
-    localMain = result.session;
-  } else if ((wasActive || !localActive) && !localMain.active) {
-    localMain.active = true;
-  }
-
+  nextIndex = reconcileAfterTermination(sessions, nextIndex, userId, platform, target.chatId, wasActive);
   return { ended: target, nextIndex };
 }
 
@@ -155,23 +171,12 @@ export function killSession(sessions: Map<string, ManagedSession>, nextIndex: nu
   const target = findAddressableSession(sessions, userId, platform, index);
   if (!target) return `Session #${index} not found on ${platform}.`;
 
+  const wasActive = target.active;
   target.status = "ended";
   target.active = false;
   pushLog(target, "killed");
 
-  // If killed a Main and it was the last, create replacement
-  const aliveMains = [...sessions.values()].filter(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
-  if (sessionType(target) === "A" && aliveMains.length === 0) {
-    const result = allocateSession(sessions, nextIndex, "A", userId, platform, target.chatId, { active: true });
-    return { killed: target, nextIndex: result.nextIndex };
-  }
-
-  // If killed the active, activate a Main
-  if (!getActiveSession(sessions, userId, platform)) {
-    const main = [...sessions.values()].find(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
-    if (main) main.active = true;
-  }
-
+  nextIndex = reconcileAfterTermination(sessions, nextIndex, userId, platform, target.chatId, wasActive);
   return { killed: target, nextIndex };
 }
 
