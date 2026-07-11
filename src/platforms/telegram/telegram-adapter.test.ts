@@ -123,9 +123,12 @@ describe("TelegramAdapter", () => {
     adapter = new TelegramAdapter(makeConfig(), deps);
     // Mock spin.getSessionById so pipeline can resolve session state
     const spinMod = await import("../../components/spin.js");
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      session.transport = transport;
+    });
     vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue({
       id: "1_A_01", userId: "master", platform: "telegram", chatId: 42,
-      delivery: "simple", active: true, status: "ready",
+      delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
@@ -133,7 +136,7 @@ describe("TelegramAdapter", () => {
     } as ManagedSession);
     vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue({
       id: "1_A_01", userId: "master", platform: "telegram", chatId: 42,
-      delivery: "simple", active: true, status: "ready",
+      delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,

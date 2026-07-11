@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -20,8 +20,12 @@ describe("boot/env.ts — secret file loading", () => {
   });
 
   function run(): { stdout: string; stderr: string } {
+    const hasDist = existsSync(join(CWD, "dist", "boot", "env.js"));
+    const args = hasDist
+      ? ["--import", "./dist/boot/env.js"]
+      : ["--import", "tsx/esm", "--import", "./src/boot/env.ts"];
     const r = spawnSync("node", [
-      "--import", "./dist/boot/env.js",
+      ...args,
       "-e", `console.log(JSON.stringify({ MY_KEY: process.env.MY_KEY || null }))`,
     ], {
       encoding: "utf-8",

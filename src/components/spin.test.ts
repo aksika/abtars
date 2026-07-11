@@ -108,12 +108,11 @@ describe("Spin — unified session router (#943)", () => {
   describe("destroySession", () => {
     it("destroys non-master session transport", async () => {
       const session = await spin.resolveSession("adrika", "telegram", 222);
-      const transport = session.transport!;
 
       spin.destroySession("adrika", session.id);
-      expect(transport.destroy).toHaveBeenCalled();
       expect(session.status).toBe("ended");
       expect(session.transport).toBeUndefined();
+      expect(session.releaseTransport).toBeUndefined();
     });
 
     it("refuses to destroy master session", () => {

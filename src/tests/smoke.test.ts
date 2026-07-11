@@ -134,7 +134,7 @@ describe("Smoke: bridge lifecycle", () => {
   it("first message triggers SOUL injection via pendingSessionStart", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const session = makeManagedSession({ pendingStart: true });
+    const session = makeManagedSession({ pendingStart: true, transport });
     vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
     vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(session);
     const deps = makeDeps(transport, memory, { pendingStart: true });
@@ -150,7 +150,7 @@ describe("Smoke: bridge lifecycle", () => {
   it("second message does NOT re-inject SOUL", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const session = makeManagedSession({ seen: true });
+    const session = makeManagedSession({ seen: true, transport });
     vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
     vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(session);
     const deps = makeDeps(transport, memory, { seen: true });
@@ -164,7 +164,7 @@ describe("Smoke: bridge lifecycle", () => {
   it("resetAndPrepare triggers SOUL re-injection on next message", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const session = makeManagedSession({ seen: true });
+    const session = makeManagedSession({ seen: true, transport });
     vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
     vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(session);
 
@@ -214,7 +214,7 @@ describe("Smoke: bridge lifecycle", () => {
   it("session-start prompt bypasses interceptor (not truncated)", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const session = makeManagedSession({ pendingStart: true });
+    const session = makeManagedSession({ pendingStart: true, transport });
     vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
     vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(session);
     const deps = makeDeps(transport, memory, { pendingStart: true });
