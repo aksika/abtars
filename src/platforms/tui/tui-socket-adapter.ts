@@ -47,6 +47,7 @@ import {
   type TuiServerFrame,
   type TuiAttachMode,
 } from "./tui-protocol.js";
+import { TuiFrameWriter } from "./tui-frame-writer.js";
 
 const TAG = "tui";
 
@@ -87,6 +88,10 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private _unsubActivity: (() => void) | null = null;
   /** #1319: Cached activity sequence for subscriber scoping. */
   private _activitySequence = 0;
+  /** #1339: True while incremental activity is suppressed pending recovery. */
+  private _activityDirty = false;
+  /** #1339: Bounded per-connection frame writer (replaced on every new attach). */
+  private _writer: TuiFrameWriter | null = null;
   /** Monotonic status revision for the current socket/attachment. */
   private _statusRevision = 0;
 
@@ -149,6 +154,9 @@ export class TuiSocketAdapter implements PlatformAdapter {
     if (!this.started) return;
     this.started = false;
     if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
+    // #1339: invalidate the writer and remove its listeners.
+    this._writer?.close();
+    this._writer = null;
     if (this.conn) {
       try { this.conn.destroy(); } catch { /* best effort */ }
       this.conn = null;
@@ -228,12 +236,27 @@ export class TuiSocketAdapter implements PlatformAdapter {
     conn.on("error", (err) => logAndSwallow(TAG, "conn error", err));
     conn.on("close", () => {
       if (this.conn === conn) {
+        // #1339: close the exact writer bound to this socket so a stale
+        // drain/close from a superseded connection cannot leak frames.
+        this._writer?.close();
+        this._writer = null;
         this.conn = null;
         this.attachedSessionId = null;
         this.mode = "pipeline";
         if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
       }
     });
+
+    // #1339: create a fresh bounded writer for this exact connection. The
+    // captured `writer` identity plus `isCurrent()` guarantees a superseded
+    // connection's drain/close events cannot flush into this one.
+    this._writer?.close();
+    const writer = new TuiFrameWriter(conn, {
+      isCurrent: () => this._writer === writer && this.conn === conn && !conn.destroyed,
+      onSemanticOverflow: () => { this._activityDirty = true; },
+      onWritable: () => this._recoverActivity(),
+    });
+    this._writer = writer;
   }
 
   private async _handleFrame(frame: TuiClientFrame): Promise<void> {
@@ -260,6 +283,10 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private async _handleAttach(mode: TuiAttachMode): Promise<void> {
     // Clean up any previous activity subscription
     if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
+    // #1339: reset semantic-recovery state and clear attachment-scoped queued
+    // frames (status/activity/snapshot/typing) for the new attachment.
+    this._activityDirty = false;
+    this._writer?.clearAttachment();
 
     const master = getMasterUserId();
     const spin = this.deps.spin;
@@ -323,8 +350,22 @@ export class TuiSocketAdapter implements PlatformAdapter {
           };
           this._unsubActivity = feed.subscribe(filter, (event) => {
             if (event.sequence <= this._activitySequence) return;
+            // #1339: suppress incremental activity while awaiting recovery.
+            if (this._activityDirty) return;
             this._activitySequence = event.sequence;
             this._push({ t: "activity", event });
+          }, () => {
+            // #1339: feed-side overflow → mark dirty, discard the pending
+            // incremental batch, and attempt recovery now. The writer flushes
+            // the snapshot when writable; if blocked, onWritable retries after
+            // the next drain. Dirty is cleared only after the feed's pending
+            // microtask batch is consumed, so stale increments stay suppressed
+            // and the fresh snapshot stays first.
+            this._activityDirty = true;
+            const recovered = this._recoverActivity(false);
+            if (recovered) {
+              queueMicrotask(() => { this._activityDirty = false; });
+            }
           });
         }
         break;
@@ -345,7 +386,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     if (nextMode === "orc" && this.deps.orcActivityFeed) {
       const orcSession = spin.getSessionById(sessionId);
       if (orcSession) {
-        const snapshot = buildOrcActivitySnapshot(orcSession, spin.getSessions(), this._activitySequence);
+        const snapshot = buildOrcActivitySnapshot(orcSession, this.deps.spin.getSessions?.() ?? new Map(), this._activitySequence);
         this._push({ t: "activity-snapshot", sequence: this._activitySequence, snapshot });
       }
     }
@@ -357,6 +398,47 @@ export class TuiSocketAdapter implements PlatformAdapter {
     if (!session) return;
     this._statusRevision++;
     this._push({ t: "status", status: buildTuiRuntimeStatus(session, this._statusRevision) });
+  }
+
+  /**
+   * #1339: semantic-activity overflow recovery, triggered by the writer's
+   * `onWritable` (when a previously-blocked socket can accept frames again)
+   * or by the feed's overflow callback.
+   *
+   * Verifies socket/attachment identity (guaranteed by the writer's
+   * `isCurrent()`), drops queued incremental activity, and enqueues a fresh
+   * authoritative snapshot before subsequent incremental activity resumes.
+   * If the recovery snapshot itself cannot be queued, stays dirty (the writer
+   * coalesces to the newest snapshot) and the caller retries on the next
+   * writable. When `clearDirty` is true the dirty flag is cleared on success
+   * (drain path); the feed-overflow path clears it after its pending batch.
+   *
+   * @returns true if recovery succeeded and dirty was (or will be) cleared.
+   */
+  private _recoverActivity(clearDirty = true): boolean {
+    if (!this._writer || !this._activityDirty) return false;
+    const feed = this.deps.orcActivityFeed;
+    if (!feed) return false;
+    const orcEntry = this.deps.spin.listAllSessions().find(
+      s => s.id.includes("_O_") && s.status !== "ended",
+    );
+    if (!orcEntry) return false;
+
+    // Discard queued incremental activity for this attachment.
+    this._writer.dropActivity();
+
+    // Build a fresh authoritative snapshot from the feed's current sequence.
+    const seq = feed.currentSequence;
+    const sessions = this.deps.spin.getSessions?.() ?? new Map();
+    const snapshot = buildOrcActivitySnapshot(orcEntry, sessions, seq);
+    const res = this._writer.enqueue({ t: "activity-snapshot", sequence: seq, snapshot });
+    if (res === "dropped") {
+      // Recovery itself pressured → remain dirty; newest snapshot wins on retry.
+      return false;
+    }
+    this._activitySequence = seq;
+    if (clearDirty) this._activityDirty = false;
+    return true;
   }
 
   private async _handleInput(text: string): Promise<void> {
@@ -569,20 +651,23 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
   // ── Internal helpers ─────────────────────────────────────────────────
 
-  /** Send a server frame to the attached client (best-effort). */
+  /** Send a server frame to the attached client via the current bounded writer. */
   private _push(frame: TuiServerFrame): void {
-    const conn = this.conn;
-    if (!conn || conn.destroyed) return;
-    try { conn.write(encodeFrame(frame)); }
-    catch (err) { logAndSwallow(TAG, "socket write", err); }
+    if (!this._writer) return;
+    this._writer.enqueue(frame);
   }
 
   /** Reject an attach with a structured error frame, then drop the conn. */
   private _reject(message: string): void {
-    this._push({ t: "error", message });
-    // Pre-`ready` errors are fatal on the client side (exit 1). Drop the
-    // socket so the client sees `close` immediately after the error frame.
     const conn = this.conn;
+    // Direct best-effort write (pre-ready terminal path); do not route through
+    // the writer's queue which we are about to invalidate.
+    if (conn && !conn.destroyed) {
+      try { conn.write(encodeFrame({ t: "error", message })); } catch { /* best effort */ }
+    }
+    // #1339: invalidate the writer so no further frames target this socket.
+    this._writer?.close();
+    this._writer = null;
     this.conn = null;
     this.attachedSessionId = null;
     this.mode = "pipeline";

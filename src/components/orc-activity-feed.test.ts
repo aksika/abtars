@@ -149,3 +149,29 @@ describe("OrcActivityFeed", () => {
     expect(l2).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("OrcActivityFeed — #1339 overflow surfacing + sequence watermark", () => {
+  it("invokes onOverflow when the subscriber queue overflows", async () => {
+    const feed = new OrcActivityFeed();
+    const listener = vi.fn();
+    const onOverflow = vi.fn();
+    feed.subscribe({ sessionId: SID, executionId: EID }, listener, onOverflow);
+
+    for (let i = 0; i < 65; i++) {
+      feed.publish(event({ kind: "card.queued", title: `c${i}`, status: "queued", cardId: i + 200 } as any));
+    }
+    await flush();
+    expect(onOverflow).toHaveBeenCalled();
+  });
+
+  it("exposes the highest assigned sequence as currentSequence", async () => {
+    const feed = new OrcActivityFeed();
+    const listener = vi.fn();
+    feed.subscribe({ sessionId: SID, executionId: EID }, listener);
+    expect(feed.currentSequence).toBe(0);
+    feed.publish(event({ kind: "execution.started" }));
+    feed.publish(event({ kind: "card.queued", title: "x", status: "queued", cardId: 1 } as any));
+    await flush();
+    expect(feed.currentSequence).toBe(2);
+  });
+});

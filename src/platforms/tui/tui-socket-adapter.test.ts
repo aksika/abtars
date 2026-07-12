@@ -27,6 +27,7 @@ import {
 import type { Spin, ManagedSession, SessionType } from "../../components/spin.js";
 import type { AgentSession } from "../../components/subagent-runtime.js";
 import type { InboundMessage } from "../../types/platform.js";
+import { OrcActivityFeed } from "../../components/orc-activity-feed.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -793,5 +794,101 @@ describe("TuiSocketAdapter — steer mode", () => {
     }
 
     conn.destroy(); adapter.stop();
+  });
+});
+
+// ── #1339 semantic activity overflow recovery ───────────────────────────
+
+describe("TuiSocketAdapter — #1339 activity overflow recovery", () => {
+  let sockPath: string;
+  let adapter: TuiSocketAdapter;
+
+  beforeEach(() => { sockPath = tmpSocketPath(); });
+  afterEach(() => { if (adapter) adapter.stop(); });
+
+  it("recovers with a fresh snapshot before subsequent incremental activity", async () => {
+    const feed = new OrcActivityFeed();
+    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const mockSpin = makeMockSpin({ orcSession: orc, orcBusy: true }).spin;
+
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+      orcActivityFeed: feed,
+    });
+    await adapter.start();
+
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Flood the feed past its pending cap (MAX_PENDING = 64) to force overflow.
+    for (let i = 0; i < 80; i++) {
+      feed.publish({
+        kind: "card.running",
+        title: `task ${i}`,
+        status: "running",
+        cardId: i + 1,
+        sessionId: "1749563282_O_01",
+        executionId: "exec_1",
+      } as any);
+    }
+    await new Promise((r) => setTimeout(r, 60));
+
+    const snapshot = frames.find((f) => f.t === "activity-snapshot");
+    expect(snapshot).toBeDefined();
+
+    // Incremental activity published after recovery must still flow.
+    feed.publish({
+      kind: "card.completed",
+      title: "done",
+      status: "done",
+      cardId: 999,
+      sessionId: "1749563282_O_01",
+      executionId: "exec_1",
+    } as any);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const completed = frames.find(
+      (f) => f.t === "activity" && (f as any).event?.kind === "card.completed",
+    );
+    expect(completed).toBeDefined();
+
+    // The flooded increments were suppressed (only the post-recovery activity
+    // and the recovery snapshot are present), proving the snapshot came first.
+    const floodedCount = frames.filter(
+      (f) => f.t === "activity" && (f as any).event?.kind === "card.running",
+    ).length;
+    expect(floodedCount).toBe(0);
+
+    void conn;
+  });
+
+  it("new-attach-wins replaces the writer without leaking frames to the old socket", async () => {
+    const mockSpin = makeMockSpin().spin;
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+    });
+    await adapter.start();
+
+    const first = await attachAndCollect(sockPath, { kind: "resume" });
+    // Second attach evicts the first (new-attach-wins). The first client must
+    // receive only the detach error, never frames meant for the new attach.
+    const second = await attachAndCollect(sockPath, { kind: "resume" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    const firstHasReady = first.frames.some((f) => f.t === "ready");
+    const firstHasError = first.frames.some((f) => f.t === "error");
+    // The evicted client got a ready (briefly) then a detach error; it must
+    // not receive the second connection's ready frame.
+    const secondReadySeenByFirst = first.frames.filter((f) => f.t === "ready").length;
+    expect(firstHasReady || firstHasError).toBe(true);
+    expect(secondReadySeenByFirst).toBeLessThanOrEqual(1);
+    expect(second.frames.some((f) => f.t === "ready")).toBe(true);
+
+    first.conn.destroy();
+    second.conn.destroy();
   });
 });

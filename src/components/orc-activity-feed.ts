@@ -48,6 +48,8 @@ function truncate(s: string, max = TRUNCATE_STRING): string {
 interface Subscriber {
   filter: OrcActivityFilter;
   listener: OrcActivityListener;
+  /** #1339: invoked when this subscriber's queue overflows (resync request). */
+  onOverflow?: () => void;
   pending: OrcActivityEvent[];
   dirty: boolean;
   scheduled: boolean;
@@ -56,6 +58,11 @@ interface Subscriber {
 export class OrcActivityFeed {
   private _nextSeq = 1;
   private _subscribers: Subscriber[] = [];
+
+  /** Highest sequence number assigned so far (watermark for recovery). */
+  get currentSequence(): number {
+    return this._nextSeq - 1;
+  }
 
   publish(event: UnsequencedOrcActivityEvent): void {
     const seq = this._nextSeq++;
@@ -88,6 +95,8 @@ export class OrcActivityFeed {
           sub.pending.shift();
         }
         sub.dirty = true;
+        // #1339: surface overflow so the consumer can request a fresh snapshot.
+        sub.onOverflow?.();
       }
 
       sub.pending.push(full);
@@ -95,8 +104,8 @@ export class OrcActivityFeed {
     }
   }
 
-  subscribe(filter: OrcActivityFilter, listener: OrcActivityListener): () => void {
-    const sub: Subscriber = { filter, listener, pending: [], dirty: false, scheduled: false };
+  subscribe(filter: OrcActivityFilter, listener: OrcActivityListener, onOverflow?: () => void): () => void {
+    const sub: Subscriber = { filter, listener, onOverflow, pending: [], dirty: false, scheduled: false };
     this._subscribers.push(sub);
     logDebug(TAG, `subscribe session=${filter.sessionId} executionId=${filter.executionId ?? "(follow)"}`);
     return () => {

@@ -193,6 +193,19 @@ export function formatRuntimeStatus(status: TuiRuntimeStatus, width: number): st
  * the TUI client can recover (terminal restore + stderr + exit 1) instead
  * of becoming an uncaught exception.
  */
+/**
+ * #1339: Pure description of a `chunk-end` terminal frame for the client UI.
+ * Returns the system message to render, or `null` if the frame carries no
+ * user-visible truncation marker (e.g. a normal `complete` end).
+ */
+export function describeChunkEnd(frame: TuiServerFrame): string | null {
+  if (frame.t !== "chunk-end") return null;
+  if (frame.reason === "truncated") {
+    return "[output truncated — connect a live terminal for the full stream]";
+  }
+  return null;
+}
+
 export function processMessageFrame(
   pit: Pick<typeof import("@earendil-works/pi-tui"), "Markdown">,
   frame: TuiServerFrame,
@@ -390,8 +403,12 @@ export async function tui(args: string[]): Promise<number> {
         ui.requestRender();
         return;
       case "chunk":
-      case "chunk-end":
         return;
+      case "chunk-end": {
+        const marker = describeChunkEnd(frame);
+        if (marker) appendMessage("system", marker);
+        return;
+      }
       case "typing":
         return;
       case "steer-ack":

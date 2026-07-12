@@ -19,6 +19,7 @@ import {
   createMarkdownMessage,
   processMessageFrame,
   formatRuntimeStatus,
+  describeChunkEnd,
   type MessageRole,
 } from "./tui.js";
 import type { TuiRuntimeStatus } from "../../platforms/tui/runtime-status.js";
@@ -277,6 +278,20 @@ describe("processMessageFrame (#1333 error boundary)", () => {
   });
 });
 
-// Quiet the unused-type-import warning when MessageRole is only used in
-// test code via createMarkdownMessage's parameter type.
-type _MessageRoleUsed = MessageRole;
+describe("describeChunkEnd (#1339)", () => {
+  it("returns a marker for a truncated chunk-end", () => {
+    expect(describeChunkEnd({ t: "chunk-end", id: "s1", reason: "truncated" }))
+      .toMatch(/truncated/i);
+  });
+
+  it("returns null for a normal completion without a reason", () => {
+    expect(describeChunkEnd({ t: "chunk-end", id: "s1" })).toBeNull();
+    expect(describeChunkEnd({ t: "chunk-end", id: "s1", reason: "complete" })).toBeNull();
+    expect(describeChunkEnd({ t: "chunk-end", id: "s1", reason: "cancelled" })).toBeNull();
+  });
+
+  it("returns null for non chunk-end frames", () => {
+    expect(describeChunkEnd({ t: "message", role: "assistant", markdown: "x" })).toBeNull();
+  });
+});
+

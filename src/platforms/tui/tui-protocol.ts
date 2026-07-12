@@ -27,7 +27,7 @@ export type TuiServerFrame =
   | { t: "error"; message: string }                                       // attach/route rejected (fatal)
   | { t: "message"; role: "assistant" | "system"; markdown: string }     // v1: whole response
   | { t: "chunk"; id: string; delta: string }                             // RESERVED — see Streaming (v1)
-  | { t: "chunk-end"; id: string }                                        // RESERVED — not emitted in v1
+  | { t: "chunk-end"; id: string; reason?: "complete" | "error" | "cancelled" | "truncated" }  // RESERVED — not emitted in v1
   | { t: "typing" }
   | { t: "steer-ack"; status: "queued" | "rejected" | "consumed" | "expired" | "failed"; instructionId: string; message: string }  // #1332: steer lifecycle
   // #1319: Orc activity

@@ -19,11 +19,14 @@ describe("encodeFrame", () => {
     expect(encodeFrame(frame)).toBe(JSON.stringify(frame) + "\n");
   });
 
-  it("round-trips through a fresh decoder", () => {
+  it("round-trips a chunk-end frame with an optional reason", () => {
     const decoder = createFrameDecoder<TuiServerFrame>();
-    const frame: TuiServerFrame = { t: "ready", sessionLabel: "Main", sessionId: "1749563282_A_01" };
-    const decoded = decoder(encodeFrame(frame));
-    expect(decoded).toEqual([frame]);
+    const noReason = decoder(encodeFrame({ t: "chunk-end", id: "s1" }));
+    expect(noReason).toEqual([{ t: "chunk-end", id: "s1" }]);
+    const truncated = decoder(encodeFrame({ t: "chunk-end", id: "s1", reason: "truncated" }));
+    expect(truncated).toEqual([{ t: "chunk-end", id: "s1", reason: "truncated" }]);
+    const cancelled = decoder(encodeFrame({ t: "chunk-end", id: "s2", reason: "cancelled" }));
+    expect(cancelled).toEqual([{ t: "chunk-end", id: "s2", reason: "cancelled" }]);
   });
 });
 
