@@ -37,6 +37,8 @@ export interface RuntimeExecution {
   readonly transport: IKiroTransport;
   readonly sessionKey: string;
   readonly ephemeral: boolean;
+  /** #1364: Per-execution abort signal. Abort the controller to cancel the execution. */
+  readonly abortSignal?: AbortSignal;
   lastUsage(): RuntimeUsageSnapshot | null;
 }
 
