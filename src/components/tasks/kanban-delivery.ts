@@ -49,9 +49,10 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
   if (card.result_path) {
     await deps.sendDocument(chatId, card.result_path, card.title);
   }
+  const summary = card.result_summary ? `\n\n${card.result_summary}` : "";
   const confirmation = card.result_path
-    ? `Task "${card.title}" complete. File delivered: ${card.result_path}`
-    : `Task "${card.title}" complete.`;
+    ? `Task "${card.title}" complete. File delivered: ${card.result_path}${summary}`
+    : `Task "${card.title}" complete.${summary}`;
   await deps.sendMessage(chatId, confirmation);
   kanbanMarkDelivered(card.id);
 }

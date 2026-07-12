@@ -45,6 +45,7 @@ describe("deliverCard — deliver mode", () => {
     await deliverCard(card, deps);
     expect(deps.sendMessage).toHaveBeenCalledOnce();
     expect(deps.sendMessage.mock.calls[0]![1]).toContain("Test task");
+    expect(deps.sendMessage.mock.calls[0]![1]).toContain("ok");
     expect(deps.announce).not.toHaveBeenCalled();
     expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
   });
