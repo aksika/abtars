@@ -256,4 +256,96 @@ describe("WorkerSupervisionStore", () => {
     const attempts = store.getAttemptsForCard(101);
     expect(attempts).toHaveLength(0);
   });
+
+  describe("lifecycle transitions", () => {
+    let store: import("./worker-supervision-store.js").WorkerSupervisionStore;
+    beforeEach(() => {
+      store = new Store();
+      store.insertContract(TEST_CONTRACT, 101);
+      store.insertAttempt({
+        id: "a_lc_001", card_id: 101, contract_id: "c_test_001",
+        ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+        status: "pending", started_at: "2026-07-12T00:00:00.000Z",
+      });
+    });
+
+    it("starts as pending lifecycle", () => {
+      const attempt = store.getAttempt("a_lc_001");
+      expect(attempt!.lifecycle).toBe("pending");
+    });
+
+    it("claimAttempt transitions from pending to claimed", () => {
+      const claim = store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1);
+      expect(claim).not.toBeNull();
+      expect(claim!.attemptId).toBe("a_lc_001");
+      const attempt = store.getAttempt("a_lc_001");
+      expect(attempt!.lifecycle).toBe("claimed");
+      expect(attempt!.generation).toBe(1);
+      expect(attempt!.claimed_at).not.toBeNull();
+    });
+
+    it("claimAttempt returns null for non-pending attempt", () => {
+      store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1);
+      const claim2 = store.claimAttempt(101, "c_test_001", "agent", "spin-01", 2);
+      expect(claim2).toBeNull();
+    });
+
+    it("lifecycleTransition guards against invalid transitions", () => {
+      store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1);
+      const result = store.markAttemptRunning("a_lc_001");
+      expect(result).toBe(true);
+      expect(store.getAttempt("a_lc_001")!.lifecycle).toBe("running");
+    });
+
+    it("completeAttempt transitions from running to completed", () => {
+      store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1);
+      store.markAttemptRunning("a_lc_001");
+      expect(store.completeAttempt("a_lc_001")).toBe(true);
+      expect(store.getAttempt("a_lc_001")!.lifecycle).toBe("completed");
+    });
+
+    it("cannot transition from completed", () => {
+      store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1);
+      store.markAttemptRunning("a_lc_001");
+      store.completeAttempt("a_lc_001");
+      expect(store.failAttempt("a_lc_001")).toBe(false);
+      expect(store.getAttempt("a_lc_001")!.lifecycle).toBe("completed");
+    });
+
+    it("requestCancel transitions from running to cancel_requested", () => {
+      store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1);
+      store.markAttemptRunning("a_lc_001");
+      expect(store.requestCancel("a_lc_001", "operator")).toBe(true);
+      expect(store.getAttempt("a_lc_001")!.lifecycle).toBe("cancel_requested");
+      expect(store.getAttempt("a_lc_001")!.cancel_reason).toBe("operator");
+    });
+
+    it("cancelled is terminal and blocks further transitions", () => {
+      store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1);
+      store.cancelAttempt("a_lc_001");
+      expect(store.getAttempt("a_lc_001")!.lifecycle).toBe("cancelled");
+      expect(store.failAttempt("a_lc_001")).toBe(false);
+    });
+
+    it("hasLiveClaim returns true for active lifecycle", () => {
+      expect(store.hasLiveClaim(101)).toBe(false);
+      store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1);
+      expect(store.hasLiveClaim(101)).toBe(true);
+      store.completeAttempt("a_lc_001");
+      expect(store.hasLiveClaim(101)).toBe(false);
+    });
+
+    it("generation increments on sequential claims", () => {
+      store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1);
+      store.completeAttempt("a_lc_001");
+      store.insertAttempt({
+        id: "a_lc_002", card_id: 101, contract_id: "c_test_001",
+        ordinal: 2, executor_kind: "local_worker", executor_id: "spin-01",
+        status: "pending", started_at: "2026-07-12T00:00:00.000Z",
+      });
+      const claim2 = store.claimAttempt(101, "c_test_001", "agent", "spin-01", 2);
+      expect(claim2).not.toBeNull();
+      expect(store.getAttempt("a_lc_002")!.generation).toBe(2);
+    });
+  });
 });

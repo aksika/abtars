@@ -1,6 +1,19 @@
 import { requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "./worker-contract.js";
 
+export type AttemptLifecycle =
+  | "pending"
+  | "claimed"
+  | "starting"
+  | "running"
+  | "cancel_requested"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "timed_out";
+
+export type ExecutorKind = "agent" | "pi" | "remote";
+
 export interface ContractRow {
   id: string;
   card_id: number;
@@ -17,10 +30,15 @@ export interface AttemptRow {
   ordinal: number;
   executor_kind: string;
   executor_id: string;
+  generation: number;
+  lifecycle: AttemptLifecycle;
   remote_task_id: number | null;
   status: string;
+  claimed_at: string | null;
   started_at: string;
   settled_at: string | null;
+  hard_deadline_at: string | null;
+  cancel_reason: string | null;
 }
 
 export interface ResultRow {
@@ -28,6 +46,17 @@ export interface ResultRow {
   envelope_json: string;
   envelope_digest: string;
   created_at: string;
+}
+
+export interface ExecutionClaim {
+  attemptId: string;
+  cardId: number;
+  contractId: string;
+  executorKind: ExecutorKind;
+  executorId: string;
+  generation: number;
+  claimedAt: string;
+  hardDeadlineAt?: string;
 }
 
 export class WorkerSupervisionStore {
@@ -57,10 +86,15 @@ export class WorkerSupervisionStore {
         ordinal INTEGER NOT NULL,
         executor_kind TEXT NOT NULL,
         executor_id TEXT NOT NULL,
+        generation INTEGER DEFAULT 1,
+        lifecycle TEXT NOT NULL DEFAULT 'pending' CHECK(lifecycle IN ('pending','claimed','starting','running','cancel_requested','completed','failed','cancelled','timed_out')),
         remote_task_id INTEGER,
-        status TEXT NOT NULL CHECK(status IN ('pending','running','settled','failed')),
+        status TEXT NOT NULL,
+        claimed_at TEXT,
         started_at TEXT NOT NULL,
         settled_at TEXT,
+        hard_deadline_at TEXT,
+        cancel_reason TEXT,
         UNIQUE(card_id, ordinal)
       );
 
@@ -71,6 +105,12 @@ export class WorkerSupervisionStore {
         created_at TEXT NOT NULL
       );
     `);
+    // Safe migration: add columns if they don't exist
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN generation INTEGER DEFAULT 1`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'pending'`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN claimed_at TEXT`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN hard_deadline_at TEXT`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN cancel_reason TEXT`); } catch {}
   }
 
   insertContract(contract: WorkerAcceptanceContractV1, cardId: number): void {
@@ -118,9 +158,117 @@ export class WorkerSupervisionStore {
     return this.db.prepare(`SELECT * FROM worker_attempts WHERE card_id = ? ORDER BY ordinal ASC`).all(cardId) as unknown as AttemptRow[];
   }
 
+  getLatestAttempt(cardId: number): AttemptRow | undefined {
+    return this.db.prepare(`SELECT * FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(cardId) as AttemptRow | undefined;
+  }
+
   settleAttempt(attemptId: string, status: string): void {
     this.db.prepare(`UPDATE worker_attempts SET status = ?, settled_at = ? WHERE id = ?`).run(status, new Date().toISOString(), attemptId);
   }
+
+  // ── #1364: Lifecycle and claim operations ──────────────────────────────
+
+  lifecycleTransition(
+    attemptId: string,
+    fromLifecycles: readonly AttemptLifecycle[],
+    toLifecycle: AttemptLifecycle,
+    extraSets?: Record<string, string | null>,
+  ): boolean {
+    const sets = ["lifecycle = ?"];
+    const vals: unknown[] = [toLifecycle];
+    if (extraSets) {
+      for (const [k, v] of Object.entries(extraSets)) {
+        sets.push(`${k} = ?`);
+        vals.push(v);
+      }
+    }
+    vals.push(attemptId);
+    const placeholders = fromLifecycles.map(() => "?").join(",");
+    const sql = `UPDATE worker_attempts SET ${sets.join(", ")} WHERE id = ? AND lifecycle IN (${placeholders})`;
+    const stmt = this.db.prepare(sql);
+    const result = stmt.run(...vals, ...fromLifecycles);
+    return result.changes > 0;
+  }
+
+  claimAttempt(
+    cardId: number,
+    contractId: string,
+    executorKind: ExecutorKind,
+    executorId: string,
+    generation: number,
+    hardDeadlineAt?: string,
+  ): ExecutionClaim | null {
+    const latest = this.getLatestAttempt(cardId);
+    if (!latest) return null;
+    if (latest.lifecycle !== "pending") return null;
+
+    const attemptId = latest.id;
+
+    const claimedAt = new Date().toISOString();
+    const claim: ExecutionClaim = {
+      attemptId,
+      cardId,
+      contractId,
+      executorKind,
+      executorId,
+      generation,
+      claimedAt,
+      hardDeadlineAt,
+    };
+
+    const updated = this.lifecycleTransition(attemptId, ["pending"], "claimed", {
+      executor_kind: executorKind,
+      executor_id: executorId,
+      generation: String(generation),
+      claimed_at: claimedAt,
+      hard_deadline_at: hardDeadlineAt ?? null,
+    });
+
+    return updated ? claim : null;
+  }
+
+  markAttemptStartObservable(attemptId: string): boolean {
+    return this.lifecycleTransition(attemptId, ["claimed"], "starting");
+  }
+
+  markAttemptRunning(attemptId: string): boolean {
+    return this.lifecycleTransition(attemptId, ["claimed", "starting"], "running");
+  }
+
+  requestCancel(attemptId: string, reason: string): boolean {
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running"], "cancel_requested", {
+      cancel_reason: reason,
+    });
+  }
+
+  completeAttempt(attemptId: string): boolean {
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed");
+  }
+
+  failAttempt(attemptId: string): boolean {
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "failed");
+  }
+
+  cancelAttempt(attemptId: string): boolean {
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "cancelled");
+  }
+
+  timeoutAttempt(attemptId: string): boolean {
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "timed_out");
+  }
+
+  isAttemptTerminal(lifecycle: AttemptLifecycle): boolean {
+    return lifecycle === "completed" || lifecycle === "failed" || lifecycle === "cancelled" || lifecycle === "timed_out";
+  }
+
+  hasLiveClaim(cardId: number): boolean {
+    const latest = this.getLatestAttempt(cardId);
+    if (!latest) return false;
+    if (latest.lifecycle === "pending") return false;
+    return !this.isAttemptTerminal(latest.lifecycle);
+  }
+
+  // ── Result persistence ─────────────────────────────────────────────────
 
   insertResult(attemptId: string, envelope: WorkerResultEnvelopeV1): void {
     const envelopeJson = JSON.stringify(envelope);
