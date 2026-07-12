@@ -15,6 +15,7 @@ import {
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn } from "./logger.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
+import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle } from "./worker-supervision-store.js";
@@ -23,6 +24,7 @@ const TAG = "reconciler";
 const MAX_RETRIES = 3;
 const MAX_WORKERS = 10;
 const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
+const DELIVERY_RETRY_COUNT = 3; // legacy retries for unsupervised cards
 
 let _shutdownRequested = false;
 
@@ -159,22 +161,17 @@ function reconcileChildCard(card: KanbanCard): void {
     return;
   }
 
-  if (card.status === "failed" && latestAttempt && latestAttempt.lifecycle !== "failed" && latestAttempt.lifecycle !== "cancelled") {
-    const retries = card.delivery_attempts ?? 0;
-    if (retries < MAX_RETRIES) {
-      logInfo(TAG, `Retrying card ${card.id} (attempt ${retries + 1}/${MAX_RETRIES})`);
-      kanbanUpdate(card.id, { status: "queued" });
-      spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
-    } else {
-      cascadeFail(card.id, kanbanGetChildren(card.parent_id ?? 0));
-    }
+  // #1365: Adaptive retry for supervised cards
+  if (card.status === "failed" && hasContract && latestAttempt) {
+    handleSupervisedRetry(card, latestAttempt.lifecycle);
     return;
   }
 
+  // Legacy retry for unsupervised cards
   if (card.status === "failed" && !hasContract) {
     const retries = card.delivery_attempts ?? 0;
-    if (retries < MAX_RETRIES) {
-      logInfo(TAG, `Retrying card ${card.id} (attempt ${retries + 1}/${MAX_RETRIES})`);
+    if (retries < DELIVERY_RETRY_COUNT) {
+      logInfo(TAG, `Retrying card ${card.id} (attempt ${retries + 1}/${DELIVERY_RETRY_COUNT})`);
       kanbanUpdate(card.id, { status: "queued" });
       spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
     } else {
@@ -235,6 +232,76 @@ function evaluateLease(card: KanbanCard): void {
   }
 }
 
+function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): void {
+  // Only retry failed/cancelled/timed_out lifecycles
+  if (lifecycle !== "failed" && lifecycle !== "cancelled" && lifecycle !== "timed_out") return;
+
+  try {
+    const supStore = new WorkerSupervisionStore();
+    const latestAttempt = supStore.getLatestAttempt(card.id);
+    if (!latestAttempt) {
+      fallbackRetry(card);
+      return;
+    }
+
+    const { RetryService } = require("./retry/retry-service.js") as typeof import("./retry/retry-service.js");
+    const retryService = new RetryService();
+
+    const result = retryService.handleTerminalAttempt(latestAttempt.id, card.id);
+    if ("error" in result) {
+      logWarn(TAG, `retry classification failed for ${card.id}: ${result.error}`);
+      fallbackRetry(card);
+      return;
+    }
+
+    const { classification, decision } = result;
+
+    switch (decision.disposition) {
+      case "automatic_retry": {
+        const directiveResult = retryService.buildAutomaticDirective(
+          latestAttempt.id, card.id, classification, decision,
+        );
+        if ("error" in directiveResult) {
+          logWarn(TAG, `auto directive failed for ${card.id}: ${directiveResult.error}`);
+          fallbackRetry(card);
+          return;
+        }
+        logInfo(TAG, `Auto-retry card ${card.id}: attempt ${latestAttempt.ordinal} -> ${directiveResult.directive.target_ordinal} (${classification.primary})`);
+        kanbanUpdate(card.id, { status: "queued" });
+        spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
+        break;
+      }
+      case "orc_review": {
+        logInfo(TAG, `Orc review required for card ${card.id}: attempt ${latestAttempt.id} (${classification.primary})`);
+        // Card stays failed — Orc will see it in check_workers and call review_worker_failure
+        break;
+      }
+      case "needs_input": {
+        logInfo(TAG, `Needs input for card ${card.id}: attempt ${latestAttempt.id} (${classification.primary})`);
+        break;
+      }
+      case "stop": {
+        logInfo(TAG, `Stopping retry for card ${card.id}: ${decision.reasonCode}`);
+        cascadeFail(card.id, kanbanGetChildren(card.parent_id ?? 0));
+        break;
+      }
+    }
+  } catch (err) {
+    logWarn(TAG, `handleSupervisedRetry error for ${card.id}: ${err}`);
+    fallbackRetry(card);
+  }
+}
+
+function fallbackRetry(card: KanbanCard): void {
+  const retries = card.delivery_attempts ?? 0;
+  if (retries < DELIVERY_RETRY_COUNT) {
+    kanbanUpdate(card.id, { status: "queued" });
+    spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
+  } else {
+    cascadeFail(card.id, kanbanGetChildren(card.parent_id ?? 0));
+  }
+}
+
 function abortProject(projectId: number, children: KanbanCard[], reason: string): void {
   logWarn(TAG, `ABORT project ${projectId}: ${reason}`);
   for (const card of children) {
@@ -245,13 +312,13 @@ function abortProject(projectId: number, children: KanbanCard[], reason: string)
   kanbanFail(projectId, reason);
 }
 
-function getLatestAttemptInfo(cardId: number): { lifecycle: AttemptLifecycle } | null {
+function getLatestAttemptInfo(cardId: number): { lifecycle: AttemptLifecycle; id: string } | null {
   try {
     const { WorkerSupervisionStore } = require("./worker-supervision-store.js") as typeof import("./worker-supervision-store.js");
     const store = new WorkerSupervisionStore();
     const latest = store.getLatestAttempt(cardId);
     if (!latest) return null;
-    return { lifecycle: latest.lifecycle };
+    return { lifecycle: latest.lifecycle, id: latest.id };
   } catch { return null; }
 }
 
