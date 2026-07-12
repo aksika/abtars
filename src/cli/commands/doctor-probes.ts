@@ -400,6 +400,23 @@ async function probeMind(): Promise<ProbeResult> {
   }
 }
 
+// ── Shared Native Deps Probe (#1388) ──────────────────────────────────────────
+
+async function probeSharedDeps(): Promise<ProbeResult> {
+  try {
+    const { diagnoseSharedNativeDeps } = await import("abmind/deploy-lib/shared-native-deps.js");
+    const status = diagnoseSharedNativeDeps();
+    const detail = `gen ${status.manifestGeneration}, ${status.packageCount} pkg(s)${status.lockHeld ? `, lock: ${status.lockOwner ?? "?"}` : ""}`;
+    const mismatches = status.packages.filter(p => !p.onDisk);
+    if (mismatches.length > 0) {
+      return { name: "shared-deps", status: "failed", detail: `${detail}, ${mismatches.length} missing from disk` };
+    }
+    return { name: "shared-deps", status: "ok", detail };
+  } catch {
+    return { name: "shared-deps", status: "skipped", detail: "manifest not available" };
+  }
+}
+
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 export async function runAllProbes(): Promise<DoctorOutput> {
@@ -408,7 +425,7 @@ export async function runAllProbes(): Promise<DoctorOutput> {
   const [body, heart, brain, soul, tribe] = await Promise.all([
     Promise.all([probePlatforms(), probeDashboard(), probeSecurity(), probeWatchdog(), probeBridge(), probeTui()].map(p => timedProbe(() => p))),
     Promise.all([probeHeartbeat()].map(p => timedProbe(() => p))),
-    Promise.all([probeTransport(), probeSpin(), probeKanban(), probeSkills(), probeSha()].map(p => timedProbe(() => p))),
+    Promise.all([probeTransport(), probeSpin(), probeKanban(), probeSkills(), probeSha(), probeSharedDeps()].map(p => timedProbe(() => p))),
     Promise.all([probeMind()].map(p => timedProbe(() => p))),
     Promise.all([probeA2a(), probePeers(), probeIdentity(), probeGossip()].map(p => timedProbe(() => p))),
   ]);
