@@ -11,6 +11,23 @@ export type ResumeCapability =
 
 export type PiPendingRequestType = "select" | "confirm" | "input" | "editor";
 export type PiUiReply = string | number | boolean | null;
+export type UiReplyOutcome = "claimed" | "acknowledged" | "delivery_unknown";
+export type RpcDelivery = "not_written" | "written_unacknowledged" | "acknowledged";
+
+export type PendingUiClaim =
+  | { claimed: true; requestType: PiPendingRequestType }
+  | { claimed: false; reason: "missing" | "wrong_generation" | "wrong_status" | "request_mismatch" | "already_consumed" };
+
+export type PendingUiSetResult =
+  | { ok: true }
+  | { ok: false; reason: "wrong_status" | "wrong_generation" | "duplicate_request" | "busy" | "missing" };
+
+export type UiResponseResult = {
+  ok: boolean;
+  delivery: RpcDelivery;
+  result?: unknown;
+  error?: string;
+};
 
 export interface PiModelSelection {
   provider: string;
@@ -62,6 +79,9 @@ export interface PiRunRecord {
   thinking?: string;
   pendingRequestId?: string;
   pendingRequestType?: PiPendingRequestType;
+  lastUiReplyRequestId?: string;
+  lastUiReplyGeneration?: number;
+  lastUiReplyOutcome?: UiReplyOutcome;
   createdAt: string;
   updatedAt: string;
   lastRpcActivityAt?: string;
@@ -84,6 +104,7 @@ export interface PiRunView {
   thinking?: string;
   pendingRequestId?: string;
   pendingRequestType?: PiPendingRequestType;
+  lastUiReplyOutcome?: UiReplyOutcome;
   generation: number;
   createdAt: string;
   updatedAt: string;

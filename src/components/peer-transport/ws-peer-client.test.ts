@@ -1,13 +1,16 @@
 /**
- * ws-peer-client.test.ts — tests for durable outbound queue (#1293 Task 7).
+ * ws-peer-client.test.ts — tests for durable outbox (#1401).
+ *
+ * Uses WsOutboxStore directly for storage-focused tests and WsPeerClient for
+ * lifecycle tests.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { WsOutboxStore } from "./ws-outbox-store.js";
 
-// Set up a fake HOME so paths resolve to a temp dir
 const originalHome = process.env["HOME"];
 let tmpDir: string;
 
@@ -21,89 +24,113 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-// The queue is implemented in WsPeerClient but we can exercise it via the class interface.
-// We need a mock PeerEntry with a valid signingKey to instantiate WsPeerClient.
-// Since network calls would fail in tests, we only test the queue logic.
-
-describe("WsPeerClient durable queue", () => {
-  it("enqueues messages when disconnected and reports queued status", async () => {
-    // Need a valid signingKey — generate one
-    const { generateKeyPairSync } = await import("node:crypto");
-    const { privateKey } = generateKeyPairSync("ed25519");
-    const signingKey = privateKey.export({ type: "pkcs8", format: "der" }).toString("base64");
-
-    // Set up minimal peers.json
-    const { mkdirSync, writeFileSync } = await import("node:fs");
-    mkdirSync(join(tmpDir, ".abtars", "config"), { recursive: true });
-    const { deriveVerifyKey } = await import("../../components/peer-config.js");
-    const verifyKey = deriveVerifyKey(signingKey);
-    const peersData = {
-      self: { name: "test", signingKey, tribeToken: Buffer.alloc(32).toString("base64") },
-      peers: {},
-    };
-    writeFileSync(join(tmpDir, ".abtars", "config", "peers.json"), JSON.stringify(peersData, null, 2));
-
-    const { clearPeerConfigCache } = await import("../../components/peer-config.js");
-    clearPeerConfigCache();
-
-    const { WsPeerClient } = await import("./ws-peer-client.js");
-
-    const client = new WsPeerClient("testpeer", {
-      host: "127.0.0.1",
-      port: 9999,
-      verifyKey,
+describe("WsOutboxStore", () => {
+  it("accepts and persists entries", () => {
+    const path = join(tmpDir, "outbox.json");
+    const store = new WsOutboxStore({
+      peerName: "testpeer",
+      filePath: path,
+      maxEntries: 200,
+      maxEntryBytes: 512 * 1024,
+      maxFileBytes: 10 * 1024 * 1024,
     });
 
-    // Send while disconnected (ws is null) — should enqueue
-    const result = await client.send("callback", { task_id: 1, status: "done" });
-    expect((result as { queued: boolean }).queued).toBe(true);
+    expect(store.length).toBe(0);
+    const entry = store.append("delegate", { goal: "hello" });
+    expect(store.length).toBe(1);
+    expect(store.peek()!.id).toBe(entry.id);
 
-    // Queue should have one entry persisted to disk
-    const queuePath = join(tmpDir, ".abtars", "ws-queue-testpeer.json");
-    expect(existsSync(queuePath)).toBe(true);
-
-    client.destroy();
-    // After destroy, queue file should be removed
-    expect(existsSync(queuePath)).toBe(false);
+    // Survives reload
+    const store2 = new WsOutboxStore({
+      peerName: "testpeer",
+      filePath: path,
+      maxEntries: 200,
+      maxEntryBytes: 512 * 1024,
+      maxFileBytes: 10 * 1024 * 1024,
+    });
+    expect(store2.length).toBe(1);
+    expect(store2.peek()!.id).toBe(entry.id);
   });
 
-  it("drops oldest when queue exceeds 200 entries", async () => {
-    const { generateKeyPairSync } = await import("node:crypto");
-    const { privateKey } = generateKeyPairSync("ed25519");
-    const signingKey = privateKey.export({ type: "pkcs8", format: "der" }).toString("base64");
-
-    const { mkdirSync, writeFileSync } = await import("node:fs");
-    mkdirSync(join(tmpDir, ".abtars", "config"), { recursive: true });
-    const { deriveVerifyKey } = await import("../../components/peer-config.js");
-    const verifyKey = deriveVerifyKey(signingKey);
-    const peersData = {
-      self: { name: "test", signingKey, tribeToken: Buffer.alloc(32).toString("base64") },
-      peers: {},
-    };
-    writeFileSync(join(tmpDir, ".abtars", "config", "peers.json"), JSON.stringify(peersData, null, 2));
-
-    const { clearPeerConfigCache } = await import("../../components/peer-config.js");
-    clearPeerConfigCache();
-
-    const { WsPeerClient } = await import("./ws-peer-client.js");
-
-    const client = new WsPeerClient("testpeer2", {
-      host: "127.0.0.1",
-      port: 9999,
-      verifyKey,
+  it("acknowledge removes entry", () => {
+    const path = join(tmpDir, "outbox.json");
+    const store = new WsOutboxStore({
+      peerName: "testpeer",
+      filePath: path,
+      maxEntries: 200,
+      maxEntryBytes: 512 * 1024,
+      maxFileBytes: 10 * 1024 * 1024,
     });
 
-    // Enqueue 201 messages
-    for (let i = 0; i < 201; i++) {
-      await client.send("test", { i });
-    }
+    const e1 = store.append("delegate", { goal: "a" });
+    store.append("delegate", { goal: "b" });
+    expect(store.length).toBe(2);
 
-    // Access internal queue via any cast
-    const queue = (client as any)._queue as Array<{ payload: { i: number } }>;
-    expect(queue.length).toBe(200); // capped at 200
-    // First message (i=0) was dropped, queue starts at i=1
-    expect(queue[0]!.payload.i).toBe(1);
+    store.acknowledge(e1.id);
+    expect(store.length).toBe(1);
+    expect(store.peek()!.payload).toEqual({ goal: "b" });
+  });
 
-    client.destroy();
+  it("rejects unsupported methods", () => {
+    const path = join(tmpDir, "outbox.json");
+    const store = new WsOutboxStore({
+      peerName: "testpeer",
+      filePath: path,
+      maxEntries: 200,
+      maxEntryBytes: 512 * 1024,
+      maxFileBytes: 10 * 1024 * 1024,
+    });
+    expect(() => store.append("unknown", {})).toThrow("Unsupported WSS method");
+  });
+
+  it("rejects when full", () => {
+    const path = join(tmpDir, "outbox.json");
+    const store = new WsOutboxStore({
+      peerName: "testpeer",
+      filePath: path,
+      maxEntries: 3,
+      maxEntryBytes: 512 * 1024,
+      maxFileBytes: 10 * 1024 * 1024,
+    });
+    store.append("delegate", { i: 0 });
+    store.append("delegate", { i: 1 });
+    store.append("delegate", { i: 2 });
+    expect(() => store.append("delegate", { i: 3 })).toThrow("Outbox full");
+  });
+
+  it("quarantines corrupt files", () => {
+    const path = join(tmpDir, "outbox.json");
+    // Write garbage
+    require("node:fs").writeFileSync(path, "not json");
+    const store = new WsOutboxStore({
+      peerName: "testpeer",
+      filePath: path,
+      maxEntries: 200,
+      maxEntryBytes: 512 * 1024,
+      maxFileBytes: 10 * 1024 * 1024,
+    });
+    expect(store.length).toBe(0);
+    expect(store.isDegraded).toBe(true);
+    // Corrupt file should have been renamed
+    const dirFiles = require("node:fs").readdirSync(tmpDir);
+    expect(dirFiles.some(f => f.includes(".corrupt"))).toBe(true);
+  });
+
+  it("purge clears everything", () => {
+    const path = join(tmpDir, "outbox.json");
+    const store = new WsOutboxStore({
+      peerName: "testpeer",
+      filePath: path,
+      maxEntries: 200,
+      maxEntryBytes: 512 * 1024,
+      maxFileBytes: 10 * 1024 * 1024,
+    });
+    store.append("delegate", { goal: "test" });
+    expect(store.length).toBe(1);
+    expect(existsSync(path)).toBe(true);
+
+    store.purge();
+    expect(store.length).toBe(0);
+    expect(existsSync(path)).toBe(false);
   });
 });

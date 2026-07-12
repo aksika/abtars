@@ -12,7 +12,36 @@ import { resolveNativeDep } from "../../utils/lazy-require.js";
 import { logWarn } from "../logger.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
-type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void };
+type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
+
+/** #1393 — Typed capability for components that need durable SQLite access alongside kanban. */
+export interface TaskDatabase {
+  prepare(sql: string): {
+    run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+    get(...params: unknown[]): Record<string, unknown> | undefined;
+    all(...params: unknown[]): Record<string, unknown>[];
+  };
+  exec(sql: string): void;
+  transaction<T>(fn: () => T): T;
+}
+
+/** #1393 — Get the canonical task database. Throws if unavailable (fail-explicit for Pi). */
+export function requireTaskDatabase(): TaskDatabase {
+  const d = db();
+  if (!d) throw new Error("Kanban database unavailable — better-sqlite3 not installed");
+  return {
+    prepare(sql: string) {
+      const stmt = d.prepare(sql);
+      return {
+          run(...params: unknown[]) { return stmt.run(...params); },
+          get(...params: unknown[]) { return stmt.get(...params) as Record<string, unknown> | undefined; },
+          all(...params: unknown[]) { return stmt.all(...params) as Record<string, unknown>[]; },
+      };
+    },
+    exec(sql: string) { d.exec(sql); },
+    transaction<T>(fn: () => T): T { return d.transaction(fn)(); },
+  };
+}
 
 export interface KanbanCard {
   id: number;

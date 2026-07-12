@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { logDebug, logWarn, logError } from "../logger.js";
 import type { PiRpcRequest, PiRpcResponse, PiRpcEvent, PiState, PiModel, PiSessionStats, PiUiReply } from "./pi-rpc-types.js";
+import type { UiResponseResult } from "./types.js";
 import { MAX_RPC_LINE_BYTES, MAX_STDERR_BYTES } from "./types.js";
 
 const TAG = "pi-rpc";
@@ -114,8 +115,49 @@ export class PiRpcClient {
     return this._command("get_session_stats") as Promise<PiSessionStats>;
   }
 
-  async respondToUi(requestId: string, value: PiUiReply): Promise<void> {
-    await this._command("extension_ui_response", { requestId, value });
+  async respondToUi(requestId: string, value: PiUiReply): Promise<UiResponseResult> {
+    // Phase 1: not writable — definitely not written
+    if (this._closed) return { ok: false, delivery: "not_written", error: "closed" };
+    if (!this.child?.stdin?.writable) return { ok: false, delivery: "not_written", error: "not_connected" };
+
+    const id = randomUUID().slice(0, 8);
+    const request: PiRpcRequest = { id, cmd: "extension_ui_response", args: { requestId, value } };
+
+    // Phase 2: synchronous write — if it throws, it was not written
+    let wrote = false;
+    try {
+      this.child!.stdin!.write(JSON.stringify(request) + "\n");
+      wrote = true;
+    } catch (err) {
+      return { ok: false, delivery: "not_written", error: `write_error: ${err instanceof Error ? err.message : String(err)}` };
+    }
+
+    if (!wrote) return { ok: false, delivery: "not_written", error: "write_returned_false" };
+
+    // Phase 3: after write accepted — wait for outcome
+    return new Promise<UiResponseResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        resolve({ ok: false, delivery: "written_unacknowledged", error: "timeout" });
+      }, COMMAND_TIMEOUT_MS);
+
+      this.pending.set(id, {
+        resolve: (result) => {
+          clearTimeout(timer);
+          resolve({ ok: true, delivery: "acknowledged", result });
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          // Distinguish correlated Pi error responses from uncorrelated failures
+          if (err instanceof PiRpcError && err.code === "rpc_error") {
+            resolve({ ok: false, delivery: "acknowledged", error: err.message });
+          } else {
+            resolve({ ok: false, delivery: "written_unacknowledged", error: err.message });
+          }
+        },
+        timer,
+      });
+    });
   }
 
   async switchSession(sessionFile: string): Promise<void> {

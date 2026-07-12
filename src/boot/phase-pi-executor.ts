@@ -11,33 +11,24 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     return;
   }
 
+  const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
+
+  let taskDb: import("../components/tasks/kanban-board.js").TaskDatabase;
+  try {
+    taskDb = requireTaskDatabase();
+  } catch (err) {
+    logError(TAG, `Kanban database unavailable — Pi executor requires it: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  // Enable foreign-key enforcement (safe after kanban migrations, before Pi migrations)
+  taskDb.exec("PRAGMA foreign_keys = ON");
+
   const { PiRunStore } = await import("../components/pi-executor/pi-run-store.js");
   const { PiExecutor } = await import("../components/pi-executor/pi-executor.js");
   const { PiRunService } = await import("../components/pi-executor/pi-run-service.js");
 
-  let db: import("better-sqlite3").Database | null = null;
-  try {
-    const { resolveNativeDep } = await import("../utils/lazy-require.js");
-    const Database = resolveNativeDep("better-sqlite3") as typeof import("better-sqlite3").default;
-    db = new Database(":memory:") as unknown as import("better-sqlite3").Database;
-  } catch {
-    logError(TAG, "better-sqlite3 not available — Pi executor requires it");
-    return;
-  }
-
-  const store = new PiRunStore({
-    db: {
-      prepare(sql: string) {
-        const stmt = db!.prepare(sql);
-        return {
-          run(...params: unknown[]) { const r = stmt.run(...params); return { changes: r.changes }; },
-          get(...params: unknown[]) { return stmt.get(...params) as Record<string, unknown> | undefined; },
-          all(...params: unknown[]) { return stmt.all(...params) as Record<string, unknown>[]; },
-        };
-      },
-      transaction<T>(fn: () => T): T { return db!.transaction(fn)(); },
-    },
-  });
+  const store = new PiRunStore({ db: taskDb });
 
   const executor = new PiExecutor(config, store);
   const service = new PiRunService({

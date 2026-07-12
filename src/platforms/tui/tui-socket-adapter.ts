@@ -21,6 +21,15 @@
  * recovery handler. wireTui() swaps in handleInboundMessage after
  * pipelineDeps is ready. We never call handleInboundMessage at
  * construction (would crash pre-pipelineDeps).
+ *
+ * #1398: Connection and attachment lifetimes are tracked via monotonic
+ * generations. Every subscription callback captures the generation at
+ * subscription time and checks it before enqueuing frames. Central
+ * teardown (detachAttachment / detachConnection) increments generations
+ * BEFORE unsubscribing, so a synchronous callback during unsubscribe
+ * cannot pass the current check. New-attach-wins is an atomic handoff:
+ * old attachment/connection is detached before the replacement writer
+ * is installed, leaving zero stale feed subscriptions.
  */
 
 import * as fs from "node:fs";
@@ -54,13 +63,9 @@ const TAG = "tui";
 
 export interface TuiAdapterDeps {
   spin: Spin;
-  /** #1319: Activity feed for Orc execution events. */
   orcActivityFeed?: OrcActivityFeed;
-  /** #1338: Live attached-session output feed. */
   sessionOutputFeed?: SessionOutputFeed;
-  /** Set to the recovery handler at construction; swapped to handleInboundMessage by wireTui. */
   onMessage: (msg: InboundMessage) => void;
-  /** Override the default socket path (~/.abtars/tui.sock). */
   socketPath?: string;
 }
 
@@ -72,9 +77,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
     typing: true,
     threads: false,
   };
-  // v1: whole-message frames only. Per-delta streaming is reserved for #1319
-  // — the pipeline's onIntermediateResponse hook is transport-level, not
-  // adapter-level (see message-pipeline.ts:410, cleared post-response).
   readonly supportsStreaming = false;
 
   private server: net.Server | null = null;
@@ -85,33 +87,37 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private mode: "pipeline" | "orc" = "pipeline";
   private deps: TuiAdapterDeps;
   private readonly socketPath: string;
-  /** True between `start()` and `stop()` — guards re-entrant close. */
+  /** True between `start()` and `stop()`. */
   private started = false;
-  /** #1319: Activity subscription cleanup, set on orc attach, cleared on detach. */
+  /** Activity subscription cleanup handle. */
   private _unsubActivity: (() => void) | null = null;
-  /** #1338: Output subscription cleanup, set on any attach, cleared on detach/switch. */
+  /** Output subscription cleanup handle. */
   private _unsubOutput: (() => void) | null = null;
-  /** #1362: Scoped steer event subscription cleanup, replaced on attach/switch/detach. */
+  /** Steer event subscription cleanup handle. */
   private _unsubSteer: (() => void) | null = null;
-  /** #1338: Execution whose model text was mirrored live (suppress duplicate whole-result). */
-  private _streamedExecutionId: string | null = null;
-  /** #1338: True once live chunks were mirrored for the current attachment. */
+  /** True once live chunks were mirrored for the current attachment. */
   private _hasStreamed = false;
-  /** #1319: Cached activity sequence for subscriber scoping. */
+  /** Cached activity sequence for subscriber scoping. */
   private _activitySequence = 0;
-  /** #1339: True while incremental activity is suppressed pending recovery. */
+  /** True while incremental activity is suppressed pending recovery. */
   private _activityDirty = false;
-  /** #1339: Bounded per-connection frame writer (replaced on every new attach). */
+  /** Bounded per-connection frame writer (replaced on every new connection). */
   private _writer: TuiFrameWriter | null = null;
-  /** Monotonic status revision for the current socket/attachment. */
+  /** Monotonic revision number for status frames (reset per attachment). */
   private _statusRevision = 0;
+
+  // #1398: Connection and attachment generations — incremented on teardown.
+  // Feed callbacks capture the value at subscription time and compare before
+  // pushing; if stale they silently no-op.
+  private _connGen = 1;
+  private _attGen = 1;
 
   constructor(deps: TuiAdapterDeps) {
     this.deps = deps;
     this.socketPath = deps.socketPath ?? join(abtarsHome(), "tui.sock");
   }
 
-  /** Late-bind: replace onMessage callback after construction. Mirrors IrcAdapter. */
+  /** Late-bind: replace onMessage callback after construction. */
   setMessageHandler(onMessage: (msg: InboundMessage) => void): void {
     this.deps.onMessage = onMessage;
   }
@@ -137,8 +143,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
       const server = net.createServer({ allowHalfOpen: false }, (conn) => this._onConnection(conn));
       server.on("error", (err) => reject(err));
       server.listen(this.socketPath, () => {
-        // Explicit 0600 — see header comment. We do this AFTER listen so
-        // a race-y chmod of a non-existent path can't happen.
         try { fs.chmodSync(this.socketPath, 0o600); }
         catch (err) { logAndSwallow(TAG, "chmod socket", err); }
         this.server = server;
@@ -152,37 +156,24 @@ export class TuiSocketAdapter implements PlatformAdapter {
   stop(): void {
     if (!this.started) return;
     this.started = false;
-    if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
-    if (this._unsubOutput) { this._unsubOutput(); this._unsubOutput = null; }
-    if (this._unsubSteer) { this._unsubSteer(); this._unsubSteer = null; }
-    // #1339: invalidate the writer and remove its listeners.
-    this._writer?.close();
-    this._writer = null;
-    if (this.conn) {
-      try { this.conn.destroy(); } catch { /* best effort */ }
-      this.conn = null;
-    }
-    if (this.server) {
-      try { this.server.close(); } catch { /* best effort */ }
-      this.server = null;
+    const server = this.server;
+    this.server = null;
+    this.detachConnection();
+    if (server) {
+      try { server.close(); } catch { /* best effort */ }
     }
     this._unlinkSocket();
-    this.attachedSessionId = null;
-    this.mode = "pipeline";
     logInfo(TAG, "Stopped");
   }
 
   // ── PlatformAdapter surface ──────────────────────────────────────────
 
   authorize(_msg: InboundMessage): boolean {
-    // Authorization is enforced at attach time (master-only via getMasterUserId).
     return true;
   }
 
   async sendMessage(_channelId: string, text: string, _opts?: SendOpts): Promise<undefined> {
-    // #1338: if this session's model text was already mirrored live as
-    // streamed chunks, the whole result is a duplicate — suppress it (the
-    // stream already showed the content). Status still refreshes.
+    // #1338: suppress duplicate whole-result if already streamed.
     if (!this._hasStreamed) {
       this._push({ t: "message", role: "assistant", markdown: text });
     }
@@ -191,81 +182,115 @@ export class TuiSocketAdapter implements PlatformAdapter {
   }
 
   chunkResponse(text: string): string[] {
-    // Terminal has no platform message-size limit; passthrough.
     return [text];
+  }
+
+  // ── #1398: Generation guards ──────────────────────────────────────────
+
+  /** True if the given connection generation is still current. */
+  private _isConnCurrent(gen: number): boolean {
+    return this._connGen === gen && this._writer !== null && !this._writer.isClosed;
+  }
+
+  /** True if both connection and attachment generations are still current. */
+  private _isAttCurrent(connGen: number, attGen: number): boolean {
+    return this._connGen === connGen && this._attGen === attGen;
+  }
+
+  // ── #1398: Centralized idempotent teardown ─────────────────────────────
+
+  /**
+   * Detach the current attachment. Invalidates the attachment generation
+   * FIRST, then unsubscribes all three feeds and resets attachment-scoped
+   * state. Idempotent — safe to call multiple times.
+   */
+  private detachAttachment(): void {
+    this._attGen++;
+    const ua = this._unsubActivity; this._unsubActivity = null;
+    const uo = this._unsubOutput; this._unsubOutput = null;
+    const us = this._unsubSteer; this._unsubSteer = null;
+    try { ua?.(); } catch { /* best effort */ }
+    try { uo?.(); } catch { /* best effort */ }
+    try { us?.(); } catch { /* best effort */ }
+    this._writer?.clearAttachment();
+    this.attachedSessionId = null;
+    this.mode = "pipeline";
+    this._hasStreamed = false;
+    this._activitySequence = 0;
+    this._activityDirty = false;
+    this._statusRevision = 0;
+  }
+
+  /**
+   * Detach the current connection (including its attachment). Invalidates
+   * both generations, closes the exact writer, and nullifies conn/writer
+   * ownership. Does NOT close the socket itself (the caller owns the
+   * socket lifetime).
+   */
+  private detachConnection(): void {
+    this.detachAttachment();
+    this._connGen++;
+    this._writer?.close();
+    this._writer = null;
+    this.conn = null;
   }
 
   // ── Connection handling ──────────────────────────────────────────────
 
   private _onConnection(conn: net.Socket): void {
-    // #1334: one decoder per connection. A stateful frame decoder buffers
-    // a trailing partial JSONL line. Adapter-scoped, that buffer was
-    // shared across every connection's bytes — so when new-attach-wins
-    // evicted the old client, the old client's leftover bytes combined
-    // with the new client's first frame and dropped it (malformed JSON).
-    // Per-connection, the buffer dies with its socket.
+    // #1334: one decoder per connection.
     const decode = createFrameDecoder<TuiClientFrame>();
 
-    // New-attach-wins: send a "superseded" error to the existing client and
-    // destroy it. We write directly to `old` — not via this._push, which now
-    // targets the new conn. The evicted client sees post-`ready` error →
-    // exit 0, NOT a startup failure.
-    const old = this.conn;
-    this.conn = conn;
-    this.attachedSessionId = null;
-    this.mode = "pipeline";
+    // #1398: atomic handoff — capture old, detach BEFORE installing new.
+    const oldConn = this.conn;
+    this.detachConnection();
 
-    if (old && !old.destroyed) {
+    // Send superseded error to the old socket directly (best-effort).
+    if (oldConn && !oldConn.destroyed) {
       try {
-        old.write(encodeFrame({ t: "error", message: "detached: superseded by a new attach" }));
+        oldConn.write(encodeFrame({ t: "error", message: "detached: superseded by a new attach" }));
       } catch { /* best effort */ }
-      try { old.destroy(); } catch { /* best effort */ }
+      try { oldConn.destroy(); } catch { /* best effort */ }
       logDebug(TAG, "Evicted previous client (new-attach-wins)");
     }
 
+    // Install the new connection with a fresh generation.
+    this.conn = conn;
+    this._connGen++;
+    this._attGen++;
+
+    const connGen = this._connGen;
+
+    // #1339: bounded writer bound to this exact connection generation.
+    const writer = new TuiFrameWriter(conn, {
+      isCurrent: () => this._connGen === connGen && !conn.destroyed,
+      onSemanticOverflow: () => {
+        if (this._connGen === connGen) this._activityDirty = true;
+      },
+      onWritable: () => {
+        if (this._connGen === connGen) this._recoverActivity();
+      },
+    });
+    this._writer = writer;
+
+    // Data handler with identity guard.
     conn.on("data", (buf: Buffer) => {
-      // Identity guard: a superseded socket may still deliver a final
-      // data event after new-attach-wins replaced `this.conn`. Drop any
-      // bytes that don't belong to the current connection so a late
-      // complete frame from the evicted client cannot act on the new
-      // attachment.
       if (this.conn !== conn) return;
       const frames = decode(buf.toString());
       for (const f of frames) {
         if (isClientFrame(f)) {
-          // Best-effort: handler errors are logged via logAndSwallow where
-          // they originate; we never let one crash the connection.
           void this._handleFrame(f);
         }
       }
     });
     conn.on("error", (err) => logAndSwallow(TAG, "conn error", err));
+
+    // Close handler: detach only if this generation is still current.
     conn.on("close", () => {
-      if (this.conn === conn) {
-        // #1339: close the exact writer bound to this socket so a stale
-        // drain/close from a superseded connection cannot leak frames.
-        this._writer?.close();
-        this._writer = null;
-        this.conn = null;
-        this.attachedSessionId = null;
-        this.mode = "pipeline";
-        if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
-        // #1338: drop output mirroring for the detached attachment.
-        if (this._unsubOutput) { this._unsubOutput(); this._unsubOutput = null; }
-        this._streamedExecutionId = null;
+      if (this._connGen === connGen) {
+        this.detachConnection();
       }
     });
-
-    // #1339: create a fresh bounded writer for this exact connection. The
-    // captured `writer` identity plus `isCurrent()` guarantees a superseded
-    // connection's drain/close events cannot flush into this one.
-    this._writer?.close();
-    const writer = new TuiFrameWriter(conn, {
-      isCurrent: () => this._writer === writer && this.conn === conn && !conn.destroyed,
-      onSemanticOverflow: () => { this._activityDirty = true; },
-      onWritable: () => this._recoverActivity(),
-    });
-    this._writer = writer;
   }
 
   private async _handleFrame(frame: TuiClientFrame): Promise<void> {
@@ -277,9 +302,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
         await this._handleInput(frame.text);
         return;
       case "resize":
-        // v1: ignore. The client reports cols/rows on attach; future
-        // re-render could be wired here. For now, the terminal client
-        // handles its own redraw on SIGWINCH.
         return;
       case "steer":
         await this._handleSteer(frame);
@@ -287,15 +309,94 @@ export class TuiSocketAdapter implements PlatformAdapter {
     }
   }
 
-  // ── Attach + input routing (filled in by Tasks 4 + 5) ───────────────
+  // ── Attach + commit attachment ───────────────────────────────────────
+
+  /**
+   * #1398: Unified commit helper. Detaches any current attachment (incrementing
+   * _attGen), subscribes output/steer/activity feeds scoped to the new session
+   * with captured generations, emits ready/status, and sends the activity
+   * snapshot for orc mode. Used by _handleAttach, /session N, /session new.
+   */
+  private commitAttachment(
+    sessionId: string,
+    mode: "pipeline" | "orc",
+    spin: Spin,
+  ): void {
+    // Detach the prior attachment first — invalidates old feed callbacks.
+    this.detachAttachment();
+    // Bump attGen so the new binding has a fresh value.
+    this._attGen++;
+
+    this.attachedSessionId = sessionId;
+    this.mode = mode;
+    this._statusRevision = 0;
+    this._writer?.clearAttachment();
+
+    const capturedConnGen = this._connGen;
+    const capturedAttGen = this._attGen;
+
+    // Subscribe output mirroring for the selected session.
+    this._subscribeOutput(sessionId, capturedConnGen, capturedAttGen);
+
+    // Subscribe steer lifecycle events.
+    this._subscribeSteer(sessionId, capturedConnGen, capturedAttGen);
+
+    // Emit ready + status.
+    const type = sessionTypeOf(sessionId);
+    const index = parseInt(sessionId.split("_")[2] ?? "0", 10);
+    const label = `${typeLabel(type as SessionType)} #${index}`;
+    this._push({ t: "ready", sessionLabel: label, sessionId });
+    this._pushStatus();
+
+    // #1319: Activity snapshot after ready.
+    if (mode === "orc") {
+      this._subscribeAndSnapshotOrc(sessionId, spin, capturedConnGen, capturedAttGen);
+    }
+  }
+
+  /** Subscribe activity feed and send initial snapshot for orc mode. */
+  private _subscribeAndSnapshotOrc(
+    sessionId: string,
+    spin: Spin,
+    capturedConnGen: number,
+    capturedAttGen: number,
+  ): void {
+    const feed = this.deps.orcActivityFeed;
+    const orcEntry = spin.listAllSessions().find(
+      s => s.id.includes("_O_") && s.status !== "ended",
+    );
+    if (!feed || !orcEntry) return;
+
+    this._activitySequence = 0;
+    const filter = {
+      sessionId,
+      executionId: orcEntry.activeExecutionId,
+    };
+    this._unsubActivity = feed.subscribe(filter, (event) => {
+      if (!this._isAttCurrent(capturedConnGen, capturedAttGen)) return;
+      if (event.sequence <= this._activitySequence) return;
+      if (this._activityDirty) return;
+      this._activitySequence = event.sequence;
+      this._push({ t: "activity", event });
+    }, () => {
+      if (!this._isAttCurrent(capturedConnGen, capturedAttGen)) return;
+      this._activityDirty = true;
+      const recovered = this._recoverActivity(false);
+      if (recovered) {
+        queueMicrotask(() => { this._activityDirty = false; });
+      }
+    });
+
+    // Send the initial snapshot.
+    const orcSession = spin.getSessionById(sessionId);
+    if (orcSession) {
+      const snapshot = buildOrcActivitySnapshot(orcSession, spin.getSessions?.() ?? new Map(), this._activitySequence);
+      this._push({ t: "activity-snapshot", sequence: this._activitySequence, snapshot });
+    }
+  }
 
   private async _handleAttach(mode: TuiAttachMode): Promise<void> {
-    // Clean up any previous activity subscription
-    if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
-    // #1339: reset semantic-recovery state and clear attachment-scoped queued
-    // frames (status/activity/snapshot/typing) for the new attachment.
-    this._activityDirty = false;
-    this._writer?.clearAttachment();
+    const capturedConnGen = this._connGen;
 
     const master = getMasterUserId();
     const spin = this.deps.spin;
@@ -305,8 +406,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
     switch (mode.kind) {
       case "resume": {
-        // #1336: Default to the master's newest ready Main across all platforms.
-        // Sort by lastActiveAt desc, shortIndex desc as tie-breaker.
         const candidates = spin.listAllSessions().filter(
           s => s.userId === master && s.id.includes("_A_") && s.status === "ready",
         );
@@ -315,7 +414,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
         if (existing) {
           sessionId = existing.id;
         } else {
-          // No ready Main anywhere — create a TUI-born one
           const r = spin.createSession(master, "tui", "A" as SessionType);
           if (typeof r === "string") return this._reject(r);
           sessionId = r.id;
@@ -323,7 +421,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
         break;
       }
       case "session": {
-        // #1336: global-index lookup — does not call switchSession()
         const target = spin.getSessionByGlobalIndex(mode.index);
         if (!target) return this._reject(`Session #${mode.index} not found.`);
         if (target.userId !== master) return this._reject(`Session #${mode.index} belongs to another user.`);
@@ -348,61 +445,14 @@ export class TuiSocketAdapter implements PlatformAdapter {
         if (!orcEntry) return this._reject("No Orc session is running.");
         sessionId = orcEntry.id;
         nextMode = "orc";
-
-        // #1319: Subscribe to activity feed before snapshot to close the race
-        const feed = this.deps.orcActivityFeed;
-        if (feed) {
-          this._activitySequence = 0;
-          const filter = {
-            sessionId,
-            executionId: orcEntry.activeExecutionId,
-          };
-          this._unsubActivity = feed.subscribe(filter, (event) => {
-            if (event.sequence <= this._activitySequence) return;
-            // #1339: suppress incremental activity while awaiting recovery.
-            if (this._activityDirty) return;
-            this._activitySequence = event.sequence;
-            this._push({ t: "activity", event });
-          }, () => {
-            // #1339: feed-side overflow → mark dirty, discard the pending
-            // incremental batch, and attempt recovery now. The writer flushes
-            // the snapshot when writable; if blocked, onWritable retries after
-            // the next drain. Dirty is cleared only after the feed's pending
-            // microtask batch is consumed, so stale increments stay suppressed
-            // and the fresh snapshot stays first.
-            this._activityDirty = true;
-            const recovered = this._recoverActivity(false);
-            if (recovered) {
-              queueMicrotask(() => { this._activityDirty = false; });
-            }
-          });
-        }
         break;
       }
     }
 
-    this.attachedSessionId = sessionId;
-    this.mode = nextMode;
-    this._statusRevision = 0;
-    // #1338: (re)subscribe live output mirroring to the selected session.
-    this._subscribeOutput(sessionId);
-    // #1362: Subscribe steer lifecycle events scoped to the attached session.
-    this._subscribeSteer(sessionId);
+    // Guard: connection may have been replaced during setup.
+    if (!this._isConnCurrent(capturedConnGen)) return;
 
-    const type = sessionTypeOf(sessionId);
-    const index = parseInt(sessionId.split("_")[2] ?? "0", 10);
-    const label = `${typeLabel(type as SessionType)} #${index}`;
-    this._push({ t: "ready", sessionLabel: label, sessionId });
-    this._pushStatus();
-
-    // #1319: Send activity snapshot after ready
-    if (nextMode === "orc" && this.deps.orcActivityFeed) {
-      const orcSession = spin.getSessionById(sessionId);
-      if (orcSession) {
-        const snapshot = buildOrcActivitySnapshot(orcSession, this.deps.spin.getSessions?.() ?? new Map(), this._activitySequence);
-        this._push({ t: "activity-snapshot", sequence: this._activitySequence, snapshot });
-      }
-    }
+    this.commitAttachment(sessionId, nextMode, spin);
   }
 
   private _pushStatus(): void {
@@ -417,16 +467,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
    * #1339: semantic-activity overflow recovery, triggered by the writer's
    * `onWritable` (when a previously-blocked socket can accept frames again)
    * or by the feed's overflow callback.
-   *
-   * Verifies socket/attachment identity (guaranteed by the writer's
-   * `isCurrent()`), drops queued incremental activity, and enqueues a fresh
-   * authoritative snapshot before subsequent incremental activity resumes.
-   * If the recovery snapshot itself cannot be queued, stays dirty (the writer
-   * coalesces to the newest snapshot) and the caller retries on the next
-   * writable. When `clearDirty` is true the dirty flag is cleared on success
-   * (drain path); the feed-overflow path clears it after its pending batch.
-   *
-   * @returns true if recovery succeeded and dirty was (or will be) cleared.
    */
   private _recoverActivity(clearDirty = true): boolean {
     if (!this._writer || !this._activityDirty) return false;
@@ -437,16 +477,13 @@ export class TuiSocketAdapter implements PlatformAdapter {
     );
     if (!orcEntry) return false;
 
-    // Discard queued incremental activity for this attachment.
     this._writer.dropActivity();
 
-    // Build a fresh authoritative snapshot from the feed's current sequence.
     const seq = feed.currentSequence;
     const sessions = this.deps.spin.getSessions?.() ?? new Map();
     const snapshot = buildOrcActivitySnapshot(orcEntry, sessions, seq);
     const res = this._writer.enqueue({ t: "activity-snapshot", sequence: seq, snapshot });
     if (res === "dropped") {
-      // Recovery itself pressured → remain dirty; newest snapshot wins on retry.
       return false;
     }
     this._activitySequence = seq;
@@ -456,22 +493,19 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
   /**
    * #1338: subscribe the current connection's writer to the live output feed
-   * for exactly `sessionId`. Replaces any previous output subscription so a
-   * session switch atomically stops mirroring the old session. Every frame is
-   * emitted through the bounded #1339 writer; stale-socket guards in the
-   * writer prevent a superseded connection from receiving it.
+   * for exactly `sessionId`. Captures the current connection and attachment
+   * generations so the callback silently no-ops after detach.
    */
-  private _subscribeOutput(sessionId: string): void {
+  private _subscribeOutput(sessionId: string, capturedConnGen: number, capturedAttGen: number): void {
     if (this._unsubOutput) { this._unsubOutput(); this._unsubOutput = null; }
     this._hasStreamed = false;
-    this._streamedExecutionId = null;
     const feed = this.deps.sessionOutputFeed;
     if (!feed) return;
     this._unsubOutput = feed.subscribe({ sessionId }, (event: SessionOutputEvent) => {
+      if (!this._isAttCurrent(capturedConnGen, capturedAttGen)) return;
       switch (event.type) {
         case "delta":
           this._hasStreamed = true;
-          this._streamedExecutionId = event.executionId;
           this._push({ t: "chunk", id: event.streamId, delta: event.text });
           break;
         case "tool-start":
@@ -487,9 +521,10 @@ export class TuiSocketAdapter implements PlatformAdapter {
   }
 
   /** #1362: Subscribe to steer lifecycle events scoped to the attached session. */
-  private _subscribeSteer(sessionId: string): void {
+  private _subscribeSteer(sessionId: string, capturedConnGen: number, capturedAttGen: number): void {
     if (this._unsubSteer) { this._unsubSteer(); this._unsubSteer = null; }
     this._unsubSteer = subscribeSteerEvents({ sessionId }, (event) => {
+      if (!this._isAttCurrent(capturedConnGen, capturedAttGen)) return;
       const status = event.type === "steer.queued" ? "queued" as const
         : event.type === "steer.consumed" ? "consumed" as const
         : event.type === "steer.rejected" ? "rejected" as const
@@ -503,9 +538,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
   }
 
   private async _handleInput(text: string): Promise<void> {
-    if (!this.attachedSessionId) {
-      return;
-    }
+    if (!this.attachedSessionId) return;
     if (this.mode === "orc") {
       if (text.startsWith("/steer ")) {
         const body = text.slice("/steer ".length).trim();
@@ -551,16 +584,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
         this._push({ t: "message", role: "system", markdown: r });
         return;
       }
-      this.attachedSessionId = r.id;
-      const type = sessionTypeOf(r.id);
-      const index2 = parseInt(r.id.split("_")[2] ?? "0", 10);
-      const label = `${typeLabel(type as SessionType)} #${index2}`;
-      this._push({ t: "ready", sessionLabel: label, sessionId: r.id });
-      // #1338: mirror output for the newly created session.
-      this._subscribeOutput(r.id);
-      // #1362: Subscribe steer lifecycle events.
-      this._subscribeSteer(r.id);
-      this._pushStatus();
+      // #1398: Use the unified commit helper.
+      this.commitAttachment(r.id, "pipeline", spin);
       return;
     }
 
@@ -583,7 +608,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
       timestamp: Date.now(),
       isGroup: false,
       isVoice: false,
-      // #1336: carry the attached session as the routing target
       targetSessionId: this.attachedSessionId,
     };
     this.deps.onMessage(msg);
@@ -627,23 +651,13 @@ export class TuiSocketAdapter implements PlatformAdapter {
       this._push({ t: "message", role: "system", markdown: `Session #${index} is ended.` });
       return;
     }
-    this.attachedSessionId = target.id;
-    this._statusRevision = 0;
-    const type = sessionTypeOf(target.id);
-    const idx = parseInt(target.id.split("_")[2] ?? "0", 10);
-    const label = `${typeLabel(type as SessionType)} #${idx}`;
-    this._push({ t: "ready", sessionLabel: label, sessionId: target.id });
-    // #1338: atomically switch output mirroring to the selected session.
-    this._subscribeOutput(target.id);
-    // #1362: Atomically switch steer event subscription to the selected session.
-    this._subscribeSteer(target.id);
-    this._pushStatus();
+    // #1398: Use the unified commit helper.
+    this.commitAttachment(target.id, "pipeline", spin);
   }
 
   /** #1361: Handle an explicit steer client frame from any attached session. */
   private async _handleSteer(frame: TuiClientFrame & { t: "steer" }): Promise<void> {
     if (!this.attachedSessionId) return;
-    // Validate frame.sessionId matches the current attachment exactly
     if (frame.sessionId && frame.sessionId !== this.attachedSessionId) {
       this._push({ t: "steer-ack", status: "rejected", instructionId: frame.instructionId, message: "Steer session ID does not match the current attachment." });
       return;
@@ -681,28 +695,26 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
   private async _routeToOrc(text: string): Promise<void> {
     const spin = this.deps.spin;
+    const capturedGen = this._connGen;
+
     if (!spin.getOrcSession()) {
       return void this._push({
-        t: "message",
-        role: "system",
+        t: "message", role: "system",
         markdown: "Orc is not available (not running or still warming up).",
       });
     }
     const orcEntry = spin.listAllSessions().find(
       s => s.id.includes("_O_") && s.status !== "ended",
     );
-    // #1332: When busy, suggest /steer instead of rejecting
     if (orcEntry?.busy) {
       return void this._push({
-        t: "message",
-        role: "system",
+        t: "message", role: "system",
         markdown: `Orc is busy — use /steer <text> to queue a steering instruction, or wait until idle.\n\nExisting steering: try \`/steer ${text.slice(0, 80)}\` to queue this as a steering instruction.`,
       });
     }
     if (!orcEntry) {
       return void this._push({
-        t: "message",
-        role: "system",
+        t: "message", role: "system",
         markdown: "Orc is not available (not running or still warming up).",
       });
     }
@@ -713,8 +725,11 @@ export class TuiSocketAdapter implements PlatformAdapter {
         prompt: `[USER] ${text}`,
         await: true,
       });
+      // #1398: Guard against replacement during the async spin call.
+      if (!this._isConnCurrent(capturedGen)) return;
       this._push({ t: "message", role: "assistant", markdown: result ?? "(no reply)" });
     } catch (err) {
+      if (!this._isConnCurrent(capturedGen)) return;
       const message = err instanceof Error ? err.message : String(err);
       this._push({ t: "message", role: "system", markdown: `Orc error: ${message}` });
     }
@@ -731,17 +746,10 @@ export class TuiSocketAdapter implements PlatformAdapter {
   /** Reject an attach with a structured error frame, then drop the conn. */
   private _reject(message: string): void {
     const conn = this.conn;
-    // Direct best-effort write (pre-ready terminal path); do not route through
-    // the writer's queue which we are about to invalidate.
     if (conn && !conn.destroyed) {
       try { conn.write(encodeFrame({ t: "error", message })); } catch { /* best effort */ }
     }
-    // #1339: invalidate the writer so no further frames target this socket.
-    this._writer?.close();
-    this._writer = null;
-    this.conn = null;
-    this.attachedSessionId = null;
-    this.mode = "pipeline";
+    this.detachConnection();
     if (conn) {
       try { conn.end(); } catch { /* best effort */ }
     }

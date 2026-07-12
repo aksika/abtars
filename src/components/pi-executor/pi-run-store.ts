@@ -1,16 +1,49 @@
 import { randomUUID } from "node:crypto";
-import type { PiRunRecord, PiRunStatus, PiRunView, PiRunOrigin, PiPendingRequestType, ResumeCapability } from "./types.js";
+import type { PiRunRecord, PiRunStatus, PiRunView, PiRunOrigin, PiPendingRequestType, ResumeCapability, PendingUiClaim, PendingUiSetResult } from "./types.js";
+import type { UiReplyOutcome } from "./types.js";
 import { MAX_PROGRESS_ENTRIES } from "./types.js";
+import type { TaskDatabase } from "../tasks/kanban-board.js";
+
+export type RpcDelivery = "not_written" | "written_unacknowledged" | "acknowledged";
 
 export interface PiRunStoreDeps {
-  db: {
-    prepare(sql: string): { run(...params: unknown[]): { changes: number }; get(...params: unknown[]): Record<string, unknown> | undefined; all(...params: unknown[]): Record<string, unknown>[] };
-    transaction<T>(fn: () => T): T;
-  };
+  db: TaskDatabase;
 }
 
+// #1393 — Input for atomic card+run creation.
+export interface CreatePiRunInput {
+  runId: string;
+  sessionId: string;
+  title: string;
+  goal: string;
+  workspaceAlias: string;
+  ownerPrincipalId: string;
+  origin: PiRunOrigin;
+  originPlatform?: string;
+  originChatId?: string;
+  originPeer?: string;
+  modelProvider?: string;
+  modelId?: string;
+  thinking?: string;
+}
+
+// #1396 — Canonical terminal outcome mapping
+export type PiTerminalOutcome = "completed" | "failed" | "cancelled";
+
+export interface PiTerminalMetadata {
+  resultSummary?: string;
+  changedFilesSummary?: string;
+  usageJson?: string;
+  error?: string;
+  piSessionId?: string;
+}
+
+export type PiTerminalSettlement =
+  | { committed: true; outcome: PiTerminalOutcome; cardId: number }
+  | { committed: false; reason: "stale_generation" | "wrong_status" | "missing" };
+
 export class PiRunStore {
-  private readonly db: PiRunStoreDeps["db"];
+  private readonly db: TaskDatabase;
 
   constructor(deps: PiRunStoreDeps) {
     this.db = deps.db;
@@ -18,9 +51,9 @@ export class PiRunStore {
   }
 
   private migrate(): void {
-    this.db.prepare(`CREATE TABLE IF NOT EXISTS pi_runs (
+    this.db.exec(`CREATE TABLE IF NOT EXISTS pi_runs (
       id TEXT PRIMARY KEY,
-      card_id INTEGER UNIQUE NOT NULL,
+      card_id INTEGER UNIQUE NOT NULL REFERENCES kanban_board(id),
       workspace_alias TEXT NOT NULL,
       operational_goal TEXT NOT NULL,
       owner_principal_id TEXT NOT NULL,
@@ -47,38 +80,54 @@ export class PiRunStore {
       changed_files_summary TEXT,
       usage_json TEXT,
       error TEXT
-    )`).run();
-    this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_pi_runs_status ON pi_runs(status)`).run();
-    this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_pi_runs_card_id ON pi_runs(card_id)`).run();
-    this.db.prepare(`CREATE TABLE IF NOT EXISTS pi_run_progress (
+    )`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pi_runs_status ON pi_runs(status)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pi_runs_card_id ON pi_runs(card_id)`);
+    // #1395 — diagnostic reply-outcome columns (idempotent)
+    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN last_ui_reply_request_id TEXT`); } catch {}
+    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN last_ui_reply_generation INTEGER`); } catch {}
+    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN last_ui_reply_outcome TEXT`); } catch {}
+    this.db.exec(`CREATE TABLE IF NOT EXISTS pi_run_progress (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id TEXT NOT NULL REFERENCES pi_runs(id),
       kind TEXT NOT NULL,
       payload TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )`).run();
-    this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_progress_run_id ON pi_run_progress(run_id)`).run();
+    )`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_progress_run_id ON pi_run_progress(run_id)`);
+  }
+
+  /**
+   * #1393 — Create a Pi card and its run in one durable transaction.
+   * Fires no Nerve event — caller publishes card:queued after the transaction
+   * commits so an observer never sees a committed card without its run.
+   */
+  createPiCardAndRun(input: CreatePiRunInput): { runId: string; cardId: number; sessionId: string } {
+    return this.db.transaction<{ runId: string; cardId: number; sessionId: string }>(() => {
+      const cardResult = this.db.prepare(
+        `INSERT INTO kanban_board (title, source, source_id, priority, type, notes, delivery_mode)
+         VALUES (?, 'pi', ?, 'MEDIUM', 'pi', ?, 'silent')`
+      ).run(input.title, input.runId, input.goal);
+      const cardId = Number(cardResult.lastInsertRowid);
+      if (!cardId || cardId < 1) throw new Error("Failed to allocate card ID for Pi run");
+
+      this.db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id,
+        origin, origin_platform, origin_chat_id, origin_peer, execution_generation, current_session_id, status,
+        model_provider, model_id, thinking)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'queued', ?, ?, ?)`).run(
+        input.runId, cardId, input.workspaceAlias, input.goal,
+        input.ownerPrincipalId, input.origin, input.originPlatform ?? null,
+        input.originChatId ?? null, input.originPeer ?? null,
+        input.sessionId,
+        input.modelProvider ?? null, input.modelId ?? null, input.thinking ?? null,
+      );
+
+      return { runId: input.runId, cardId, sessionId: input.sessionId };
+    });
   }
 
   generateId(): string {
     return randomUUID().slice(0, 12);
-  }
-
-  insert(input: {
-    id: string; cardId: number; workspaceAlias: string; operationalGoal: string;
-    ownerPrincipalId: string; origin: PiRunOrigin; originPlatform?: string;
-    originChatId?: string; originPeer?: string; modelProvider?: string;
-    modelId?: string; thinking?: string;
-  }): void {
-    this.db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id,
-      origin, origin_platform, origin_chat_id, origin_peer, execution_generation, status,
-      model_provider, model_id, thinking)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'queued', ?, ?, ?)`).run(
-      input.id, input.cardId, input.workspaceAlias, input.operationalGoal,
-      input.ownerPrincipalId, input.origin, input.originPlatform ?? null,
-      input.originChatId ?? null, input.originPeer ?? null,
-      input.modelProvider ?? null, input.modelId ?? null, input.thinking ?? null,
-    );
   }
 
   get(id: string): PiRunRecord | null {
@@ -107,7 +156,7 @@ export class PiRunStore {
   casTransition(id: string, fromStatus: PiRunStatus | PiRunStatus[], toStatus: PiRunStatus, updates?: Partial<{
     executionGeneration: number; currentSessionId: string; piSessionId: string;
     piSessionFile: string; observedPid: number; modelProvider: string; modelId: string;
-    thinking: string; pendingRequestId: string; pendingRequestType: PiPendingRequestType;
+    thinking: string; pendingRequestId: string | null; pendingRequestType: PiPendingRequestType | null;
     resultSummary: string; changedFilesSummary: string; usageJson: string;
     error: string; resumeCapability: ResumeCapability;
   }>): boolean {
@@ -136,8 +185,194 @@ export class PiRunStore {
     return result.changes > 0;
   }
 
+  /**
+   * #1396 — Atomically transition a Pi run to its terminal outcome and update
+   * the linked Kanban card in one transaction.  Predicates on run id,
+   * execution_generation, and expected statuses so that only one concurrent
+   * contender wins.  Publishes no Nerve event — the caller fires the mapped
+   * event only after commit.
+   */
+  settleTerminal(input: {
+    runId: string;
+    generation: number;
+    expectedStatuses: PiRunStatus[];
+    outcome: PiTerminalOutcome;
+    metadata: PiTerminalMetadata;
+  }): PiTerminalSettlement {
+    return this.db.transaction<PiTerminalSettlement>(() => {
+      // Read current run (within the transaction)
+      const runRow = this.db.prepare(
+        `SELECT card_id, execution_generation, status FROM pi_runs WHERE id = ?`
+      ).get(input.runId);
+      if (!runRow) return { committed: false, reason: "missing" };
+
+      const row = runRow as { card_id: number; execution_generation: number; status: string };
+      if (row.execution_generation !== input.generation) return { committed: false, reason: "stale_generation" };
+      if (!input.expectedStatuses.includes(row.status as PiRunStatus)) return { committed: false, reason: "wrong_status" };
+      const cardId = row.card_id;
+
+      // Build run update — #1395 also clears pending fields on terminal settlement
+      const runSet = [`status = ?`, `updated_at = datetime('now')`, `pending_request_id = NULL`, `pending_request_type = NULL`];
+      const runParams: unknown[] = [input.outcome];
+      if (input.metadata.resultSummary !== undefined) { runSet.push(`result_summary = ?`); runParams.push(input.metadata.resultSummary); }
+      if (input.metadata.changedFilesSummary !== undefined) { runSet.push(`changed_files_summary = ?`); runParams.push(input.metadata.changedFilesSummary); }
+      if (input.metadata.usageJson !== undefined) { runSet.push(`usage_json = ?`); runParams.push(input.metadata.usageJson); }
+      if (input.metadata.error !== undefined) { runSet.push(`error = ?`); runParams.push(input.metadata.error); }
+      if (input.metadata.piSessionId !== undefined) { runSet.push(`pi_session_id = ?`); runParams.push(input.metadata.piSessionId); }
+
+      const runResult = this.db.prepare(
+        `UPDATE pi_runs SET ${runSet.join(", ")} WHERE id = ? AND execution_generation = ? AND status IN (${input.expectedStatuses.map(() => "?").join(",")})`
+      ).run(...runParams, input.runId, input.generation, ...input.expectedStatuses);
+
+      if (runResult.changes === 0) return { committed: false, reason: "wrong_status" };
+
+      // Update linked kanban card
+      if (input.outcome === "completed") {
+        this.db.prepare(
+          `UPDATE kanban_board SET status = 'done', result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+        ).run(input.metadata.resultSummary?.slice(0, 4000) ?? null, cardId);
+      } else {
+        // failed or cancelled → kanban_board status = 'failed'
+        this.db.prepare(
+          `UPDATE kanban_board SET status = 'failed', error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+        ).run(input.metadata.error?.slice(0, 1000) ?? input.outcome, cardId);
+      }
+
+      return { committed: true, outcome: input.outcome, cardId };
+    });
+  }
+
   touchActivity(id: string): void {
     this.db.prepare(`UPDATE pi_runs SET last_rpc_activity_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`).run(id);
+  }
+
+  // #1395 — Claim a pending UI request atomically.
+  // Transitions awaiting_input → running, clears both pending columns, records the
+  // claim outcome.  Exactly one contender wins.
+  claimPendingUi(input: {
+    runId: string;
+    generation: number;
+    requestId: string;
+  }): PendingUiClaim {
+    // Read current request type within transaction
+    const row = this.db.prepare(
+      `SELECT pending_request_type FROM pi_runs WHERE id = ? AND execution_generation = ? AND status = 'awaiting_input' AND pending_request_id = ? AND pending_request_type IS NOT NULL`
+    ).get(input.runId, input.generation, input.requestId) as { pending_request_type: string } | undefined;
+    if (!row) {
+      // Determine why it failed — check generation and consumed first
+      const existing = this.db.prepare(`SELECT status, execution_generation, pending_request_id, pending_request_type, last_ui_reply_request_id FROM pi_runs WHERE id = ?`).get(input.runId) as Record<string, unknown> | undefined;
+      if (!existing) return { claimed: false, reason: "missing" };
+      if (existing.execution_generation !== input.generation) return { claimed: false, reason: "wrong_generation" };
+      if (existing.pending_request_id === null || existing.pending_request_id === undefined) {
+        if (existing.last_ui_reply_request_id === input.requestId) return { claimed: false, reason: "already_consumed" };
+        return { claimed: false, reason: "wrong_status" };
+      }
+      if (existing.pending_request_id !== input.requestId) return { claimed: false, reason: "request_mismatch" };
+      return { claimed: false, reason: "already_consumed" };
+    }
+
+    const changed = this.db.prepare(`
+      UPDATE pi_runs
+      SET status = 'running',
+          pending_request_id = NULL,
+          pending_request_type = NULL,
+          last_ui_reply_request_id = ?,
+          last_ui_reply_generation = ?,
+          last_ui_reply_outcome = 'claimed',
+          updated_at = datetime('now')
+      WHERE id = ?
+        AND execution_generation = ?
+        AND status = 'awaiting_input'
+        AND pending_request_id = ?
+        AND pending_request_type IS NOT NULL
+    `).run(input.requestId, input.generation, input.runId, input.generation, input.requestId);
+
+    if (changed.changes === 0) return { claimed: false, reason: "already_consumed" };
+    return { claimed: true, requestType: row.pending_request_type as PiPendingRequestType };
+  }
+
+  // #1395 — Restore a pending UI request after provable pre-write failure.
+  // Narrowly predicates on generation, status='running', both pending fields NULL,
+  // matching last claimed request, and outcome='claimed'.
+  restorePendingUi(input: {
+    runId: string;
+    generation: number;
+    requestId: string;
+    requestType: PiPendingRequestType;
+  }): boolean {
+    const result = this.db.prepare(`
+      UPDATE pi_runs
+      SET status = 'awaiting_input',
+          pending_request_id = ?,
+          pending_request_type = ?,
+          last_ui_reply_outcome = NULL,
+          updated_at = datetime('now')
+      WHERE id = ?
+        AND execution_generation = ?
+        AND status = 'running'
+        AND pending_request_id IS NULL
+        AND pending_request_type IS NULL
+        AND last_ui_reply_request_id = ?
+        AND last_ui_reply_outcome = 'claimed'
+    `).run(input.requestId, input.requestType, input.runId, input.generation, input.requestId);
+    return result.changes > 0;
+  }
+
+  // #1395 — Record the outcome of a UI reply RPC.
+  // Only updates if the outcome is still 'claimed'.
+  recordUiReplyOutcome(input: {
+    runId: string;
+    generation: number;
+    requestId: string;
+    outcome: "acknowledged" | "delivery_unknown";
+  }): boolean {
+    const result = this.db.prepare(`
+      UPDATE pi_runs
+      SET last_ui_reply_outcome = ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+        AND execution_generation = ?
+        AND last_ui_reply_request_id = ?
+        AND last_ui_reply_outcome = 'claimed'
+    `).run(input.outcome, input.runId, input.generation, input.requestId);
+    return result.changes > 0;
+  }
+
+  // #1395 — Guarded set of a pending UI request from an incoming Pi event.
+  // Requires: run is running for the correct generation, no existing different
+  // pending request, and the (generation, requestId) is not a duplicate of a
+  // consumed reply.
+  setPendingUi(input: {
+    runId: string;
+    generation: number;
+    requestId: string;
+    requestType: PiPendingRequestType;
+  }): PendingUiSetResult {
+    const row = this.db.prepare(
+      `SELECT status, execution_generation, pending_request_id, pending_request_type, last_ui_reply_request_id FROM pi_runs WHERE id = ?`
+    ).get(input.runId) as Record<string, unknown> | undefined;
+    if (!row) return { ok: false, reason: "missing" };
+    if (row.execution_generation !== input.generation) return { ok: false, reason: "wrong_generation" };
+    if (row.pending_request_id !== null && row.pending_request_id !== undefined) return { ok: false, reason: "busy" };
+    if (row.pending_request_type !== null && row.pending_request_type !== undefined) return { ok: false, reason: "busy" };
+    if (row.status !== "running") return { ok: false, reason: "wrong_status" };
+    if (row.last_ui_reply_request_id === input.requestId) return { ok: false, reason: "duplicate_request" };
+
+    const changed = this.db.prepare(`
+      UPDATE pi_runs
+      SET status = 'awaiting_input',
+          pending_request_id = ?,
+          pending_request_type = ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+        AND execution_generation = ?
+        AND status = 'running'
+        AND pending_request_id IS NULL
+        AND pending_request_type IS NULL
+        AND (last_ui_reply_request_id IS NULL OR last_ui_reply_request_id != ?)
+    `).run(input.requestId, input.requestType, input.runId, input.generation, input.requestId);
+    if (changed.changes === 0) return { ok: false, reason: "wrong_status" };
+    return { ok: true };
   }
 
   addProgress(runId: string, kind: string, payload: string): void {
@@ -172,6 +407,7 @@ export class PiRunStore {
       thinking: record.thinking,
       pendingRequestId: callerPrincipalId === record.ownerPrincipalId ? record.pendingRequestId : undefined,
       pendingRequestType: callerPrincipalId === record.ownerPrincipalId ? record.pendingRequestType : undefined,
+      lastUiReplyOutcome: callerPrincipalId === record.ownerPrincipalId ? record.lastUiReplyOutcome : undefined,
       generation: record.executionGeneration,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
@@ -190,28 +426,31 @@ export class PiRunStore {
       operationalGoal: row.operational_goal as string,
       ownerPrincipalId: row.owner_principal_id as string,
       origin: row.origin as PiRunOrigin,
-      originPlatform: row.origin_platform as string | undefined,
-      originChatId: row.origin_chat_id as string | undefined,
-      originPeer: row.origin_peer as string | undefined,
+      originPlatform: (row.origin_platform as string | null) ?? undefined,
+      originChatId: (row.origin_chat_id as string | null) ?? undefined,
+      originPeer: (row.origin_peer as string | null) ?? undefined,
       executionGeneration: row.execution_generation as number,
-      currentSessionId: row.current_session_id as string | undefined,
+      currentSessionId: (row.current_session_id as string | null) ?? undefined,
       status: row.status as PiRunStatus,
       resumeCapability: row.resume_capability as ResumeCapability,
-      piSessionId: row.pi_session_id as string | undefined,
-      piSessionFile: row.pi_session_file as string | undefined,
-      observedPid: row.observed_pid as number | undefined,
-      modelProvider: row.model_provider as string | undefined,
-      modelId: row.model_id as string | undefined,
-      thinking: row.thinking as string | undefined,
-      pendingRequestId: row.pending_request_id as string | undefined,
-      pendingRequestType: row.pending_request_type as PiPendingRequestType | undefined,
+      piSessionId: (row.pi_session_id as string | null) ?? undefined,
+      piSessionFile: (row.pi_session_file as string | null) ?? undefined,
+      observedPid: (row.observed_pid as number | null) ?? undefined,
+      modelProvider: (row.model_provider as string | null) ?? undefined,
+      modelId: (row.model_id as string | null) ?? undefined,
+      thinking: (row.thinking as string | null) ?? undefined,
+      pendingRequestId: (row.pending_request_id as string | null) ?? undefined,
+      pendingRequestType: (row.pending_request_type as PiPendingRequestType | null) ?? undefined,
+      lastUiReplyRequestId: (row.last_ui_reply_request_id as string | null) ?? undefined,
+      lastUiReplyGeneration: (row.last_ui_reply_generation as number | null) ?? undefined,
+      lastUiReplyOutcome: (row.last_ui_reply_outcome as UiReplyOutcome | null) ?? undefined,
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
-      lastRpcActivityAt: row.last_rpc_activity_at as string | undefined,
-      resultSummary: row.result_summary as string | undefined,
-      changedFilesSummary: row.changed_files_summary as string | undefined,
-      usageJson: row.usage_json as string | undefined,
-      error: row.error as string | undefined,
+      lastRpcActivityAt: (row.last_rpc_activity_at as string | null) ?? undefined,
+      resultSummary: (row.result_summary as string | null) ?? undefined,
+      changedFilesSummary: (row.changed_files_summary as string | null) ?? undefined,
+      usageJson: (row.usage_json as string | null) ?? undefined,
+      error: (row.error as string | null) ?? undefined,
     };
   }
 }

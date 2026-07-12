@@ -1,33 +1,36 @@
 /**
  * ws-peer-client.ts — Persistent outbound WebSocket to a peer (#972, #1293).
  *
- * #1293 changes:
- * - Auth: Ed25519 request signatures replacing JWT header
- * - Removed own ping setInterval (dead-detection via HB tick)
- * - setKeepAlive(true, 20_000) to hold NAT hole
- * - Durable outbound queue (persist to disk, drain on reconnect)
+ * #1401 changes:
+ * - Durable outbox (WsOutboxStore) with atomic checkpoint on every mutation.
+ * - Stable request ID assigned at enqueue, reused on every retry.
+ * - Serial pump: one entry in flight at a time, removed only after correlated
+ *   success response.
+ * - `destroy()` preserves the outbox; `purgeOutbox()` for explicit removal.
+ * - Corrupt checkpoints quarantined, not silently reset.
  */
 import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
 import { signRequest, verifyServerCert } from "./peer-auth.js";
 import { loadPeerConfig, deriveVerifyKey, type PeerEntry } from "../peer-config.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
+import { WsOutboxStore } from "./ws-outbox-store.js";
 
 const TAG = "ws-peer";
 const MAX_BACKOFF_MS = 30_000;
-const REQUEST_TIMEOUT_MS = 30_000;
-const QUEUE_MAX = 200;
+const OUTBOX_TIMEOUT_MS = 30_000;
+const OUTBOX_MAX = 200;
+const OUTBOX_MAX_ENTRY_BYTES = 512 * 1024;   // 512 KiB per entry
+const OUTBOX_MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB total
 
 type PushHandler = (method: string, payload: unknown) => void;
-type PendingRequest = { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
+type PendingWaiter = { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
 
-interface QueueEntry {
-  method: string;
-  payload: unknown;
-  id: string;
+interface InFlight {
+  entryId: string;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 export class WsPeerClient {
@@ -37,17 +40,27 @@ export class WsPeerClient {
   private backoff = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pushHandler: PushHandler | null = null;
-  private pending = new Map<string, PendingRequest>();
+  /** #1401 — Runtime waiters for connected callers (keyed by stable outbox ID). */
+  private waiters = new Map<string, PendingWaiter>();
   private destroyed = false;
-  /** Durable outbound queue: pending messages while disconnected. */
-  private _queue: QueueEntry[] = [];
-  private readonly queuePath: string;
+  /** #1401 — Durable outbox: entries survive disconnect, timeout, restart. */
+  private readonly outbox: WsOutboxStore;
+  /** #1401 — Currently in-flight entry (at most one at a time). */
+  private inFlight: InFlight | null = null;
+  /** #1401 — Monotonic generation counter for socket identity. */
+  private sockGen = 0;
 
   constructor(peerName: string, entry: PeerEntry) {
     this.peerName = peerName;
     this.entry = entry;
-    this.queuePath = join(abtarsHome(), `ws-queue-${peerName}.json`);
-    this.loadQueue();
+    const filePath = join(abtarsHome(), `ws-outbox-${peerName}.json`);
+    this.outbox = new WsOutboxStore({
+      peerName,
+      filePath,
+      maxEntries: OUTBOX_MAX,
+      maxEntryBytes: OUTBOX_MAX_ENTRY_BYTES,
+      maxFileBytes: OUTBOX_MAX_FILE_BYTES,
+    });
   }
 
   onPush(handler: PushHandler): void { this.pushHandler = handler; }
@@ -55,7 +68,7 @@ export class WsPeerClient {
   connect(): void {
     if (this.destroyed) return;
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-      return; // already connected / connecting
+      return;
     }
 
     const config = loadPeerConfig();
@@ -76,7 +89,6 @@ export class WsPeerClient {
         try {
           const { createPublicKey } = require("node:crypto") as typeof import("node:crypto");
           const keyObj = createPublicKey({ key: cert.raw, format: "der", type: "spki" });
-          // Build PEM cert block from raw DER
           const certDerB64 = cert.raw.toString("base64");
           const certPemBlock = `-----BEGIN CERTIFICATE-----\n${certDerB64.match(/.{1,64}/g)!.join("\n")}\n-----END CERTIFICATE-----\n`;
           if (!verifyServerCert(certPemBlock, this.entry.verifyKey)) {
@@ -89,18 +101,20 @@ export class WsPeerClient {
       },
     } as any);
 
+    const myGen = ++this.sockGen;
+
     this.ws.on("open", () => {
       logInfo(TAG, `Connected to ${this.peerName}`);
       this.backoff = 1000;
-      // NAT keepalive: 20s idle probe
       (this.ws as any)._socket?.setKeepAlive(true, 20_000);
-      this.drainQueue();
+      this.pump(myGen);
     });
 
-    this.ws.on("message", (data) => this.handleMessage(data.toString()));
+    this.ws.on("message", (data) => this.handleMessage(data.toString(), myGen));
 
     this.ws.on("close", () => {
-      this.cleanup();
+      this.clearInFlight();
+      this.rejectWaiters(new Error("WS connection closed"));
       if (!this.destroyed) this.scheduleReconnect();
     });
 
@@ -110,124 +124,131 @@ export class WsPeerClient {
     });
   }
 
+  // ── Public API ───────────────────────────────────────────────────────────
+
   /**
-   * Send a message over the WS. If disconnected, enqueues it for delivery on reconnect.
+   * #1401 — Send a message over the WSS outbox.
+   * Always creates a durable entry first.  If connected, the pump sends it.
+   * Returns a promise that resolves on correlated success or rejects on
+   * terminal failure / client shutdown.
    */
   async send(method: string, payload: unknown): Promise<unknown> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      // Enqueue instead of throwing
-      return this.enqueue(method, payload);
-    }
-    return this.sendNow(method, payload);
+    if (this.outbox.isDegraded) throw new Error(`Outbox degraded for ${this.peerName}`);
+    if (this.outbox.isFull) throw new Error(`Outbox full for ${this.peerName} (max ${OUTBOX_MAX})`);
+
+    const entry = this.outbox.append(method, payload);
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.waiters.delete(entry.id);
+        reject(new Error(`Outbox timeout (${this.peerName}/${method})`));
+      }, OUTBOX_TIMEOUT_MS);
+      this.waiters.set(entry.id, { resolve, reject, timer });
+      this.pump(this.sockGen);
+    });
   }
 
   get connected(): boolean { return this.ws?.readyState === WebSocket.OPEN; }
 
+  /** #1401 — Close runtime resources. Outbox entries survive for the next client/process. */
   destroy(): void {
     this.destroyed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.cleanup();
+    this.clearInFlight();
+    this.rejectWaiters(new Error("WsPeerClient destroyed"));
     this.ws?.close();
-    this.clearPersistedQueue();
   }
 
-  private async sendNow(method: string, payload: unknown): Promise<unknown> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error(`WS not connected to ${this.peerName}`);
-    }
-    const id = randomUUID();
+  /** #1401 — Explicit operator/test destructive action. */
+  purgeOutbox(): void {
+    this.outbox.purge();
+  }
+
+  // ── Pump ─────────────────────────────────────────────────────────────────
+
+  /** #1401 — Serial pump: send the oldest entry if nothing is in flight. */
+  private pump(gen: number): void {
+    if (this.destroyed) return;
+    if (this.inFlight) return;
+    if (this.outbox.isDegraded) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    const entry = this.outbox.peek();
+    if (!entry) return;
+
+    this.outbox.recordAttempt(entry.id);
+
     const config = loadPeerConfig();
-    // Sign the serialized payload as a "request"
-    const payloadStr = JSON.stringify(payload);
-    const sigHeaders = signRequest("POST", `/${method}`, payloadStr, config.self.signingKey, config.self.name);
+    const payloadStr = JSON.stringify(entry.payload);
+    const sigHeaders = signRequest("POST", `/${entry.method}`, payloadStr, config.self.signingKey, config.self.name);
+    const frame = JSON.stringify({ type: "request", id: entry.id, method: entry.method, payload: entry.payload, ...sigHeaders });
 
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`WS request timeout (${this.peerName}/${method})`));
-      }, REQUEST_TIMEOUT_MS);
-      this.pending.set(id, { resolve, reject, timer });
-      this.ws!.send(JSON.stringify({ type: "request", id, method, payload, ...sigHeaders }));
-    });
+    const timer = setTimeout(() => {
+      // Timeout — clear in-flight, keep entry, let next pump retry
+      if (gen !== this.sockGen) return;
+      this.outbox.recordAttempt(entry.id, "timeout");
+      this.clearInFlight();
+      this.pump(gen);
+    }, OUTBOX_TIMEOUT_MS);
+
+    this.inFlight = { entryId: entry.id, timer };
+    this.ws.send(frame);
   }
 
-  private enqueue(method: string, payload: unknown): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      if (this._queue.length >= QUEUE_MAX) {
-        const dropped = this._queue.shift()!;
-        logWarn(TAG, `[warn] ws queue for ${this.peerName} full, dropping oldest (${dropped.method})`);
-      }
-      const entry: QueueEntry = { method, payload, id: randomUUID() };
-      this._queue.push(entry);
-      this.persistQueue();
-      // We can't resolve/reject immediately for queued messages
-      // Resolve immediately with a sentinel (fire-and-forget semantics)
-      resolve({ queued: true, id: entry.id });
-    });
-  }
-
-  private drainQueue(): void {
-    if (this._queue.length === 0) return;
-    logInfo(TAG, `Draining ${this._queue.length} queued message(s) for ${this.peerName}`);
-    const queue = this._queue.splice(0);
-    this.clearPersistedQueue();
-    for (const entry of queue) {
-      this.sendNow(entry.method, entry.payload).catch(err => {
-        logWarn(TAG, `Queue drain failed for ${this.peerName}/${entry.method}: ${err.message}`);
-      });
+  /** Clear in-flight state without affecting durable entries. */
+  private clearInFlight(): void {
+    if (this.inFlight) {
+      clearTimeout(this.inFlight.timer);
+      this.inFlight = null;
     }
   }
 
-  private persistQueue(): void {
-    try {
-      writeFileSync(this.queuePath, JSON.stringify(this._queue), { encoding: "utf-8", mode: 0o600 });
-    } catch { /* best effort */ }
-  }
+  // ── Response handling ────────────────────────────────────────────────────
 
-  private clearPersistedQueue(): void {
-    try { if (existsSync(this.queuePath)) unlinkSync(this.queuePath); } catch { /* best effort */ }
-  }
-
-  private loadQueue(): void {
-    try {
-      if (existsSync(this.queuePath)) {
-        const data = readFileSync(this.queuePath, "utf-8");
-        const parsed = JSON.parse(data) as QueueEntry[];
-        if (Array.isArray(parsed)) {
-          this._queue = parsed.slice(0, QUEUE_MAX);
-          if (this._queue.length > 0) {
-            logInfo(TAG, `Loaded ${this._queue.length} queued message(s) for ${this.peerName} from disk`);
-          }
-        }
-      }
-    } catch { /* best effort — corrupt queue, start fresh */ }
-  }
-
-  private handleMessage(raw: string): void {
+  private handleMessage(raw: string, gen: number): void {
     try {
       const msg = JSON.parse(raw);
-      if (msg.type === "response" && msg.id && this.pending.has(msg.id)) {
-        const p = this.pending.get(msg.id)!;
-        this.pending.delete(msg.id);
-        clearTimeout(p.timer);
-        p.resolve(msg.payload);
+
+      if (msg.type === "response" && msg.id) {
+        // #1401 — correlated success: acknowledge the durable entry
+        if (this.inFlight && this.inFlight.entryId === msg.id) {
+          this.outbox.acknowledge(msg.id);
+          this.clearInFlight();
+        }
+
+        // Settle the runtime waiter if present
+        const w = this.waiters.get(msg.id);
+        if (w) {
+          this.waiters.delete(msg.id);
+          clearTimeout(w.timer);
+          if (msg.error) {
+            w.reject(new Error(String(msg.error)));
+          } else {
+            w.resolve(msg.payload);
+          }
+        }
+
+        // Pump the next entry
+        if (gen === this.sockGen) this.pump(gen);
       } else if (msg.type === "push") {
         this.pushHandler?.(msg.method, msg.payload);
       }
     } catch { /* malformed — ignore */ }
   }
 
-  private cleanup(): void {
-    // Reject all pending requests
-    for (const [, p] of this.pending) {
-      clearTimeout(p.timer);
-      p.reject(new Error("WS connection closed"));
+  /** Reject all outstanding waiters (e.g. on close/destroy). Entries survive. */
+  private rejectWaiters(err: Error): void {
+    for (const [, w] of this.waiters) {
+      clearTimeout(w.timer);
+      w.reject(err);
     }
-    this.pending.clear();
+    this.waiters.clear();
   }
 
+  // ── Reconnect ────────────────────────────────────────────────────────────
+
   private scheduleReconnect(): void {
-    const jitter = this.backoff * (0.8 + Math.random() * 0.4); // ±20%
+    const jitter = this.backoff * (0.8 + Math.random() * 0.4);
     logDebug(TAG, `Reconnecting to ${this.peerName} in ${Math.round(jitter)}ms`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -246,7 +267,7 @@ export class WsPeerClient {
       macTribe, signEnroll, verifyAck,
     } = await import("./peer-auth.js");
     const { clearPeerConfigCache } = await import("../peer-config.js");
-    const { writeFileSync, existsSync: exSync, mkdirSync } = await import("node:fs");
+    const { writeFileSync, existsSync: exSync } = await import("node:fs");
 
     const enrollUrl = `wss://${this.entry.host}:${this.entry.port}/v1/enroll-ws`;
     const nonceI = randomBytes(16).toString("hex");
@@ -262,18 +283,9 @@ export class WsPeerClient {
       let stage = 0;
       let nonceR = "";
       let pubKeyR = "";
+      let enrollTimeout: ReturnType<typeof setTimeout> | null = null;
 
-      enrollWs.on("open", () => {
-        // Step A: knock
-        enrollWs.send(JSON.stringify({
-          pubKey_i: selfVerifyKey,
-          nonce_i: nonceI,
-          ts: tsNow,
-        }));
-        stage = 1;
-      });
-
-      enrollWs.on("message", async (rawData) => {
+      const onEnrollMessage = async (rawData: import("ws").RawData) => {
         try {
           const msg = JSON.parse(rawData.toString());
 
@@ -312,6 +324,9 @@ export class WsPeerClient {
               reject(new Error("Invalid ack signature")); enrollWs.close(); return;
             }
 
+            // Clear enrollment timeout
+            if (enrollTimeout) { clearTimeout(enrollTimeout); enrollTimeout = null; }
+
             // Persist responder to own peers.json
             const peersPath = join(abtarsHome(), "config", "peers.json");
             let raw: Record<string, unknown> = {};
@@ -328,26 +343,52 @@ export class WsPeerClient {
             clearPeerConfigCache();
 
             logInfo(TAG, `Enrolled with '${name_r}' at trust=1`);
-            // Keep WS alive as steady-state peer connection
+
+            // Detach enrollment message handler, keep socket as steady-state connection
+            enrollWs.removeListener("message", onEnrollMessage);
             this.ws = enrollWs;
-            enrollWs.removeAllListeners("message");
             enrollWs.on("message", (data) => this.handleMessage(data.toString()));
             enrollWs.on("close", () => { this.cleanup(); if (!this.destroyed) this.scheduleReconnect(); });
             enrollWs.on("error", (err) => { logDebug(TAG, `WS error (${this.peerName}): ${err.message}`); this.ws?.close(); });
+
+            // Remove handshake-only close handler (steady-state close is installed above)
+            enrollWs.removeListener("close", onEnrollClose);
+            // Remove handshake-only error handler (steady-state error is installed above)
+            enrollWs.removeListener("error", onEnrollError);
+
             resolve();
           }
         } catch (err) {
           reject(err);
           enrollWs.close();
         }
+      };
+
+      const onEnrollClose = (_code: number, _reason: Buffer) => {
+        if (stage < 2) reject(new Error(`Enrollment WS closed early: ${_code} ${_reason}`));
+      };
+
+      const onEnrollError = (err: Error) => {
+        reject(new Error(`Enrollment WS error: ${err.message}`));
+      };
+
+      enrollWs.on("open", () => {
+        // Step A: knock
+        enrollWs.send(JSON.stringify({
+          pubKey_i: selfVerifyKey,
+          nonce_i: nonceI,
+          ts: tsNow,
+        }));
+        stage = 1;
       });
 
-      enrollWs.on("error", (err) => reject(new Error(`Enrollment WS error: ${err.message}`)));
-      enrollWs.on("close", (code, reason) => {
-        if (stage < 2) reject(new Error(`Enrollment WS closed early: ${code} ${reason}`));
-      });
+      enrollWs.on("message", onEnrollMessage);
+      enrollWs.on("error", onEnrollError);
+      enrollWs.on("close", onEnrollClose);
 
-      setTimeout(() => { if (stage < 2) { reject(new Error("Enrollment timeout")); enrollWs.close(); } }, 30_000);
+      enrollTimeout = setTimeout(() => {
+        if (stage < 2) { reject(new Error("Enrollment timeout")); enrollWs.close(); }
+      }, 30_000);
     });
   }
 }

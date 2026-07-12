@@ -4,8 +4,8 @@ import { PiExecutor } from "./pi-executor.js";
 import { resolveAndValidateWorkspace, type PiExecutorConfig } from "./config.js";
 import type { PiRunRecord, PiRunView, PiRunRef, PiRunRequest, PiRunStatus, PiUiReply } from "./types.js";
 import { MAX_GOAL_CHARS } from "./types.js";
-import { kanbanEnqueue } from "../tasks/kanban-board.js";
 import type { Spin } from "../spin.js";
+import { nerve } from "../nerve.js";
 import { logInfo } from "../logger.js";
 
 const TAG = "pi-service";
@@ -46,16 +46,15 @@ export class PiRunService {
     const ws = resolveAndValidateWorkspace(input.workspaceAlias, this.deps.config);
     if (ws.error) throw new Error(ws.error);
 
+    // #1393 — atomic card+run creation in one transaction, no Nerve event inside
     const runId = this.deps.store.generateId();
-    const cardId = kanbanEnqueue(`Pi: ${goal.slice(0, 80)}`, "pi", runId, {
-      type: "pi", notes: goal, priority: "MEDIUM",
-    });
-
-    this.deps.store.insert({
-      id: runId,
-      cardId,
+    const sessionId = `${Date.now()}_C_pi_${runId}`;
+    const { cardId } = this.deps.store.createPiCardAndRun({
+      runId,
+      sessionId,
+      title: `Pi: ${goal.slice(0, 80)}`,
+      goal,
       workspaceAlias: input.workspaceAlias,
-      operationalGoal: goal,
       ownerPrincipalId: input.owner.principalId,
       origin: input.owner.origin,
       originPlatform: input.owner.platform,
@@ -66,12 +65,10 @@ export class PiRunService {
       thinking: input.model?.thinking,
     });
 
-    const genSessionId = `${Date.now()}_C_pi_${runId}`;
-    this.deps.store.casTransition(runId, "queued", "queued", { currentSessionId: genSessionId });
+    nerve.fire("card:queued", cardId);
     logInfo(TAG, `Pi run ${runId} created (card ${cardId})`);
 
-    const r = this.deps.store.get(runId)!;
-    return { runId, cardId, sessionId: genSessionId, generation: r.executionGeneration };
+    return { runId, cardId, sessionId, generation: 1 };
   }
 
   get(runId: string, caller: Principal): PiRunView {
@@ -92,8 +89,17 @@ export class PiRunService {
     const run = this._getActive(runId, caller);
     if (!run.pendingRequestId) throw new Error(`Run ${runId} has no pending request`);
     if (run.pendingRequestId !== requestId) throw new Error(`Request ID mismatch for run ${runId}`);
-    const ok = await this.deps.executor.reply(runId, requestId, value);
-    if (!ok) throw new Error(`Failed to reply to run ${runId}`);
+    const claim = await this.deps.executor.reply(runId, run.executionGeneration, requestId, value);
+    if (!claim.claimed) {
+      switch (claim.reason) {
+        case "already_consumed": throw new Error(`Request already consumed for run ${runId}`);
+        case "wrong_generation": throw new Error(`Stale generation for run ${runId}`);
+        case "wrong_status": throw new Error(`Run ${runId} is no longer awaiting input`);
+        case "request_mismatch": throw new Error(`Request ID mismatch for run ${runId}`);
+        case "missing": throw new Error(`Run ${runId} not found`);
+        default: throw new Error(`Failed to reply to run ${runId}`);
+      }
+    }
     return this.deps.store.toView(this.deps.store.get(runId)!, caller.userId);
   }
 
@@ -135,6 +141,8 @@ export class PiRunService {
       executionGeneration: newGen,
       currentSessionId: newSessionId,
       resumeCapability: "available",
+      pendingRequestId: null,
+      pendingRequestType: null,
     });
 
     const updated = this.deps.store.get(runId)!;

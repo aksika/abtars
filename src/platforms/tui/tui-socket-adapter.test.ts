@@ -1018,3 +1018,142 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     second.conn.destroy();
   });
 });
+
+// ── #1398: feed isolation — new-attach-wins must drop old subscriptions ──
+
+describe("TuiSocketAdapter — #1398 feed isolation", () => {
+  let sockPath: string;
+  let adapter: TuiSocketAdapter;
+
+  beforeEach(() => { sockPath = tmpSocketPath(); });
+  afterEach(() => { if (adapter) adapter.stop(); });
+
+  it("replacement drops old output subscribers before new writer is installed", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin().spin;
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+
+    const a = await attachAndCollect(sockPath, { kind: "resume" });
+    expect(feed.subscriberCount).toBe(1);
+
+    const b = net.createConnection(sockPath);
+    await new Promise<void>((resolve, reject) => {
+      b.once("connect", () => resolve()); b.once("error", reject);
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // After eviction, A's output subscription must be gone.
+    expect(feed.subscriberCount).toBe(0);
+
+    b.destroy();
+    a.conn.destroy();
+  });
+
+  it("old session output does not reach replacement before its own attach", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin().spin;
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+
+    const a = await attachAndCollect(sockPath, { kind: "resume" });
+    const aReady = a.frames.find((f) => f.t === "ready") as any;
+    const aSessionId: string = aReady.sessionId;
+
+    // B connects without sending an attach frame.
+    const bFrames: TuiServerFrame[] = [];
+    const bDec = createFrameDecoder<TuiServerFrame>();
+    const b = net.createConnection(sockPath);
+    await new Promise<void>((resolve, reject) => {
+      b.once("connect", () => resolve()); b.once("error", reject);
+    });
+    b.on("data", (buf: Buffer) => {
+      for (const f of bDec(buf.toString())) bFrames.push(f);
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Publish output for A's old session. With the fix it reaches no one.
+    feed.publish({ type: "delta", sessionId: aSessionId, executionId: "e1", streamId: "st1", text: "LEAK" });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const hasAttachmentFrame = bFrames.some(
+      (f) => f.t === "chunk" || f.t === "message" || f.t === "ready" || f.t === "status",
+    );
+    expect(hasAttachmentFrame).toBe(false);
+
+    b.destroy();
+    a.conn.destroy();
+  });
+
+  it("rapid replacement does not accumulate subscribers", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin().spin;
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+
+    // Make an initial attached connection to get a subscription.
+    const first = await attachAndCollect(sockPath, { kind: "resume" });
+    expect(feed.subscriberCount).toBe(1);
+
+    // Rapidly replace connections without attaching them.
+    for (let i = 0; i < 5; i++) {
+      const c = net.createConnection(sockPath);
+      await new Promise<void>((resolve, reject) => {
+        c.once("connect", () => resolve()); c.once("error", reject);
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      c.destroy();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    expect(feed.subscriberCount).toBe(0);
+    first.conn.destroy();
+  });
+
+  it("stop leaves zero subscribers", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin().spin;
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+
+    const a = await attachAndCollect(sockPath, { kind: "resume" });
+    expect(feed.subscriberCount).toBe(1);
+
+    adapter.stop();
+    expect(feed.subscriberCount).toBe(0);
+
+    a.conn.destroy();
+  });
+
+  it("session switch retains exactly one output subscriber", async () => {
+    const feed = new SessionOutputFeed();
+    const sessions = [
+      { id: "1_A_01", userId: "aksika", platform: "telegram", chatId: 100, active: true, status: "ready", shortIndex: 1, lastActiveAt: 1000, delivery: "streaming" },
+      { id: "2_A_02", userId: "aksika", platform: "discord", chatId: 200, active: false, status: "ready", shortIndex: 2, lastActiveAt: 2000, delivery: "streaming" },
+    ] as ManagedSession[];
+    const mockSpin = makeMockSpin({ allSessions: sessions }).spin;
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+
+    const c = await attachAndCollect(sockPath, { kind: "session", index: 2 });
+    expect(feed.subscriberCount).toBe(1);
+
+    // Switch to session 1 via a second attach frame on the same connection.
+    c.conn.write(encodeFrame({ t: "attach", mode: { kind: "session", index: 1 }, cols: 80, rows: 24 }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(feed.subscriberCount).toBe(1);
+
+    c.conn.destroy();
+  });
+});
