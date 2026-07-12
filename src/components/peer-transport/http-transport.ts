@@ -119,7 +119,7 @@ export class HttpTransport implements PeerTransport {
     for (const h of this.handlers) { try { h(from, message); } catch {} }
   }
 
-  async delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }> }): Promise<{ taskId: number; remoteSessionId?: string }> {
+  async delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }>; contract?: Record<string, unknown>; attemptId?: string }): Promise<{ taskId: number; remoteSessionId?: string }> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
 
@@ -142,6 +142,8 @@ export class HttpTransport implements PeerTransport {
 
     const payload: Record<string, unknown> = { goal, priority: opts?.priority ?? "MEDIUM", context: opts?.context, callback_peer: config.self.name };
     if (opts?.artifacts?.length) payload.artifacts = opts.artifacts;
+    if (opts?.contract) payload.worker_contract = opts.contract;
+    if (opts?.attemptId) payload.attempt_id = opts.attemptId;
 
     // #972: Route via WS if connected, otherwise HTTP
     const ws = this.wsClients.get(peer);

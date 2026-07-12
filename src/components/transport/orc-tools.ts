@@ -98,9 +98,23 @@ const spawnWorkerTool: ToolDefinition = {
 
 // ── check_workers ────────────────────────────────────────────────────────────
 
+function supervisionSummary(cardId: number): string {
+  try {
+    const { WorkerSupervisionService } = require("../worker-supervision-service.js") as typeof import("../worker-supervision-service.js");
+    const svc = new WorkerSupervisionService();
+    if (!svc.cardHasContract(cardId)) return "";
+    const contract = svc.getContractForCard(cardId);
+    if (!contract) return "";
+    const totalCriteria = contract.criteria.length;
+    const attempts = svc["store"].getAttemptsForCard(cardId) as Array<{ status: string; ordinal: number }>;
+    const settledAttempts = attempts.filter(a => a.status === "settled" || a.status === "failed").length;
+    return ` [sup: ${totalCriteria} criteria, ${settledAttempts}/${attempts.length} attempts]`;
+  } catch { return ""; }
+}
+
 const checkWorkersTool: ToolDefinition = {
   name: "check_workers",
-  description: "Check status of all workers on the current project. Returns their status and results.",
+  description: "Check status of all workers on the current project. Returns their status and results, including supervision info for supervised Workers (#1366).",
   parameters: { type: "object", properties: {}, required: [] },
   async execute(): Promise<string> {
     if (!_activeOrcCardId) return "[err] No active Orc project.";
@@ -112,7 +126,8 @@ const checkWorkersTool: ToolDefinition = {
       const result = c.result_summary ? ` — ${c.result_summary.slice(0, 100)}` : "";
       const tokens = c.tokens_used ? ` (${c.tokens_used} tok)` : "";
       const source = c.type === "remote" ? (() => { try { return ` [${JSON.parse(c.notes ?? "{}").peer}]`; } catch { return ""; } })() : "";
-      return `${icon} #${c.id} ${c.title || "(untitled)"} (${c.status})${tokens}${source}${result}`;
+      const sup = supervisionSummary(c.id);
+      return `${icon} #${c.id} ${c.title || "(untitled)"} (${c.status})${tokens}${source}${sup}${result}`;
     });
     return `Workers (${children.length}):\n${lines.join("\n")}`;
   },

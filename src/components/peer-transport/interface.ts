@@ -33,6 +33,8 @@ export interface TaskResult {
   result?: string;
   error?: string;
   tokensUsed?: number;
+  /** #1366: Worker result envelope for supervised tasks. */
+  workerResult?: Record<string, unknown>;
 }
 
 export interface PeerTransport {
@@ -49,7 +51,7 @@ export interface PeerTransport {
   onMessage(handler: (from: string, message: PeerMessage) => void): void;
 
   /** Delegate a task to a remote peer. Returns remote cardId. */
-  delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }> }): Promise<{ taskId: number; remoteSessionId?: string }>;
+  delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }>; contract?: Record<string, unknown>; attemptId?: string }): Promise<{ taskId: number; remoteSessionId?: string }>;
 
   /** Check status of a remote task. */
   checkTask(peer: string, taskId: number): Promise<TaskResult>;

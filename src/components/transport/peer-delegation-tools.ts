@@ -25,6 +25,8 @@ export const peerDelegateTool: ToolDefinition = {
       context: { type: "string", description: "Optional context to include" },
       requires: { type: "array", items: { type: "string" }, description: "Required capabilities (e.g. ['gpu', 'docker'])" },
       artifacts: { type: "string", description: "JSON array of {name, content} objects (base64-encoded files to send)" },
+      worker_contract: { type: "string", description: "JSON string of WorkerAcceptanceContractV1 for supervised delegation (#1366)" },
+      attempt_id: { type: "string", description: "Pre-allocated attempt ID for supervision correlation (#1366)" },
     },
     required: ["goal"],
   },
@@ -72,7 +74,8 @@ export const peerDelegateTool: ToolDefinition = {
 
     try {
       const transport = getPeerTransport();
-      const { taskId: remoteTaskId, remoteSessionId } = await transport.delegateTask(peer, goal, { priority, context, artifacts });
+      const contract = args.worker_contract ? JSON.parse(args.worker_contract) : undefined;
+      const { taskId: remoteTaskId, remoteSessionId } = await transport.delegateTask(peer, goal, { priority, context, artifacts, contract, attemptId: args.attempt_id });
 
       const localCardId = kanbanEnqueue(`[remote:${peer}] ${goal.slice(0, 80)}`, "peer", undefined, {
         type: "remote",
