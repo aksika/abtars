@@ -10,9 +10,10 @@ import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
-import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, QueuedSessionInstruction, SpinExecutionDriver } from "./spin-types.js";
+import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver } from "./spin-types.js";
 import { sessionType } from "./spin-types.js";
 import { profileFor, isValidSessionType, type SessionProfile } from "./spin-profiles.js";
+import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
 import { drainInstructionBatch, expireInstructions } from "./session-instruction-queue.js";
@@ -505,6 +506,16 @@ export class Spin {
       for (const decorate of profile.decorators) {
         prompt = await decorate(prompt, { session, cardId, parentCardId: spec.parentCardId });
       }
+      // #1366: Inject Worker contract into prompt when contractId is set
+      if (spec.contractId && cardId !== undefined) {
+        try {
+          const sup = new WorkerSupervisionService();
+          const contract = sup.getContractForCard(cardId);
+          if (contract) {
+            prompt = sup.renderContractForPrompt(contract) + "\n\n" + prompt;
+          }
+        } catch { /* best effort — non-supervised cards pass through unchanged */ }
+      }
       pushLog(session, `spin type=${spec.type} agent=${agent} step=${stepIndex}`);
 
       // 7. Execute — persistent/continuation sends via the session's own transport
@@ -823,6 +834,8 @@ export class Spin {
       sourcePeer: request.sourcePeer,
       chatId: request.chatId ? Number(request.chatId) : undefined,
       await: false,
+      contractId: request.contract?.id,
+      attemptId: request.attemptId,
     });
     return { cardId };
   }
@@ -860,7 +873,23 @@ export class Spin {
 
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {
     if (request.type === "O") throw new Error("Cannot nest orchestrators");
-    return this.dispatch({ ...request, type: "W", parentCardId }).cardId;
+    const cardId = this.dispatch({ ...request, type: "W", parentCardId }).cardId;
+    if (request.contract && cardId) {
+      try {
+        const service = new WorkerSupervisionService();
+        const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+        service.createChild(request.goal, cardId, rootCardId, "orc", {
+          criteria: request.contract.criteria as Array<{ id: string; description: string }>,
+          expectedArtifacts: request.contract.expected_artifacts as Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>,
+          verificationCommands: request.contract.verification_commands as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
+          requiredCapabilities: [...request.contract.required_capabilities],
+          limits: { ...request.contract.limits },
+        });
+      } catch (err) {
+        logWarn(TAG, `spawnChild: failed to create contract for card ${cardId}: ${err}`);
+      }
+    }
+    return cardId;
   }
 
   // ── Internal ───────────────────────────────────────────────────────────

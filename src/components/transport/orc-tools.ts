@@ -41,15 +41,24 @@ export async function isActiveCardPeerSourced(): Promise<boolean> {
 
 // ── spawn_worker ─────────────────────────────────────────────────────────────
 
+function parseJsonArray(raw: string | undefined): unknown[] {
+  if (!raw) return [];
+  try { return JSON.parse(raw) as unknown[]; } catch { return []; }
+}
+
 const spawnWorkerTool: ToolDefinition = {
   name: "spawn_worker",
-  description: "Spawn a worker to execute a task in parallel. Workers run independently and report results.",
+  description: "Spawn a worker to execute a task in parallel. Workers run independently and report results. For supervised dispatch (Agent Swarm), provide structured criteria, artifacts, and checks.",
   parameters: {
     type: "object",
     properties: {
       goal: { type: "string", description: "What the worker should accomplish (detailed instruction)" },
       title: { type: "string", description: "Short label for the worker card (optional)" },
       priority: { type: "string", description: "CRITICAL | HIGH | MEDIUM | LOW", enum: ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
+      criteria: { type: "string", description: "JSON array of {id, description} acceptance criteria (supervised)" },
+      expected_artifacts: { type: "string", description: "JSON array of {id, kind, ref, required, criterion_ids} expected artifacts (supervised)" },
+      verification_commands: { type: "string", description: "JSON array of {id, argv, cwd, timeout_ms, criterion_ids} verification commands (supervised)" },
+      required_capabilities: { type: "string", description: "JSON array of required capability strings (supervised)" },
     },
     required: ["goal"],
   },
@@ -58,14 +67,32 @@ const spawnWorkerTool: ToolDefinition = {
     const goal = args.goal;
     if (!goal) return "[err] goal is required";
     const { spin } = await import("../spin.js");
+    const criteriaRaw = parseJsonArray(args.criteria);
+    const artifactsRaw = parseJsonArray(args.expected_artifacts);
+    const commandsRaw = parseJsonArray(args.verification_commands);
+    const capsRaw = parseJsonArray(args.required_capabilities) as string[];
+    const hasStructuredData = criteriaRaw.length > 0 || artifactsRaw.length > 0 || commandsRaw.length > 0;
+    const contract = hasStructuredData ? {
+      schema_version: 1 as const,
+      id: "",
+      digest: "",
+      goal,
+      criteria: criteriaRaw as Array<{ id: string; description: string }>,
+      expected_artifacts: artifactsRaw as Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>,
+      verification_commands: commandsRaw as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
+      required_capabilities: capsRaw,
+      limits: {},
+      provenance: { root_card_id: 0, card_id: 0, authored_by: "orc", created_at: "" },
+    } : undefined;
     const cardId = spin.spawnChild(_activeOrcCardId, {
       goal,
       title: args.title || goal.slice(0, 40),
       source: "agent",
       priority: args.priority as any,
+      contract,
     });
-    logInfo(TAG, `spawn_worker card:${cardId} parent:${_activeOrcCardId} — ${(args.title || goal).slice(0, 60)}`);
-    return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"`;
+    logInfo(TAG, `spawn_worker card:${cardId} parent:${_activeOrcCardId} — ${(args.title || goal).slice(0, 60)}${hasStructuredData ? " [supervised]" : ""}`);
+    return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"${hasStructuredData ? " [supervised]" : ""}`;
   },
 };
 

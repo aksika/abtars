@@ -128,6 +128,10 @@ export interface SpinRequest {
   sourcePeer?: string;   // #949: which peer delegated this task
   chatId?: string;      // #1008: delivery target chat (fallback: masterChatId)
   maxToolRounds?: number; // #1283: per-task circuit breaker override
+  /** #1366: Worker acceptance contract (supervised dispatch). */
+  contract?: import("./worker-contract.js").WorkerAcceptanceContractV1;
+  /** #1366: Pre-allocated attempt ID for supervision correlation. */
+  attemptId?: string;
 }
 
 // ── #1271: unified session API ──────────────────────────────────────────
@@ -178,6 +182,10 @@ export interface SpinSessionSpec {
   // (transport.onIntermediateResponse / onToolCallStart / onSegmentBreak) that the
   // PIPELINE sets before calling spin() and resets in its finally — Spin never touches it.
   // sendPrompt is (sessionKey, message, image?, context?: PromptRequestContext) — 4 args, no stream.
+
+  // #1366: Worker supervision contract and attempt ID
+  contractId?: string;
+  attemptId?: string;
 
   // Extension / future-proofing
   metadata?: Record<string, unknown>;  // session-scoped initial data, set ONCE at allocation
