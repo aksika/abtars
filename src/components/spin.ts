@@ -674,7 +674,16 @@ export class Spin {
         const { drainArtifacts } = require("./transport/artifact-tools.js") as typeof import("./transport/artifact-tools.js");
         artifacts = drainArtifacts(cardId) ?? [];
       } catch { /* artifact-tools unavailable (e.g. test env) — skip */ }
-      kanbanComplete(cardId, null, result.slice(0, 500));
+      // #1366: Collect evidence and settle for supervised Workers
+      let workerSummary = result.slice(0, 500);
+      if (spec.contractId || spec.type === "W") {
+        try {
+          const svc = new WorkerSupervisionService();
+          const outcome = svc.collectAndSettle(cardId, result, session.workingDir);
+          if (outcome.settled) workerSummary = outcome.summary;
+        } catch { /* non-supervised Workers pass through unchanged */ }
+      }
+      kanbanComplete(cardId, null, workerSummary);
       if (spec.callbackPeer) {
         const card = kanbanGetCard(cardId);
         fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);

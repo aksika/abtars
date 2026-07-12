@@ -93,4 +93,53 @@ describe("WorkerSupervisionService", () => {
       expect(rendered).toContain('<criterion id="c1">');
     }
   });
+
+  describe("collectAndSettle", () => {
+    it("returns not-settled for card without contract", () => {
+      const svc = new Service();
+      const outcome = svc.collectAndSettle(999, "worker output");
+      expect(outcome.settled).toBe(false);
+      expect(outcome.summary).toBe("worker output");
+    });
+
+    it("settles and produces envelope for contracted card", () => {
+      const svc = new Service();
+      svc.createChild("Build report", 101, 100, "orc", {
+        criteria: [{ id: "c1", description: "Must work" }],
+      });
+      const outcome = svc.collectAndSettle(101, "<summary>Done</summary>");
+      expect(outcome.settled).toBe(true);
+      expect(outcome.envelope).toBeDefined();
+      expect(outcome.envelope!.attempt.contract_id).toMatch(/^c_/);
+      expect(["completed", "failed"]).toContain(outcome.envelope!.outcome);
+      expect(outcome.envelope!.criteria.length).toBe(1);
+    });
+
+    it("parses worker report from XML tags", () => {
+      const svc = new Service();
+      svc.createChild("Build report", 101, 100, "orc", {
+        criteria: [{ id: "c1", description: "Must work" }],
+      });
+      const outcome = svc.collectAndSettle(101, `
+        <summary>All checks passed</summary>
+        <claim criterion_id="c1">I verified the output</claim>
+        <risk>Network might be slow</risk>
+      `);
+      expect(outcome.settled).toBe(true);
+      expect(outcome.envelope!.worker_report.summary).toContain("All checks passed");
+      expect(outcome.envelope!.worker_report.claims).toHaveLength(1);
+      expect(outcome.envelope!.worker_report.unresolved_risks).toHaveLength(1);
+    });
+
+    it("settleResult returns conflict on duplicate call", () => {
+      const svc = new Service();
+      svc.createChild("Build report", 101, 100, "orc", {
+        criteria: [{ id: "c1", description: "Must work" }],
+      });
+      svc.collectAndSettle(101, "<summary>Done</summary>");
+      const second = svc.collectAndSettle(101, "<summary>Different result</summary>");
+      expect(second.settled).toBe(false);
+      expect(second.summary).toContain("conflict");
+    });
+  });
 });
