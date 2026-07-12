@@ -81,30 +81,10 @@ export async function writeWrapper(binDir: string, name: string, currentLink: st
   const bundleFile = name === 'abtars' ? 'abtars-cli.js' : `${name}.js`;
   // #912: ensure node is in PATH on macOS (homebrew) and Linux (.local/bin)
   const pathPreamble = `export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"\nexport NODE_PATH="$HOME/.local/lib/node_modules:\${NODE_PATH:-}"\n`;
-  let content: string;
-
-  if (name === 'abmind') {
-    content = `#!/usr/bin/env bash
-${pathPreamble}# Resolve abmind CLI — global install is canonical under #1243 (no longer bundled in the release)
-LOCAL_CLI="$HOME/.local/lib/node_modules/abmind/dist/cli/abmind.js"
-GLOBAL_CLI="$(npm root -g 2>/dev/null)/abmind/dist/cli/abmind.js"
-SRC_CLI="$HOME/.abmind/src/abmind/dist/cli/abmind.js"
-if [ -f "$LOCAL_CLI" ]; then
-  exec node "$LOCAL_CLI" "$@"
-elif [ -f "$GLOBAL_CLI" ]; then
-  exec node "$GLOBAL_CLI" "$@"
-elif [ -f "$SRC_CLI" ]; then
-  exec node "$SRC_CLI" "$@"
-else
-  echo "abmind: not found. Install via: npm install -g abmind" >&2
-  exit 1
-fi
-`;
-  } else {
-    const target = join(currentLink, 'bundle', bundleFile);
-    const distFile = name === 'abtars' ? 'abtars.js' : `${name}.js`;
-    const fallback = join(currentLink, 'dist', 'cli', distFile);
-    content = `#!/usr/bin/env bash
+  const target = join(currentLink, 'bundle', bundleFile);
+  const distFile = name === 'abtars' ? 'abtars.js' : `${name}.js`;
+  const fallback = join(currentLink, 'dist', 'cli', distFile);
+  const content = `#!/usr/bin/env bash
 ${pathPreamble}if [ -f "${target}" ]; then
   exec node "${target}" "$@"
 elif [ -f "${fallback}" ]; then
@@ -118,7 +98,6 @@ else
   exit 1
 fi
 `;
-  }
   const path = join(binDir, name);
   if (dryRun) {
     process.stdout.write(`[dry-run] write wrapper ${path}\n`);

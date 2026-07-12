@@ -10,7 +10,7 @@ import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, mkdirSync, cop
 import { mkdir, writeFile } from "node:fs/promises";
 import { execSync } from "node:child_process";
 import { acquireLock, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
-import { resolveAbmindHome } from "./paths.js";
+
 import { makeLocalBuildSource } from "../update-sources/dev.js";
 import { makeNpmSource } from "../update-sources/npm.js";
 import type { SourceName, StagedRelease } from "../update-sources/types.js";
@@ -375,28 +375,27 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
   const { writeWrapper } = await import("../commands/install.js");
   const { loadManifest } = await import("../install-manifest.js");
   const installManifest = loadManifest(paths.app);
+  // #1387: Clean legacy abtars-generated abmind wrappers before refreshing
+  // abtars wrappers. Cleanup is conservative — only removes files whose
+  // content matches known abtars-generated patterns, preserving npm symlinks
+  // and unknown files.
+  const { classifyLegacyAbmindWrapper } = await import("./legacy-wrapper.js");
+  for (const legacy of ["abmind", "abmind-embed"]) {
+    const p = join(paths.bin, legacy);
+    if (classifyLegacyAbmindWrapper(p) === "abtars-generated") {
+      rmSync(p);
+      process.stdout.write(`✓ removed legacy abtars-generated wrapper: ${p}\n`);
+    }
+  }
+
   for (const name of installManifest.cliWrappers) {
     await writeWrapper(paths.bin, name, paths.app, false);
   }
 
-  // abmind CLI wrappers — point at the bundled copy inside the release
-  const abmindDist = join(paths.app, "node_modules", "abmind", "dist", "cli");
-  if (existsSync(abmindDist)) {
-    for (const name of ["abmind", "abmind-embed"]) {
-      const cliFile = name === "abmind" ? "abmind.js" : `${name}.js`;
-      const target = join(abmindDist, cliFile);
-      const content = `#!/usr/bin/env bash\nexport NODE_PATH="$HOME/.local/lib/node_modules:\${NODE_PATH:-}"\nexec node "${target}" "$@"\n`;
-      const dest = join(paths.bin, name);
-      try { rmSync(dest); } catch {}
-      await writeFile(dest, content, { mode: 0o755 });
-    }
-  }
-
   process.stdout.write(`✓ wrappers refreshed (${installManifest.cliWrappers.length} files)\n`);
 
-  // One-time cleanup: remove stale binary dirs from data directories (#1134)
-  const abmindHome = resolveAbmindHome();
-  for (const stale of [join(abmindHome, "bin"), join(abmindHome, "current"), join(abmindHome, "lib"), join(paths.home, "bin"), join(paths.home, "scripts"), join(paths.releasesDir, "deps")]) {
+  // #1387: Clean only abtars-owned stale dirs. No abmind-home mutation.
+  for (const stale of [join(paths.home, "bin"), join(paths.home, "scripts"), join(paths.releasesDir, "deps")]) {
     if (existsSync(stale)) {
       rmSync(stale, { recursive: true, force: true });
       process.stdout.write(`✓ removed stale ${stale}\n`);
