@@ -284,7 +284,7 @@ export class Spin {
       await this._attachRuntimeTransport(session, userId);
       return session;
     } catch (err) {
-      session.status = "ended";
+      this.finalizeSession(session, "creation_failed");
       pushLog(session, `error: ${err instanceof Error ? err.message : String(err)}`);
       logWarn(TAG, `Session creation failed for ${userId}: ${err instanceof Error ? err.message : String(err)}`);
       throw err;
@@ -321,7 +321,7 @@ export class Spin {
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
       ]);
     } catch (err) {
-      session.status = "ended";
+      this.finalizeSession(session, "transport_attach_failed");
       throw err;
     }
     session.transport = agentSession.transport!;
@@ -340,10 +340,7 @@ export class Spin {
       if (s.userId !== userId) continue;
       if (sessionId && s.id !== sessionId) continue;
       if (s.idleTimeoutMs === Infinity) continue;
-      this.releaseSessionTransport(s);
-      s.status = "ended";
-      s.active = false;
-      pushLog(s, "destroyed");
+      this.finalizeSession(s, "destroyed");
       logInfo(TAG, `Session destroyed: ${userId} id=${s.id}`);
     }
   }
@@ -779,8 +776,8 @@ export class Spin {
   }
 
   private applyTerminate(session: ManagedSession, terminate: "call" | "response" | "external"): void {
-    if (terminate === "call") { this.releaseSessionTransport(session); this.sessions.delete(session.id); }
-    else if (terminate === "response") { this.releaseSessionTransport(session); session.status = "ended"; session.active = false; }
+    if (terminate === "call") { this.finalizeSession(session, "call_terminated"); this.sessions.delete(session.id); }
+    else if (terminate === "response") { this.finalizeSession(session, "response_terminated"); }
     // "external" → stays alive (Orc, persistent D); 1hr housekeeping prunes ended ones
   }
 
@@ -1027,12 +1024,24 @@ export class Spin {
     } catch (err) { logAndSwallow(TAG, "audit prune", err); }
   }
 
+  /** #1364: Idempotent session finalization — records endedAt, releases resources exactly once. */
+  private finalizeSession(session: ManagedSession, reason: string): void {
+    if (session.status === "ended") return; // already finalized
+    this.releaseSessionTransport(session);
+    session.active = false;
+    (session as unknown as Record<string, unknown>)["endedAt"] = Date.now();
+    session.status = "ended";
+    pushLog(session, `finalized: ${reason}`);
+    logDebug(TAG, `Session finalized: ${session.userId} id=${session.id} reason=${reason}`);
+  }
+
   /** #1248: Prune ended sessions older than 1 hour (~hourly). Prevents unbounded Map growth. */
   private pruneEndedSessions(): void {
     const ONE_HOUR_MS = 60 * 60 * 1000;
     const now = Date.now();
     for (const [id, s] of this.sessions) {
-      if (s.status === "ended" && now - s.lastActiveAt > ONE_HOUR_MS) {
+      const endedAt = ((s as unknown as Record<string, unknown>)["endedAt"] as number | undefined) ?? s.lastActiveAt;
+      if (s.status === "ended" && now - endedAt > ONE_HOUR_MS) {
         this.sessions.delete(id);
         logDebug(TAG, `Pruned ended session: ${s.userId} id=${id}`);
       }
