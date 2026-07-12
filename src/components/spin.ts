@@ -898,6 +898,7 @@ export class Spin {
           expectedArtifacts: request.contract.expected_artifacts as Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>,
           verificationCommands: request.contract.verification_commands as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
           requiredCapabilities: [...request.contract.required_capabilities],
+          supportsRootCriteria: request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : undefined,
           limits: { ...request.contract.limits },
         });
       } catch (err) {

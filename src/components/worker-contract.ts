@@ -63,6 +63,7 @@ export interface WorkerAcceptanceContractV1 {
   readonly expected_artifacts: readonly ExpectedArtifact[];
   readonly verification_commands: readonly VerificationCommand[];
   readonly required_capabilities: readonly string[];
+  readonly supports_root_criteria?: readonly string[];
   readonly limits: {
     readonly max_duration_ms?: number;
     readonly max_tokens?: number;
@@ -519,6 +520,7 @@ export function normalizeContract(raw: unknown): NormalizeResult {
   }));
 
   const capabilitiesRaw = Array.isArray(obj["required_capabilities"]) ? (obj["required_capabilities"] as string[]) : [];
+  const supportsRootCriteriaRaw = Array.isArray(obj["supports_root_criteria"]) ? (obj["supports_root_criteria"] as string[]) : undefined;
   const limitsRaw = (typeof obj["limits"] === "object" && obj["limits"] !== null) ? (obj["limits"] as Record<string, unknown>) : {};
   const provenanceRaw = (typeof obj["provenance"] === "object" && obj["provenance"] !== null) ? (obj["provenance"] as Record<string, unknown>) : undefined;
 
@@ -543,6 +545,9 @@ export function normalizeContract(raw: unknown): NormalizeResult {
         }
       : { root_card_id: 0, card_id: 0, authored_by: "unknown", created_at: new Date().toISOString() },
   };
+  if (supportsRootCriteriaRaw !== undefined && supportsRootCriteriaRaw.length > 0) {
+    built["supports_root_criteria"] = supportsRootCriteriaRaw;
+  }
 
   const digest = computeDigest(built);
   built["digest"] = digest;

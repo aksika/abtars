@@ -27,6 +27,7 @@ export class WorkerSupervisionService {
       expectedArtifacts?: Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>;
       verificationCommands?: Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>;
       requiredCapabilities?: string[];
+      supportsRootCriteria?: string[];
       limits?: { max_duration_ms?: number; max_tokens?: number };
       contractId?: string;
       attemptId?: string;
@@ -57,6 +58,9 @@ export class WorkerSupervisionService {
     }
     if (opts?.requiredCapabilities && opts.requiredCapabilities.length > 0) {
       raw["required_capabilities"] = opts.requiredCapabilities;
+    }
+    if (opts?.supportsRootCriteria && opts.supportsRootCriteria.length > 0) {
+      raw["supports_root_criteria"] = opts.supportsRootCriteria;
     }
     if (opts?.limits && Object.keys(opts.limits).length > 0) {
       raw["limits"] = opts.limits;

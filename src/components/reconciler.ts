@@ -17,6 +17,8 @@ import { logInfo, logWarn } from "./logger.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
+import { ProjectReviewStore, type ProjectState } from "./project-acceptance/project-review-store.js";
+import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle } from "./worker-supervision-store.js";
 
@@ -131,12 +133,84 @@ function reconcileProject(projectId: number): void {
     return;
   }
 
-  // All done?
-  if (children.every(c => c.status === "done" || c.status === "delivered")) {
-    logInfo(TAG, `Project ${projectId}: all children done`);
-    const summaries = children.map(c => c.result_summary).filter(Boolean).join("\n");
-    kanbanComplete(projectId, null, summaries.slice(0, 500));
+  // ── Project acceptance gate (#1363) ─────────────────────────────────────
+  const reviewStore = new ProjectReviewStore();
+  const hasRootContract = reviewStore.contractExists(projectId);
+
+  // Legacy unsupervised project — keep old behavior
+  if (!hasRootContract) {
+    if (children.every(c => c.status === "done" || c.status === "delivered")) {
+      logInfo(TAG, `Project ${projectId}: all children done (unsupervised)`);
+      const summaries = children.map(c => c.result_summary).filter(Boolean).join("\n");
+      kanbanComplete(projectId, null, summaries.slice(0, 500));
+    }
+    return;
   }
+
+  // Supervised project — use acceptance gate
+  const supervision = reviewStore.getSupervision(projectId);
+  if (!supervision) {
+    // Root contract exists but supervision not initialized yet
+    logWarn(TAG, `Project ${projectId}: root contract exists but no supervision state — initializing`);
+    const contractRow = reviewStore.getContractByProjectCardId(projectId);
+    if (contractRow) {
+      reviewStore.initializeSupervision(projectId, contractRow.id);
+    }
+    return;
+  }
+
+  // Skip if project is already in a terminal state
+  if (supervision.state === "accepted" || supervision.state === "blocked") return;
+
+  // Check if project is in repair mode — let repair work complete
+  if (supervision.state === "repair_planned" || supervision.state === "repairing") return;
+
+  // Check review readiness: all children must be terminal
+  const allChildrenTerminal = children.every(c => {
+    const terminalStatuses = ["done", "delivered", "failed"];
+    return terminalStatuses.includes(c.status);
+  });
+
+  if (!allChildrenTerminal) return;
+
+  // Prevent duplicate review cases: no open case should already exist
+  const existingOpenCase = reviewStore.getLatestOpenCase(projectId);
+  if (existingOpenCase) return;
+
+  // Transition to review_ready and create review case atomically
+  const transitioned = reviewStore.stateTransition(
+    projectId,
+    ["executing", "review_ready"] as ProjectState[],
+    "review_ready",
+    { review_round: supervision.review_round + 1 },
+  );
+
+  if (!transitioned) {
+    logWarn(TAG, `Project ${projectId}: failed to transition to review_ready`);
+    return;
+  }
+
+  // Assemble full review case
+  const assembler = new ReviewCaseAssembler();
+  const snapshot = assembler.assembleCase(projectId, supervision.generation, supervision.review_round + 1);
+
+  if ("error" in snapshot) {
+    logWarn(TAG, `Project ${projectId}: review case assembly failed — ${snapshot.error}`);
+    return;
+  }
+
+  const snapshotDigest = `rc_${projectId}_${supervision.generation}_${supervision.review_round + 1}`;
+  const { id: caseId } = reviewStore.insertReviewCase(
+    projectId,
+    supervision.generation,
+    supervision.review_round + 1,
+    snapshot,
+    snapshotDigest,
+  );
+
+  logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created (gen=${supervision.generation}, round=${supervision.review_round + 1}, criteria=${snapshot.root_contract.criteria.length}, uncovered=${snapshot.uncovered_criteria.length}, contradictions=${snapshot.contradiction_count})`);
+
+  // TODO(Task 6): Create Orc review request / wake Orc session
 }
 
 function reconcileChildCard(card: KanbanCard): void {

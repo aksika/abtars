@@ -59,6 +59,7 @@ const spawnWorkerTool: ToolDefinition = {
       expected_artifacts: { type: "string", description: "JSON array of {id, kind, ref, required, criterion_ids} expected artifacts (supervised)" },
       verification_commands: { type: "string", description: "JSON array of {id, argv, cwd, timeout_ms, criterion_ids} verification commands (supervised)" },
       required_capabilities: { type: "string", description: "JSON array of required capability strings (supervised)" },
+      supports_root_criteria: { type: "string", description: "JSON array of root project criterion IDs this worker supports (#1363)" },
     },
     required: ["goal"],
   },
@@ -71,7 +72,8 @@ const spawnWorkerTool: ToolDefinition = {
     const artifactsRaw = parseJsonArray(args.expected_artifacts);
     const commandsRaw = parseJsonArray(args.verification_commands);
     const capsRaw = parseJsonArray(args.required_capabilities) as string[];
-    const hasStructuredData = criteriaRaw.length > 0 || artifactsRaw.length > 0 || commandsRaw.length > 0;
+    const supportsRootCriteriaRaw = parseJsonArray(args.supports_root_criteria) as string[];
+    const hasStructuredData = criteriaRaw.length > 0 || artifactsRaw.length > 0 || commandsRaw.length > 0 || supportsRootCriteriaRaw.length > 0;
     const contract = hasStructuredData ? {
       schema_version: 1 as const,
       id: "",
@@ -81,6 +83,7 @@ const spawnWorkerTool: ToolDefinition = {
       expected_artifacts: artifactsRaw as Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>,
       verification_commands: commandsRaw as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
       required_capabilities: capsRaw,
+      supports_root_criteria: supportsRootCriteriaRaw.length > 0 ? supportsRootCriteriaRaw : undefined,
       limits: {},
       provenance: { root_card_id: 0, card_id: 0, authored_by: "orc", created_at: "" },
     } : undefined;
@@ -256,8 +259,112 @@ const reviewWorkerFailureTool: ToolDefinition = {
   },
 };
 
+// ── review_project (#1363) ─────────────────────────────────────────────────────
+
+const reviewProjectTool: ToolDefinition = {
+  name: "review_project",
+  description: "Submit a final review decision for the current supervised project. All root criteria must be evaluated. Required for project acceptance.",
+  parameters: {
+    type: "object",
+    properties: {
+      action: { type: "string", description: "accept | repair | blocked | needs_input", enum: ["accept", "repair", "blocked", "needs_input"] },
+      criteria: { type: "string", description: "JSON array of {criterion_id, verdict, evidence_ids, rationale} — every root criterion must have a verdict" },
+      outputs: { type: "string", description: "JSON array of {output_id, disposition, evidence_ids}" },
+      contradictions: { type: "string", description: "JSON array of {id, affected_criterion_ids, evidence_ids, disposition, rationale}" },
+      residual_risks: { type: "string", description: "JSON array of {text, blocking, evidence_ids}" },
+      synthesis: { type: "string", description: "Final synthesis of the review" },
+      repair_items: { type: "string", description: "JSON array of repair items (required if action=repair)" },
+      blocker_class: { type: "string", description: "Blocker class (required if action=blocked)" },
+      what_was_attempted: { type: "string", description: "What was attempted before blocking (required if action=blocked)" },
+      input_question: { type: "string", description: "Question for user input (required if action=needs_input)" },
+    },
+    required: ["action", "criteria", "synthesis"],
+  },
+  async execute(args: Record<string, string>): Promise<string> {
+    if (!_activeOrcCardId) return "[err] No active Orc project.";
+    const action = args.action ?? "";
+    if (!["accept", "repair", "blocked", "needs_input"].includes(action)) return "[err] action must be accept, repair, blocked, or needs_input";
+
+    try {
+      const criteria: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1["criteria"] = JSON.parse(args.criteria ?? "[]");
+      const outputs: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1["outputs"] = JSON.parse(args.outputs ?? "[]");
+      const contradictions: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1["contradictions"] = JSON.parse(args.contradictions ?? "[]");
+      const residual_risks: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1["residual_risks"] = JSON.parse(args.residual_risks ?? "[]");
+
+      const { ProjectReviewService } = await import("../project-acceptance/project-review-service.js");
+      const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+
+      const store = new ProjectReviewStore();
+      const supervision = store.getSupervision(_activeOrcCardId);
+      if (!supervision) return "[err] No project supervision state found. Is this a supervised project?";
+      if (supervision.state !== "review_ready" && supervision.state !== "reviewing") return `[err] Project is in state "${supervision.state}", not review_ready`;
+
+      const openCase = store.getLatestOpenCase(_activeOrcCardId);
+      if (!openCase) return "[err] No open review case found";
+
+      const service = new ProjectReviewService();
+
+      const repair: import("../project-acceptance/project-review-validator.js").ProjectRepairProposal | undefined = action === "repair" ? {
+        items: JSON.parse(args.repair_items ?? "[]") as import("../project-acceptance/project-review-validator.js").ProjectRepairProposal["items"],
+        rationale: args.synthesis ?? "",
+      } : undefined;
+
+      const blocker: import("../project-acceptance/project-review-validator.js").ProjectBlocker | undefined = action === "blocked" ? {
+        blocker_class: args.blocker_class ?? "unknown",
+        affected_criterion_ids: criteria.filter(c => c.verdict === "unsatisfied").map(c => c.criterion_id),
+        exhausted_failures: [],
+        contradiction_evidence: contradictions.filter(c => c.disposition === "blocking").flatMap(c => c.evidence_ids),
+        what_was_attempted: args.what_was_attempted ?? "",
+        unblock_conditions: "",
+      } : undefined;
+
+      const input_request: import("../project-acceptance/project-review-validator.js").ProjectInputRequest | undefined = action === "needs_input" ? {
+        question: args.input_question ?? "",
+        affected_criterion_ids: criteria.filter(c => c.verdict === "inconclusive").map(c => c.criterion_id),
+        expected_response_kind: "text",
+        context: args.synthesis ?? "",
+      } : undefined;
+
+      const decision: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1 = {
+        schema_version: 1,
+        id: `rd_${_activeOrcCardId}_${Date.now()}`,
+        project_card_id: _activeOrcCardId,
+        review_case_id: openCase.id,
+        project_generation: supervision.generation,
+        action: action as import("../project-acceptance/project-review-validator.js").ProjectReviewAction,
+        criteria,
+        outputs,
+        contradictions,
+        residual_risks,
+        synthesis: args.synthesis ?? "",
+        repair,
+        blocker,
+        input_request,
+        authored_at: new Date().toISOString(),
+      };
+
+      const result = service.processDecision(decision);
+
+      switch (result.kind) {
+        case "accepted":
+          return `✓ Project accepted (${result.decisionId}). ${result.summary}`;
+        case "repair":
+          return `→ Repair planned (${result.decisionId}). ${result.summary}`;
+        case "blocked":
+          return `✗ Project blocked (${result.decisionId}). ${result.summary}`;
+        case "needs_input":
+          return `? Input requested (${result.decisionId}). ${result.summary}`;
+        case "invalid":
+          return `[err] Invalid review:\n${result.errors.join("\n")}`;
+      }
+    } catch (err) {
+      return `[err] review_project error: ${String(err)}`;
+    }
+  },
+};
+
 // ── Export ────────────────────────────────────────────────────────────────────
 
 export function getOrcTools(): ToolDefinition[] {
-  return [spawnWorkerTool, checkWorkersTool, cancelWorkerTool, reviewWorkerFailureTool];
+  return [spawnWorkerTool, checkWorkersTool, cancelWorkerTool, reviewWorkerFailureTool, reviewProjectTool];
 }
