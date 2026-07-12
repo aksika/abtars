@@ -15,6 +15,7 @@ import {
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn } from "./logger.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
+import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle } from "./worker-supervision-store.js";
 
@@ -182,14 +183,56 @@ function reconcileChildCard(card: KanbanCard): void {
     return;
   }
 
-  // #1364: Cancel-requested supervised attempts — do NOT fail the card here;
-  // the executor adapter will settle it. Reconciler only records policy intent.
-  if (latestAttempt && latestAttempt.lifecycle === "cancel_requested") {
-    // Awaiting executor settlement — do nothing
+  // #1367: Lease-based stale evaluation for supervised cards
+  if (hasContract && latestAttempt && !isTerminal(latestAttempt.lifecycle)) {
+    evaluateLease(card);
     return;
   }
 
-  // Stale detection moved to #1367 / executor adapter
+  // #1364: Cancel-requested supervised attempts — do NOT fail the card here;
+  // the executor adapter will settle it. Reconciler only records policy intent.
+  if (latestAttempt && latestAttempt.lifecycle === "cancel_requested") {
+    return;
+  }
+}
+
+function isTerminal(lc: AttemptLifecycle): boolean {
+  return lc === "completed" || lc === "failed" || lc === "cancelled" || lc === "timed_out";
+}
+
+function evaluateLease(card: KanbanCard): void {
+  try {
+    const svc = new WorkerSupervisionService();
+    const contract = svc.getContractForCard(card.id);
+    if (!contract) return;
+    const store = (svc as any)["store"] as import("./worker-supervision-store.js").WorkerSupervisionStore;
+    const latestAttempt = store.getLatestAttempt(card.id);
+    if (!latestAttempt) return;
+
+    const leaseStore = new ExecutorLeaseStore();
+    const snapshot = leaseStore.getSnapshot(latestAttempt.id);
+    if (!snapshot) return;
+
+    const now = Date.now();
+    const livenessDeadline = new Date(snapshot.livenessDeadlineAt).getTime();
+    const progressDeadline = new Date(snapshot.progressDeadlineAt).getTime();
+
+    if (now > livenessDeadline || now > progressDeadline) {
+      if (snapshot.evaluation === "healthy") {
+        leaseStore.updateEvaluation(latestAttempt.id, "warning");
+        logWarn(TAG, `Lease warning for card ${card.id}: attempt=${latestAttempt.id}`);
+      } else if (snapshot.evaluation === "warning") {
+        leaseStore.updateEvaluation(latestAttempt.id, "inspect_due");
+        logWarn(TAG, `Inspect due for card ${card.id}`);
+      } else if (snapshot.evaluation === "inspect_due") {
+        logWarn(TAG, `Cancelling stale card ${card.id} via lease policy`);
+        leaseStore.updateEvaluation(latestAttempt.id, "cancel_requested");
+        store.requestCancel(latestAttempt.id, "lease_expired");
+      }
+    }
+  } catch (err) {
+    logWarn(TAG, `lease evaluation failed for card ${card.id}: ${err}`);
+  }
 }
 
 function abortProject(projectId: number, children: KanbanCard[], reason: string): void {
