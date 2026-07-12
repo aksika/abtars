@@ -970,12 +970,14 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
     await new Promise((r) => setTimeout(r, 30));
 
-    // The pipeline's whole-result delivery should be suppressed (already streamed).
-    await adapter.sendMessage("tui:local", "streamed");
+    // With matching correlation, the whole-result should be suppressed (already streamed).
+    await adapter.sendMessage("tui:local", "streamed", {
+      deliveryCorrelation: { sessionId: sid, executionId: "e1", kind: "final_assistant" },
+    });
     await new Promise((r) => setTimeout(r, 30));
     expect(frames.filter((f) => f.t === "message").length).toBe(0);
 
-    // Without streaming, the whole result is delivered.
+    // Without matching correlation (no execution ID), the whole result is delivered.
     const adapter2 = new TuiSocketAdapter({
       spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath,
     });

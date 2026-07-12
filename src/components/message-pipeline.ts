@@ -32,7 +32,7 @@ import type { MemoryManager } from "abmind";
 import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
-import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
+import type { InboundMessage, PlatformAdapter, DeliveryCorrelation } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
 import { releaseBusy } from "./pipeline/busy-guard.js";
@@ -416,6 +416,12 @@ export async function handleInboundMessage(
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
+    // #1397: Capture stable execution ID before async cleanup may clear it.
+    const deliveryCorrelation: DeliveryCorrelation | undefined =
+      pSession.activeExecutionId
+        ? { sessionId: activeSessionId, executionId: pSession.activeExecutionId, kind: "final_assistant" }
+        : undefined;
+
     // #869: strip <think>/<thinking> blocks unless user opted in via /effort show
     const reasoningSession = transport.getActiveSession?.();
     if (!reasoningSession?.showReasoning) {
@@ -438,7 +444,7 @@ export async function handleInboundMessage(
         const chunks = adapter.chunkResponse(userResponse);
         for (const chunk of chunks) {
           const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
-          if (clean) await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
+          if (clean) await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
         }
       }
       // Record assistant response to memory
@@ -493,7 +499,7 @@ export async function handleInboundMessage(
       const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
       if (clean) {
         await adapter.sendTyping?.(channelId, msg.threadId);
-        lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
+        lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
       }
     }
 

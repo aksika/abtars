@@ -30,6 +30,17 @@
  * cannot pass the current check. New-attach-wins is an atomic handoff:
  * old attachment/connection is detached before the replacement writer
  * is installed, leaving zero stale feed subscriptions.
+ *
+ * #1397: Stream-suppression ledger. Replaces the attachment-wide
+ * `_hasStreamed` boolean with execution-scoped `StreamObservation`
+ * tracking. Each stream start/delta/end event updates the ledger
+ * keyed by (sessionId, executionId). Final delivery carries
+ * DeliveryCorrelation; the ledger looks up the exact execution,
+ * compares normalized visible streamed text with the whole result,
+ * and suppresses only an exact match. Missing, stale, incomplete,
+ * truncated, or mismatched executions always deliver the whole result.
+ * State is consumed after every final decision so it cannot affect
+ * another execution.
  */
 
 import * as fs from "node:fs";
@@ -39,7 +50,7 @@ import { join, dirname } from "node:path";
 import { logInfo, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { abtarsHome } from "../../paths.js";
-import type { PlatformAdapter, InboundMessage, PlatformCapabilities, SendOpts } from "../../types/platform.js";
+import type { PlatformAdapter, InboundMessage, PlatformCapabilities, SendOpts, DeliveryCorrelation } from "../../types/platform.js";
 import type { Spin } from "../../components/spin.js";
 import type { SessionType } from "../../components/spin-types.js";
 import { typeLabel, sessionTypeOf } from "../../components/spin-types.js";
@@ -57,9 +68,55 @@ import {
   type TuiServerFrame,
   type TuiAttachMode,
 } from "./tui-protocol.js";
-import { TuiFrameWriter } from "./tui-frame-writer.js";
+import { TuiFrameWriter, type TuiFrameWriterResult } from "./tui-frame-writer.js";
 
 const TAG = "tui";
+
+// ── #1397: Stream-suppression ledger types ────────────────────────────────
+
+interface StreamObservation {
+  streamId: string;
+  sequence: number;
+  text: string;
+  textBytes: number;
+  ended: boolean;
+  endReason?: string;
+  truncated: boolean;
+  errored: boolean;
+}
+
+interface ExecutionStreamObservation {
+  sessionId: string;
+  executionId: string;
+  connGen: number;
+  attGen: number;
+  streams: Map<string, StreamObservation>;
+  streamOrder: string[];
+  totalBytes: number;
+  hasVisibleText: boolean;
+  anyTruncated: boolean;
+  anyErrored: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// #1397: Ledger bounds
+const MAX_EXECUTION_OBSERVATIONS = 4;
+const MAX_STREAMS_PER_EXECUTION = 20;
+const MAX_COMPARISON_BYTES = 64 * 1024;   // 64 KiB accepted text cap
+const COMPLETED_TTL_MS = 30_000;          // completed-undelivered cleanup
+
+/** Normalize text for suppression comparison — CRLF→LF only. */
+function normalizeComparison(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
+
+/**
+ * Build a ledger key from session + execution IDs.
+ */
+function execLedgerKey(sessionId: string, executionId: string): string {
+  return `${sessionId}::${executionId}`;
+}
 
 export interface TuiAdapterDeps {
   spin: Spin;
@@ -95,8 +152,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private _unsubOutput: (() => void) | null = null;
   /** Steer event subscription cleanup handle. */
   private _unsubSteer: (() => void) | null = null;
-  /** True once live chunks were mirrored for the current attachment. */
-  private _hasStreamed = false;
+  /** #1397: Execution-scoped stream observation ledger (keyed by sessionId::executionId). */
+  private _streamLedger = new Map<string, ExecutionStreamObservation>();
   /** Cached activity sequence for subscriber scoping. */
   private _activitySequence = 0;
   /** True while incremental activity is suppressed pending recovery. */
@@ -173,12 +230,168 @@ export class TuiSocketAdapter implements PlatformAdapter {
   }
 
   async sendMessage(_channelId: string, text: string, _opts?: SendOpts): Promise<undefined> {
-    // #1338: suppress duplicate whole-result if already streamed.
-    if (!this._hasStreamed) {
-      this._push({ t: "message", role: "assistant", markdown: text });
-    }
+    // #1338/#1397: suppress whole result when the exact execution's
+    // complete streamed text matches the delivered text.
+    const correlation = _opts?.deliveryCorrelation;
+    if (this.shouldSuppressWholeResult(text, correlation)) return;
+    this._push({ t: "message", role: "assistant", markdown: text });
     this._pushStatus();
     return undefined;
+  }
+
+  // ── #1397: Suppression logic ───────────────────────────────────────────
+
+  /**
+   * Decide whether to suppress a whole assistant result because the same
+   * execution already delivered equivalent complete streamed text.
+   * The correlation entry is consumed (deleted) on every decision so it
+   * cannot affect another execution.
+   */
+  private shouldSuppressWholeResult(text: string, correlation: DeliveryCorrelation | undefined): boolean {
+    if (!correlation || correlation.kind !== "final_assistant") return false;
+    if (correlation.sessionId !== this.attachedSessionId) return false;
+
+    const key = execLedgerKey(correlation.sessionId, correlation.executionId);
+    const obs = this._streamLedger.get(key);
+    if (!obs) return false;
+
+    // Stale generation — could be a reuse of the same session by another attach
+    if (obs.connGen !== this._connGen || obs.attGen !== this._attGen) {
+      this._streamLedger.delete(key);
+      return false;
+    }
+
+    // Consume the entry after decision (both suppress and fallback)
+    this._streamLedger.delete(key);
+
+    // Must have visible text and no truncation/error
+    if (!obs.hasVisibleText) return false;
+    if (obs.anyTruncated || obs.anyErrored) return false;
+
+    // All streams must have ended
+    for (const stream of obs.streams.values()) {
+      if (!stream.ended) return false;
+    }
+
+    // Normalized text comparison (CRLF→LF only)
+    const streamedText = obs.streamOrder.map(id => obs.streams.get(id)!.text).join("");
+    return normalizeComparison(streamedText) === normalizeComparison(text);
+  }
+
+  /** #1397: Record a stream start from the output feed. */
+  private observeStreamStart(executionId: string, streamId: string): void {
+    const key = execLedgerKey(this.attachedSessionId!, executionId);
+    let obs = this._streamLedger.get(key);
+    if (!obs) {
+      // Bounded: drop oldest when at cap
+      if (this._streamLedger.size >= MAX_EXECUTION_OBSERVATIONS) {
+        const oldest = [...this._streamLedger.entries()]
+          .sort(([, a], [, b]) => a.createdAt - b.createdAt)[0];
+        if (oldest) this._streamLedger.delete(oldest[0]);
+      }
+      obs = {
+        sessionId: this.attachedSessionId!,
+        executionId,
+        connGen: this._connGen,
+        attGen: this._attGen,
+        streams: new Map(),
+        streamOrder: [],
+        totalBytes: 0,
+        hasVisibleText: false,
+        anyTruncated: false,
+        anyErrored: false,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      this._streamLedger.set(key, obs);
+    }
+
+    if (obs.streamOrder.length >= MAX_STREAMS_PER_EXECUTION) return;
+
+    if (!obs.streams.has(streamId)) {
+      obs.streamOrder.push(streamId);
+      obs.streams.set(streamId, {
+        streamId,
+        sequence: obs.streamOrder.length,
+        text: "",
+        textBytes: 0,
+        ended: false,
+        truncated: false,
+        errored: false,
+      });
+      obs.updatedAt = Date.now();
+    }
+  }
+
+  /** #1397: Record an accepted text delta. */
+  private observeStreamDelta(executionId: string, streamId: string, delta: string, accepted: boolean): void {
+    const key = execLedgerKey(this.attachedSessionId!, executionId);
+    const obs = this._streamLedger.get(key);
+    if (!obs) return;
+    const stream = obs.streams.get(streamId);
+    if (!stream || stream.ended) return;
+
+    if (!accepted) {
+      // Writer dropped the delta — stream is incomplete / truncated
+      stream.truncated = true;
+      obs.anyTruncated = true;
+      obs.updatedAt = Date.now();
+      return;
+    }
+
+    // Bounded comparison text
+    if (obs.totalBytes < MAX_COMPARISON_BYTES) {
+      const deltaBytes = Buffer.byteLength(delta, "utf8");
+      if (obs.totalBytes + deltaBytes <= MAX_COMPARISON_BYTES) {
+        stream.text += delta;
+        stream.textBytes += deltaBytes;
+        obs.totalBytes += deltaBytes;
+      } else {
+        // Partial append up to cap
+        const remaining = MAX_COMPARISON_BYTES - obs.totalBytes;
+        const partial = Buffer.from(delta, "utf8").slice(0, remaining).toString("utf8");
+        stream.text += partial;
+        stream.textBytes += Buffer.byteLength(partial, "utf8");
+        obs.totalBytes = MAX_COMPARISON_BYTES;
+      }
+      obs.hasVisibleText = true;
+    }
+    obs.updatedAt = Date.now();
+  }
+
+  /** #1397: Record a stream end event. */
+  private observeStreamEnd(executionId: string, streamId: string, reason: string): void {
+    const key = execLedgerKey(this.attachedSessionId!, executionId);
+    const obs = this._streamLedger.get(key);
+    if (!obs) return;
+    const stream = obs.streams.get(streamId);
+    if (!stream) return;
+    stream.ended = true;
+    stream.endReason = reason;
+    if (reason !== "complete") {
+      if (reason === "error") {
+        stream.errored = true;
+        obs.anyErrored = true;
+      } else if (reason === "truncated") {
+        stream.truncated = true;
+        obs.anyTruncated = true;
+      } else if (reason === "cancelled") {
+        stream.errored = true;
+        obs.anyErrored = true;
+      }
+    }
+    obs.updatedAt = Date.now();
+  }
+
+  /** #1397: Opportunistic cleanup of expired completed entries. */
+  private pruneStreamLedger(): void {
+    const cutoff = Date.now() - COMPLETED_TTL_MS;
+    for (const [key, obs] of this._streamLedger) {
+      const allEnded = [...obs.streams.values()].every(s => s.ended);
+      if (allEnded && obs.updatedAt < cutoff) {
+        this._streamLedger.delete(key);
+      }
+    }
   }
 
   chunkResponse(text: string): string[] {
@@ -215,7 +428,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this._writer?.clearAttachment();
     this.attachedSessionId = null;
     this.mode = "pipeline";
-    this._hasStreamed = false;
+    this._streamLedger.clear();
     this._activitySequence = 0;
     this._activityDirty = false;
     this._statusRevision = 0;
@@ -498,24 +711,45 @@ export class TuiSocketAdapter implements PlatformAdapter {
    */
   private _subscribeOutput(sessionId: string, capturedConnGen: number, capturedAttGen: number): void {
     if (this._unsubOutput) { this._unsubOutput(); this._unsubOutput = null; }
-    this._hasStreamed = false;
     const feed = this.deps.sessionOutputFeed;
     if (!feed) return;
     this._unsubOutput = feed.subscribe({ sessionId }, (event: SessionOutputEvent) => {
       if (!this._isAttCurrent(capturedConnGen, capturedAttGen)) return;
+
+      // #1397: executionId is present on all event types
+      const executionId = event.executionId;
+
+      // Prune stale ledger entries opportunistically
+      this.pruneStreamLedger();
+
       switch (event.type) {
-        case "delta":
-          this._hasStreamed = true;
-          this._push({ t: "chunk", id: event.streamId, delta: event.text });
+        case "delta": {
+          // Enqueue and check acceptance
+          const result = this._push({ t: "chunk", id: event.streamId, delta: event.text });
+          const accepted = result !== "dropped";
+          if (executionId) {
+            this.observeStreamStart(executionId, event.streamId);
+            this.observeStreamDelta(executionId, event.streamId, event.text, accepted);
+          }
           break;
+        }
         case "tool-start":
           this._push({ t: "tool-start", id: event.streamId, name: event.name });
           break;
-        case "end":
+        case "end": {
           this._push({ t: "chunk-end", id: event.streamId, reason: event.reason });
+          if (executionId) {
+            this.observeStreamStart(executionId, event.streamId);
+            this.observeStreamEnd(executionId, event.streamId, event.reason);
+          }
           break;
-        case "start":
+        }
+        case "start": {
+          if (executionId) {
+            this.observeStreamStart(executionId, event.streamId);
+          }
           break;
+        }
       }
     });
   }
@@ -737,10 +971,10 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
   // ── Internal helpers ─────────────────────────────────────────────────
 
-  /** Send a server frame to the attached client via the current bounded writer. */
-  private _push(frame: TuiServerFrame): void {
-    if (!this._writer) return;
-    this._writer.enqueue(frame);
+  /** Send a server frame to the attached client via the current bounded writer. Returns the enqueue result. */
+  private _push(frame: TuiServerFrame): TuiFrameWriterResult {
+    if (!this._writer) return "dropped";
+    return this._writer.enqueue(frame);
   }
 
   /** Reject an attach with a structured error frame, then drop the conn. */
