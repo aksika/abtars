@@ -10,7 +10,8 @@
         "rootDir": "src",
         "baseUrl": ".",
         "paths": {
-            "abmind": ["../abmind/dist/src/index.d.ts"]
+            "abmind": ["../abmind/dist/src/index.d.ts"],
+            "abmind/deploy-lib/*": ["../abmind/dist/src/deploy-lib/*"]
         },
         "strict": true,
         "esModuleInterop": true,
