@@ -14,6 +14,7 @@ import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinRes
 import { sessionType } from "./spin-types.js";
 import { profileFor, isValidSessionType, type SessionProfile } from "./spin-profiles.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
+import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
 import { drainInstructionBatch, expireInstructions } from "./session-instruction-queue.js";
@@ -26,6 +27,14 @@ export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType }
 export { isHollow };
 
 const TAG = "spin";
+
+/** #1364: Returns true if a card has an active supervision contract. */
+function cardHasSupervision(cardId: number): boolean {
+  try {
+    const store = new WorkerSupervisionStore();
+    return store.contractExists(cardId) && store.hasLiveClaim(cardId);
+  } catch { return false; }
+}
 const USER_SESSION_IDLE_MS = parseInt(process.env["USER_SESSION_IDLE_MS"] ?? "7200000", 10);
 const GUEST_SESSION_IDLE_MS = parseInt(process.env["GUEST_SESSION_IDLE_MS"] ?? "1800000", 10);
 const MAX_TOTAL_SESSIONS = parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10);
@@ -907,6 +916,8 @@ export class Spin {
     const queued = kanbanList("queued");
     const now = new Date().toISOString();
     for (const card of queued) {
+      // #1364: Supervised cards go through Reconciler — skip them here
+      if (cardHasSupervision(card.id)) continue;
       // #897: respect retry backoff
       if ((card as any).next_retry_at && (card as any).next_retry_at > now) continue;
       // #677: respect DAG dependencies
@@ -931,9 +942,9 @@ export class Spin {
 
   /** Periodic housekeeping — registered as HB task (#980). */
   async tick(): Promise<void> {
+    // #1364: drain only non-supervised cards; supervised dispatch goes through Reconciler
     this.drainQueued();
     this.checkStaleWorkers();
-    await this.pollRemoteCards();
     this._housekeepCounter++;
     if (this._housekeepCounter % 72 === 0) {
       this.pruneSkillTrash();
@@ -950,6 +961,8 @@ export class Spin {
       for (const cardId of [...cardIds]) {           // snapshot — markDone mutates the Set
         const card = kanbanGetCard(cardId);
         if (!card || card.status !== "running") continue;
+        // #1364: Skip supervised cards — Reconciler handles staleness
+        if (cardHasSupervision(cardId)) continue;
         const lastActivity = new Date(card.updated_at + "Z").getTime();
         if (now - lastActivity > STALE_MS) {
           logWarn(TAG, `Stale card ${cardId} (${Math.round((now - lastActivity) / 1000)}s no activity) — failing`);
@@ -1023,28 +1036,6 @@ export class Spin {
         this.sessions.delete(id);
         logDebug(TAG, `Pruned ended session: ${s.userId} id=${id}`);
       }
-    }
-  }
-
-  private async pollRemoteCards(): Promise<void> {
-    const remoteCards = kanbanList("running", "status").filter(c => c.type === "remote");
-    if (remoteCards.length === 0) return;
-    const { getPeerTransport } = await import("./peer-transport/index.js");
-    const transport = getPeerTransport();
-    const REMOTE_MAX_AGE_MS = 15 * 60 * 1000;
-    for (const card of remoteCards) {
-      try {
-        const meta = JSON.parse(card.notes ?? "{}") as { peer?: string; remote_task_id?: number };
-        if (!meta.peer || !meta.remote_task_id) continue;
-        const cardAge = Date.now() - new Date(card.created_at + "Z").getTime();
-        if (cardAge > REMOTE_MAX_AGE_MS) {
-          kanbanFail(card.id, `remote task timeout (${Math.round(cardAge / 60000)}min)`);
-          continue;
-        }
-        const result = await transport.checkTask(meta.peer, meta.remote_task_id);
-        if (result.status === "done") kanbanComplete(card.id, null, result.result?.slice(0, 500) ?? "completed");
-        else if (result.status === "failed") kanbanFail(card.id, result.error ?? "remote task failed");
-      } catch (err) { logAndSwallow(TAG, "pollRemote", err); }
     }
   }
 
