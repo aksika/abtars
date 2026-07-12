@@ -19,6 +19,10 @@ import {
   handleSoftware, handlePeers, handleMetrics,
 } from "./handlers.js";
 import { handleSession } from "./session-handler.js";
+import {
+  handlePiRun, handlePiStatus, handlePiList, handlePiReply,
+  handlePiSteer, handlePiCancel, handlePiResume,
+} from "./handlers-pi.js";
 
 // ── Exact-match commands ────────────────────────────────────────────────────
 registerExact("/reset", handleNewReset);
@@ -81,3 +85,11 @@ registerPrefix("/task pause ", handleTaskPause);
 registerPrefix("/task resume ", handleTaskPause);
 registerPrefix("/tasks pause ", handleTaskPause);
 registerPrefix("/tasks resume ", handleTaskPause);
+registerPrefix("/pi run ", handlePiRun);
+registerPrefix("/pi status ", handlePiStatus);
+registerPrefix("/pi get ", handlePiStatus);
+registerPrefix("/pi list", handlePiList);
+registerPrefix("/pi reply ", handlePiReply);
+registerPrefix("/pi steer ", handlePiSteer);
+registerPrefix("/pi cancel ", handlePiCancel);
+registerPrefix("/pi resume ", handlePiResume);

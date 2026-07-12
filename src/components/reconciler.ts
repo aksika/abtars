@@ -3,6 +3,9 @@
  *
  * Subscribes to Nerve events. On every state change, checks active projects
  * and fixes drift: dispatch queued, retry failed, kill stale, abort on limits.
+ *
+ * #1314: executor-aware lanes. The agent lane dispatches W-type workers
+ * (unchanged). The Pi lane dispatches typed Pi cards to the PiExecutor.
  */
 
 import { nerve } from "./nerve.js";
@@ -12,6 +15,7 @@ import {
   kanbanGetCard, kanbanGetChildren, isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn } from "./logger.js";
+import type { PiRunService } from "./pi-executor/pi-run-service.js";
 
 const TAG = "reconciler";
 const MAX_RETRIES = 3;
@@ -20,6 +24,12 @@ const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 const STALE_MS = 5 * 60 * 1000;
 const REMOTE_STALE_MS = 10 * 60 * 1000;
 const REMOTE_WARN_MS = 7 * 60 * 1000;
+
+let piService: PiRunService | null = null;
+
+export function setPiService(service: PiRunService | null): void {
+  piService = service;
+}
 
 export function startReconciler(): void {
   nerve.on("card:done", reconcile);
@@ -34,6 +44,24 @@ function reconcile(): void {
 
   for (const project of projects) {
     reconcileProject(project.id);
+  }
+
+  // #1314: Pi lane — reconcile queued Pi cards outside project context
+  reconcilePiLane();
+}
+
+function reconcilePiLane(): void {
+  if (!piService) return;
+  if (piService.executor.activeCount >= piService.executor.maxConcurrent) return;
+  const piCards = kanbanList("queued", "status").filter(c => c.type === "pi");
+  for (const card of piCards) {
+    if (!isUnblocked(card)) continue;
+    const run = piService.store.getByCardId(card.id);
+    if (!run || run.status !== "queued") continue;
+    if (piService.executor.activeCount >= piService.executor.maxConcurrent) break;
+    piService.executor.claimAndStart(run.id).catch(err => {
+      logWarn(TAG, `Pi start failed for ${run.id}: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 }
 

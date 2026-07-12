@@ -118,6 +118,9 @@ export interface BootCtx {
 
   // ── #1338: Live attached-session output feed ─────────────────────────
   sessionOutputFeed?: import("../components/session-output-feed.js").SessionOutputFeed;
+
+  // ── #1314: Pi coding executor ──────────────────────────────────────────
+  piExecutorService?: import("../components/pi-executor/pi-run-service.js").PiRunService;
 }
 
 /**
