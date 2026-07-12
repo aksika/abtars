@@ -31,20 +31,41 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const { AgentApiAdapter } = await import("../platforms/agent-api/agent-api-adapter.js");
   const a2aAdapter = new AgentApiAdapter();
 
-  // Ensure Ed25519 identity + TLS cert exist before AgentApiServer constructor reads them.
-  // bootstrapIdentity() is idempotent — no-op when files already present.
-  const { bootstrapIdentity } = await import("../components/peer-config.js");
+  // Ensure stable peer identity (signingKey + tribeToken) before TLS prep
+  const { bootstrapIdentity, loadPeerConfig } = await import("../components/peer-config.js");
   bootstrapIdentity();
 
   registry.register("agent-api", {
     configured: Boolean(agentConfig.port),
     async create() {
+      // #1305: Prepare validated TLS identity before server construction.
+      // Must run inside create() (not at phase level) so that Agent API can be
+      // disabled without requiring OpenSSL or TLS files.
+      let tlsIdentity: import("../components/peer-transport/tls-identity.js").ValidatedTlsIdentity;
+      try {
+        const { abtarsHome } = await import("../paths.js");
+        const { join } = await import("node:path");
+        const { ensureAgentApiTlsIdentity } = await import("../components/peer-transport/tls-identity.js");
+        const peerConfig = loadPeerConfig();
+        tlsIdentity = ensureAgentApiTlsIdentity(
+          join(abtarsHome(), "config"),
+          peerConfig.self.signingKey,
+          peerConfig.self.name,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logError(TAG, `Agent API TLS identity preparation failed: ${msg}`);
+        // Fail closed — no listener opens without validated TLS (#1305)
+        throw err;
+      }
+
       agentApiServer = new AgentApiServer({
         config: agentConfig,
         cliPath: config.transport.agentCliPath,
         workingDir: config.transport.workingDir,
         memory,
         runtime,
+        tls: tlsIdentity,
         sessionManager: ctx.sessionManager,
         onPeerActivity: notifyPeer,
         a2aAdapter,
@@ -93,11 +114,11 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
           // Call peer to get their pending prompt
           const prompt = await callPeer(peerName, "callback: you requested a call-back via wake-up signal", peerConfig.maxHops, { skipWakeup: true });
           if (!prompt || prompt.trim() === "") return;
-          // Process the prompt via local agent-api (self-call localhost)
-          const http = await import("node:http");
+          // Process the prompt via local agent-api (self-call localhost HTTPS)
+          const https = await import("node:https");
           const answer = await new Promise<string>((resolve, reject) => {
             const body = JSON.stringify({ model: "default", messages: [{ role: "user", content: prompt }] });
-            const req = http.request({ hostname: "127.0.0.1", port: agentConfig.port, path: "/v1/chat/completions", method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), "Authorization": `Bearer ${process.env["AGENT_API_TOKEN"] ?? ""}`  }, timeout: 55000 }, (res) => {
+            const req = https.request({ hostname: "127.0.0.1", port: agentConfig.port, path: "/v1/chat/completions", method: "POST", rejectUnauthorized: false, headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), "Authorization": `Bearer ${process.env["AGENT_API_TOKEN"] ?? ""}`  }, timeout: 55000 }, (res) => {
               let data = ""; res.on("data", c => data += c); res.on("end", () => { try { resolve(JSON.parse(data)?.choices?.[0]?.message?.content ?? ""); } catch (err) { logAndSwallow(TAG, "JSON.parse agent-api response", err); resolve(""); } });
             });
             req.on("error", reject); req.on("timeout", () => { req.destroy(); reject(new Error("self-call timeout")); });

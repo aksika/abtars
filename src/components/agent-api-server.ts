@@ -1,7 +1,7 @@
 import { logAndSwallow } from "./log-and-swallow.js";
-import { createServer, IncomingMessage, ServerResponse } from "http";
-import { createServer as createHttpsServer } from "https";
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
+import { IncomingMessage, ServerResponse } from "http";
+import { createServer } from "https";
+import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { abtarsHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
@@ -11,6 +11,7 @@ import { logInfo, logWarn, logDebug, logTrace } from "./logger.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
 import { openaiError } from "./openai-compat-translate.js";
 import { handleModels as v1HandleModels, handleModel as v1HandleModel, handleEmbeddings as v1HandleEmbeddings, writeResult } from "./openai-compat-routes.js";
+import type { ValidatedTlsIdentity } from "./peer-transport/tls-identity.js";
 
 const TAG = "agent-api";
 const MAX_TRAFFIC_LOG = 50;
@@ -31,6 +32,8 @@ interface AgentApiDeps {
   workingDir: string;
   memory: IMemorySystem | null;
   runtime: SubagentRuntime;
+  /** #1305: Validated TLS identity — HTTPS-only, no fallback to plain HTTP. */
+  tls: ValidatedTlsIdentity;
   /** Spin session manager (#1271) — used for /v1/chat/completions main path. */
   sessionManager?: import("./spin.js").Spin;
   /** Optional callback for peer activity notifications (A2A). */
@@ -145,12 +148,11 @@ function tryReadVersion(): string | null {
 }
 
 export class AgentApiServer {
-  private server!: ReturnType<typeof import("node:http").createServer>;
+  private server: ReturnType<typeof import("node:https").createServer>;
   private config: AgentApiConfig;
   private memory: IMemorySystem | null;
   private trafficLog: TrafficEntry[] = [];
   private onPeerActivity?: (msg: string) => void;
-  private tlsEnabled = false;
   private a2aAdapter?: import("../platforms/agent-api/agent-api-adapter.js").AgentApiAdapter;
   private peerWsConnections = new Map<string, import("ws").WebSocket>();
   private peerWss: import("ws").WebSocketServer | null = null;
@@ -166,28 +168,12 @@ export class AgentApiServer {
     this.onPiNotify = deps.onPiNotify;
     this.a2aAdapter = deps.a2aAdapter;
 
-    // Use HTTPS with self-signed identity cert if available
-    const configDir = join(abtarsHome(), "config");
-    const identityCrtPath = join(configDir, "identity.crt");
-    const identityKeyPath = join(configDir, "identity.tls.key");
-    let hasTls = false;
-    if (existsSync(identityCrtPath) && existsSync(identityKeyPath)) {
-      try {
-        this.server = createHttpsServer({
-          key: readFileSync(identityKeyPath),
-          cert: readFileSync(identityCrtPath),
-          minVersion: "TLSv1.3",
-        }, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
-        hasTls = true;
-        this.tlsEnabled = true;
-        logInfo(TAG, "TLS 1.3 enabled for agent-api (self-signed cert)");
-      } catch (err) { logAndSwallow(TAG, "TLS setup", err); }
-    } else {
-      logWarn(TAG, "identity.crt/identity.tls.key not found — agent-api starting without TLS (plain HTTP)");
-    }
-    if (!hasTls) {
-      this.server = createServer((req, res) => this.handle(req, res));
-    }
+    // HTTPS-only: validated TLS material is a required dependency (#1305)
+    this.server = createServer({
+      key: deps.tls.key,
+      cert: deps.tls.cert,
+      minVersion: "TLSv1.3",
+    }, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
   }
 
   async start(): Promise<void> {
@@ -862,7 +848,7 @@ export class AgentApiServer {
     }
 
     logInfo(TAG, `Peer call: ${caller} → ${this.config.agentCodename} [${commsType}]`);
-    const secLabel = `${this.tlsEnabled ? "tls" : "http"}+${commsType === "signed" ? "signed" : "jwt"}`;
+    const secLabel = `tls+${commsType === "signed" ? "signed" : "jwt"}`;
     this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} [${secLabel}]`);
 
     // #991 — Read peer trust level

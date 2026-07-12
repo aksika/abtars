@@ -331,28 +331,16 @@ async function probeIdentity(): Promise<ProbeResult> {
   const env = readEnv();
   if (env.get("ENABLE_AGENT_API") !== "true") return { name: "identity", status: "skipped", detail: "a2a disabled" };
 
-  const certPath = join(configDir, "identity.crt");
-  const keyPath = join(configDir, "identity.tls.key");
-  const certExists = existsSync(certPath);
-  const keyExists = existsSync(keyPath);
-  if (!certExists || !keyExists) {
-    const missing = [!certExists && "identity.crt", !keyExists && "identity.tls.key"].filter(Boolean);
-    return { name: "identity", status: "failed", detail: `missing: ${missing.join(", ")}` };
-  }
-
-  // Verify cert public key matches self.signingKey (#1293)
+  // Use the shared read-only validator (#1305)
   try {
-    const { loadPeerConfig, deriveVerifyKey } = require("../../components/peer-config.js") as typeof import("../../components/peer-config.js");
-    const { verifyServerCert } = require("../../components/peer-transport/peer-auth.js") as typeof import("../../components/peer-transport/peer-auth.js");
+    const { loadPeerConfig } = require("../../components/peer-config.js") as typeof import("../../components/peer-config.js");
+    const { validateAgentApiTlsIdentity } = require("../../components/peer-transport/tls-identity.js") as typeof import("../../components/peer-transport/tls-identity.js");
     const config = loadPeerConfig();
-    const expectedVerifyKey = deriveVerifyKey(config.self.signingKey);
-    const certPem = readFileSync(certPath, "utf-8");
-    if (!verifyServerCert(certPem, expectedVerifyKey)) {
-      return { name: "identity", status: "failed", detail: "cert pubkey mismatch — re-run: abtars install --force" };
-    }
-    return { name: "identity", status: "ok", detail: "cert matches signing key" };
-  } catch {
-    return { name: "identity", status: "ok", detail: "cert present (key-match skipped)" };
+    const identity = validateAgentApiTlsIdentity(configDir, config.self.signingKey);
+    return { name: "identity", status: "ok", detail: `cert matches signing key (expires ${identity.certificateNotAfter.toISOString().slice(0, 10)})` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { name: "identity", status: "failed", detail: msg };
   }
 }
 
