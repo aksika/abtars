@@ -342,6 +342,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   if (prof?.provider.fallbackChain?.length) {
     lines.push(`\nFallback chain: ${prof.provider.fallbackChain.join(" → ")}`);
   }
+  // #1386: Show effective candidate order from the transport's policy
+  const transport = ctx.transport as unknown as { policy?: { candidates: Array<{ model: string; endpoint: string; source: string }> } };
+  if (transport.policy?.candidates && transport.policy.candidates.length > 1) {
+    const { formatCandidateChain } = await import("../transport/model-candidates.js");
+    lines.push(`\nEffective chain:\n${formatCandidateChain(transport.policy.candidates as any)}`);
+  }
   if (ctx.hailMary) {
     lines.push(`hailMary: ${ctx.hailMary.model} `);
   }

@@ -1,5 +1,6 @@
 import { logDebug } from "./logger.js";
 import type { QueuedSessionInstruction, QueueInstructionResult, ManagedSession, SteerEvent, SteerEventType } from "./spin-types.js";
+import { isHollow } from "./spin-sessions.js";
 
 const TAG = "steer-queue";
 
@@ -9,10 +10,27 @@ const MAX_TOTAL_BYTES = 32 * 1024;
 
 let instructionSeq = 0;
 
-let steerListener: ((event: SteerEvent) => void) | null = null;
+/** #1362: Scoped multi-subscriber steering event bus. Replaces the singleton steerListener. */
+interface SteerSub {
+  filter: { sessionId: string; executionId?: string };
+  listener: (event: SteerEvent) => void;
+}
+let steerSubs: SteerSub[] = [];
 
-export function onSteerEvent(listener: (event: SteerEvent) => void): void {
-  steerListener = listener;
+export function onSteerEvent(listener: (event: SteerEvent) => void): () => void {
+  const sub: SteerSub = { filter: { sessionId: "" }, listener };
+  steerSubs.push(sub);
+  return () => { steerSubs = steerSubs.filter(s => s !== sub); };
+}
+
+/** #1362: Subscribe with a session/execution filter. Returns unsubscribe function. */
+export function subscribeSteerEvents(
+  filter: { sessionId: string; executionId?: string },
+  listener: (event: SteerEvent) => void,
+): () => void {
+  const sub: SteerSub = { filter, listener };
+  steerSubs.push(sub);
+  return () => { steerSubs = steerSubs.filter(s => s !== sub); };
 }
 
 function publish(type: SteerEventType, instructionIds: string[], session: ManagedSession, description: string): void {
@@ -24,21 +42,36 @@ function publish(type: SteerEventType, instructionIds: string[], session: Manage
     timestamp: Date.now(),
     description: description.slice(0, 200),
   };
-  steerListener?.(event);
+  for (const sub of steerSubs) {
+    if (sub.filter.sessionId && sub.filter.sessionId !== event.sessionId) continue;
+    if (sub.filter.executionId && sub.filter.executionId !== event.executionId) continue;
+    try { sub.listener(event); } catch { /* swallow */ }
+  }
 }
 
+/** #1361: Generalized validation — supports any local active steerable session. */
 export function queueInstruction(
   session: ManagedSession,
   input: { text: string; source: QueuedSessionInstruction["source"] },
 ): QueueInstructionResult {
-  if (!session.id.includes("_O_")) {
-    return { ok: false, reason: "not_orc" };
+  // Reject hollow (remote) sessions
+  if (session.peer || isHollow(session)) {
+    return { ok: false, reason: "not_local" };
   }
-  if (!session.busy) {
-    return { ok: false, reason: "not_busy" };
+  // Session must allow execution
+  if (session.status === "ended") {
+    return { ok: false, reason: "not_active" };
   }
+  if (session.status === "paused") {
+    return { ok: false, reason: "not_active" };
+  }
+  // Must have an active execution generation
   if (!session.activeExecutionId) {
     return { ok: false, reason: "stale_execution" };
+  }
+  // Acceptance gate must be open
+  if (!session.steeringAccepting) {
+    return { ok: false, reason: "not_steerable" };
   }
 
   if (Buffer.byteLength(input.text, "utf-8") > MAX_BYTES_PER_ITEM) {
@@ -72,13 +105,31 @@ export function queueInstruction(
   return { ok: true, instruction };
 }
 
+/** #1361: Drain instructions matching the current execution generation only. */
 export function drainInstructionBatch(session: ManagedSession): QueuedSessionInstruction[] {
   if (session.instructionQueue.length === 0) return [];
 
-  const batch = session.instructionQueue.splice(0);
-  publish("steer.consumed", batch.map(i => i.id), session, `batch of ${batch.length}`);
-  logDebug(TAG, `drained ${batch.length} instructions from ${session.id}`);
-  return batch;
+  // Filter to current generation only, expire stale ones
+  const current = session.activeExecutionId;
+  const stale: QueuedSessionInstruction[] = [];
+  const fresh: QueuedSessionInstruction[] = [];
+  for (const inst of session.instructionQueue) {
+    if (inst.executionId === current) {
+      fresh.push(inst);
+    } else {
+      stale.push(inst);
+    }
+  }
+  if (stale.length > 0) {
+    failInstructions(session, stale.map(i => i.id), "stale_generation");
+  }
+
+  if (fresh.length === 0) return [];
+
+  session.instructionQueue = session.instructionQueue.filter(i => !fresh.includes(i));
+  publish("steer.consumed", fresh.map(i => i.id), session, `batch of ${fresh.length}`);
+  logDebug(TAG, `drained ${fresh.length} instructions from ${session.id}`);
+  return fresh;
 }
 
 export function expireInstructions(session: ManagedSession, reason: string): void {

@@ -1,3 +1,4 @@
+import type { CandidateSource } from "../components/transport/model-candidates.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { getEnv } from "../components/env-schema.js";
 /**
@@ -194,8 +195,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     const { FallbackPolicy } = await import("../components/transport/fallback-policy.js");
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
 
-    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number }> = [
-      { endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: resolved.model, maxContext: resolved.contextWindow },
+    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number; source: CandidateSource }> = [
+      { endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: resolved.model, maxContext: resolved.contextWindow, source: "primary" },
     ];
     for (const fb of resolved.fallbacks) {
       const fbResolved = tc ? resolveAgent("_fallback", { ...tc, agents: { ...tc.agents, _fallback: { model: fb.model, provider: fb.provider } } }) : null;
@@ -204,6 +205,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
         model: fb.model,
         maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
+        source: "agent_fallback",
       });
     }
 
@@ -229,6 +231,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       maxOutput: resolved.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
       maxToolRounds: tc?.maxToolRounds ?? 25,
+      maxFallbackToolRounds: tc?.maxFallbackToolRounds ?? 5,
       apiFormat: resolved.provider.apiFormat,
       useProviderLib: resolved.provider.useProviderLib,
       thinking: resolved.provider.thinking,

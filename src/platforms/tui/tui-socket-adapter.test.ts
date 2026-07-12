@@ -53,7 +53,8 @@ function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActive
   // what carries the busy flag.
   const orcManagedEntry: ManagedSession | undefined = opts.orcSession
     ? ({ id: opts.orcSession.id, busy: opts.orcBusy ?? false,
-        instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined } as unknown as ManagedSession)
+        instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined,
+        steeringAccepting: opts.orcBusy ?? false } as unknown as ManagedSession)
     : undefined;
   const allEntries: ManagedSession[] = opts.allSessions ?? (orcManagedEntry ? [orcManagedEntry] : []);
   const spin: Partial<Spin> = {
@@ -72,7 +73,7 @@ function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActive
     getOrcSession: vi.fn(() => opts.orcSession ?? null),
     getSessionById: vi.fn((id: string) => {
       if (!opts.orcSession || id !== opts.orcSession.id) return undefined;
-      return { id, busy: opts.orcBusy ?? false, instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined } as unknown as ManagedSession;
+      return { id, busy: opts.orcBusy ?? false, instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined, steeringAccepting: opts.orcBusy ?? false } as unknown as ManagedSession;
     }),
     getSessionByGlobalIndex: vi.fn((index: number) => {
       calls.getSessionByGlobalIndex.push([index]);
@@ -791,7 +792,7 @@ describe("TuiSocketAdapter — steer mode", () => {
     expect(ack).toBeDefined();
     if (ack && ack.t === "steer-ack") {
       expect(ack.status).toBe("rejected");
-      expect(ack.message).toMatch(/not busy/i);
+      expect(ack.message).toMatch(/steering/i);
     }
 
     conn.destroy(); adapter.stop();

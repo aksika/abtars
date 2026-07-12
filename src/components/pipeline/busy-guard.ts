@@ -39,12 +39,24 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
       return;
     }
 
-    // /wait or /steer — non-interrupting injection
-    if (lower.startsWith("/wait") || lower.startsWith("/steer")) {
-      const body = text.replace(/^\/(wait|steer)\s*/i, "").trim();
+    // /steer — use the generalized generation-bound instruction queue
+    if (lower.startsWith("/steer")) {
+      const body = text.replace(/^\/steer\s*/i, "").trim();
+      const { queueInstruction } = await import("../session-instruction-queue.js");
+      const result = queueInstruction(entry, { text: body, source: "platform" });
+      logInfo("busy-guard", `Steer for ${activeId}: ${result.ok ? "queued" : result.reason} — "${body.slice(0, 60)}"`);
+      const message = result.ok ? "📌 Noted." : `Steering not accepted: ${result.reason}.`;
+      try { await adapter.sendMessage(msg.channelId, message, { threadId: msg.threadId }); } catch { /* */ }
+      ctx.handled = true;
+      return;
+    }
+
+    // /wait — legacy non-interrupting injection (preserved separately from /steer)
+    if (lower.startsWith("/wait")) {
+      const body = text.replace(/^\/wait\s*/i, "").trim();
       const steer = body ? `[USER] Wait! ${body}` : "[USER] Wait!";
       entry.pendingWait = entry.pendingWait ? entry.pendingWait + "\n" + steer : steer;
-      logInfo("busy-guard", `Steer queued for ${activeId}: "${body || "(no message)"}"`);
+      logInfo("busy-guard", `Wait queued for ${activeId}: "${body || "(no message)"}"`);
       try { await adapter.sendMessage(msg.channelId, "📌 Noted.", { threadId: msg.threadId }); } catch { /* */ }
       ctx.handled = true;
       return;

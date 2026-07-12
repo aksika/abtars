@@ -5,8 +5,8 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
-import { logInfo, logWarn } from "./logger.js";
+import type { IKiroTransport, PromptRequestContext, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
+import { logInfo, logDebug, logWarn } from "./logger.js";
 import { randomBytes } from "node:crypto";
 
 import type { ModelHealthRegistry } from "./transport/model-health-registry.js";
@@ -28,6 +28,16 @@ export interface AgentOpts {
   maxToolRounds?: number;
   /** #1338: call-local observer for live TUI output mirroring. Forwarded to the transport. */
   outputObserver?: import("./session-output-feed.js").OutputObserver;
+}
+
+/** #1361: Per-execution handle for one-shot or continuation-capable LLM calls. */
+export interface RuntimeExecution {
+  send(prompt: string, image?: { mime: string; base64: string }, context?: PromptRequestContext): Promise<string>;
+  close(): Promise<void>;
+  readonly transport: IKiroTransport;
+  readonly sessionKey: string;
+  readonly ephemeral: boolean;
+  lastUsage(): RuntimeUsageSnapshot | null;
 }
 
 /** Persistent transport handle for multi-turn callers. */
@@ -94,6 +104,23 @@ export class SubagentRuntime {
 
   /** Send a prompt to a named agent and get the response. */
   async complete(agent: AgentName, prompt: string, opts?: AgentOpts): Promise<string> {
+    const exec = await this.openExecution(agent, agent, opts);
+    try {
+      const response = await exec.send(prompt, undefined, { outputObserver: opts?.outputObserver });
+      this._lastUsage = exec.lastUsage();
+      return response ?? "";
+    } catch (err) {
+      logWarn(TAG, `${agent} complete failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.cache.delete(agent);
+      throw err;
+    } finally {
+      await exec.close();
+    }
+  }
+
+  /** #1361: Open a uniquely-keyed execution handle. Key must be unique per concurrent
+   *  execution (use ManagedSession ID for one-shot sessions, not the agent name alone). */
+  async openExecution(agent: AgentName, key: string, opts?: AgentOpts): Promise<RuntimeExecution> {
     const { checkBudget, sendBudgetNotification } = await import("./budget.js");
     const budgetCheck = checkBudget(agent);
     if (!budgetCheck.allowed) {
@@ -103,44 +130,60 @@ export class SubagentRuntime {
     }
 
     const sessionStrategy = opts?.session ?? DEFAULT_SESSION[agent] ?? "fresh";
-    const start = Date.now();
 
-    const cached = this.cache.get(agent);
+    const cached = this.cache.get(key as AgentName);
     if (cached && sessionStrategy === "fresh") {
       await cached.transport.resetSession?.(cached.sessionKey);
       (await import("./transport/tool-registry.js")).resetStoreCounter();
     }
 
-    const { transport, model, sessionKey } = cached ?? await this.createAgent(agent, opts?.sessionType);
+    const cacheKey = key as AgentName;
+    const entry = this.cache.get(cacheKey) ?? await this.createAgent(agent, opts?.sessionType, key);
+    const { transport, model } = entry;
+    const sessionKey = entry.sessionKey;
 
-    // Per-call timeout override (e.g. dreamy sleep steps need longer than default)
+    // Per-call timeout override
     if (opts?.timeoutMs && transport.setTimeoutOverride) {
       transport.setTimeoutOverride(opts.timeoutMs);
     }
-
-    // Per-call tool-round circuit breaker override (e.g. long-running task agents)
+    // Per-call tool-round circuit breaker override
     if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
       transport.setMaxToolRoundsOverride(opts.maxToolRounds);
     }
 
-    try {
-      const response = await transport.sendPrompt(sessionKey, prompt, undefined, { outputObserver: opts?.outputObserver });
-      const elapsed = Date.now() - start;
-      this._lastUsage = transport.lastUsage?.() ?? null;
-      logInfo(TAG, `${agent} complete: ${prompt.length}ch → ${response?.length ?? 0}ch (${elapsed}ms, ${model})`);
-      return response ?? "";
-    } catch (err) {
-      logWarn(TAG, `${agent} complete failed: ${err instanceof Error ? err.message : String(err)}`);
-      this.cache.delete(agent);
-      throw err;
-    } finally {
-      if (opts?.timeoutMs && transport.setTimeoutOverride) {
-        transport.setTimeoutOverride(null);
-      }
-      if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
-        transport.setMaxToolRoundsOverride(null);
-      }
-    }
+    let closed = false;
+    const start = Date.now();
+
+    const exec: RuntimeExecution = {
+      transport,
+      sessionKey,
+      ephemeral: sessionStrategy === "fresh",
+      lastUsage: () => transport.lastUsage?.() ?? null,
+
+      send: async (prompt, image, context) => {
+        const response = await transport.sendPrompt(sessionKey, prompt, image, context);
+        logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
+        return response ?? "";
+      },
+
+      close: async () => {
+        if (closed) return;
+        closed = true;
+
+        // Reset overrides — transport stays in cache (cleaned by shutdown())
+        if (opts?.timeoutMs && transport.setTimeoutOverride) {
+          transport.setTimeoutOverride(null);
+        }
+        if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+          transport.setMaxToolRoundsOverride(null);
+        }
+
+        const elapsed = Date.now() - start;
+        logDebug(TAG, `${key} exec closed (${elapsed}ms, ${model})`);
+      },
+    };
+
+    return exec;
   }
 
   /** Get a persistent session handle for multi-turn callers. */

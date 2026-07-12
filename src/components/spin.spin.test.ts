@@ -132,9 +132,28 @@ function makeRuntime(opts: {
       return mockTransport(overrides);
     },
   };
+  const sendPromptFn = opts.sendPromptImpl
+    ? vi.fn(opts.sendPromptImpl)
+    : vi.fn(async () => opts.sendPromptResponse ?? opts.completeResponse ?? "agent response");
+  const mockTransportInstance = mockTransport({
+    lastUsage: vi.fn().mockReturnValue(lastUsage),
+    sendPrompt: sendPromptFn,
+  });
+  const mockExec = {
+    send: vi.fn(async (prompt: string, image?: any, context?: any) => {
+      const response = await mockTransportInstance.sendPrompt("mock:exec", prompt, image, context);
+      return response ?? "(no output)";
+    }),
+    close: vi.fn(),
+    transport: mockTransportInstance,
+    sessionKey: "mock:exec",
+    ephemeral: true,
+    lastUsage: () => lastUsage,
+  };
   return {
     session: vi.fn().mockResolvedValue(agentSession),
     complete: vi.fn(opts.completeImpl ?? (async () => opts.completeResponse ?? "(no output)")),
+    openExecution: vi.fn(async () => mockExec),
     lastUsage,
   };
 }
@@ -360,7 +379,14 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
     it("fires on failure path with error", async () => {
       const runtime = makeRuntime();
-      runtime.complete = vi.fn(async () => { throw new Error("boom"); });
+      runtime.openExecution = vi.fn(async () => ({
+        send: vi.fn(async () => { throw new Error("boom"); }),
+        close: vi.fn(),
+        transport: mockTransport(),
+        sessionKey: "mock:boom",
+        ephemeral: true,
+        lastUsage: () => null,
+      }));
       spin.setRuntime(runtime as any);
       const events: any[] = [];
       await expect(spin.spin({
@@ -408,15 +434,17 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const runtime = makeRuntime({ completeResponse: "ok" });
       spin.setRuntime(runtime as any);
       await spin.dispatchBackground({ prompt: "x" });
-      // S = coding agent
-      expect(runtime.complete).toHaveBeenCalledWith("coding", "x", expect.objectContaining({ session: "fresh" }));
+      // S = coding agent → openExecution called with agent="coding"
+      const call = (runtime.openExecution as any).mock.calls[0];
+      expect(call[0]).toBe("coding");
     });
 
     it("agent override routes to that agent", async () => {
       const runtime = makeRuntime({ completeResponse: "ok" });
       spin.setRuntime(runtime as any);
       await spin.dispatchBackground({ prompt: "compact", agent: "dreamy" });
-      expect(runtime.complete).toHaveBeenCalledWith("dreamy", "compact", expect.objectContaining({ session: "fresh" }));
+      const call = (runtime.openExecution as any).mock.calls[0];
+      expect(call[0]).toBe("dreamy");
     });
   });
 
@@ -682,9 +710,9 @@ describe("spin() — #1338 output mirroring", () => {
   it("threads the observer through the oneshot runtime.complete path", async () => {
     const feed = new RecordingFeed();
     const runtime = makeRuntime({
-      completeImpl: async (_agent: string, _prompt: string, opts?: any) => {
-        expect(opts?.outputObserver).toBeDefined();
-        opts.outputObserver.onDelta({ kind: "text", text: "one-shot text" });
+      sendPromptImpl: async (_key: string, _p: string, _img?: any, ctx?: any) => {
+        expect(ctx?.outputObserver).toBeDefined();
+        ctx.outputObserver.onDelta({ kind: "text", text: "one-shot text" });
         return "one-shot text";
       },
     });

@@ -36,8 +36,9 @@ export function allocateSession(
     busy: false, queue: [], fullMode: false, pendingStart: false,
     seen: false, compacting: false, ctxWarned: false, compactFailures: 0,
     primingTerms: [], completions: [],
-    // #1332: Steering queue
+    // #1332/#1361: Steering queue and acceptance gate
     instructionQueue: [],
+    steeringAccepting: false,
   };
   sessions.set(session.id, session);
   pushLog(session, "created");

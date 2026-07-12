@@ -4,7 +4,7 @@ import { getEnv } from "../env-schema.js";
  * Implements IKiroTransport with its own agent loop (send → stream → tools → loop).
  */
 
-import { logInfo, logWarn, logError, logDebug, logTrace } from "../logger.js";
+import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { withRetry, isFatal } from "../retry.js";
 import { ConversationSession, type ToolCall, type ContentPart } from "./conversation-session.js";
@@ -16,10 +16,23 @@ import { recordUsage } from "../usage-tracker.js";
 import { clampMaxOutputTokens, estimateTokensFromChars } from "./token-budget.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport, PromptRequestContext, RuntimeStatusSnapshot, RuntimeUsageSnapshot } from "./kiro-transport.js";
+import type { OutputObserver } from "../session-output-feed.js";
 import { isCompactable } from "../spin-types.js";
+import { ToolLoopGuard, ToolBehaviorError } from "./tool-loop-guard.js";
+import { candidateKey } from "./model-candidates.js";
 
 const TAG = "direct-api";
 
+export interface PromptToolBudget {
+  readonly maxRounds: number;
+  roundsUsed: number;
+}
+
+export interface AgentLoopPolicy {
+  candidateKey: string;
+  candidateRoundLimit: number;
+  promptBudget: PromptToolBudget;
+}
 
 export interface DirectApiConfig {
   provider?: string;
@@ -30,6 +43,7 @@ export interface DirectApiConfig {
   maxOutput: number;
   maxTurns: number;
   maxToolRounds?: number;
+  maxFallbackToolRounds?: number;
   apiFormat?: "chat" | "responses" | "anthropic";
   /** #1311: route DirectApi through the pi-ai provider engine (L1) when installed. Default off — L0 reptile floor otherwise. */
   useProviderLib?: boolean;
@@ -68,7 +82,6 @@ export class DirectApiTransport implements IKiroTransport {
   private _lastTurnUsage: RuntimeUsageSnapshot | null = null;
   private _activeSessionKey = "";
   private _activeUserId = "master";
-  private _activeSessionId: string | null = null;
   private _outputObserver?: OutputObserver;
 
   /** Agent name for budget tracking (set by caller). */
@@ -219,7 +232,16 @@ export class DirectApiTransport implements IKiroTransport {
     this._activeMaxContext = em.maxContext;
     this._lastActivityAt = Date.now();
     logWarn(TAG, `🚨 Emergency mode: using ${em.model}`);
-    const result = await this.agentLoop(session, signal);
+    const promptBudget: PromptToolBudget = {
+      maxRounds: this._maxToolRoundsOverride ?? this.config.maxToolRounds ?? 25,
+      roundsUsed: 0,
+    };
+    const loopPolicy: AgentLoopPolicy = {
+      candidateKey: candidateKey(em.model, em.endpoint),
+      candidateRoundLimit: promptBudget.maxRounds,
+      promptBudget,
+    };
+    const result = await this.agentLoop(session, signal, loopPolicy);
     this._lastAnswer = result;
     return result;
   }
@@ -228,6 +250,14 @@ export class DirectApiTransport implements IKiroTransport {
     const policy = this.policy!;
     const failedAttempts: Array<{ model: string; kind: string; bucket: number }> = [];
     const isPrimary = (m: string): boolean => m === this.config.model;
+    const effectiveMaxToolRounds = this._maxToolRoundsOverride ?? this.config.maxToolRounds ?? 25;
+    const maxFallbackRounds = this.config.maxFallbackToolRounds ?? 5;
+
+    // #1386: Create one prompt-wide budget shared across all candidates
+    const promptBudget: PromptToolBudget = {
+      maxRounds: effectiveMaxToolRounds,
+      roundsUsed: 0,
+    };
 
     // Try each candidate via policy
     let candidate = policy.selectModel(this._lastPromptTokens);
@@ -245,8 +275,20 @@ export class DirectApiTransport implements IKiroTransport {
         this.onFallback(candidate.model, ctxPct, lastFail?.kind);
       }
 
+      // #1386: Determine candidate round limit
+      const isPrimaryCandidate = isPrimary(candidate.model);
+      const candidateRoundLimit = isPrimaryCandidate
+        ? effectiveMaxToolRounds
+        : Math.min(effectiveMaxToolRounds, maxFallbackRounds);
+
+      const loopPolicy: AgentLoopPolicy = {
+        candidateKey: candidateKey(candidate.model, candidate.endpoint),
+        candidateRoundLimit,
+        promptBudget,
+      };
+
       try {
-        const result = await this.agentLoop(session, signal);
+        const result = await this.agentLoop(session, signal, loopPolicy);
         this._lastAnswer = result;
         if (!result || !result.trim()) {
           policy.recordError(candidate, "empty");
@@ -258,6 +300,20 @@ export class DirectApiTransport implements IKiroTransport {
         return result;
       } catch (err) {
         if (signal.aborted) { session.rollbackToLastUser(); throw err; }
+
+        // #1386: Handle tool behavior failure (loop, repeated failures, round limits)
+        if (err instanceof ToolBehaviorError) {
+          session.rollbackToLastUser();
+          policy.recordError(candidate, "weak");
+          const emKey = candidateKey(candidate.model, candidate.endpoint);
+          policy.excludedKeys.add(emKey);
+          const bucket = policy.registry.getBucketLevel(candidate.model, candidate.endpoint);
+          failedAttempts.push({ model: candidate.model, kind: `behavior_${err.reason}`, bucket });
+          logWarn(TAG, `${candidate.model} behavior failure (${err.reason}, rounds: ${err.roundsUsed}, bucket: ${bucket}%) — ${err.message}`);
+          candidate = policy.selectModel(this._lastPromptTokens);
+          continue;
+        }
+
         const errMsg = err instanceof Error ? err.message : String(err);
         // Capability miss — strip image and retry text-only (#670)
         if (errMsg.includes("does not support image input") || errMsg.includes("No endpoints found that support image")) {
@@ -272,11 +328,27 @@ export class DirectApiTransport implements IKiroTransport {
           logWarn(TAG, `${candidate.model} doesn't support images — retrying text-only`);
           if (this.onIntermediateResponse) this.onIntermediateResponse("⚠️ Model doesn't support images via this provider. Sending text-only.\n");
           try {
-            const result = await this.agentLoop(session, signal);
+            const imageLoopPolicy: AgentLoopPolicy = {
+              candidateKey: loopPolicy.candidateKey,
+              candidateRoundLimit: loopPolicy.candidateRoundLimit,
+              promptBudget,
+            };
+            const result = await this.agentLoop(session, signal, imageLoopPolicy);
             this._lastAnswer = result;
             policy.recordSuccess(candidate);
             return result;
           } catch (retryErr) {
+            if (retryErr instanceof ToolBehaviorError) {
+              session.rollbackToLastUser();
+              policy.recordError(candidate, "weak");
+              const emKey = candidateKey(candidate.model, candidate.endpoint);
+              policy.excludedKeys.add(emKey);
+              const bucket = policy.registry.getBucketLevel(candidate.model, candidate.endpoint);
+              failedAttempts.push({ model: candidate.model, kind: `behavior_${retryErr.reason}`, bucket });
+              logWarn(TAG, `${candidate.model} behavior failure on retry (${retryErr.reason})`);
+              candidate = policy.selectModel(this._lastPromptTokens);
+              continue;
+            }
             const retryStatus = this.parseErrorStatus(retryErr);
             const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
             policy.recordError(candidate, classifyError(retryStatus, retryMsg));
@@ -314,36 +386,66 @@ export class DirectApiTransport implements IKiroTransport {
         this.onFallback(`${smallest.model} (compacted)`, Math.round((session.estimateTokens() / smallest.maxContext) * 100));
       }
       try {
-        const result = await this.agentLoop(session, signal);
+        const compactionRoundLimit = Math.min(effectiveMaxToolRounds, maxFallbackRounds);
+        const compactionPolicy: AgentLoopPolicy = {
+          candidateKey: candidateKey(smallest.model, smallest.endpoint),
+          candidateRoundLimit: compactionRoundLimit,
+          promptBudget,
+        };
+        const result = await this.agentLoop(session, signal, compactionPolicy);
         this._lastAnswer = result;
         if (!result || !result.trim()) policy.recordError(smallest, "empty");
         else policy.recordSuccess(smallest);
         return result;
       } catch (err) {
-        const status = this.parseErrorStatus(err);
-        const errMsg2 = err instanceof Error ? err.message : String(err);
-        policy.recordError(smallest, classifyError(status, errMsg2));
-        failedAttempts.push({ model: smallest.model, kind: classifyError(status, errMsg2), bucket: policy.registry.getBucketLevel(smallest.model, smallest.endpoint) });
+        if (err instanceof ToolBehaviorError) {
+          policy.recordError(smallest, "weak");
+          failedAttempts.push({ model: smallest.model, kind: `behavior_${err.reason}`, bucket: policy.registry.getBucketLevel(smallest.model, smallest.endpoint) });
+        } else {
+          const status = this.parseErrorStatus(err);
+          const errMsg2 = err instanceof Error ? err.message : String(err);
+          policy.recordError(smallest, classifyError(status, errMsg2));
+          failedAttempts.push({ model: smallest.model, kind: classifyError(status, errMsg2), bucket: policy.registry.getBucketLevel(smallest.model, smallest.endpoint) });
+        }
       }
     }
 
+    // #1386: If all candidates exhausted (including behavior failures), return a transport-authored message
+    // instead of throwing, so the user gets a bounded response without another model call.
     const summary = failedAttempts.map(a => `  - ${a.model}: ${a.kind} (bucket: ${a.bucket}%)`).join("\n");
     if (policy.lastDecision) {
       logDebug(TAG, `Last decision: ${JSON.stringify(policy.lastDecision)}`);
     }
-    throw new Error(`All models exhausted:\n${summary}`);
+    logWarn(TAG, `All models exhausted:\n${summary}`);
+    const exhaustedMsg = `[SYSTEM] All available models failed to produce a valid response. No more fallbacks remain. Try /model change to pick a different provider, or /model health reset to retry.`;
+    session.addAssistant(exhaustedMsg);
+    this._lastAnswer = exhaustedMsg;
+    return exhaustedMsg;
   }
 
-  private async agentLoop(session: ConversationSession, signal: AbortSignal): Promise<string> {
+  private async agentLoop(session: ConversationSession, signal: AbortSignal, loopPolicy?: AgentLoopPolicy): Promise<string> {
     let zeroTokenRetries = 0;
     const loopStart = Date.now();
-    const callSigs: string[] = []; // #1133: track across turns for loop detection
+    const guard = new ToolLoopGuard();
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
       if (signal.aborted) return signal.reason === "timeout" ? "Response timed out." : "Interrupted.";
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
+
+      // #1386: Check prompt-wide budget first
+      const promptBudget = loopPolicy?.promptBudget;
+      if (promptBudget && promptBudget.roundsUsed >= promptBudget.maxRounds) {
+        throw new ToolBehaviorError("prompt_round_limit", promptBudget.roundsUsed);
+      }
+
+      // #1386: Check candidate-local budget
+      if (loopPolicy && guard.roundsUsed >= loopPolicy.candidateRoundLimit) {
+        throw new ToolBehaviorError("candidate_round_limit", guard.roundsUsed);
+      }
+
+      // #1386: Also enforce the static circuit breaker as a safety net (matches old behavior)
       if (turn >= (this._maxToolRoundsOverride ?? this.config.maxToolRounds ?? 25)) {
-        logError(TAG, `Tool loop circuit breaker: ${turn} rounds without final response — aborting`);
-        return "[SYSTEM] Tool loop limit reached. Stopped after " + turn + " rounds.";
+        if (promptBudget) promptBudget.roundsUsed = Math.max(promptBudget.roundsUsed, turn + 1);
+        throw new ToolBehaviorError("prompt_round_limit", turn + 1);
       }
 
       const pendingInstruction = this.getPendingInstruction?.();
@@ -374,6 +476,9 @@ export class DirectApiTransport implements IKiroTransport {
       }
 
       if (toolCalls.length > 0) {
+        // #1386: increment prompt budget and guard rounds for this tool-calling round
+        if (promptBudget) promptBudget.roundsUsed++;
+
         session.addAssistant(content, toolCalls);
         logDebug(TAG, `Tool calls: ${toolCalls.map(tc => tc.function.name).join(", ")}`);
         logTrace(TAG, `Tool args: ${toolCalls.map(tc => {
@@ -389,7 +494,7 @@ export class DirectApiTransport implements IKiroTransport {
           this.onSegmentBreak?.(content.trim());
         }
 
-        // #1133: Track tool call signatures for loop detection
+        // #1386: Tool call processing with loop guard
         for (let ti = 0; ti < toolCalls.length; ti++) {
           const tc = toolCalls[ti]!;
           if (signal.aborted) {
@@ -407,7 +512,7 @@ export class DirectApiTransport implements IKiroTransport {
           if (mid) session.addUser(mid);
 
           this.onToolCallStart?.(tc.function.name ?? "tool");
-          outputObserver?.onToolStart?.({ name: tc.function.name ?? "tool" });
+          this._outputObserver?.onToolStart?.({ name: tc.function.name ?? "tool" });
 
           let args: Record<string, string>;
           try { args = JSON.parse(tc.function.arguments); } catch {
@@ -418,18 +523,38 @@ export class DirectApiTransport implements IKiroTransport {
             continue;
           }
 
-          // #1133: Loop detection — abort if same call (name+args hash) repeats 3x across turns
-          const { createHash } = await import("node:crypto");
-          const sig = `${tc.function.name}:${createHash("sha256").update(tc.function.arguments).digest("hex").slice(0, 8)}`;
-          callSigs.push(sig);
-          if (callSigs.filter(s => s === sig).length >= 3) {
-            logWarn(TAG, `Tool loop detected: ${tc.function.name} repeated 3x — aborting`);
-            session.addToolResult(tc.id, tc.function.name, JSON.stringify({ error: "[SYSTEM] Repeated identical tool call detected (3x). Stop retrying and provide a final text response to the user." }));
-            break;
+          // #1386: Loop guard — detect exact-repeat before execution
+          try {
+            guard.observeCall(tc.function.name, tc.function.arguments);
+          } catch (err) {
+            if (err instanceof ToolBehaviorError) {
+              session.addToolResult(tc.id, tc.function.name, JSON.stringify({ error: `[SYSTEM] ${err.message}. Stop retrying and provide a final text response.` }));
+              // Inject cancellation results for remaining batched calls
+              for (const remaining of toolCalls.slice(ti + 1)) {
+                session.addToolResult(remaining.id, remaining.function.name,
+                  JSON.stringify({ error: `[SYSTEM] Cancelled — ${remaining.function.name} skipped due to loop detection` }));
+              }
+              throw err;
+            }
+            throw err;
           }
 
           const result = await executeToolCall(tc.function.name, args, { userId: this._activeUserId, signal, sandboxPolicy: this.sandboxPolicy });
           session.addToolResult(tc.id, tc.function.name, result);
+
+          // #1386: Loop guard — classify outcome and detect repeated failures
+          try {
+            guard.observeOutcome(tc.function.name, result);
+          } catch (err) {
+            if (err instanceof ToolBehaviorError) {
+              for (const remaining of toolCalls.slice(ti + 1)) {
+                session.addToolResult(remaining.id, remaining.function.name,
+                  JSON.stringify({ error: `[SYSTEM] Cancelled — ${remaining.function.name} skipped due to consecutive failures` }));
+              }
+              throw err;
+            }
+            throw err;
+          }
 
           // #621: scrub secret values from conversation history after store
           if ((tc.function.name === "abmind_store" || tc.function.name === "memory_store") && parseInt(args.classification ?? args.class ?? "1", 10) >= 2) {
@@ -536,7 +661,7 @@ export class DirectApiTransport implements IKiroTransport {
       const toolCallAcc = new Map<string, { id: string; name: string; arguments: string }>();
       for await (const event of parseResponsesSSE(res, composed)) {
         this._lastActivityAt = Date.now();
-        if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); outputObserver?.onDelta?.({ kind: "text", text: event.content }); }
+        if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); this._outputObserver?.onDelta?.({ kind: "text", text: event.content }); }
         else if (event.type === "tool_call_delta") { this.accumulateToolCall(toolCallAcc, event); }
         else if (event.type === "done") { usage = event.usage; }
       }
@@ -562,7 +687,7 @@ export class DirectApiTransport implements IKiroTransport {
       const toolCallAcc = new Map<string, { id: string; name: string; arguments: string }>();
       for await (const event of parseAnthropicSSE(res, composed)) {
         this._lastActivityAt = Date.now();
-        if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); outputObserver?.onDelta?.({ kind: "text", text: event.content }); }
+        if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); this._outputObserver?.onDelta?.({ kind: "text", text: event.content }); }
         else if (event.type === "tool_call_delta") { this.accumulateToolCall(toolCallAcc, event); }
         else if (event.type === "done") { usage = event.usage; }
       }
@@ -642,7 +767,7 @@ export class DirectApiTransport implements IKiroTransport {
           content += event.content;
           this._intermediateText += event.content;
           this.onIntermediateResponse?.(event.content);
-          outputObserver?.onDelta?.({ kind: "text", text: event.content });
+          this._outputObserver?.onDelta?.({ kind: "text", text: event.content });
           break;
 
         case "tool_call_delta":
@@ -710,11 +835,11 @@ export class DirectApiTransport implements IKiroTransport {
         content += event.content;
         this._intermediateText += event.content;
         this.onIntermediateResponse?.(event.content);
-        outputObserver?.onDelta?.({ kind: "text", text: event.content });
+        this._outputObserver?.onDelta?.({ kind: "text", text: event.content });
       } else if (event.type === "thinking") {
         // Reasoning streams to the user but is never folded into the final answer.
         this.onIntermediateResponse?.(event.content);
-        outputObserver?.onDelta?.({ kind: "thinking", text: event.content });
+        this._outputObserver?.onDelta?.({ kind: "thinking", text: event.content });
       } else if (event.type === "tool_call_delta") {
         this.accumulateToolCall(toolCallAcc, event);
       } else if (event.type === "done") {

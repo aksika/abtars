@@ -3,6 +3,7 @@
  * Handles: mb:, mslot:, mprov:, mpos:, mprov2:, mset:, model: prefixes.
  */
 import type { TelegramApi } from "./telegram-api.js";
+import type { CandidateSource } from "../../components/transport/model-candidates.js";
 import { getEnv } from "../../components/env-schema.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 
@@ -294,10 +295,10 @@ export async function handleModelPickerCallback(
           const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
           const { ModelHealthRegistry } = await import("../../components/transport/model-health-registry.js");
           const apiKey = getEnv().getApiKey(newResolved?.provider.apiKeyEnv ?? "API_KEY");
-          const candidates = [{ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow }];
+          const candidates: Array<{ endpoint: string; apiKey?: string; model: string; maxContext: number; source: CandidateSource }> = [{ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, source: "primary" }];
           for (const fb of (tc.agents["professor"]?.fallbacks ?? [])) {
             const fbRes = resolveAgent("_fb", { ...tc, agents: { ...tc.agents, _fb: { model: fb.model, provider: fb.provider } } });
-            if (fbRes) candidates.push({ endpoint: fbRes.provider.endpoint!, apiKey: fbRes.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey, model: fb.model, maxContext: fbRes.contextWindow });
+            if (fbRes) candidates.push({ endpoint: fbRes.provider.endpoint!, apiKey: fbRes.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey, model: fb.model, maxContext: fbRes.contextWindow, source: "agent_fallback" });
           }
           const registry = (deps.transport as unknown as { policy?: { registry: InstanceType<typeof ModelHealthRegistry> } }).policy?.registry ?? new ModelHealthRegistry();
           const policy = new FallbackPolicy(candidates, registry);

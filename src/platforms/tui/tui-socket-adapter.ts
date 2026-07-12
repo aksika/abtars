@@ -35,7 +35,7 @@ import type { Spin } from "../../components/spin.js";
 import type { SessionType } from "../../components/spin-types.js";
 import { typeLabel, sessionTypeOf } from "../../components/spin-types.js";
 import { getMasterUserId } from "../../components/master-user.js";
-import { queueInstruction, onSteerEvent } from "../../components/session-instruction-queue.js";
+import { queueInstruction, subscribeSteerEvents } from "../../components/session-instruction-queue.js";
 import type { OrcActivityFeed } from "../../components/orc-activity-feed.js";
 import type { SessionOutputFeed, SessionOutputEvent } from "../../components/session-output-feed.js";
 import { buildOrcActivitySnapshot } from "../../components/orc-activity-snapshot.js";
@@ -91,6 +91,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private _unsubActivity: (() => void) | null = null;
   /** #1338: Output subscription cleanup, set on any attach, cleared on detach/switch. */
   private _unsubOutput: (() => void) | null = null;
+  /** #1362: Scoped steer event subscription cleanup, replaced on attach/switch/detach. */
+  private _unsubSteer: (() => void) | null = null;
   /** #1338: Execution whose model text was mirrored live (suppress duplicate whole-result). */
   private _streamedExecutionId: string | null = null;
   /** #1338: True once live chunks were mirrored for the current attachment. */
@@ -107,18 +109,6 @@ export class TuiSocketAdapter implements PlatformAdapter {
   constructor(deps: TuiAdapterDeps) {
     this.deps = deps;
     this.socketPath = deps.socketPath ?? join(abtarsHome(), "tui.sock");
-    // #1332: Subscribe to async steer lifecycle events to push ack frames
-    onSteerEvent((event) => {
-      const status = event.type === "steer.queued" ? "queued" as const
-        : event.type === "steer.consumed" ? "consumed" as const
-        : event.type === "steer.rejected" ? "rejected" as const
-        : event.type === "steer.expired" ? "expired" as const
-        : event.type === "steer.failed" ? "failed" as const
-        : null;
-      if (!status || status === "queued") return;
-      const id = event.instructionIds[0] ?? "";
-      this._push({ t: "steer-ack", status, instructionId: id, message: event.description });
-    });
   }
 
   /** Late-bind: replace onMessage callback after construction. Mirrors IrcAdapter. */
@@ -164,6 +154,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this.started = false;
     if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
     if (this._unsubOutput) { this._unsubOutput(); this._unsubOutput = null; }
+    if (this._unsubSteer) { this._unsubSteer(); this._unsubSteer = null; }
     // #1339: invalidate the writer and remove its listeners.
     this._writer?.close();
     this._writer = null;
@@ -395,6 +386,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this._statusRevision = 0;
     // #1338: (re)subscribe live output mirroring to the selected session.
     this._subscribeOutput(sessionId);
+    // #1362: Subscribe steer lifecycle events scoped to the attached session.
+    this._subscribeSteer(sessionId);
 
     const type = sessionTypeOf(sessionId);
     const index = parseInt(sessionId.split("_")[2] ?? "0", 10);
@@ -488,9 +481,24 @@ export class TuiSocketAdapter implements PlatformAdapter {
           this._push({ t: "chunk-end", id: event.streamId, reason: event.reason });
           break;
         case "start":
-          // The first delta opens the visible stream; nothing to emit yet.
           break;
       }
+    });
+  }
+
+  /** #1362: Subscribe to steer lifecycle events scoped to the attached session. */
+  private _subscribeSteer(sessionId: string): void {
+    if (this._unsubSteer) { this._unsubSteer(); this._unsubSteer = null; }
+    this._unsubSteer = subscribeSteerEvents({ sessionId }, (event) => {
+      const status = event.type === "steer.queued" ? "queued" as const
+        : event.type === "steer.consumed" ? "consumed" as const
+        : event.type === "steer.rejected" ? "rejected" as const
+        : event.type === "steer.expired" ? "expired" as const
+        : event.type === "steer.failed" ? "failed" as const
+        : null;
+      if (!status || status === "queued") return;
+      const id = event.instructionIds[0] ?? "";
+      this._push({ t: "steer-ack", status, instructionId: id, message: event.description });
     });
   }
 
@@ -550,6 +558,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
       this._push({ t: "ready", sessionLabel: label, sessionId: r.id });
       // #1338: mirror output for the newly created session.
       this._subscribeOutput(r.id);
+      // #1362: Subscribe steer lifecycle events.
+      this._subscribeSteer(r.id);
       this._pushStatus();
       return;
     }
@@ -625,14 +635,17 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this._push({ t: "ready", sessionLabel: label, sessionId: target.id });
     // #1338: atomically switch output mirroring to the selected session.
     this._subscribeOutput(target.id);
+    // #1362: Atomically switch steer event subscription to the selected session.
+    this._subscribeSteer(target.id);
     this._pushStatus();
   }
 
-  /** #1332: Handle an explicit steer client frame. Validates and queues. */
+  /** #1361: Handle an explicit steer client frame from any attached session. */
   private async _handleSteer(frame: TuiClientFrame & { t: "steer" }): Promise<void> {
     if (!this.attachedSessionId) return;
-    if (this.mode !== "orc") {
-      this._push({ t: "steer-ack", status: "rejected", instructionId: frame.instructionId, message: "Steer is only available in Orc mode." });
+    // Validate frame.sessionId matches the current attachment exactly
+    if (frame.sessionId && frame.sessionId !== this.attachedSessionId) {
+      this._push({ t: "steer-ack", status: "rejected", instructionId: frame.instructionId, message: "Steer session ID does not match the current attachment." });
       return;
     }
     await this._queueAndAck(frame.text);
@@ -655,9 +668,10 @@ export class TuiSocketAdapter implements PlatformAdapter {
     } else {
       const reasonMap: Record<string, string> = {
         not_found: "Session not found.",
-        not_orc: "Steering is only available for the Orc session.",
-        not_busy: "Orc is not busy — use plain text to send a query.",
-        stale_execution: "Orc execution has changed — steering rejected.",
+        not_local: "Remote sessions cannot be steered.",
+        not_active: "Session is ended or paused.",
+        not_steerable: "Session is not accepting steering right now.",
+        stale_execution: "Execution generation changed — steering rejected.",
         too_large: "Steering text too large (max 4 KiB).",
         queue_full: "Steering queue is full (max 20 items or 32 KiB).",
       };

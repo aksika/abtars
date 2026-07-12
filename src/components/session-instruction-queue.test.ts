@@ -30,6 +30,7 @@ function makeOrcSession(overrides?: Partial<ManagedSession>): ManagedSession {
     completions: [],
     instructionQueue: [],
     activeExecutionId: "1749563282_O_01_5_1712345678000",
+    steeringAccepting: true,
     ...overrides,
   };
 }
@@ -49,18 +50,32 @@ describe("session-instruction-queue", () => {
       expect(session.instructionQueue.length).toBe(1);
     });
 
-    it("rejects non-Orc sessions with not_orc", () => {
-      const session = makeOrcSession({ id: "1749563282_A_01" });
+    it("rejects when steering acceptance gate is closed", () => {
+      const session = makeOrcSession({ steeringAccepting: false });
       const result = queueInstruction(session, { text: "hello", source: "tui" });
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.reason).toBe("not_orc");
+      if (!result.ok) expect(result.reason).toBe("not_steerable");
     });
 
-    it("rejects when Orc is not busy with not_busy", () => {
-      const session = makeOrcSession({ busy: false });
+    it("rejects hollow (remote) sessions with not_local", () => {
+      const session = makeOrcSession({ peer: "remote-host", remoteSessionId: "s1" });
       const result = queueInstruction(session, { text: "hello", source: "tui" });
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.reason).toBe("not_busy");
+      if (!result.ok) expect(result.reason).toBe("not_local");
+    });
+
+    it("rejects ended sessions with not_active", () => {
+      const session = makeOrcSession({ status: "ended" });
+      const result = queueInstruction(session, { text: "hello", source: "tui" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("not_active");
+    });
+
+    it("rejects paused sessions with not_active", () => {
+      const session = makeOrcSession({ status: "paused" });
+      const result = queueInstruction(session, { text: "hello", source: "tui" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("not_active");
     });
 
     it("rejects when no active execution with stale_execution", () => {

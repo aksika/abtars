@@ -75,6 +75,8 @@ export type TransportConfig = {
   transportDefaults?: TransportDefaults;
   maxTurns?: number;
   maxToolRounds?: number;
+  /** #1386: Lower tool-round limit for fallback candidates. Default 5. */
+  maxFallbackToolRounds?: number;
   hailMary?: { model: string; provider: string };
   healthPolicy?: HealthPolicyConfig;
 };

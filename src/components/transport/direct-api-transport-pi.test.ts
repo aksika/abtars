@@ -94,8 +94,9 @@ describe("DirectApiTransport — pi-ai gate (#1311)", () => {
       throw new Error("API error 429: rate limited");
     } as never);
     const t = makeTransport(true);
-    // With a single candidate, L2 exhausts and rethrows — surface the mapped status.
-    await expect(t.sendPrompt("s", "hi")).rejects.toThrow(/All models exhausted/);
+    // #1386: With a single candidate, L2 exhausts and returns a bounded transport-authored message.
+    const result = await t.sendPrompt("s", "hi");
+    expect(result).toContain("All available models failed");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

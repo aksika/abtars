@@ -1,3 +1,4 @@
+import type { CandidateSource } from "./transport/model-candidates.js";
 import { getEnv } from "./env-schema.js";
 /**
  * agent-registry.ts — Centralized agent role configuration.
@@ -143,20 +144,21 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     // Dedup key is model+endpoint pair — same model on different providers is a distinct candidate.
     const candidateKey = (model: string, endpoint: string): string => `${model}@${endpoint}`;
     const seenCandidates = new Set<string>();
-    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number }> = [];
+    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number; source: CandidateSource }> = [];
 
-    const addCandidate = (model: string, endpoint: string, candidateApiKey: string | undefined, maxContext: number): void => {
+    const addCandidate = (model: string, endpoint: string, candidateApiKey: string | undefined, maxContext: number, source: CandidateSource): void => {
       const key = candidateKey(model, endpoint);
       if (seenCandidates.has(key)) return;
       seenCandidates.add(key);
-      candidates.push({ model, endpoint, apiKey: candidateApiKey, maxContext });
+      candidates.push({ model, endpoint, apiKey: candidateApiKey, maxContext, source });
     };
 
-    addCandidate(startModel, startEndpoint, startApiKey, agent.contextWindow);
+    // #1386: Track candidate source for diagnostics
+    addCandidate(startModel, startEndpoint, startApiKey, agent.contextWindow, startModel !== agent.model ? "inherited_chain" : "primary");
 
     // Add static config model if different from startModel
     if (agent.model !== startModel) {
-      addCandidate(agent.model, agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, agent.contextWindow);
+      addCandidate(agent.model, agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, agent.contextWindow, "primary");
     }
 
     // Add professor's model as fallback if different and transport-compatible
@@ -170,6 +172,7 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
           profAgent.provider.endpoint,
           profAgent.provider.apiKeyEnv ? getEnv().getApiKey(profAgent.provider.apiKeyEnv) : apiKey,
           profAgent.contextWindow,
+          "inherited_chain",
         );
       }
     }
@@ -181,11 +184,11 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
         const fbEndpoint = fbProvider?.endpoint ?? profAgent.provider.endpoint;
         if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
         const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
-        addCandidate(fb.model, fbEndpoint, fbApiKey, profAgent.contextWindow);
+        addCandidate(fb.model, fbEndpoint, fbApiKey, profAgent.contextWindow, "inherited_chain");
       }
       for (const chainModel of profAgent.provider.fallbackChain ?? []) {
         if (!profAgent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
-        addCandidate(chainModel, profAgent.provider.endpoint, apiKey, profAgent.contextWindow);
+        addCandidate(chainModel, profAgent.provider.endpoint, apiKey, profAgent.contextWindow, "inherited_chain");
       }
     }
 
@@ -195,14 +198,14 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       const fbEndpoint = fbProvider?.endpoint ?? agent.provider.endpoint;
       if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
       const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
-      addCandidate(fb.model, fbEndpoint, fbApiKey, agent.contextWindow);
+      addCandidate(fb.model, fbEndpoint, fbApiKey, agent.contextWindow, "agent_fallback");
     }
 
     // Append fallbackChain entries as last-resort candidates
     const chain = agent.provider.fallbackChain ?? [];
     for (const chainModel of chain) {
       if (!agent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
-      addCandidate(chainModel, agent.provider.endpoint, apiKey, agent.contextWindow);
+      addCandidate(chainModel, agent.provider.endpoint, apiKey, agent.contextWindow, "provider_chain");
     }
 
     // Use shared registry if provided, otherwise create isolated one
@@ -216,6 +219,7 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       maxContext: agent.contextWindow, maxOutput: agent.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
       maxToolRounds: tc?.maxToolRounds ?? 25,
+      maxFallbackToolRounds: tc?.maxFallbackToolRounds ?? 5,
       useProviderLib: agent.provider.useProviderLib,
     }, policy);
     await transport.initialize();

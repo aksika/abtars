@@ -22,6 +22,7 @@ export interface QueuedSessionInstruction {
 export type QueueInstructionResult =
   | { ok: true; instruction: QueuedSessionInstruction }
   | { ok: false; reason: "not_found" | "not_orc" | "not_busy" |
+      "not_local" | "not_active" | "not_steerable" | "closing" |
       "stale_execution" | "too_large" | "queue_full" };
 
 export type SteerEventType = "steer.queued" | "steer.consumed" | "steer.rejected" | "steer.expired" | "steer.failed";
@@ -100,9 +101,11 @@ export interface ManagedSession {
   // `onStepComplete`'s event for per-step data.
   metadata?: Record<string, unknown>;
 
-  // #1332: Cooperative steering queue for busy Orc session
+  // #1332/#1361: Cooperative steering queue for any active execution
   instructionQueue: QueuedSessionInstruction[];
   activeExecutionId?: string;
+  /** #1361: True while the current execution is accepting steering continuations. */
+  steeringAccepting: boolean;
 
   // #1319: Orc activity correlation
   activeCardId?: number;
@@ -202,6 +205,13 @@ export interface SpinResult {
   sessionId: string;
   cardId?: number;
   result?: string;          // present when await: true
+}
+
+/** #1361: Per-execution continuation-capable driver for Spin's execution loop. */
+export interface SpinExecutionDriver {
+  send(prompt: string, image?: { mime: string; base64: string }, context?: import("./transport/kiro-transport.js").PromptRequestContext): Promise<string>;
+  close(): Promise<void>;
+  readonly ephemeral: boolean;
 }
 
 export interface DispatchBackgroundOptions {
