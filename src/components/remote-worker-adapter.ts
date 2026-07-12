@@ -1,6 +1,7 @@
 import { logInfo, logWarn } from "./logger.js";
 import { getPeerTransport } from "./peer-transport/index.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
+import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
 
 const TAG = "remote-adapter";
@@ -13,6 +14,10 @@ export class RemoteWorkerAdapter implements SwarmExecutorAdapter {
   }
 
   async start(claim: ExecutionClaim): Promise<StartObservation> {
+    try {
+      const emitter = new ExecutorProgressEmitter();
+      emitter.emitAlive(claim.attemptId, claim.generation, claim.executorId);
+    } catch { /* best-effort */ }
     try {
       const card = await import("./tasks/kanban-board.js").then(m => m.kanbanGetCard(claim.cardId));
       if (!card) return { kind: "start_failed", reason: "card not found", retryable: false };

@@ -5,6 +5,7 @@ import { WorkerSupervisionStore, settleResult, SettlementResult } from "./worker
 import { normalizeContract, createContractId, createAttemptId } from "./worker-contract.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation } from "./worker-contract.js";
 import type { TaskDatabase } from "./tasks/kanban-board.js";
+import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 
 const MAX_RESULT_LENGTH = 500;
 const MAX_CHECK_OUTPUT_LENGTH = 10_000;
@@ -177,6 +178,12 @@ export class WorkerSupervisionService {
     if (result === SettlementResult.Conflict) {
       return { settled: false, summary: "[conflict] duplicate attempt with different result" };
     }
+
+    // #1367: Emit durable milestone progress on settlement
+    try {
+      const emitter = new ExecutorProgressEmitter();
+      emitter.emitMilestone(latestAttempt.id, contract.provenance.card_id, latestAttempt.executor_id, contract.id, outcome === "completed" ? "all criteria passed" : "criteria failed");
+    } catch { /* progress emission is best-effort */ }
 
     const summary = outcome === "completed"
       ? `✓ ${criteria.filter(c => c.status === "passed").length}/${criteria.length} criteria passed`

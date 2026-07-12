@@ -2,6 +2,7 @@ import { logInfo } from "./logger.js";
 import { spin } from "./spin.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
+import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
 
 const TAG = "spin-worker-adapter";
@@ -51,6 +52,12 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     const contract = sup.getContractForCard(claim.cardId);
 
     logInfo(TAG, `Starting Worker ${claim.cardId} attempt=${claim.attemptId} gen=${claim.generation}`);
+
+    // #1367: Emit alive progress on start
+    try {
+      const emitter = new ExecutorProgressEmitter();
+      emitter.emitAlive(claim.attemptId, claim.generation, claim.executorId);
+    } catch { /* best-effort */ }
 
     try {
       spin.dispatch({

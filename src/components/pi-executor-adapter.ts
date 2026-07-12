@@ -1,5 +1,6 @@
 import { logWarn } from "./logger.js";
 import { PiExecutor } from "./pi-executor/pi-executor.js";
+import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
 
 const TAG = "pi-adapter";
@@ -20,6 +21,10 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
   }
 
   async start(claim: ExecutionClaim): Promise<StartObservation> {
+    try {
+      const emitter = new ExecutorProgressEmitter();
+      emitter.emitAlive(claim.attemptId, claim.generation, claim.executorId);
+    } catch { /* best-effort */ }
     try {
       const result = await this.executor.claimAndStart(claim.attemptId);
       switch (result) {
