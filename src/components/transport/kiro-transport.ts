@@ -15,6 +15,12 @@
 export interface PromptRequestContext {
   userId?: string;
   beforeMessageId?: number;
+  /**
+   * #1338: call-local observer for live TUI output mirroring. Set by Spin per
+   * model call/round; transports invoke it alongside existing transport-wide
+   * callbacks. Never alters execution, ownership, or results.
+   */
+  outputObserver?: import("../session-output-feed.js").OutputObserver;
 }
 
 export interface RuntimeUsageSnapshot {

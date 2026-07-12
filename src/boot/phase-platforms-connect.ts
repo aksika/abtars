@@ -184,6 +184,7 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
         spin: ctx.sessionManager,
         onMessage: (msg) => recovery.handle(msg, adapter),
         orcActivityFeed: ctx.orcActivityFeed,
+        sessionOutputFeed: ctx.sessionOutputFeed,
       });
       platformAdapters.set("tui", adapter);
       // Retry path (#1306): wire full pipeline if phasePipelineDeps already ran.

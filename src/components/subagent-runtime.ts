@@ -26,6 +26,8 @@ export interface AgentOpts {
   sessionType?: import("./spin-types.js").SessionType;
   /** Override tool-loop circuit breaker limit for this call. */
   maxToolRounds?: number;
+  /** #1338: call-local observer for live TUI output mirroring. Forwarded to the transport. */
+  outputObserver?: import("./session-output-feed.js").OutputObserver;
 }
 
 /** Persistent transport handle for multi-turn callers. */
@@ -122,7 +124,7 @@ export class SubagentRuntime {
     }
 
     try {
-      const response = await transport.sendPrompt(sessionKey, prompt);
+      const response = await transport.sendPrompt(sessionKey, prompt, undefined, { outputObserver: opts?.outputObserver });
       const elapsed = Date.now() - start;
       this._lastUsage = transport.lastUsage?.() ?? null;
       logInfo(TAG, `${agent} complete: ${prompt.length}ch → ${response?.length ?? 0}ch (${elapsed}ms, ${model})`);

@@ -17,6 +17,8 @@ import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
 import { drainInstructionBatch, expireInstructions } from "./session-instruction-queue.js";
 import type { OrcActivityFeed } from "./orc-activity-feed.js";
+import type { SessionOutputFeed, OutputObserver } from "./session-output-feed.js";
+import { createOutputObserver } from "./session-output-feed.js";
 
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
@@ -45,10 +47,12 @@ export class Spin {
   private _lastHealerDoneAt = 0;
   private _housekeepCounter = 0;
   private orcActivityFeed?: OrcActivityFeed;
+  private sessionOutputFeed?: SessionOutputFeed;
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
   setMemory(memory: Spin["memory"]): void { this.memory = memory; }
   setOrcActivityFeed(feed: OrcActivityFeed): void { this.orcActivityFeed = feed; }
+  setSessionOutputFeed(feed: SessionOutputFeed): void { this.sessionOutputFeed = feed; }
 
   // ── Session CRUD ───────────────────────────────────────────────────────
 
@@ -510,15 +514,63 @@ export class Spin {
       //    context assembly to history only.
       //    #1332: wrap with steering continuation loop for persistent sessions.
       const promptContext = { userId: spec.userId ?? userId, beforeMessageId: spec.currentMessageId };
+      // #1338: wrap each model call/round in a fresh call-local observer so the
+      // output feed receives a unique stream per turn. The observer publishes
+      // `start` on creation and `end`+invalidate on every exit path; the
+      // transport invokes onDelta/onToolStart during streaming.
+      const observe = async (
+        transport: IKiroTransport,
+        key: string,
+        msg: string,
+        image?: { mime: string; base64: string },
+        ctx?: typeof promptContext,
+      ): Promise<string> => {
+        if (!this.sessionOutputFeed || !session.activeExecutionId) {
+          return await transport.sendPrompt(key, msg, image, ctx);
+        }
+        const obs = createOutputObserver(this.sessionOutputFeed, {
+          sessionId: session.id,
+          executionId: session.activeExecutionId,
+        });
+        const enriched: typeof promptContext & { outputObserver: OutputObserver } =
+          { ...(ctx ?? {}), outputObserver: obs } as typeof promptContext & { outputObserver: OutputObserver };
+        let result: string;
+        try {
+          result = await transport.sendPrompt(key, msg, image, enriched);
+          obs.end("complete");
+        } catch (err) {
+          obs.end("error");
+          throw err;
+        } finally {
+          obs.invalidate();
+        }
+        return result;
+      };
       const executeWithSteering = async (): Promise<string> => {
         if (!sessionTransport) {
-          return (await this.runtime!.complete(agent, prompt, { timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds })) || "(no output)";
+          const opts: import("./subagent-runtime.js").AgentOpts = { timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds };
+          if (this.sessionOutputFeed && session.activeExecutionId) {
+            const obs = createOutputObserver(this.sessionOutputFeed, {
+              sessionId: session.id,
+              executionId: session.activeExecutionId,
+            });
+            (opts as { outputObserver?: OutputObserver }).outputObserver = obs;
+            try {
+              return (await this.runtime!.complete(agent, prompt, opts)) || "(no output)";
+            } catch (err) {
+              obs.end("error");
+              throw err;
+            } finally {
+              obs.invalidate();
+            }
+          }
+          return (await this.runtime!.complete(agent, prompt, opts)) || "(no output)";
         }
-        let result = (await sessionTransport.sendPrompt(session.id, prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
+        let result = (await observe(sessionTransport, session.id, prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
         for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
           const batch = drainInstructionBatch(session);
           if (batch.length === 0) break;
-          result = (await sessionTransport.sendPrompt(session.id, renderSteeringContinuation(batch), undefined, { userId: spec.userId ?? userId })) || "(no output)";
+          result = (await observe(sessionTransport, session.id, renderSteeringContinuation(batch), undefined, { userId: spec.userId ?? userId })) || "(no output)";
         }
         if (session.instructionQueue.length > 0) expireInstructions(session, "round_limit");
         return result;

@@ -115,6 +115,9 @@ export interface BootCtx {
   orcActivityFeed?: import("../components/orc-activity-feed.js").OrcActivityFeed;
   /** Cleanup function returned by bridgeNerveToFeed — called on shutdown. */
   _orcActivityBridgeCleanup?: () => void;
+
+  // ── #1338: Live attached-session output feed ─────────────────────────
+  sessionOutputFeed?: import("../components/session-output-feed.js").SessionOutputFeed;
 }
 
 /**

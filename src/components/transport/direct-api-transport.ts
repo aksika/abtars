@@ -68,6 +68,8 @@ export class DirectApiTransport implements IKiroTransport {
   private _lastTurnUsage: RuntimeUsageSnapshot | null = null;
   private _activeSessionKey = "";
   private _activeUserId = "master";
+  private _activeSessionId: string | null = null;
+  private _outputObserver?: OutputObserver;
 
   /** Agent name for budget tracking (set by caller). */
   agentLabel = "professor";
@@ -140,6 +142,9 @@ export class DirectApiTransport implements IKiroTransport {
     const session = this.getOrCreateSession(sessionKey);
     this._activeSessionKey = sessionKey;
     this._activeUserId = context?.userId || "master";
+    // #1338: call-local observer for live TUI output mirroring. Invoked
+    // alongside transport-wide callbacks; never changes execution/results.
+    this._outputObserver = context?.outputObserver;
 
     // If context orchestrator is active, rebuild messages from DB.
     // #1329: when the pipeline hands us the just-inserted current message
@@ -402,6 +407,7 @@ export class DirectApiTransport implements IKiroTransport {
           if (mid) session.addUser(mid);
 
           this.onToolCallStart?.(tc.function.name ?? "tool");
+          outputObserver?.onToolStart?.({ name: tc.function.name ?? "tool" });
 
           let args: Record<string, string>;
           try { args = JSON.parse(tc.function.arguments); } catch {
@@ -530,7 +536,7 @@ export class DirectApiTransport implements IKiroTransport {
       const toolCallAcc = new Map<string, { id: string; name: string; arguments: string }>();
       for await (const event of parseResponsesSSE(res, composed)) {
         this._lastActivityAt = Date.now();
-        if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); }
+        if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); outputObserver?.onDelta?.({ kind: "text", text: event.content }); }
         else if (event.type === "tool_call_delta") { this.accumulateToolCall(toolCallAcc, event); }
         else if (event.type === "done") { usage = event.usage; }
       }
@@ -556,7 +562,7 @@ export class DirectApiTransport implements IKiroTransport {
       const toolCallAcc = new Map<string, { id: string; name: string; arguments: string }>();
       for await (const event of parseAnthropicSSE(res, composed)) {
         this._lastActivityAt = Date.now();
-        if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); }
+        if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); outputObserver?.onDelta?.({ kind: "text", text: event.content }); }
         else if (event.type === "tool_call_delta") { this.accumulateToolCall(toolCallAcc, event); }
         else if (event.type === "done") { usage = event.usage; }
       }
@@ -636,6 +642,7 @@ export class DirectApiTransport implements IKiroTransport {
           content += event.content;
           this._intermediateText += event.content;
           this.onIntermediateResponse?.(event.content);
+          outputObserver?.onDelta?.({ kind: "text", text: event.content });
           break;
 
         case "tool_call_delta":
@@ -703,9 +710,11 @@ export class DirectApiTransport implements IKiroTransport {
         content += event.content;
         this._intermediateText += event.content;
         this.onIntermediateResponse?.(event.content);
+        outputObserver?.onDelta?.({ kind: "text", text: event.content });
       } else if (event.type === "thinking") {
         // Reasoning streams to the user but is never folded into the final answer.
         this.onIntermediateResponse?.(event.content);
+        outputObserver?.onDelta?.({ kind: "thinking", text: event.content });
       } else if (event.type === "tool_call_delta") {
         this.accumulateToolCall(toolCallAcc, event);
       } else if (event.type === "done") {

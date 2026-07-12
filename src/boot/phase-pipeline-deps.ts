@@ -115,6 +115,12 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const feed = new OrcActivityFeed();
   spin.setOrcActivityFeed(feed);
   ctx.orcActivityFeed = feed;
+
+  // #1338: Create the live attached-session output feed and wire Spin producer.
+  const { SessionOutputFeed } = await import("../components/session-output-feed.js");
+  const outputFeed = new SessionOutputFeed();
+  spin.setSessionOutputFeed(outputFeed);
+  ctx.sessionOutputFeed = outputFeed;
   const { bridgeNerveToFeed } = await import("../components/orc-activity-bridge.js");
   ctx._orcActivityBridgeCleanup = bridgeNerveToFeed(feed, () =>
     spin.listAllSessions().filter(s => s.id.includes("_O_") && s.status !== "ended"),

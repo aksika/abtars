@@ -28,6 +28,7 @@ import type { Spin, ManagedSession, SessionType } from "../../components/spin.js
 import type { AgentSession } from "../../components/subagent-runtime.js";
 import type { InboundMessage } from "../../types/platform.js";
 import { OrcActivityFeed } from "../../components/orc-activity-feed.js";
+import { SessionOutputFeed } from "../../components/session-output-feed.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -887,6 +888,130 @@ describe("TuiSocketAdapter — #1339 activity overflow recovery", () => {
     expect(firstHasReady || firstHasError).toBe(true);
     expect(secondReadySeenByFirst).toBeLessThanOrEqual(1);
     expect(second.frames.some((f) => f.t === "ready")).toBe(true);
+
+    first.conn.destroy();
+    second.conn.destroy();
+  });
+});
+
+// ── #1338 live attached-session output mirroring ───────────────────────
+
+describe("TuiSocketAdapter — #1338 output mirroring", () => {
+  let sockPath: string;
+  let adapter: TuiSocketAdapter;
+
+  beforeEach(() => { sockPath = tmpSocketPath(); });
+  afterEach(() => { if (adapter) adapter.stop(); });
+
+  it("mirrors model text + tool starts and terminates with chunk-end", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin();
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
+
+    feed.publish({ type: "start", sessionId: sid, executionId: "e1", streamId: "st1" });
+    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "Hello " });
+    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "world" });
+    feed.publish({ type: "tool-start", sessionId: sid, executionId: "e1", streamId: "st1", name: "search" });
+    feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    const chunks = frames.filter((f) => f.t === "chunk");
+    expect(chunks.length).toBe(2);
+    expect((chunks[0] as any).delta).toBe("Hello ");
+    expect((chunks[1] as any).delta).toBe("world");
+    const tools = frames.filter((f) => f.t === "tool-start");
+    expect(tools.length).toBe(1);
+    expect((tools[0] as any).name).toBe("search");
+    const ends = frames.filter((f) => f.t === "chunk-end");
+    expect(ends.length).toBe(1);
+    expect((ends[0] as any).reason).toBe("complete");
+
+    conn.destroy();
+  });
+
+  it("only delivers output for the attached session (no cross-delivery)", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin();
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
+
+    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "mine" });
+    feed.publish({ type: "delta", sessionId: "other_session", executionId: "e2", streamId: "st2", text: "theirs" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    const chunks = frames.filter((f) => f.t === "chunk");
+    expect(chunks.length).toBe(1);
+    expect((chunks[0] as any).delta).toBe("mine");
+
+    conn.destroy();
+  });
+
+  it("suppresses the duplicate whole-result when streaming was observed", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin();
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
+
+    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "streamed" });
+    feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
+    await new Promise((r) => setTimeout(r, 30));
+
+    // The pipeline's whole-result delivery should be suppressed (already streamed).
+    await adapter.sendMessage("tui:local", "streamed");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(frames.filter((f) => f.t === "message").length).toBe(0);
+
+    // Without streaming, the whole result is delivered.
+    const adapter2 = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath,
+    });
+    await adapter2.start();
+    const { frames: frames2 } = await attachAndCollect(sockPath, { kind: "resume" });
+    await adapter2.sendMessage("tui:local", "no-stream-result");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(frames2.filter((f) => f.t === "message" && (f as any).markdown === "no-stream-result").length).toBe(1);
+    adapter2.stop();
+
+    conn.destroy();
+  });
+
+  it("switches output mirroring atomically on attach change", async () => {
+    const feed = new SessionOutputFeed();
+    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const mockSpin = makeMockSpin({ orcSession: orc });
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+    const first = await attachAndCollect(sockPath, { kind: "resume" });
+    const aSid = (first.frames.find((f) => f.t === "ready") as any).sessionId;
+
+    // Switch attachment to Orc.
+    const second = await attachAndCollect(sockPath, { kind: "orc" });
+    const oSid = (second.frames.find((f) => f.t === "ready") as any).sessionId;
+    expect(oSid).toBe("1749563282_O_01");
+
+    // Output for the now-detached A session must not reach the client.
+    feed.publish({ type: "delta", sessionId: aSid, executionId: "eA", streamId: "stA", text: "old" });
+    feed.publish({ type: "delta", sessionId: oSid, executionId: "eO", streamId: "stO", text: "new" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    const chunks = [...first.frames, ...second.frames].filter((f) => f.t === "chunk");
+    expect(chunks.some((c) => (c as any).delta === "old")).toBe(false);
+    expect(chunks.some((c) => (c as any).delta === "new")).toBe(true);
 
     first.conn.destroy();
     second.conn.destroy();

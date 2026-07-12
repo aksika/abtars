@@ -37,6 +37,7 @@ import { typeLabel, sessionTypeOf } from "../../components/spin-types.js";
 import { getMasterUserId } from "../../components/master-user.js";
 import { queueInstruction, onSteerEvent } from "../../components/session-instruction-queue.js";
 import type { OrcActivityFeed } from "../../components/orc-activity-feed.js";
+import type { SessionOutputFeed, SessionOutputEvent } from "../../components/session-output-feed.js";
 import { buildOrcActivitySnapshot } from "../../components/orc-activity-snapshot.js";
 import { buildTuiRuntimeStatus } from "./runtime-status.js";
 import {
@@ -55,6 +56,8 @@ export interface TuiAdapterDeps {
   spin: Spin;
   /** #1319: Activity feed for Orc execution events. */
   orcActivityFeed?: OrcActivityFeed;
+  /** #1338: Live attached-session output feed. */
+  sessionOutputFeed?: SessionOutputFeed;
   /** Set to the recovery handler at construction; swapped to handleInboundMessage by wireTui. */
   onMessage: (msg: InboundMessage) => void;
   /** Override the default socket path (~/.abtars/tui.sock). */
@@ -86,6 +89,12 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private started = false;
   /** #1319: Activity subscription cleanup, set on orc attach, cleared on detach. */
   private _unsubActivity: (() => void) | null = null;
+  /** #1338: Output subscription cleanup, set on any attach, cleared on detach/switch. */
+  private _unsubOutput: (() => void) | null = null;
+  /** #1338: Execution whose model text was mirrored live (suppress duplicate whole-result). */
+  private _streamedExecutionId: string | null = null;
+  /** #1338: True once live chunks were mirrored for the current attachment. */
+  private _hasStreamed = false;
   /** #1319: Cached activity sequence for subscriber scoping. */
   private _activitySequence = 0;
   /** #1339: True while incremental activity is suppressed pending recovery. */
@@ -154,6 +163,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     if (!this.started) return;
     this.started = false;
     if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
+    if (this._unsubOutput) { this._unsubOutput(); this._unsubOutput = null; }
     // #1339: invalidate the writer and remove its listeners.
     this._writer?.close();
     this._writer = null;
@@ -179,7 +189,12 @@ export class TuiSocketAdapter implements PlatformAdapter {
   }
 
   async sendMessage(_channelId: string, text: string, _opts?: SendOpts): Promise<undefined> {
-    this._push({ t: "message", role: "assistant", markdown: text });
+    // #1338: if this session's model text was already mirrored live as
+    // streamed chunks, the whole result is a duplicate — suppress it (the
+    // stream already showed the content). Status still refreshes.
+    if (!this._hasStreamed) {
+      this._push({ t: "message", role: "assistant", markdown: text });
+    }
     this._pushStatus();
     return undefined;
   }
@@ -244,6 +259,9 @@ export class TuiSocketAdapter implements PlatformAdapter {
         this.attachedSessionId = null;
         this.mode = "pipeline";
         if (this._unsubActivity) { this._unsubActivity(); this._unsubActivity = null; }
+        // #1338: drop output mirroring for the detached attachment.
+        if (this._unsubOutput) { this._unsubOutput(); this._unsubOutput = null; }
+        this._streamedExecutionId = null;
       }
     });
 
@@ -375,6 +393,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this.attachedSessionId = sessionId;
     this.mode = nextMode;
     this._statusRevision = 0;
+    // #1338: (re)subscribe live output mirroring to the selected session.
+    this._subscribeOutput(sessionId);
 
     const type = sessionTypeOf(sessionId);
     const index = parseInt(sessionId.split("_")[2] ?? "0", 10);
@@ -441,6 +461,39 @@ export class TuiSocketAdapter implements PlatformAdapter {
     return true;
   }
 
+  /**
+   * #1338: subscribe the current connection's writer to the live output feed
+   * for exactly `sessionId`. Replaces any previous output subscription so a
+   * session switch atomically stops mirroring the old session. Every frame is
+   * emitted through the bounded #1339 writer; stale-socket guards in the
+   * writer prevent a superseded connection from receiving it.
+   */
+  private _subscribeOutput(sessionId: string): void {
+    if (this._unsubOutput) { this._unsubOutput(); this._unsubOutput = null; }
+    this._hasStreamed = false;
+    this._streamedExecutionId = null;
+    const feed = this.deps.sessionOutputFeed;
+    if (!feed) return;
+    this._unsubOutput = feed.subscribe({ sessionId }, (event: SessionOutputEvent) => {
+      switch (event.type) {
+        case "delta":
+          this._hasStreamed = true;
+          this._streamedExecutionId = event.executionId;
+          this._push({ t: "chunk", id: event.streamId, delta: event.text });
+          break;
+        case "tool-start":
+          this._push({ t: "tool-start", id: event.streamId, name: event.name });
+          break;
+        case "end":
+          this._push({ t: "chunk-end", id: event.streamId, reason: event.reason });
+          break;
+        case "start":
+          // The first delta opens the visible stream; nothing to emit yet.
+          break;
+      }
+    });
+  }
+
   private async _handleInput(text: string): Promise<void> {
     if (!this.attachedSessionId) {
       return;
@@ -495,6 +548,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
       const index2 = parseInt(r.id.split("_")[2] ?? "0", 10);
       const label = `${typeLabel(type as SessionType)} #${index2}`;
       this._push({ t: "ready", sessionLabel: label, sessionId: r.id });
+      // #1338: mirror output for the newly created session.
+      this._subscribeOutput(r.id);
       this._pushStatus();
       return;
     }
@@ -568,6 +623,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
     const idx = parseInt(target.id.split("_")[2] ?? "0", 10);
     const label = `${typeLabel(type as SessionType)} #${idx}`;
     this._push({ t: "ready", sessionLabel: label, sessionId: target.id });
+    // #1338: atomically switch output mirroring to the selected session.
+    this._subscribeOutput(target.id);
     this._pushStatus();
   }
 

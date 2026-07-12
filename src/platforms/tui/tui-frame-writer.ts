@@ -426,6 +426,7 @@ function classify(frame: TuiServerFrame): {
     case "status":
       return { cls: "status" };
     case "typing":
+    case "tool-start":
       return { cls: "typing" };
     case "chunk":
       return { cls: "chunk", streamId: frame.id };
@@ -464,6 +465,8 @@ function boundFrame(frame: TuiServerFrame, maxFrameBytes: number, _maxChunkBytes
         return { t: "error", message: truncateUtf8(frame.message, budget) };
       case "steer-ack":
         return { t: "steer-ack", status: frame.status, instructionId: frame.instructionId, message: truncateUtf8(frame.message, budget) };
+      case "tool-start":
+        return { t: "tool-start", id: frame.id, name: truncateUtf8(frame.name, budget) };
       case "chunk-end":
       case "typing":
         return frame;

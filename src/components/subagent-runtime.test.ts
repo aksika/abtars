@@ -35,7 +35,7 @@ describe("SubagentRuntime", () => {
   it("complete() returns response from transport", async () => {
     const result = await runtime.complete("dreamy", "test prompt");
     expect(result).toBe("response text");
-    expect(mockSendPrompt).toHaveBeenCalledWith("system:dreamy", "test prompt");
+    expect(mockSendPrompt).toHaveBeenCalledWith("system:dreamy", "test prompt", undefined, { outputObserver: undefined });
   });
 
   it("caches transport — second call reuses", async () => {

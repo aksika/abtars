@@ -112,8 +112,9 @@ function mockTransport(overrides: Partial<IKiroTransport> = {}): IKiroTransport 
 
 function makeRuntime(opts: {
   completeResponse?: string;
+  completeImpl?: (agent: string, prompt: string, o?: any) => Promise<string>;
   sendPromptResponse?: string;
-  sendPromptImpl?: (sessionKey: string, prompt: string) => Promise<string>;
+  sendPromptImpl?: (sessionKey: string, prompt: string, image?: { mime: string; base64: string }, context?: any) => Promise<string>;
   lastUsage?: { input: number; output: number } | null;
 } = {}) {
   const lastUsage = opts.lastUsage ?? null;
@@ -121,11 +122,19 @@ function makeRuntime(opts: {
     sendPrompt: vi.fn(opts.sendPromptImpl ?? (async () => opts.sendPromptResponse ?? "agent response")),
     destroy: vi.fn(),
     get isReady() { return true; },
-    get transport() { return mockTransport({ lastUsage: vi.fn().mockReturnValue(lastUsage) }); },
+    get transport() {
+      const overrides: Partial<IKiroTransport> = {
+        lastUsage: vi.fn().mockReturnValue(lastUsage),
+      };
+      if (opts.sendPromptImpl) {
+        overrides.sendPrompt = vi.fn(opts.sendPromptImpl);
+      }
+      return mockTransport(overrides);
+    },
   };
   return {
     session: vi.fn().mockResolvedValue(agentSession),
-    complete: vi.fn(async () => opts.completeResponse ?? "(no output)"),
+    complete: vi.fn(opts.completeImpl ?? (async () => opts.completeResponse ?? "(no output)")),
     lastUsage,
   };
 }
@@ -620,5 +629,82 @@ describe("spin(spec) — unified session API (#1271)", () => {
         spin.dispatchAwait({ type: "W", goal: "overflow", source: "user" }),
       ).rejects.toThrow(/System busy/);
     });
+  });
+});
+
+// ── #1338 live attached-session output mirroring ───────────────────────
+
+import { SessionOutputFeed, type SessionOutputEvent } from "./session-output-feed.js";
+
+class RecordingFeed extends SessionOutputFeed {
+  events: SessionOutputEvent[] = [];
+  publish(e: SessionOutputEvent): void {
+    this.events.push(e);
+    super.publish(e);
+  }
+}
+
+describe("spin() — #1338 output mirroring", () => {
+  it("threads a call-local observer to the feed for a persistent session", async () => {
+    const feed = new RecordingFeed();
+    const runtime = makeRuntime({
+      sendPromptImpl: async (_key: string, _prompt: string, _image?: { mime: string; base64: string }, ctx?: any) => {
+        expect(ctx?.outputObserver).toBeDefined();
+        ctx.outputObserver.onDelta({ kind: "text", text: "Hi from model" });
+        ctx.outputObserver.onDelta({ kind: "thinking", text: "secret thought" }); // must be excluded
+        ctx.outputObserver.onToolStart({ name: "search" });
+        return "Hi from model";
+      },
+    });
+    const spin2 = new Spin();
+    setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
+    spin2.setRuntime(runtime as any);
+    spin2.setSessionOutputFeed(feed);
+    const r = await spin2.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+
+    const types = feed.events.map((e) => e.type);
+    expect(types).toContain("start");
+    expect(types).toContain("delta");
+    expect(types).toContain("tool-start");
+    expect(types).toContain("end");
+
+    const delta = feed.events.find((e) => e.type === "delta") as Extract<SessionOutputEvent, { type: "delta" }>;
+    expect(delta.text).toBe("Hi from model");
+    // thinking never entered the feed
+    expect(feed.events.some((e) => e.type === "delta" && (e as any).text === "secret thought")).toBe(false);
+    // end is terminal-complete for the same stream
+    const end = feed.events.find((e) => e.type === "end") as Extract<SessionOutputEvent, { type: "end" }>;
+    expect(end.reason).toBe("complete");
+    // every event is tagged with the executed session
+    expect(feed.events.every((e) => e.sessionId === r.sessionId)).toBe(true);
+  });
+
+  it("threads the observer through the oneshot runtime.complete path", async () => {
+    const feed = new RecordingFeed();
+    const runtime = makeRuntime({
+      completeImpl: async (_agent: string, _prompt: string, opts?: any) => {
+        expect(opts?.outputObserver).toBeDefined();
+        opts.outputObserver.onDelta({ kind: "text", text: "one-shot text" });
+        return "one-shot text";
+      },
+    });
+    const spin2 = new Spin();
+    setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
+    spin2.setRuntime(runtime as any);
+    spin2.setSessionOutputFeed(feed);
+    await spin2.spin({ type: "S", prompt: "x", await: true, userId: "aksika", platform: "telegram" });
+
+    const delta = feed.events.find((e) => e.type === "delta") as Extract<SessionOutputEvent, { type: "delta" }>;
+    expect(delta?.text).toBe("one-shot text");
+  });
+
+  it("does not publish when no output feed is wired", async () => {
+    const runtime = makeRuntime({ sendPromptImpl: async () => "ok" });
+    const spin2 = new Spin();
+    setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
+    spin2.setRuntime(runtime as any);
+    // No setSessionOutputFeed — must not throw and must still return the result.
+    const r = await spin2.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+    expect(r.result).toBe("ok");
   });
 });
