@@ -280,6 +280,7 @@ export async function tui(args: string[]): Promise<number> {
   let shouldExitCode: number | null = null;
   let stopping = false;
   let latestStatus: TuiRuntimeStatus | undefined;
+  let currentSessionId: string | null = null;  // #1361: tracked from ready frame
 
   // pi-tui's TUI.start() is NON-BLOCKING (event-driven: it sets up stdin/stdout
   // and returns). We need a promise to await so the process stays alive until
@@ -369,11 +370,11 @@ export async function tui(args: string[]): Promise<number> {
     if (!ready) return;        // can't send before attach accepted
     if (text.length === 0) return;
     appendMessage("user", text);
-    // #1332: Detect /steer prefix and send a steer frame in orc mode
-    if (text.startsWith("/steer ") && mode.kind === "orc") {
+    // #1361: Detect /steer prefix in every attach mode and send a steer frame
+    if (text.startsWith("/steer ")) {
       const body = text.slice("/steer ".length).trim();
-      if (body) {
-        conn.write(encodeFrame({ t: "steer", sessionId: "", instructionId: `client_${Date.now()}`, text: body }));
+      if (body && currentSessionId) {
+        conn.write(encodeFrame({ t: "steer", sessionId: currentSessionId, instructionId: `client_${Date.now()}`, text: body }));
         return;
       }
     }
@@ -384,6 +385,7 @@ export async function tui(args: string[]): Promise<number> {
     switch (frame.t) {
       case "ready":
         ready = true;
+        currentSessionId = frame.sessionId;
         return;
       case "error":
         if (!ready) {
