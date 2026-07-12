@@ -1,68 +1,90 @@
 /**
- * reconciler.ts — K8s-inspired reconciliation loop for the Orc.
+ * reconciler.ts — K8s-inspired reconciliation loop for the Orc (#1364).
  *
- * Subscribes to Nerve events. On every state change, checks active projects
- * and fixes drift: dispatch queued, retry failed, kill stale, abort on limits.
- *
- * #1314: executor-aware lanes. The agent lane dispatches W-type workers
- * (unchanged). The Pi lane dispatches typed Pi cards to the PiExecutor.
+ * Single scheduling authority: every supervised dispatch, retry, cancel, and
+ * release decision originates here. Nerve/heartbeat events are only wakeups.
+ * Reconciliation is keyed by card — independent cards run concurrently; one
+ * card has at most one active pass (dirty-bit coalescing).
  */
 
 import { nerve } from "./nerve.js";
 import { spin } from "./spin.js";
 import {
-  kanbanList, kanbanFail, kanbanComplete, kanbanUpdate,
+  kanbanFail, kanbanComplete, kanbanUpdate,
   kanbanGetCard, kanbanGetChildren, isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn } from "./logger.js";
+import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
+import type { AttemptLifecycle } from "./worker-supervision-store.js";
 
 const TAG = "reconciler";
 const MAX_RETRIES = 3;
 const MAX_WORKERS = 10;
 const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
-const STALE_MS = 5 * 60 * 1000;
-const REMOTE_STALE_MS = 10 * 60 * 1000;
-const REMOTE_WARN_MS = 7 * 60 * 1000;
 
-let piService: PiRunService | null = null;
+let _shutdownRequested = false;
 
-export function setPiService(service: PiRunService | null): void {
-  piService = service;
+export function setPiService(_service: PiRunService | null): void {
+  // Pi service reference retained for future executor adapter use (#1364 Task 3)
 }
 
-export function startReconciler(): void {
-  nerve.on("card:done", reconcile);
-  nerve.on("card:failed", reconcile);
-  nerve.on("card:queued", reconcile);
-  logInfo(TAG, "Reconciler started");
+export function requestShutdown(): void {
+  _shutdownRequested = true;
 }
 
-function reconcile(): void {
-  const projects = kanbanList("running", "status")
-    .filter(c => c.type === "O");
+// ── Keyed scheduler ──────────────────────────────────────────────────────────
 
-  for (const project of projects) {
-    reconcileProject(project.id);
+interface CardReconcilerState {
+  running: boolean;       // true while reconcileCard() is in flight
+  dirty: boolean;         // true if a wakeup arrived during the pass
+}
+
+const _states = new Map<number, CardReconcilerState>();
+
+function getState(cardId: number): CardReconcilerState {
+  let s = _states.get(cardId);
+  if (!s) { s = { running: false, dirty: false }; _states.set(cardId, s); }
+  return s;
+}
+
+function wakeCard(cardId: number): void {
+  const s = getState(cardId);
+  if (s.running) { s.dirty = true; return; }
+  s.running = true;
+  s.dirty = false;
+  // Use microtask to avoid deep stacks
+  queueMicrotask(() => reconcileCard(cardId));
+}
+
+async function reconcileCard(cardId: number): Promise<void> {
+  const s = getState(cardId);
+  try {
+    do {
+      s.dirty = false;
+      if (_shutdownRequested) return;
+      deriveAction(cardId);
+    } while (s.dirty);
+  } finally {
+    s.running = false;
+  }
+}
+
+// ── Derive action ─────────────────────────────────────────────────────────────
+
+function deriveAction(cardId: number): void {
+  if (cardId <= 0) return;
+  const card = kanbanGetCard(cardId);
+  if (!card) return;
+
+  // Project card (type "O") — reconcile children
+  if (card.type === "O" && card.status === "running") {
+    reconcileProject(cardId);
+    return;
   }
 
-  // #1314: Pi lane — reconcile queued Pi cards outside project context
-  reconcilePiLane();
-}
-
-function reconcilePiLane(): void {
-  if (!piService) return;
-  if (piService.executor.activeCount >= piService.executor.maxConcurrent) return;
-  const piCards = kanbanList("queued", "status").filter(c => c.type === "pi");
-  for (const card of piCards) {
-    if (!isUnblocked(card)) continue;
-    const run = piService.store.getByCardId(card.id);
-    if (!run || run.status !== "queued") continue;
-    if (piService.executor.activeCount >= piService.executor.maxConcurrent) break;
-    piService.executor.claimAndStart(run.id).catch(err => {
-      logWarn(TAG, `Pi start failed for ${run.id}: ${err instanceof Error ? err.message : String(err)}`);
-    });
-  }
+  // Non-project card — check if supervised and reconcile individually
+  reconcileChildCard(card);
 }
 
 function reconcileProject(projectId: number): void {
@@ -95,41 +117,9 @@ function reconcileProject(projectId: number): void {
 
   let totalRetries = 0;
 
-  for (const card of children) {
-    const retries = card.delivery_attempts ?? 0; // reuse delivery_attempts as retry_count
-    totalRetries += retries;
-
-    if (card.status === "queued") {
-      if (!isUnblocked(card)) continue;
-      spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: projectId });
-    }
-
-    if (card.status === "failed" && retries < MAX_RETRIES) {
-      logInfo(TAG, `Retrying card ${card.id} (attempt ${retries + 1}/${MAX_RETRIES})`);
-      kanbanUpdate(card.id, { status: "queued" });
-      spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: projectId });
-    } else if (card.status === "failed" && retries >= MAX_RETRIES) {
-      // Permanent failure — cascade to downstream cards
-      cascadeFail(card.id, children);
-    }
-
-    if (card.status === "running" && card.type !== "remote" && isStale(card)) {
-      logWarn(TAG, `Card ${card.id} stale (${STALE_MS / 1000}s no activity) — marking failed`);
-      kanbanFail(card.id, "stale — no activity");
-    }
-
-    // #949: Remote cards get longer timeout (10min) + channel warning before failure
-    if (card.status === "running" && card.type === "remote" && card.source_peer) {
-      const age = Date.now() - new Date(card.updated_at + "Z").getTime();
-      if (age > REMOTE_STALE_MS) {
-        logWarn(TAG, `Remote card ${card.id} stale (${REMOTE_STALE_MS / 1000}s) — marking failed`);
-        kanbanFail(card.id, "remote worker unresponsive");
-      } else if (age > REMOTE_WARN_MS && !card.labels?.includes("stale-warned")) {
-        const { channelPost } = require("./tasks/kanban-channel.js") as typeof import("./tasks/kanban-channel.js");
-        channelPost(card.id, "SYSTEM", "ALL", "Remote worker unresponsive — consider cancelling");
-        kanbanUpdate(card.id, { labels: [card.labels, "stale-warned"].filter(Boolean).join(",") });
-      }
-    }
+  for (const child of children) {
+    reconcileChildCard(child);
+    totalRetries += child.delivery_attempts ?? 0;
   }
 
   // Circuit breaker: total retries
@@ -146,6 +136,62 @@ function reconcileProject(projectId: number): void {
   }
 }
 
+function reconcileChildCard(card: KanbanCard): void {
+  // #1364: Use supervision service for lifecycle-aware management
+  const svc = new WorkerSupervisionService();
+  const hasContract = svc.cardHasContract(card.id);
+  const latestAttempt = hasContract ? getLatestAttemptInfo(card.id) : null;
+
+  if (card.status === "queued") {
+    if (!isUnblocked(card)) return;
+
+    if (hasContract && latestAttempt) {
+      // Supervised: claim if pending, otherwise skip
+      if (latestAttempt.lifecycle === "pending") {
+        logInfo(TAG, `Claiming supervised card ${card.id}`);
+        spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
+      }
+    } else {
+      // Unsupervised: direct dispatch (legacy path)
+      spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
+    }
+    return;
+  }
+
+  if (card.status === "failed" && latestAttempt && latestAttempt.lifecycle !== "failed" && latestAttempt.lifecycle !== "cancelled") {
+    const retries = card.delivery_attempts ?? 0;
+    if (retries < MAX_RETRIES) {
+      logInfo(TAG, `Retrying card ${card.id} (attempt ${retries + 1}/${MAX_RETRIES})`);
+      kanbanUpdate(card.id, { status: "queued" });
+      spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
+    } else {
+      cascadeFail(card.id, kanbanGetChildren(card.parent_id ?? 0));
+    }
+    return;
+  }
+
+  if (card.status === "failed" && !hasContract) {
+    const retries = card.delivery_attempts ?? 0;
+    if (retries < MAX_RETRIES) {
+      logInfo(TAG, `Retrying card ${card.id} (attempt ${retries + 1}/${MAX_RETRIES})`);
+      kanbanUpdate(card.id, { status: "queued" });
+      spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
+    } else {
+      cascadeFail(card.id, kanbanGetChildren(card.parent_id ?? 0));
+    }
+    return;
+  }
+
+  // #1364: Cancel-requested supervised attempts — do NOT fail the card here;
+  // the executor adapter will settle it. Reconciler only records policy intent.
+  if (latestAttempt && latestAttempt.lifecycle === "cancel_requested") {
+    // Awaiting executor settlement — do nothing
+    return;
+  }
+
+  // Stale detection moved to #1367 / executor adapter
+}
+
 function abortProject(projectId: number, children: KanbanCard[], reason: string): void {
   logWarn(TAG, `ABORT project ${projectId}: ${reason}`);
   for (const card of children) {
@@ -156,9 +202,34 @@ function abortProject(projectId: number, children: KanbanCard[], reason: string)
   kanbanFail(projectId, reason);
 }
 
-function isStale(card: KanbanCard): boolean {
-  const lastActivity = new Date(card.updated_at + "Z").getTime();
-  return Date.now() - lastActivity > STALE_MS;
+function getLatestAttemptInfo(cardId: number): { lifecycle: AttemptLifecycle } | null {
+  try {
+    const { WorkerSupervisionStore } = require("./worker-supervision-store.js") as typeof import("./worker-supervision-store.js");
+    const store = new WorkerSupervisionStore();
+    const latest = store.getLatestAttempt(cardId);
+    if (!latest) return null;
+    return { lifecycle: latest.lifecycle };
+  } catch { return null; }
 }
 
-// Remote card polling moved to spin.tick() (#980)
+// ── Public API ───────────────────────────────────────────────────────────────
+
+export function requestReconcile(cardId: number): void {
+  wakeCard(cardId);
+}
+
+export function requestReconcileForProject(cardId: number): void {
+  // Wake the project card — it will reconcile children
+  const card = kanbanGetCard(cardId);
+  if (card?.parent_id) {
+    wakeCard(card.parent_id);
+  }
+  wakeCard(cardId);
+}
+
+export function startReconciler(): void {
+  nerve.on("card:queued", (cardId: number) => requestReconcileForProject(cardId));
+  nerve.on("card:done", (cardId: number) => requestReconcileForProject(cardId));
+  nerve.on("card:failed", (cardId: number) => requestReconcileForProject(cardId));
+  logInfo(TAG, "Reconciler started");
+}
