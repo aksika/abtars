@@ -80,7 +80,8 @@ async function seedConfig(repoRoot: string, _configDir: string, dryRun: boolean,
 export async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
   const bundleFile = name === 'abtars' ? 'abtars-cli.js' : `${name}.js`;
   // #912: ensure node is in PATH on macOS (homebrew) and Linux (.local/bin)
-  const pathPreamble = `export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"\nexport NODE_PATH="$HOME/.local/lib/node_modules:\${NODE_PATH:-}"\n`;
+  // #1387: add ~/.npm-global/bin for npm global bin on macOS
+  const pathPreamble = `export PATH="/opt/homebrew/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"\nexport NODE_PATH="$HOME/.local/lib/node_modules:\${NODE_PATH:-}"\n`;
   const target = join(currentLink, 'bundle', bundleFile);
   const distFile = name === 'abtars' ? 'abtars.js' : `${name}.js`;
   const fallback = join(currentLink, 'dist', 'cli', distFile);
