@@ -280,13 +280,12 @@ export async function handleInboundMessage(
       (sessionTransport as any).isPaused = () => effectiveSession.status === "paused";
     }
 
-    // Wire /wait steer injection (#655) — agent loop drains this between tool rounds
+    // Wire /wait steer injection (#1248) — agent loop drains bounded FIFO between tool rounds
     if ("getPendingInstruction" in transport) {
       (transport as any).getPendingInstruction = () => {
-        const pending = pSession.pendingWait;
-        if (!pending) return undefined;
-        pSession.pendingWait = undefined;
-        return pending;
+        if (pSession.pendingWait.length === 0) return undefined;
+        const items = pSession.pendingWait.splice(0);
+        return items.map(i => i.text).join("\n");
       };
     }
 

@@ -33,6 +33,7 @@ export interface AgentOpts {
 /** #1361: Per-execution handle for one-shot or continuation-capable LLM calls. */
 export interface RuntimeExecution {
   send(prompt: string, image?: { mime: string; base64: string }, context?: PromptRequestContext): Promise<string>;
+  cancel(reason: import("./swarm-executor-types.js").CancelReason): Promise<void>;
   close(): Promise<void>;
   readonly transport: IKiroTransport;
   readonly sessionKey: string;
@@ -166,6 +167,14 @@ export class SubagentRuntime {
         const response = await transport.sendPrompt(sessionKey, prompt, image, context);
         logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
         return response ?? "";
+      },
+
+      cancel: async (_reason: import("./swarm-executor-types.js").CancelReason) => {
+        // Logical cancellation: mark closed so future send() is a no-op
+        // No shared transport interrupt to avoid affecting sibling executions
+        if (closed) return;
+        logDebug(TAG, `${key} exec.cancel (${_reason})`);
+        closed = true;
       },
 
       close: async () => {

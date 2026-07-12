@@ -36,6 +36,19 @@ export interface SteerEvent {
   description: string;
 }
 
+// ── #1248: Bounded /wait FIFO ─────────────────────────────────────────────────
+
+export const MAX_WAIT_ITEMS = 20;
+export const MAX_WAIT_ITEM_BYTES = 4 * 1024;
+export const MAX_WAIT_TOTAL_BYTES = 32 * 1024;
+
+export interface PendingWaitInstruction {
+  readonly id: string;
+  readonly text: string;
+  readonly createdAt: number;
+  readonly bytes: number;
+}
+
 export interface ManagedSession {
   id: string;                    // "1749563282_A_01"
   userId: string;
@@ -91,7 +104,8 @@ export interface ManagedSession {
   ctxWarned: boolean;
   compactFailures: number;
   primingTerms: string[];
-  pendingWait?: string;
+  /** #1248: Bounded FIFO for /wait instructions (replaced unbounded string). */
+  pendingWait: PendingWaitInstruction[];
 
   // Completion buffer (#1040 — merged from completion-buffer.ts)
   completions: Array<{ sessionId: string; goal: string; status: string; result: string; elapsedMs: number; inputTokens: number; outputTokens: number }>;
@@ -117,6 +131,7 @@ export interface SpinRequest {
   agent?: import("./subagent-runtime.js").AgentName; // override typeAgent() default
   goal: string;
   title?: string;
+  executionControl?: import("./execution-control.js").WorkerExecutionControl;
   source: "task" | "user" | "agent" | "peer";
   cardId?: number;
   parentCardId?: number;
@@ -186,6 +201,8 @@ export interface SpinSessionSpec {
   // #1366: Worker supervision contract and attempt ID
   contractId?: string;
   attemptId?: string;
+  // #1248: Execution control for cancellation
+  executionControl?: import("./execution-control.js").WorkerExecutionControl;
 
   // Extension / future-proofing
   metadata?: Record<string, unknown>;  // session-scoped initial data, set ONCE at allocation

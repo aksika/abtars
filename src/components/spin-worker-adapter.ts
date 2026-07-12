@@ -3,22 +3,10 @@ import { spin } from "./spin.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
+import { registerControl, removeControlByAttempt, getControl } from "./execution-control.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
 
 const TAG = "spin-worker-adapter";
-
-interface WorkerExecutionHandle {
-  attemptId: string;
-  generation: number;
-  cardId: number;
-  abort?: AbortController;
-}
-
-const _executions = new Map<string, WorkerExecutionHandle>();
-
-export function getExecutionHandle(attemptId: string): WorkerExecutionHandle | undefined {
-  return _executions.get(attemptId);
-}
 
 export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   readonly kind = "agent" as const;
@@ -28,25 +16,11 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   }
 
   async start(claim: ExecutionClaim): Promise<StartObservation> {
-    const existing = _executions.get(claim.attemptId);
-    if (existing) {
-      if (existing.generation === claim.generation) {
-        return { kind: "already_started", attemptId: claim.attemptId, generation: claim.generation, executorId: claim.executorId };
-      }
-      return { kind: "start_failed", reason: "stale generation", retryable: false };
-    }
-
     const card = await import("./tasks/kanban-board.js").then(m => m.kanbanGetCard(claim.cardId));
     if (!card) return { kind: "start_failed", reason: "card not found", retryable: false };
 
-    const abort = new AbortController();
-    const handle: WorkerExecutionHandle = {
-      attemptId: claim.attemptId,
-      generation: claim.generation,
-      cardId: claim.cardId,
-      abort,
-    };
-    _executions.set(claim.attemptId, handle);
+    // Register generation-bound control before async dispatch
+    const ctrl = registerControl(claim.attemptId, claim.generation, claim.cardId);
 
     const sup = new WorkerSupervisionService();
     const contract = sup.getContractForCard(claim.cardId);
@@ -68,9 +42,10 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
         parentCardId: card.parent_id ?? undefined,
         contract: contract ?? undefined,
         attemptId: claim.attemptId,
+        executionControl: ctrl,
       });
     } catch (err) {
-      _executions.delete(claim.attemptId);
+      removeControlByAttempt(claim.attemptId);
       return { kind: "start_failed", reason: String(err), retryable: true };
     }
 
@@ -78,26 +53,40 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   }
 
   async cancel(claim: ExecutionClaim, reason: CancelReason): Promise<CancelObservation> {
-    const existing = _executions.get(claim.attemptId);
-    if (!existing) return { kind: "not_found" };
+    const ctrl = getControl(claim.attemptId, claim.generation);
+    if (!ctrl) {
+      // Check durable state — may already be terminal
+      const store = new WorkerSupervisionStore();
+      const attempt = store.getAttempt(claim.attemptId);
+      if (!attempt) return { kind: "not_found" };
+      if (store.isAttemptTerminal(attempt.lifecycle)) {
+        return { kind: "already_terminal", lifecycle: attempt.lifecycle };
+      }
+      return { kind: "not_found" };
+    }
 
-    if (existing.generation !== claim.generation) {
+    if (ctrl.generation !== claim.generation) {
       return { kind: "already_terminal", lifecycle: "failed" };
     }
 
-    existing.abort?.abort();
-    logInfo(TAG, `Cancelled Worker ${claim.cardId} attempt=${claim.attemptId} reason=${reason}`);
-
+    // Persist cancel intent first, then invoke runtime
     const store = new WorkerSupervisionStore();
     store.requestCancel(claim.attemptId, reason);
-    _executions.delete(claim.attemptId);
 
+    const result = await ctrl.requestCancel(reason);
+    logInfo(TAG, `Cancelled Worker ${claim.cardId} attempt=${claim.attemptId} reason=${reason} result=${result}`);
+
+    if (result === "already_terminal") {
+      return { kind: "already_terminal", lifecycle: "cancelled" };
+    }
+
+    // Keep control until terminal settlement — do not delete here
     return { kind: "cancelled", attemptId: claim.attemptId };
   }
 
   async inspect(claim: ExecutionClaim): Promise<ExecutionObservation> {
-    const existing = _executions.get(claim.attemptId);
-    if (!existing) {
+    const ctrl = getControl(claim.attemptId, claim.generation);
+    if (!ctrl) {
       const store = new WorkerSupervisionStore();
       const attempt = store.getAttempt(claim.attemptId);
       if (!attempt) return { kind: "unknown", message: "attempt not found" };
@@ -106,6 +95,9 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
       }
       return { kind: "unknown", message: "no handle but lifecycle=" + attempt.lifecycle };
     }
-    return { kind: "running", lifecycle: "running" };
+    if (ctrl.terminal) {
+      return { kind: "terminal", lifecycle: ctrl.terminalOutcome === "cancelled" ? "cancelled" : "completed" };
+    }
+    return { kind: "running", lifecycle: ctrl.cancelled ? "cancel_requested" : "running" };
   }
 }

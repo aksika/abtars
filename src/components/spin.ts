@@ -576,6 +576,12 @@ export class Spin {
         const executor = await this.runtime!.openExecution(agent, session.id, {
           timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds,
         });
+        // #1248: Bind execution control to runtime cancel mechanism
+        if (spec.executionControl) {
+          spec.executionControl.bind(async (reason) => {
+            await executor.cancel(reason);
+          });
+        }
         sessionTransport = executor.transport as IKiroTransport;
         session.transport = sessionTransport;
         session.transportOwner = "runtime";
@@ -675,6 +681,13 @@ export class Spin {
       this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
     }
     if (cardId !== undefined) {
+      // #1248: If cancellation already won, skip normal completion settlement
+      if (spec.executionControl?.terminal) {
+        logInfo(TAG, `Card ${cardId}: execution control already terminal — skipping finishSpin settlement`);
+        this.markDone(spec.type, cardId);
+        return;
+      }
+
       let artifacts: Array<{ name: string; content: string }> = [];
       try {
         const { drainArtifacts } = require("./transport/artifact-tools.js") as typeof import("./transport/artifact-tools.js");
@@ -735,6 +748,12 @@ export class Spin {
     logWarn(TAG, `${spec.type} spin failed: ${msg}`);
     pushLog(session, `failed: ${msg.slice(0, 80)}`);
     if (cardId !== undefined) {
+      // #1248: If terminal already won (cancellation), skip fail settlement
+      if (spec.executionControl?.terminal) {
+        logInfo(TAG, `Card ${cardId}: execution control already terminal — skipping failSpin settlement`);
+        this.markDone(spec.type, cardId);
+        return;
+      }
       kanbanRetryOrFail(cardId, msg);
       if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
     }
@@ -851,6 +870,7 @@ export class Spin {
       await: false,
       contractId: request.contract?.id,
       attemptId: request.attemptId,
+      executionControl: request.executionControl,
     });
     return { cardId };
   }
@@ -942,35 +962,13 @@ export class Spin {
   async tick(): Promise<void> {
     // #1364: drain only non-supervised cards; supervised dispatch goes through Reconciler
     this.drainQueued();
-    this.checkStaleWorkers();
+    // #1248: Legacy stale scanner removed — execution timeout is the real bound
     this._housekeepCounter++;
     if (this._housekeepCounter % 72 === 0) {
       this.pruneSkillTrash();
       this.rotateAuditLog();
       this.pruneEndedSessions();
     }
-  }
-
-  private checkStaleWorkers(): void {
-    const STALE_MS = parseInt(process.env["WORKER_STALE_MS"] || "300000", 10);
-    const now = Date.now();
-    let freed = false;
-    for (const [type, cardIds] of this.running) {
-      for (const cardId of [...cardIds]) {           // snapshot — markDone mutates the Set
-        const card = kanbanGetCard(cardId);
-        if (!card || card.status !== "running") continue;
-        // #1364: Skip supervised cards — Reconciler handles staleness
-        if (cardHasSupervision(cardId)) continue;
-        const lastActivity = new Date(card.updated_at + "Z").getTime();
-        if (now - lastActivity > STALE_MS) {
-          logWarn(TAG, `Stale card ${cardId} (${Math.round((now - lastActivity) / 1000)}s no activity) — failing`);
-          kanbanFail(cardId, "stale — no activity");
-          this.markDone(type, cardId);               // release in-memory slot (#1274)
-          freed = true;
-        }
-      }
-    }
-    if (freed) this.drainQueued();                   // reuse freed slot without waiting a tick
   }
 
   /** #613: Prune .trash/ entries older than 7 days (~hourly). */
