@@ -121,6 +121,30 @@ export function reserveRequest(
   };
 }
 
+/**
+ * #1407 — Complete a pending request inside an existing transaction.
+ * Uses the caller's Database handle (must be the same physical database).
+ * Does not start a nested transaction. Returns true only when exactly
+ * one row was updated.
+ */
+export function completePendingRequestInTransaction(
+  d: Database,
+  input: {
+    clientId: string;
+    operation: "task:create";
+    requestId: string;
+    requestHash: string;
+    responseJson: string;
+  },
+): boolean {
+  const result = d.prepare(
+    `UPDATE pi_api_requests
+     SET state = 'completed', response_json = ?, updated_at = datetime('now')
+     WHERE client_id = ? AND operation = ? AND request_id = ? AND request_hash = ? AND state = 'pending'`,
+  ).run(input.responseJson, input.clientId, input.operation, input.requestId, input.requestHash);
+  return result.changes === 1;
+}
+
 /** Complete a pending request with the result JSON. */
 export function completeRequest(
   clientId: string,

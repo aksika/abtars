@@ -1417,7 +1417,7 @@ export class AgentApiServer {
     }
   }
 
-  /** #1313 — POST /v1/pi/tasks: queue an async Kanban task, return tracking ID. */
+  /** #1313/#1407 — POST /v1/pi/tasks: queue an async Kanban task, return tracking ID. */
   private async handlePiTaskCreate(
     res: ServerResponse, clientId: string, body: Record<string, unknown> | undefined,
   ): Promise<void> {
@@ -1438,7 +1438,7 @@ export class AgentApiServer {
     const priority = typeof body.priority === "string" ? (body.priority as string) : "MEDIUM";
     const deliveryMode = typeof body.delivery === "string" ? (body.delivery as string) : "silent";
 
-    const { reserveRequest, completeRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
+    const { reserveRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
     const hash = hashCanonicalJson(body as Record<string, unknown>);
     const reservation = reserveRequest(clientId, "task:create", requestId, hash);
 
@@ -1460,46 +1460,58 @@ export class AgentApiServer {
       return;
     }
 
+    // #1407: Use PiTaskStore for atomic card+ownership creation
     try {
-      const { kanbanEnqueue } = await import("./tasks/kanban-board.js");
+      const { getPiTaskStore } = await import("./pi-task-store.js");
+      const store = await getPiTaskStore();
       const fullGoal = context ? `${goal}\n\nContext: ${context}` : goal;
-      const cardId = kanbanEnqueue(fullGoal, "pi", requestId, {
+      const result = store.createAndComplete({
+        clientId,
+        requestId,
+        requestHash: hash,
+        title: fullGoal.slice(0, 200),
+        goal: fullGoal,
         priority: priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
         deliveryMode: deliveryMode as "silent" | "deliver" | "announce",
       });
-      const resp = this.piOk({ task_id: cardId, status: "queued" });
-      completeRequest(clientId, "task:create", requestId, resp);
-      res.writeHead(200, { "Content-Type": "application/json" }).end(resp);
+
+      if (result.created) {
+        const { nerve } = await import("./nerve.js");
+        nerve.fire("card:queued", result.cardId);
+        res.writeHead(200, { "Content-Type": "application/json" }).end(result.responseJson);
+      } else {
+        const resp = this.piErr("task_failed", "Task creation failed", true);
+        res.writeHead(500, { "Content-Type": "application/json" }).end(resp);
+      }
     } catch (err) {
       const resp = this.piErr("task_failed", "Failed to create task", true);
-      completeRequest(clientId, "task:create", requestId, resp);
       res.writeHead(500, { "Content-Type": "application/json" }).end(resp);
     }
   }
 
-  /** #1313 — GET /v1/pi/tasks/:id — Pi-scoped task status. */
-  private handlePiTaskStatus(url: string, res: ServerResponse, clientId: string): void {
+  /** #1313/#1407 — GET /v1/pi/tasks/:id — Pi-scoped task status with exact ownership. */
+  private async handlePiTaskStatus(url: string, res: ServerResponse, clientId: string): Promise<void> {
     const id = parseInt(url.slice("/v1/pi/tasks/".length), 10);
     if (isNaN(id)) {
       res.writeHead(400, { "Content-Type": "application/json" })
         .end(this.piErr("invalid_request", "Invalid task ID", false));
       return;
     }
-    const { kanbanList } = require("./tasks/kanban-board.js") as typeof import("./tasks/kanban-board.js");
-    const cards = kanbanList("*").filter(c => c.id === id && c.source === "pi" && c.source_id?.startsWith(clientId));
-    if (cards.length === 0) {
+    const { getPiTaskStore } = await import("./pi-task-store.js");
+    const store = await getPiTaskStore();
+    const view = store.getOwned(id, clientId);
+    if (!view) {
       res.writeHead(404, { "Content-Type": "application/json" })
         .end(this.piErr("not_found", "Task not found", false));
       return;
     }
-    const card = cards[0]!;
     res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({
-      task_id: card.id,
-      status: card.status,
-      created_at: card.created_at,
-      completed_at: card.completed_at,
-      result_summary: card.result_summary,
-      error: card.error,
+      task_id: view.id,
+      status: view.status,
+      created_at: view.createdAt,
+      completed_at: view.completedAt,
+      result_summary: view.resultSummary,
+      error: view.error,
     }));
   }
 
