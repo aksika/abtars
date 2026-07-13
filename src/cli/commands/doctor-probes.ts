@@ -6,7 +6,9 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { abtarsHome } from "../../paths.js";
+import { resolveAbmindPackageDir } from "../../utils/abmind-lazy.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -392,7 +394,7 @@ async function probeMind(): Promise<ProbeResult> {
 
 async function probeSharedDeps(): Promise<ProbeResult> {
   try {
-    const { diagnoseSharedNativeDeps } = await import("abmind/deploy-lib/shared-native-deps.js");
+    const { diagnoseSharedNativeDeps } = await importSharedDepsModule();
     const status = diagnoseSharedNativeDeps();
     const detail = `gen ${status.manifestGeneration}, ${status.packageCount} pkg(s)${status.lockHeld ? `, lock: ${status.lockOwner ?? "?"}` : ""}`;
     const mismatches = status.packages.filter(p => !p.onDisk);
@@ -403,6 +405,18 @@ async function probeSharedDeps(): Promise<ProbeResult> {
   } catch {
     return { name: "shared-deps", status: "skipped", detail: "manifest not available" };
   }
+}
+
+/** Import `diagnoseSharedNativeDeps` from abmind's deploy-lib using active discovery. */
+async function importSharedDepsModule(): Promise<{ diagnoseSharedNativeDeps: () => import("abmind/deploy-lib/shared-native-deps.js").SharedNativeDepsStatus }> {
+  const abmindDir = resolveAbmindPackageDir();
+  if (abmindDir) {
+    const modPath = join(abmindDir, "dist", "src", "deploy-lib", "shared-native-deps.js");
+    if (existsSync(modPath)) {
+      return import(pathToFileURL(modPath).href);
+    }
+  }
+  return import("abmind/deploy-lib/shared-native-deps.js");
 }
 
 // ── Runner ───────────────────────────────────────────────────────────────────
