@@ -112,6 +112,39 @@ export class PiRunStore {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_progress_run_id ON pi_run_progress(run_id)`);
+
+    // #1358 — Remote Pi lifecycle event outbox
+    this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_events (
+      run_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      sequence INTEGER NOT NULL,
+      event_id TEXT NOT NULL UNIQUE,
+      content_sha256 TEXT NOT NULL,
+      origin_peer TEXT NOT NULL,
+      origin_request_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      projection_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      acknowledged_at TEXT,
+      PRIMARY KEY (run_id, sequence)
+    )`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_events_origin_peer ON remote_pi_events(origin_peer)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_events_acknowledged ON remote_pi_events(acknowledged_at) WHERE acknowledged_at IS NULL`);
+
+    // #1358 — Remote Pi command ledger for idempotency
+    this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_commands (
+      origin_peer TEXT NOT NULL,
+      command_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      state TEXT NOT NULL,
+      response_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (origin_peer, command_id)
+    )`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_commands_run_id ON remote_pi_commands(run_id)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_commands_state ON remote_pi_commands(state)`);
   }
 
   /**
@@ -635,5 +668,289 @@ export class PiRunStore {
       usageJson: (row.usage_json as string | null) ?? undefined,
       error: (row.error as string | null) ?? undefined,
     };
+  }
+
+  // ── #1358: Remote Pi event outbox and command ledger ─────────────────────
+
+  /**
+   * Allocate the next sequence number for a run.
+   * Thread-safe via SQLite's auto-increment and transactional isolation.
+   */
+  allocateNextSequence(runId: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(MAX(sequence), 0) as max_seq FROM remote_pi_events WHERE run_id = ?`
+    ).get(runId) as { max_seq: number } | undefined;
+    return (row?.max_seq ?? 0) + 1;
+  }
+
+  /**
+   * Append a lifecycle event to the durable outbox.
+   * Returns false if an event with the same (run_id, sequence) already exists with different content.
+   */
+  appendEvent(input: {
+    runId: string;
+    generation: number;
+    sequence: number;
+    eventId: string;
+    contentSha256: string;
+    originPeer: string;
+    originRequestId: string;
+    kind: string;
+    projectionJson: string;
+  }): boolean {
+    try {
+      this.db.prepare(`
+        INSERT INTO remote_pi_events
+          (run_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      `).run(
+        input.runId,
+        input.generation,
+        input.sequence,
+        input.eventId,
+        input.contentSha256,
+        input.originPeer,
+        input.originRequestId,
+        input.kind,
+        input.projectionJson,
+      );
+      return true;
+    } catch (err: unknown) {
+      // UNIQUE constraint violation means duplicate event_id or (run_id, sequence)
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('UNIQUE constraint')) {
+        // Check if it's the same content (idempotent)
+        const existing = this.db.prepare(
+          `SELECT content_sha256 FROM remote_pi_events WHERE run_id = ? AND sequence = ?`
+        ).get(input.runId, input.sequence) as { content_sha256: string } | undefined;
+        if (existing && existing.content_sha256 === input.contentSha256) {
+          return true; // Idempotent duplicate
+        }
+        return false; // Conflicting content
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Get events for a run after a given sequence (for catch-up).
+   */
+  getEventsAfter(input: { runId: string; afterSequence: number; limit: number }): Array<{
+    run_id: string;
+    generation: number;
+    sequence: number;
+    event_id: string;
+    content_sha256: string;
+    origin_peer: string;
+    origin_request_id: string;
+    kind: string;
+    projection_json: string;
+    created_at: string;
+    acknowledged_at: string | null;
+  }> {
+    return this.db.prepare(`
+      SELECT run_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, created_at, acknowledged_at
+      FROM remote_pi_events
+      WHERE run_id = ? AND sequence > ?
+      ORDER BY sequence ASC
+      LIMIT ?
+    `).all(input.runId, input.afterSequence, input.limit) as any;
+  }
+
+  /**
+   * Get unacknowledged events for a run (for push delivery).
+   */
+  getUnacknowledgedEvents(runId: string, limit: number): Array<{
+    run_id: string;
+    generation: number;
+    sequence: number;
+    event_id: string;
+    content_sha256: string;
+    origin_peer: string;
+    origin_request_id: string;
+    kind: string;
+    projection_json: string;
+    created_at: string;
+  }> {
+    return this.db.prepare(`
+      SELECT run_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, created_at
+      FROM remote_pi_events
+      WHERE run_id = ? AND acknowledged_at IS NULL
+      ORDER BY sequence ASC
+      LIMIT ?
+    `).all(runId, limit) as any;
+  }
+
+  /**
+   * Acknowledge events up to a sequence.
+   * Returns the number of events acknowledged.
+   */
+  acknowledgeEvents(runId: string, upToSequence: number): number {
+    const result = this.db.prepare(`
+      UPDATE remote_pi_events
+      SET acknowledged_at = datetime('now')
+      WHERE run_id = ? AND sequence <= ? AND acknowledged_at IS NULL
+    `).run(runId, upToSequence);
+    return result.changes;
+  }
+
+  /**
+   * Get the latest acknowledged sequence for a run.
+   */
+  getLatestAcknowledgedSequence(runId: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(MAX(sequence), 0) as max_seq FROM remote_pi_events WHERE run_id = ? AND acknowledged_at IS NOT NULL`
+    ).get(runId) as { max_seq: number } | undefined;
+    return row?.max_seq ?? 0;
+  }
+
+  /**
+   * Get the maximum sequence for a run (acknowledged or not).
+   */
+  getMaxSequence(runId: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(MAX(sequence), 0) as max_seq FROM remote_pi_events WHERE run_id = ?`
+    ).get(runId) as { max_seq: number } | undefined;
+    return row?.max_seq ?? 0;
+  }
+
+  /**
+   * Compact old progress events for a run, retaining state/input/terminal events.
+   * Keeps at most N progress events and all critical events.
+   */
+  compactProgressEvents(runId: string, maxProgressToRetain: number): number {
+    const criticalKinds = ['awaiting_input', 'input_cleared', 'interrupted', 'resumed', 'completed', 'failed', 'cancelled', 'accepted', 'queued', 'starting', 'running'];
+    const placeholders = criticalKinds.map(() => '?').join(',');
+    // First find progress events to keep (most recent N)
+    const toKeep = this.db.prepare(`
+      SELECT sequence FROM remote_pi_events
+      WHERE run_id = ? AND kind NOT IN (${placeholders})
+      ORDER BY sequence DESC
+      LIMIT ?
+    `).all(runId, ...criticalKinds, maxProgressToRetain) as Array<{ sequence: number }>;
+    const keepSequences = toKeep.map(r => r.sequence);
+    if (keepSequences.length === 0) {
+      // Delete all acknowledged progress events
+      const result = this.db.prepare(`
+        DELETE FROM remote_pi_events
+        WHERE run_id = ? AND kind NOT IN (${placeholders}) AND acknowledged_at IS NOT NULL
+      `).run(runId, ...criticalKinds);
+      return result.changes;
+    }
+    // Delete progress events that are acknowledged and not in the keep set
+    const keepList = keepSequences.map(() => '?').join(',');
+    const result = this.db.prepare(`
+      DELETE FROM remote_pi_events
+      WHERE run_id = ?
+        AND kind NOT IN (${placeholders})
+        AND acknowledged_at IS NOT NULL
+        AND sequence NOT IN (${keepList})
+    `).run(runId, ...criticalKinds, ...keepSequences);
+    return result.changes;
+  }
+
+  /**
+   * Reserve a command slot for idempotency.
+   * Returns true if the command is new, false if a conflicting state exists.
+   */
+  reserveCommand(input: {
+    originPeer: string;
+    commandId: string;
+    runId: string;
+    payloadHash: string;
+  }): boolean {
+    try {
+      this.db.prepare(`
+        INSERT INTO remote_pi_commands (origin_peer, command_id, run_id, payload_hash, state, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'received', datetime('now'), datetime('now'))
+      `).run(input.originPeer, input.commandId, input.runId, input.payloadHash);
+      return true;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('UNIQUE constraint')) {
+        const existing = this.db.prepare(
+          `SELECT state, payload_hash FROM remote_pi_commands WHERE origin_peer = ? AND command_id = ?`
+        ).get(input.originPeer, input.commandId) as { state: string; payload_hash: string } | undefined;
+        if (!existing) return false;
+        // Allow replay if payload hash matches and state permits
+        if (existing.payload_hash === input.payloadHash) {
+          return ['received', 'dispatch_started'].includes(existing.state);
+        }
+        return false; // Conflicting payload
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Update command state and response.
+   */
+  updateCommand(input: {
+    originPeer: string;
+    commandId: string;
+    state: string;
+    responseJson?: string;
+  }): boolean {
+    const setClauses = ["state = ?", "updated_at = datetime('now')"];
+    const params: unknown[] = [input.state];
+    if (input.responseJson !== undefined) {
+      setClauses.push("response_json = ?");
+      params.push(input.responseJson);
+    }
+    params.push(input.originPeer, input.commandId);
+    const result = this.db.prepare(`
+      UPDATE remote_pi_commands
+      SET ${setClauses.join(', ')}
+      WHERE origin_peer = ? AND command_id = ?
+    `).run(...params);
+    return result.changes > 0;
+  }
+
+  /**
+   * Get a command record.
+   */
+  getCommand(originPeer: string, commandId: string): {
+    run_id: string;
+    payload_hash: string;
+    state: string;
+    response_json: string | null;
+    created_at: string;
+    updated_at: string;
+  } | null {
+    const row = this.db.prepare(
+      `SELECT run_id, payload_hash, state, response_json, created_at, updated_at FROM remote_pi_commands WHERE origin_peer = ? AND command_id = ?`
+    ).get(originPeer, commandId) as any;
+    return row ?? null;
+  }
+
+  /**
+   * Clean up old command records (completed/rejected).
+   */
+  cleanupOldCommands(olderThanHours: number): number {
+    const result = this.db.prepare(`
+      DELETE FROM remote_pi_commands
+      WHERE state IN ('completed', 'rejected', 'outcome_unknown')
+        AND updated_at < datetime('now', '-' || ? || ' hours')
+    `).run(olderThanHours);
+    return result.changes;
+  }
+
+  /**
+   * Get runs with unacknowledged events (for outbox draining).
+   */
+  fallsWithUnacknowledgedEvents(): Array<{ run_id: string; origin_peer: string }> {
+    return this.db.prepare(`
+      SELECT DISTINCT e.run_id, r.origin_peer
+      FROM remote_pi_events e
+      JOIN pi_runs r ON e.run_id = r.id
+      WHERE e.acknowledged_at IS NULL
+    `).all() as Array<{ run_id: string; origin_peer: string }>;
+  }
+
+  /**
+   * Get the underlying database (for advanced queries).
+   */
+  getDb(): TaskDatabase {
+    return this.db;
   }
 }

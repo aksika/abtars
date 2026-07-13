@@ -217,6 +217,58 @@ export class HttpTransport implements PeerTransport {
     await this.httpCall(entry, peer, "POST", `/v1/tasks/${cardId}/messages`, JSON.stringify({ from_agent: from, message, created_at: createdAt }));
   }
 
+  // #1358 — Remote Pi lifecycle and control implementations
+
+  async pushLifecycleEvent(peer: string, event: unknown): Promise<void> {
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      ws.sendPush("pi.lifecycle.v1", event);
+      logTrace(TAG, `Pushed lifecycle event to ${peer}`);
+      return;
+    }
+    // Fallback to HTTPS push endpoint
+    const config = loadPeerConfig();
+    const entry = resolvePeer(config.peers, peer);
+    await this.httpCall(entry, peer, "POST", "/v1/pi-events/push", JSON.stringify(event));
+  }
+
+  async listRemotePiEvents(peer: string, request: unknown): Promise<unknown> {
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      return await ws.call("pi.events.list.v1", request);
+    }
+    // Fallback to HTTPS
+    const config = loadPeerConfig();
+    const entry = resolvePeer(config.peers, peer);
+    const bodyStr = JSON.stringify(request);
+    const response = await this.httpCall(entry, peer, "GET", `/v1/pi-runs/${(request as any).run_id}/events?after_sequence=${(request as any).after_sequence}&limit=${(request as any).limit ?? 100}`);
+    return JSON.parse(response);
+  }
+
+  async acknowledgeRemotePiEvents(peer: string, request: unknown): Promise<unknown> {
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      return await ws.call("pi.events.ack.v1", request);
+    }
+    // Fallback to HTTPS
+    const config = loadPeerConfig();
+    const entry = resolvePeer(config.peers, peer);
+    const response = await this.httpCall(entry, peer, "POST", `/v1/pi-runs/${(request as any).run_id}/events/acknowledge`, JSON.stringify(request));
+    return JSON.parse(response);
+  }
+
+  async sendRemotePiControl(peer: string, request: unknown): Promise<unknown> {
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      return await ws.call("pi.control.v1", request);
+    }
+    // Fallback to HTTPS
+    const config = loadPeerConfig();
+    const entry = resolvePeer(config.peers, peer);
+    const response = await this.httpCall(entry, peer, "POST", `/v1/pi-runs/${(request as any).run_id}/control`, JSON.stringify(request));
+    return JSON.parse(response);
+  }
+
   private async httpCall(entry: PeerEntry, peerName: string, method: string, path: string, body?: string): Promise<string> {
     const { signRequest } = await import("./peer-auth.js");
     const { loadPeerConfig } = await import("../peer-config.js");

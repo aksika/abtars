@@ -153,6 +153,11 @@ export class WsPeerClient {
     }
   }
 
+  /** #1358: Call a method and wait for a correlated response. Alias for send(). */
+  async call(method: string, payload: unknown): Promise<unknown> {
+    return this.send(method, payload);
+  }
+
   /** #1401 — Close runtime resources. Outbox entries survive for the next client/process. */
   destroy(): void {
     this.destroyed = true;

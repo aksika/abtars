@@ -2,6 +2,17 @@
  * peer-transport/interface.ts — PeerTransport abstraction (#911/#1357).
  */
 
+// #1358 — Remote Pi lifecycle and control types
+import type {
+  RemotePiEventV1,
+  RemotePiEventsListRequestV1,
+  RemotePiEventsListResponseV1,
+  RemotePiEventsAckRequestV1,
+  RemotePiEventsAckResponseV1,
+  RemotePiControlRequestV1,
+  RemotePiControlResponseV1,
+} from "./remote-pi-types.js";
+
 export interface PeerHealth {
   name: string;
   lastSeen: number;
@@ -78,4 +89,18 @@ export interface PeerTransport {
   checkTask(peer: string, taskId: number): Promise<TaskResult>;
   terminateTask(peer: string, taskId: number): Promise<void>;
   pushChannelMessage(peer: string, cardId: number, from: string, message: string, createdAt: string): Promise<void>;
+
+  // #1358 — Remote Pi lifecycle and control methods
+
+  /** Push a lifecycle event to a peer via WSS. */
+  pushLifecycleEvent(peer: string, event: RemotePiEventV1): Promise<void>;
+
+  /** List events for a remote Pi run (catch-up). */
+  listRemotePiEvents(peer: string, request: RemotePiEventsListRequestV1): Promise<RemotePiEventsListResponseV1>;
+
+  /** Acknowledge events for a remote Pi run. */
+  acknowledgeRemotePiEvents(peer: string, request: RemotePiEventsAckRequestV1): Promise<RemotePiEventsAckResponseV1>;
+
+  /** Send a control command to a remote Pi run. */
+  sendRemotePiControl(peer: string, request: RemotePiControlRequestV1): Promise<RemotePiControlResponseV1>;
 }
