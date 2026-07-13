@@ -719,21 +719,19 @@ describe("TuiSocketAdapter — steer mode", () => {
     conn.destroy(); adapter.stop();
   });
 
-  it("steer client frame on pipeline mode returns rejected steer-ack", async () => {
+  it("steer client frame with empty sessionId is dropped by protocol validation", async () => {
     mock = makeMockSpin();
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
     await adapter.start();
     const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
     expect(frames.find((f) => f.t === "ready")).toBeDefined();
 
+    // #1399: empty sessionId fails validateClientFrame and is silently dropped
     conn.write(encodeFrame({ t: "steer", sessionId: "", instructionId: "cid2", text: "focus" }));
     await new Promise((r) => setTimeout(r, 50));
 
-    const ack = frames.find((f) => f.t === "steer-ack");
-    expect(ack).toBeDefined();
-    if (ack && ack.t === "steer-ack") {
-      expect(ack.status).toBe("rejected");
-    }
+    const steerAcks = frames.filter((f) => f.t === "steer-ack");
+    expect(steerAcks.length).toBe(0);
 
     conn.destroy(); adapter.stop();
   });
@@ -1275,5 +1273,72 @@ describe("TuiSocketAdapter — #1398 feed isolation", () => {
     expect(readyFrames.length).toBe(2);
 
     c.conn.destroy();
+  });
+});
+
+// ── #1399: steer frame binding enforcement ──────────────────────────────
+
+describe("TuiSocketAdapter — #1399 steer binding", () => {
+  let sockPath: string;
+  let adapter: TuiSocketAdapter;
+
+  beforeEach(() => { sockPath = tmpSocketPath(); });
+  afterEach(() => { if (adapter) adapter.stop(); });
+
+  it("non-matching sessionId sends rejected ack preserving client instructionId", async () => {
+    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const mock = makeMockSpin({ orcSession: orc, orcBusy: true });
+    adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+
+    conn.write(encodeFrame({ t: "steer", sessionId: "different_session", instructionId: "cid-mismatch", text: "focus" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const ack = frames.find((f) => f.t === "steer-ack") as any;
+    expect(ack).toBeDefined();
+    expect(ack.status).toBe("rejected");
+    expect(ack.instructionId).toBe("cid-mismatch");
+    conn.destroy();
+  });
+
+  it("no attachment silently drops steer frame", async () => {
+    const mock = makeMockSpin().spin;
+    adapter = new TuiSocketAdapter({ spin: mock, onMessage: makeRecoveryHandler(), socketPath: sockPath });
+    await adapter.start();
+
+    const c = net.createConnection(sockPath);
+    await new Promise<void>((resolve, reject) => {
+      c.once("connect", () => resolve()); c.once("error", reject);
+    });
+
+    const frames: TuiServerFrame[] = [];
+    const dec = createFrameDecoder<TuiServerFrame>();
+    c.on("data", (buf: Buffer) => {
+      for (const f of dec.push(buf)) frames.push(f);
+    });
+
+    c.write(encodeFrame({ t: "steer", sessionId: "1749563282_A_01", instructionId: "cid3", text: "nobody home" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const steerAcks = frames.filter((f) => f.t === "steer-ack");
+    expect(steerAcks.length).toBe(0);
+    c.destroy();
+  });
+
+  it("correct sessionId queues normally", async () => {
+    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const mock = makeMockSpin({ orcSession: orc, orcBusy: true });
+    adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+
+    conn.write(encodeFrame({ t: "steer", sessionId: "1749563282_O_01", instructionId: "cid-ok", text: "focus on memory" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const ack = frames.find((f) => f.t === "steer-ack") as any;
+    expect(ack).toBeDefined();
+    expect(ack.status).toBe("queued" as const);
+    conn.destroy();
   });
 });

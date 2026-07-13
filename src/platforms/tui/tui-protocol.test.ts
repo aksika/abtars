@@ -8,8 +8,9 @@ import {
   MAX_TUI_FRAME_BYTES,
   MAX_INPUT_BYTES,
   MAX_TERMINAL_DIM,
-  type TuiClientFrame,
-  type TuiServerFrame,
+  MAX_TUI_SESSION_ID_BYTES,
+  MAX_TUI_INSTRUCTION_ID_BYTES,
+  MAX_TUI_STEER_TEXT_BYTES,
 } from "./tui-protocol.js";
 
 describe("encodeFrame", () => {
@@ -275,8 +276,80 @@ describe("validateClientFrame", () => {
   });
 
   it("rejects steer with oversized text", () => {
-    const large = "x".repeat(MAX_INPUT_BYTES + 1);
+    const large = "x".repeat(MAX_TUI_STEER_TEXT_BYTES + 1);
     const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: "i1", text: large });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects steer with whitespace-only text", () => {
+    const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: "i1", text: "   " });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects steer with empty sessionId", () => {
+    const result = validateClientFrame({ t: "steer", sessionId: "", instructionId: "i1", text: "hello" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects steer with non-string sessionId", () => {
+    const result = validateClientFrame({ t: "steer", sessionId: 123 as any, instructionId: "i1", text: "hello" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects steer with oversized sessionId", () => {
+    const large = "s".repeat(MAX_TUI_SESSION_ID_BYTES + 1);
+    const result = validateClientFrame({ t: "steer", sessionId: large, instructionId: "i1", text: "hello" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("accepts steer with sessionId at exact byte limit", () => {
+    const exact = "s".repeat(MAX_TUI_SESSION_ID_BYTES);
+    const result = validateClientFrame({ t: "steer", sessionId: exact, instructionId: "i1", text: "hello" });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects steer with empty instructionId", () => {
+    const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: "", text: "hello" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects steer with non-string instructionId", () => {
+    const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: null as any, text: "hello" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects steer with oversized instructionId", () => {
+    const large = "i".repeat(MAX_TUI_INSTRUCTION_ID_BYTES + 1);
+    const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: large, text: "hello" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("accepts steer with instructionId at exact byte limit", () => {
+    const exact = "i".repeat(MAX_TUI_INSTRUCTION_ID_BYTES);
+    const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: exact, text: "hello" });
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts steer with text at exact byte limit", () => {
+    const exact = "x".repeat(MAX_TUI_STEER_TEXT_BYTES);
+    const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: "i1", text: exact });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects steer with non-string text", () => {
+    const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: "i1", text: 42 as any });
+    expect(result.ok).toBe(false);
+  });
+
+  it("accepts steer with Unicode text (byte-accurate)", () => {
+    const uni = "🚀".repeat(1024); // 4 bytes each * 1024 = 4 KiB = MAX_TUI_STEER_TEXT_BYTES
+    const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: "i1", text: uni });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects steer with Unicode text one byte over limit", () => {
+    const uni = "a".repeat(MAX_TUI_STEER_TEXT_BYTES - 3) + "🚀"; // 4 bytes rocket at the end = limit + 1
+    const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: "i1", text: uni });
     expect(result.ok).toBe(false);
   });
 });

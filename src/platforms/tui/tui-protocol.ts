@@ -18,6 +18,15 @@ export const MAX_TUI_FRAME_BYTES = 256 * 1024;
 /** Maximum input text field size (UTF-8 bytes). */
 export const MAX_INPUT_BYTES = 64 * 1024;
 
+/** #1399: Maximum steer session ID field size (UTF-8 bytes). */
+export const MAX_TUI_SESSION_ID_BYTES = 256;
+
+/** #1399: Maximum steer instruction ID field size (UTF-8 bytes). */
+export const MAX_TUI_INSTRUCTION_ID_BYTES = 128;
+
+/** #1399: Maximum steering text size (UTF-8 bytes). Aligned with queue MAX_BYTES_PER_ITEM. */
+export const MAX_TUI_STEER_TEXT_BYTES = 4 * 1024;
+
 /** Maximum terminal dimension (cols, rows). */
 export const MAX_TERMINAL_DIM = 1024;
 
@@ -225,18 +234,23 @@ export function validateClientFrame(frame: TuiClientFrame): FrameValidationResul
       return { ok: true };
     }
     case "steer": {
-      if (typeof frame.text !== "string" || !frame.text) {
+      if (typeof frame.text !== "string" || !frame.text.trim()) {
         return { ok: false, error: "steer text must be a non-empty string" };
       }
-      // #1399 limit (must match or be below MAX_INPUT_BYTES)
-      if (Buffer.byteLength(frame.text, "utf8") > MAX_INPUT_BYTES) {
-        return { ok: false, error: `steer text exceeds ${MAX_INPUT_BYTES} byte limit` };
+      if (Buffer.byteLength(frame.text, "utf8") > MAX_TUI_STEER_TEXT_BYTES) {
+        return { ok: false, error: `steer text exceeds ${MAX_TUI_STEER_TEXT_BYTES} byte limit` };
       }
-      if (typeof frame.instructionId !== "string") {
-        return { ok: false, error: "steer instructionId must be a string" };
+      if (typeof frame.instructionId !== "string" || !frame.instructionId) {
+        return { ok: false, error: "steer instructionId must be a non-empty string" };
       }
-      if (typeof frame.sessionId !== "string") {
-        return { ok: false, error: "steer sessionId must be a string" };
+      if (Buffer.byteLength(frame.instructionId, "utf8") > MAX_TUI_INSTRUCTION_ID_BYTES) {
+        return { ok: false, error: `steer instructionId exceeds ${MAX_TUI_INSTRUCTION_ID_BYTES} byte limit` };
+      }
+      if (typeof frame.sessionId !== "string" || !frame.sessionId) {
+        return { ok: false, error: "steer sessionId must be a non-empty string" };
+      }
+      if (Buffer.byteLength(frame.sessionId, "utf8") > MAX_TUI_SESSION_ID_BYTES) {
+        return { ok: false, error: `steer sessionId exceeds ${MAX_TUI_SESSION_ID_BYTES} byte limit` };
       }
       return { ok: true };
     }

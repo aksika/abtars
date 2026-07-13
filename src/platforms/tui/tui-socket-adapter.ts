@@ -794,7 +794,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
       if (text.startsWith("/steer ")) {
         const body = text.slice("/steer ".length).trim();
         if (body) {
-          await this._queueAndAck(body);
+          // #1399: capture current attachment binding for the /steer text path
+          await this._queueAndAck(body, this.attachedSessionId!, this._connGen, this._attGen, "");
           return;
         }
       }
@@ -906,24 +907,33 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this.commitAttachment(target.id, "pipeline", spin);
   }
 
-  /** #1361: Handle an explicit steer client frame from any attached session. */
+  /** #1361/#1399: Handle an explicit steer client frame. Requires exact non-empty sessionId match. */
   private async _handleSteer(frame: TuiClientFrame & { t: "steer" }): Promise<void> {
-    if (!this.attachedSessionId) return;
-    if (frame.sessionId && frame.sessionId !== this.attachedSessionId) {
+    // #1399: capture current attachment identity before any async boundary
+    const capturedSessionId = this.attachedSessionId;
+    const capturedConnGen = this._connGen;
+    const capturedAttGen = this._attGen;
+    if (!capturedSessionId) return;
+
+    // #1399: exact non-empty sessionId comparison — no truthiness bypass
+    if (frame.sessionId !== capturedSessionId) {
       this._push({ t: "steer-ack", status: "rejected", instructionId: frame.instructionId, message: "Steer session ID does not match the current attachment." });
       return;
     }
-    await this._queueAndAck(frame.text);
+    await this._queueAndAck(frame.text, capturedSessionId, capturedConnGen, capturedAttGen, frame.instructionId);
   }
 
-  /** #1332: Queue a steering instruction and push the acknowledgement frame. */
-  private async _queueAndAck(text: string): Promise<void> {
+  /** #1332/#1399: Queue a steering instruction and push the acknowledgement frame. */
+  private async _queueAndAck(text: string, capturedSessionId: string, capturedConnGen: number, capturedAttGen: number, clientInstructionId: string): Promise<void> {
     const spin = this.deps.spin;
-    if (!this.attachedSessionId) return;
 
-    const session = spin.getSessionById(this.attachedSessionId);
+    // #1399: recheck binding before mutating queue
+    if (!this._isAttCurrent(capturedConnGen, capturedAttGen)) return;
+    if (this.attachedSessionId !== capturedSessionId) return;
+
+    const session = spin.getSessionById(capturedSessionId);
     if (!session) {
-      this._push({ t: "steer-ack", status: "rejected", instructionId: "", message: "Session not found." });
+      this._push({ t: "steer-ack", status: "rejected", instructionId: clientInstructionId, message: "Session not found." });
       return;
     }
 
@@ -940,7 +950,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
         too_large: "Steering text too large (max 4 KiB).",
         queue_full: "Steering queue is full (max 20 items or 32 KiB).",
       };
-      this._push({ t: "steer-ack", status: "rejected", instructionId: "", message: reasonMap[result.reason] ?? "Steering rejected." });
+      this._push({ t: "steer-ack", status: "rejected", instructionId: clientInstructionId, message: reasonMap[result.reason] ?? "Steering rejected." });
     }
   }
 
