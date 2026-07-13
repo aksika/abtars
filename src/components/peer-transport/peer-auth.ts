@@ -23,25 +23,22 @@ import { writeFileSync, readFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// ── Nonce cache (replay prevention) ──────────────────────────────────────────
+// ── Nonce cache (replay prevention) — #1390 durable store ────────────────────
 
-const nonceCache = new Map<string, number>(); // nonce → timestamp (ms)
-const NONCE_TTL_MS = 60_000; // 60s — must be >= 30s ts window
+import { PeerNonceStore } from "./peer-nonce-store.js";
 
-function pruneNonces(): void {
-  const cutoff = Date.now() - NONCE_TTL_MS;
-  for (const [nonce, ts] of nonceCache) {
-    if (ts < cutoff) nonceCache.delete(nonce);
-  }
+let _nonceStore: PeerNonceStore | null = null;
+function getNonceStore(): PeerNonceStore {
+  if (!_nonceStore) _nonceStore = new PeerNonceStore();
+  return _nonceStore;
 }
 
 export function isNonceSeen(nonce: string): boolean {
-  pruneNonces();
-  return nonceCache.has(nonce);
+  return getNonceStore().isSeen(nonce);
 }
 
 export function recordNonce(nonce: string): void {
-  nonceCache.set(nonce, Date.now());
+  getNonceStore().record(nonce);
 }
 
 // ── Key helpers ───────────────────────────────────────────────────────────────
@@ -73,7 +70,8 @@ function edVerify(verifyKey: string, message: string, sigBase64: string): boolea
 
 // ── Request signing ───────────────────────────────────────────────────────────
 
-const TS_WINDOW_MS = 30_000; // reject requests older than 30s
+/** Timestamp window (seconds). Used inline in verifyRequest/verifyWsRequest. */
+const TS_WINDOW_SEC = 30;
 
 /**
  * Sign an outbound request. Returns headers to attach.
@@ -138,7 +136,7 @@ export function verifyRequest(
   if (isNaN(ts)) return { ok: false, reason: "invalid_ts" };
 
   const nowSec = Math.floor(Date.now() / 1000);
-  if (Math.abs(nowSec - ts) > 30) return { ok: false, reason: "stale_ts" };
+  if (Math.abs(nowSec - ts) > TS_WINDOW_SEC) return { ok: false, reason: "stale_ts" };
 
   if (isNonceSeen(nonce)) return { ok: false, reason: "nonce_replay" };
 
@@ -148,6 +146,74 @@ export function verifyRequest(
   if (!edVerify(verifyKey, canonical, sig)) return { ok: false, reason: "bad_sig" };
 
   recordNonce(nonce);
+  return { ok: true };
+}
+
+// ── #1390: WSS request domain (binds peerId + requestId) ─────────────────────
+
+/**
+ * Sign a WSS request frame. Uses the WS domain which binds peerId and requestId:
+ *
+ * Canonical string:
+ *   "abtars-ws-req-v1\n" + peerId + "\n" + requestId + "\n" + method + "\n" +
+ *   canonicalPath + "\n" + ts + "\n" + nonce + "\n" + hex(sha256(body))
+ */
+export function signWsRequest(
+  peerId: string,
+  requestId: string,
+  method: string,
+  canonicalPath: string,
+  body: string,
+  signingKey: string,
+): { ts: string; nonce: string; sig: string } {
+  const ts = String(Math.floor(Date.now() / 1000));
+  const nonce = randomBytes(16).toString("hex");
+  const bodyHash = createHash("sha256").update(body, "utf-8").digest("hex");
+  const canonical = `abtars-ws-req-v1\n${peerId}\n${requestId}\n${method}\n${canonicalPath}\n${ts}\n${nonce}\n${bodyHash}`;
+  const sig = edSign(signingKey, canonical);
+  return { ts, nonce, sig };
+}
+
+export interface VerifyWsRequestFields {
+  peerId: string;
+  requestId: string;
+  ts: string;
+  nonce: string;
+  sig: string;
+}
+
+/**
+ * Verify a WSS request frame's Ed25519 signature. Uses the durable
+ * PeerNonceStore for restart-proof replay protection.
+ */
+export function verifyWsRequest(
+  fields: VerifyWsRequestFields,
+  method: string,
+  canonicalPath: string,
+  body: string,
+  verifyKey: string,
+): VerifyRequestResult {
+  const { peerId, requestId, ts: tsStr, nonce, sig } = fields;
+
+  if (!peerId || !requestId || !tsStr || !nonce || !sig) {
+    return { ok: false, reason: "missing_fields" };
+  }
+
+  const ts = parseInt(tsStr, 10);
+  if (isNaN(ts)) return { ok: false, reason: "invalid_ts" };
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (Math.abs(nowSec - ts) > TS_WINDOW_SEC) return { ok: false, reason: "stale_ts" };
+
+  const store = getNonceStore();
+  if (store.isSeen(nonce)) return { ok: false, reason: "nonce_replay" };
+
+  const bodyHash = createHash("sha256").update(body, "utf-8").digest("hex");
+  const canonical = `abtars-ws-req-v1\n${peerId}\n${requestId}\n${method}\n${canonicalPath}\n${tsStr}\n${nonce}\n${bodyHash}`;
+
+  if (!edVerify(verifyKey, canonical, sig)) return { ok: false, reason: "bad_sig" };
+
+  store.record(nonce);
   return { ok: true };
 }
 

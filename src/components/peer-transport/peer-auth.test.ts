@@ -7,6 +7,8 @@ import { generateKeyPairSync } from "node:crypto";
 import {
   signRequest,
   verifyRequest,
+  signWsRequest,
+  verifyWsRequest,
   macTribe,
   signEnroll,
   verifyEnroll,
@@ -198,7 +200,89 @@ describe("generateTlsCert / verifyServerCert", () => {
   });
 });
 
-// ── isNonceSeen / recordNonce (nonce cache) ───────────────────────────────────
+// ── #1390: signWsRequest / verifyWsRequest ────────────────────────────────────
+
+describe("signWsRequest / verifyWsRequest", () => {
+  const peerId = "KP";
+  const requestId = "req-123";
+  const method = "POST";
+  const path = "/v1/tasks";
+  const body = '{"goal":"test"}';
+
+  it("round-trip: valid sig accepted", () => {
+    const { signingKey, verifyKey } = makeKey();
+    const auth = signWsRequest(peerId, requestId, method, path, body, signingKey);
+    const result = verifyWsRequest({ ...auth, peerId, requestId }, method, path, body, verifyKey);
+    expect(result.ok).toBe(true);
+  });
+
+  it("wrong key rejected", () => {
+    const { signingKey } = makeKey();
+    const { verifyKey: wrongKey } = makeKey();
+    const auth = signWsRequest(peerId, requestId, method, path, body, signingKey);
+    const result = verifyWsRequest({ ...auth, peerId, requestId }, method, path, body, wrongKey);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("bad_sig");
+  });
+
+  it("stale ts rejected", () => {
+    const { signingKey, verifyKey } = makeKey();
+    const auth = signWsRequest(peerId, requestId, method, path, body, signingKey);
+    const staleTs = String(Math.floor(Date.now() / 1000) - 60);
+    const result = verifyWsRequest({ ...auth, peerId, requestId, ts: staleTs }, method, path, body, verifyKey);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("stale_ts");
+  });
+
+  it("nonce replay rejected", () => {
+    const { signingKey, verifyKey } = makeKey();
+    const auth = signWsRequest(peerId, requestId, method, path, body, signingKey);
+    const fields = { ...auth, peerId, requestId };
+    const r1 = verifyWsRequest(fields, method, path, body, verifyKey);
+    expect(r1.ok).toBe(true);
+    const r2 = verifyWsRequest(fields, method, path, body, verifyKey);
+    expect(r2.ok).toBe(false);
+    expect(r2.reason).toBe("nonce_replay");
+  });
+
+  it("body mismatch rejected", () => {
+    const { signingKey, verifyKey } = makeKey();
+    const auth = signWsRequest(peerId, requestId, method, path, body, signingKey);
+    const result = verifyWsRequest({ ...auth, peerId, requestId }, method, path, '{"goal":"different"}', verifyKey);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("bad_sig");
+  });
+
+  it("wrong peerId rejected", () => {
+    const { signingKey, verifyKey } = makeKey();
+    const auth = signWsRequest(peerId, requestId, method, path, body, signingKey);
+    const result = verifyWsRequest({ ...auth, peerId: "WRONG", requestId }, method, path, body, verifyKey);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("bad_sig");
+  });
+
+  it("wrong requestId rejected", () => {
+    const { signingKey, verifyKey } = makeKey();
+    const auth = signWsRequest(peerId, requestId, method, path, body, signingKey);
+    const result = verifyWsRequest({ ...auth, peerId, requestId: "wrong-id" }, method, path, body, verifyKey);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("bad_sig");
+  });
+
+  it("domain separation from HTTP signRequest", () => {
+    const { signingKey, verifyKey } = makeKey();
+    // HTTP signature should not verify as WS
+    const httpHeaders = signRequest(method, path, body, signingKey, peerId);
+    const result = verifyWsRequest(
+      { peerId, requestId, ts: httpHeaders["X-Peer-Ts"]!, nonce: httpHeaders["X-Peer-Nonce"]!, sig: httpHeaders["X-Peer-Sig"]! },
+      method, path, body, verifyKey,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("bad_sig");
+  });
+});
+
+// ── isNonceSeen / recordNonce (nonce cache — durable #1390) ───────────────────
 
 describe("nonce cache", () => {
   it("unseen nonce returns false", () => {

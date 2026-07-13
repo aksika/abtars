@@ -264,22 +264,65 @@ export class AgentApiServer {
     });
   }
 
-  /** Push a message to a connected peer via WS. Returns true if delivered. */
+  /**
+   * #1390: Push a non-mutating notification to a connected peer via WS.
+   * Unsigned push frames may never settle cards, post channels, deliver results,
+   * modify files, or invoke tools. Only notify-type methods are allowed.
+   */
   pushToPeer(peerName: string, method: string, payload: unknown): boolean {
+    // Strict allowlist of notification-only methods
+    const ALLOWED_PUSH: readonly string[] = ["notify", "heartbeat", "ping"];
+    if (!ALLOWED_PUSH.includes(method)) return false;
     const ws = this.peerWsConnections.get(peerName);
     if (!ws || ws.readyState !== ws.OPEN) return false;
     ws.send(JSON.stringify({ type: "push", method, payload }));
     return true;
   }
 
-  /** Handle incoming WS message from a peer. */
+  /** Handle incoming WS message from a peer. #1390: per-frame signature required. */
   private handlePeerWsMessage(peerName: string, raw: string): void {
     try {
       const msg = JSON.parse(raw);
-      if (msg.type === "request") {
-        // Peer sending a request over WS — route same as HTTP
-        this.handlePeerWsRequest(peerName, msg).catch(err => logAndSwallow(TAG, "ws-request", err));
+      if (msg.type !== "request") return;
+
+      // #1390: extract auth fields from frame body
+      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+      const { verifyRequest } = require("./peer-transport/peer-auth.js") as typeof import("./peer-transport/peer-auth.js");
+      const config = loadPeerConfig();
+      const peerEntry = config.peers[peerName];
+      if (!peerEntry) {
+        const ws = this.peerWsConnections.get(peerName);
+        if (ws && ws.readyState === ws.OPEN) {
+          ws.send(JSON.stringify({
+            type: "response", id: msg.id ?? null,
+            error: { code: "unknown_peer", message: "Peer not enrolled", retryable: false },
+          }));
+        }
+        return;
       }
+
+      // Build headers-like object from frame fields (X-Peer-* sent inside frame)
+      const headers: Record<string, string> = {};
+      const authFields = ["X-Peer-Id", "X-Peer-Ts", "X-Peer-Nonce", "X-Peer-Sig"];
+      for (const f of authFields) {
+        if (typeof msg[f] === "string") headers[f] = msg[f];
+      }
+
+      const path = `/${msg.method}`; // client signs with signRequest("POST", "/{method}", ...)
+      const body = typeof msg.payload === "string" ? msg.payload : JSON.stringify(msg.payload ?? {});
+      const authResult = verifyRequest(headers, "POST", path, body, peerEntry.verifyKey);
+      if (!authResult.ok) {
+        const ws = this.peerWsConnections.get(peerName);
+        if (ws && ws.readyState === ws.OPEN) {
+          ws.send(JSON.stringify({
+            type: "response", id: msg.id ?? null,
+            error: { code: "auth_failed", message: `Request auth failed: ${authResult.reason}`, retryable: false },
+          }));
+        }
+        return;
+      }
+
+      this.handlePeerWsRequest(peerName, msg).catch(err => logAndSwallow(TAG, "ws-request", err));
     } catch { /* malformed — ignore */ }
   }
 
