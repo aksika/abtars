@@ -27,6 +27,7 @@ import {
   encodeFrame,
   createFrameDecoder,
   isServerFrame,
+  type FrameDecoder,
   type TuiAttachMode,
   type TuiClientFrame,
   type TuiServerFrame,
@@ -223,6 +224,21 @@ export function processMessageFrame(
   }
 }
 
+/**
+ * #1400: Testable seam for consuming raw server frame bytes.
+ * Pushes the buffer through the decoder and dispatches valid server frames.
+ */
+export function consumeServerFrames(
+  decoder: FrameDecoder<TuiServerFrame>,
+  chunk: Buffer,
+  onFrame: (frame: TuiServerFrame) => void,
+): void {
+  for (const frame of decoder.push(chunk)) {
+    if (!isServerFrame(frame)) continue;
+    onFrame(frame);
+  }
+}
+
 /** Entry point for the `abtars tui` subcommand. */
 export async function tui(args: string[]): Promise<number> {
   let mode: TuiAttachMode;
@@ -275,7 +291,12 @@ export async function tui(args: string[]): Promise<number> {
 
   // Connect.
   const conn = net.createConnection(socketPath);
-  const decode = createFrameDecoder<TuiServerFrame>();
+  const decoder = createFrameDecoder<TuiServerFrame>({
+    onFatal: (error) => {
+      process.stderr.write(`Protocol error: ${error.message}\n`);
+      stop(1);
+    },
+  });
   let ready = false;             // pre-`ready` errors = startup failure (exit 1)
   let shouldExitCode: number | null = null;
   let stopping = false;
@@ -296,6 +317,7 @@ export async function tui(args: string[]): Promise<number> {
     stopping = true;
     shouldExitCode = code;
     try { ui.stop(); } catch { /* best effort */ }
+    decoder.close();
     try { conn.destroy(); } catch { /* best effort */ }
     resolveStopped();
     // Defer the actual exit to the next tick so any in-flight renders finish.
@@ -310,6 +332,7 @@ export async function tui(args: string[]): Promise<number> {
   }
   process.once("exit", () => {
     try { ui.stop(); } catch { /* best effort */ }
+    decoder.close();
   });
 
   conn.on("connect", () => {
@@ -323,10 +346,7 @@ export async function tui(args: string[]): Promise<number> {
   });
 
   conn.on("data", (buf: Buffer) => {
-    for (const frame of decode(buf.toString())) {
-      if (!isServerFrame(frame)) continue;
-      handleServerFrame(frame);
-    }
+    consumeServerFrames(decoder, buf, handleServerFrame);
   });
 
   conn.on("error", (err) => {
@@ -351,6 +371,7 @@ export async function tui(args: string[]): Promise<number> {
   // hidden behind the terminal's restore escape sequences.
   const stopForRenderError = (err: Error): void => {
     try { ui.stop(); } catch { /* best effort */ }
+    decoder.close();
     try { conn.destroy(); } catch { /* best effort */ }
     process.stderr.write(`TUI render error: ${err.message}\n`);
     stop(1);

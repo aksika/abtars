@@ -1076,7 +1076,7 @@ describe("TuiSocketAdapter — #1398 feed isolation", () => {
       b.once("connect", () => resolve()); b.once("error", reject);
     });
     b.on("data", (buf: Buffer) => {
-      for (const f of bDec(buf.toString())) bFrames.push(f);
+      for (const f of bDec.push(buf)) bFrames.push(f);
     });
     await new Promise((r) => setTimeout(r, 50));
 
