@@ -1,8 +1,5 @@
 /**
- * peer-transport/interface.ts — PeerTransport abstraction (#911).
- *
- * Unified interface for all peer-to-peer communication. Initial impl: HTTP.
- * Future: libp2p, GossipSub, etc. — swap implementation, same API.
+ * peer-transport/interface.ts — PeerTransport abstraction (#911/#1357).
  */
 
 export interface PeerHealth {
@@ -33,32 +30,52 @@ export interface TaskResult {
   result?: string;
   error?: string;
   tokensUsed?: number;
-  /** #1366: Worker result envelope for supervised tasks. */
   workerResult?: Record<string, unknown>;
 }
 
+/**
+ * #1357 — Discriminated Pi execution target for remote delegation.
+ */
+export interface RemotePiTargetV1 {
+  executor: "pi";
+  workspace_alias: string;
+  model?: {
+    provider: string;
+    model_id: string;
+    thinking?: string;
+  };
+  delivery?: "commit_push" | "patch_artifact" | "leave_remote";
+}
+
+export interface PeerDelegateResult {
+  taskId: number;
+  remoteSessionId?: string;
+  /** #1357 — Present when executor === "pi" on the response. */
+  runId?: string;
+  generation?: number;
+  executor?: "agent" | "pi";
+}
+
 export interface PeerTransport {
-  /** Send a message to a specific peer. */
   send(peer: string, message: PeerMessage): Promise<unknown>;
-
-  /** Broadcast a message to all known peers. */
   broadcast(message: PeerMessage): Promise<void>;
-
-  /** Discover available peers (static from peers.json for now). */
   discover(): PeerCard[];
-
-  /** Register handler for incoming peer messages. */
   onMessage(handler: (from: string, message: PeerMessage) => void): void;
 
-  /** Delegate a task to a remote peer. Returns remote cardId. */
-  delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }>; contract?: Record<string, unknown>; attemptId?: string }): Promise<{ taskId: number; remoteSessionId?: string }>;
+  /** Delegate a task to a remote peer. Returns remote identifiers. */
+  delegateTask(peer: string, goal: string, opts?: {
+    priority?: string;
+    context?: string;
+    artifacts?: Array<{ name: string; content: string }>;
+    contract?: Record<string, unknown>;
+    attemptId?: string;
+    /** #1357 — Typed Pi execution target. */
+    target?: RemotePiTargetV1;
+    /** #1357 — Origin-generated request ID for idempotency. */
+    requestId?: string;
+  }): Promise<PeerDelegateResult>;
 
-  /** Check status of a remote task. */
   checkTask(peer: string, taskId: number): Promise<TaskResult>;
-
-  /** Terminate a remote task. */
   terminateTask(peer: string, taskId: number): Promise<void>;
-
-  /** #949: Push a channel message to a remote peer. */
   pushChannelMessage(peer: string, cardId: number, from: string, message: string, createdAt: string): Promise<void>;
 }

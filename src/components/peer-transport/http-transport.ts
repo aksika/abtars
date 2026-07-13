@@ -5,7 +5,7 @@
  * PeerTransport interface. discover() reads peers.json (static).
  */
 
-import type { PeerTransport, PeerCard, PeerMessage, TaskResult } from "./interface.js";
+import type { PeerTransport, PeerCard, PeerMessage, TaskResult, PeerDelegateResult } from "./interface.js";
 import { getAlivePeers } from "./gossip.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
 import { logInfo, logDebug, logTrace } from "../logger.js";
@@ -145,19 +145,17 @@ export class HttpTransport implements PeerTransport {
     for (const h of this.handlers) { try { h(from, message); } catch {} }
   }
 
-  async delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }>; contract?: Record<string, unknown>; attemptId?: string }): Promise<{ taskId: number; remoteSessionId?: string }> {
+  async delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }>; contract?: Record<string, unknown>; attemptId?: string; target?: import("./interface.js").RemotePiTargetV1; requestId?: string }): Promise<PeerDelegateResult> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
 
-    // Callback: remote peer looks us up in its peers.json by name
-
-    logDebug(TAG, `→ peer_delegate ${peer}: priority=${opts?.priority ?? "MEDIUM"}, goal=${goal.length}ch`);
+    const kind = opts?.target?.executor === "pi" ? "pi" : "agent";
+    logDebug(TAG, `→ peer_delegate ${peer} kind=${kind} priority=${opts?.priority ?? "MEDIUM"}, goal=${goal.length}ch`);
     logTrace(TAG, `→ peer_delegate ${peer} goal: ${goal.slice(0, 300)}`);
 
-    // Size guard for artifacts (#928)
     if (opts?.artifacts?.length) {
-      const MAX_SINGLE = 1_400_000; // 1.4MB base64 per artifact
-      const MAX_TOTAL = 5_000_000;  // 5MB total
+      const MAX_SINGLE = 1_400_000;
+      const MAX_TOTAL = 5_000_000;
       let total = 0;
       for (const a of opts.artifacts) {
         if (a.content.length > MAX_SINGLE) throw new Error(`Artifact '${a.name}' exceeds 1.4MB limit (${a.content.length} bytes)`);
@@ -170,20 +168,21 @@ export class HttpTransport implements PeerTransport {
     if (opts?.artifacts?.length) payload.artifacts = opts.artifacts;
     if (opts?.contract) payload.worker_contract = opts.contract;
     if (opts?.attemptId) payload.attempt_id = opts.attemptId;
+    if (opts?.target) payload.target = opts.target;
+    if (opts?.requestId) payload.request_id = opts.requestId;
 
-    // #972: Route via WS if connected, otherwise HTTP
     const ws = this.wsClients.get(peer);
     if (ws?.connected) {
       const result = await ws.send("delegate", payload) as any;
       logInfo(TAG, `PEER_DELEGATE ${peer} (ws) → remote#${result.taskId} (${goal.length}ch)`);
-      return { taskId: result.taskId, remoteSessionId: result.session_id };
+      return { taskId: result.taskId, remoteSessionId: result.session_id, runId: result.run_id, generation: result.generation, executor: result.executor };
     }
 
     const body = JSON.stringify(payload);
     const response = await this.httpCall(entry, peer, "POST", "/v1/tasks", body);
     const parsed = JSON.parse(response);
-    logInfo(TAG, `PEER_DELEGATE ${peer} → remote#${parsed.task_id} (${goal.length}ch)`);
-    return { taskId: parsed.task_id, remoteSessionId: parsed.session_id };
+    logInfo(TAG, `PEER_DELEGATE ${peer} → remote#${parsed.task_id} (${goal.length}ch) executor=${parsed.executor ?? "agent"}`);
+    return { taskId: parsed.task_id, remoteSessionId: parsed.session_id, runId: parsed.run_id, generation: parsed.generation, executor: parsed.executor ?? "agent" };
   }
 
   async checkTask(peer: string, taskId: number): Promise<TaskResult> {

@@ -41,6 +41,8 @@ interface AgentApiDeps {
   /** A2A platform adapter — routes chat through pipeline/Spin (#978). */
   a2aAdapter?: import("../platforms/agent-api/agent-api-adapter.js").AgentApiAdapter;
   onPiNotify?: (text: string) => Promise<import("./main-chat.js").SendResult>;
+  /** #1357 — Pi run service for remote Pi delegation on the receiving side. */
+  piExecutorService?: import("./pi-executor/pi-run-service.js").PiRunService;
 }
 
 function normalizeIp(raw: string): string {
@@ -160,12 +162,15 @@ export class AgentApiServer {
   private enrollRateLimit = new Map<string, number>();
   /** #1313 — Pi notification callback (set by boot phase). */
   private onPiNotify?: (text: string) => Promise<import("./main-chat.js").SendResult>;
+  /** #1357 — Pi run service for remote Pi delegation. */
+  private piExecutorService?: import("./pi-executor/pi-run-service.js").PiRunService;
 
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
     this.memory = deps.memory;
     this.onPeerActivity = deps.onPeerActivity;
     this.onPiNotify = deps.onPiNotify;
+    this.piExecutorService = deps.piExecutorService;
     this.a2aAdapter = deps.a2aAdapter;
 
     // HTTPS-only: validated TLS material is a required dependency (#1305)
@@ -1016,6 +1021,7 @@ export class AgentApiServer {
     const typedBody = body as {
       goal?: string; priority?: string; context?: string; callback_peer?: string;
       delivery_mode?: string; artifacts?: Array<{ name: string; content: string }>;
+      request_id?: string; target?: { executor: string; workspace_alias: string; model?: { provider: string; model_id: string; thinking?: string }; delivery?: string };
     };
 
     const goal = typedBody.goal;
@@ -1025,6 +1031,14 @@ export class AgentApiServer {
       return;
     }
 
+    // #1357: Pi execution target
+    const piTarget = typedBody.target;
+    if (piTarget && piTarget.executor === "pi") {
+      await this.handleV1PiTask(typedBody, res, caller, goal);
+      return;
+    }
+
+    // Generic delegation path (unchanged)
     const { spin } = await import("./spin.js");
     const { cardId, sessionId } = spin.dispatch({
       type: "O",
@@ -1036,7 +1050,6 @@ export class AgentApiServer {
       sourcePeer: caller,
     });
 
-    // #928: Write inbound artifacts to card workspace
     if (typedBody.artifacts?.length) {
       const { basename: bn } = await import("node:path");
       const dir = join(abtarsHome(), "workspace", "cards", String(cardId));
@@ -1059,6 +1072,84 @@ export class AgentApiServer {
 
     res.writeHead(202, { "Content-Type": "application/json" })
       .end(JSON.stringify({ task_id: cardId, status: "queued", session_id: sessionId }));
+  }
+
+  /** #1357 — Handle a Pi-targeted peer delegation. */
+  private async handleV1PiTask(
+    body: Record<string, unknown>, res: ServerResponse, caller: string, goal: string,
+  ): Promise<void> {
+    const target = body.target as Record<string, unknown>;
+    const workspaceAlias = target.workspace_alias as string | undefined;
+    if (!workspaceAlias || typeof workspaceAlias !== "string" || !/^[a-z][a-z0-9_.\-]{0,63}$/.test(workspaceAlias)) {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Invalid workspace_alias", "invalid_request_error", "bad_alias")));
+      return;
+    }
+
+    if (!this.piExecutorService) {
+      res.writeHead(503, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Pi executor not available on this host", "server_error", "executor_unavailable")));
+      return;
+    }
+
+    const requestId = (body.request_id as string) ?? "";
+    // Idempotency via the pi-request-ledger
+    if (requestId && /^[A-Za-z0-9._:\-]+$/.test(requestId)) {
+      const { reserveRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
+      const hash = hashCanonicalJson(body as Record<string, unknown>);
+      const reservation = reserveRequest(caller, "pi:delegate", requestId, hash);
+
+      if (!reservation.ok) {
+        if (reservation.code === "duplicate_conflict") {
+          res.writeHead(409, { "Content-Type": "application/json" })
+            .end(JSON.stringify(openaiError("request_id used with different payload", "conflict", "request_id_conflict")));
+          return;
+        }
+        if (reservation.code === "outcome_unknown") {
+          res.writeHead(409, { "Content-Type": "application/json" })
+            .end(JSON.stringify(openaiError("Previous outcome unknown — retry by same request_id", "conflict", "outcome_unknown")));
+          return;
+        }
+      }
+
+      // Duplicate same payload → replay original response
+      if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
+        res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
+        return;
+      }
+    }
+
+    // Build model selection from target
+    const modelTarget = target.model as Record<string, unknown> | undefined;
+    const model = modelTarget?.provider && modelTarget?.model_id
+      ? { provider: modelTarget.provider as string, model_id: modelTarget.model_id as string, thinking: modelTarget.thinking as string | undefined }
+      : undefined;
+
+    try {
+      const result = await this.piExecutorService.run(
+        { goal, workspaceAlias, model, owner: { principalId: `peer:${caller}`, origin: "peer" as const, peer: caller } },
+        { userId: `peer:${caller}` },
+      );
+      const response = JSON.stringify({
+        task_id: result.cardId, status: "queued", executor: "pi",
+        run_id: result.runId, generation: result.generation, session_id: result.sessionId,
+      });
+
+      // Record idempotency outcome
+      if (requestId && /^[A-Za-z0-9._:\-]+$/.test(requestId)) {
+        const { completeRequest } = await import("./pi-request-ledger.js");
+        completeRequest(caller, "pi:delegate", requestId, response);
+      }
+
+      logInfo(TAG, `Pi task from ${caller}: card #${result.cardId} run=${result.runId} gen=${result.generation} alias=${workspaceAlias}`);
+      this.onPeerActivity?.(`🤖 Pi task from ${caller}: "${goal.slice(0, 60)}" → card #${result.cardId} (run ${result.runId})`);
+      res.writeHead(202, { "Content-Type": "application/json" }).end(response);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `Pi task from ${caller} failed: ${msg}`);
+      res.writeHead(500, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError(`Pi execution failed: ${msg}`, "server_error", "pi_execution_failed")));
+    }
   }
 
   /** #894 — GET /v1/tasks/:id — poll task status + result. */

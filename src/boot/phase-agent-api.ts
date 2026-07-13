@@ -73,6 +73,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
           { telegram: ctx.telegramAdapter, discord: ctx.discordAdapter },
           text,
         ),
+        piExecutorService: ctx.piExecutorService,
       });
       ctx.agentApiServer = agentApiServer;
       return {
