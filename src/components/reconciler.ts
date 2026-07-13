@@ -26,7 +26,6 @@ const TAG = "reconciler";
 const MAX_RETRIES = 3;
 const MAX_WORKERS = 10;
 const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
-const DELIVERY_RETRY_COUNT = 3; // legacy retries for unsupervised cards
 
 let _shutdownRequested = false;
 
@@ -122,17 +121,8 @@ function reconcileProject(projectId: number): void {
     return;
   }
 
-  let totalRetries = 0;
-
   for (const child of children) {
     reconcileChildCard(child);
-    totalRetries += child.delivery_attempts ?? 0;
-  }
-
-  // Circuit breaker: total retries
-  if (totalRetries > MAX_RETRIES * 3) {
-    abortProject(projectId, children, `too many total retries (${totalRetries})`);
-    return;
   }
 
   // ── Project acceptance gate (#1363) ─────────────────────────────────────
@@ -264,48 +254,34 @@ function reconcileChildCard(card: KanbanCard): void {
     return;
   }
 
-  // #1364: Use supervision service for lifecycle-aware management
+  // #1411: Domain guard — only supervised or Pi cards enter Reconciler.
+  // Unsupervised legacy cards are owned entirely by Spin's bounded retry path
+  // (kanbanRetryOrFail + drainQueued). Reconciler must never touch them.
   const svc = new WorkerSupervisionService();
   const hasContract = svc.cardHasContract(card.id);
-  const latestAttempt = hasContract ? getLatestAttemptInfo(card.id) : null;
+  if (!hasContract) return;
 
+  const latestAttempt = getLatestAttemptInfo(card.id);
+
+  // #1364: Supervised queued card — claim if pending attempt exists
   if (card.status === "queued") {
     if (!isUnblocked(card)) return;
-
-    if (hasContract && latestAttempt) {
-      // Supervised: claim if pending, otherwise skip
-      if (latestAttempt.lifecycle === "pending") {
-        logInfo(TAG, `Claiming supervised card ${card.id}`);
-        spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
-      }
-    } else {
-      // Unsupervised: direct dispatch (legacy path)
+    if (latestAttempt && latestAttempt.lifecycle === "pending") {
+      logInfo(TAG, `Claiming supervised card ${card.id}`);
       spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
     }
+    // Fail closed: no pending attempt → leave card unchanged for supervision service recovery
     return;
   }
 
   // #1365: Adaptive retry for supervised cards
-  if (card.status === "failed" && hasContract && latestAttempt) {
+  if (card.status === "failed" && latestAttempt) {
     handleSupervisedRetry(card, latestAttempt.lifecycle);
     return;
   }
 
-  // Legacy retry for unsupervised cards
-  if (card.status === "failed" && !hasContract) {
-    const retries = card.delivery_attempts ?? 0;
-    if (retries < DELIVERY_RETRY_COUNT) {
-      logInfo(TAG, `Retrying card ${card.id} (attempt ${retries + 1}/${DELIVERY_RETRY_COUNT})`);
-      kanbanUpdate(card.id, { status: "queued" });
-      spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
-    } else {
-      cascadeFail(card.id, kanbanGetChildren(card.parent_id ?? 0));
-    }
-    return;
-  }
-
   // #1367: Lease-based stale evaluation for supervised cards
-  if (hasContract && latestAttempt && !isTerminal(latestAttempt.lifecycle)) {
+  if (latestAttempt && !isTerminal(latestAttempt.lifecycle)) {
     evaluateLease(card);
     return;
   }
@@ -364,7 +340,7 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
     const supStore = new WorkerSupervisionStore();
     const latestAttempt = supStore.getLatestAttempt(card.id);
     if (!latestAttempt) {
-      fallbackRetry(card);
+      logWarn(TAG, `handleSupervisedRetry: no attempt for ${card.id} — leaving card failed for Orc review`);
       return;
     }
 
@@ -373,8 +349,7 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
 
     const result = retryService.handleTerminalAttempt(latestAttempt.id, card.id);
     if ("error" in result) {
-      logWarn(TAG, `retry classification failed for ${card.id}: ${result.error}`);
-      fallbackRetry(card);
+      logWarn(TAG, `retry classification failed for ${card.id}: ${result.error} — leaving card failed for Orc review`);
       return;
     }
 
@@ -386,8 +361,7 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
           latestAttempt.id, card.id, classification, decision,
         );
         if ("error" in directiveResult) {
-          logWarn(TAG, `auto directive failed for ${card.id}: ${directiveResult.error}`);
-          fallbackRetry(card);
+          logWarn(TAG, `auto directive failed for ${card.id}: ${directiveResult.error} — leaving card failed for Orc review`);
           return;
         }
         logInfo(TAG, `Auto-retry card ${card.id}: attempt ${latestAttempt.ordinal} -> ${directiveResult.directive.target_ordinal} (${classification.primary})`);
@@ -411,18 +385,7 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
       }
     }
   } catch (err) {
-    logWarn(TAG, `handleSupervisedRetry error for ${card.id}: ${err}`);
-    fallbackRetry(card);
-  }
-}
-
-function fallbackRetry(card: KanbanCard): void {
-  const retries = card.delivery_attempts ?? 0;
-  if (retries < DELIVERY_RETRY_COUNT) {
-    kanbanUpdate(card.id, { status: "queued" });
-    spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
-  } else {
-    cascadeFail(card.id, kanbanGetChildren(card.parent_id ?? 0));
+    logWarn(TAG, `handleSupervisedRetry error for ${card.id}: ${err} — leaving card failed for Orc review`);
   }
 }
 
@@ -438,7 +401,6 @@ function abortProject(projectId: number, children: KanbanCard[], reason: string)
 
 function getLatestAttemptInfo(cardId: number): { lifecycle: AttemptLifecycle; id: string } | null {
   try {
-    const { WorkerSupervisionStore } = require("./worker-supervision-store.js") as typeof import("./worker-supervision-store.js");
     const store = new WorkerSupervisionStore();
     const latest = store.getLatestAttempt(cardId);
     if (!latest) return null;

@@ -148,6 +148,66 @@ describe("kanban-board", () => {
   });
 });
 
+describe("kanbanRetryOrFail (#1411)", () => {
+  it("increments retry_count and writes future next_retry_at", () => {
+    const id = mod.kanbanEnqueue("Retry me", "agent");
+    mod.kanbanRunning(id);
+    const result = mod.kanbanRetryOrFail(id, "token budget exceeded");
+    expect(result).toBe("retrying");
+    const card = mod.kanbanList("*")[0]!;
+    expect((card as any).retry_count).toBe(1);
+    expect((card as any).next_retry_at).toBeTruthy();
+    expect(new Date((card as any).next_retry_at).getTime()).toBeGreaterThan(Date.now());
+    expect(card.status).toBe("queued");
+  });
+
+  it("second retry has larger backoff than first", () => {
+    const id = mod.kanbanEnqueue("Retry me 2", "agent");
+    mod.kanbanRunning(id);
+    mod.kanbanRetryOrFail(id, "first");
+    const c1 = mod.kanbanList("*")[0]!;
+    const d1 = new Date((c1 as any).next_retry_at).getTime();
+    // Run again
+    mod.kanbanRunning(id);
+    mod.kanbanRetryOrFail(id, "second");
+    const c2 = mod.kanbanList("*")[0]!;
+    const d2 = new Date((c2 as any).next_retry_at).getTime();
+    expect((c2 as any).retry_count).toBe(2);
+    expect(d2 - d1).toBeGreaterThanOrEqual(9_000); // 10s backoff vs 20s backoff
+  });
+
+  it("permanently fails after MAX_RETRIES", () => {
+    const id = mod.kanbanEnqueue("Fatal error", "agent");
+    mod.kanbanRunning(id);
+    const results: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      mod.kanbanRunning(id);
+      results.push(mod.kanbanRetryOrFail(id, "fail"));
+    }
+    // First 3 retries succeed, 4th fails
+    expect(results).toEqual(["retrying", "retrying", "retrying", "failed"]);
+    const card = mod.kanbanList("*")[0]!;
+    expect(card.status).toBe("failed");
+    expect(card.error).toContain("after 3 retries");
+  });
+
+  it("retry_count and next_retry_at survive DB reopen", async () => {
+    // Write state
+    const id = mod.kanbanEnqueue("Survive", "agent");
+    mod.kanbanRunning(id);
+    mod.kanbanRetryOrFail(id, "oops");
+
+    // Reimport with a fresh module (same tmpdir)
+    vi.resetModules();
+    vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
+    const mod2 = await import("./kanban-board.js");
+    const card = mod2.kanbanList("*")[0]!;
+    expect((card as any).retry_count).toBe(1);
+    expect((card as any).next_retry_at).toBeTruthy();
+    expect(new Date((card as any).next_retry_at).getTime()).toBeGreaterThan(Date.now());
+  });
+});
+
 describe("kanbanSearch (#1298)", () => {
   it("matches by title", () => {
     mod.kanbanEnqueue("finance report", "cron");

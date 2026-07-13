@@ -44,7 +44,8 @@ vi.mock("./tasks/kanban-channel.js", () => ({
 // real cards into the production DB, which the running bridge reconciler then delivers to
 // Telegram as `Task "X" complete.` spam (boom×60, first×60, init×140, …).
 let _nextId = 1;
-const _cards = new Map<number, { id: number; title: string; source: string; status: string; type: string }>();
+interface MockCard { id: number; title: string; source: string; status: string; type: string; [key: string]: unknown; }
+const _cards = new Map<number, MockCard>();
 vi.mock("./tasks/kanban-board.js", () => ({
   kanbanEnqueue: (title: string, source: string) => {
     const id = _nextId++;
@@ -55,7 +56,11 @@ vi.mock("./tasks/kanban-board.js", () => ({
   kanbanComplete: (id: number) => { const c = _cards.get(id); if (c) c.status = "done"; },
   kanbanFail: (id: number) => { const c = _cards.get(id); if (c) c.status = "failed"; },
   kanbanRetryOrFail: (id: number) => { const c = _cards.get(id); if (c) c.status = "failed"; return "failed"; },
-  kanbanList: () => [],
+  kanbanList: (filter?: string) => {
+    const cards = Array.from(_cards.values());
+    if (filter === "*") return cards;
+    return cards.filter(c => c.status === (filter || "queued"));
+  },
   kanbanGetCard: (id: number) => _cards.get(id) ?? null,
   isUnblocked: () => true,
   resolveRootId: (id: number) => id,
@@ -64,6 +69,12 @@ vi.mock("./tasks/kanban-board.js", () => ({
   kanbanGetChildren: () => [],
   kanbanAddTokens: () => {},
   kanbanProgress: () => {},
+  // #1411: internal card data accessor for test assertions
+  _kanbanGetCardRaw: (id: number) => _cards.get(id) ?? null,
+  _kanbanSetCardField: (id: number, field: string, value: unknown) => {
+    const c = _cards.get(id);
+    if (c) (c as any)[field] = value;
+  },
 }));
 
 vi.mock("../utils/local-time.js", () => ({
@@ -610,6 +621,50 @@ describe("spin(spec) — unified session API (#1271)", () => {
       runningMap.set("W", new Set([99999]));
       (spin as any).markDone("W", 99999);
       expect(runningMap.get("W")?.has(99999)).toBe(false);
+    });
+  });
+
+  describe("#1411 — drainQueued legacy retry path", () => {
+    beforeEach(() => {
+      spin.setRuntime(makeRuntime() as any);
+    });
+
+    it("skips card with future next_retry_at", async () => {
+      const id = kanbanEnqueue("future", "user");
+      const future = new Date(Date.now() + 86_400_000).toISOString();
+      const mod = await import("./tasks/kanban-board.js");
+      (mod as any)._kanbanSetCardField(id, "next_retry_at", future);
+      const runningMap: Map<string, Set<number>> = (spin as any).running;
+      runningMap.set("W", new Set());
+      await (spin as any).tick();
+      expect(runningMap.get("W")?.size ?? 0).toBe(0);
+    });
+
+    it("dispatches due card with stored type B, not W", async () => {
+      const id = kanbanEnqueue("due-b", "user");
+      const mod = await import("./tasks/kanban-board.js");
+      (mod as any)._kanbanSetCardField(id, "type", "B");
+      (mod as any)._kanbanSetCardField(id, "goal", "test goal");
+      const past = new Date(Date.now() - 86_400_000).toISOString();
+      (mod as any)._kanbanSetCardField(id, "next_retry_at", past);
+      const dispatchSpy = vi.spyOn(spin, "dispatch");
+      await (spin as any).tick();
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      expect(dispatchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ cardId: id, type: "B", goal: "test goal" }),
+      );
+    });
+
+    it("skips card with no next_retry_at and dispatches via stored type", async () => {
+      const id = kanbanEnqueue("no-retry", "user");
+      const mod = await import("./tasks/kanban-board.js");
+      (mod as any)._kanbanSetCardField(id, "type", "C");
+      const dispatchSpy = vi.spyOn(spin, "dispatch");
+      await (spin as any).tick();
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      expect(dispatchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ cardId: id, type: "C" }),
+      );
     });
   });
 
