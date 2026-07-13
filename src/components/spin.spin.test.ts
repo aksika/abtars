@@ -598,18 +598,18 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(unhandled).toBe(false);
     });
 
-    it("checkStaleWorkers releases slot so next dispatch of that type proceeds", async () => {
-      // The stale-worker path requires mocking kanban-board at module level —
-      // tested in spin-stale.test.ts (separate file due to module-mock scoping).
-      // Here we just verify the slot-tracking invariant directly without a kanban stub:
-      // if a cardId is in running but its DB card is not "running", checkStaleWorkers
-      // must leave the slot alone (no crash, no spurious release).
+    it("tick calls drainQueued (no crash when running set is empty)", async () => {
+      spin.setRuntime(makeRuntime() as any);
+      // tick is the replacement for the stale scanner — must be safe to call at any time
+      await expect((spin as any).tick()).resolves.toBeUndefined();
+    });
+
+    it("markDone removes card from running set", async () => {
       spin.setRuntime(makeRuntime() as any);
       const runningMap: Map<string, Set<number>> = (spin as any).running;
-      runningMap.set("W", new Set([99999])); // fake id — kanbanGetCard returns undefined
-      expect(() => (spin as any).checkStaleWorkers()).not.toThrow();
-      // Card not found → no action; slot stays as-is (safe no-op for unknown ids)
-      expect(runningMap.get("W")?.has(99999)).toBe(true);
+      runningMap.set("W", new Set([99999]));
+      (spin as any).markDone("W", 99999);
+      expect(runningMap.get("W")?.has(99999)).toBe(false);
     });
   });
 

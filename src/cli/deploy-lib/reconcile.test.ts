@@ -35,6 +35,7 @@ describe("#1321 reconcile canonical sleep-cycle task", () => {
     const entries = readTasks();
     const ids = entries.map(e => (e as { id: string }).id);
     expect(ids).toContain("sleep-cycle");
+    expect(ids).toContain("hardware-sleep");
     // Existing entry preserved untouched.
     expect(ids).toContain("morning-greeting");
     const seeded = entries.find(e => (e as { id: string }).id === "sleep-cycle") as Record<string, unknown>;
@@ -46,13 +47,15 @@ describe("#1321 reconcile canonical sleep-cycle task", () => {
     mkdirSync(join(HOME, "tasks"), { recursive: true });
     writeFileSync(tasksPath(), JSON.stringify([
       { id: "sleep-cycle", executor: "system", action: "sleep-cycle", schedule: "0 3 * * *", paused: true, type: "task", fired: false, createdAt: 0 },
+      // hardware-sleep must also be present: both are in CANONICAL_SYSTEM_TASKS
+      { id: "hardware-sleep", executor: "system", action: "hardware-sleep", schedule: "30 3 * * *", paused: true, type: "task", fired: false, createdAt: 0 },
     ]), "utf-8");
 
     reconcile(join(HOME, "no-such-templates"), HOME);
 
     const entries = readTasks();
-    expect(entries.length).toBe(1);
-    const entry = entries[0] as Record<string, unknown>;
+    expect(entries.length).toBe(2); // sleep-cycle + hardware-sleep
+    const entry = entries.find(e => (e as { id: string }).id === "sleep-cycle") as Record<string, unknown>;
     expect(entry["schedule"]).toBe("0 3 * * *"); // user edit preserved
     expect(entry["paused"]).toBe(true);          // pause state preserved
   });
@@ -61,5 +64,6 @@ describe("#1321 reconcile canonical sleep-cycle task", () => {
     reconcile(join(HOME, "no-such-templates"), HOME);
     const ids = readTasks().map(e => (e as { id: string }).id);
     expect(ids).toContain("sleep-cycle");
+    expect(ids).toContain("hardware-sleep");
   });
 });

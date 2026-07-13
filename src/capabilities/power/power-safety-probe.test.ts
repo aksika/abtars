@@ -20,7 +20,7 @@ function makeDefaultReaders() {
 describe("PowerSafetyProbe", () => {
   it("returns safe when all conditions pass", () => {
     const probe = createPowerSafetyProbe(makeReaders());
-    const result = probe.inspect({ idleMinutes: 20, latestLocalTime: "05:30" });
+    const result = probe.inspect({ idleMinutes: 20, latestLocalTime: "23:59" });
     expect(result.safe).toBe(true);
     expect(result.reasons).toEqual([]);
   });
