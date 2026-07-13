@@ -19,6 +19,7 @@ const TAG = "system-task";
 export type SystemTaskResult =
   | { status: "accepted"; detail?: string }
   | { status: "noop"; detail?: string }
+  | { status: "deferred"; retryAt: number; detail: string }
   | { status: "failed"; error: string };
 
 /** A handler for one allowlisted action. Returns promptly. */

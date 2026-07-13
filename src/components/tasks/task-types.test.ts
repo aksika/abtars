@@ -120,8 +120,8 @@ describe("#1321 normalize + validation", () => {
       expect(r.ok).toBe(true);
     });
 
-    it("SYSTEM_ACTIONS allowlist contains exactly sleep-cycle for #1321", () => {
-      expect(SYSTEM_ACTIONS).toEqual(["sleep-cycle"]);
+    it("SYSTEM_ACTIONS allowlist contains sleep-cycle and hardware-sleep for #1321/#1322", () => {
+      expect(SYSTEM_ACTIONS).toEqual(["sleep-cycle", "hardware-sleep"]);
     });
   });
 

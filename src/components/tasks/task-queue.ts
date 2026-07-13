@@ -331,14 +331,31 @@ export class CronQueue {
     this.setCurrent(entry, 0, "system");
     try {
       const result = await getSystemTaskRegistry().dispatch(entry);
-      const ok = result.status !== "failed";
-      recordRunToFile(entry.id, ok ? 0 : 1);
-      if (ok) recordRun(entry, 0); // count toward maxRunsPerDay only on success
-      const detail = "detail" in result && result.detail ? result.detail : "error" in result ? result.error : "";
-      logInfo(TAG, `■ System ${ok ? "✓" : "❌"}: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
-      if (!ok) {
-        this.checkAutoPause(entry, 1, detail);
-        scheduleRetry(entry, !!entry._retrying);
+      if (result.status === "deferred") {
+        // #1322 — Durable deferral: schedule retry at retryAt without counting
+        // as failure, auto-pause, or maxRunsPerDay consumption.
+        recordRunToFile(entry.id, 0); // not a failure
+        logInfo(TAG, `⏸ Deferred: "${entry.action}" (${entry.id}) — retry at ${new Date(result.retryAt).toISOString()}: ${result.detail}`);
+        try {
+          const target = readEntry(entry.id);
+          if (target) {
+            target.fireAt = result.retryAt;
+            target.fired = false;
+            writeEntry(target);
+          }
+        } catch (err) {
+          logWarn(TAG, `Failed to persist deferred retry for "${entry.id}": ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else {
+        const ok = result.status !== "failed";
+        recordRunToFile(entry.id, ok ? 0 : 1);
+        if (ok) recordRun(entry, 0); // count toward maxRunsPerDay only on success
+        const detail = "detail" in result && result.detail ? result.detail : "error" in result ? result.error : "";
+        logInfo(TAG, `■ System ${ok ? "✓" : "❌"}: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
+        if (!ok) {
+          this.checkAutoPause(entry, 1, detail);
+          scheduleRetry(entry, !!entry._retrying);
+        }
       }
     } catch (err) {
       // dispatch() catches handler throws, but guard the await boundary too.

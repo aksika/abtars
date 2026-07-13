@@ -19,11 +19,11 @@ import { CronExpressionParser } from "cron-parser";
 
 export type TaskExecutor = "agent" | "script" | "orc" | "system";
 
-/** Allowlisted in-process actions. #1321 ships exactly one. */
-export type SystemTaskAction = "sleep-cycle";
+/** Allowlisted in-process actions. #1321 ships exactly one. #1322 adds hardware-sleep. */
+export type SystemTaskAction = "sleep-cycle" | "hardware-sleep";
 
 /** Compile-time allowlist of valid system actions. */
-export const SYSTEM_ACTIONS: readonly SystemTaskAction[] = ["sleep-cycle"];
+export const SYSTEM_ACTIONS: readonly SystemTaskAction[] = ["sleep-cycle", "hardware-sleep"];
 
 /**
  * Command-like fields that are forbidden on a `system` entry. A system task is
@@ -59,6 +59,11 @@ export interface CronEntry {
   executor?: TaskExecutor;
   /** Required for `executor: "system"`. Ignored otherwise. */
   action?: SystemTaskAction;
+  /** #1322 — Hardware-sleep action-specific fields. Ignored for non-system entries. */
+  idleMinutes?: number;
+  retryMinutes?: number;
+  latestLocalTime?: string;
+  expectedWakeTime?: string;
   schedule?: string;
   /** hours: max delay after fireAt before skipping to next. 0 = no catch-up. */
   catchUp?: number;
@@ -169,6 +174,24 @@ export function normalize(raw: unknown, now: number = Date.now()): NormalizeResu
       }
     }
 
+    // #1322 — Validate hardware-sleep action-specific fields.
+    if (action === "hardware-sleep") {
+      const idle = e["idleMinutes"];
+      if (idle !== undefined && (typeof idle !== "number" || !Number.isInteger(idle) || idle < 1 || idle > 240)) {
+        return { ok: false, error: `hardware-sleep idleMinutes must be an integer 1-240`, id };
+      }
+      const retry = e["retryMinutes"];
+      if (retry !== undefined && (typeof retry !== "number" || !Number.isInteger(retry) || retry < 1 || retry > 60)) {
+        return { ok: false, error: `hardware-sleep retryMinutes must be an integer 1-60`, id };
+      }
+      if (e["latestLocalTime"] !== undefined && !/^\d{2}:\d{2}$/.test(e["latestLocalTime"] as string)) {
+        return { ok: false, error: `hardware-sleep latestLocalTime must be HH:mm format`, id };
+      }
+      if (e["expectedWakeTime"] !== undefined && !/^\d{2}:\d{2}$/.test(e["expectedWakeTime"] as string)) {
+        return { ok: false, error: `hardware-sleep expectedWakeTime must be HH:mm format`, id };
+      }
+    }
+
     // Build the normalized system entry. message is display-only and optional.
     const chatId = typeof e["chatId"] === "number" ? (e["chatId"] as number) : 0;
     const message = typeof e["message"] === "string" ? (e["message"] as string) : "";
@@ -228,6 +251,7 @@ function stripBookkeeping(e: Record<string, unknown>): Partial<CronEntry> {
     "deliveryMethod", "deliveryMode", "maxToolRounds", "paused", "maxRunsPerDay",
     "consecutiveFails", "agentFollowUp", "agentMessage", "lastRanAt", "retryAfter",
     "_prevFireAt", "_retrying", "history",
+    "idleMinutes", "retryMinutes", "latestLocalTime", "expectedWakeTime",
   ];
   for (const k of carry) {
     if (e[k as string] !== undefined) {

@@ -41,6 +41,21 @@ const CANONICAL_SYSTEM_TASKS: object[] = [
     deliveryMode: "silent",
     paused: false,
   },
+  {
+    id: "hardware-sleep",
+    title: "Suspend Molty when idle",
+    type: "task",
+    executor: "system",
+    action: "hardware-sleep",
+    schedule: "30 3 * * *",
+    idleMinutes: 20,
+    retryMinutes: 10,
+    latestLocalTime: "05:30",
+    expectedWakeTime: "07:55",
+    deliveryMode: "silent",
+    maxRunsPerDay: 1,
+    paused: true,
+  },
 ];
 
 /**
