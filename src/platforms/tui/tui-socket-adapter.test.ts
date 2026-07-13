@@ -1160,4 +1160,120 @@ describe("TuiSocketAdapter — #1398 feed isolation", () => {
 
     c.conn.destroy();
   });
+
+  it("delayed old socket close does not clear current connection or its writer", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin().spin;
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+
+    // A attaches → gains a subscriber
+    const a = await attachAndCollect(sockPath, { kind: "resume" });
+    expect(feed.subscriberCount).toBe(1);
+    expect(adapter.hasClient).toBe(true);
+
+    // B connects → A is superseded, subscribers are dropped
+    const b = net.createConnection(sockPath);
+    await new Promise<void>((resolve, reject) => {
+      b.once("connect", () => resolve()); b.once("error", reject);
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(feed.subscriberCount).toBe(0);
+    expect(adapter.hasClient).toBe(true);
+
+    // A's close handler fires after destruction
+    a.conn.destroy();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // B's state must still be intact — adapter still has a client
+    expect(adapter.hasClient).toBe(true);
+    // Subscribers were not re-added by A's close handler
+    expect(feed.subscriberCount).toBe(0);
+
+    // B can still attach and receive frames
+    b.write(encodeFrame({ t: "attach", mode: { kind: "resume" }, cols: 80, rows: 24 }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(feed.subscriberCount).toBe(1);
+
+    b.destroy();
+    a.conn.destroy();
+  });
+
+  it("rejected attach leaves zero subscribers", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin().spin;
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+
+    // Connect but send an invalid sessionType that triggers _reject
+    const c = net.createConnection(sockPath);
+    await new Promise<void>((resolve, reject) => {
+      c.once("connect", () => resolve()); c.once("error", reject);
+    });
+    // No attach frame sent yet — subscriber count should be 0
+    await new Promise((r) => setTimeout(r, 30));
+    expect(feed.subscriberCount).toBe(0);
+
+    // Send attach with invalid sessionType — validation drops before dispatch,
+    // no subscriber is ever added
+    c.write(encodeFrame({ t: "attach", mode: { kind: "new", sessionType: "O" as any }, cols: 80, rows: 24 }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(feed.subscriberCount).toBe(0);
+
+    c.destroy();
+  });
+
+  it("normal close leaves zero subscribers", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin().spin;
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+
+    const a = await attachAndCollect(sockPath, { kind: "resume" });
+    expect(feed.subscriberCount).toBe(1);
+
+    // Close the connection as the client would
+    a.conn.end();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // After close cleanup, subscribers must be zero
+    expect(feed.subscriberCount).toBe(0);
+    expect(adapter.hasClient).toBe(false);
+  });
+
+  it("reattaching to same session drops callbacks from prior attachment generation", async () => {
+    const feed = new SessionOutputFeed();
+    const sessions = [
+      { id: "1749563282_A_01", userId: "aksika", platform: "telegram", chatId: 100, active: true, status: "ready", shortIndex: 1, lastActiveAt: 1000, delivery: "streaming" },
+    ] as ManagedSession[];
+    const mockSpin = makeMockSpin({ allSessions: sessions }).spin;
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+
+    const c = await attachAndCollect(sockPath, { kind: "session", index: 1 });
+    expect(feed.subscriberCount).toBe(1);
+    const firstReady = c.frames.find((f) => f.t === "ready")!;
+    expect(firstReady).toBeDefined();
+
+    // Reattach to the same session via a second attach frame on the same socket
+    c.conn.write(encodeFrame({ t: "attach", mode: { kind: "session", index: 1 }, cols: 80, rows: 24 }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Still exactly one subscriber (not two)
+    expect(feed.subscriberCount).toBe(1);
+
+    // The second ready frame proves a new attachment was created
+    const readyFrames = c.frames.filter((f) => f.t === "ready");
+    expect(readyFrames.length).toBe(2);
+
+    c.conn.destroy();
+  });
 });
