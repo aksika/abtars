@@ -64,9 +64,11 @@ import {
   encodeFrame,
   createFrameDecoder,
   isClientFrame,
+  validateClientFrame,
   type TuiClientFrame,
   type TuiServerFrame,
   type TuiAttachMode,
+  MAX_TUI_FRAME_BYTES,
 } from "./tui-protocol.js";
 import { TuiFrameWriter, type TuiFrameWriterResult } from "./tui-frame-writer.js";
 
@@ -451,9 +453,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
   // ── Connection handling ──────────────────────────────────────────────
 
   private _onConnection(conn: net.Socket): void {
-    // #1334: one decoder per connection.
-    const decode = createFrameDecoder<TuiClientFrame>();
-
+    // #1334/#1400: one bounded byte-oriented decoder per connection.
     // #1398: atomic handoff — capture old, detach BEFORE installing new.
     const oldConn = this.conn;
     this.detachConnection();
@@ -474,6 +474,17 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
     const connGen = this._connGen;
 
+    const decode = createFrameDecoder<TuiClientFrame>({
+      maxFrameBytes: MAX_TUI_FRAME_BYTES,
+      onFatal: (error) => {
+        // Only act if this exact connection and generation is still current.
+        if (this.conn !== conn || this._connGen !== connGen) return;
+        logDebug(TAG, `Fatal decode error: ${error.message}`);
+        try { conn.write(encodeFrame({ t: "error", message: `protocol error: ${error.message}` })); } catch { /* best effort */ }
+        conn.destroy();
+      },
+    });
+
     // #1339: bounded writer bound to this exact connection generation.
     const writer = new TuiFrameWriter(conn, {
       isCurrent: () => this._connGen === connGen && !conn.destroyed,
@@ -486,14 +497,20 @@ export class TuiSocketAdapter implements PlatformAdapter {
     });
     this._writer = writer;
 
-    // Data handler with identity guard.
+    // Data handler with identity guard — passes raw bytes to bounded decoder.
     conn.on("data", (buf: Buffer) => {
       if (this.conn !== conn) return;
-      const frames = decode(buf.toString());
+      if (decode.failed) return;
+      const frames = decode.push(buf);
       for (const f of frames) {
-        if (isClientFrame(f)) {
-          void this._handleFrame(f);
+        // #1400: validate client frame fields before dispatch
+        if (!isClientFrame(f)) continue;
+        const validation = validateClientFrame(f);
+        if (!validation.ok) {
+          logDebug(TAG, `Invalid client frame: ${validation.error}`);
+          continue;
         }
+        void this._handleFrame(f);
       }
     });
     conn.on("error", (err) => logAndSwallow(TAG, "conn error", err));

@@ -95,7 +95,7 @@ async function attachAndCollect(
   mode: TuiAttachMode,
   cols = 80,
   rows = 24,
-): Promise<{ conn: net.Socket; frames: TuiServerFrame[]; decoder: (chunk: string) => TuiServerFrame[] }> {
+): Promise<{ conn: net.Socket; frames: TuiServerFrame[] }> {
   const frames: TuiServerFrame[] = [];
   const decoder = createFrameDecoder<TuiServerFrame>();
   const conn = net.createConnection(socketPath);
@@ -104,13 +104,13 @@ async function attachAndCollect(
     conn.once("error", reject);
   });
   conn.on("data", (buf: Buffer) => {
-    for (const f of decoder(buf.toString())) frames.push(f);
+    for (const f of decoder.push(buf)) frames.push(f);
   });
   const attach: TuiClientFrame = { t: "attach", mode, cols, rows };
   conn.write(encodeFrame(attach));
   // Wait briefly for the round-trip — attach→ready is sync after start.
   await new Promise((r) => setTimeout(r, 50));
-  return { conn, frames, decoder };
+  return { conn, frames };
 }
 
 function makeRecoveryHandler() {
@@ -267,7 +267,7 @@ describe("TuiSocketAdapter — new-attach-wins", () => {
       });
       c.once("error", reject);
       c.on("data", (buf: Buffer) => {
-        for (const f of dec(buf.toString())) frames.push(f);
+        for (const f of dec.push(buf)) frames.push(f);
       });
     });
 
@@ -508,24 +508,26 @@ describe("TuiSocketAdapter — attach selector resolution", () => {
     conn.destroy(); adapter.stop();
   });
 
-  it("bridge-side rejects --new O with an `error` frame and does NOT call createSession", async () => {
+  it("bridge-side rejects --new O — validation drops frame before dispatch", async () => {
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
     await adapter.start();
     // Cast: the wire spec only allows A/B/C, but a hostile/buggy client can send O.
+    // #1400: frame validation drops this before _handleFrame — createSession is
+    // never called, and no error frame is sent (the line is simply ignored).
     const { conn, frames } = await attachAndCollect(sockPath, { kind: "new", sessionType: "O" as unknown as "A" });
     expect(mock.calls.createSession).toEqual([]);
-    const err = frames.find((f) => f.t === "error")!;
-    expect(err.t).toBe("error");
-    if (err.t === "error") expect(err.message).toMatch(/not selectable/i);
+    // No error frame is sent for validation-level rejection
+    expect(frames.filter((f) => f.t === "error").length).toBe(0);
     conn.destroy(); adapter.stop();
   });
 
-  it("bridge-side rejects --new T (internal) with an `error` frame", async () => {
+  it("bridge-side rejects --new T — validation drops frame before dispatch", async () => {
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
     await adapter.start();
     const { conn, frames } = await attachAndCollect(sockPath, { kind: "new", sessionType: "T" as unknown as "A" });
     expect(mock.calls.createSession).toEqual([]);
-    expect(frames.find((f) => f.t === "error")).toBeDefined();
+    // No error frame — validation drops the line silently
+    expect(frames.filter((f) => f.t === "error").length).toBe(0);
     conn.destroy(); adapter.stop();
   });
 
