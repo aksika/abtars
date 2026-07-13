@@ -33,12 +33,12 @@ export function subscribeSteerEvents(
   return () => { steerSubs = steerSubs.filter(s => s !== sub); };
 }
 
-function publish(type: SteerEventType, instructionIds: string[], session: ManagedSession, description: string): void {
+function publish(type: SteerEventType, instructionIds: string[], sessionId: string, executionId: string, description: string): void {
   const event: SteerEvent = {
     type,
     instructionIds,
-    sessionId: session.id,
-    executionId: session.activeExecutionId ?? "",
+    sessionId,
+    executionId,
     timestamp: Date.now(),
     description: description.slice(0, 200),
   };
@@ -46,6 +46,17 @@ function publish(type: SteerEventType, instructionIds: string[], session: Manage
     if (sub.filter.sessionId && sub.filter.sessionId !== event.sessionId) continue;
     if (sub.filter.executionId && sub.filter.executionId !== event.executionId) continue;
     try { sub.listener(event); } catch { /* swallow */ }
+  }
+}
+
+function publishMultiGroup(records: QueuedSessionInstruction[], type: SteerEventType, sessionId: string, reason: string): void {
+  const byGroup = new Map<string, QueuedSessionInstruction[]>();
+  for (const rec of records) {
+    const g = byGroup.get(rec.executionId);
+    if (g) g.push(rec); else byGroup.set(rec.executionId, [rec]);
+  }
+  for (const [, group] of byGroup) {
+    publish(type, group.map(i => i.id), sessionId, group[0]!.executionId, reason);
   }
 }
 
@@ -100,7 +111,7 @@ export function queueInstruction(
   };
 
   session.instructionQueue.push(instruction);
-  publish("steer.queued", [id], session, input.text);
+  publish("steer.queued", [id], session.id, instruction.executionId, input.text);
   logDebug(TAG, `queued ${id} for ${session.id}`);
   return { ok: true, instruction };
 }
@@ -127,21 +138,27 @@ export function drainInstructionBatch(session: ManagedSession): QueuedSessionIns
   if (fresh.length === 0) return [];
 
   session.instructionQueue = session.instructionQueue.filter(i => !fresh.includes(i));
-  publish("steer.consumed", fresh.map(i => i.id), session, `batch of ${fresh.length}`);
+  publish("steer.consumed", fresh.map(i => i.id), session.id, session.activeExecutionId ?? "", `batch of ${fresh.length}`);
   logDebug(TAG, `drained ${fresh.length} instructions from ${session.id}`);
   return fresh;
 }
 
 export function expireInstructions(session: ManagedSession, reason: string): void {
   if (session.instructionQueue.length === 0) return;
-  const ids = session.instructionQueue.map(i => i.id);
+  const records = [...session.instructionQueue];
   session.instructionQueue = [];
-  publish("steer.expired", ids, session, reason);
-  logDebug(TAG, `expired ${ids.length} instructions from ${session.id}: ${reason}`);
+  publishMultiGroup(records, "steer.expired", session.id, reason);
+  logDebug(TAG, `expired ${records.length} instructions from ${session.id}: ${reason}`);
 }
 
 export function failInstructions(session: ManagedSession, ids: string[], reason: string): void {
   if (ids.length === 0) return;
-  publish("steer.failed", ids, session, reason);
+  // Derive execution identity from queued records (still in queue at call time)
+  const records: QueuedSessionInstruction[] = [];
+  for (const id of ids) {
+    const rec = session.instructionQueue.find(i => i.id === id);
+    if (rec) records.push(rec);
+  }
+  publishMultiGroup(records, "steer.failed", session.id, reason);
   logDebug(TAG, `failed ${ids.length} instructions from ${session.id}: ${reason}`);
 }

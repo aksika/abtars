@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import type { ManagedSession, QueuedSessionInstruction } from "./spin-types.js";
-import { queueInstruction, drainInstructionBatch, expireInstructions, onSteerEvent } from "./session-instruction-queue.js";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import type { ManagedSession, QueuedSessionInstruction, SteerEvent, SteerEventType } from "./spin-types.js";
+import { queueInstruction, drainInstructionBatch, expireInstructions, onSteerEvent, subscribeSteerEvents } from "./session-instruction-queue.js";
 
 function makeOrcSession(overrides?: Partial<ManagedSession>): ManagedSession {
   return {
@@ -182,6 +182,101 @@ describe("session-instruction-queue", () => {
     it("does nothing when queue is empty", () => {
       const session = makeOrcSession();
       expect(() => expireInstructions(session, "test")).not.toThrow();
+    });
+  });
+
+  // ── #1362: Event identity tests ──────────────────────────────────────
+
+  describe("subscribeSteerEvents — session/execution filters", () => {
+    let unsubs: (() => void)[];
+
+    beforeEach(() => { unsubs = []; });
+    afterEach(() => { unsubs.forEach(u => u()); });
+
+    it("delivers events only to the matching session subscriber", () => {
+      const sessionA = makeOrcSession({ id: "sess_A", activeExecutionId: "exec_1" });
+      const sessionB = makeOrcSession({ id: "sess_B", activeExecutionId: "exec_1" });
+      const eventsA: SteerEvent[] = [];
+      const eventsB: SteerEvent[] = [];
+      unsubs.push(subscribeSteerEvents({ sessionId: "sess_A" }, e => eventsA.push(e)));
+      unsubs.push(subscribeSteerEvents({ sessionId: "sess_B" }, e => eventsB.push(e)));
+
+      queueInstruction(sessionA, { text: "for A", source: "tui" });
+      expect(eventsA.length).toBe(1);
+      expect(eventsB.length).toBe(0);
+      expect(eventsA[0]!.sessionId).toBe("sess_A");
+    });
+
+    it("delivers events only to the matching execution subscriber", () => {
+      const session = makeOrcSession({ id: "sess_X", activeExecutionId: "exec_1" });
+      const eventsExec1: SteerEvent[] = [];
+      const eventsExec2: SteerEvent[] = [];
+      unsubs.push(subscribeSteerEvents({ sessionId: "sess_X", executionId: "exec_1" }, e => eventsExec1.push(e)));
+      unsubs.push(subscribeSteerEvents({ sessionId: "sess_X", executionId: "exec_2" }, e => eventsExec2.push(e)));
+
+      queueInstruction(session, { text: "gen1", source: "tui" });
+      expect(eventsExec1.length).toBe(1);
+      expect(eventsExec2.length).toBe(0);
+    });
+
+    it("unsubscribe isolation — stopped subscriber does not receive events", () => {
+      const session = makeOrcSession({ id: "sess_U", activeExecutionId: "exec_1" });
+      const events: SteerEvent[] = [];
+      const unsub = subscribeSteerEvents({ sessionId: "sess_U" }, e => events.push(e));
+      queueInstruction(session, { text: "first", source: "tui" });
+      expect(events.length).toBe(1);
+      unsub();
+      queueInstruction(session, { text: "second", source: "tui" });
+      // events still has the first event only
+      expect(events.length).toBe(1);
+    });
+
+    it("activeExecutionId change preserves original generation in terminal events", () => {
+      const events: SteerEvent[] = [];
+      unsubs.push(onSteerEvent(e => events.push(e)));
+      const session = makeOrcSession({ id: "sess_G", activeExecutionId: "exec_old" });
+
+      // Queue instructions while on old generation
+      queueInstruction(session, { text: "old gen", source: "tui" });
+      expect(events.length).toBe(1);
+      expect(events[0]!.executionId).toBe("exec_old");
+
+      // Advance generation
+      session.activeExecutionId = "exec_new";
+
+      // Drain — old-gen instructions become stale and get failed with their original generation
+      events.length = 0;
+      const batch = drainInstructionBatch(session);
+      expect(batch.length).toBe(0);
+
+      const failed = events.filter(e => e.type === "steer.failed");
+      expect(failed.length).toBeGreaterThan(0);
+      for (const e of failed) {
+        expect(e.executionId).toBe("exec_old");
+        expect(e.sessionId).toBe("sess_G");
+      }
+    });
+
+    it("expireInstructions preserves original execution generation after generation advance", () => {
+      const events: SteerEvent[] = [];
+      unsubs.push(onSteerEvent(e => events.push(e)));
+      const session = makeOrcSession({ id: "sess_E", activeExecutionId: "exec_old" });
+
+      queueInstruction(session, { text: "gen1", source: "tui" });
+      queueInstruction(session, { text: "gen2", source: "tui" });
+
+      // Advance generation
+      session.activeExecutionId = "exec_new";
+
+      events.length = 0;
+      expireInstructions(session, "round_limit");
+
+      const expired = events.filter(e => e.type === "steer.expired");
+      expect(expired.length).toBe(1);
+      for (const e of expired) {
+        expect(e.executionId).toBe("exec_old");
+        expect(e.instructionIds.length).toBe(2);
+      }
     });
   });
 });

@@ -171,6 +171,9 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private _connGen = 1;
   private _attGen = 1;
 
+  /** #1362: Attachment-scoped steering instruction ownership. Keyed by canonical server instruction ID. */
+  private ownedSteer = new Map<string, { sessionId: string; executionId: string; connGen: number; attGen: number }>();
+
   constructor(deps: TuiAdapterDeps) {
     this.deps = deps;
     this.socketPath = deps.socketPath ?? join(abtarsHome(), "tui.sock");
@@ -428,6 +431,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     try { uo?.(); } catch { /* best effort */ }
     try { us?.(); } catch { /* best effort */ }
     this._writer?.clearAttachment();
+    this.ownedSteer.clear();
     this.attachedSessionId = null;
     this.mode = "pipeline";
     this._streamLedger.clear();
@@ -771,20 +775,31 @@ export class TuiSocketAdapter implements PlatformAdapter {
     });
   }
 
-  /** #1362: Subscribe to steer lifecycle events scoped to the attached session. */
+  /** #1362: Subscribe to steer lifecycle events scoped to the attached session.
+   *  Terminal acknowledgements are emitted only for instruction IDs owned by the
+   *  current attachment, with exact session/execution identity match. Ownership
+   *  is deleted after terminal delivery so duplicate events are idempotent. */
   private _subscribeSteer(sessionId: string, capturedConnGen: number, capturedAttGen: number): void {
     if (this._unsubSteer) { this._unsubSteer(); this._unsubSteer = null; }
     this._unsubSteer = subscribeSteerEvents({ sessionId }, (event) => {
       if (!this._isAttCurrent(capturedConnGen, capturedAttGen)) return;
-      const status = event.type === "steer.queued" ? "queued" as const
-        : event.type === "steer.consumed" ? "consumed" as const
-        : event.type === "steer.rejected" ? "rejected" as const
-        : event.type === "steer.expired" ? "expired" as const
-        : event.type === "steer.failed" ? "failed" as const
+      if (event.type === "steer.queued") return;
+
+      const status: "consumed" | "rejected" | "expired" | "failed" | null =
+        event.type === "steer.consumed" ? "consumed"
+        : event.type === "steer.rejected" ? "rejected"
+        : event.type === "steer.expired" ? "expired"
+        : event.type === "steer.failed" ? "failed"
         : null;
-      if (!status || status === "queued") return;
-      const id = event.instructionIds[0] ?? "";
-      this._push({ t: "steer-ack", status, instructionId: id, message: event.description });
+      if (!status) return;
+
+      for (const id of event.instructionIds) {
+        const owner = this.ownedSteer.get(id);
+        if (!owner) continue;
+        if (owner.sessionId !== event.sessionId || owner.executionId !== event.executionId) continue;
+        this._push({ t: "steer-ack", status, instructionId: id, message: event.description });
+        this.ownedSteer.delete(id);
+      }
     });
   }
 
@@ -939,6 +954,12 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
     const result = queueInstruction(session, { text, source: "tui" });
     if (result.ok) {
+      this.ownedSteer.set(result.instruction.id, {
+        sessionId: capturedSessionId,
+        executionId: result.instruction.executionId,
+        connGen: capturedConnGen,
+        attGen: capturedAttGen,
+      });
       this._push({ t: "steer-ack", status: "queued", instructionId: result.instruction.id, message: "Steering queued." });
     } else {
       const reasonMap: Record<string, string> = {
