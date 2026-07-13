@@ -51,18 +51,22 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const { setPiService: setCmdService } = await import("../components/commands/handlers-pi.js");
   setCmdService(service);
 
-  const { setPiService: setReconcilerService } = await import("../components/reconciler.js");
+  const { setPiService: setReconcilerService, requestReconcile } = await import("../components/reconciler.js");
   setReconcilerService(service);
 
-  const activeRuns = store.findNonTerminal();
-  for (const run of activeRuns) {
-    store.casTransition(run.id, run.status as any, "interrupted", {
-      resumeCapability: run.piSessionId ? "available" : "never_started",
-    });
-    logInfo(TAG, `Interrupted Pi run ${run.id} (was ${run.status})`);
+  // #1405: Boot recovery — preserve queued, interrupt active, collect queued card IDs
+  const recovery = store.recoverNonterminal();
+  if (recovery.interrupted > 0) {
+    logInfo(TAG, `Recovered ${recovery.interrupted} active Pi run(s) — interrupted`);
   }
 
   ctx.piExecutorService = service;
+
+  // #1405: Wake preserved queued Pi cards after service registration
+  for (const cardId of recovery.queuedCardIds) {
+    logInfo(TAG, `Waking preserved queued Pi card ${cardId}`);
+    requestReconcile(cardId);
+  }
 
   // #1360: Register Pi executor capabilities in the peer-health store
   try {

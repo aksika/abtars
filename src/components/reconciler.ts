@@ -30,8 +30,10 @@ const DELIVERY_RETRY_COUNT = 3; // legacy retries for unsupervised cards
 
 let _shutdownRequested = false;
 
-export function setPiService(_service: PiRunService | null): void {
-  // Pi service reference retained for future executor adapter use (#1364 Task 3)
+let _piService: PiRunService | null = null;
+
+export function setPiService(service: PiRunService | null): void {
+  _piService = service;
 }
 
 export function requestShutdown(): void {
@@ -213,7 +215,55 @@ function reconcileProject(projectId: number): void {
   // TODO(Task 6): Create Orc review request / wake Orc session
 }
 
+// ── #1405: Pi executor lane ──────────────────────────────────────────────────
+
+function reconcilePiCard(card: KanbanCard): void {
+  const svc = _piService;
+  if (!svc) {
+    logWarn(TAG, `Pi card ${card.id} queued but Pi service not available`);
+    return;
+  }
+  if (card.status !== "queued") return;
+  if (!isUnblocked(card)) return;
+
+  // Check capacity
+  if (svc.executor.activeCount >= svc.executor.maxConcurrent) {
+    logInfo(TAG, `Pi card ${card.id} queued but Pi capacity full (${svc.executor.activeCount}/${svc.executor.maxConcurrent})`);
+    return;
+  }
+
+  // Look up the Pi run by card ID
+  const run = svc.store.getByCardId(card.id);
+  if (!run) {
+    logWarn(TAG, `Pi card ${card.id} has no associated Pi run`);
+    return;
+  }
+  if (run.status !== "queued") {
+    logWarn(TAG, `Pi card ${card.id} run ${run.id} status is ${run.status} not queued`);
+    return;
+  }
+
+  // Atomic claim: run queued→starting + card queued→running
+  const claim = svc.store.claimQueuedGeneration(card.id);
+  if (!claim.claimed) {
+    logWarn(TAG, `Failed to claim Pi card ${card.id}: ${claim.reason}`);
+    return;
+  }
+
+  // Start the Pi process with the claimed generation
+  logInfo(TAG, `Starting Pi run ${claim.runId} (card ${card.id}, gen ${claim.generation})`);
+  svc.executor.startWithClaim(claim.runId, claim.generation, run.currentSessionId ?? `${Date.now()}_C_pi_${claim.runId}`).catch((err) => {
+    logWarn(TAG, `Pi start failed for ${claim.runId}: ${err instanceof Error ? err.message : String(err)}`);
+  });
+}
+
 function reconcileChildCard(card: KanbanCard): void {
+  // #1405: Pi lane — route type='pi' cards through Pi executor, not Worker dispatch
+  if (card.type === "pi") {
+    reconcilePiCard(card);
+    return;
+  }
+
   // #1364: Use supervision service for lifecycle-aware management
   const svc = new WorkerSupervisionService();
   const hasContract = svc.cardHasContract(card.id);

@@ -42,6 +42,14 @@ export type PiTerminalSettlement =
   | { committed: true; outcome: PiTerminalOutcome; cardId: number }
   | { committed: false; reason: "stale_generation" | "wrong_status" | "missing" };
 
+export type PiStartClaim =
+  | { claimed: true; runId: string; generation: number }
+  | { claimed: false; reason: "missing" | "not_queued" | "card_mismatch" };
+
+export type PiResumeCommit =
+  | { committed: true; runId: string; newGeneration: number; cardId: number }
+  | { committed: false; reason: "stale" | "not_resumable" | "card_mismatch" };
+
 export class PiRunStore {
   private readonly db: TaskDatabase;
 
@@ -381,6 +389,156 @@ export class PiRunStore {
     if (count && count.cnt > MAX_PROGRESS_ENTRIES) {
       this.db.prepare(`DELETE FROM pi_run_progress WHERE id IN (SELECT id FROM pi_run_progress WHERE run_id = ? ORDER BY id ASC LIMIT ?)`).run(runId, count.cnt - MAX_PROGRESS_ENTRIES);
     }
+  }
+
+  // ── #1405: atomic lifecycle operations ──────────────────────────────────────
+
+  /**
+   * #1405 — Atomically claim a queued Pi run and its linked card.
+   * Transitions run queued→starting, card queued→running in one transaction.
+   * Returns the claim or a typed conflict.
+   */
+  claimQueuedGeneration(cardId: number): PiStartClaim {
+    return this.db.transaction<PiStartClaim>(() => {
+      const runRow = this.db.prepare(
+        `SELECT id, execution_generation, status FROM pi_runs WHERE card_id = ? AND status = 'queued'`
+      ).get(cardId) as Record<string, unknown> | undefined;
+      if (!runRow) return { claimed: false, reason: "missing" };
+
+      const runId = runRow.id as string;
+      const gen = runRow.execution_generation as number;
+
+      // Run queued → starting
+      const runChanged = this.db.prepare(
+        `UPDATE pi_runs SET status = 'starting', updated_at = datetime('now') WHERE id = ? AND status = 'queued'`
+      ).run(runId);
+      if (runChanged.changes === 0) return { claimed: false, reason: "not_queued" };
+
+      // Card queued → running
+      const cardChanged = this.db.prepare(
+        `UPDATE kanban_board SET status = 'running', updated_at = datetime('now') WHERE id = ? AND status = 'queued'`
+      ).run(cardId);
+      if (cardChanged.changes === 0) {
+        // Compensate — roll back the run transition
+        this.db.prepare(`UPDATE pi_runs SET status = 'queued', updated_at = datetime('now') WHERE id = ?`).run(runId);
+        return { claimed: false, reason: "card_mismatch" };
+      }
+
+      return { claimed: true, runId, generation: gen };
+    });
+  }
+
+  /**
+   * #1405 — Atomically create a new resume generation: increment generation,
+   * set run and card to queued, clear terminal fields. Returns the commit or
+   * a typed conflict.
+   */
+  queueResumeGeneration(input: {
+    runId: string;
+    expectedGeneration: number;
+    newSessionId: string;
+    sessionFile: string;
+  }): PiResumeCommit {
+    return this.db.transaction<PiResumeCommit>(() => {
+      const row = this.db.prepare(
+        `SELECT id, execution_generation, status, card_id, resume_capability FROM pi_runs WHERE id = ?`
+      ).get(input.runId) as Record<string, unknown> | undefined;
+      if (!row) return { committed: false, reason: "stale" };
+      if ((row.execution_generation as number) !== input.expectedGeneration) return { committed: false, reason: "stale" };
+      if ((row.status as string) !== "interrupted" && (row.status as string) !== "failed") return { committed: false, reason: "not_resumable" };
+      if ((row.resume_capability as string) !== "available") return { committed: false, reason: "not_resumable" };
+
+      const cardId = row.card_id as number;
+      const newGen = input.expectedGeneration + 1;
+
+      // Update run
+      this.db.prepare(`
+        UPDATE pi_runs
+        SET status = 'queued',
+            execution_generation = ?,
+            current_session_id = ?,
+            pi_session_file = ?,
+            observed_pid = NULL,
+            pending_request_id = NULL,
+            pending_request_type = NULL,
+            result_summary = NULL,
+            changed_files_summary = NULL,
+            usage_json = NULL,
+            error = NULL,
+            resume_capability = 'available',
+            updated_at = datetime('now')
+        WHERE id = ? AND execution_generation = ? AND status IN ('interrupted', 'failed')
+      `).run(newGen, input.newSessionId, input.sessionFile, input.runId, input.expectedGeneration);
+
+      // Update card
+      this.db.prepare(`
+        UPDATE kanban_board
+        SET status = 'queued',
+            completed_at = NULL,
+            error = NULL,
+            result_summary = NULL,
+            updated_at = datetime('now')
+        WHERE id = ? AND status IN ('failed', 'done')
+      `).run(cardId);
+
+      return { committed: true, runId: input.runId, newGeneration: newGen, cardId };
+    });
+  }
+
+  /**
+   * #1405 — Recover all non-terminal Pi runs at boot.
+   * - queued runs: preserved as-is, return their card IDs for post-registration wakeup
+   * - active runs (starting/running/awaiting_input/cancelling): interrupted
+   * - terminal runs: unchanged
+   * Returns queued card IDs that should be woken after Pi service registration.
+   */
+  recoverNonterminal(): { interrupted: number; queuedCardIds: number[] } {
+    return this.db.transaction<{ interrupted: number; queuedCardIds: number[] }>(() => {
+      const runs = this.db.prepare(
+        `SELECT id, status, card_id FROM pi_runs WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')`
+      ).all() as Record<string, unknown>[];
+
+      const activeStatuses = ["starting", "running", "awaiting_input", "cancelling"];
+      const queuedCardIds: number[] = [];
+      let interrupted = 0;
+
+      for (const run of runs) {
+        const runId = run.id as string;
+        const cardId = run.card_id as number;
+        const status = run.status as string;
+
+        if (status === "queued") {
+          queuedCardIds.push(cardId);
+          // Clear stale observed PID
+          this.db.prepare(`UPDATE pi_runs SET observed_pid = NULL, updated_at = datetime('now') WHERE id = ?`).run(runId);
+        } else if (activeStatuses.includes(status)) {
+          this.db.prepare(`
+            UPDATE pi_runs
+            SET status = 'interrupted',
+                observed_pid = NULL,
+                pending_request_id = NULL,
+                pending_request_type = NULL,
+                resume_capability = CASE WHEN pi_session_id IS NOT NULL THEN 'available' ELSE 'never_started' END,
+                updated_at = datetime('now')
+            WHERE id = ? AND status = ?
+          `).run(runId, status);
+          // Update card to failed/interrupted
+          this.db.prepare(`
+            UPDATE kanban_board SET status = 'failed', error = 'interrupted by bridge restart', updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'running')
+          `).run(cardId);
+          interrupted++;
+        }
+      }
+
+      return { interrupted, queuedCardIds };
+    });
+  }
+
+  /** Query all queued Pi card IDs (for Reconciler lookup). */
+  findQueuedPiCardIds(): number[] {
+    return (this.db.prepare(
+      `SELECT card_id FROM pi_runs WHERE status = 'queued' ORDER BY created_at ASC`
+    ).all() as { card_id: number }[]).map(r => r.card_id);
   }
 
   findNonTerminal(): PiRunRecord[] {

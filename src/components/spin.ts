@@ -116,6 +116,43 @@ export class Spin {
     return r.session;
   }
 
+  /**
+   * #1405 — Allocate a non-active, transportless C session for an external Pi
+   * execution generation. Visible in global session listing and TUI attachment
+   * but has no transport, no idle timeout, and no memory recording.
+   */
+  allocateExternalSession(spec: {
+    type: "C";
+    userId: string;
+    platform: string;
+    name: string;
+    workingDir: string;
+    metadata: { runId: string; generation: number; executor: string };
+  }): ManagedSession {
+    const r = Sessions.allocateSession(this.sessions, this.nextIndex, spec.type, spec.userId, spec.platform, 0, { active: false });
+    this.nextIndex = r.nextIndex;
+    r.session.name = spec.name;
+    r.session.workingDir = spec.workingDir;
+    (r.session as unknown as Record<string, unknown>).externalMetadata = spec.metadata;
+    return r.session;
+  }
+
+  /**
+   * #1405 — End an external Pi generation session. Validates the immutable
+   * metadata to ensure the caller owns this exact generation.
+   */
+  endExternalSession(sessionId: string, expected: { runId: string; generation: number }): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    const meta = (session as unknown as Record<string, unknown>).externalMetadata as { runId?: string; generation?: number } | undefined;
+    if (!meta || meta.runId !== expected.runId || meta.generation !== expected.generation) return false;
+    const r = Sessions.endSession(this.sessions, this.nextIndex, session.userId, session.platform, session.shortIndex);
+    if (typeof r === "string") return false;
+    this.nextIndex = r.nextIndex;
+    this.releaseSessionTransport(r.ended);
+    return true;
+  }
+
   switchSession(userId: string, platform: string, index: number): ManagedSession | string {
     return Sessions.switchSession(this.sessions, userId, platform, index);
   }

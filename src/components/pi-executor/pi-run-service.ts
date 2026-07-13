@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { PiRunStore } from "./pi-run-store.js";
 import { PiExecutor } from "./pi-executor.js";
-import { resolveAndValidateWorkspace, type PiExecutorConfig } from "./config.js";
+import { resolveAndValidateWorkspace, validateSessionFile, type PiExecutorConfig } from "./config.js";
 import type { PiRunRecord, PiRunView, PiRunRef, PiRunRequest, PiRunStatus, PiUiReply } from "./types.js";
 import { MAX_GOAL_CHARS } from "./types.js";
 import type { Spin } from "../spin.js";
@@ -46,29 +46,51 @@ export class PiRunService {
     const ws = resolveAndValidateWorkspace(input.workspaceAlias, this.deps.config);
     if (ws.error) throw new Error(ws.error);
 
-    // #1393 — atomic card+run creation in one transaction, no Nerve event inside
     const runId = this.deps.store.generateId();
-    const sessionId = `${Date.now()}_C_pi_${runId}`;
-    const { cardId } = this.deps.store.createPiCardAndRun({
-      runId,
-      sessionId,
-      title: `Pi: ${goal.slice(0, 80)}`,
-      goal,
-      workspaceAlias: input.workspaceAlias,
-      ownerPrincipalId: input.owner.principalId,
-      origin: input.owner.origin,
-      originPlatform: input.owner.platform,
-      originChatId: input.owner.chatId,
-      originPeer: input.owner.peer,
-      modelProvider: input.model?.provider,
-      modelId: input.model?.modelId,
-      thinking: input.model?.thinking,
-    });
 
-    nerve.fire("card:queued", cardId);
-    logInfo(TAG, `Pi run ${runId} created (card ${cardId})`);
+    // #1405: Allocate a Spin external session before committing the run
+    let spinSessionId: string | undefined;
+    try {
+      const spinSession = this.deps.spin.allocateExternalSession({
+        type: "C",
+        userId: input.owner.principalId,
+        platform: "pi",
+        name: `Pi: ${goal.slice(0, 60)}`,
+        workingDir: ws.canonicalPath,
+        metadata: { runId, generation: 1, executor: "pi" },
+      });
+      spinSessionId = spinSession.id;
+    } catch (err) {
+      throw new Error(`Failed to allocate Spin session: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
-    return { runId, cardId, sessionId, generation: 1 };
+    try {
+      const { cardId } = this.deps.store.createPiCardAndRun({
+        runId,
+        sessionId: spinSessionId,
+        title: `Pi: ${goal.slice(0, 80)}`,
+        goal,
+        workspaceAlias: input.workspaceAlias,
+        ownerPrincipalId: input.owner.principalId,
+        origin: input.owner.origin,
+        originPlatform: input.owner.platform,
+        originChatId: input.owner.chatId,
+        originPeer: input.owner.peer,
+        modelProvider: input.model?.provider,
+        modelId: input.model?.modelId,
+        thinking: input.model?.thinking,
+      });
+
+      nerve.fire("card:queued", cardId);
+      logInfo(TAG, `Pi run ${runId} created (card ${cardId})`);
+      return { runId, cardId, sessionId: spinSessionId, generation: 1 };
+    } catch (err) {
+      // Compensate: end the allocated Spin session if the transaction failed
+      if (spinSessionId) {
+        try { this.deps.spin.endExternalSession(spinSessionId, { runId, generation: 1 }); } catch { /* best effort */ }
+      }
+      throw err;
+    }
   }
 
   get(runId: string, caller: Principal): PiRunView {
@@ -129,24 +151,58 @@ export class PiRunService {
     const ws = resolveAndValidateWorkspace(run.workspaceAlias, this.deps.config);
     if (ws.error) throw new Error(`Workspace policy changed: ${ws.error}`);
 
-    if (run.piSessionFile && !existsSync(run.piSessionFile)) {
+    if (!run.piSessionFile) {
+      throw new Error(`Run ${runId} has no saved session file — cannot resume`);
+    }
+
+    if (!existsSync(run.piSessionFile)) {
       this.deps.store.casTransition(runId, run.status, run.status, { resumeCapability: "session_missing" });
       throw new Error(`Pi session file not found at ${run.piSessionFile}`);
     }
 
-    const newGen = run.executionGeneration + 1;
-    const newSessionId = `${Date.now()}_C_pi_${runId}_gen${newGen}`;
+    // Validate session file
+    const validated = validateSessionFile(this.deps.config.sessionStorageRoot, run.piSessionFile);
+    if (validated.error) {
+      throw new Error(`Session file validation failed: ${validated.error}`);
+    }
 
-    this.deps.store.casTransition(runId, run.status, "queued", {
-      executionGeneration: newGen,
-      currentSessionId: newSessionId,
-      resumeCapability: "available",
-      pendingRequestId: null,
-      pendingRequestType: null,
+    const newGen = run.executionGeneration + 1;
+
+    // #1405: Allocate a new Spin external session for the resumed generation
+    let spinSessionId: string;
+    try {
+      const spinSession = this.deps.spin.allocateExternalSession({
+        type: "C",
+        userId: run.ownerPrincipalId,
+        platform: "pi",
+        name: `Pi resume: ${run.operationalGoal.slice(0, 60)}`,
+        workingDir: ws.canonicalPath,
+        metadata: { runId, generation: newGen, executor: "pi" },
+      });
+      spinSessionId = spinSession.id;
+    } catch (err) {
+      throw new Error(`Failed to allocate Spin session for resume: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Atomic resume generation commit
+    const commit = this.deps.store.queueResumeGeneration({
+      runId,
+      expectedGeneration: run.executionGeneration,
+      newSessionId: spinSessionId,
+      sessionFile: validated.canonicalPath!,
     });
 
-    const updated = this.deps.store.get(runId)!;
-    return { runId, cardId: run.cardId, sessionId: newSessionId, generation: updated.executionGeneration };
+    if (!commit.committed) {
+      // Compensate: end the pre-allocated session
+      try { this.deps.spin.endExternalSession(spinSessionId, { runId, generation: newGen }); } catch { /* best effort */ }
+      throw new Error(`Failed to queue resume generation: ${commit.reason}`);
+    }
+
+    // Fire card:queued so Reconciler picks it up
+    nerve.fire("card:queued", commit.cardId);
+    logInfo(TAG, `Pi run ${runId} resumed (generation ${run.executionGeneration} → ${newGen})`);
+
+    return { runId, cardId: run.cardId, sessionId: spinSessionId, generation: newGen };
   }
 
   private _getActive(runId: string, caller: Principal): PiRunRecord {

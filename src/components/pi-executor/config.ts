@@ -50,7 +50,7 @@ export function isPathWithinRoot(
 /** #1394: Validate all workspace aliases at boot. Returns error map keyed by alias. */
 export function validatePiWorkspaceAliases(config: PiExecutorConfig): Record<string, string> {
   const errors: Record<string, string> = {};
-  for (const [alias, mapping] of Object.entries(config.workspaceAliases)) {
+  for (const alias of Object.keys(config.workspaceAliases)) {
     const r = resolveAndValidateWorkspace(alias, config);
     if (r.error) errors[alias] = r.error;
   }
@@ -119,6 +119,65 @@ export function resolveAndValidateWorkspace(alias: string, config: PiExecutorCon
 
 export function buildTrustArgs(config: PiExecutorConfig): string[] {
   return config.projectTrust === "always" ? ["--approve"] : ["--no-approve"];
+}
+
+const FIXED_ENV_BASELINE = ["HOME", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"];
+
+const DANGEROUS_NODE_VARS = ["NODE_OPTIONS", "NODE_PATH", "NODE_DEBUG", "NODE_EXTRA_CA_CERTS"];
+
+/**
+ * #1405 — Build the child process environment from fixed baseline + explicit
+ * allowlist + ABMIND correlation variables. Deny-by-default: no process.env
+ * values cross unless explicitly allowlisted or in the fixed baseline.
+ */
+export function buildChildEnv(
+  config: PiExecutorConfig,
+  run: { id: string; ownerPrincipalId: string; executionGeneration: number },
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of FIXED_ENV_BASELINE) {
+    if (process.env[name]) env[name] = process.env[name]!;
+  }
+  for (const name of config.allowedEnv) {
+    if (DANGEROUS_NODE_VARS.includes(name)) continue;
+    if (process.env[name]) env[name] = process.env[name]!;
+  }
+  env["ABMIND_USER_ID"] = run.ownerPrincipalId;
+  env["ABMIND_PARENT_EXECUTION_ID"] = `pi-run-${run.id}-gen-${run.executionGeneration}`;
+  env["ABMIND_AUTOMATIC_WRITE_OWNER"] = "abmind-pi-plugin";
+  return env;
+}
+
+/**
+ * #1405 — Validate and canonicalize a Pi session file path.
+ * Requires a configured absolute session storage root. Returns the canonical
+ * absolute path or an error string.
+ */
+export function validateSessionFile(
+  sessionStorageRoot: string,
+  filePath: string,
+): { canonicalPath?: string; error?: string } {
+  if (!sessionStorageRoot) return { error: "sessionStorageRoot not configured" };
+  if (!isAbsolute(sessionStorageRoot)) return { error: "sessionStorageRoot must be absolute" };
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync(sessionStorageRoot);
+  } catch {
+    return { error: `sessionStorageRoot "${sessionStorageRoot}" not found` };
+  }
+  if (!isAbsolute(filePath)) return { error: "Session file path must be absolute" };
+  let canonicalFile: string;
+  try {
+    canonicalFile = realpathSync(filePath);
+  } catch {
+    return { error: `Session file "${filePath}" not found` };
+  }
+  const st = statSync(canonicalFile);
+  if (!st.isFile()) return { error: "Session path is not a regular file" };
+  if (!isPathWithinRoot(canonicalRoot, canonicalFile)) {
+    return { error: `Session file "${canonicalFile}" escapes session storage root "${canonicalRoot}"` };
+  }
+  return { canonicalPath: canonicalFile };
 }
 
 export function buildPluginArgs(config: PiExecutorConfig): string[] {

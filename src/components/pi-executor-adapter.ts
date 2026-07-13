@@ -25,17 +25,16 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
       const emitter = new ExecutorProgressEmitter();
       emitter.emitAlive(claim.attemptId, claim.generation, claim.executorId);
     } catch { /* best-effort */ }
+
     try {
-      const result = await this.executor.claimAndStart(claim.attemptId);
+      const run = this.executor.piStore.get(claim.attemptId) as { currentSessionId?: string } | undefined;
+      const sessionId = run?.currentSessionId ?? `${Date.now()}_C_pi_${claim.attemptId}`;
+      const result = await this.executor.startWithClaim(claim.attemptId, claim.generation, sessionId);
       switch (result) {
         case "started":
           return { kind: "started", attemptId: claim.attemptId, generation: claim.generation, executorId: claim.executorId };
-        case "concurrency_full":
-          return { kind: "start_failed", reason: "concurrency full", retryable: true };
-        case "not_found":
-          return { kind: "start_failed", reason: "run not found", retryable: false };
         default:
-          return { kind: "start_failed", reason: String(result), retryable: true };
+          return { kind: "start_failed", reason: String(result), retryable: false };
       }
     } catch (err) {
       logWarn(TAG, `start failed for ${claim.attemptId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -54,7 +53,7 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
   }
 
   async inspect(claim: ExecutionClaim): Promise<ExecutionObservation> {
-    const run = this.executor["store"]?.get(claim.attemptId);
+    const run = this.executor.piStore.get(claim.attemptId);
     if (!run) return { kind: "unknown", message: "run not found" };
     switch (run.status) {
       case "starting":

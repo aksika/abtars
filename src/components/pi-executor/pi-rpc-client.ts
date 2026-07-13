@@ -20,6 +20,12 @@ export class PiRpcError extends Error {
 
 type RpcListener = (event: PiRpcEvent) => void;
 
+export type PiProcessTermination =
+  | { kind: "exit"; code: number | null; signal: NodeJS.Signals | null }
+  | { kind: "error"; error: Error };
+
+type TerminationListener = (event: PiProcessTermination) => void;
+
 interface PendingCommand {
   resolve: (result: unknown) => void;
   reject: (err: Error) => void;
@@ -32,32 +38,43 @@ export class PiRpcClient {
   private stderrBuf = "";
   private readonly pending = new Map<string, PendingCommand>();
   private readonly listeners = new Set<RpcListener>();
+  private readonly _terminationListeners = new Set<TerminationListener>();
   private _closed = false;
   private _ready = false;
+  private _terminationFired = false;
 
   get closed(): boolean { return this._closed; }
   get ready(): boolean { return this._ready; }
   get pid(): number | undefined { return this.child?.pid; }
 
-  async launch(command: string, args: string[], cwd: string, env: Record<string, string | undefined>): Promise<void> {
+  /** Subscribe to exact child-process termination. Fires at most once. */
+  onTermination(listener: TerminationListener): () => void {
+    this._terminationListeners.add(listener);
+    return () => { this._terminationListeners.delete(listener); };
+  }
+
+  async launch(command: string, args: string[], cwd: string, env: Record<string, string>): Promise<void> {
     if (this.child) throw new PiRpcError("already_started", "Pi RPC client is already running");
     logDebug(TAG, `Launching: ${command} ${args.join(" ")}`);
 
+    // #1405: Deny-by-default — only the passed env object is used, not process.env
     this.child = spawn(command, args, {
       cwd,
-      env: { ...process.env as Record<string, string>, ...env },
+      env,
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
     });
 
     this.child.on("exit", (code, signal) => {
       logDebug(TAG, `Pi process exited: code=${code} signal=${signal}`);
+      this._fireTermination({ kind: "exit", code, signal });
       if (!this._closed) {
         this._rejectAll(new PiRpcError("process_exit", `Pi process exited (code=${code}, signal=${signal})`));
       }
     });
     this.child.on("error", (err) => {
       logError(TAG, `Pi process error: ${err.message}`);
+      this._fireTermination({ kind: "error", error: err });
       if (!this._closed) this._rejectAll(new PiRpcError("process_error", err.message));
     });
 
@@ -172,6 +189,7 @@ export class PiRpcClient {
   async close(): Promise<void> {
     if (this._closed) return;
     this._closed = true;
+    this._fireTermination({ kind: "exit", code: null, signal: null });
     this._rejectAll(new PiRpcError("closed", "Pi RPC client closed"));
     if (this.rl) { this.rl.close(); this.rl = null; }
     if (this.child && !this.child.killed) {
@@ -249,6 +267,14 @@ export class PiRpcClient {
     } else {
       this._ready = true;
       pending.resolve(parsed.result);
+    }
+  }
+
+  private _fireTermination(event: PiProcessTermination): void {
+    if (this._terminationFired) return;
+    this._terminationFired = true;
+    for (const listener of this._terminationListeners) {
+      try { listener(event); } catch (err) { logWarn(TAG, `Termination listener error: ${err instanceof Error ? err.message : String(err)}`); }
     }
   }
 
