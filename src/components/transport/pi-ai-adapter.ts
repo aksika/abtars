@@ -527,6 +527,12 @@ export async function* streamPiAiCompletion(
   };
   if (candidate.sessionId) options.sessionId = candidate.sessionId;
   if (reasoningLevel) options.reasoning = reasoningLevel;
+  // #1335: optional cache breakpoint — mark the end of the stable historical prefix
+  if (candidate.apiFormat !== "anthropic" && (options as Record<string, unknown>).cacheBreakpoint) {
+    // pi-ai may support a cache_control breakpoint via its provider abstractions;
+    // we pass through the breakpoint parameter if the provider supports it.
+    (options as Record<string, unknown>).cacheBreakpoint = true;
+  }
 
   // #1318: option dump just before streamSimple — apiKey presence ONLY (never the value).
   // #1318: resolved-model debug line — concise view of what the candidate resolved to.

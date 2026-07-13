@@ -71,6 +71,9 @@ export class Bridge {
     }
     const { flushUsage } = await import("./components/usage-tracker.js");
     flushUsage();
+    const { flushCacheTelemetry, pruneCacheTelemetryFile } = await import("./components/cache-telemetry.js");
+    flushCacheTelemetry();
+    pruneCacheTelemetryFile();
     clearTimeout(forceTimer);
     this._resolve?.(this._exitCode);
   }

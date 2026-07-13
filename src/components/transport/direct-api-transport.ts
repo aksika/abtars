@@ -13,7 +13,8 @@ import { getToolSchemas, executeToolCall } from "./tool-registry.js";
 import { classifyError } from "./model-health-registry.js";
 import { normalizeToolCalls, parseErrorStatus, parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
 import { recordUsage } from "../usage-tracker.js";
-import { clampMaxOutputTokens, estimateTokensFromChars } from "./token-budget.js";
+import { recordCacheTelemetry, stableHash, sessionHash, candidateKeyHash } from "../cache-telemetry.js";
+import { clampMaxOutputTokens, estimateTokensFromChars, calculateReserve } from "./token-budget.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport, PromptRequestContext, RuntimeStatusSnapshot, RuntimeUsageSnapshot } from "./kiro-transport.js";
 import type { OutputObserver } from "../session-output-feed.js";
@@ -73,6 +74,10 @@ export class DirectApiTransport implements IKiroTransport {
   private activeModel: string;
   /** #1295: maxContext of the model currently serving requests. Used for accurate contextPercent. */
   private _activeMaxContext: number;
+  /** #1335: previous turn's stable prefix digest for churn detection. */
+  private _priorStablePrefixDigest = "";
+  /** #1335: previous turn's stable prefix token count for churn detection. */
+  private _priorStablePrefixTokens = 0;
   private readonly useProviderLib: boolean;
   private _lastPromptTokens = 0;
   private _lastCompletionTokens = 0;
@@ -107,6 +112,9 @@ export class DirectApiTransport implements IKiroTransport {
 
   /** Context orchestrator — when set, messages are built from DB instead of in-memory session. */
   contextOrchestrator?: import("abmind").ContextOrchestrator;
+
+  /** #1335: Checkpoint engine for cache-stable context assembly. */
+  checkpointEngine?: import("../checkpoint-engine.js").CheckpointEngine;
 
   /** Memory backend — used for hydrating sessions after restart (#843). */
   memoryBackend?: { getRecentConversation(userId: string, since: number, limit: number): Array<{ role: string; content: string; timestamp: number }> };
@@ -183,7 +191,31 @@ export class DirectApiTransport implements IKiroTransport {
       }
     }
 
-    session.addUser(message, image);
+    // #1335: assign a logical turn ID
+    session.currentTurnId = `${Date.now()}-${sessionKey}`;
+
+    // #1335: when structured current turn is available, inject volatile blocks
+    // separately and use raw text as the single real user message.
+    if (context?.directContextTurn) {
+      const { rawUserText, volatileBlocks } = context.directContextTurn;
+      // Inject volatile context blocks immediately before the current user turn
+      for (const block of volatileBlocks) {
+        session.messages.push({ role: "system", content: block.content });
+      }
+      session.addUser(rawUserText, image);
+    } else {
+      session.addUser(message, image);
+    }
+
+    // #1335: record turn boundary (will get assistant message ID later)
+    const userMsgIndex = session.messages.length - 1;
+    if (session.currentTurnId) {
+      session.turnBoundaries.push({
+        turnId: session.currentTurnId,
+        userMessageId: context?.beforeMessageId ?? userMsgIndex,
+        disposition: "orphaned",
+      });
+    }
 
     this._lastAnswer = "";
     this._toolCallsSucceeded = 0;
@@ -453,6 +485,11 @@ export class DirectApiTransport implements IKiroTransport {
 
       const { content, toolCalls, usage } = await this.streamCompletion(session, signal);
 
+      // #1335: Record cache telemetry after each stream completion
+      if (usage) {
+        this.recordContextTelemetry(session, usage);
+      }
+
       if (usage) {
         session.updateTokens(usage.prompt_tokens);
         this._contextPercent = this._activeMaxContext > 0
@@ -584,12 +621,109 @@ export class DirectApiTransport implements IKiroTransport {
         }
       }
       session.addAssistant(answer);
+      // #1335: complete the current turn boundary
+      if (session.currentTurnId) {
+        const lastBoundary = session.turnBoundaries[session.turnBoundaries.length - 1];
+        if (lastBoundary && lastBoundary.turnId === session.currentTurnId) {
+          lastBoundary.assistantMessageId = this._lastPromptTokens;
+          lastBoundary.disposition = "complete";
+        }
+        session.currentTurnId = null;
+      }
+      // #1335: record atomic growth and trigger background compaction if needed
+      if (usage) {
+        session.recordAtomicGrowth(usage.prompt_tokens);
+        if (this.checkpointEngine && isCompactable(this._activeSessionKey)) {
+          this.maybeCompactBackground(this._activeSessionKey, session);
+        }
+      }
       return answer;
     }
 
     logWarn(TAG, `Max turns (${this.config.maxTurns}) reached`);
     const last = session.messages.at(-1)?.content;
     return (typeof last === "string" ? last : null) ?? "(max turns reached)";
+  }
+
+  /** #1335: Fire background compaction if headroom requires it. */
+  private async maybeCompactBackground(sessionKey: string, session: ConversationSession): Promise<void> {
+    if (!this.checkpointEngine) return;
+    try {
+      const reserve = calculateReserve({
+        contextWindow: this._activeMaxContext,
+        configuredMaxOutput: this.config.maxOutput,
+        clampedMaxOutput: this.config.maxOutput,
+        safetyMargin: 4096,
+        stableSystemTokens: estimateTokensFromChars(this.systemPrompt.length),
+        toolSchemaTokens: 2000,
+        volatileContextTokens: 500,
+        currentTurnTokens: 100,
+        inFlightTokens: 0,
+        recentAtomicGrowthTokens: session.recentAtomicGrowth,
+      });
+      if (!reserve.compactionDue) return;
+
+      // Build raw messages list from the session (excluding system)
+      const rawMessages = session.messages
+        .filter(m => m.role !== "system")
+        .map((m, i) => ({
+          id: i,
+          role: m.role,
+          content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+        }));
+
+      await this.checkpointEngine.maybeCompact(sessionKey, rawMessages, {
+        maxHistoryTokens: reserve.historyBudget,
+        minRecentTokens: Math.max(2000, Math.floor(reserve.historyBudget * 0.15)),
+        reason: "headroom",
+        activeModel: this.activeModel,
+      });
+      logDebug(TAG, `Background compaction completed for ${sessionKey}`);
+    } catch (err) {
+      logWarn(TAG, `Background compaction failed for ${sessionKey}: ${err}`);
+    }
+  }
+
+  /** #1335: Record context cache telemetry for the baseline and A/B gate. */
+  private recordContextTelemetry(session: ConversationSession, usage: { prompt_tokens: number; completion_tokens: number }): void {
+    // Compute stable prefix digest from system + all messages except the current turn
+    const prefixMessages = session.messages.slice(0, -1); // exclude just-appended user/assistant
+    const prefixStr = prefixMessages.map(m => `${m.role}:${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`).join("\n");
+    const stablePrefixTokens = Math.ceil(prefixStr.length / 4);
+    const digest = stableHash(prefixStr);
+    const priorDigest = this._priorStablePrefixDigest;
+    const priorTokens = this._priorStablePrefixTokens;
+    const firstChangedIndex = priorDigest && digest !== priorDigest
+      ? prefixMessages.findIndex((m, i) => {
+          const prevMsg = i < prefixMessages.length ? prefixMessages[i] : undefined;
+          if (!prevMsg) return true;
+          return stableHash(`${prevMsg.role}:${typeof prevMsg.content === "string" ? prevMsg.content : JSON.stringify(prevMsg.content)}`) !==
+                 stableHash(`${m.role}:${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`);
+        })
+      : undefined;
+
+    recordCacheTelemetry({
+      version: 1,
+      sessionHash: sessionHash(this._activeSessionKey),
+      logicalTurnId: `${Date.now()}-${this._activeSessionKey}`,
+      candidateKeyHash: candidateKeyHash(this.activeEndpoint, this.activeModel),
+      contextWindow: this._activeMaxContext,
+      reservedOutput: this.config.maxOutput,
+      safetyMargin: 4096,
+      estimatedInput: usage.prompt_tokens,
+      measuredInput: usage.prompt_tokens,
+      cacheRead: this._lastCacheRead ?? undefined,
+      cacheWrite: this._lastCacheWrite ?? undefined,
+      stablePrefixTokens,
+      stablePrefixDigest: digest,
+      priorCommonPrefixTokens: priorTokens > 0 ? priorTokens : undefined,
+      firstChangedMessageIndex: firstChangedIndex,
+      latencyMs: Date.now() - (this._promptStartedAt ?? Date.now()),
+      rendererVersion: "abm-l-v2-baseline",
+    });
+
+    this._priorStablePrefixDigest = digest;
+    this._priorStablePrefixTokens = stablePrefixTokens;
   }
 
   private parseErrorStatus(err: unknown): number { return parseErrorStatus(err); }

@@ -46,9 +46,11 @@ export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
   ctx.bridgeLockPath = join(abtarsHome(), "bridge.lock");
   ctx.sleepAuditDir = memoryDir ? join(memoryDir, "sleep") : "";
 
-  // Usage tracker
+  // Usage tracker + cache telemetry
   const { initUsageTracker } = await import("../components/usage-tracker.js");
   initUsageTracker(abtarsHome());
+  const { initCacheTelemetry } = await import("../components/cache-telemetry.js");
+  initCacheTelemetry(abtarsHome());
 
   // STT/TTS/NLM config (lightweight — just reads env vars)
   ctx.sttConfig = ctx.config.voice.sttEnabled

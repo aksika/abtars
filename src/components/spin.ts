@@ -530,7 +530,11 @@ export class Spin {
       //    beforeMessageId cursor so DirectApiTransport can bound its DB-backed
       //    context assembly to history only.
       //    #1332: wrap with steering continuation loop for persistent sessions.
-      const promptContext = { userId: spec.userId ?? userId, beforeMessageId: spec.currentMessageId };
+      const promptContext: import("./transport/kiro-transport.js").PromptRequestContext = {
+        userId: spec.userId ?? userId,
+        beforeMessageId: spec.currentMessageId,
+        directContextTurn: spec.directContextTurn,
+      };
       // #1338: wrap each model call/round in a fresh call-local observer so the
       // output feed receives a unique stream per turn. The observer publishes
       // `start` on creation and `end`+invalidate on every exit path; the

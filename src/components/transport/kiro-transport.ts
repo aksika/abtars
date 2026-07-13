@@ -21,6 +21,11 @@ export interface PromptRequestContext {
    * callbacks. Never alters execution, ownership, or results.
    */
   outputObserver?: import("../session-output-feed.js").OutputObserver;
+  /** #1335: structured current turn components for Direct API cache-stable assembly. */
+  directContextTurn?: {
+    rawUserText: string;
+    volatileBlocks: ReadonlyArray<{ kind: string; content: string }>;
+  };
 }
 
 export interface RuntimeUsageSnapshot {

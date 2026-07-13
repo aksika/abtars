@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { clampMaxOutputTokens, estimateTokensFromChars } from "./token-budget.js";
+import { clampMaxOutputTokens, estimateTokensFromChars, calculateReserve, proportionalSafetyMargin } from "./token-budget.js";
+import type { ContextReserveInput } from "./token-budget.js";
 import * as logger from "../logger.js";
 
 describe("estimateTokensFromChars", () => {
@@ -67,5 +68,90 @@ describe("clampMaxOutputTokens", () => {
   it("respects a custom safetyMargin", () => {
     // contextWindow 10000, input 0, margin 1000 → available 9000
     expect(clampMaxOutputTokens(50000, 10000, 0, 1000)).toBe(9000);
+  });
+});
+
+// ── #1335 reserve calculator ─────────────────────────────────────────────────
+
+describe("calculateReserve", () => {
+  function makeInput(overrides: Partial<ContextReserveInput> = {}): ContextReserveInput {
+    return {
+      contextWindow: 128_000,
+      configuredMaxOutput: 4096,
+      clampedMaxOutput: 4096,
+      safetyMargin: 4096,
+      stableSystemTokens: 500,
+      toolSchemaTokens: 2000,
+      volatileContextTokens: 300,
+      currentTurnTokens: 100,
+      inFlightTokens: 0,
+      recentAtomicGrowthTokens: [800, 1200, 900, 1500, 1100],
+      ...overrides,
+    };
+  }
+
+  it("computes usableInput from context window minus output and margin", () => {
+    const r = calculateReserve(makeInput());
+    expect(r.usableInput).toBe(128_000 - 4096 - 4096); // 119808
+  });
+
+  it("computes historyBudget after subtracting overhead", () => {
+    const r = calculateReserve(makeInput());
+    const overhead = 500 + 2000 + 300 + 100 + 0;
+    expect(r.historyBudget).toBe(128_000 - 4096 - 4096 - overhead);
+  });
+
+  it("returns zero historyBudget when overhead exceeds usable input", () => {
+    const r = calculateReserve(makeInput({
+      contextWindow: 10_000,
+      stableSystemTokens: 5000,
+      toolSchemaTokens: 5000,
+      volatileContextTokens: 1000,
+      currentTurnTokens: 500,
+    }));
+    expect(r.historyBudget).toBe(0);
+    expect(r.usableInput).toBe(10_000 - 4096 - 4096); // 1808
+  });
+
+  it("sets reservedOutput to clamped value", () => {
+    const r = calculateReserve(makeInput({ clampedMaxOutput: 2048 }));
+    expect(r.reservedOutput).toBe(2048);
+  });
+
+  it("growthReserve uses P90 of recent growth, bounded", () => {
+    const r = calculateReserve(makeInput({ recentAtomicGrowthTokens: [512, 512, 512, 512, 512, 512, 512, 512, 512, 10000] }));
+    // P90 of sorted [512,...,512,10000] is 10000, capped at 10% of contextWindow (12800)
+    expect(r.growthReserve).toBe(10000);
+  });
+
+  it("growthReserve has minimum floor of 512", () => {
+    const r = calculateReserve(makeInput({ recentAtomicGrowthTokens: [10, 20, 30] }));
+    expect(r.growthReserve).toBeGreaterThanOrEqual(512);
+  });
+
+  it("compactionDue is false when there's enough headroom", () => {
+    const r = calculateReserve(makeInput({
+      contextWindow: 1_000_000,
+      recentAtomicGrowthTokens: [800],
+    }));
+    // Only 1 growth sample → compactionDue requires >= 2
+    expect(r.compactionDue).toBe(false);
+  });
+
+  it("compactionDue is false with unknown context window", () => {
+    const r = calculateReserve(makeInput({ contextWindow: 0 }));
+    expect(r.compactionDue).toBe(false);
+  });
+
+  it("returns zero values for unknown context window", () => {
+    const r = calculateReserve(makeInput({ contextWindow: -1 }));
+    expect(r.usableInput).toBe(0);
+    expect(r.historyBudget).toBe(0);
+  });
+
+  it("proportionalSafetyMargin scales with context window", () => {
+    expect(proportionalSafetyMargin(128_000)).toBe(3840);
+    expect(proportionalSafetyMargin(8_000)).toBe(2048); // floor at 2048
+    expect(proportionalSafetyMargin(0)).toBe(4096); // default for unknown
   });
 });

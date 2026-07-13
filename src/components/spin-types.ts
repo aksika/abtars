@@ -193,6 +193,11 @@ export interface SpinSessionSpec {
   // `beforeMessageId` cursor so the augmented current turn is appended
   // exactly once. Undefined on no-write paths (memory disabled, etc.).
   currentMessageId?: number;
+  /** #1335: structured current turn components for Direct API cache-stable assembly. */
+  directContextTurn?: {
+    rawUserText: string;
+    volatileBlocks: ReadonlyArray<{ kind: string; content: string }>;
+  };
   // NOTE: no `stream` field. Streaming is a transport property
   // (transport.onIntermediateResponse / onToolCallStart / onSegmentBreak) that the
   // PIPELINE sets before calling spin() and resets in its finally — Spin never touches it.

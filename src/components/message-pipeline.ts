@@ -227,7 +227,7 @@ export async function handleInboundMessage(
     // undefined on a no-write path). We forward it to spin as part of
     // the spec, and the chokepoint at spin.ts#sendPrompt carries it
     // through to DirectApiTransport.sendPrompt as `beforeMessageId`.
-    const { prompt: builtPrompt, imageContent, recalledHits, currentMessageId } = await buildPrompt(msg, text, {
+    const { prompt: builtPrompt, imageContent, recalledHits, currentMessageId, currentTurn } = await buildPrompt(msg, text, {
       memory, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: !("agentLoop" in transport),
     }, registry);
@@ -292,6 +292,9 @@ export async function handleInboundMessage(
     // #1271: pipeline main turn goes through spin(spec) (model-call chokepoint).
     // Streaming/tool callbacks remain pipeline-owned (set on the transport before,
     // reset in the finally below). spin() sends via the session's own transport.
+    const directContextTurn = currentTurn
+      ? { rawUserText: currentTurn.rawText, volatileBlocks: currentTurn.volatileContext }
+      : undefined;
     const responsePromise = deps.sessionManager.spin({
       type: sessionType(effectiveSession),
       sessionId: activeSessionId,
@@ -299,6 +302,7 @@ export async function handleInboundMessage(
       imageContent,
       userId,
       currentMessageId,
+      directContextTurn,
       await: true,
     }).then(r => r.result ?? "");
     // #1292: the model call is started early to overlap with the setReaction/sendTyping
