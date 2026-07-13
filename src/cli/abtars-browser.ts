@@ -168,7 +168,7 @@ export function executeViaIpc(
   });
 }
 
-async function main() {
+export async function main() {
   const raw = parseArgs(process.argv);
   const validation = validateArgs(raw);
 

@@ -47,25 +47,45 @@ Use when:
 
 ## Level 4 — CloakBrowser (full browser, interaction)
 
-Use the **browser skill**. Two modes — pick based on the task shape:
+Escalate to a managed Browsie session. Create a B-type kanban card with a detailed goal and report the card ID. Do NOT invoke a browser CLI from Main.
 
-**Mode A — Interactive session** (`abtars-browser`): synchronous, stepwise control.
-Use when: login flows, form fills, click sequences, visual verification, screenshot needed.
+### Goal checklist
 
-```bash
-abtars-browser --action navigate --url "URL" --session-id my-session
-abtars-browser --action extract_text --session-id my-session
-abtars-browser --action close_session --session-id my-session
+Include in the goal:
+- Objective and expected outcome
+- Starting URL(s) and any prior fetch results
+- Required interactions (login, forms, clicks, navigation)
+- Expected artifacts (screenshots, extracted text, page info)
+- Success criteria and stopping condition
+
+### Direct API
+
+```
+kanban_manage action=create type=B title="<short title>" goal="<detailed goal>"
 ```
 
-**Mode B — Background research** (`abtars-browse`): fire-and-forget, report delivered to chat.
-Use when: multi-page research, data gathering, task takes >30s, no step-by-step control needed.
+### ACP
 
 ```bash
-abtars-browse --task "description + starting URL + what to extract" --chat-id <CHAT_ID>
+abtars kanban create --type B --title "short title" --goal "$(cat <<'GOAL'
+detailed goal text
+GOAL
+)"
 ```
 
-See the browser skill for full action reference, session management, and architecture.
+Or pass a goal file:
+
+```bash
+abtars kanban create --type B --title "short title" --goal-file /tmp/goal.txt
+```
+
+### Acknowledgement
+
+When the card is queued, say: `"Browsie task #<id> queued — result will appear here when complete."` Do NOT proceed with inline browser commands.
+
+### Emergency direct operation
+
+If the user explicitly requests that Main use the browser directly (and ONLY if they do), see the browser skill Emergency Direct Mode section. A slow/queued card or suspected session trouble does not authorize fallback.
 
 ## Decision summary
 
@@ -74,6 +94,5 @@ See the browser skill for full action reference, session management, and archite
 | Single URL, open site | 1 (curl) |
 | Single URL, CF-protected | 2 (Jina) |
 | Single URL, JS-rendered | 3 (lightpanda) |
-| Login / forms / interaction | 4A (abtars-browser interactive) |
-| Multi-page research / async | 4B (abtars-browse background) |
+| Full browser (login, forms, interaction) | 4 (B kanban card) |
 | Previous level failed | Try next level up |

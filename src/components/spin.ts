@@ -953,7 +953,8 @@ export class Spin {
         continue;
       }
       if (this.canDispatch(type, card.id)) {
-        this.dispatch({ type, goal: card.title, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id });
+        const goal = (card as any).goal || card.title;
+        this.dispatch({ type, goal, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id });
       }
     }
   }

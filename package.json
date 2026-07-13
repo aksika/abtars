@@ -42,6 +42,7 @@
   },
   "bin": {
     "abtars": "bundle/abtars-cli.js",
+    "cloakbrowser": "bundle/cloakbrowser.js",
     "abtars-browser": "bundle/abtars-browser.js",
     "abtars-browse": "bundle/abtars-browse.js",
     "abtars-restart": "bundle/abtars-restart.js"

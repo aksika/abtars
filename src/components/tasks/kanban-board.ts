@@ -10,6 +10,7 @@ import { mkdirSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 import { logWarn } from "../logger.js";
+import { isValidSessionType } from "../spin-profiles.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
 type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
@@ -52,6 +53,7 @@ export interface KanbanCard {
   priority: string;
   status: string;
   type: string | null;
+  goal: string | null;
   notes: string | null;
   result_summary: string | null;
   result_path: string | null;
@@ -118,6 +120,7 @@ function db(): SqliteDb | null {
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN source_peer TEXT`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN goal TEXT`); } catch {}
   } catch {
     logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
     _db = null;
@@ -132,18 +135,61 @@ function dbOrNull(): SqliteDb | null {
   return db();
 }
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; blocked_by?: string; chatId?: string; sourcePeer?: string }): number {
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; blocked_by?: string; chatId?: string; sourcePeer?: string }): number {
   const d = dbOrNull();
   if (!d) return 0;
   const deliveryMode = opts?.deliveryMode ?? "deliver";
   const stmt = d.prepare(
-    `INSERT INTO kanban_board (title, source, source_id, priority, type, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null);
+  const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null);
   const id = Number(result.lastInsertRowid);
   nerve.fire("card:queued", id);
   return id;
+}
+
+export interface CreateCardInput {
+  type?: string;
+  title: string;
+  goal?: string;
+  source?: string;
+  sourceId?: string;
+  priority?: string;
+  labels?: string;
+  deliveryMode?: "silent" | "deliver" | "announce";
+  chatId?: string;
+  sourcePeer?: string;
+}
+
+/** #955 — Shared create operation for dispatchable cards. Validates SessionType,
+ *  applies bounds, requires goal for B cards. Returns card ID or error. */
+export function createDispatchableCard(input: CreateCardInput): { cardId: number; status: "queued" } | { error: string } {
+  const { type, title, goal } = input;
+  if (!title || !title.trim()) return { error: "title required" };
+  const titleBytes = Buffer.byteLength(title, "utf-8");
+  if (titleBytes > 160) return { error: `title exceeds 160 bytes (${titleBytes})` };
+  if (type && !isValidSessionType(type)) {
+    return { error: `invalid type "${type}": must be a SessionType (A/B/C/T/P/S/O/W/D/H)` };
+  }
+  if (type === "B" && (!goal || !goal.trim())) {
+    return { error: "goal is required for type B (Browsie) cards" };
+  }
+  if (goal) {
+    const goalBytes = Buffer.byteLength(goal, "utf-8");
+    if (goalBytes > 32768) return { error: `goal exceeds 32 KiB (${goalBytes} bytes)` };
+  }
+  const cardId = kanbanEnqueue(title, input.source || "agent", input.sourceId, {
+    priority: input.priority,
+    type,
+    goal,
+    labels: input.labels,
+    deliveryMode: input.deliveryMode,
+    chatId: input.chatId,
+    sourcePeer: input.sourcePeer,
+  });
+  if (cardId === 0) return { error: "kanban database unavailable" };
+  return { cardId, status: "queued" };
 }
 
 export function kanbanRunning(id: number): void {

@@ -600,6 +600,30 @@ export class AgentApiServer {
       return;
     }
 
+    // #955 — Kanban card creation (localhost CLI, uses shared createDispatchableCard)
+    if (url === "/v1/kanban" && method === "POST") {
+      this.handleAsync(req, res, async () => {
+        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
+        const { createDispatchableCard } = await import("./tasks/kanban-board.js");
+        const result = createDispatchableCard({
+          type: body.type,
+          title: body.title,
+          goal: body.goal,
+          source: body.source || "cli",
+          priority: body.priority,
+          labels: body.labels,
+          deliveryMode: body.delivery_mode,
+          chatId: body.chat_id,
+        });
+        if ("error" in result) {
+          res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: result.error }));
+        } else {
+          res.writeHead(201, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, card_id: result.cardId, status: result.status }));
+        }
+      });
+      return;
+    }
+
     // #1313 — Pi capability bridge (signed, loopback, scoped)
     if (url.startsWith("/v1/pi/")) {
       this.handlePiRoute(url, method, req, res).catch((err) => {
