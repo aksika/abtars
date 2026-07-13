@@ -4,10 +4,20 @@ import type { BootCtx } from "./context.js";
 const TAG = "boot-pi";
 
 export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
-  const { loadPiConfig } = await import("../components/pi-executor/config.js");
+  const { loadPiConfig, validatePiWorkspaceAliases } = await import("../components/pi-executor/config.js");
   const config = loadPiConfig();
   if (!config) {
     logInfo(TAG, "Pi executor not configured — skipping");
+    return;
+  }
+
+  // #1394: Validate all workspace aliases at boot.
+  const aliasErrors = validatePiWorkspaceAliases(config);
+  if (Object.keys(aliasErrors).length > 0) {
+    for (const [alias, error] of Object.entries(aliasErrors)) {
+      logError(TAG, `Workspace alias "${alias}" invalid: ${error}`);
+    }
+    logError(TAG, "Pi executor disabled due to invalid workspace alias(es)");
     return;
   }
 

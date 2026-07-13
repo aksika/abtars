@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { resolve, isAbsolute } from "node:path";
+import { resolve, isAbsolute, relative, sep } from "node:path";
 import { logInfo, logWarn } from "../logger.js";
 import { configDir } from "../transport-config.js";
 
@@ -19,6 +19,42 @@ export interface PiExecutorConfig {
   abmindPlugin: string;
   supportedRpcVersion: string;
   defaultModel?: { provider: string; modelId: string; thinking?: string };
+}
+
+// ── #1394: Component-aware path containment ─────────────────────────────────
+
+export interface PathOps {
+  relative(from: string, to: string): string;
+  isAbsolute(path: string): boolean;
+  sep: string;
+}
+
+/**
+ * Pure containment check. Both paths must be already-canonical absolute paths.
+ * Accepts when candidate equals root or is a proper descendant by path
+ * components (not by string prefix).
+ */
+export function isPathWithinRoot(
+  canonicalRoot: string,
+  canonicalCandidate: string,
+  pathOps: PathOps = { relative, isAbsolute, sep },
+): boolean {
+  const rel = pathOps.relative(canonicalRoot, canonicalCandidate);
+  if (rel === "") return true;          // exact equality
+  if (pathOps.isAbsolute(rel)) return false;  // different drives/roots
+  if (rel === "..") return false;
+  if (rel.startsWith(`..${pathOps.sep}`)) return false;
+  return true;
+}
+
+/** #1394: Validate all workspace aliases at boot. Returns error map keyed by alias. */
+export function validatePiWorkspaceAliases(config: PiExecutorConfig): Record<string, string> {
+  const errors: Record<string, string> = {};
+  for (const [alias, mapping] of Object.entries(config.workspaceAliases)) {
+    const r = resolveAndValidateWorkspace(alias, config);
+    if (r.error) errors[alias] = r.error;
+  }
+  return errors;
 }
 
 export function loadPiConfig(): PiExecutorConfig | null {
@@ -60,6 +96,7 @@ export function loadPiConfig(): PiExecutorConfig | null {
 export function resolveAndValidateWorkspace(alias: string, config: PiExecutorConfig): { canonicalPath: string; error?: string } {
   const mapping = config.workspaceAliases[alias];
   if (!mapping) return { canonicalPath: "", error: `Unknown workspace alias "${alias}"` };
+  if (typeof alias !== "string" || alias.length > 128) return { canonicalPath: "", error: `Invalid alias` };
   if (!isAbsolute(mapping.path)) return { canonicalPath: "", error: `Path must be absolute` };
   if (!existsSync(mapping.path)) return { canonicalPath: "", error: `Path "${mapping.path}" does not exist` };
   try {
@@ -67,10 +104,12 @@ export function resolveAndValidateWorkspace(alias: string, config: PiExecutorCon
     const st = statSync(canonical);
     if (!st.isDirectory()) return { canonicalPath: "", error: `Not a directory` };
     if (mapping.root) {
-      const root = resolve(mapping.root);
-      if (!existsSync(root)) return { canonicalPath: "", error: `Root "${root}" not found` };
-      const canonicalRoot = realpathSync(root);
-      if (!canonical.startsWith(canonicalRoot)) return { canonicalPath: "", error: `Escapes root "${canonicalRoot}"` };
+      if (!isAbsolute(mapping.root)) return { canonicalPath: "", error: `Root must be absolute` };
+      if (!existsSync(mapping.root)) return { canonicalPath: "", error: `Root "${mapping.root}" not found` };
+      const canonicalRoot = realpathSync(mapping.root);
+      const rootSt = statSync(canonicalRoot);
+      if (!rootSt.isDirectory()) return { canonicalPath: "", error: `Root is not a directory` };
+      if (!isPathWithinRoot(canonicalRoot, canonical)) return { canonicalPath: "", error: `Escapes root "${canonicalRoot}"` };
     }
     return { canonicalPath: canonical };
   } catch (err) {
