@@ -251,6 +251,16 @@ export class AgentApiServer {
     }
 
     ws.on("message", (data) => this.handlePeerWsMessage(peerName, data.toString()));
+
+    // #1360: Send our signed status immediately on accepted connection
+    try {
+      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+      const { buildSignedStatus } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
+      const config = loadPeerConfig();
+      const signed = buildSignedStatus(config.self.signingKey);
+      ws.send(JSON.stringify({ type: "push", method: "peer-status.v1", payload: signed }));
+    } catch { /* best effort */ }
+
     ws.on("close", () => {
       if (this.peerWsConnections.get(peerName) === ws) {
         this.peerWsConnections.delete(peerName);
@@ -268,10 +278,11 @@ export class AgentApiServer {
    * #1390: Push a non-mutating notification to a connected peer via WS.
    * Unsigned push frames may never settle cards, post channels, deliver results,
    * modify files, or invoke tools. Only notify-type methods are allowed.
+   * #1360: Added peer-status.v1 for signed health status exchange.
    */
   pushToPeer(peerName: string, method: string, payload: unknown): boolean {
     // Strict allowlist of notification-only methods
-    const ALLOWED_PUSH: readonly string[] = ["notify", "heartbeat", "ping"];
+    const ALLOWED_PUSH: readonly string[] = ["notify", "heartbeat", "ping", "peer-status.v1"];
     if (!ALLOWED_PUSH.includes(method)) return false;
     const ws = this.peerWsConnections.get(peerName);
     if (!ws || ws.readyState !== ws.OPEN) return false;
@@ -279,10 +290,33 @@ export class AgentApiServer {
     return true;
   }
 
-  /** Handle incoming WS message from a peer. #1390: per-frame signature required. */
+  /** #1360: Broadcast signed status to all connected WSS peers (server-side). */
+  broadcastStatus(): void {
+    try {
+      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+      const { buildSignedStatus } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
+      const config = loadPeerConfig();
+      const signed = buildSignedStatus(config.self.signingKey);
+      for (const [name] of this.peerWsConnections) {
+        this.pushToPeer(name, "peer-status.v1", signed);
+      }
+    } catch { /* best effort */ }
+  }
+
+  /** Handle incoming WS message from a peer. #1390: per-frame signature required. #1360: peer-status.v1 push. */
   private handlePeerWsMessage(peerName: string, raw: string): void {
     try {
       const msg = JSON.parse(raw);
+
+      // #1360: Handle signed health status pushes
+      if (msg.type === "push" && msg.method === "peer-status.v1" && msg.payload) {
+        try {
+          const { getHealthStore } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
+          getHealthStore().ingestSignedStatus("wss", peerName, msg.payload);
+        } catch { /* best effort */ }
+        return;
+      }
+
       if (msg.type !== "request") return;
 
       // #1390: extract auth fields from frame body

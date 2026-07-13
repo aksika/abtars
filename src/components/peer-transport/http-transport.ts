@@ -25,6 +25,16 @@ export class HttpTransport implements PeerTransport {
       if (entry.transport !== "ws-outbound") continue;
       const client = new Client(name, entry);
       client.onPush((method, payload) => {
+        if (method === "peer-status.v1") {
+          // #1360: Ingest signed peer status — ephemeral health update
+          const envelope = payload as { payload: string; signature: string };
+          if (envelope && typeof envelope.payload === "string" && typeof envelope.signature === "string") {
+            import("./peer-health.js").then(({ getHealthStore }) => {
+              getHealthStore().ingestSignedStatus("wss", name, envelope);
+            }).catch(() => {});
+          }
+          return;
+        }
         if (method === "callback") {
           // Inbound callback from peer — fire as if it arrived via HTTP /v1/callbacks
           const p = payload as { task_id: number; status: string; result_summary?: string; error?: string; tokens_used?: number };
@@ -58,6 +68,21 @@ export class HttpTransport implements PeerTransport {
   /** Check if a peer is reachable via WS. */
   hasWsConnection(peer: string): boolean {
     return this.wsClients.get(peer)?.connected ?? false;
+  }
+
+  /** #1360: Broadcast signed status to all connected WSS peers. */
+  broadcastStatus(): void {
+    const { loadPeerConfig } = require("../peer-config.js");
+    const { buildSignedStatus } = require("./peer-health.js");
+    const config = loadPeerConfig();
+    const signed = buildSignedStatus(config.self.signingKey);
+    for (const [name, client] of this.wsClients) {
+      if (client.connected) {
+        try {
+          (client as any).sendPush("peer-status.v1", signed);
+        } catch { /* skip failed peer */ }
+      }
+    }
   }
 
   /** #1293 — Called by HB tick to check and reconnect stale ws-outbound connections. */

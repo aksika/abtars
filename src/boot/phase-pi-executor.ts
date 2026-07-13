@@ -63,5 +63,18 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   }
 
   ctx.piExecutorService = service;
+
+  // #1360: Register Pi executor capabilities in the peer-health store
+  try {
+    const { getHealthStore } = await import("../components/peer-transport/peer-health.js");
+    const store = getHealthStore();
+    const capValues: string[] = ["pi-executor"];
+    for (const alias of Object.keys(config.workspaceAliases)) {
+      const normalized = alias.toLowerCase().replace(/[^a-z0-9_.\-]/g, "-");
+      capValues.push(`workspace:${normalized}`);
+    }
+    store.capabilities.register("pi-executor-boot", capValues);
+  } catch { /* best effort */ }
+
   logInfo(TAG, `Pi executor ready (${config.command}, ${Object.keys(config.workspaceAliases).length} aliases)`);
 }

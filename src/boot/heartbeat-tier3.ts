@@ -153,11 +153,22 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     }});
   }
 
-  // Gossip
-  import("../components/peer-transport/gossip.js").then(({ gossipBroadcast, setGossipInterval }) => {
-    setGossipInterval(heartbeat.intervalMs);
-    heartbeat.registerTask({ name: "gossip-health", execute: async () => { gossipBroadcast(); } });
-  }).catch(err => logAndSwallow(TAG, "gossip", err));
+  // Peer health broadcast (#1360): UDP gossip + WSS status via heartbeat
+  import("../components/peer-transport/gossip.js").then(({ gossipBroadcast }) => {
+    heartbeat.registerTask({ name: "peer-health", execute: async () => {
+      // 1. UDP broadcast
+      gossipBroadcast();
+
+      // 2. WSS status push to all connected peers
+      try {
+        const { getPeerTransport } = await import("../components/peer-transport/index.js");
+        const transport = getPeerTransport() as import("../components/peer-transport/http-transport.js").HttpTransport;
+        if (typeof transport.broadcastStatus === "function") {
+          transport.broadcastStatus();
+        }
+      } catch { /* best effort */ }
+    } });
+  }).catch(err => logAndSwallow(TAG, "peer-health", err));
 
   if (transport.healthCheck) {
     heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });

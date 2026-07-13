@@ -5,6 +5,7 @@
 export type { PeerTransport, PeerCard, PeerMessage, TaskResult, PeerHealth } from "./interface.js";
 export { HttpTransport } from "./http-transport.js";
 export { startGossipListener, gossipBroadcast, getAlivePeers, getPeerTable, setGossipInterval, stopGossipListener } from "./gossip.js";
+export { getHealthStore, getLocalSnapshot, buildSignedStatus, CapabilityRegistry } from "./peer-health.js";
 
 import { HttpTransport } from "./http-transport.js";
 import type { PeerTransport } from "./interface.js";

@@ -107,6 +107,16 @@ export class WsPeerClient {
       logInfo(TAG, `Connected to ${this.peerName}`);
       this.backoff = 1000;
       (this.ws as any)._socket?.setKeepAlive(true, 20_000);
+
+      // #1360: Send our signed status immediately on connect
+      try {
+        const { loadPeerConfig } = require("../peer-config.js") as typeof import("../peer-config.js");
+        const { buildSignedStatus } = require("./peer-health.js") as typeof import("./peer-health.js");
+        const config = loadPeerConfig();
+        const signed = buildSignedStatus(config.self.signingKey);
+        this.ws!.send(JSON.stringify({ type: "push", method: "peer-status.v1", payload: signed }));
+      } catch { /* best effort */ }
+
       this.pump(myGen);
     });
 
@@ -149,6 +159,13 @@ export class WsPeerClient {
   }
 
   get connected(): boolean { return this.ws?.readyState === WebSocket.OPEN; }
+
+  /** #1360: Send an ephemeral push (not through the durable outbox). */
+  sendPush(method: string, payload: unknown): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "push", method, payload }));
+    }
+  }
 
   /** #1401 — Close runtime resources. Outbox entries survive for the next client/process. */
   destroy(): void {
