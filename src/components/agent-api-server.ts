@@ -59,6 +59,11 @@ interface AuthenticatedPeerRequest {
   rawBody: string;
 }
 
+interface PiPeerDelegateResult {
+  statusCode: number;
+  response: string;
+}
+
 type PeerAuthOptions = {
   maxBodyBytes: number;
   rateLimited?: boolean;
@@ -371,7 +376,22 @@ export class AgentApiServer {
     let result: unknown = { error: "unknown method" };
     if (msg.method === "delegate") {
       const { kanbanList } = await import("./tasks/kanban-board.js");
-      const p = msg.payload as { goal: string; priority?: string; context?: string };
+      const p = msg.payload as { goal: string; priority?: string; context?: string; target?: { executor?: unknown } };
+
+      if (p.target) {
+        if (p.target.executor !== "pi") {
+          ws.send(JSON.stringify({ type: "response", id: msg.id, error: "Unsupported execution target" }));
+          return;
+        }
+        const piResult = await this.executePiPeerDelegate(p as Record<string, unknown>, peerName);
+        if (piResult.statusCode >= 400) {
+          ws.send(JSON.stringify({ type: "response", id: msg.id, error: piResult.response }));
+          return;
+        }
+        result = JSON.parse(piResult.response);
+        ws.send(JSON.stringify({ type: "response", id: msg.id, payload: result }));
+        return;
+      }
 
       // #1401 — idempotency: reuse existing card for the same (peer, requestId)
       if (msg.id) {
@@ -1033,8 +1053,13 @@ export class AgentApiServer {
 
     // #1357: Pi execution target
     const piTarget = typedBody.target;
-    if (piTarget && piTarget.executor === "pi") {
-      await this.handleV1PiTask(typedBody, res, caller, goal);
+    if (piTarget) {
+      if (piTarget.executor !== "pi") {
+        res.writeHead(400, { "Content-Type": "application/json" })
+          .end(JSON.stringify(openaiError("Unsupported execution target", "invalid_request_error", "bad_target")));
+        return;
+      }
+      await this.handleV1PiTask(typedBody as Record<string, unknown>, res, caller, goal);
       return;
     }
 
@@ -1078,77 +1103,96 @@ export class AgentApiServer {
   private async handleV1PiTask(
     body: Record<string, unknown>, res: ServerResponse, caller: string, goal: string,
   ): Promise<void> {
-    const target = body.target as Record<string, unknown>;
-    const workspaceAlias = target.workspace_alias as string | undefined;
-    if (!workspaceAlias || typeof workspaceAlias !== "string" || !/^[a-z][a-z0-9_.\-]{0,63}$/.test(workspaceAlias)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Invalid workspace_alias", "invalid_request_error", "bad_alias")));
-      return;
-    }
+    const piResult = await this.executePiPeerDelegate(body, caller, goal);
+    res.writeHead(piResult.statusCode, { "Content-Type": "application/json" }).end(piResult.response);
+  }
 
+  /** Shared authenticated HTTPS/WSS Pi delegation path. */
+  private async executePiPeerDelegate(body: Record<string, unknown>, caller: string, receivedGoal?: string): Promise<PiPeerDelegateResult> {
+    const goal = receivedGoal ?? body.goal;
+    if (typeof goal !== "string" || !goal.trim()) {
+      return { statusCode: 400, response: JSON.stringify(openaiError("Missing 'goal' field", "invalid_request_error", "missing_field")) };
+    }
+    const target = body.target;
+    if (!target || typeof target !== "object" || Array.isArray(target)) {
+      return { statusCode: 400, response: JSON.stringify(openaiError("Pi target is required", "invalid_request_error", "bad_target")) };
+    }
+    const targetRecord = target as Record<string, unknown>;
+    if (targetRecord.executor !== "pi") {
+      return { statusCode: 400, response: JSON.stringify(openaiError("Invalid Pi executor target", "invalid_request_error", "bad_target")) };
+    }
+    const workspaceAlias = targetRecord.workspace_alias;
+    if (typeof workspaceAlias !== "string" || !/^[a-z][a-z0-9_.\-]{0,63}$/.test(workspaceAlias)) {
+      return { statusCode: 400, response: JSON.stringify(openaiError("Invalid workspace_alias", "invalid_request_error", "bad_alias")) };
+    }
+    const requestId = body.request_id;
+    if (typeof requestId !== "string" || requestId.length === 0 || requestId.length > 128 || !/^[A-Za-z0-9._:\-]+$/.test(requestId)) {
+      return { statusCode: 400, response: JSON.stringify(openaiError("request_id must match [A-Za-z0-9._:-]+ and be at most 128 characters", "invalid_request_error", "bad_request_id")) };
+    }
+    if (body.artifacts !== undefined) {
+      return { statusCode: 400, response: JSON.stringify(openaiError("Artifacts are not supported for Pi delegation", "invalid_request_error", "artifacts_unsupported")) };
+    }
+    const context = body.context;
+    if (context !== undefined && (typeof context !== "string" || Buffer.byteLength(context, "utf-8") > 16_384)) {
+      return { statusCode: 400, response: JSON.stringify(openaiError("Invalid context", "invalid_request_error", "bad_context")) };
+    }
+    const priority = body.priority ?? "MEDIUM";
+    if (priority !== "CRITICAL" && priority !== "HIGH" && priority !== "MEDIUM" && priority !== "LOW") {
+      return { statusCode: 400, response: JSON.stringify(openaiError("Invalid priority", "invalid_request_error", "bad_priority")) };
+    }
+    const delivery = targetRecord.delivery;
+    if (delivery !== undefined && delivery !== "commit_push" && delivery !== "patch_artifact" && delivery !== "leave_remote") {
+      return { statusCode: 400, response: JSON.stringify(openaiError("Invalid delivery policy", "invalid_request_error", "bad_delivery")) };
+    }
+    const modelTarget = targetRecord.model;
+    let model: { provider: string; modelId: string; thinking?: string } | undefined;
+    if (modelTarget !== undefined) {
+      if (!modelTarget || typeof modelTarget !== "object" || Array.isArray(modelTarget)) {
+        return { statusCode: 400, response: JSON.stringify(openaiError("Invalid model", "invalid_request_error", "bad_model")) };
+      }
+      const modelRecord = modelTarget as Record<string, unknown>;
+      if (typeof modelRecord.provider !== "string" || !modelRecord.provider || modelRecord.provider.length > 128 ||
+          typeof modelRecord.model_id !== "string" || !modelRecord.model_id || modelRecord.model_id.length > 256 ||
+          (modelRecord.thinking !== undefined && typeof modelRecord.thinking !== "string")) {
+        return { statusCode: 400, response: JSON.stringify(openaiError("Invalid model", "invalid_request_error", "bad_model")) };
+      }
+      model = { provider: modelRecord.provider, modelId: modelRecord.model_id, thinking: modelRecord.thinking as string | undefined };
+    }
     if (!this.piExecutorService) {
-      res.writeHead(503, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Pi executor not available on this host", "server_error", "executor_unavailable")));
-      return;
+      return { statusCode: 503, response: JSON.stringify(openaiError("Pi executor not available on this host", "server_error", "executor_unavailable")) };
     }
 
-    const requestId = (body.request_id as string) ?? "";
-    // Idempotency via the pi-request-ledger
-    if (requestId && /^[A-Za-z0-9._:\-]+$/.test(requestId)) {
-      const { reserveRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
-      const hash = hashCanonicalJson(body as Record<string, unknown>);
-      const reservation = reserveRequest(caller, "pi:delegate", requestId, hash);
-
-      if (!reservation.ok) {
-        if (reservation.code === "duplicate_conflict") {
-          res.writeHead(409, { "Content-Type": "application/json" })
-            .end(JSON.stringify(openaiError("request_id used with different payload", "conflict", "request_id_conflict")));
-          return;
-        }
-        if (reservation.code === "outcome_unknown") {
-          res.writeHead(409, { "Content-Type": "application/json" })
-            .end(JSON.stringify(openaiError("Previous outcome unknown — retry by same request_id", "conflict", "outcome_unknown")));
-          return;
-        }
+    const fullGoal = context ? `${goal}\n\nContext: ${context}` : goal;
+    const { reserveRequest, hashCanonicalJson, failRequest } = await import("./pi-request-ledger.js");
+    const requestHash = hashCanonicalJson(body);
+    const reservation = reserveRequest(caller, "pi:delegate", requestId, requestHash);
+    if (!reservation.ok) {
+      if (reservation.code === "duplicate_conflict") {
+        return { statusCode: 409, response: JSON.stringify(openaiError("request_id used with different payload", "conflict", "request_id_conflict")) };
       }
-
-      // Duplicate same payload → replay original response
-      if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
-        res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
-        return;
-      }
+      return { statusCode: 409, response: JSON.stringify(openaiError("Previous outcome unknown — retry by same request_id", "conflict", "outcome_unknown")) };
     }
-
-    // Build model selection from target
-    const modelTarget = target.model as Record<string, unknown> | undefined;
-    const model = modelTarget?.provider && modelTarget?.model_id
-      ? { provider: modelTarget.provider as string, model_id: modelTarget.model_id as string, thinking: modelTarget.thinking as string | undefined }
-      : undefined;
+    if ((reservation.entry.state === "completed" || reservation.entry.state === "failed") && reservation.entry.responseJson) {
+      return { statusCode: reservation.entry.state === "completed" ? 202 : 422, response: reservation.entry.responseJson };
+    }
 
     try {
       const result = await this.piExecutorService.run(
-        { goal, workspaceAlias, model, owner: { principalId: `peer:${caller}`, origin: "peer" as const, peer: caller } },
+        { goal: fullGoal, workspaceAlias, priority, model, owner: { principalId: `peer:${caller}`, origin: "peer", peer: caller } },
         { userId: `peer:${caller}` },
+        { clientId: caller, operation: "pi:delegate", requestId, requestHash },
       );
-      const response = JSON.stringify({
-        task_id: result.cardId, status: "queued", executor: "pi",
-        run_id: result.runId, generation: result.generation, session_id: result.sessionId,
-      });
-
-      // Record idempotency outcome
-      if (requestId && /^[A-Za-z0-9._:\-]+$/.test(requestId)) {
-        const { completeRequest } = await import("./pi-request-ledger.js");
-        completeRequest(caller, "pi:delegate", requestId, response);
-      }
-
+      const response = result.responseJson;
+      if (!response) throw new Error("Pi creation did not produce an idempotent response");
       logInfo(TAG, `Pi task from ${caller}: card #${result.cardId} run=${result.runId} gen=${result.generation} alias=${workspaceAlias}`);
       this.onPeerActivity?.(`🤖 Pi task from ${caller}: "${goal.slice(0, 60)}" → card #${result.cardId} (run ${result.runId})`);
-      res.writeHead(202, { "Content-Type": "application/json" }).end(response);
+      return { statusCode: 202, response };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logWarn(TAG, `Pi task from ${caller} failed: ${msg}`);
-      res.writeHead(500, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError(`Pi execution failed: ${msg}`, "server_error", "pi_execution_failed")));
+      const message = err instanceof Error ? err.message : String(err);
+      const response = JSON.stringify(openaiError(`Pi execution failed: ${message}`, "server_error", "pi_execution_failed"));
+      try { failRequest(caller, "pi:delegate", requestId, response); } catch { /* a ledger failure leaves the outcome safely unknown */ }
+      logWarn(TAG, `Pi task from ${caller} failed: ${message}`);
+      return { statusCode: 422, response };
     }
   }
 

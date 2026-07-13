@@ -12,6 +12,17 @@ const TAG = "pi-service";
 
 export type Principal = { userId: string };
 
+export interface PiRunIdempotency {
+  clientId: string;
+  operation: string;
+  requestId: string;
+  requestHash: string;
+}
+
+export interface PiRunCreationRef extends PiRunRef {
+  responseJson?: string;
+}
+
 export interface PiServiceDeps {
   store: PiRunStore;
   executor: PiExecutor;
@@ -30,7 +41,7 @@ export class PiRunService {
   get store(): PiRunStore { return this.deps.store; }
   get config(): PiExecutorConfig { return this.deps.config; }
 
-  async run(input: PiRunRequest, caller: Principal): Promise<PiRunRef> {
+  async run(input: PiRunRequest, caller: Principal, idempotency?: PiRunIdempotency): Promise<PiRunCreationRef> {
     if (!this.deps.config.enabled) throw new Error("Pi executor is not enabled");
     if (caller.userId !== input.owner.principalId) throw new Error("Caller must match the run owner");
 
@@ -65,11 +76,12 @@ export class PiRunService {
     }
 
     try {
-      const { cardId } = this.deps.store.createPiCardAndRun({
+      const created = this.deps.store.createPiCardAndRun({
         runId,
         sessionId: spinSessionId,
         title: `Pi: ${goal.slice(0, 80)}`,
         goal,
+        priority: input.priority,
         workspaceAlias: input.workspaceAlias,
         ownerPrincipalId: input.owner.principalId,
         origin: input.owner.origin,
@@ -79,11 +91,12 @@ export class PiRunService {
         modelProvider: input.model?.provider,
         modelId: input.model?.modelId,
         thinking: input.model?.thinking,
+        idempotency,
       });
 
-      nerve.fire("card:queued", cardId);
-      logInfo(TAG, `Pi run ${runId} created (card ${cardId})`);
-      return { runId, cardId, sessionId: spinSessionId, generation: 1 };
+      nerve.fire("card:queued", created.cardId);
+      logInfo(TAG, `Pi run ${runId} created (card ${created.cardId})`);
+      return { runId, cardId: created.cardId, sessionId: spinSessionId, generation: 1, responseJson: created.responseJson };
     } catch (err) {
       // Compensate: end the allocated Spin session if the transaction failed
       if (spinSessionId) {

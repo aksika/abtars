@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { abtarsHome } from "../paths.js";
 import { resolveNativeDep } from "../utils/lazy-require.js";
+import type { TaskDatabase } from "./tasks/kanban-board.js";
 
 type Database = import("better-sqlite3").Database;
 
@@ -41,8 +42,7 @@ function db(): Database {
   return _db;
 }
 
-function ensureSchema(d: Database): void {
-  d.exec(`CREATE TABLE IF NOT EXISTS pi_api_requests (
+export const PI_REQUEST_LEDGER_SCHEMA = `CREATE TABLE IF NOT EXISTS pi_api_requests (
     client_id TEXT NOT NULL,
     operation TEXT NOT NULL,
     request_id TEXT NOT NULL,
@@ -53,12 +53,29 @@ function ensureSchema(d: Database): void {
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (client_id, operation, request_id)
-  )`);
+  )`;
+
+function ensureSchema(d: Database): void {
+  d.exec(PI_REQUEST_LEDGER_SCHEMA);
+}
+
+/** Ensure the ledger exists on the canonical Kanban connection. */
+export function ensureRequestLedgerSchema(d: TaskDatabase): void {
+  d.exec(PI_REQUEST_LEDGER_SCHEMA);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 /** Compute a canonical hash from validated JSON (not raw whitespace). */
 export function hashCanonicalJson(data: Record<string, unknown>): string {
-  const canonical = JSON.stringify(data, Object.keys(data).sort());
+  const canonical = stableJson(data);
   return createHash("sha256").update(canonical, "utf-8").digest("hex");
 }
 
@@ -128,10 +145,10 @@ export function reserveRequest(
  * one row was updated.
  */
 export function completePendingRequestInTransaction(
-  d: Database,
+  d: TaskDatabase,
   input: {
     clientId: string;
-    operation: "task:create";
+    operation: string;
     requestId: string;
     requestHash: string;
     responseJson: string;

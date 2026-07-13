@@ -3,6 +3,7 @@ import type { PiRunRecord, PiRunStatus, PiRunView, PiRunOrigin, PiPendingRequest
 import type { UiReplyOutcome } from "./types.js";
 import { MAX_PROGRESS_ENTRIES } from "./types.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
+import { completePendingRequestInTransaction, ensureRequestLedgerSchema } from "../pi-request-ledger.js";
 
 export type RpcDelivery = "not_written" | "written_unacknowledged" | "acknowledged";
 
@@ -16,6 +17,7 @@ export interface CreatePiRunInput {
   sessionId: string;
   title: string;
   goal: string;
+  priority?: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
   workspaceAlias: string;
   ownerPrincipalId: string;
   origin: PiRunOrigin;
@@ -25,6 +27,12 @@ export interface CreatePiRunInput {
   modelProvider?: string;
   modelId?: string;
   thinking?: string;
+  idempotency?: {
+    clientId: string;
+    operation: string;
+    requestId: string;
+    requestHash: string;
+  };
 }
 
 // #1396 — Canonical terminal outcome mapping
@@ -56,6 +64,7 @@ export class PiRunStore {
   constructor(deps: PiRunStoreDeps) {
     this.db = deps.db;
     this.migrate();
+    ensureRequestLedgerSchema(this.db);
   }
 
   private migrate(): void {
@@ -106,16 +115,16 @@ export class PiRunStore {
   }
 
   /**
-   * #1393 — Create a Pi card and its run in one durable transaction.
-   * Fires no Nerve event — caller publishes card:queued after the transaction
-   * commits so an observer never sees a committed card without its run.
+   * #1393/#1357 — Create a Pi card/run and, when supplied, complete the
+   * idempotency reservation in the same durable transaction. Fires no Nerve
+   * event so an observer never sees a committed card without its run.
    */
-  createPiCardAndRun(input: CreatePiRunInput): { runId: string; cardId: number; sessionId: string } {
-    return this.db.transaction<{ runId: string; cardId: number; sessionId: string }>(() => {
+  createPiCardAndRun(input: CreatePiRunInput): { runId: string; cardId: number; sessionId: string; responseJson?: string } {
+    return this.db.transaction<{ runId: string; cardId: number; sessionId: string; responseJson?: string }>(() => {
       const cardResult = this.db.prepare(
         `INSERT INTO kanban_board (title, source, source_id, priority, type, notes, delivery_mode)
-         VALUES (?, 'pi', ?, 'MEDIUM', 'pi', ?, 'silent')`
-      ).run(input.title, input.runId, input.goal);
+         VALUES (?, 'pi', ?, ?, 'pi', ?, 'silent')`
+      ).run(input.title, input.runId, input.priority ?? "MEDIUM", input.goal);
       const cardId = Number(cardResult.lastInsertRowid);
       if (!cardId || cardId < 1) throw new Error("Failed to allocate card ID for Pi run");
 
@@ -130,7 +139,23 @@ export class PiRunStore {
         input.modelProvider ?? null, input.modelId ?? null, input.thinking ?? null,
       );
 
-      return { runId: input.runId, cardId, sessionId: input.sessionId };
+      if (!input.idempotency) return { runId: input.runId, cardId, sessionId: input.sessionId };
+
+      const responseJson = JSON.stringify({
+        task_id: cardId,
+        status: "queued",
+        executor: "pi",
+        run_id: input.runId,
+        generation: 1,
+        session_id: input.sessionId,
+      });
+      const completed = completePendingRequestInTransaction(this.db, {
+        ...input.idempotency,
+        responseJson,
+      });
+      if (!completed) throw new Error("Pi idempotency reservation was not pending");
+
+      return { runId: input.runId, cardId, sessionId: input.sessionId, responseJson };
     });
   }
 

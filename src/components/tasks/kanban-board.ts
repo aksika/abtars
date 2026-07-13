@@ -324,6 +324,17 @@ export function kanbanGetCard(id: number): KanbanCard | undefined {
   return d.prepare(`SELECT * FROM kanban_board WHERE id = ?`).get(id) as KanbanCard | undefined;
 }
 
+/** Find a durable remote-delegation proxy by its peer-scoped request ID. */
+export function kanbanFindRemoteDelegation(peer: string, requestId: string): KanbanCard | undefined {
+  const d = dbOrNull();
+  if (!d) return undefined;
+  return d.prepare(
+    `SELECT * FROM kanban_board
+     WHERE source = 'peer' AND type = 'remote' AND source_id = ? AND source_peer = ?
+     ORDER BY id DESC LIMIT 1`,
+  ).get(requestId, peer) as KanbanCard | undefined;
+}
+
 /** Test-only: run a raw SQL statement against the kanban DB (avoids direct better-sqlite3 require in tests). */
 export function _kanbanExecForTest(sql: string, params: unknown[] = []): void {
   const d = dbOrNull();

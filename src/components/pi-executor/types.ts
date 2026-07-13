@@ -46,6 +46,7 @@ export interface PiRunOwner {
 export interface PiRunRequest {
   goal: string;
   workspaceAlias: string;
+  priority?: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
   model?: PiModelSelection;
   owner: PiRunOwner;
 }
