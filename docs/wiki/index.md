@@ -22,6 +22,12 @@ abTARS instances find each other via gossip, delegate work based on capabilities
 
 → [Agent Swarm](/abtars/agent-swarm)
 
+## Plus: Pi Integration
+
+abTARS integrates Pi as a symbiotic peer — Pi's provider engine powers Direct API with ~36 providers and prompt caching, Pi's TUI gives you a terminal face, and Pi's coding agent runs supervised coding tasks. Additive, reversible, zero coupling.
+
+→ [Pi Integration](/abtars/pi)
+
 ## Features
 
 - **Multi-platform** — Telegram, Discord, IRC (more coming)
