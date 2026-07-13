@@ -11,7 +11,8 @@
  */
 import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
-import { signRequest, verifyServerCert } from "./peer-auth.js";
+import { signRequest } from "./peer-auth.js";
+import { createPinnedPeerWsConnection } from "./pinned-peer-tls.js";
 import { loadPeerConfig, deriveVerifyKey, type PeerEntry } from "../peer-config.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { join } from "node:path";
@@ -83,22 +84,7 @@ export class WsPeerClient {
     this.ws = new WebSocket(url, {
       headers: sigHeaders,
       minVersion: "TLSv1.3",
-      rejectUnauthorized: true,
-      checkServerIdentity: (_host: string, cert: { raw?: Buffer }) => {
-        if (!cert.raw) return new Error("No cert from peer");
-        try {
-          const { createPublicKey } = require("node:crypto") as typeof import("node:crypto");
-          const keyObj = createPublicKey({ key: cert.raw, format: "der", type: "spki" });
-          const certDerB64 = cert.raw.toString("base64");
-          const certPemBlock = `-----BEGIN CERTIFICATE-----\n${certDerB64.match(/.{1,64}/g)!.join("\n")}\n-----END CERTIFICATE-----\n`;
-          if (!verifyServerCert(certPemBlock, this.entry.verifyKey)) {
-            return new Error(`${this.peerName} cert key != enrolled verifyKey`);
-          }
-        } catch (e) {
-          return new Error(`Cert verify: ${e instanceof Error ? e.message : String(e)}`);
-        }
-        return undefined;
-      },
+      createConnection: createPinnedPeerWsConnection({ peerName: this.peerName, verifyKey: this.entry.verifyKey }),
     } as any);
 
     const myGen = ++this.sockGen;

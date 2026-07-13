@@ -5,6 +5,7 @@
 
 import { loadPeerConfig, type PeerEntry } from "./peer-config.js";
 import { logInfo } from "./logger.js";
+import { createPinnedPeerHttpsAgent } from "./peer-transport/pinned-peer-tls.js";
 
 const TAG = "peer-client";
 
@@ -79,7 +80,7 @@ export async function callPeer(peerName: string, prompt: string, hops: number, o
 }
 
 function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops: number, timeoutMs: number, selfName: string): Promise<string> {
-  const { signRequest, verifyServerCert } = require("./peer-transport/peer-auth.js") as typeof import("./peer-transport/peer-auth.js");
+  const { signRequest } = require("./peer-transport/peer-auth.js") as typeof import("./peer-transport/peer-auth.js");
   const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
   const config = loadPeerConfig();
 
@@ -95,19 +96,7 @@ function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops:
     ? (require("node:https") as typeof import("node:https")).request
     : require("node:http").request;
 
-  const tlsOpts = useTls ? {
-    minVersion: "TLSv1.3" as const,
-    rejectUnauthorized: true,
-    checkServerIdentity: (_hostname: string, cert: { raw?: Buffer }) => {
-      if (!cert.raw) return new Error("No cert from peer");
-      const certDerB64 = cert.raw.toString("base64");
-      const certPemBlock = `-----BEGIN CERTIFICATE-----\n${certDerB64.match(/.{1,64}/g)!.join("\n")}\n-----END CERTIFICATE-----\n`;
-      if (!verifyServerCert(certPemBlock, peer.verifyKey)) {
-        return new Error(`Cert key != enrolled verifyKey for ${peerName}`);
-      }
-      return undefined;
-    },
-  } : {};
+  const tlsAgent = useTls ? createPinnedPeerHttpsAgent({ peerName, verifyKey: peer.verifyKey }) : undefined;
 
   return new Promise((resolve, reject) => {
     const req = requestFn({
@@ -122,7 +111,7 @@ function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops:
         "X-Peer-Hops": String(hops),
       },
       timeout: timeoutMs,
-      ...tlsOpts,
+      ...(useTls ? { minVersion: "TLSv1.3" as const, agent: tlsAgent } : {}),
     } as any, (res: any) => {
       let data = "";
       res.on("data", (c: any) => data += c);

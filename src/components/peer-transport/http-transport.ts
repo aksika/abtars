@@ -10,6 +10,7 @@ import { getAlivePeers } from "./gossip.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
 import { logInfo, logDebug, logTrace } from "../logger.js";
 import type { WsPeerClient } from "./ws-peer-client.js";
+import { createPinnedPeerHttpsAgent } from "./pinned-peer-tls.js";
 
 const TAG = "http-transport";
 
@@ -218,7 +219,7 @@ export class HttpTransport implements PeerTransport {
   }
 
   private async httpCall(entry: PeerEntry, peerName: string, method: string, path: string, body?: string): Promise<string> {
-    const { signRequest, verifyServerCert } = await import("./peer-auth.js");
+    const { signRequest } = await import("./peer-auth.js");
     const { loadPeerConfig } = await import("../peer-config.js");
     const config = loadPeerConfig();
 
@@ -230,6 +231,7 @@ export class HttpTransport implements PeerTransport {
     const sigHeaders = signRequest(method, path, bodyStr, config.self.signingKey, config.self.name);
 
     const http = await import("node:https");
+    const agent = createPinnedPeerHttpsAgent({ peerName, verifyKey: entry.verifyKey });
 
     return new Promise((resolve, reject) => {
       const headers: Record<string, string> = {
@@ -246,24 +248,7 @@ export class HttpTransport implements PeerTransport {
         headers,
         timeout: 60_000,
         minVersion: "TLSv1.3" as const,
-        rejectUnauthorized: true,
-        checkServerIdentity: (_host: string, cert: { raw?: Buffer }) => {
-          if (!cert.raw) return new Error("No cert presented by peer");
-          try {
-            const { createPublicKey } = require("node:crypto") as typeof import("node:crypto");
-            const keyObj = createPublicKey({ key: cert.raw, format: "der", type: "spki" });
-            const certPem = keyObj.export({ type: "spki", format: "pem" }) as string;
-            // Reconstruct as X.509 for verifyServerCert: use the raw DER cert to build PEM
-            const certDerB64 = cert.raw.toString("base64");
-            const certPemBlock = `-----BEGIN CERTIFICATE-----\n${certDerB64.match(/.{1,64}/g)!.join("\n")}\n-----END CERTIFICATE-----\n`;
-            if (!verifyServerCert(certPemBlock, entry.verifyKey)) {
-              return new Error(`Peer ${peerName} cert key does not match enrolled verifyKey`);
-            }
-          } catch (e) {
-            return new Error(`Cert verify error: ${e instanceof Error ? e.message : String(e)}`);
-          }
-          return undefined;
-        },
+        agent,
       } as any, (res: any) => {
         let data = "";
         res.on("data", (c: any) => data += c);
