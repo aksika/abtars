@@ -1,13 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, unlinkSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { describe, it, expect } from "vitest";
 import { HardwareSleepController } from "./hardware-sleep-controller.js";
 import { PowerTransitionStore } from "./power-transition-store.js";
 import { createPowerSafetyProbe } from "./power-safety-probe.js";
 import type { PowerSafetyProbe, PowerAdapter, FixedCommandRunner } from "./types.js";
-
-const TEST_FILE = join(homedir(), ".abtars", "state", "power-transition.json");
 
 function makeSafeProbe(): PowerSafetyProbe {
   return createPowerSafetyProbe({
@@ -39,15 +34,6 @@ function makeAdapter(run?: FixedCommandRunner): PowerAdapter {
 const MOLTY_FIXTURE = `Repeating power events:\n  wakepoweron at 7:55AM every day\n`;
 
 describe("HardwareSleepController", () => {
-  beforeEach(() => {
-    try { mkdirSync(join(homedir(), ".abtars", "state"), { recursive: true }); } catch {}
-    try { unlinkSync(TEST_FILE); } catch {}
-  });
-
-  afterEach(() => {
-    try { unlinkSync(TEST_FILE); } catch {}
-  });
-
   it("inspect returns safe with all pass", async () => {
     const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), new PowerTransitionStore());
     // latestLocalTime must be in the future relative to test run time

@@ -8,6 +8,7 @@ import { join } from "node:path";
 // Instead, we test the file operations directly by temporarily pointing HOME.
 
 const originalHome = process.env.HOME;
+const originalAbtarsHome = process.env.ABTARS_HOME;
 
 describe("abtars-todo", () => {
   let tmpDir: string;
@@ -16,11 +17,14 @@ describe("abtars-todo", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "todo-test-"));
     process.env.HOME = tmpDir;
+    delete process.env.ABTARS_HOME; // let abtarsHome() fall through to homedir()
     todoPath = join(tmpDir, ".abtars", "workspace", "todo", "todo.md");
   });
 
   afterEach(() => {
     process.env.HOME = originalHome;
+    if (originalAbtarsHome === undefined) delete process.env.ABTARS_HOME;
+    else process.env.ABTARS_HOME = originalAbtarsHome;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

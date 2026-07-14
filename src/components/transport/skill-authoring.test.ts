@@ -2,14 +2,17 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { skillCreateTool } from "./skill-authoring.js";
 import { existsSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { assertSandboxPath } from "../../test-support/runtime-isolation.js";
 
-const SKILLS_DIR = join(process.env.ABTARS_HOME ?? join(homedir(), ".abtars"), "skills");
+const SKILLS_DIR = join(process.env.ABTARS_HOME!, "skills");
 const TEST_NAME = "test-skill-vitest-tmp";
 const TEST_PATH = join(SKILLS_DIR, "self", TEST_NAME);
 
 function cleanup(): void {
-  if (existsSync(TEST_PATH)) rmSync(TEST_PATH, { recursive: true });
+  if (existsSync(TEST_PATH)) {
+    assertSandboxPath(TEST_PATH);
+    rmSync(TEST_PATH, { recursive: true });
+  }
 }
 
 describe("skill_create (#381, #614)", () => {

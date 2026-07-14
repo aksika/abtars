@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const originalHome = process.env.HOME;
+const originalAbtarsHome = process.env.ABTARS_HOME;
 
 describe("abtars-task", () => {
   let tmpDir: string;
@@ -11,11 +12,14 @@ describe("abtars-task", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "cron-test-"));
     process.env.HOME = tmpDir;
+    delete process.env.ABTARS_HOME; // let abtarsHome() fall through to homedir()
     mkdirSync(join(tmpDir, ".abtars", "memory"), { recursive: true });
   });
 
   afterEach(async () => {
     process.env.HOME = originalHome;
+    if (originalAbtarsHome === undefined) delete process.env.ABTARS_HOME;
+    else process.env.ABTARS_HOME = originalAbtarsHome;
     // Close DB before cleanup
     const { closeDb } = await import("../components/tasks/task-store.js");
     closeDb();

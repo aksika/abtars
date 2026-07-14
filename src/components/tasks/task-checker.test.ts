@@ -6,6 +6,7 @@ import type { CronEntry } from "../../cli/abtars-task.js";
 import { writeEntry, readEntries, closeDb } from "./task-store.js";
 
 const originalHome = process.env.HOME;
+const originalAbtarsHome = process.env.ABTARS_HOME;
 
 describe("cron-checker", () => {
   let tmpDir: string;
@@ -15,6 +16,7 @@ describe("cron-checker", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "cronchk-test-"));
     process.env.HOME = tmpDir;
+    delete process.env.ABTARS_HOME; // let abtarsHome() fall through to homedir()
     memDir = join(tmpDir, ".abtars", "state");
     mkdirSync(memDir, { recursive: true });
     remindersPath = join(memDir, "pending_reminders.json");
@@ -24,6 +26,8 @@ describe("cron-checker", () => {
   afterEach(() => {
     closeDb();
     process.env.HOME = originalHome;
+    if (originalAbtarsHome === undefined) delete process.env.ABTARS_HOME;
+    else process.env.ABTARS_HOME = originalAbtarsHome;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

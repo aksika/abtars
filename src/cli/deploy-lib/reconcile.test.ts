@@ -19,7 +19,10 @@ function readTasks(): unknown[] {
 }
 
 describe("#1321 reconcile canonical sleep-cycle task", () => {
-  beforeEach(() => { rmSync(HOME, { recursive: true, force: true }); mkdirSync(HOME, { recursive: true }); });
+  beforeEach(() => {
+    rmSync(HOME, { recursive: true, force: true });
+    mkdirSync(join(HOME, "templates", "config"), { recursive: true });
+  });
   afterEach(() => rmSync(HOME, { recursive: true, force: true }));
 
   it("appends sleep-cycle to an existing tasks.json when the id is absent", () => {
@@ -28,9 +31,7 @@ describe("#1321 reconcile canonical sleep-cycle task", () => {
       { id: "morning-greeting", type: "task", executor: "agent", schedule: "0 9 * * *", message: "hi", chatId: 1, fired: false, createdAt: 0 },
     ]), "utf-8");
 
-    // templatesSrc may not exist in this synthetic test — reconcile() logs + skips,
-    // but seedCanonicalSystemTasks runs regardless. Pass a missing templates path.
-    reconcile(join(HOME, "no-such-templates"), HOME);
+    reconcile(join(HOME, "templates"), HOME);
 
     const entries = readTasks();
     const ids = entries.map(e => (e as { id: string }).id);
@@ -51,7 +52,7 @@ describe("#1321 reconcile canonical sleep-cycle task", () => {
       { id: "hardware-sleep", executor: "system", action: "hardware-sleep", schedule: "30 3 * * *", paused: true, type: "task", fired: false, createdAt: 0 },
     ]), "utf-8");
 
-    reconcile(join(HOME, "no-such-templates"), HOME);
+    reconcile(join(HOME, "templates"), HOME);
 
     const entries = readTasks();
     expect(entries.length).toBe(2); // sleep-cycle + hardware-sleep
@@ -61,7 +62,7 @@ describe("#1321 reconcile canonical sleep-cycle task", () => {
   });
 
   it("creates tasks.json with the canonical entry when none exists", () => {
-    reconcile(join(HOME, "no-such-templates"), HOME);
+    reconcile(join(HOME, "templates"), HOME);
     const ids = readTasks().map(e => (e as { id: string }).id);
     expect(ids).toContain("sleep-cycle");
     expect(ids).toContain("hardware-sleep");

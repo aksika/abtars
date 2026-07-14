@@ -1,15 +1,17 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { join, dirname } from "node:path";
+import { abtarsHome } from "../../paths.js";
 import type { PowerTransitionState } from "./types.js";
 
-const TRANSITION_FILE = join(homedir(), ".abtars", "state", "power-transition.json");
-
 export class PowerTransitionStore {
+  constructor(
+    private readonly filePath: string = join(abtarsHome(), "state", "power-transition.json"),
+  ) {}
+
   read(): PowerTransitionState | null {
     try {
-      if (!existsSync(TRANSITION_FILE)) return null;
-      const raw = JSON.parse(readFileSync(TRANSITION_FILE, "utf-8")) as PowerTransitionState;
+      if (!existsSync(this.filePath)) return null;
+      const raw = JSON.parse(readFileSync(this.filePath, "utf-8")) as PowerTransitionState;
       if (raw.expiresAt && raw.expiresAt < Date.now()) {
         this.clear();
         return null;
@@ -22,8 +24,8 @@ export class PowerTransitionStore {
 
   write(state: PowerTransitionState): void {
     try {
-      mkdirSync(join(homedir(), ".abtars", "state"), { recursive: true });
-      writeFileSync(TRANSITION_FILE, JSON.stringify(state), "utf-8");
+      mkdirSync(dirname(this.filePath), { recursive: true });
+      writeFileSync(this.filePath, JSON.stringify(state), "utf-8");
     } catch {
       // best-effort; transition is advisory
     }
@@ -31,8 +33,8 @@ export class PowerTransitionStore {
 
   clear(): void {
     try {
-      if (existsSync(TRANSITION_FILE)) {
-        writeFileSync(TRANSITION_FILE, JSON.stringify(null), "utf-8");
+      if (existsSync(this.filePath)) {
+        writeFileSync(this.filePath, JSON.stringify(null), "utf-8");
       }
     } catch {
       // best-effort
