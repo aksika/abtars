@@ -48,6 +48,44 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     spin: ctx.sessionManager!,
   });
 
+  // #1358 — Construct remote Pi lifecycle components and wire transition hook
+  let localPeerName = "local";
+  try {
+    const { loadPeerConfig } = await import("../components/peer-config.js");
+    localPeerName = loadPeerConfig().self.name;
+  } catch { /* peer config may not exist in standalone Pi mode */ }
+
+  const { RemotePiEventProducer } = await import("../components/peer-transport/remote-pi-event-producer.js");
+  const { RemotePiDeliveryManager } = await import("../components/peer-transport/remote-pi-delivery.js");
+  const { RemotePiControlHandler } = await import("../components/peer-transport/remote-pi-control-handler.js");
+  const { RemotePiOriginReducer, SqliteProjectionStore } = await import("../components/peer-transport/remote-pi-origin-projection.js");
+  const { setRemotePiComponents } = await import("../components/peer-transport/remote-pi-registry.js");
+
+  const eventProducer = new RemotePiEventProducer({ store });
+  const deliveryManager = new RemotePiDeliveryManager({ store, eventProducer, localPeerName });
+  const controlHandler = new RemotePiControlHandler({ store, service });
+  const originReducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb));
+
+  setRemotePiComponents({ eventProducer, delivery: deliveryManager, controlHandler, originReducer });
+
+  // Wire the PiExecutor transition hook to produce lifecycle events.
+  // Only runs for delegated runs (origin_peer set).
+  executor.onTransition((runId, _fromStatus, toStatus) => {
+    const run = store.get(runId);
+    if (!run || !run.originPeer) return; // not a delegated run
+    eventProducer.produceFromTransition({
+      run,
+      previousStatus: _fromStatus,
+      originPeer: run.originPeer,
+      originRequestId: run.originChatId ?? run.id,
+    }).then(() => {
+      // Attempt immediate WS push after producing
+      deliveryManager.pushEvents(runId, run.originPeer!).catch(() => {});
+    }).catch(err => {
+      logError(TAG, `Failed to produce lifecycle event for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  });
+
   const { setPiService: setCmdService } = await import("../components/commands/handlers-pi.js");
   setCmdService(service);
 

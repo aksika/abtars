@@ -6,18 +6,19 @@
  */
 
 import type { RemotePiEventV1, RemotePiEventsListRequestV1, RemotePiEventsListResponseV1, RemotePiEventsAckRequestV1, RemotePiEventsAckResponseV1, RemotePiEventCursor } from "./remote-pi-types.js";
-import { validateEventV1, REMOTE_PI_BOUNDS, deriveEventId } from "./remote-pi-types.js";
+import { validateEventV1, REMOTE_PI_BOUNDS, deriveEventId, verifyEventHash } from "./remote-pi-types.js";
 import type { RemotePiEventProducer } from "./remote-pi-event-producer.js";
 import type { PiRunStore } from "../pi-executor/pi-run-store.js";
 import type { WsPeerClient } from "./ws-peer-client.js";
 import { logInfo, logDebug, logTrace, logError } from "../logger.js";
-import { computeSha256 } from "./remote-pi-types.js";
 
 const TAG = "remote-pi-delivery";
 
 export interface DeliveryDeps {
   store: PiRunStore;
   eventProducer: RemotePiEventProducer;
+  /** Local peer name (for origin-side inbound event ownership checks) */
+  localPeerName?: string;
 }
 
 /**
@@ -119,7 +120,7 @@ export class RemotePiDeliveryManager {
     let pushed = 0;
     for (const row of events) {
       try {
-        const event = await this.deps.eventProducer.buildEventEnvelope(row);
+        const event = this.deps.eventProducer.buildEventEnvelope(row);
         this._validateEvent(event);
 
         // Send via WS
@@ -144,7 +145,7 @@ export class RemotePiDeliveryManager {
     let failed = 0;
 
     // Get all runs with unacknowledged events
-    const rows = this.deps.store.fallsWithUnacknowledgedEvents();
+    const rows = this.deps.store.findRunsWithUnacknowledgedEvents();
 
     logDebug(TAG, `Draining outbox for ${rows.length} runs`);
 
@@ -167,6 +168,10 @@ export class RemotePiDeliveryManager {
   /**
    * Handle an inbound lifecycle event (origin side).
    * Validates, reduces, and acknowledges.
+   *
+   * On the origin side, the authenticatedPeer is the OWNER pushing to us.
+   * The event's origin_peer is us (the local origin). We verify
+   * event.origin_peer === localPeerName, NOT === authenticatedPeer.
    */
   async handleInboundEvent(
     authenticatedPeer: string,
@@ -174,16 +179,16 @@ export class RemotePiDeliveryManager {
     onReduce?: (event: RemotePiEventV1) => Promise<void>
   ): Promise<{ accepted: boolean; reason?: string }> {
     try {
-      // Validate event
+      // Validate event (includes hash verification)
       this._validateEvent(event);
 
-      // Verify peer ownership
-      if (event.origin_peer !== authenticatedPeer) {
-        return { accepted: false, reason: "Event origin_peer does not match authenticated peer" };
+      // Verify this event is addressed to us (the origin).
+      if (this.deps.localPeerName && event.origin_peer !== this.deps.localPeerName) {
+        return { accepted: false, reason: "Event origin_peer does not match local peer" };
       }
 
       // Check for duplicate with different content
-      const existing = this.deps.store.getEventsAfter(event.run_id, event.sequence - 1, 1).find(e => e.sequence === event.sequence);
+      const existing = this.deps.store.getEventsAfter({ runId: event.run_id, afterSequence: event.sequence - 1, limit: 1 }).find(e => e.sequence === event.sequence);
       if (existing) {
         if (existing.content_sha256 !== event.content_sha256) {
           return { accepted: false, reason: "Conflicting event hash" };
@@ -218,8 +223,9 @@ export class RemotePiDeliveryManager {
         }
       }
 
-      // Acknowledge
-      await this.acknowledgeEvent(authenticatedPeer, event.run_id, event.sequence);
+      // Note: acknowledgement back to the owner is a transport-level operation,
+      // not a local store operation. The origin sends an ack via WS/HTTPS
+      // to the owner's pi.events.ack.v1 endpoint after committing the projection.
 
       logTrace(TAG, `Accepted event ${event.event_id} for run ${event.run_id}`);
 
@@ -258,9 +264,7 @@ export class RemotePiDeliveryManager {
     logDebug(TAG, `Listed ${events.length} events for run ${request.run_id} after seq ${request.after_sequence}`);
 
     // Build response
-    const eventEnvelopes = await Promise.all(
-      events.map(row => this.deps.eventProducer.buildEventEnvelope(row))
-    );
+    const eventEnvelopes = events.map(row => this.deps.eventProducer.buildEventEnvelope(row));
 
     return {
       version: 1,
@@ -392,38 +396,13 @@ export class RemotePiDeliveryManager {
    * Validate an event envelope.
    */
   private _validateEvent(event: RemotePiEventV1): void {
-    // Schema validation
+    // Schema + hash validation (validateEventV1 includes hash verification)
     validateEventV1(event);
 
     // Size validation
     const bytes = Buffer.byteLength(JSON.stringify(event), "utf-8");
     if (bytes > REMOTE_PI_BOUNDS.MAX_EVENT_SIZE) {
       throw new Error(`Event exceeds ${REMOTE_PI_BOUNDS.MAX_EVENT_SIZE} bytes`);
-    }
-
-    // Verify event_id matches derived value
-    const expectedId = deriveEventId(event.run_id, event.sequence);
-    if (event.event_id !== expectedId) {
-      throw new Error(`Event ID mismatch: expected ${expectedId}, got ${event.event_id}`);
-    }
-
-    // Verify content_sha256
-    const canonical = JSON.stringify({
-      version: event.version,
-      event_id: event.event_id,
-      run_id: event.run_id,
-      card_id: event.card_id,
-      generation: event.generation,
-      sequence: event.sequence,
-      kind: event.kind,
-      origin_peer: event.origin_peer,
-      origin_request_id: event.origin_request_id,
-      occurred_at: event.occurred_at,
-      projection: event.projection,
-    });
-    const expectedHash = computeSha256(canonical);
-    if (event.content_sha256 !== expectedHash) {
-      throw new Error(`Content hash mismatch for event ${event.event_id}`);
     }
   }
 }

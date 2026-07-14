@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -326,6 +326,127 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       expect(record.status).toBe("completed");
       expect(record.pendingRequestId).toBeUndefined();
       expect(record.pendingRequestType).toBeUndefined();
+    });
+  });
+
+  describe("createPiCardAndRun", () => {
+    function makeInput(overrides: Record<string, unknown> = {}) {
+      return {
+        runId: "test-run-1",
+        sessionId: "spin-sess-1",
+        title: "Pi: test task",
+        goal: "do the thing",
+        priority: "MEDIUM",
+        workspaceAlias: "my-ws",
+        ownerPrincipalId: "usr-1",
+        origin: "user" as const,
+        originPlatform: undefined,
+        originChatId: undefined,
+        originPeer: undefined,
+        modelProvider: undefined,
+        modelId: undefined,
+        thinking: undefined,
+        ...overrides,
+      };
+    }
+
+    it("creates a card and run with no idempotency", () => {
+      const store = makeStore();
+      const result = store.createPiCardAndRun(makeInput());
+
+      expect(result.runId).toBe("test-run-1");
+      expect(result.cardId).toBeGreaterThan(0);
+      expect(result.sessionId).toBe("spin-sess-1");
+      expect(result.responseJson).toBeUndefined();
+
+      // Verify the run was stored
+      const run = store.get("test-run-1")!;
+      expect(run.status).toBe("queued");
+      expect(run.cardId).toBe(result.cardId);
+      expect(run.workspaceAlias).toBe("my-ws");
+      expect(run.ownerPrincipalId).toBe("usr-1");
+      expect(run.origin).toBe("user");
+    });
+
+    it("handles peer-origin owner (#1357)", () => {
+      const store = makeStore();
+      const result = store.createPiCardAndRun(makeInput({
+        origin: "peer" as const,
+        ownerPrincipalId: "peer:remote-host",
+        originPeer: "remote-host",
+      }));
+
+      const run = store.get(result.runId)!;
+      expect(run.origin).toBe("peer");
+      expect(run.ownerPrincipalId).toBe("peer:remote-host");
+      expect(run.originPeer).toBe("remote-host");
+    });
+
+    it("accepts optional model fields", () => {
+      const store = makeStore();
+      const result = store.createPiCardAndRun(makeInput({
+        modelProvider: "openai",
+        modelId: "gpt-4",
+        thinking: "high",
+      }));
+
+      const run = store.get(result.runId)!;
+      expect(run.modelProvider).toBe("openai");
+      expect(run.modelId).toBe("gpt-4");
+      expect(run.thinking).toBe("high");
+    });
+
+    it("completes idempotency reservation when provided", () => {
+      const store = makeStore();
+      const db = (store as any).db as TaskDatabase;
+
+      // Insert a pending ledger entry first (same DB, same schema)
+      db.prepare(
+        `INSERT INTO pi_api_requests (client_id, operation, request_id, request_hash, state)
+         VALUES ('usr-1', 'pi:delegate', 'idem-req-1', 'abc123', 'pending')`
+      ).run();
+
+      const result = store.createPiCardAndRun(makeInput({
+        runId: "idem-run-1",
+        idempotency: {
+          clientId: "usr-1",
+          operation: "pi:delegate",
+          requestId: "idem-req-1",
+          requestHash: "abc123",
+        },
+      }));
+
+      expect(result.responseJson).toBeDefined();
+      const parsed = JSON.parse(result.responseJson!);
+      expect(parsed.task_id).toBe(result.cardId);
+      expect(parsed.run_id).toBe("idem-run-1");
+      expect(parsed.executor).toBe("pi");
+      expect(parsed.generation).toBe(1);
+      expect(parsed.session_id).toBe("spin-sess-1");
+    });
+
+    it("throws when idempotency reservation is not pending", () => {
+      const store = makeStore();
+
+      expect(() => store.createPiCardAndRun(makeInput({
+        runId: "idem-run-2",
+        idempotency: {
+          clientId: "usr-1",
+          operation: "pi:delegate",
+          requestId: "nonexistent-req",
+          requestHash: "abc123",
+        },
+      }))).toThrow("Pi idempotency reservation was not pending");
+    });
+
+    it("creates multiple runs with unique IDs", () => {
+      const store = makeStore();
+      const r1 = store.createPiCardAndRun(makeInput({ runId: "run-a" }));
+      const r2 = store.createPiCardAndRun(makeInput({ runId: "run-b", title: "Pi: another" }));
+
+      expect(r1.cardId).not.toBe(r2.cardId);
+      expect(store.get("run-a")).toBeDefined();
+      expect(store.get("run-b")).toBeDefined();
     });
   });
 });

@@ -153,9 +153,14 @@ export class WsPeerClient {
     }
   }
 
-  /** #1358: Call a method and wait for a correlated response. Alias for send(). */
-  async call(method: string, payload: unknown): Promise<unknown> {
-    return this.send(method, payload);
+  /**
+   * #1358: Call a method and wait for a correlated response. The generic T
+   * documents the expected response shape at the call site; the underlying
+   * transport returns `unknown` so callers must validate before use. The
+   * default T = unknown keeps existing untyped callers working.
+   */
+  async call<T = unknown>(method: string, payload: unknown): Promise<T> {
+    return (await this.send(method, payload)) as T;
   }
 
   /** #1401 — Close runtime resources. Outbox entries survive for the next client/process. */

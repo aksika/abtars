@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { isolatedChildEnv } from "../test-support/runtime-isolation.js";
 
 const TEST_HOME = "/tmp/abtars-secret-test-" + process.pid;
 const CONFIG_DIR = join(TEST_HOME, "config");
@@ -29,7 +30,7 @@ describe("boot/env.ts — secret file loading", () => {
       "-e", `console.log(JSON.stringify({ MY_KEY: process.env.MY_KEY || null }))`,
     ], {
       encoding: "utf-8",
-      env: { ...process.env, ABTARS_HOME: TEST_HOME },
+      env: isolatedChildEnv({ ABTARS_HOME: TEST_HOME }),
       timeout: 5000,
       cwd: CWD,
     });

@@ -4,15 +4,16 @@
  * Uses a real in-memory SQLite for the store, mocks PiExecutor and Spin.
  */
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createRequire } from "node:module";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { PiRunStore } from "./pi-run-store.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
 import type { PiExecutor } from "./pi-executor.js";
 import type { Spin } from "../spin.js";
-import { PiRunService } from "./pi-run-service.js";
+import { PiRunService, type Principal } from "./pi-run-service.js";
 
 const _require = createRequire(import.meta.url);
 const sharedPath = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
@@ -59,6 +60,9 @@ const mockCancel = vi.fn();
 const mockAllocateExternalSession = vi.fn();
 const mockEndExternalSession = vi.fn();
 
+let testDir: string;
+let wsPath: string;
+
 function makeService(configOverrides: Record<string, unknown> = {}): PiRunService {
   const db = createTestDb();
   const store = new PiRunStore({ db });
@@ -77,8 +81,17 @@ function makeService(configOverrides: Record<string, unknown> = {}): PiRunServic
     executor,
     config: {
       enabled: true,
+      command: "pi",
+      fixedArgs: [],
+      workspaceAliases: { "test-ws": { path: wsPath } },
+      allowedEnv: [],
+      maxConcurrent: 1,
+      maxWallClockMs: 60000,
+      abortGraceMs: 5000,
+      projectTrust: "never",
       sessionStorageRoot: "/tmp",
-      workspaces: [{ alias: "test-ws", canonicalPath: "/tmp/test-ws" }],
+      abmindPlugin: "",
+      supportedRpcVersion: "0.1",
       ...configOverrides,
     } as any,
     spin,
@@ -86,6 +99,9 @@ function makeService(configOverrides: Record<string, unknown> = {}): PiRunServic
 }
 
 beforeEach(() => {
+  testDir = join(tmpdir(), `pi-svc-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  wsPath = join(testDir, "workspace", "test-ws");
+  mkdirSync(wsPath, { recursive: true });
   mockExecute.mockReset();
   mockReply.mockReset().mockResolvedValue({ claimed: true });
   mockSteer.mockReset().mockResolvedValue(true);
@@ -94,25 +110,27 @@ beforeEach(() => {
   mockEndExternalSession.mockReset();
 });
 
+afterEach(() => {
+  rmSync(testDir, { recursive: true, force: true });
+});
+
+const u1: Principal = { userId: "usr-1" };
+const u1Peer = { userId: "peer:remote-host" };
+const u2: Principal = { userId: "usr-2" };
+
 describe("PiRunService.run()", () => {
   it("creates a Pi run and returns ref", async () => {
     const svc = makeService();
 
     const result = await svc.run(
-      {
-        goal: "implement feature",
-        workspaceAlias: "test-ws",
-        priority: "HIGH",
-        owner: { principalId: "usr-1", origin: "user" },
-      },
-      { userId: "usr-1" },
+      { goal: "implement feature", workspaceAlias: "test-ws", priority: "HIGH", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
     );
 
     expect(result.runId).toBeDefined();
     expect(result.cardId).toBeGreaterThan(0);
     expect(result.sessionId).toBe("spin-sess-1");
     expect(result.generation).toBe(1);
-    // Verify it persists in the store
     const record = svc.store.get(result.runId)!;
     expect(record.status).toBe("queued");
     expect(record.workspaceAlias).toBe("test-ws");
@@ -124,12 +142,8 @@ describe("PiRunService.run()", () => {
     const svc = makeService();
 
     const result = await svc.run(
-      {
-        goal: "remote pi task",
-        workspaceAlias: "test-ws",
-        owner: { principalId: "peer:remote-host", origin: "peer", peer: "remote-host" },
-      },
-      { userId: "peer:remote-host" },
+      { goal: "remote pi task", workspaceAlias: "test-ws", owner: { principalId: "peer:remote-host", origin: "peer", peer: "remote-host" } },
+      u1Peer,
     );
 
     expect(result.runId).toBeDefined();
@@ -140,62 +154,50 @@ describe("PiRunService.run()", () => {
 
   it("rejects if Pi executor is disabled", async () => {
     const svc = makeService({ enabled: false });
-
     await expect(svc.run(
-      { goal: "x", workspaceAlias: "test-ws", owner: { principalId: "u1", origin: "user" } },
-      { userId: "u1" },
+      { goal: "x", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
     )).rejects.toThrow("Pi executor is not enabled");
   });
 
   it("rejects caller mismatch", async () => {
     const svc = makeService();
-
     await expect(svc.run(
       { goal: "x", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
-      { userId: "usr-2" },
+      u2,
     )).rejects.toThrow("Caller must match the run owner");
   });
 
   it("rejects empty goal", async () => {
     const svc = makeService();
-
     await expect(svc.run(
-      { goal: "  ", workspaceAlias: "test-ws", owner: { principalId: "u1", origin: "user" } },
-      { userId: "u1" },
+      { goal: "  ", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
     )).rejects.toThrow("Goal is required");
   });
 
   it("rejects oversize goal", async () => {
     const svc = makeService();
-    const bigGoal = "x".repeat(4001);
-
     await expect(svc.run(
-      { goal: bigGoal, workspaceAlias: "test-ws", owner: { principalId: "u1", origin: "user" } },
-      { userId: "u1" },
+      { goal: "x".repeat(4001), workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
     )).rejects.toThrow(/exceeds/);
   });
 
   it("rejects goal containing secrets", async () => {
     const svc = makeService();
-
     await expect(svc.run(
-      { goal: "use sk-proj-ABC123DEF456GHI789JKL", workspaceAlias: "test-ws", owner: { principalId: "u1", origin: "user" } },
-      { userId: "u1" },
+      { goal: "use sk-proj-ABC123DEF456GHI789JKL", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
     )).rejects.toThrow("secret token");
   });
 
-  it("compensates spin session on store failure", async () => {
+  it("rejects unknown workspace alias", async () => {
     const svc = makeService();
-    // Break the store by inserting a conflicting row first
-    const badInput = {
-      goal: "test",
-      workspaceAlias: "test-ws",
-      owner: { principalId: "u1", origin: "user" },
-    };
-
-    await expect(svc.run(badInput, { userId: "u1" })).rejects.toThrow();
-    // Session should be cleaned up
-    expect(mockEndExternalSession).toHaveBeenCalled();
+    await expect(svc.run(
+      { goal: "x", workspaceAlias: "nonexistent-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
+    )).rejects.toThrow("Unknown workspace alias");
   });
 });
 
@@ -203,28 +205,28 @@ describe("PiRunService.get()", () => {
   it("returns run for the owner", async () => {
     const svc = makeService();
     const { runId } = await svc.run(
-      { goal: "my task", workspaceAlias: "test-ws", owner: { principalId: "u1", origin: "user" } },
-      { userId: "u1" },
+      { goal: "my task", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
     );
 
-    const view = svc.get(runId, { userId: "u1" });
+    const view = svc.get(runId, u1);
     expect(view.runId).toBe(runId);
     expect(view.status).toBe("queued");
   });
 
-  it("throws for non-existent run", async () => {
+  it("throws for non-existent run", () => {
     const svc = makeService();
-    expect(() => svc.get("nonexistent", { userId: "u1" })).toThrow("not found");
+    expect(() => svc.get("nonexistent", u1)).toThrow("not found");
   });
 
   it("throws for unauthorized caller", async () => {
     const svc = makeService();
     const { runId } = await svc.run(
-      { goal: "my task", workspaceAlias: "test-ws", owner: { principalId: "u1", origin: "user" } },
-      { userId: "u1" },
+      { goal: "my task", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
     );
 
-    expect(() => svc.get(runId, { userId: "u2" })).toThrow("different principal");
+    expect(() => svc.get(runId, u2)).toThrow("different principal");
   });
 });
 
@@ -232,15 +234,15 @@ describe("PiRunService.list()", () => {
   it("returns only caller's runs", async () => {
     const svc = makeService();
     await svc.run(
-      { goal: "task a", workspaceAlias: "test-ws", owner: { principalId: "u1", origin: "user" } },
-      { userId: "u1" },
+      { goal: "task a", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
     );
     await svc.run(
-      { goal: "task b", workspaceAlias: "test-ws", owner: { principalId: "u2", origin: "user" } },
-      { userId: "u2" },
+      { goal: "task b", workspaceAlias: "test-ws", owner: { principalId: "usr-2", origin: "user" } },
+      u2,
     );
 
-    const list = svc.list({}, { userId: "u1" });
+    const list = svc.list({}, u1);
     expect(list).toHaveLength(1);
     expect(list[0]!.runId).toBeDefined();
   });

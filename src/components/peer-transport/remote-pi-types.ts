@@ -49,6 +49,12 @@ export interface RemotePiPublicProjectionV1 {
   generation: number;
   /** Last activity timestamp (ISO 8601) */
   last_activity_at?: string;
+  /** Coalesced, sanitized progress payload (progress events only). Never overlaps result_summary. */
+  progress?: {
+    step?: string;
+    message?: string;
+    percent?: number;
+  };
   /** Pending input information when awaiting_input */
   pending_input?: {
     request_id: string;
@@ -298,6 +304,15 @@ export function validatePublicProjection(projection: RemotePiPublicProjectionV1)
   validateBoundedString(projection.resume_capability, "resume_capability");
   validateBoundedString(projection.delivery?.error, "delivery.error");
 
+  if (projection.progress) {
+    validateBoundedString(projection.progress.step, "progress.step");
+    validateBoundedString(projection.progress.message, "progress.message");
+    if (projection.progress.percent !== undefined &&
+        (typeof projection.progress.percent !== "number" || projection.progress.percent < 0 || projection.progress.percent > 100)) {
+      throw new Error("progress.percent must be a number in [0, 100]");
+    }
+  }
+
   if (projection.pending_input) {
     validateBoundedString(projection.pending_input.request_id, "pending_input.request_id");
     validateBoundedString(projection.pending_input.title, "pending_input.title");
@@ -322,10 +337,10 @@ export function validatePublicProjection(projection: RemotePiPublicProjectionV1)
 }
 
 /**
- * Compute SHA-256 of a string.
+ * Compute SHA-256 of a string (synchronous).
  */
-export async function computeSha256(content: string): Promise<string> {
-  const crypto = await import("node:crypto");
+export function computeSha256(content: string): string {
+  const crypto = require("node:crypto") as typeof import("node:crypto");
   return crypto.createHash("sha256").update(content, "utf-8").digest("hex");
 }
 
@@ -334,6 +349,47 @@ export async function computeSha256(content: string): Promise<string> {
  */
 export function deriveEventId(runId: string, sequence: number): string {
   return `evt_${runId}_${sequence}`;
+}
+
+/**
+ * Build the canonical payload for content_sha256 hashing.
+ *
+ * This is the SINGLE source of truth for what the hash covers.
+ * It includes every field of the event EXCEPT `content_sha256` itself.
+ * Both the producer (owner) and the receiver (origin) must use this function.
+ *
+ * `projection` is always serialized as an object (not a pre-stringified string)
+ * to guarantee structural consistency. `occurred_at` IS included.
+ */
+export function canonicalEventPayload(event: Omit<RemotePiEventV1, "content_sha256">): string {
+  return JSON.stringify({
+    version: event.version,
+    event_id: event.event_id,
+    origin_peer: event.origin_peer,
+    origin_request_id: event.origin_request_id,
+    run_id: event.run_id,
+    card_id: event.card_id,
+    generation: event.generation,
+    sequence: event.sequence,
+    kind: event.kind,
+    occurred_at: event.occurred_at,
+    projection: event.projection,
+  });
+}
+
+/**
+ * Compute the content_sha256 for an event.
+ */
+export function computeEventHash(event: Omit<RemotePiEventV1, "content_sha256">): string {
+  return computeSha256(canonicalEventPayload(event));
+}
+
+/**
+ * Verify that an event's content_sha256 matches its canonical payload.
+ */
+export function verifyEventHash(event: RemotePiEventV1): boolean {
+  const { content_sha256, ...rest } = event;
+  return computeEventHash(rest) === content_sha256;
 }
 
 /**
@@ -360,6 +416,11 @@ export function validateEventV1(event: RemotePiEventV1): void {
   const expectedEventId = deriveEventId(event.run_id, event.sequence);
   if (event.event_id !== expectedEventId) {
     throw new Error(`Event ID mismatch: expected ${expectedEventId}, got ${event.event_id}`);
+  }
+
+  // Verify content_sha256 matches canonical payload
+  if (!verifyEventHash(event)) {
+    throw new Error(`Content hash mismatch for event ${event.event_id}`);
   }
 }
 
@@ -459,4 +520,45 @@ export function createControlError(
     outcome: "rejected",
     error: { code, message, details },
   };
+}
+
+/**
+ * Compute the canonical hash of a control request payload.
+ * Used for command ledger idempotency.
+ */
+export function computeControlRequestHash(request: RemotePiControlRequestV1): string {
+  return computeSha256(JSON.stringify({
+    version: request.version,
+    command_id: request.command_id,
+    run_id: request.run_id,
+    expected_generation: request.expected_generation,
+    command: request.command,
+  }));
+}
+
+/**
+ * Build the canonical approval statement that approval_statement_sha256 covers.
+ *
+ * This binds every field that makes the approval meaningful:
+ * run, origin peer, command, approving principal, timestamps, and generation.
+ */
+export function canonicalApprovalStatement(approval: Omit<ResumeApprovalV1, "approval_statement_sha256">): string {
+  return JSON.stringify({
+    approval_id: approval.approval_id,
+    run_id: approval.run_id,
+    origin_peer: approval.origin_peer,
+    command_id: approval.command_id,
+    approving_principal: approval.approving_principal,
+    issued_at: approval.issued_at,
+    expires_at: approval.expires_at,
+    interrupted_generation: approval.interrupted_generation,
+  });
+}
+
+/**
+ * Verify that an approval's approval_statement_sha256 matches its canonical payload.
+ */
+export function verifyApprovalStatement(approval: ResumeApprovalV1): boolean {
+  const { approval_statement_sha256, ...rest } = approval;
+  return computeSha256(canonicalApprovalStatement(rest)) === approval_statement_sha256;
 }

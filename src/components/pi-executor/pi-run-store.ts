@@ -116,6 +116,7 @@ export class PiRunStore {
     // #1358 — Remote Pi lifecycle event outbox
     this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_events (
       run_id TEXT NOT NULL,
+      card_id INTEGER NOT NULL,
       generation INTEGER NOT NULL,
       sequence INTEGER NOT NULL,
       event_id TEXT NOT NULL UNIQUE,
@@ -124,7 +125,8 @@ export class PiRunStore {
       origin_request_id TEXT NOT NULL,
       kind TEXT NOT NULL,
       projection_json TEXT NOT NULL,
-      created_at TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
       acknowledged_at TEXT,
       PRIMARY KEY (run_id, sequence)
     )`);
@@ -145,6 +147,16 @@ export class PiRunStore {
     )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_commands_run_id ON remote_pi_commands(run_id)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_commands_state ON remote_pi_commands(state)`);
+
+    // #1358 — Consumed resume approvals (single-use enforcement)
+    this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_approvals_consumed (
+      approval_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      origin_peer TEXT NOT NULL,
+      command_id TEXT NOT NULL,
+      consumed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_approvals_run ON remote_pi_approvals_consumed(run_id)`);
   }
 
   /**
@@ -449,6 +461,28 @@ export class PiRunStore {
     }
   }
 
+  /**
+   * #1358 — Get the most recent "ui" progress payload for a run. Used by the
+   * event producer to attach title/prompt/options to the awaiting_input
+   * public projection. Returns the parsed JSON object or null if no UI
+   * request is currently active.
+   */
+  getLatestUiRequest(runId: string): Record<string, unknown> | null {
+    const row = this.db.prepare(
+      `SELECT payload FROM pi_run_progress
+       WHERE run_id = ? AND kind = 'ui'
+       ORDER BY id DESC LIMIT 1`
+    ).get(runId) as { payload: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.payload);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch { /* fall through */ }
+    return null;
+  }
+
   // ── #1405: atomic lifecycle operations ──────────────────────────────────────
 
   /**
@@ -684,11 +718,88 @@ export class PiRunStore {
   }
 
   /**
+   * Atomically allocate the next sequence AND insert the event in one
+   * transaction. This is the only safe way to produce an event: the separate
+   * allocateNextSequence + appendEvent pair has a race window where two
+   * concurrent producers can both compute the same sequence and one of them
+   * silently drops its event when the INSERT hits a UNIQUE violation.
+   *
+   * The `computeFields` callback receives the freshly-allocated sequence and
+   * returns the derived `eventId` and `contentSha256`. The callback runs
+   * inside the transaction so the row is inserted with the same sequence the
+   * caller used to compute the hash.
+   *
+   * Returns { sequence, idempotent } on success. If a row already exists for
+   * (run_id, sequence) with the same content_sha256, the call is treated as
+   * an idempotent retry and returns the existing sequence.
+   */
+  appendEventAuto(input: {
+    runId: string;
+    cardId: number;
+    generation: number;
+    originPeer: string;
+    originRequestId: string;
+    kind: string;
+    occurredAt: string;
+    projectionJson: string;
+    computeFields: (sequence: number) => { eventId: string; contentSha256: string };
+  }): { sequence: number; idempotent: boolean } {
+    const fn = (): { sequence: number; idempotent: boolean } => {
+      // Step 1: read MAX inside the transaction. SQLite serializes writes, so
+      // the MAX we read here is stable until our transaction commits.
+      const row = this.db.prepare(
+        `SELECT COALESCE(MAX(sequence), 0) as max_seq FROM remote_pi_events WHERE run_id = ?`
+      ).get(input.runId) as { max_seq: number };
+      const sequence = row.max_seq + 1;
+
+      // Step 2: ask the caller to derive eventId and content_sha256 from
+      // the allocated sequence. Both fields depend on the sequence, so they
+      // must be computed AFTER allocation.
+      const { eventId, contentSha256 } = input.computeFields(sequence);
+
+      // Step 3: INSERT. If (run_id, sequence) already exists (because a prior
+      // idempotent retry lost its return value), compare content.
+      try {
+        this.db.prepare(`
+          INSERT INTO remote_pi_events
+            (run_id, card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        `).run(
+          input.runId, input.cardId, input.generation, sequence, eventId,
+          contentSha256, input.originPeer, input.originRequestId,
+          input.kind, input.projectionJson, input.occurredAt,
+        );
+        return { sequence, idempotent: false };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("UNIQUE constraint")) {
+          const existing = this.db.prepare(
+            `SELECT content_sha256 FROM remote_pi_events WHERE run_id = ? AND sequence = ?`
+          ).get(input.runId, sequence) as { content_sha256: string } | undefined;
+          if (existing && existing.content_sha256 === contentSha256) {
+            return { sequence, idempotent: true };
+          }
+          // Conflicting content for the same sequence — surface as a retryable
+          // conflict so the caller can either rebuild with a fresh timestamp
+          // or escalate. We do NOT swallow this; the producer must know.
+          throw new Error(
+            `Event conflict for run ${input.runId} sequence ${sequence}: ` +
+            `existing content_sha256 differs from new`,
+          );
+        }
+        throw err;
+      }
+    };
+    return this.db.transaction(fn);
+  }
+
+  /**
    * Append a lifecycle event to the durable outbox.
    * Returns false if an event with the same (run_id, sequence) already exists with different content.
    */
   appendEvent(input: {
     runId: string;
+    cardId: number;
     generation: number;
     sequence: number;
     eventId: string;
@@ -696,15 +807,17 @@ export class PiRunStore {
     originPeer: string;
     originRequestId: string;
     kind: string;
+    occurredAt: string;
     projectionJson: string;
   }): boolean {
     try {
       this.db.prepare(`
         INSERT INTO remote_pi_events
-          (run_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          (run_id, card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `).run(
         input.runId,
+        input.cardId,
         input.generation,
         input.sequence,
         input.eventId,
@@ -713,6 +826,7 @@ export class PiRunStore {
         input.originRequestId,
         input.kind,
         input.projectionJson,
+        input.occurredAt,
       );
       return true;
     } catch (err: unknown) {
@@ -737,6 +851,7 @@ export class PiRunStore {
    */
   getEventsAfter(input: { runId: string; afterSequence: number; limit: number }): Array<{
     run_id: string;
+    card_id: number;
     generation: number;
     sequence: number;
     event_id: string;
@@ -745,11 +860,12 @@ export class PiRunStore {
     origin_request_id: string;
     kind: string;
     projection_json: string;
+    occurred_at: string;
     created_at: string;
     acknowledged_at: string | null;
   }> {
     return this.db.prepare(`
-      SELECT run_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, created_at, acknowledged_at
+      SELECT run_id, card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at, acknowledged_at
       FROM remote_pi_events
       WHERE run_id = ? AND sequence > ?
       ORDER BY sequence ASC
@@ -762,6 +878,7 @@ export class PiRunStore {
    */
   getUnacknowledgedEvents(runId: string, limit: number): Array<{
     run_id: string;
+    card_id: number;
     generation: number;
     sequence: number;
     event_id: string;
@@ -770,10 +887,11 @@ export class PiRunStore {
     origin_request_id: string;
     kind: string;
     projection_json: string;
+    occurred_at: string;
     created_at: string;
   }> {
     return this.db.prepare(`
-      SELECT run_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, created_at
+      SELECT run_id, card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at
       FROM remote_pi_events
       WHERE run_id = ? AND acknowledged_at IS NULL
       ORDER BY sequence ASC
@@ -851,32 +969,47 @@ export class PiRunStore {
 
   /**
    * Reserve a command slot for idempotency.
-   * Returns true if the command is new, false if a conflicting state exists.
+   *
+   * Returns the reservation result:
+   * - 'new': slot was created, caller may proceed
+   * - 'replay_completed': identical payload already has a final response — return it
+   * - 'replay_dispatch_started': identical payload was dispatched but outcome unknown
+   *   (crash between dispatch and response persistence). Caller must return
+   *   outcome_unknown and MUST NOT re-dispatch.
+   * - 'conflict': different payload with same (peer, command_id) — reject
    */
   reserveCommand(input: {
     originPeer: string;
     commandId: string;
     runId: string;
     payloadHash: string;
-  }): boolean {
+  }): { result: "new" | "replay_completed" | "replay_dispatch_started" | "conflict"; state?: string } {
     try {
       this.db.prepare(`
         INSERT INTO remote_pi_commands (origin_peer, command_id, run_id, payload_hash, state, created_at, updated_at)
         VALUES (?, ?, ?, ?, 'received', datetime('now'), datetime('now'))
       `).run(input.originPeer, input.commandId, input.runId, input.payloadHash);
-      return true;
+      return { result: "new" };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('UNIQUE constraint')) {
         const existing = this.db.prepare(
           `SELECT state, payload_hash FROM remote_pi_commands WHERE origin_peer = ? AND command_id = ?`
         ).get(input.originPeer, input.commandId) as { state: string; payload_hash: string } | undefined;
-        if (!existing) return false;
-        // Allow replay if payload hash matches and state permits
-        if (existing.payload_hash === input.payloadHash) {
-          return ['received', 'dispatch_started'].includes(existing.state);
+        if (!existing) return { result: "conflict" };
+        if (existing.payload_hash !== input.payloadHash) {
+          return { result: "conflict", state: existing.state };
         }
-        return false; // Conflicting payload
+        // Same payload — return based on current state
+        if (existing.state === "completed" || existing.state === "rejected" || existing.state === "outcome_unknown") {
+          return { result: "replay_completed", state: existing.state };
+        }
+        if (existing.state === "dispatch_started" || existing.state === "received") {
+          // dispatch_started = crash before response persisted → outcome unknown
+          // received = concurrent retry before we started → outcome unknown
+          return { result: "replay_dispatch_started", state: existing.state };
+        }
+        return { result: "conflict", state: existing.state };
       }
       throw err;
     }
@@ -936,9 +1069,55 @@ export class PiRunStore {
   }
 
   /**
+   * Atomically consume a resume approval.
+   * Returns true if the approval was newly consumed (first use),
+   * false if it was already consumed by a different command.
+   *
+   * If the same (approval_id, command_id) is replayed, returns true
+   * (idempotent — the command ledger handles that case separately).
+   */
+  consumeApproval(input: {
+    approvalId: string;
+    runId: string;
+    originPeer: string;
+    commandId: string;
+  }): { consumed: true; firstUse: boolean } | { consumed: false; reason: string } {
+    try {
+      this.db.prepare(`
+        INSERT INTO remote_pi_approvals_consumed (approval_id, run_id, origin_peer, command_id)
+        VALUES (?, ?, ?, ?)
+      `).run(input.approvalId, input.runId, input.originPeer, input.commandId);
+      return { consumed: true, firstUse: true };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('UNIQUE constraint')) {
+        // Already consumed — check if it's the same command (idempotent replay)
+        const existing = this.db.prepare(
+          `SELECT command_id FROM remote_pi_approvals_consumed WHERE approval_id = ?`
+        ).get(input.approvalId) as { command_id: string } | undefined;
+        if (existing && existing.command_id === input.commandId) {
+          return { consumed: true, firstUse: false };
+        }
+        return { consumed: false, reason: "Approval already consumed by a different command" };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Check if an approval has been consumed.
+   */
+  isApprovalConsumed(approvalId: string): boolean {
+    const row = this.db.prepare(
+      `SELECT approval_id FROM remote_pi_approvals_consumed WHERE approval_id = ?`
+    ).get(approvalId) as { approval_id: string } | undefined;
+    return !!row;
+  }
+
+  /**
    * Get runs with unacknowledged events (for outbox draining).
    */
-  fallsWithUnacknowledgedEvents(): Array<{ run_id: string; origin_peer: string }> {
+  findRunsWithUnacknowledgedEvents(): Array<{ run_id: string; origin_peer: string }> {
     return this.db.prepare(`
       SELECT DISTINCT e.run_id, r.origin_peer
       FROM remote_pi_events e

@@ -193,14 +193,21 @@ describe("peer_delegate — #1357 Pi delegation", () => {
   });
 
   it("rejects invalid requestId characters", async () => {
+    mockGetPeerTable.mockReturnValue([
+      { name: "pi-host", alive: true, load: 0.5, capabilities: ["pi-executor", "workspace:my-ws"] },
+    ]);
+
     const result = JSON.parse(await mod.peerDelegateTool.execute({
       goal: "fix", executor: "pi", workspace_alias: "my-ws",
-      request_id: "bad id with spaces!",
+      peer: "pi-host", request_id: "bad id with spaces!",
     }));
     expect(result.error).toContain("request_id must match");
   });
 
   it("returns duplicate when existing delegation with same requestId", async () => {
+    mockGetPeerTable.mockReturnValue([
+      { name: "pi-host", alive: true, load: 0.5, capabilities: ["pi-executor", "workspace:my-ws"] },
+    ]);
     mockKanbanFindRemoteDelegation.mockReturnValue({
       id: 1, title: "[remote:pi-host] fix", source: "peer", type: "remote",
       source_id: "dup-req", source_peer: "pi-host",
@@ -214,17 +221,19 @@ describe("peer_delegate — #1357 Pi delegation", () => {
 
     const result = JSON.parse(await mod.peerDelegateTool.execute({
       goal: "fix", executor: "pi", workspace_alias: "my-ws",
-      request_id: "dup-req",
+      peer: "pi-host", request_id: "dup-req",
     }));
 
     expect(result.duplicate).toBe(true);
     expect(result.remote_task_id).toBe(200);
     expect(result.local_card_id).toBe(1);
-    // Should NOT have called delegateTask again
     expect(mockDelegateTask).not.toHaveBeenCalled();
   });
 
   it("detects requestId conflict with different payload", async () => {
+    mockGetPeerTable.mockReturnValue([
+      { name: "pi-host", alive: true, load: 0.5, capabilities: ["pi-executor", "workspace:my-ws"] },
+    ]);
     mockKanbanFindRemoteDelegation.mockReturnValue({
       id: 1, title: "[remote:pi-host] fix", source: "peer", type: "remote",
       source_id: "conflict-req", source_peer: "pi-host",
@@ -236,7 +245,7 @@ describe("peer_delegate — #1357 Pi delegation", () => {
 
     const result = JSON.parse(await mod.peerDelegateTool.execute({
       goal: "fix", executor: "pi", workspace_alias: "my-ws",
-      request_id: "conflict-req",
+      peer: "pi-host", request_id: "conflict-req",
     }));
 
     expect(result.reason).toBe("request_id_conflict");

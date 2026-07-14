@@ -292,7 +292,8 @@ export class AgentApiServer {
    */
   pushToPeer(peerName: string, method: string, payload: unknown): boolean {
     // Strict allowlist of notification-only methods
-    const ALLOWED_PUSH: readonly string[] = ["notify", "heartbeat", "ping", "peer-status.v1"];
+    // #1358: pi.lifecycle.v1 is a push from owner to origin (read-only lifecycle event)
+    const ALLOWED_PUSH: readonly string[] = ["notify", "heartbeat", "ping", "peer-status.v1", "pi.lifecycle.v1"];
     if (!ALLOWED_PUSH.includes(method)) return false;
     const ws = this.peerWsConnections.get(peerName);
     if (!ws || ws.readyState !== ws.OPEN) return false;
@@ -324,6 +325,12 @@ export class AgentApiServer {
           const { getHealthStore } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
           getHealthStore().ingestSignedStatus("wss", peerName, msg.payload);
         } catch { /* best effort */ }
+        return;
+      }
+
+      // #1358: Handle lifecycle event push (owner → origin)
+      if (msg.type === "push" && msg.method === "pi.lifecycle.v1" && msg.payload) {
+        this.handleRemotePiLifecyclePush(peerName, msg.payload, msg.id).catch(err => logAndSwallow(TAG, "pi.lifecycle.v1", err));
         return;
       }
 
@@ -415,6 +422,34 @@ export class AgentApiServer {
       const { kanbanGetCard } = await import("./tasks/kanban-board.js");
       const card = kanbanGetCard((msg.payload as any).taskId);
       result = card ? { taskId: card.id, status: card.status, result: card.result_summary, error: card.error } : { error: "not found" };
+    } else if (msg.method === "pi.events.list.v1") {
+      // #1358 — origin requests catch-up events from owner
+      const { getRemotePiDelivery } = await import("./peer-transport/remote-pi-registry.js");
+      const delivery = getRemotePiDelivery();
+      if (!delivery) {
+        ws.send(JSON.stringify({ type: "response", id: msg.id, error: { code: "unavailable", message: "Remote Pi delivery not available" } }));
+        return;
+      }
+      result = await delivery.listEvents(msg.payload as any, peerName);
+    } else if (msg.method === "pi.events.ack.v1") {
+      // #1358 — origin acknowledges events to owner
+      const { getRemotePiDelivery } = await import("./peer-transport/remote-pi-registry.js");
+      const delivery = getRemotePiDelivery();
+      if (!delivery) {
+        ws.send(JSON.stringify({ type: "response", id: msg.id, error: { code: "unavailable", message: "Remote Pi delivery not available" } }));
+        return;
+      }
+      const p = msg.payload as { run_id: string; sequence: number };
+      result = delivery.acknowledgeEvent(peerName, p.run_id, p.sequence);
+    } else if (msg.method === "pi.control.v1") {
+      // #1358 — origin sends control command to owner
+      const { getRemotePiControlHandler } = await import("./peer-transport/remote-pi-registry.js");
+      const handler = getRemotePiControlHandler();
+      if (!handler) {
+        ws.send(JSON.stringify({ type: "response", id: msg.id, error: { code: "unavailable", message: "Remote Pi control handler not available" } }));
+        return;
+      }
+      result = await handler.handleControlRequest({ peerName, principalId: `peer:${peerName}` }, msg.payload as any);
     }
     ws.send(JSON.stringify({ type: "response", id: msg.id, payload: result }));
   }
@@ -694,6 +729,46 @@ export class AgentApiServer {
         await this.handleV1Callback(body, res, auth.caller);
       });
       return;
+    }
+
+    // #1358 — Remote Pi lifecycle and control routes
+    // POST /v1/pi-events/push — owner pushes lifecycle event to origin
+    if (url === "/v1/pi-events/push" && method === "POST") {
+      this.handleAsync(req, res, async () => {
+        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
+        if (!auth) return;
+        await this.handleRemotePiEventPush(JSON.parse(auth.rawBody), res, auth.caller);
+      });
+      return;
+    }
+    // GET /v1/pi-runs/:runId/events — origin pulls catch-up events from owner
+    // POST /v1/pi-runs/:runId/events/acknowledge — origin acknowledges events to owner
+    // POST /v1/pi-runs/:runId/control — origin sends control command to owner
+    const piRunMatch = url.match(/^\/v1\/pi-runs\/([^/]+)\/(events|control)(?:\/(acknowledge))?$/);
+    if (piRunMatch) {
+      const [, runId, subPath, action] = piRunMatch;
+      if (subPath === "events" && action === "acknowledge" && method === "POST") {
+        this.handleAsync(req, res, async () => {
+          const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
+          if (!auth) return;
+          await this.handleRemotePiEventsAck(JSON.parse(auth.rawBody), res, auth.caller, runId);
+        });
+        return;
+      }
+      if (subPath === "events" && !action && method === "GET") {
+        const caller = this.authenticateBodylessPeer(req, res);
+        if (caller === null) return;
+        this.handleRemotePiEventsList(url, res, caller, runId);
+        return;
+      }
+      if (subPath === "control" && !action && method === "POST") {
+        this.handleAsync(req, res, async () => {
+          const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
+          if (!auth) return;
+          await this.handleRemotePiControl(JSON.parse(auth.rawBody), res, auth.caller);
+        });
+        return;
+      }
     }
 
     // #1011 — Orc worker management (localhost only, no auth — same process)
@@ -1252,6 +1327,95 @@ export class AgentApiServer {
     const { channelGetSince } = require("./tasks/kanban-channel.js") as typeof import("./tasks/kanban-channel.js");
     const messages = channelGetSince(cardId, since);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ messages }));
+  }
+
+  // ── #1358 — Remote Pi lifecycle and control route handlers ─────────────
+
+  /** POST /v1/pi-events/push — owner pushes lifecycle event to origin. */
+  private async handleRemotePiEventPush(body: unknown, res: ServerResponse, caller: string): Promise<void> {
+    const { getRemotePiOriginReducer } = await import("./peer-transport/remote-pi-registry.js");
+    const reducer = getRemotePiOriginReducer();
+    if (!reducer) {
+      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi origin reducer not available" }));
+      return;
+    }
+    const { loadPeerConfig } = await import("./peer-config.js");
+    const localPeerName = loadPeerConfig().self.name;
+    const { handlePushLifecycleEvent } = await import("./peer-transport/remote-pi-agent-api-integration.js");
+    const result = await handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, caller, body as any);
+    if (result.success) {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
+    } else {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: result.error }));
+    }
+  }
+
+  /** GET /v1/pi-runs/:runId/events — origin pulls catch-up events from owner. */
+  private handleRemotePiEventsList(url: string, res: ServerResponse, caller: string, runId: string): void {
+    const afterMatch = url.match(/[?&]after_sequence=([^&]+)/);
+    const limitMatch = url.match(/[?&]limit=([^&]+)/);
+    const { getRemotePiDelivery } = require("./peer-transport/remote-pi-registry.js") as typeof import("./peer-transport/remote-pi-registry.js");
+    const delivery = getRemotePiDelivery();
+    if (!delivery) {
+      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi delivery not available" }));
+      return;
+    }
+    const after_sequence = afterMatch ? parseInt(afterMatch[1], 10) : 0;
+    const limit = limitMatch ? parseInt(limitMatch[1], 10) : 100;
+    delivery.listEvents({ version: 1, run_id: runId, after_sequence, limit }, caller).then(result => {
+      if ("error" in result) {
+        res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: result.error }));
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
+      }
+    });
+  }
+
+  /** POST /v1/pi-runs/:runId/events/acknowledge — origin acknowledges events to owner. */
+  private async handleRemotePiEventsAck(body: unknown, res: ServerResponse, caller: string, runId: string): Promise<void> {
+    const { getRemotePiDelivery } = await import("./peer-transport/remote-pi-registry.js");
+    const delivery = getRemotePiDelivery();
+    if (!delivery) {
+      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi delivery not available" }));
+      return;
+    }
+    const typed = body as { sequence?: number };
+    if (typeof typed.sequence !== "number") {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Missing sequence" }));
+      return;
+    }
+    const result = delivery.acknowledgeEvent(caller, runId, typed.sequence);
+    if ("error" in result) {
+      res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: result.error }));
+    } else {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
+    }
+  }
+
+  /** POST /v1/pi-runs/:runId/control — origin sends control command to owner. */
+  private async handleRemotePiControl(body: unknown, res: ServerResponse, caller: string): Promise<void> {
+    const { getRemotePiControlHandler } = await import("./peer-transport/remote-pi-registry.js");
+    const handler = getRemotePiControlHandler();
+    if (!handler) {
+      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi control handler not available" }));
+      return;
+    }
+    const principalId = `peer:${caller}`;
+    const response = await handler.handleControlRequest({ peerName: caller, principalId }, body as any);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+  }
+
+  /** #1358 — WS push: owner pushes lifecycle event to origin (pi.lifecycle.v1). */
+  private async handleRemotePiLifecyclePush(ownerPeer: string, event: unknown, msgId?: string): Promise<void> {
+    const { getRemotePiOriginReducer } = await import("./peer-transport/remote-pi-registry.js");
+    const reducer = getRemotePiOriginReducer();
+    if (!reducer) return; // origin reducer not configured — not an error
+    const { loadPeerConfig } = await import("./peer-config.js");
+    const localPeerName = loadPeerConfig().self.name;
+    const { handlePushLifecycleEvent } = await import("./peer-transport/remote-pi-agent-api-integration.js");
+    await handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, ownerPeer, event as any);
+    // Push frames don't get a correlated response — the durable outbox + ack
+    // protocol handles reliability.
   }
 
   /** #675 — POST /v1/callbacks: remote peer delivers task result. Body already authenticated and parsed by caller. */

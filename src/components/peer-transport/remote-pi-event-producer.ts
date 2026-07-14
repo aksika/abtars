@@ -11,17 +11,19 @@ import type {
   RemotePiEventV1,
   RemotePiEventKind,
   RemotePiPublicProjectionV1,
-  DeliveryPolicy,
-  DeliveryStatus,
 } from "./remote-pi-types.js";
 import {
-  computeSha256,
+  computeEventHash,
   deriveEventId,
   validatePublicProjection,
-  validateBoundedString,
   REMOTE_PI_BOUNDS,
 } from "./remote-pi-types.js";
+import { buildPublicProjection, sanitizeString } from "./remote-pi-projection.js";
 import { logInfo, logDebug, logTrace } from "../logger.js";
+
+/** Re-exported for callers (e.g. tests) that imported the symbol from this
+ * module before the projection builder was extracted to its own file. */
+export { buildPublicProjection };
 
 const TAG = "remote-pi-event-producer";
 
@@ -30,128 +32,37 @@ export interface EventProducerDeps {
 }
 
 /**
- * Sanitizes a string to fit within bounds.
+ * Coalesce a raw progress payload into a bounded typed projection field.
+ * Drops everything but `step`, `message`, and `percent`; caps each field by
+ * byte count so the result fits the projection bounds.
  */
-function sanitizeString(value: string | null | undefined, fieldName: string): string | undefined {
-  if (!value) return undefined;
-  const bytes = Buffer.byteLength(value, "utf-8");
-  if (bytes <= REMOTE_PI_BOUNDS.MAX_PROJECTION_STRING) {
-    return value;
-  }
-  // Truncate with ellipsis
-  const truncated = Buffer.from(value.slice(0, Math.floor(value.length * REMOTE_PI_BOUNDS.MAX_PROJECTION_STRING / bytes))).toString("utf-8");
-  return truncated.slice(0, -3) + "...";
-}
-
-/**
- * Parse usage from JSON string if present.
- */
-function parseUsage(usageJson: string | null | undefined): { input_tokens?: number; output_tokens?: number; total_tokens?: number } | undefined {
-  if (!usageJson) return undefined;
+function coalesceProgress(payload: string): RemotePiPublicProjectionV1["progress"] {
+  if (!payload) return undefined;
+  let parsed: Record<string, unknown> = {};
   try {
-    const parsed = JSON.parse(usageJson);
-    if (typeof parsed !== "object" || parsed === null) return undefined;
-    const usage: { input_tokens?: number; output_tokens?: number; total_tokens?: number } = {};
-    if (typeof parsed.input_tokens === "number") usage.input_tokens = parsed.input_tokens;
-    if (typeof parsed.output_tokens === "number") usage.output_tokens = parsed.output_tokens;
-    if (typeof parsed.total_tokens === "number") usage.total_tokens = parsed.total_tokens;
-    return Object.keys(usage).length > 0 ? usage : undefined;
+    const obj = JSON.parse(payload);
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      parsed = obj as Record<string, unknown>;
+    }
   } catch {
     return undefined;
   }
-}
 
-/**
- * Determine delivery policy from run metadata (stored in kanban_board notes).
- */
-function getDeliveryPolicy(run: PiRunRecord): DeliveryPolicy {
-  // The delivery policy is stored in the kanban_board notes as JSON
-  // For now, default to leave_remote unless we have specific metadata
-  // This would be enhanced by #1357 integration
-  return "leave_remote";
-}
+  const MAX_STEP_BYTES = 200;
+  const MAX_MESSAGE_BYTES = 1_000;
+  const out: { step?: string; message?: string; percent?: number } = {};
 
-/**
- * Build a public projection from a run record.
- */
-export function buildPublicProjection(run: PiRunRecord): RemotePiPublicProjectionV1 {
-  const projection: RemotePiPublicProjectionV1 = {
-    status: run.status,
-    generation: run.executionGeneration,
-    last_activity_at: run.lastRpcActivityAt || run.updatedAt,
-  };
-
-  // Add pending input if present
-  if (run.pendingRequestId && run.pendingRequestType && run.status === "awaiting_input") {
-    projection.pending_input = {
-      request_id: run.pendingRequestId,
-      type: run.pendingRequestType,
-      // Title, prompt, and options would come from the request ledger
-      // For now, we only include the minimal required fields
-    };
+  if (typeof parsed.step === "string") {
+    out.step = sanitizeString(parsed.step, "progress.step", MAX_STEP_BYTES);
+  }
+  if (typeof parsed.message === "string") {
+    out.message = sanitizeString(parsed.message, "progress.message", MAX_MESSAGE_BYTES);
+  }
+  if (typeof parsed.percent === "number" && Number.isFinite(parsed.percent)) {
+    out.percent = Math.min(100, Math.max(0, Math.trunc(parsed.percent)));
   }
 
-  // Add terminal information if available
-  if (["completed", "failed", "cancelled"].includes(run.status)) {
-    if (run.resultSummary) {
-      projection.result_summary = sanitizeString(run.resultSummary, "result_summary");
-    }
-    if (run.error && run.status !== "completed") {
-      projection.error_summary = sanitizeString(run.error, "error_summary");
-    }
-    const usage = parseUsage(run.usageJson);
-    if (usage) {
-      projection.usage = usage;
-    }
-    if (run.changedFilesSummary) {
-      projection.changed_files_summary = sanitizeString(run.changedFilesSummary, "changed_files_summary");
-    }
-    if (run.resumeCapability === "available") {
-      // A resume capability token would be generated here
-      // For now, we use a placeholder derived from run metadata
-      projection.resume_capability = `res_${run.id}_${run.executionGeneration}`;
-    }
-  }
-
-  // Add delivery outcome if terminal
-  if (["completed", "failed", "cancelled"].includes(run.status)) {
-    const policy = getDeliveryPolicy(run);
-    projection.delivery = {
-      policy,
-      status: "not_requested", // Would be populated from actual delivery execution
-    };
-  }
-
-  return projection;
-}
-
-/**
- * Coalesce progress payload to fit bounds.
- */
-function coalesceProgressPayload(kind: string, payload: string): string {
-  try {
-    const parsed = JSON.parse(payload);
-    if (typeof parsed !== "object" || parsed === null) return "{}";
-
-    // Limit progress payload size
-    const bytes = Buffer.byteLength(payload, "utf-8");
-    if (bytes <= REMOTE_PI_BOUNDS.MAX_PROJECTION_STRING) {
-      return payload;
-    }
-
-    // Create a minimal progress summary
-    const minimal: Record<string, unknown> = {
-      kind,
-      timestamp: new Date().toISOString(),
-    };
-    if (parsed.step !== undefined) minimal.step = String(parsed.step).slice(0, 50);
-    if (parsed.message !== undefined) minimal.message = String(parsed.message).slice(0, 200);
-    if (parsed.percent !== undefined) minimal.percent = Math.min(100, Math.max(0, Number(parsed.percent) || 0));
-
-    return JSON.stringify(minimal);
-  } catch {
-    return "{}";
-  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -183,51 +94,72 @@ export class RemotePiEventProducer {
       return null;
     }
 
-    // Build public projection
-    const projection = buildPublicProjection(run);
+    // Build public projection. Pull the most recent UI request details
+    // (title/prompt/options) from progress entries so awaiting_input events
+    // carry the bounded public projection the spec requires.
+    const uiRequest = run.pendingRequestId && run.status === "awaiting_input"
+      ? this.deps.store.getLatestUiRequest(run.id)
+      : null;
+    const projection = buildPublicProjection(run, uiRequest);
     validatePublicProjection(projection);
 
-    // Coalesce progress payload if needed
+    // Attach coalesced progress payload to the dedicated `progress` field.
+    // Never overwrite terminal fields (result_summary) with progress data.
     if (kind === "progress" && progressPayload) {
-      // Progress events don't need full projection, just minimal state
-      projection.result_summary = coalesceProgressPayload(kind, progressPayload);
+      projection.progress = coalesceProgress(progressPayload);
     }
 
+    // The occurred_at timestamp is stable for the duration of this call.
+    // Two concurrent producers can share the same ms-granularity timestamp
+    // and that's fine — the sequence is what makes the events unique.
+    const occurredAt = new Date().toISOString();
     const projectionJson = JSON.stringify(projection);
 
-    // Allocate sequence
-    const sequence = this.deps.store.allocateNextSequence(run.id);
-    const eventId = deriveEventId(run.id, sequence);
-
-    // Compute content hash
-    const contentSha256 = await computeSha256(JSON.stringify({
-      version: 1,
-      event_id: eventId,
-      run_id: run.id,
-      card_id: run.cardId,
-      generation: run.executionGeneration,
-      sequence,
-      kind,
-      origin_peer: originPeer,
-      origin_request_id: originRequestId,
-      projection: projectionJson,
-    }));
-
-    // Append to outbox
-    const appended = this.deps.store.appendEvent({
-      runId: run.id,
-      generation: run.executionGeneration,
-      sequence,
-      eventId,
-      contentSha256,
-      originPeer,
-      originRequestId,
-      kind,
-      projectionJson,
-    });
-
-    if (!appended) {
-      logDebug(TAG, `Failed to append event for run ${run.id} sequence ${sequence}: conflicting event`);
+    // Atomic allocate + append inside a single transaction. The store
+    // allocates the next sequence, then invokes computeFields to derive
+    // eventId and content_sha256. We never compute a hash for a sequence
+    // we didn't actually get, so concurrent producers cannot collide.
+    let sequence: number;
+    let eventId: string;
+    try {
+      const result = this.deps.store.appendEventAuto({
+        runId: run.id,
+        cardId: run.cardId,
+        generation: run.executionGeneration,
+        originPeer,
+        originRequestId,
+        kind,
+        occurredAt,
+        projectionJson,
+        computeFields: (seq) => {
+          const eId = deriveEventId(run.id, seq);
+          const hash = computeEventHash({
+            version: 1,
+            event_id: eId,
+            origin_peer: originPeer,
+            origin_request_id: originRequestId,
+            run_id: run.id,
+            card_id: run.cardId,
+            generation: run.executionGeneration,
+            sequence: seq,
+            kind,
+            occurred_at: occurredAt,
+            projection,
+          });
+          return { eventId: eId, contentSha256: hash };
+        },
+      });
+      sequence = result.sequence;
+      eventId = result.idempotent
+        ? deriveEventId(run.id, result.sequence)
+        : deriveEventId(run.id, result.sequence);
+    } catch (err) {
+      // Conflicting content for the same sequence — surface as a no-op so
+      // the caller can decide whether to retry with a fresh timestamp or
+      // escalate. This is the only path that drops an event.
+      logDebug(TAG,
+        `Skipping event for run ${run.id} kind=${kind}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return null;
     }
 
@@ -399,9 +331,11 @@ export class RemotePiEventProducer {
 
   /**
    * Build a complete event envelope from stored event data.
+   * Uses the card_id and occurred_at stored alongside the event.
    */
-  async buildEventEnvelope(row: {
+  buildEventEnvelope(row: {
     run_id: string;
+    card_id: number;
     generation: number;
     sequence: number;
     event_id: string;
@@ -410,10 +344,10 @@ export class RemotePiEventProducer {
     origin_request_id: string;
     kind: string;
     projection_json: string;
+    occurred_at: string;
     created_at: string;
-  }): Promise<RemotePiEventV1> {
+  }): RemotePiEventV1 {
     const projection = JSON.parse(row.projection_json) as RemotePiPublicProjectionV1;
-    validatePublicProjection(projection);
 
     return {
       version: 1,
@@ -422,11 +356,11 @@ export class RemotePiEventProducer {
       origin_peer: row.origin_peer,
       origin_request_id: row.origin_request_id,
       run_id: row.run_id,
-      card_id: 0, // Would be looked up from the run
+      card_id: row.card_id,
       generation: row.generation,
       sequence: row.sequence,
       kind: row.kind as RemotePiEventKind,
-      occurred_at: row.created_at,
+      occurred_at: row.occurred_at,
       projection,
     };
   }

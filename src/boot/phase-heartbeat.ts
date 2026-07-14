@@ -108,6 +108,24 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
           transport.checkWsConnections();
         }
       } catch { /* best effort — transport may not be up yet */ }
+
+      // #1358: Drain unacknowledged remote Pi lifecycle events to connected peers.
+      // Uses the existing HB tick — no new recurring timer.
+      try {
+        const { getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
+        const delivery = getRemotePiDelivery();
+        if (delivery) {
+          // Register WS clients from the transport so delivery can push
+          const { getPeerTransport } = await import("../components/peer-transport/index.js");
+          const transport = getPeerTransport() as any;
+          if (transport?.wsClients) {
+            for (const [name, client] of transport.wsClients as Map<string, any>) {
+              delivery.registerWsClient(name, client);
+            }
+          }
+          await delivery.drainOutbox();
+        }
+      } catch { /* best effort */ }
     },
   });
 

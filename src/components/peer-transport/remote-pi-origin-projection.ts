@@ -8,7 +8,7 @@
 import type { RemotePiEventV1, RemotePiPublicProjectionV1, RemotePiEventCursor } from "./remote-pi-types.js";
 import { validateEventV1 } from "./remote-pi-types.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
-import { logInfo, logDebug, logTrace, logError } from "../logger.js";
+import { logInfo, logDebug, logTrace, logWarn, logError } from "../logger.js";
 
 const TAG = "remote-pi-origin-projection";
 
@@ -31,6 +31,11 @@ export interface RemotePiOriginProjection {
     title?: string;
     prompt?: string;
     options?: Array<{ id: string; label: string }>;
+  };
+  latest_progress?: {
+    step?: string;
+    message?: string;
+    percent?: number;
   };
   result_summary?: string;
   error_summary?: string;
@@ -190,33 +195,46 @@ export class RemotePiOriginReducer {
   /**
    * Reduce an event into the projection.
    * Returns true if the projection changed, false if rejected/idempotent.
+   *
+   * GAP HANDLING: events must arrive contiguously. An event whose sequence
+   * exceeds latest_sequence + 1 is REJECTED (not buffered) so that catch-up
+   * can later deliver the missing range. Once the gap is filled, the
+   * previously-rejected event will be accepted on re-delivery.
    */
   reduce(event: RemotePiEventV1): boolean {
-    // Validate event
+    // Validate event (includes hash verification)
     validateEventV1(event);
 
     // Load existing projection
-    let projection = this.store.getProjection(event.run_id);
+    const existing = this.store.getProjection(event.run_id);
 
     // Initialize projection for first event
-    if (!projection) {
+    if (!existing) {
       if (event.sequence !== 1) {
         logError(TAG, `First event for run ${event.run_id} has sequence ${event.sequence}, expected 1`);
         return false;
       }
-      projection = this._initializeProjection(event);
+      // First event — initialize, store, and return immediately
+      const projection = this._initializeProjection(event);
+      this.store.upsertProjection(projection);
+      this._notifyListeners(event.run_id, projection);
+      logTrace(TAG, `Initialized projection for run ${event.run_id} at seq ${projection.latest_sequence}`);
+      return true;
     }
 
-    // Validate monotonic sequence
+    const projection = existing;
+
+    // Idempotent duplicate: same sequence already processed
     if (event.sequence <= projection.latest_sequence) {
       logTrace(TAG, `Ignoring stale event ${event.event_id} (seq ${event.sequence} <= ${projection.latest_sequence})`);
       return false;
     }
 
-    // Check for gaps
+    // GAP DETECTION: reject events that would skip a sequence.
+    // The origin must not advance past a gap — catch-up must fill it first.
     if (event.sequence > projection.latest_sequence + 1) {
-      logDebug(TAG, `Gap detected for run ${event.run_id}: have ${projection.latest_sequence}, got ${event.sequence}`);
-      // Don't reject - allow later catch-up to fill gaps
+      logWarn(TAG, `Gap detected for run ${event.run_id}: have ${projection.latest_sequence}, got ${event.sequence} (expected ${projection.latest_sequence + 1}) — rejecting, catch-up required`);
+      return false;
     }
 
     // Validate monotonic generation
@@ -346,6 +364,7 @@ export class RemotePiOriginReducer {
       latest_status: event.projection.status,
       last_activity_at: event.occurred_at,
       pending_input: event.projection.pending_input,
+      latest_progress: event.projection.progress,
       result_summary: event.projection.result_summary,
       error_summary: event.projection.error_summary,
       usage: event.projection.usage,
@@ -395,6 +414,13 @@ export class RemotePiOriginReducer {
     }
     if (event.projection.delivery !== undefined) {
       updated.delivery = event.projection.delivery;
+    }
+    // Apply progress field if present. Cleared on terminal/awaiting events to avoid stale
+    // progress surviving a status change.
+    if (event.projection.progress !== undefined) {
+      updated.latest_progress = event.projection.progress;
+    } else if (["completed", "failed", "cancelled", "awaiting_input", "input_cleared"].includes(event.kind)) {
+      updated.latest_progress = undefined;
     }
 
     return updated;

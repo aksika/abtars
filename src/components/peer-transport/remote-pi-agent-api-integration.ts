@@ -38,27 +38,35 @@ export interface RemotePiApiDeps {
   deliveryManager?: RemotePiDeliveryManager;
   /** Origin-side projection reducer */
   originReducer?: RemotePiOriginReducer;
+  /** Local peer name (for origin-side ownership checks) */
+  localPeerName?: string;
 }
 
 /**
- * Handler for POST /v1/pi-events/push (owner side).
+ * Handler for POST /v1/pi-events/push (origin side).
+ *
+ * The authenticated peer is the OWNER who is pushing the event to us.
+ * The event's origin_peer field identifies who the event is FOR (us).
+ * So we verify: event.origin_peer === localPeerName.
  */
 export async function handlePushLifecycleEvent(
   deps: RemotePiApiDeps,
   authenticatedPeer: string,
   event: RemotePiEventV1
 ): Promise<{ success: boolean; error?: string }> {
-  if (!deps.deliveryManager) {
-    return { success: false, error: "Delivery manager not available" };
+  if (!deps.originReducer) {
+    return { success: false, error: "Origin reducer not available" };
   }
 
   try {
-    // Validate event
+    // Validate event (includes hash verification)
     validateEventV1(event);
 
-    // Verify ownership
-    if (event.origin_peer !== authenticatedPeer) {
-      return { success: false, error: "Event origin_peer does not match authenticated peer" };
+    // Verify this event is addressed to us (the origin).
+    // The owner pushes events whose origin_peer === our local peer name.
+    // authenticatedPeer is the owner; they need NOT match origin_peer.
+    if (deps.localPeerName && event.origin_peer !== deps.localPeerName) {
+      return { success: false, error: "Event origin_peer does not match local peer" };
     }
 
     // Check payload size
@@ -67,15 +75,13 @@ export async function handlePushLifecycleEvent(
       return { success: false, error: `Event exceeds ${REMOTE_PI_BOUNDS.MAX_EVENT_SIZE} bytes` };
     }
 
-    // Store and reduce on origin side
-    if (deps.originReducer) {
-      const accepted = deps.originReducer.reduce(event);
-      if (!accepted) {
-        logTrace(TAG, `Rejected event ${event.event_id} for run ${event.run_id}`);
-        return { success: false, error: "Event rejected by reducer" };
-      }
-      logTrace(TAG, `Accepted event ${event.event_id} for run ${event.run_id}`);
+    // Reduce into local projection
+    const accepted = deps.originReducer.reduce(event);
+    if (!accepted) {
+      logTrace(TAG, `Rejected event ${event.event_id} for run ${event.run_id}`);
+      return { success: false, error: "Event rejected by reducer" };
     }
+    logTrace(TAG, `Accepted event ${event.event_id} for run ${event.run_id}`);
 
     return { success: true };
   } catch (err) {

@@ -29,6 +29,8 @@ export class PiExecutor {
   private readonly live = new Map<string, OwnedProcess>();
   private _stopped = false;
   private _onCapacityReleased: (() => void) | null = null;
+  /** #1358 — Lifecycle transition hook for remote Pi event production. */
+  private _onTransition: ((runId: string, fromStatus: string | undefined, toStatus: string) => void) | null = null;
 
   constructor(config: PiExecutorConfig, store: PiRunStore) {
     this.config = config;
@@ -43,6 +45,18 @@ export class PiExecutor {
   /** Register a callback fired when a Pi slot is released. */
   onCapacityReleased(cb: () => void): void {
     this._onCapacityReleased = cb;
+  }
+
+  /** #1358 — Register a callback fired on run state transitions. */
+  onTransition(cb: (runId: string, fromStatus: string | undefined, toStatus: string) => void): void {
+    this._onTransition = cb;
+  }
+
+  /** #1358 — Fire the transition hook for a run. */
+  private _fireTransition(runId: string, fromStatus: string | undefined, toStatus: string): void {
+    if (this._onTransition) {
+      try { this._onTransition(runId, fromStatus, toStatus); } catch { /* best effort */ }
+    }
   }
 
   /**
@@ -250,7 +264,11 @@ export class PiExecutor {
       }
     }
 
-    return this.store.casTransition(run.id, "starting", "running", { piSessionId, piSessionFile });
+    const transitioned = this.store.casTransition(run.id, "starting", "running", { piSessionId, piSessionFile });
+    if (transitioned) {
+      this._fireTransition(run.id, "starting", "running");
+    }
+    return transitioned;
   }
 
   private async _submitPrompt(runId: string, goal: string): Promise<boolean> {
@@ -348,6 +366,7 @@ export class PiExecutor {
       } else {
         nerve.fire("card:failed", settlement.cardId);
       }
+      this._fireTransition(owned.runId, undefined, settlement.outcome);
     } else {
       logWarn(TAG, `Terminal CAS lost for ${owned.runId} (gen=${owned.generation} outcome=${outcome}): ${settlement.reason}`);
     }
@@ -389,6 +408,7 @@ export class PiExecutor {
     if (!this.store.casTransition(runId, ["running", "awaiting_input", "starting"], "cancelling", {
       pendingRequestId: null, pendingRequestType: null,
     })) return;
+    this._fireTransition(runId, undefined, "cancelling");
 
     owned.client.abort().catch(() => {});
 
@@ -435,7 +455,20 @@ export class PiExecutor {
             runId, generation: owned.generation, requestId: reqId, requestType: reqType as PiPendingRequestType,
           });
           if (result.ok) {
-            this.store.addProgress(runId, "ui", JSON.stringify({ requestId: reqId, type: reqType, title: data?.title }));
+            // Persist the full UI request payload (title/prompt/options/etc) so
+            // the awaiting_input public projection can surface them to the
+            // origin. Without this, the origin sees only request_id+type and
+            // cannot render a choice for the user.
+            this.store.addProgress(runId, "ui", JSON.stringify({
+              requestId: reqId,
+              type: reqType,
+              title: data?.title,
+              description: data?.description ?? data?.prompt,
+              options: data?.options,
+              defaultValue: data?.defaultValue,
+              filePattern: data?.filePattern,
+            }));
+            this._fireTransition(runId, "running", "awaiting_input");
           } else {
             logWarn(TAG, `UI request rejected for ${runId} (gen=${owned.generation}, req=${reqId}): ${result.reason}`);
           }
@@ -504,9 +537,10 @@ export class PiExecutor {
     for (const [runId, owned] of this.live) {
       if (owned.abortTimer) clearTimeout(owned.abortTimer);
       try { await owned.client.close(); } catch { /* ignore */ }
-      this.store.casTransition(runId, ["starting", "running", "awaiting_input", "cancelling"], "interrupted", {
+      const interrupted = this.store.casTransition(runId, ["starting", "running", "awaiting_input", "cancelling"], "interrupted", {
         pendingRequestId: null, pendingRequestType: null,
       });
+      if (interrupted) this._fireTransition(runId, undefined, "interrupted");
     }
     this.live.clear();
   }

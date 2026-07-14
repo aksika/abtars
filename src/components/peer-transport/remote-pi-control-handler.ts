@@ -20,11 +20,13 @@ import {
   validateControlRequestV1,
   validateResumeApproval,
   createControlError,
-  computeSha256,
+  computeControlRequestHash,
+  verifyApprovalStatement,
   REMOTE_PI_BOUNDS,
 } from "./remote-pi-types.js";
 import type { PiRunStore } from "../pi-executor/pi-run-store.js";
-import { logInfo, logDebug, logTrace, logError } from "../logger.js";
+import { buildPublicProjection } from "./remote-pi-projection.js";
+import { logInfo, logDebug, logTrace, logWarn, logError } from "../logger.js";
 
 const TAG = "remote-pi-control-handler";
 
@@ -88,41 +90,57 @@ export class RemotePiControlHandler {
     }
 
     // Compute payload hash for idempotency
-    const payloadHash = await computeSha256(JSON.stringify(request));
+    const payloadHash = computeControlRequestHash(request);
 
     // Reserve command slot (idempotency)
-    const reserved = this.deps.store.reserveCommand({
+    const reservation = this.deps.store.reserveCommand({
       originPeer: authenticatedPeer.peerName,
       commandId: request.command_id,
       runId: request.run_id,
       payloadHash,
     });
 
-    if (!reserved) {
-      // Check if there's an existing completed command
+    if (reservation.result === "conflict") {
+      return createControlError(request.command_id, "CONFLICTING_COMMAND", "Command ID reused with different payload");
+    }
+
+    if (reservation.result === "replay_completed") {
+      // Return the previous final response
       const existing = this.deps.store.getCommand(authenticatedPeer.peerName, request.command_id);
-      if (existing && ["completed", "rejected", "outcome_unknown"].includes(existing.state)) {
-        // Return the previous response
-        const response = existing.response_json ? JSON.parse(existing.response_json) as RemotePiControlResponseV1 : null;
-        if (response) {
-          logTrace(TAG, `Returning cached response for command ${request.command_id} state=${existing.state}`);
-          return response;
-        }
+      if (existing?.response_json) {
+        logTrace(TAG, `Returning cached response for command ${request.command_id} state=${existing.state}`);
+        return JSON.parse(existing.response_json) as RemotePiControlResponseV1;
       }
-      return createControlError(request.command_id, "DUPLICATE_COMMAND", "Conflicting command already exists");
+      // Fall through if no response stored (shouldn't happen, but be safe)
+      return createControlError(request.command_id, "INTERNAL_ERROR", "Command in terminal state without response");
     }
 
-    // Update state to dispatch_started for side-effecting commands
-    const isSideEffecting = request.command.action !== "status";
-    if (isSideEffecting) {
-      this.deps.store.updateCommand({
-        originPeer: authenticatedPeer.peerName,
-        commandId: request.command_id,
-        state: "dispatch_started",
-      });
+    if (reservation.result === "replay_dispatch_started") {
+      // Crash between dispatch_started and response persistence.
+      // NEVER re-dispatch a side effect. Return outcome_unknown.
+      // Reconciliation may later convert this to a proven outcome.
+      const outcomeUnknown: RemotePiControlResponseV1 = {
+        version: 1,
+        command_id: request.command_id,
+        outcome: "outcome_unknown",
+        error: {
+          code: "INTERNAL_ERROR",
+          message: "Command outcome unknown — dispatch started but no response was persisted. Reconciliation required.",
+        },
+      };
+      // Persist the outcome_unknown response so future replays are consistent
+      this._recordCommandOutcome(authenticatedPeer.peerName, request.command_id, outcomeUnknown);
+      logWarn(TAG, `Command ${request.command_id} replayed after dispatch_started — returning outcome_unknown`);
+      return outcomeUnknown;
     }
 
-    // Validate expected generation
+    // reservation.result === "new" — proceed
+
+    // Validate expected generation BEFORE writing dispatch_started. Stale
+    // requests are hard rejects: they don't need the dispatch barrier because
+    // no Pi side effect will fire. Writing the barrier first would pollute
+    // the command ledger with rows that are immediately transitioned to
+    // rejected on a flood of stale requests.
     if (request.expected_generation !== run.executionGeneration) {
       const error = createControlError(
         request.command_id,
@@ -131,6 +149,18 @@ export class RemotePiControlHandler {
       );
       this._recordCommandOutcome(authenticatedPeer.peerName, request.command_id, error);
       return error;
+    }
+
+    // Update state to dispatch_started for side-effecting commands BEFORE
+    // calling Pi. This must happen before the side effect so a crash here
+    // yields outcome_unknown on the next replay.
+    const isSideEffecting = request.command.action !== "status";
+    if (isSideEffecting) {
+      this.deps.store.updateCommand({
+        originPeer: authenticatedPeer.peerName,
+        commandId: request.command_id,
+        state: "dispatch_started",
+      });
     }
 
     // Dispatch based on action
@@ -348,6 +378,11 @@ export class RemotePiControlHandler {
       return createControlError(request.command_id, "INVALID_APPROVAL", message);
     }
 
+    // Verify approval statement hash matches canonical payload
+    if (!verifyApprovalStatement(approval)) {
+      return createControlError(request.command_id, "INVALID_APPROVAL", "Approval statement hash does not match canonical payload");
+    }
+
     // Verify approval bindings
     if (approval.run_id !== request.run_id) {
       return createControlError(request.command_id, "INVALID_APPROVAL", "Approval run_id mismatch");
@@ -372,6 +407,21 @@ export class RemotePiControlHandler {
     if (issuedAt > now) {
       return createControlError(request.command_id, "INVALID_APPROVAL", "Approval issued in the future");
     }
+
+    // Atomically consume the approval — single-use enforcement.
+    // This must happen BEFORE calling Pi resume.
+    const consumed = this.deps.store.consumeApproval({
+      approvalId: approval.approval_id,
+      runId: request.run_id,
+      originPeer: authenticatedPeer.peerName,
+      commandId: request.command_id,
+    });
+    if (!consumed.consumed) {
+      return createControlError(request.command_id, "INVALID_APPROVAL", consumed.reason);
+    }
+    // If !firstUse, this is an idempotent replay of the same command+approval.
+    // The command ledger (dispatch_started/outcome_unknown) handles that path.
+    // At this point we've already passed the ledger check, so firstUse is expected.
 
     // Verify run is resumable
     if (run.resumeCapability !== "available") {
@@ -398,7 +448,7 @@ export class RemotePiControlHandler {
         return createControlError(request.command_id, "MISSING_RESUME_CAPABILITY", message);
       }
       if (message.includes("workspace policy")) {
-        return createControlError(request.command_id, "INTERNAL_ERROR", message);
+        return createControlError(request.command_id, "SESSION_CONTINUITY_FAILED", message);
       }
       return createControlError(request.command_id, "INTERNAL_ERROR", message);
     }
@@ -426,42 +476,16 @@ export class RemotePiControlHandler {
   }
 
   /**
-   * Build a public projection from a run record.
+   * Build a public projection from a run record. Delegates to the shared
+   * projection builder so the control response cannot drift from the event
+   * producer's projection.
    */
   private _buildPublicProjection(run: PiRunRecord) {
-    const projection: any = {
-      status: run.status,
-      generation: run.executionGeneration,
-      last_activity_at: run.lastRpcActivityAt || run.updatedAt,
-    };
-
-    if (run.pendingRequestId && run.pendingRequestType && run.status === "awaiting_input") {
-      projection.pending_input = {
-        request_id: run.pendingRequestId,
-        type: run.pendingRequestType,
-      };
-    }
-
-    if (["completed", "failed", "cancelled"].includes(run.status)) {
-      if (run.resultSummary) {
-        projection.result_summary = run.resultSummary.slice(0, 5000);
-      }
-      if (run.error && run.status !== "completed") {
-        projection.error_summary = run.error.slice(0, 5000);
-      }
-      if (run.usageJson) {
-        try {
-          projection.usage = JSON.parse(run.usageJson);
-        } catch {}
-      }
-      if (run.changedFilesSummary) {
-        projection.changed_files_summary = run.changedFilesSummary.slice(0, 5000);
-      }
-      if (run.resumeCapability === "available") {
-        projection.resume_capability = `res_${run.id}_${run.executionGeneration}`;
-      }
-    }
-
-    return projection;
+    // Pull the most recent UI request details for awaiting_input so the
+    // status response carries title/prompt/options just like the events do.
+    const uiRequest = run.pendingRequestId && run.status === "awaiting_input"
+      ? this.deps.store.getLatestUiRequest(run.id)
+      : null;
+    return buildPublicProjection(run, uiRequest);
   }
 }

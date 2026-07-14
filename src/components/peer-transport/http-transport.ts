@@ -36,6 +36,20 @@ export class HttpTransport implements PeerTransport {
           }
           return;
         }
+        if (method === "pi.lifecycle.v1") {
+          // #1358: Owner pushed a lifecycle event to us (origin side)
+          import("./remote-pi-registry.js").then(({ getRemotePiOriginReducer }) => {
+            const reducer = getRemotePiOriginReducer();
+            if (!reducer) return; // not configured
+            import("../peer-config.js").then(({ loadPeerConfig }) => {
+              const localPeerName = loadPeerConfig().self.name;
+              import("./remote-pi-agent-api-integration.js").then(({ handlePushLifecycleEvent }) => {
+                handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, name, payload as any).catch(() => {});
+              }).catch(() => {});
+            }).catch(() => {});
+          }).catch(() => {});
+          return;
+        }
         if (method === "callback") {
           // Inbound callback from peer — fire as if it arrived via HTTP /v1/callbacks
           const p = payload as { task_id: number; status: string; result_summary?: string; error?: string; tokens_used?: number };
@@ -237,11 +251,20 @@ export class HttpTransport implements PeerTransport {
     if (ws?.connected) {
       return await ws.call("pi.events.list.v1", request);
     }
-    // Fallback to HTTPS
+    // Fallback to HTTPS. Build the query string with URLSearchParams so
+    // values are properly encoded — run_id is a UUID-like string with no
+    // special characters, but the encoder keeps this safe for future
+    // input shapes (e.g. encoded run references).
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
-    const bodyStr = JSON.stringify(request);
-    const response = await this.httpCall(entry, peer, "GET", `/v1/pi-runs/${(request as any).run_id}/events?after_sequence=${(request as any).after_sequence}&limit=${(request as any).limit ?? 100}`);
+    const req = request as { run_id: string; after_sequence: number; limit?: number };
+    const params = new URLSearchParams();
+    params.set("after_sequence", String(req.after_sequence));
+    if (req.limit !== undefined) params.set("limit", String(req.limit));
+    const response = await this.httpCall(
+      entry, peer, "GET",
+      `/v1/pi-runs/${encodeURIComponent(req.run_id)}/events?${params.toString()}`,
+    );
     return JSON.parse(response);
   }
 
