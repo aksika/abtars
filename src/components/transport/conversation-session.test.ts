@@ -88,4 +88,29 @@ describe("ConversationSession #1335", () => {
     expect(last.disposition).toBe("complete");
     expect(last.assistantMessageId).toBe(99);
   });
+
+  it("reset clears checkpoint-related in-memory state (#1335 finding #7)", () => {
+    const s = new ConversationSession("You are a bot", 128000);
+    // Populate #1335 in-memory state.
+    s.currentTurnId = "turn-stale";
+    s.turnBoundaries.push({
+      turnId: "turn-stale",
+      userMessageId: 7,
+      disposition: "orphaned",
+    });
+    s.totalPromptTokens = 1000;
+    s.recordAtomicGrowth(1500); // records +500 growth
+    expect(s.recentAtomicGrowth.length).toBe(1);
+    expect(s.turnBoundaries.length).toBe(1);
+    expect(s.currentTurnId).not.toBeNull();
+
+    s.reset("Fresh system prompt");
+
+    // A new conversation must not inherit stale boundary/growth state.
+    expect(s.currentTurnId).toBeNull();
+    expect(s.turnBoundaries).toEqual([]);
+    expect(s.recentAtomicGrowth).toEqual([]);
+    expect(s.totalPromptTokens).toBe(0);
+    expect(s.messages).toEqual([{ role: "system", content: "Fresh system prompt" }]);
+  });
 });

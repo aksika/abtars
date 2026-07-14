@@ -89,6 +89,13 @@ export class ConversationSession {
     this.totalPromptTokens = 0;
     this.reasoningEffort = null;
     this.showReasoning = false;
+    // #1335 finding #7: clear checkpoint-related in-memory state so a new
+    // conversation cannot inherit stale turn boundaries/growth. The durable
+    // checkpoint pointer is cleared through CheckpointEngine.reset() once
+    // #1406 wires the engine into the production reset path.
+    this.currentTurnId = null;
+    this.turnBoundaries = [];
+    this.recentAtomicGrowth = [];
   }
 
   /** Roll back to last user message — remove everything after it for clean fallback. */

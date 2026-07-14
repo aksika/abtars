@@ -62,6 +62,10 @@ export interface ContextReserveInput {
   currentTurnTokens: number;
   /** Estimated tokens for in-flight (unresolved) tool exchanges. */
   inFlightTokens: number;
+  /** Measured tokens of the current stable context (active checkpoint +
+   *  verbatim suffix) that must fit within the history budget. #1335 finding #2:
+   *  compaction is decided against this real value, not the budget itself. */
+  stableContextTokens: number;
   /** Recent atomic growth measurements for growth reserve calculation. */
   recentAtomicGrowthTokens: number[];
 }
@@ -91,7 +95,7 @@ export interface ContextReserve {
  * @returns ContextReserve with all computed values.
  */
 export function calculateReserve(input: ContextReserveInput): ContextReserve {
-  const { contextWindow, configuredMaxOutput, clampedMaxOutput, safetyMargin, stableSystemTokens, toolSchemaTokens, volatileContextTokens, currentTurnTokens, inFlightTokens, recentAtomicGrowthTokens } = input;
+  const { contextWindow, configuredMaxOutput, clampedMaxOutput, safetyMargin, stableSystemTokens, toolSchemaTokens, volatileContextTokens, currentTurnTokens, inFlightTokens, stableContextTokens, recentAtomicGrowthTokens } = input;
 
   // Handle unknown context window
   if (contextWindow <= 0) {
@@ -126,12 +130,13 @@ export function calculateReserve(input: ContextReserveInput): ContextReserve {
   const MAX_GROWTH_RESERVE = Math.floor(contextWindow * 0.1);
   const growthReserve = Math.max(MIN_GROWTH_RESERVE, Math.min(p90Growth, MAX_GROWTH_RESERVE));
 
-  // Check if compaction is due: the stable prefix (checkpoint + suffix) must
-  // fit in historyBudget after accounting for growth reserve on the next turn.
-  // For now, use a simple check: historyBudget minus growth reserve is too small
-  // to accommodate the existing stable context.
-  const stableContextTokens = historyBudget; // simplified: we're estimating what we have
-  const compactionDue = stableContextTokens + growthReserve > historyBudget && recentAtomicGrowthTokens.length >= 2;
+  // Check if compaction is due: the *measured* stable context (checkpoint +
+  // verbatim suffix) plus the bounded growth reserve must fit within the
+  // history budget. #1335 finding #2: the prior code compared historyBudget
+  // against itself, so compaction was always requested after two growth
+  // samples regardless of the real prefix size. Now the actual measured
+  // stable-context token count is compared against the budget less reserve.
+  const compactionDue = stableContextTokens + growthReserve > historyBudget && historyBudget > 0;
 
   return {
     usableInput: Math.max(0, usableInput),

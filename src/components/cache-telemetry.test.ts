@@ -11,6 +11,7 @@ import {
   stableHash,
   sessionHash,
   candidateKeyHash,
+  firstChangedMessageIndex,
   type ContextCacheTelemetryV1,
 } from "./cache-telemetry.js";
 
@@ -119,5 +120,36 @@ describe("cache-telemetry", () => {
     expect(sessionHash("session-1")).toBe(sessionHash("session-1"));
     expect(candidateKeyHash("endpoint", "model")).toBe(candidateKeyHash("endpoint", "model"));
     expect(sessionHash("session-1")).not.toBe(sessionHash("session-2"));
+  });
+
+  describe("firstChangedMessageIndex (#1335 finding #6)", () => {
+    it("returns undefined when there is no prior sequence", () => {
+      expect(firstChangedMessageIndex(["a", "b"], [])).toBeUndefined();
+    });
+
+    it("returns undefined when the prefix is unchanged", () => {
+      expect(firstChangedMessageIndex(["a", "b", "c"], ["a", "b", "c"])).toBeUndefined();
+    });
+
+    it("locates a rewritten earlier message", () => {
+      // Prior [a,b,c], current [a,X,c] → divergence at index 1.
+      expect(firstChangedMessageIndex(["a", "X", "c"], ["a", "b", "c"])).toBe(1);
+    });
+
+    it("locates a change at the very first message", () => {
+      expect(firstChangedMessageIndex(["Z", "b", "c"], ["a", "b", "c"])).toBe(0);
+    });
+
+    it("locates an appended (newly durable) message at the tail", () => {
+      // Prior [a,b,c], current [a,b,c,d] → common prefix unchanged, divergence
+      // is the appended message at index 3.
+      expect(firstChangedMessageIndex(["a", "b", "c", "d"], ["a", "b", "c"])).toBe(3);
+    });
+
+    it("does not report a change when current is a prefix of prior (no divergence)", () => {
+      // Prior longer than current, common range identical → no index reported
+      // (overall digest equality is the caller's responsibility).
+      expect(firstChangedMessageIndex(["a", "b"], ["a", "b", "c"])).toBeUndefined();
+    });
   });
 });

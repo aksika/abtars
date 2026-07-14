@@ -66,6 +66,9 @@ export class CheckpointEngine {
       volatileContextTokens: volatileContext.reduce((s, v) => s + estimateTokensFromChars(v.content.length), 0),
       currentTurnTokens: estimateTokensFromChars(currentUserText.length),
       inFlightTokens: inFlightUnits.reduce((s, u) => s + estimateTokensFromChars(u.content.length), 0),
+      // #1335 finding #2: feed the *measured* checkpoint + suffix size so the
+      // compaction decision reflects the real stable prefix, not the budget.
+      stableContextTokens: Math.ceil(view.estimatedTokens),
       recentAtomicGrowthTokens: recentGrowth ?? [],
     };
     const reserve = calculateReserve(reserveInput);
@@ -106,27 +109,69 @@ export class CheckpointEngine {
   /**
    * Select and generate a checkpoint when headroom requires compaction.
    * Returns the new checkpoint ID, or -1 if no compaction was needed or CAS failed.
+   *
+   * #1335 findings #3 and #5: selection consumes `maxHistoryTokens` and
+   * `minRecentTokens`, groups messages into complete durable turn units
+   * (a user message with its assistant response and any tool exchange),
+   * retains the minimum recent complete suffix, compacts only whole turns,
+   * and derives `firstKeptMessageId` from the actual first suffix message ID
+   * rather than `sourceEnd + 1`. Callers must pass durable abmind transcript
+   * IDs (#1406 wires the live store).
    */
   async maybeCompact(
     chatId: string,
     messages: Array<{ id: number; role: string; content: string }>,
     budget: { maxHistoryTokens: number; minRecentTokens: number; reason: StableContextBudget["reason"]; activeModel: string },
   ): Promise<number> {
-    const ptr = this.store.getActivePointer(chatId);
-    const generation = ptr?.generation ?? 0;
+    if (messages.length < 2) return -1;
 
-    // Find the eligible checkpoint chunk: oldest contiguous complete turns
-    const eligibleEnd = messages.length - Math.max(1, Math.floor(messages.length * 0.2));
-    if (eligibleEnd <= 0) return -1;
+    const units = groupTurnUnits(messages);
+    if (units.length < 2) return -1; // need at least one compactable turn + suffix
 
-    const sourceMessages = messages.slice(0, eligibleEnd);
+    const totalTokens = units.reduce((s, u) => s + u.tokens, 0);
+    // maxHistoryTokens gate: if the real stable context already fits, there is
+    // nothing to compact (unless explicitly requested). This is how the budget
+    // is consumed rather than the old fixed 80% slice.
+    if (budget.reason !== "manual" && budget.maxHistoryTokens > 0 && totalTokens <= budget.maxHistoryTokens) {
+      return -1;
+    }
+
+    // Determine the minimum recent complete suffix: walk backward from the
+    // newest unit, retaining whole turns until the recent token floor is met.
+    // The trailing (possibly in-flight) unit is always retained.
+    let suffixTokens = 0;
+    let suffixUnitStart = units.length - 1;
+    for (let u = units.length - 1; u >= 0; u--) {
+      suffixTokens += units[u]!.tokens;
+      suffixUnitStart = u;
+      if (suffixTokens >= budget.minRecentTokens) break;
+    }
+    // If the entire conversation is the suffix, nothing is left to compact.
+    if (suffixUnitStart <= 0) return -1;
+
+    // Compact contiguous complete turns from the oldest. An incomplete leading
+    // turn (no final assistant response) may not be checkpointed, so compact
+    // only the contiguous complete prefix that precedes the suffix.
+    let compactEndUnit = suffixUnitStart - 1;
+    while (compactEndUnit >= 0 && !units[compactEndUnit]!.complete) compactEndUnit--;
+    if (compactEndUnit < 0) return -1; // no complete turn eligible for compaction
+
+    const sourceUnitSlice = units.slice(0, compactEndUnit + 1);
+    // Source message range from durable IDs of the unit boundaries.
+    const sourceStart = sourceUnitSlice[0]!.startId;
+    const sourceEnd = sourceUnitSlice[sourceUnitSlice.length - 1]!.endId;
+    // #1335 finding #5: firstKeptMessageId is the real first suffix message ID,
+    // not sourceEnd + 1 (which assumed contiguous integer IDs).
+    const firstKeptMessageId = units[suffixUnitStart]!.startId;
+
+    const sourceMessages = messages.slice(sourceUnitSlice[0]!.startIdx, sourceUnitSlice[sourceUnitSlice.length - 1]!.endIdx + 1);
     if (sourceMessages.length < 2) return -1;
-
-    const sourceStart = sourceMessages[0]!.id;
-    const sourceEnd = sourceMessages[sourceMessages.length - 1]!.id;
     const sourceText = sourceMessages.map(m => `${m.role}:${m.content}`).join("\n");
     const sourceTokens = Math.ceil(sourceText.length / 4);
     const sourceDigest = computeDigest(sourceText);
+
+    const ptr = this.store.getActivePointer(chatId);
+    const generation = ptr?.generation ?? 0;
 
     // Summarize
     const budget_tokens = Math.max(2000, Math.min(Math.floor(sourceTokens * 0.2), 12000));
@@ -137,8 +182,6 @@ export class CheckpointEngine {
     const checkpointTokens = Math.ceil(summary.length / 4);
     const checkpointDigest = computeDigest(summary);
     if (checkpointTokens >= sourceTokens) return -1; // inflation guard
-
-    const firstKeptMessageId = sourceEnd + 1;
 
     // Atomically commit
     return this.store.commitCheckpoint(chatId, {
@@ -173,4 +216,55 @@ import { createHash } from "node:crypto";
 
 function computeDigest(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 16);
+}
+
+/** A durable conversational turn: one user message through its final
+ *  assistant response (including any in-between tool exchange). #1335. */
+interface TurnUnit {
+  /** start index into the source message array (inclusive). */
+  startIdx: number;
+  /** end index into the source message array (inclusive). */
+  endIdx: number;
+  /** durable ID of the first message in the unit. */
+  startId: number;
+  /** durable ID of the last message in the unit. */
+  endId: number;
+  /** true when the unit ends with a final assistant message (answerable turn). */
+  complete: boolean;
+  /** estimated token weight of the whole unit. */
+  tokens: number;
+}
+
+/** Group a flat message array into whole durable turn units. A unit starts at a
+ *  `user` message (or the array head) and extends through the following
+ *  assistant/tool messages up to the next `user`. It is complete iff its last
+ *  message is an assistant message. #1335 finding #3. */
+function groupTurnUnits(messages: Array<{ id: number; role: string; content: string }>): TurnUnit[] {
+  const units: TurnUnit[] = [];
+  let startIdx = 0;
+  for (let i = 0; i < messages.length; i++) {
+    const startsNewTurn = messages[i]!.role === "user" && i > startIdx;
+    if (!startsNewTurn) continue;
+    units.push(makeUnit(messages, startIdx, i - 1));
+    startIdx = i;
+  }
+  if (startIdx < messages.length) {
+    units.push(makeUnit(messages, startIdx, messages.length - 1));
+  }
+  return units;
+}
+
+function makeUnit(messages: Array<{ id: number; role: string; content: string }>, startIdx: number, endIdx: number): TurnUnit {
+  let chars = 0;
+  for (let i = startIdx; i <= endIdx; i++) {
+    chars += messages[i]!.content.length;
+  }
+  return {
+    startIdx,
+    endIdx,
+    startId: messages[startIdx]!.id,
+    endId: messages[endIdx]!.id,
+    complete: messages[endIdx]!.role === "assistant",
+    tokens: Math.ceil(chars / 4),
+  };
 }

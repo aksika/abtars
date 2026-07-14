@@ -85,6 +85,9 @@ describe("calculateReserve", () => {
       volatileContextTokens: 300,
       currentTurnTokens: 100,
       inFlightTokens: 0,
+      // Small by default so compaction is NOT due; tests that want compaction
+      // pass a large stableContextTokens. (#1335 finding #2)
+      stableContextTokens: 1000,
       recentAtomicGrowthTokens: [800, 1200, 900, 1500, 1100],
       ...overrides,
     };
@@ -129,13 +132,43 @@ describe("calculateReserve", () => {
     expect(r.growthReserve).toBeGreaterThanOrEqual(512);
   });
 
-  it("compactionDue is false when there's enough headroom", () => {
+  it("compactionDue is false when there's enough headroom for the real stable prefix", () => {
+    // historyBudget is large; stableContextTokens (1000) + growthReserve fits.
     const r = calculateReserve(makeInput({
       contextWindow: 1_000_000,
+      stableContextTokens: 1000,
       recentAtomicGrowthTokens: [800],
     }));
-    // Only 1 growth sample → compactionDue requires >= 2
     expect(r.compactionDue).toBe(false);
+  });
+
+  it("compactionDue is false when stable prefix plus growth reserve fits even with growth data (#1335 finding #2)", () => {
+    // Regression for the old bug where compaction was requested whenever
+    // >= 2 growth samples existed, regardless of the real prefix size.
+    const r = calculateReserve(makeInput({
+      contextWindow: 128_000,
+      stableContextTokens: 5000,
+      recentAtomicGrowthTokens: [800, 1200, 900, 1500, 1100],
+    }));
+    // historyBudget = 128000 - 4096 - 4096 - 2900 = 116908; 5000 + growthReserve
+    // (P90=1500, capped) is far below that → no compaction.
+    expect(r.compactionDue).toBe(false);
+  });
+
+  it("compactionDue is true only when the measured stable prefix overflows the budget (#1335 finding #2)", () => {
+    // Shrink the window so the real stable prefix (20000) + reserve overflows.
+    const r = calculateReserve(makeInput({
+      contextWindow: 30_000,
+      stableContextTokens: 20_000,
+      recentAtomicGrowthTokens: [1500, 1600],
+    }));
+    // usableInput = 30000 - 4096 - 4096 = 21808
+    // historyBudget = 21808 - (500+2000+300+100) = 18908
+    // growthReserve = P90 of [1500,1600] capped at 3000 = 1600
+    // 20000 + 1600 = 21600 > 18908 → compaction due
+    expect(r.historyBudget).toBeLessThan(20_000 + r.growthReserve);
+    expect(r.compactionDue).toBe(true);
+    expect(r.reason).toMatch(/history budget insufficient/);
   });
 
   it("compactionDue is false with unknown context window", () => {

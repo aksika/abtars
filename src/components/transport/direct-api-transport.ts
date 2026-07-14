@@ -13,7 +13,7 @@ import { getToolSchemas, executeToolCall } from "./tool-registry.js";
 import { classifyError } from "./model-health-registry.js";
 import { normalizeToolCalls, parseErrorStatus, parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
 import { recordUsage } from "../usage-tracker.js";
-import { recordCacheTelemetry, stableHash, sessionHash, candidateKeyHash } from "../cache-telemetry.js";
+import { recordCacheTelemetry, stableHash, sessionHash, candidateKeyHash, firstChangedMessageIndex } from "../cache-telemetry.js";
 import { clampMaxOutputTokens, estimateTokensFromChars, calculateReserve } from "./token-budget.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport, PromptRequestContext, RuntimeStatusSnapshot, RuntimeUsageSnapshot } from "./kiro-transport.js";
@@ -85,6 +85,9 @@ export class DirectApiTransport implements IKiroTransport {
   private _priorStablePrefixDigest = "";
   /** #1335: previous turn's stable prefix token count for churn detection. */
   private _priorStablePrefixTokens = 0;
+  /** #1335 finding #6: per-message digests of the previous stable prefix, used
+   *  to locate the first changed message for churn evidence. */
+  private _priorStablePrefixMessageDigests: string[] = [];
   private readonly useProviderLib: boolean;
   private _lastPromptTokens = 0;
   private _lastCompletionTokens = 0;
@@ -675,11 +678,13 @@ export class DirectApiTransport implements IKiroTransport {
         }
       }
       session.addAssistant(answer);
-      // #1335: complete the current turn boundary
+      // #1335: complete the current turn boundary. The durable assistant
+      // transcript ID is assigned by abmind when the final response is
+      // persisted (#1406 wires it); do NOT store a token count as a message
+      // ID (#1335 finding #5). Mark the turn complete by disposition only.
       if (session.currentTurnId) {
         const lastBoundary = session.turnBoundaries[session.turnBoundaries.length - 1];
         if (lastBoundary && lastBoundary.turnId === session.currentTurnId) {
-          lastBoundary.assistantMessageId = this._lastPromptTokens;
           lastBoundary.disposition = "complete";
         }
         session.currentTurnId = null;
@@ -699,10 +704,31 @@ export class DirectApiTransport implements IKiroTransport {
     return (typeof last === "string" ? last : null) ?? "(max turns reached)";
   }
 
-  /** #1335: Fire background compaction if headroom requires it. */
+  /** #1335: Fire background compaction if headroom requires it.
+   *  NOTE: the durable abmind transcript IDs that the checkpoint store keys on
+   *  are supplied by #1406's production wiring. This path stays dormant until
+   *  `checkpointEngine` is assigned. */
   private async maybeCompactBackground(sessionKey: string, session: ConversationSession): Promise<void> {
     if (!this.checkpointEngine) return;
     try {
+      // Build raw messages list from the session (excluding system/volatile).
+      // Durable abmind message IDs are threaded here once #1406 wires the
+      // engine; until then this path does not execute.
+      const rawMessages = session.messages
+        .filter(m => m.role !== "system")
+        .map((m, i) => ({
+          id: i,
+          role: m.role,
+          content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+        }));
+
+      // #1335 finding #2: measure the actual stable-context size (checkpoint +
+      // verbatim suffix) rather than the budget, so compaction is requested
+      // only when the real prefix plus growth reserve overflows the budget.
+      const stableContextTokens = Math.ceil(rawMessages.reduce(
+        (s, m) => s + estimateTokensFromChars(m.content.length), 0,
+      ));
+
       const reserve = calculateReserve({
         contextWindow: this._activeMaxContext,
         configuredMaxOutput: this.config.maxOutput,
@@ -713,18 +739,10 @@ export class DirectApiTransport implements IKiroTransport {
         volatileContextTokens: 500,
         currentTurnTokens: 100,
         inFlightTokens: 0,
+        stableContextTokens,
         recentAtomicGrowthTokens: session.recentAtomicGrowth,
       });
       if (!reserve.compactionDue) return;
-
-      // Build raw messages list from the session (excluding system)
-      const rawMessages = session.messages
-        .filter(m => m.role !== "system")
-        .map((m, i) => ({
-          id: i,
-          role: m.role,
-          content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-        }));
 
       await this.checkpointEngine.maybeCompact(sessionKey, rawMessages, {
         maxHistoryTokens: reserve.historyBudget,
@@ -747,13 +765,16 @@ export class DirectApiTransport implements IKiroTransport {
     const digest = stableHash(prefixStr);
     const priorDigest = this._priorStablePrefixDigest;
     const priorTokens = this._priorStablePrefixTokens;
+
+    // #1335 finding #6: per-message digests of the current prefix, compared
+    // against the allowlisted prior sequence to find the first changed message.
+    // The old code compared each prefix message against itself, so a changed
+    // prefix never produced a meaningful index.
+    const currentMessageDigests = prefixMessages.map(m =>
+      stableHash(`${m.role}:${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`),
+    );
     const firstChangedIndex = priorDigest && digest !== priorDigest
-      ? prefixMessages.findIndex((m, i) => {
-          const prevMsg = i < prefixMessages.length ? prefixMessages[i] : undefined;
-          if (!prevMsg) return true;
-          return stableHash(`${prevMsg.role}:${typeof prevMsg.content === "string" ? prevMsg.content : JSON.stringify(prevMsg.content)}`) !==
-                 stableHash(`${m.role}:${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`);
-        })
+      ? firstChangedMessageIndex(currentMessageDigests, this._priorStablePrefixMessageDigests)
       : undefined;
 
     recordCacheTelemetry({
@@ -778,6 +799,7 @@ export class DirectApiTransport implements IKiroTransport {
 
     this._priorStablePrefixDigest = digest;
     this._priorStablePrefixTokens = stablePrefixTokens;
+    this._priorStablePrefixMessageDigests = currentMessageDigests;
   }
 
   private parseErrorStatus(err: unknown): number { return parseErrorStatus(err); }

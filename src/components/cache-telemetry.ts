@@ -214,3 +214,26 @@ export function sessionHash(sessionKey: string): string {
 export function candidateKeyHash(endpoint: string, model: string): string {
   return stableHash(`${endpoint}::${model}`);
 }
+
+/**
+ * Find the first index at which the current per-message prefix digest sequence
+ * diverges from the prior turn's sequence. Returns undefined when there is no
+ * prior sequence or no divergence within the common range and no appended tail.
+ *
+ * #1335 finding #6: the previous transport implementation compared each prefix
+ * message against itself, so a changed prefix never produced a meaningful index.
+ * This pure helper compares the current message digests against the allowlisted
+ * prior sequence so churn evidence is real.
+ */
+export function firstChangedMessageIndex(currentMessageDigests: string[], priorMessageDigests: string[]): number | undefined {
+  if (priorMessageDigests.length === 0) return undefined;
+  const common = Math.min(currentMessageDigests.length, priorMessageDigests.length);
+  for (let i = 0; i < common; i++) {
+    if (priorMessageDigests[i] !== currentMessageDigests[i]) return i;
+  }
+  // Common prefix unchanged: divergence is an appended message at the tail.
+  if (currentMessageDigests.length > priorMessageDigests.length) {
+    return priorMessageDigests.length;
+  }
+  return undefined;
+}
