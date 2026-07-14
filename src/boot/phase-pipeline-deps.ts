@@ -200,7 +200,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       try {
         const tc = loadTransport();
         if (tc) {
-          const prof = resolveAgent("professor", tc);
+          const prof = resolveAgent("main", tc);
           if (prof?.contextWindow) return prof.contextWindow;
         }
       } catch { /* fallback */ }

@@ -611,7 +611,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
   try {
     const { loadTransport, resolveAgent } = await import("./transport-config.js");
     const tc = loadTransport();
-    const prof = tc ? resolveAgent("professor", tc) : null;
+    const prof = tc ? resolveAgent("main", tc) : null;
     if (prof) {
       model = prof.model;
       transportType = (prof.provider.transport ?? "acp").toUpperCase();

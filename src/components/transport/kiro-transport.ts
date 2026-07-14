@@ -116,7 +116,7 @@ export interface IKiroTransport {
   restartSession?(workingDir: string, model?: string): Promise<void>;
 
   /** Hot-swap provider+model. API transport only. Throws if prompt in flight. */
-  switchProvider?(opts: { endpoint: string; apiKey?: string; model: string; maxContext: number; policy: unknown }): void;
+  switchProvider?(opts: { provider?: string; endpoint: string; apiKey?: string; model: string; maxContext: number; policy: unknown }): void;
 
   /** Temporarily override model API timeout for next call(s). null resets to default. */
   setTimeoutOverride?(ms: number | null): void;

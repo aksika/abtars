@@ -230,7 +230,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   } else {
     const { loadTransport, resolveAgent } = await import("../transport-config.js");
     const tc = loadTransport();
-    const prof = tc ? resolveAgent("professor", tc) : null;
+    const prof = tc ? resolveAgent("main", tc) : null;
     model = prof?.model ?? "unknown";
   }
 
@@ -245,7 +245,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   // Transport details from transport.json
   const { loadTransport: lt, resolveAgent: ra } = await import("../transport-config.js");
   const tc = lt();
-  const prof = tc ? ra("professor", tc) : null;
+  const prof = tc ? ra("main", tc) : null;
   const provider = prof?.providerName ?? "unknown";
   const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
   const transportLine = `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`;

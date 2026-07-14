@@ -72,7 +72,7 @@ export async function handleEmergencyAlias(_text: string, ctx: CommandContext): 
 }
 
 export async function handleModels(text: string, ctx: CommandContext): Promise<boolean> {
-  const { loadTransport, resolveAgent, getModelsForProvider, providersForRoute } = await import("../transport-config.js");
+  const { loadTransport, resolveAgent, getModelsForProvider } = await import("../transport-config.js");
   const tc = loadTransport();
   const prof = tc ? resolveAgent("main", tc) : null;
   const currentModel = ("currentModel" in ctx.transport
@@ -152,9 +152,9 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const models = new Set<string>();
     for (const [, agent] of Object.entries(tc!.agents)) {
       if (agent.provider === prof.providerName) models.add(agent.model);
-      for (const fb of agent.fallbacks ?? []) {
-        if (fb.provider === prof.providerName) models.add(fb.model);
-      }
+    }
+    for (const fb of tc!.fallbacks ?? []) {
+      if (fb.provider === prof.providerName) models.add(fb.model);
     }
     if (tc!.hailMary?.provider === prof.providerName) models.add(tc!.hailMary.model);
 
@@ -222,10 +222,10 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     }
 
     // Write + switch
-    tc.agents["professor"]!.model = newModel;
+    tc.agents["main"]!.model = newModel;
     const { cleanDemotedModels, writeTransportConfig } = await import("../transport-config.js");
     cleanDemotedModels(tc, newModel);
-    const result = writeTransportConfig(tc, `professor model → ${newModel}`);
+    const result = writeTransportConfig(tc, `main model → ${newModel}`);
     if (!result.ok) {
       await ctx.reply(`❌ Cannot switch: ${result.issues.map(i => i.reason).join("; ")}`);
       return true;
@@ -343,13 +343,13 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   for (const a of agents) {
     const r = tc ? resolveAgent(a, tc) : null;
     let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`;
-    if (a === "professor" && r?.fallbacks.length) {
+    if (a === "main" && r?.fallbacks.length) {
       line += "\n" + r.fallbacks.map((f, i) => `    ↳ fb${i + 1}: ${f.model} (${f.provider})`).join("\n");
     }
     lines.push(line);
   }
-  if (prof?.provider.fallbackChain?.length) {
-    lines.push(`\nFallback chain: ${prof.provider.fallbackChain.join(" → ")}`);
+  if (tc?.fallbacks?.length) {
+    lines.push(`\nFallback chain: ${tc.fallbacks.map(f => f.model).join(" → ")}`);
   }
   // #1386: Show effective candidate order from the transport's policy
   const transport = ctx.transport as unknown as { policy?: { candidates: Array<{ model: string; endpoint: string; source: string }> } };

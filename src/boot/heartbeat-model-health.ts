@@ -24,12 +24,12 @@ export function createModelHealthTask(ctx: BootCtx): { task: HeartbeatTask; runN
       for (const r of repairs) warnings.push(`🔧 ${r.agent} auto-repaired: was ${r.oldProvider} — ${r.reason}`);
     }
 
-    const prof = resolveAgent("professor", tc);
+    const prof = resolveAgent("main", tc);
     if (!prof) return;
     const profType = prof.provider.transport ?? "api";
 
     if (profType === "api") {
-      const agents = ["professor", "dreamy", "browsie", "coding"] as const;
+      const agents = ["main", "dreamy", "browsie", "cody"] as const;
       const modelToAgents = new Map<string, string[]>();
       const modelToResolved = new Map<string, { endpoint: string; apiKey: string }>();
       for (const a of agents) {

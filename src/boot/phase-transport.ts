@@ -1,4 +1,5 @@
-import type { CandidateSource } from "../components/transport/model-candidates.js";
+import type { ModelCandidate } from "../components/transport/model-candidates.js";
+import { buildCandidates } from "../components/transport/model-candidates.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { getEnv } from "../components/env-schema.js";
 /**
@@ -222,19 +223,32 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     const { FallbackPolicy } = await import("../components/transport/fallback-policy.js");
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
 
-    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number; source: CandidateSource }> = [
-      { endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: resolved.model, maxContext: resolved.contextWindow, source: "primary" },
-    ];
-    for (const fb of resolved.fallbacks) {
+    // #1418: build the Main candidate chain through the shared pure builder so
+    // every candidate carries its complete identity tuple (provider/endpoint/
+    // apiKey/maxContext). Last-successful-Main is not relevant at boot.
+    const fallbackCandidates: ModelCandidate[] = (resolved.fallbacks ?? []).map(fb => {
       const fbResolved = tc ? resolveAgent("_fallback", { ...tc, agents: { ...tc.agents, _fallback: { model: fb.model, provider: fb.provider } } }) : null;
-      candidates.push({
-        endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint!,
-        apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
+      return {
         model: fb.model,
+        provider: fbResolved?.providerName ?? fb.provider,
+        endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint ?? "http://localhost:11434/v1",
+        apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
         maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
         source: "agent_fallback",
-      });
-    }
+      };
+    });
+    const candidates = buildCandidates({
+      role: "main",
+      configured: {
+        model: resolved.model,
+        provider: resolved.providerName,
+        endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
+        apiKey,
+        maxContext: resolved.contextWindow,
+        source: "primary",
+      },
+      fallbacks: fallbackCandidates,
+    });
 
     if (!ctx.modelHealthRegistry) {
       ctx.modelHealthRegistry = new ModelHealthRegistry(tc?.healthPolicy);
@@ -293,7 +307,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       if (killed) logDebug("main", `CWD-checked kill: ${killed} orphan(s)`);
     } catch { /* best effort */ }
     logInfo("main", `🔌 ACP transport (${resolved.provider.cli ?? "kiro-cli"}, model=${resolved.model})`);
-    transport = createAgentTransport("professor", {
+    transport = createAgentTransport("main", {
       cliPath: resolved.provider.cli ?? config.transport.agentCliPath,
       workingDir: config.transport.workingDir,
       agentCli: resolved.provider.cli ?? "kiro-cli",

@@ -1,14 +1,12 @@
 import type { ModelHealthRegistry, ErrorKind } from "./model-health-registry.js";
 import { candidateKey } from "./model-candidates.js";
-import type { CandidateSource } from "./model-candidates.js";
+import type { ModelCandidate } from "./model-candidates.js";
 
-export interface ModelCandidate {
-  model: string;
-  endpoint: string;
-  apiKey?: string;
-  maxContext: number;
-  source: CandidateSource;
-}
+// #1418: `ModelCandidate` is now defined once in model-candidates.ts and carries
+// the complete identity tuple (including provider). Re-export so existing
+// `import { ModelCandidate } from "./fallback-policy.js"` keeps working.
+export type { ModelCandidate } from "./model-candidates.js";
+export type { CandidateSpec } from "./model-candidates.js";
 
 export interface FallbackDecision {
   chosen: ModelCandidate;

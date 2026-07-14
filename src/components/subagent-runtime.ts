@@ -10,6 +10,7 @@ import { logInfo, logDebug, logWarn } from "./logger.js";
 import { randomBytes } from "node:crypto";
 
 import type { ModelHealthRegistry } from "./transport/model-health-registry.js";
+import type { CandidateSpec } from "./transport/model-candidates.js";
 
 const TAG = "runtime";
 
@@ -82,7 +83,6 @@ export class SubagentRuntime {
   private readonly cache = new Map<AgentName, CachedAgent>();
   private readonly activeSpawns = new Map<string, { abort: AbortController; startedAt: number }>();
   private _registry: ModelHealthRegistry | null = null;
-  private _mainTransport: IKiroTransport | null = null;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
 
   /** Token usage from last complete() call. */
@@ -93,22 +93,24 @@ export class SubagentRuntime {
   /** Set shared model health registry (from boot ctx). */
   setRegistry(registry: ModelHealthRegistry): void { this._registry = registry; }
 
-  /** Set main transport reference for currentModel reads. */
+  /** Set main transport reference and wire the #1418 last-successful-Main tracker. */
   setMainTransport(transport: IKiroTransport): void {
-    this._mainTransport = transport;
-    // #1418: Wire last-successful-Main tracker from DirectApiTransport
-    const apiTransport = transport as unknown as { lastSuccessfulCandidate: { model: string; provider: string; endpoint: string; maxContext: number } | null; onLastSuccessfulChanged?: (cb: (c: any) => void) => void };
+    // #1418: Wire last-successful-Main tracker from DirectApiTransport. The tracker
+    // stores the complete secret-free candidate tuple (provider/model/endpoint/
+    // maxContext) so specialists can reuse the exact Main candidate that worked.
+    const apiTransport = transport as unknown as { lastSuccessfulCandidate: CandidateSpec | null; onLastSuccessfulChanged?: (candidate: CandidateSpec) => void };
     if (apiTransport && "lastSuccessfulCandidate" in apiTransport) {
       this._lastSuccessfulMain = apiTransport.lastSuccessfulCandidate ?? null;
       if ("onLastSuccessfulChanged" in apiTransport) {
-        (transport as any).onLastSuccessfulChanged = (c: any) => { this._lastSuccessfulMain = c; };
+        apiTransport.onLastSuccessfulChanged = (c: CandidateSpec) => { this._lastSuccessfulMain = c; };
       }
     }
   }
 
-  /** #1418: Last successful Main candidate for specialist fallback ordering. */
-  private _lastSuccessfulMain: { model: string; provider: string } | null = null;
-  get lastSuccessfulMain(): { model: string; provider: string } | null { return this._lastSuccessfulMain; }
+  /** #1418: Last successful Main candidate (complete secret-free tuple) for
+   *  specialist fallback ordering. Null until Main produces a non-empty response. */
+  private _lastSuccessfulMain: CandidateSpec | null = null;
+  get lastSuccessfulMain(): CandidateSpec | null { return this._lastSuccessfulMain; }
 
   /** Set session manager for auto-spawn sub-session creation (#510). */
   setSessionManager(mgr: import("./spin.js").Spin): void { this._sessionManager = mgr; }
@@ -301,10 +303,10 @@ export class SubagentRuntime {
 
     const { createSubagentTransport } = await import("./agent-registry.js");
     const role = AGENT_TO_ROLE[agent];
-    const mainModel = this._mainTransport && "currentModel" in this._mainTransport
-      ? (this._mainTransport as unknown as { currentModel: string }).currentModel
-      : undefined;
-    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, mainModel);
+    // #1418: pass the complete last-successful Main candidate (secret-free tuple)
+    // into specialist construction so fallback ordering reuses the exact Main
+    // candidate that last produced a non-empty response.
+    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
     // DirectApi only — ACP transport uses its own this.agentName. The "professor"

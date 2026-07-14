@@ -3,7 +3,6 @@
  * Handles: mb:, mslot:, mprov:, mpos:, mprov2:, mset:, model: prefixes.
  */
 import type { TelegramApi } from "./telegram-api.js";
-import type { CandidateSource } from "../../components/transport/model-candidates.js";
 import { getEnv } from "../../components/env-schema.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 
@@ -177,21 +176,27 @@ export async function handleModelPickerCallback(
     const tc = loadTransport();
     if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
     let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
-    const profResolved = resolveAgent("professor", tc);
-    const mainTransport = profResolved?.provider.transport;
-    if (slot && slot.startsWith("professor_fb") && mainTransport) {
+    const mainResolved = resolveAgent("main", tc);
+    const mainTransport = mainResolved?.provider.transport;
+    const isFallbackSlot = !!slot && slot.startsWith("fallback");
+    if (isFallbackSlot && mainTransport) {
       if (mainTransport === "api") { providers = providers.filter(p => p.config.transport === "api"); }
-      else { providers = providers.filter(p => p.name === profResolved!.providerName); }
+      else { providers = providers.filter(p => p.name === mainResolved!.providerName); }
     }
     if (providers.length === 0) { await api.sendMessage(chatId, "❌ No compatible providers for this slot"); return; }
-    const currentProvider = profResolved?.providerName;
-    const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
+    let currentProvider: string | undefined;
+    if (slot === "main") currentProvider = mainResolved?.providerName;
+    else if (isFallbackSlot) {
+      const fbIdx = parseInt(slot!.replace("fallback", ""), 10) - 1;
+      currentProvider = tc.fallbacks?.[fbIdx]?.provider;
+    }
+    const slotLabel = slot === "main" ? "Main" : isFallbackSlot ? slot!.replace("fallback", "Fb") : slot!;
     const buttons = providers.map(p => {
       const count = getModelsForProvider(p.name).length;
       const label = p.name === currentProvider ? `✓ ${p.name} (${count})` : `${p.name} (${count})`;
       return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
     });
-    buttons.push([{ text: "← Back", callback_data: "mslot:professor" }]);
+    buttons.push([{ text: "← Back", callback_data: "mslot:main" }]);
     await api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
   } else if (data.startsWith("mprov2:")) {
@@ -206,7 +211,7 @@ export async function handleModelPickerCallback(
       return;
     }
     state._pendingSlot = slot;
-    const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
+    const slotLabel = slot === "main" ? "Main" : slot!.startsWith("fallback") ? slot!.replace("fallback", "Fb") : slot!;
     state._modelPickerCache = entries.map(e => e.id);
     const buttons = entries.map((e, i) => [{ text: e.label, callback_data: `mset:${providerName}:${i}` }]);
     buttons.push([{ text: "← Back", callback_data: `mb:s:${slot}` }]);
@@ -292,21 +297,35 @@ export async function handleModelPickerCallback(
         try {
           const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
           const { ModelHealthRegistry } = await import("../../components/transport/model-health-registry.js");
+          const { buildCandidates } = await import("../../components/transport/model-candidates.js");
           const apiKey = getEnv().getApiKey(newResolved?.provider.apiKeyEnv ?? "API_KEY");
-          const candidates: Array<{ endpoint: string; apiKey?: string; model: string; maxContext: number; source: CandidateSource }> = [{ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, source: "primary" }];
-          for (const fb of (tc.fallbacks ?? [])) {
+          // #1418: build candidates through the shared builder so each carries its
+          // complete identity tuple (provider/endpoint/apiKey/maxContext).
+          const fallbackCandidates = (tc.fallbacks ?? []).map(fb => {
             const fbRes = resolveAgent("_fb", { ...tc, agents: { ...tc.agents, _fb: { model: fb.model, provider: fb.provider } } });
-            if (fbRes) candidates.push({ endpoint: fbRes.provider.endpoint!, apiKey: fbRes.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey, model: fb.model, maxContext: fbRes.contextWindow, source: "agent_fallback" });
-          }
+            return {
+              model: fb.model,
+              provider: fb.provider,
+              endpoint: fbRes?.provider.endpoint ?? newResolved!.provider.endpoint!,
+              apiKey: fbRes?.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey,
+              maxContext: fbRes?.contextWindow ?? newResolved!.contextWindow,
+              source: "agent_fallback" as const,
+            };
+          });
+          const candidates = buildCandidates({
+            role: "main",
+            configured: { model, provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey, maxContext: newResolved!.contextWindow, source: "primary" },
+            fallbacks: fallbackCandidates,
+          });
           const registry = (deps.transport as unknown as { policy?: { registry: InstanceType<typeof ModelHealthRegistry> } }).policy?.registry ?? new ModelHealthRegistry();
           const policy = new FallbackPolicy(candidates, registry);
-          (deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
+          (deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
         } catch (err) {
           await api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
           return;
         }
         try { await api.sendMessage(chatId, `✓ Switched to ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "sendMessage model switch confirm", err); }
-      } else if (isProfessor && providerChanged) {
+      } else if (isMain && providerChanged) {
         const cascadeNote = oldType !== newType ? " Subagents also reset." : "";
         try {
           if (deps.pipeline.rebuildTransport) await deps.pipeline.rebuildTransport();
@@ -316,7 +335,7 @@ export async function handleModelPickerCallback(
           await api.sendMessage(chatId, `⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}. Try /reset manually.`);
         }
       } else {
-        await api.sendMessage(chatId, `✓ ${agentKey} → ${model} (${providerName})`);
+        await api.sendMessage(chatId, `✓ ${slot} → ${model} (${providerName})`);
       }
     }
   } else if (data.startsWith("model:")) {

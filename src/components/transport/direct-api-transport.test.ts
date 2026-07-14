@@ -265,3 +265,67 @@ describe("DirectApiTransport.contextPercent — active window (#1295)", () => {
     expect(transport.contextPercent).toBe(10);
   });
 });
+
+// #1418: success tracking and provider switching must preserve the complete
+// candidate tuple (provider/model/endpoint/maxContext), not the stale configured
+// provider. The last-successful-Main tracker is the source for specialist fallback.
+describe("DirectApiTransport — candidate tuple preservation (#1418)", () => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+  afterEach(() => { fetchSpy.mockReset(); });
+
+  function makeStreamResponse(): Response {
+    const line = `data: ${JSON.stringify({
+      choices: [{ delta: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 5, completion_tokens: 2 },
+    })}\n\ndata: [DONE]\n\n`;
+    return new Response(line, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }) as unknown as Response;
+  }
+
+  it("records the fallback candidate's provider on success (not config.provider)", async () => {
+    const reg = new ModelHealthRegistry();
+    // Primary on provA, fallback on a DIFFERENT provider (provB), same endpoint.
+    const policy = new FallbackPolicy([
+      { model: "primary", provider: "provA", endpoint: "http://ep1/v1", maxContext: 100_000, source: "primary" },
+      { model: "fallback", provider: "provB", endpoint: "http://ep1/v1", maxContext: 100_000, source: "agent_fallback" },
+    ], reg);
+    const transport = new DirectApiTransport({
+      provider: "provA", endpoint: "http://ep1/v1", apiKey: "k", model: "primary",
+      maxContext: 100_000, maxOutput: 1000, maxTurns: 5,
+    }, policy);
+
+    // Primary fails → policy selects the provB fallback.
+    reg.recordError("primary", "http://ep1/v1", "credits");
+    fetchSpy.mockResolvedValue(makeStreamResponse());
+    await transport.sendPrompt("s1", "hi");
+
+    const last = transport.lastSuccessfulCandidate;
+    expect(last).not.toBeNull();
+    // Complete tuple preserved, provider taken from the serving candidate.
+    expect(last).toMatchObject({ model: "fallback", provider: "provB", endpoint: "http://ep1/v1", maxContext: 100_000 });
+    expect(transport.currentModel).toBe("fallback");
+  });
+
+  it("switchProvider preserves the provider name and clears the stale tracker", () => {
+    const reg = new ModelHealthRegistry();
+    const oldPolicy = new FallbackPolicy([
+      { model: "old", provider: "provA", endpoint: "ep1", maxContext: 128000, source: "primary" },
+    ], reg);
+    const transport = new DirectApiTransport({
+      provider: "provA", endpoint: "ep1", apiKey: "k", model: "old",
+      maxContext: 128000, maxOutput: 4096, maxTurns: 1,
+    }, oldPolicy);
+
+    const newPolicy = new FallbackPolicy([
+      { model: "new", provider: "provB", endpoint: "ep2", maxContext: 200000, source: "primary" },
+    ], reg);
+    transport.switchProvider({ provider: "provB", endpoint: "ep2", apiKey: "k2", model: "new", maxContext: 200000, policy: newPolicy });
+
+    expect(transport.currentModel).toBe("new");
+    // Switching provider invalidates the last-successful Main tuple.
+    expect(transport.lastSuccessfulCandidate).toBeNull();
+  });
+});

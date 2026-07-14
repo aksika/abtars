@@ -1,4 +1,5 @@
-import type { CandidateSource } from "./transport/model-candidates.js";
+import type { CandidateSpec, ModelCandidate } from "./transport/model-candidates.js";
+import { buildCandidates } from "./transport/model-candidates.js";
 import { getEnv } from "./env-schema.js";
 /**
  * agent-registry.ts — Centralized agent role configuration.
@@ -68,8 +69,8 @@ export type SubagentRole = "sleep" | "browse" | "coding" | "task";
 const SUBAGENT_TO_AGENT: Record<SubagentRole, string> = {
   sleep: "dreamy",
   browse: "browsie",
-  coding: "coding",
-  task: "professor",
+  coding: "cody",
+  task: "main",
 };
 
 const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
@@ -81,7 +82,7 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
 
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 /** @internal Used only by SubagentRuntime. Do not call directly. */
-export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, currentModel?: string): Promise<{ transport: IKiroTransport; model: string }> {
+export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, lastSuccessfulMain?: CandidateSpec | null): Promise<{ transport: IKiroTransport; model: string }> {
   const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
   const tc = loadTransport();
   const agentName = SUBAGENT_TO_AGENT[role];
@@ -99,98 +100,66 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const { FallbackPolicy } = await import("./transport/fallback-policy.js");
     const apiKey = getEnv().getApiKey(agent.provider.apiKeyEnv ?? "API_KEY");
 
-    // Use main transport's active model if available, else static config
-    const startModel = currentModel ?? agent.model;
+    // #1418: build the specialist candidate chain through the shared pure builder.
+    // Order: configured role → last successful Main candidate (or configured Main
+    // before the first success) → top-level fallback chain. Every candidate carries
+    // its complete identity tuple so provider switching preserves the right endpoint.
+    const primaryEndpoint = agent.provider.endpoint ?? "http://localhost:11434/v1";
 
-    /**
-     * Resolve the correct endpoint + apiKey for a given model by scanning the full
-     * transport.json candidate space: all agents' primary + fallback entries.
-     * This is needed when startModel was inherited from Main and may belong to a
-     * different provider than agent.provider (e.g. Main fell back to Ollama while
-     * the task agent's primary provider is OpenRouter).
-     */
-    function resolveModelEndpoint(model: string): { endpoint: string; apiKey: string | undefined } | null {
-      if (!tc) return null;
-      for (const [, agentEntry] of Object.entries(tc.agents)) {
-        const primaryProvider = tc.providers[agentEntry.provider];
-        if (primaryProvider?.transport === "api" && agentEntry.model === model && primaryProvider.endpoint) {
-          return {
-            endpoint: primaryProvider.endpoint,
-            apiKey: primaryProvider.apiKeyEnv ? getEnv().getApiKey(primaryProvider.apiKeyEnv) : undefined,
-          };
-        }
-      }
-      // Check top-level fallbacks
-      for (const fb of tc.fallbacks ?? []) {
-        if (fb.model !== model) continue;
-        const fbProvider = tc.providers[fb.provider];
-        if (fbProvider?.transport === "api" && fbProvider.endpoint) {
-          return {
-            endpoint: fbProvider.endpoint,
-            apiKey: fbProvider.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : undefined,
-          };
-        }
-      }
-      return null;
-    }
-
-    // Resolve the correct endpoint for startModel. When startModel was inherited
-    // from Main and belongs to a different provider, this finds the right endpoint
-    // instead of blindly using agent.provider.endpoint (#1307).
-    const startModelResolved = startModel !== agent.model ? resolveModelEndpoint(startModel) : null;
-    const startEndpoint = startModelResolved?.endpoint ?? agent.provider.endpoint ?? "http://localhost:11434/v1";
-    const startApiKey = startModelResolved?.apiKey ?? apiKey;
-
-    // Build per-agent candidate list
-    // Dedup key is model+endpoint pair — same model on different providers is a distinct candidate.
-    const candidateKey = (model: string, endpoint: string): string => `${model}@${endpoint}`;
-    const seenCandidates = new Set<string>();
-    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number; source: CandidateSource }> = [];
-
-    const addCandidate = (model: string, endpoint: string, candidateApiKey: string | undefined, maxContext: number, source: CandidateSource): void => {
-      const key = candidateKey(model, endpoint);
-      if (seenCandidates.has(key)) return;
-      seenCandidates.add(key);
-      candidates.push({ model, endpoint, apiKey: candidateApiKey, maxContext, source });
+    const configured: ModelCandidate = {
+      model: agent.model,
+      provider: agent.providerName,
+      endpoint: primaryEndpoint,
+      apiKey,
+      maxContext: agent.contextWindow,
+      source: "primary",
     };
 
-    // #1386: Track candidate source for diagnostics
-    addCandidate(startModel, startEndpoint, startApiKey, agent.contextWindow, startModel !== agent.model ? "inherited_chain" : "primary");
-
-    // Add static config model if different from startModel
-    if (agent.model !== startModel) {
-      addCandidate(agent.model, agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, agent.contextWindow, "primary");
-    }
-
-    // Add main's model as fallback if different and transport-compatible
+    // Last successful Main (secret-free tuple) — fall back to configured Main when
+    // none has succeeded yet this process. Resolve apiKey from its provider config.
     const mainAgent = tc ? resolveAgent("main", tc) : null;
-    const agentTransport = agent.provider.transport ?? "api";
-    if (mainAgent && mainAgent.model !== startModel) {
-      const mainTransport = mainAgent.provider.transport ?? "api";
-      if (mainTransport === agentTransport && mainAgent.provider.endpoint) {
-        addCandidate(
-          mainAgent.model,
-          mainAgent.provider.endpoint,
-          mainAgent.provider.apiKeyEnv ? getEnv().getApiKey(mainAgent.provider.apiKeyEnv) : apiKey,
-          mainAgent.contextWindow,
-          "inherited_chain",
-        );
-      }
+    const configuredMainSpec: CandidateSpec | null = mainAgent
+      ? {
+          model: mainAgent.model,
+          provider: mainAgent.providerName,
+          endpoint: mainAgent.provider.endpoint ?? primaryEndpoint,
+          maxContext: mainAgent.contextWindow,
+        }
+      : null;
+    const inheritedSpec = lastSuccessfulMain ?? configuredMainSpec;
+    let inheritedCandidate: ModelCandidate | null = null;
+    if (inheritedSpec) {
+      const inheritedProvider = tc?.providers[inheritedSpec.provider];
+      inheritedCandidate = {
+        model: inheritedSpec.model,
+        provider: inheritedSpec.provider,
+        endpoint: inheritedSpec.endpoint,
+        apiKey: inheritedProvider?.apiKeyEnv ? getEnv().getApiKey(inheritedProvider.apiKeyEnv) : apiKey,
+        maxContext: inheritedSpec.maxContext,
+        source: "inherited_chain",
+      };
     }
 
-    // Inherit main's full fallback chain (top-level fallbacks)
-    if (mainAgent) {
-      for (const fb of tc?.fallbacks ?? []) {
-        const fbProvider = tc?.providers[fb.provider];
-        const fbEndpoint = fbProvider?.endpoint ?? mainAgent.provider.endpoint;
-        if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
-        const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
-        addCandidate(fb.model, fbEndpoint, fbApiKey, mainAgent.contextWindow, "inherited_chain");
-      }
-    }
+    // Top-level fallback chain as complete candidates.
+    const fallbackCandidates: ModelCandidate[] = (tc?.fallbacks ?? []).map(fb => {
+      const fbProvider = tc!.providers[fb.provider];
+      const fbEndpoint = fbProvider?.endpoint ?? primaryEndpoint;
+      return {
+        model: fb.model,
+        provider: fb.provider,
+        endpoint: fbEndpoint,
+        apiKey: fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey,
+        maxContext: mainAgent?.contextWindow ?? agent.contextWindow,
+        source: "agent_fallback",
+      };
+    });
 
-    // Append top-level fallbacks as last-resort candidates (already in inherited_chain above, but keep for clarity)
-    // Agent's resolved fallbacks from resolveAgent are already included in agent.fallbacks
+    const candidates = buildCandidates({
+      role: "specialist",
+      configured,
+      lastSuccessfulMain: inheritedCandidate,
+      fallbacks: fallbackCandidates,
+    });
 
     // Use shared registry if provided, otherwise create isolated one
     const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
@@ -198,8 +167,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
 
     const transport = new DirectApiTransport({
       provider: agent.providerName,
-      endpoint: startEndpoint,
-      apiKey: startApiKey, model: startModel,
+      endpoint: primaryEndpoint,
+      apiKey, model: agent.model,
       maxContext: agent.contextWindow, maxOutput: agent.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
       maxToolRounds: tc?.maxToolRounds ?? 25,
@@ -207,7 +176,7 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       useProviderLib: agent.provider.useProviderLib,
     }, policy);
     await transport.initialize();
-    logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${startModel}, ${candidates.length} candidates, shared registry: ${!!registry})`);
+    logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${agent.model}, ${candidates.length} candidates, shared registry: ${!!registry})`);
     return { transport, model: agent.model };
   }
 

@@ -21,6 +21,7 @@ import type { OutputObserver } from "../session-output-feed.js";
 import { isCompactable } from "../spin-types.js";
 import { ToolLoopGuard, ToolBehaviorError } from "./tool-loop-guard.js";
 import { candidateKey } from "./model-candidates.js";
+import type { CandidateSpec } from "./model-candidates.js";
 
 const TAG = "direct-api";
 
@@ -72,6 +73,10 @@ export class DirectApiTransport implements IKiroTransport {
   private activeEndpoint: string;
   private activeApiKey?: string;
   private activeModel: string;
+  /** #1418: provider name of the candidate currently serving requests. Tracked alongside
+   *  the other active* fields so provider switching and success reporting preserve the
+   *  complete candidate tuple rather than the stale configured provider. */
+  private activeProvider: string | undefined;
   /** #1295: maxContext of the model currently serving requests. Used for accurate contextPercent. */
   private _activeMaxContext: number;
   /** #1335: previous turn's stable prefix digest for churn detection. */
@@ -95,9 +100,10 @@ export class DirectApiTransport implements IKiroTransport {
   /** Currently active model (may differ from config if on fallback). */
   get currentModel(): string { return this.activeModel; }
 
-  /** #1418: Last successful Main candidate (model, provider, endpoint, maxContext). Cleared on rebuild. */
-  private _lastSuccessfulCandidate: { model: string; provider: string; endpoint: string; maxContext: number } | null = null;
-  get lastSuccessfulCandidate(): typeof this._lastSuccessfulCandidate { return this._lastSuccessfulCandidate; }
+  /** #1418: Last successful Main candidate — secret-free resolved tuple (provider, model,
+   *  endpoint, maxContext). Cleared on rebuild so specialists fall back to configured Main. */
+  private _lastSuccessfulCandidate: CandidateSpec | null = null;
+  get lastSuccessfulCandidate(): CandidateSpec | null { return this._lastSuccessfulCandidate; }
   clearSuccessfulCandidate(): void { this._lastSuccessfulCandidate = null; }
 
   onIntermediateResponse?: (text: string) => void;
@@ -111,9 +117,9 @@ export class DirectApiTransport implements IKiroTransport {
    *  notification layer can re-arm and notify again on the next fallback. */
   onPrimaryRestored?: () => void;
   /** #1418: fired after a successful, non-empty Main response — records the working candidate. */
-  onMainSuccess?: (candidate: { model: string; provider: string; endpoint: string; maxContext: number }) => void;
+  onMainSuccess?: (candidate: CandidateSpec) => void;
   /** #1418: callback to signal last-successful-Main change to downstream consumers. */
-  onLastSuccessfulChanged?: (candidate: { model: string; provider: string; endpoint: string; maxContext: number }) => void;
+  onLastSuccessfulChanged?: (candidate: CandidateSpec) => void;
   /** Cooperative pause check — if returns true, agent loop breaks between tool calls. */
   isPaused?: () => boolean;
   /** Returns a pending instruction from parent, if any. Consumed once. */
@@ -147,6 +153,7 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeEndpoint = config.endpoint;
     this.activeApiKey = config.apiKey;
     this.activeModel = config.model;
+    this.activeProvider = config.provider;
     this._activeMaxContext = config.maxContext;
     this.useProviderLib = config.useProviderLib ?? false;
     this.policy = policy ?? null;
@@ -306,9 +313,10 @@ export class DirectApiTransport implements IKiroTransport {
       this.activeEndpoint = candidate.endpoint;
       this.activeApiKey = candidate.apiKey;
       this.activeModel = candidate.model;
+      this.activeProvider = candidate.provider;
       this._activeMaxContext = candidate.maxContext;
       this._lastActivityAt = Date.now();
-      logDebug(TAG, `Trying model: ${candidate.model}`);
+      logDebug(TAG, `Trying model: ${candidate.model} via ${candidate.provider}`);
 
       if (!isPrimary(candidate.model) && this.onFallback) {
         const ctxPct = candidate.maxContext > 0 ? Math.round((this._lastPromptTokens / candidate.maxContext) * 100) : -1;
@@ -337,9 +345,11 @@ export class DirectApiTransport implements IKiroTransport {
           policy.recordSuccess(candidate);
           // #1296: notify the phase-transport layer so it can re-arm the fallback notification
           if (isPrimary(candidate.model) && this.onPrimaryRestored) this.onPrimaryRestored();
-          // #1418: record successful Main candidate for specialist fallback
+          // #1418: record successful Main candidate for specialist fallback. Use the
+          // candidate's own provider (may differ from config when serving a fallback)
+          // so the complete tuple survives provider switching.
           if (result.trim()) {
-            const candidateRecord = { model: candidate.model, provider: this.config.provider, endpoint: candidate.endpoint, maxContext: candidate.maxContext };
+            const candidateRecord: CandidateSpec = { model: candidate.model, provider: candidate.provider, endpoint: candidate.endpoint, maxContext: candidate.maxContext };
             this._lastSuccessfulCandidate = candidateRecord;
             this.onLastSuccessfulChanged?.(candidateRecord);
             this.onMainSuccess?.(candidateRecord);
@@ -385,7 +395,7 @@ export class DirectApiTransport implements IKiroTransport {
             this._lastAnswer = result;
             policy.recordSuccess(candidate);
             if (result.trim()) {
-              const candidateRecord = { model: candidate.model, provider: this.config.provider, endpoint: candidate.endpoint, maxContext: candidate.maxContext };
+              const candidateRecord: CandidateSpec = { model: candidate.model, provider: candidate.provider, endpoint: candidate.endpoint, maxContext: candidate.maxContext };
               this._lastSuccessfulCandidate = candidateRecord;
               this.onLastSuccessfulChanged?.(candidateRecord);
               this.onMainSuccess?.(candidateRecord);
@@ -435,6 +445,7 @@ export class DirectApiTransport implements IKiroTransport {
       this.activeEndpoint = smallest.endpoint;
       this.activeApiKey = smallest.apiKey;
       this.activeModel = smallest.model;
+      this.activeProvider = smallest.provider;
       this._activeMaxContext = smallest.maxContext;
       if (this.onFallback) {
         this.onFallback(`${smallest.model} (compacted)`, Math.round((session.estimateTokens() / smallest.maxContext) * 100));
@@ -1084,7 +1095,7 @@ export class DirectApiTransport implements IKiroTransport {
   getRuntimeStatus(): RuntimeStatusSnapshot {
     const session = this.sessions.get(this._activeSessionKey);
     return {
-      provider: this.config.provider,
+      provider: this.activeProvider ?? this.config.provider,
       model: this.activeModel,
       contextPercent: this._contextPercent >= 0 ? this._contextPercent : undefined,
       contextWindow: this._activeMaxContext > 0 ? this._activeMaxContext : undefined,
@@ -1101,8 +1112,9 @@ export class DirectApiTransport implements IKiroTransport {
     logInfo(TAG, `Model switched (user): ${model}`);
   }
 
-  /** Hot-swap provider+model+policy. Rejects if prompt is in flight. */
-  switchProvider(opts: { endpoint: string; apiKey?: string; model: string; maxContext: number; policy: FallbackPolicy }): void {
+  /** Hot-swap provider+model+policy. Rejects if prompt is in flight. #1418: also
+   *  accepts the provider name so the complete candidate tuple is preserved. */
+  switchProvider(opts: { provider?: string; endpoint: string; apiKey?: string; model: string; maxContext: number; policy: FallbackPolicy }): void {
     if (this._promptStartedAt !== null) {
       throw new Error("Cannot switch provider while a prompt is in progress — try after the response");
     }
@@ -1110,10 +1122,16 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeApiKey = opts.apiKey;
     this.activeModel = opts.model;
     this._activeMaxContext = opts.maxContext;
+    if (opts.provider) {
+      this.activeProvider = opts.provider;
+      (this.config as { provider?: string }).provider = opts.provider;
+    }
     (this.config as { model: string; maxContext: number }).model = opts.model;
     (this.config as { maxContext: number }).maxContext = opts.maxContext;
+    // #1418: switching provider invalidates the last-successful Main tuple.
+    this._lastSuccessfulCandidate = null;
     this.policy = opts.policy;
-    logInfo(TAG, `Provider switched: ${opts.model} @ ${opts.endpoint} (maxCtx=${opts.maxContext})`);
+    logInfo(TAG, `Provider switched: ${opts.model} @ ${opts.endpoint} via ${opts.provider ?? this.activeProvider ?? "?"} (maxCtx=${opts.maxContext})`);
   }
 
   /** Get current active model name. */
