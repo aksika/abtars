@@ -23,38 +23,7 @@ const SEED = ["config", "tasks"];
 /** Legacy paths to remove (one-time cleanup, idempotent). */
 const LEGACY_CLEANUP = ["core/prompts", "core"];
 
-/**
- * Canonical in-process system tasks that must exist in every tasks.json (#1321).
- * Reconciliation appends an entry only when its stable id is absent — it never
- * overwrites a user's schedule, pause state, or other edits.
- */
-const CANONICAL_SYSTEM_TASKS: object[] = [
-  {
-    id: "sleep-cycle",
-    type: "task",
-    executor: "system",
-    action: "sleep-cycle",
-    schedule: "0 2 * * *",
-    catchUp: 6,
-    maxRunsPerDay: 1,
-    deliveryMode: "silent",
-    paused: false,
-  },
-  {
-    id: "hardware-sleep",
-    type: "task",
-    executor: "system",
-    action: "hardware-sleep",
-    schedule: "30 3 * * *",
-    idleMinutes: 20,
-    retryMinutes: 10,
-    latestLocalTime: "05:30",
-    expectedWakeTime: "07:55",
-    deliveryMode: "silent",
-    maxRunsPerDay: 1,
-    paused: true,
-  },
-];
+
 
 /**
  * Reconcile runtime tree from templates source.
@@ -103,8 +72,8 @@ export function reconcile(templatesSrc: string, home: string): void {
   }
   if (seeded > 0) logInfo(TAG, `Seeded ${seeded} missing config/task file(s)`);
 
-  // --- Canonical system tasks: append by stable id if absent (#1321) ---
-  seedCanonicalSystemTasks(home);
+  // --- Seed sleep-cycle from template if absent (#1421) ---
+  seedSleepCycle(templatesSrc, home);
 
   // --- Legacy cleanup (remove old paths, idempotent) ---
   for (const rel of LEGACY_CLEANUP) {
@@ -115,8 +84,17 @@ export function reconcile(templatesSrc: string, home: string): void {
   }
 }
 
-/** Append canonical system task entries to tasks.json only when their stable id is absent. */
-function seedCanonicalSystemTasks(home: string): void {
+/** Seed sleep-cycle from template if absent from the user tasks file (#1421). */
+function seedSleepCycle(templatesSrc: string, home: string): void {
+  const templatePath = join(templatesSrc, "tasks", "tasks.json");
+  if (!existsSync(templatePath)) return;
+  let sleepEntry: unknown;
+  try {
+    const raw = JSON.parse(readFileSync(templatePath, "utf-8"));
+    if (Array.isArray(raw)) sleepEntry = raw.find((e: unknown) => (e as { id?: string })?.id === "sleep-cycle");
+  } catch { /* skip */ }
+  if (!sleepEntry) return;
+
   const tasksPath = join(home, "tasks", "tasks.json");
   let entries: unknown[] = [];
   try {
@@ -125,23 +103,17 @@ function seedCanonicalSystemTasks(home: string): void {
       if (Array.isArray(raw)) entries = raw;
     }
   } catch (err) {
-    logInfo(TAG, `tasks.json unreadable — skipping canonical seed: ${err instanceof Error ? err.message : String(err)}`);
+    logInfo(TAG, `tasks.json unreadable — skipping sleep-cycle seed: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
 
-  let appended = 0;
-  for (const canonical of CANONICAL_SYSTEM_TASKS) {
-    const id = (canonical as { id?: string }).id;
-    const exists = entries.some(e => typeof e === "object" && e !== null && (e as { id?: string }).id === id);
-    if (exists) continue;
-    entries.push(canonical);
-    appended++;
-  }
-  if (appended > 0) {
-    mkdirSync(dirname(tasksPath), { recursive: true });
-    writeFileSync(tasksPath, JSON.stringify(entries, null, 2), "utf-8");
-    logInfo(TAG, `Seeded ${appended} canonical system task(s) by stable id`);
-  }
+  const exists = entries.some(e => typeof e === "object" && e !== null && (e as { id?: string }).id === "sleep-cycle");
+  if (exists) return;
+
+  entries.push(sleepEntry);
+  mkdirSync(dirname(tasksPath), { recursive: true });
+  writeFileSync(tasksPath, JSON.stringify(entries, null, 2), "utf-8");
+  logInfo(TAG, "Seeded sleep-cycle from template");
 }
 
 /** Recursively list all files under a directory. */
