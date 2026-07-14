@@ -31,7 +31,6 @@ const LEGACY_CLEANUP = ["core/prompts", "core"];
 const CANONICAL_SYSTEM_TASKS: object[] = [
   {
     id: "sleep-cycle",
-    title: "Nightly memory consolidation",
     type: "task",
     executor: "system",
     action: "sleep-cycle",
@@ -43,7 +42,6 @@ const CANONICAL_SYSTEM_TASKS: object[] = [
   },
   {
     id: "hardware-sleep",
-    title: "Suspend Molty when idle",
     type: "task",
     executor: "system",
     action: "hardware-sleep",

@@ -1,7 +1,6 @@
 [
   {
     "id": "morning-greeting",
-    "title": "Morning Greeting",
     "message": "Good morning! Start a new day with the user. Be warm and personal, use memory to recall something relevant about them or their plans.",
     "schedule": "0 9 * * *",
     "type": "task",
@@ -11,7 +10,6 @@
   },
   {
     "id": "daily-backup",
-    "title": "Daily Backup",
     "message": "abtars backup",
     "schedule": "0 0 * * *",
     "type": "task",
@@ -21,7 +19,6 @@
   },
   {
     "id": "sleep-cycle",
-    "title": "Nightly memory consolidation",
     "type": "task",
     "executor": "system",
     "action": "sleep-cycle",
@@ -33,7 +30,6 @@
   },
   {
     "id": "hardware-sleep",
-    "title": "Suspend Molty when idle",
     "type": "task",
     "executor": "system",
     "action": "hardware-sleep",
