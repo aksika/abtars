@@ -1,6 +1,7 @@
 import { execAsync } from "./exec-async.js";
 import { logError } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
+import { formatTaskLabel } from "../tasks/task-types.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd_tasks";
@@ -47,7 +48,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
       const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
       const running = ctx.cronCurrentJob?.entryId === e.id;
       const tick = e.paused ? "⏸" : !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
-      const label = e.title || e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
+      const label = formatTaskLabel(e);
       const name = label.length > 18 ? label.slice(0, 18) : label;
       return `${tick}  ${name.padEnd(20)}${sched.padEnd(16)}${label}`;
     });
@@ -90,7 +91,7 @@ export async function handleTasksTrigger(text: string, ctx: CommandContext): Pro
   let name = id;
   try {
     const entry = readEntry(id);
-    if (entry) name = entry.title || (entry.message.split("\n")[0] ?? "").slice(0, 30);
+    if (entry) name = formatTaskLabel(entry);
   } catch { /* fallback to id */ }
   await ctx.reply(`Running task: ${name}`);
   return true;
