@@ -338,7 +338,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     "",
     "Agents:",
   ];
-  const agents = ["professor", "dreamy", "browsie", "coding"] as const;
+  const agents = ["main", "dreamy", "browsie", "cody"] as const;
   const names: Record<string, string> = { main: "Main", dreamy: "Dreamy", browsie: "Browsie", cody: "Cody" };
   for (const a of agents) {
     const r = tc ? resolveAgent(a, tc) : null;

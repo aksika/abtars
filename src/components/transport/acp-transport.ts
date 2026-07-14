@@ -550,8 +550,8 @@ export class AcpTransport implements IKiroTransport {
       clearTransportCache();
       const tc = loadTransport();
       if (tc) {
-        const prof = resolveAgent("professor", tc);
-        if (prof?.model) this.modelId = prof.model;
+        const main = resolveAgent("main", tc);
+        if (main?.model) this.modelId = main.model;
       }
     } catch (err) { logAndSwallow("acp_transport", "op", err); }
     this.destroy();

@@ -219,7 +219,7 @@ export async function handleModelPickerCallback(
     const model = Number.isFinite(modelIdx) && state._modelPickerCache[modelIdx]
       ? state._modelPickerCache[modelIdx]!
       : parts.slice(2).join(":");
-    const slot = state._pendingSlot ?? "professor";
+    const slot = state._pendingSlot ?? "main";
     state._pendingSlot = undefined;
     state._modelPickerCache = [];
     const { loadTransport, writeTransportConfig, resolveAgent, getModelsForProvider, validateProviderReady, formatValidationError } = await import("../../components/transport-config.js");
@@ -247,31 +247,29 @@ export async function handleModelPickerCallback(
       } catch (err) { logAndSwallow(TAG, "provider reachability check", err); await api.sendMessage(chatId, `⚠️ ${providerName} unreachable. Try another?`); return; }
     }
 
-    const agentKey = slot.startsWith("professor_fb") ? "professor" : slot;
-    const fbIndex = slot === "professor_fb1" ? 0 : slot === "professor_fb2" ? 1 : slot === "professor_fb3" ? 2 : -1;
-
-    if (fbIndex >= 0) {
-      if (!tc.agents["professor"]) tc.agents["professor"] = { model: "", provider: "" };
-      if (!tc.agents["professor"]!.fallbacks) tc.agents["professor"]!.fallbacks = [];
-      tc.agents["professor"]!.fallbacks[fbIndex] = { model, provider: providerName };
+    const fbMatch = slot.match(/^fallback(\d+)$/);
+    if (fbMatch) {
+      const fbIndex = parseInt(fbMatch[1]!, 10) - 1;
+      if (!tc.fallbacks) tc.fallbacks = [];
+      tc.fallbacks[fbIndex] = { model, provider: providerName };
       const { cleanDemotedModels } = await import("../../components/transport-config.js");
       cleanDemotedModels(tc, model);
-      writeTransportConfig(tc, `professor fallback ${fbIndex + 1} → ${model} (${providerName})`);
+      writeTransportConfig(tc, `fallback ${fbIndex + 1} → ${model} (${providerName})`);
       await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`);
     } else {
-      const oldProvider = tc.agents[agentKey]?.provider;
-      tc.agents[agentKey] = { ...tc.agents[agentKey]!, model, provider: providerName };
+      const oldProvider = tc.agents[slot]?.provider;
+      tc.agents[slot] = { ...tc.agents[slot]!, model, provider: providerName };
       const { cleanDemotedModels } = await import("../../components/transport-config.js");
       cleanDemotedModels(tc, model);
-      writeTransportConfig(tc, `${agentKey} → ${model} (${providerName})`);
+      writeTransportConfig(tc, `${slot} → ${model} (${providerName})`);
 
       const providerChanged = oldProvider !== providerName;
-      const isProfessor = agentKey === "professor";
+      const isMain = slot === "main";
 
       let oldType: string | undefined;
       let newType: string | undefined;
       let newResolved: ReturnType<typeof resolveAgent> | undefined;
-      if (isProfessor && providerChanged) {
+      if (isMain && providerChanged) {
         const oldResolved = resolveAgent("_old", { ...tc, agents: { ...tc.agents, _old: { model: "", provider: oldProvider! } } });
         newResolved = resolveAgent("_new", { ...tc, agents: { ...tc.agents, _new: { model, provider: providerName } } });
         oldType = oldResolved?.provider.transport ?? "api";
@@ -279,7 +277,7 @@ export async function handleModelPickerCallback(
         if (oldType !== newType) {
           const resetAgents: string[] = [];
           for (const [a, assignment] of Object.entries(tc.agents)) {
-            if (a === "professor") continue;
+            if (a === "main") continue;
             const ap = tc.providers[assignment.provider];
             if (ap && ap.transport !== newType) { tc.agents[a] = { model, provider: providerName }; resetAgents.push(a); }
           }
@@ -287,16 +285,16 @@ export async function handleModelPickerCallback(
         }
       }
 
-      if (isProfessor && !providerChanged && "setModel" in deps.transport) {
+      if (isMain && !providerChanged && "setModel" in deps.transport) {
         await (deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
         await api.sendMessage(chatId, `✓ Switched to ${model}`);
-      } else if (isProfessor && providerChanged && oldType === newType && "switchProvider" in deps.transport) {
+      } else if (isMain && providerChanged && oldType === newType && "switchProvider" in deps.transport) {
         try {
           const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
           const { ModelHealthRegistry } = await import("../../components/transport/model-health-registry.js");
           const apiKey = getEnv().getApiKey(newResolved?.provider.apiKeyEnv ?? "API_KEY");
           const candidates: Array<{ endpoint: string; apiKey?: string; model: string; maxContext: number; source: CandidateSource }> = [{ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, source: "primary" }];
-          for (const fb of (tc.agents["professor"]?.fallbacks ?? [])) {
+          for (const fb of (tc.fallbacks ?? [])) {
             const fbRes = resolveAgent("_fb", { ...tc, agents: { ...tc.agents, _fb: { model: fb.model, provider: fb.provider } } });
             if (fbRes) candidates.push({ endpoint: fbRes.provider.endpoint!, apiKey: fbRes.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey, model: fb.model, maxContext: fbRes.contextWindow, source: "agent_fallback" });
           }

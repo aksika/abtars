@@ -9,7 +9,7 @@ import { AcpTransport } from "./transport/acp-transport.js";
 import { logInfo, logWarn } from "./logger.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
-export type AgentRole = "professor" | "dreamy" | "browsie" | "coding" | "task";
+export type AgentRole = "main" | "professor" | "dreamy" | "browsie" | "coding" | "cody" | "task";
 
 export interface AgentRoleConfig {
   agent: string | null;
@@ -19,19 +19,21 @@ export interface AgentRoleConfig {
   trust: number;
 }
 
-const AGENT_ROLES: Record<AgentRole, AgentRoleConfig> = {
+const AGENT_ROLES: Record<string, AgentRoleConfig> = {
+  main: { agent: "professor", model: null, autoReinit: true, tag: "acp-main", trust: 3 },
   professor: { agent: "professor", model: null, autoReinit: true, tag: "acp-main", trust: 3 },
   dreamy: { agent: "dreamy", model: null, autoReinit: false, tag: "acp-sleep", trust: 2 },
   coding: { agent: "coding-agent", model: null, autoReinit: true, tag: "acp-coding", trust: 2 },
+  cody: { agent: "coding-agent", model: null, autoReinit: true, tag: "acp-coding", trust: 2 },
   browsie: { agent: "browsie", model: null, autoReinit: false, tag: "acp-browsie", trust: 1 },
   task: { agent: "professor", model: null, autoReinit: false, tag: "acp-task", trust: 2 },
 };
 
-function resolveModel(role: AgentRole): string | undefined {
+function resolveModel(role: string): string | undefined {
   switch (role) {
     case "dreamy": return getEnv().sleepModel;
     case "browsie": return getEnv().browsingAgent;
-    case "coding": return getEnv().codingModel;
+    case "coding": case "cody": return getEnv().codingModel;
     default: return undefined;
   }
 }
@@ -85,9 +87,9 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
   const agentName = SUBAGENT_TO_AGENT[role];
   const resolved = tc ? resolveAgent(agentName, tc) : null;
 
-  // Fallback: use professor's config. If that also fails, use .env defaults.
-  const profResolved = resolved ?? (tc ? resolveAgent("professor", tc) : null);
-  const agent = profResolved ?? (() => {
+  // Fallback: use main's config. If that also fails, use .env defaults.
+  const mainResolved = resolved ?? (tc ? resolveAgent("main", tc) : null);
+  const agent = mainResolved ?? (() => {
     const fb = getEnvFallback();
     return { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
   })();
@@ -110,7 +112,6 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     function resolveModelEndpoint(model: string): { endpoint: string; apiKey: string | undefined } | null {
       if (!tc) return null;
       for (const [, agentEntry] of Object.entries(tc.agents)) {
-        // Check primary
         const primaryProvider = tc.providers[agentEntry.provider];
         if (primaryProvider?.transport === "api" && agentEntry.model === model && primaryProvider.endpoint) {
           return {
@@ -118,16 +119,16 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
             apiKey: primaryProvider.apiKeyEnv ? getEnv().getApiKey(primaryProvider.apiKeyEnv) : undefined,
           };
         }
-        // Check fallbacks
-        for (const fb of agentEntry.fallbacks ?? []) {
-          if (fb.model !== model) continue;
-          const fbProvider = tc.providers[fb.provider];
-          if (fbProvider?.transport === "api" && fbProvider.endpoint) {
-            return {
-              endpoint: fbProvider.endpoint,
-              apiKey: fbProvider.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : undefined,
-            };
-          }
+      }
+      // Check top-level fallbacks
+      for (const fb of tc.fallbacks ?? []) {
+        if (fb.model !== model) continue;
+        const fbProvider = tc.providers[fb.provider];
+        if (fbProvider?.transport === "api" && fbProvider.endpoint) {
+          return {
+            endpoint: fbProvider.endpoint,
+            apiKey: fbProvider.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : undefined,
+          };
         }
       }
       return null;
@@ -161,52 +162,35 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       addCandidate(agent.model, agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, agent.contextWindow, "primary");
     }
 
-    // Add professor's model as fallback if different and transport-compatible
-    const profAgent = tc ? resolveAgent("professor", tc) : null;
+    // Add main's model as fallback if different and transport-compatible
+    const mainAgent = tc ? resolveAgent("main", tc) : null;
     const agentTransport = agent.provider.transport ?? "api";
-    if (profAgent && profAgent.model !== startModel) {
-      const profTransport = profAgent.provider.transport ?? "api";
-      if (profTransport === agentTransport && profAgent.provider.endpoint) {
+    if (mainAgent && mainAgent.model !== startModel) {
+      const mainTransport = mainAgent.provider.transport ?? "api";
+      if (mainTransport === agentTransport && mainAgent.provider.endpoint) {
         addCandidate(
-          profAgent.model,
-          profAgent.provider.endpoint,
-          profAgent.provider.apiKeyEnv ? getEnv().getApiKey(profAgent.provider.apiKeyEnv) : apiKey,
-          profAgent.contextWindow,
+          mainAgent.model,
+          mainAgent.provider.endpoint,
+          mainAgent.provider.apiKeyEnv ? getEnv().getApiKey(mainAgent.provider.apiKeyEnv) : apiKey,
+          mainAgent.contextWindow,
           "inherited_chain",
         );
       }
     }
 
-    // Inherit professor's full fallback chain (fb1→fb2→fb3)
-    if (profAgent) {
-      for (const fb of profAgent.fallbacks ?? []) {
+    // Inherit main's full fallback chain (top-level fallbacks)
+    if (mainAgent) {
+      for (const fb of tc?.fallbacks ?? []) {
         const fbProvider = tc?.providers[fb.provider];
-        const fbEndpoint = fbProvider?.endpoint ?? profAgent.provider.endpoint;
+        const fbEndpoint = fbProvider?.endpoint ?? mainAgent.provider.endpoint;
         if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
         const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
-        addCandidate(fb.model, fbEndpoint, fbApiKey, profAgent.contextWindow, "inherited_chain");
-      }
-      for (const chainModel of profAgent.provider.fallbackChain ?? []) {
-        if (!profAgent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
-        addCandidate(chainModel, profAgent.provider.endpoint, apiKey, profAgent.contextWindow, "inherited_chain");
+        addCandidate(fb.model, fbEndpoint, fbApiKey, mainAgent.contextWindow, "inherited_chain");
       }
     }
 
-    // Append agent-level cross-provider fallbacks
-    for (const fb of agent.fallbacks) {
-      const fbProvider = tc?.providers[fb.provider];
-      const fbEndpoint = fbProvider?.endpoint ?? agent.provider.endpoint;
-      if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
-      const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
-      addCandidate(fb.model, fbEndpoint, fbApiKey, agent.contextWindow, "agent_fallback");
-    }
-
-    // Append fallbackChain entries as last-resort candidates
-    const chain = agent.provider.fallbackChain ?? [];
-    for (const chainModel of chain) {
-      if (!agent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
-      addCandidate(chainModel, agent.provider.endpoint, apiKey, agent.contextWindow, "provider_chain");
-    }
+    // Append top-level fallbacks as last-resort candidates (already in inherited_chain above, but keep for clarity)
+    // Agent's resolved fallbacks from resolveAgent are already included in agent.fallbacks
 
     // Use shared registry if provided, otherwise create isolated one
     const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
@@ -227,11 +211,11 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     return { transport, model: agent.model };
   }
 
-  // ACP path — try configured model, then fallbackChain on failure
+  // ACP path — try configured model, then top-level fallbacks on failure
   const { loadAndValidateConfig } = await import("./config.js");
   const config = await loadAndValidateConfig();
-  const chain = agent.provider.fallbackChain ?? [];
-  const modelsToTry = [agent.model, ...chain.filter(m => m !== agent.model)];
+  const fallbackModels = (tc?.fallbacks ?? []).map(f => f.model).filter(m => m !== agent.model);
+  const modelsToTry = [agent.model, ...fallbackModels];
 
   for (let i = 0; i < modelsToTry.length; i++) {
     const model = modelsToTry[i]!;
