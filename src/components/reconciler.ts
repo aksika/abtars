@@ -11,7 +11,8 @@ import { nerve } from "./nerve.js";
 import { spin } from "./spin.js";
 import {
   kanbanFail, kanbanComplete, kanbanUpdate,
-  kanbanGetCard, kanbanGetChildren, isUnblocked, cascadeFail, type KanbanCard,
+  kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds,
+  isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn } from "./logger.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
@@ -94,20 +95,23 @@ function deriveAction(cardId: number): void {
 }
 
 function reconcileProject(projectId: number): void {
-  const children = kanbanGetChildren(projectId);
-  if (children.length === 0) return;
-
   const project = kanbanGetCard(projectId);
-  if (!project) return;
+  if (!project || project.status !== "running") return;
+
+  const children = kanbanGetChildren(projectId);
 
   const now = Date.now();
   const projectStart = new Date(project.created_at + "Z").getTime();
 
-  // Circuit breaker: wall-clock
+  // Circuit breaker: wall-clock — evaluated before zero-child early return
+  // so an expired project with no children is failed explicitly.
   if (now - projectStart > MAX_WALL_CLOCK_MS) {
     abortProject(projectId, children, "wall-clock exceeded (30min)");
     return;
   }
+
+  // Zero children before deadline — stay running, may still spawn work
+  if (children.length === 0) return;
 
   // Circuit breaker: token budget
   if (project.max_tokens && (project.tokens_used ?? 0) >= project.max_tokens) {
@@ -423,9 +427,17 @@ export function requestReconcileForProject(cardId: number): void {
   wakeCard(cardId);
 }
 
+/** #1414: Scan all running O-type projects and schedule reconciliation. Returns candidate count. */
+export function scanActiveProjects(): number {
+  const projectIds = kanbanRunningProjectIds();
+  for (const projectId of projectIds) wakeCard(projectId);
+  return projectIds.length;
+}
+
 export function startReconciler(): void {
   nerve.on("card:queued", (cardId: number) => requestReconcileForProject(cardId));
   nerve.on("card:done", (cardId: number) => requestReconcileForProject(cardId));
   nerve.on("card:failed", (cardId: number) => requestReconcileForProject(cardId));
-  logInfo(TAG, "Reconciler started");
+  const count = scanActiveProjects();
+  logInfo(TAG, `Reconciler started — recovered ${count} running project(s)`);
 }

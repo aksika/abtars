@@ -21,12 +21,16 @@ const kanbanGetChildrenMock = vi.fn();
 const isUnblockedMock = vi.fn().mockReturnValue(true);
 const kanbanUpdateMock = vi.fn();
 const cascadeFailMock = vi.fn();
+const kanbanFailMock = vi.fn();
+const kanbanCompleteMock = vi.fn();
+const kanbanRunningProjectIdsMock = vi.fn().mockReturnValue([]);
 vi.mock("./tasks/kanban-board.js", () => ({
-  kanbanFail: vi.fn(),
-  kanbanComplete: vi.fn(),
+  kanbanFail: kanbanFailMock,
+  kanbanComplete: kanbanCompleteMock,
   kanbanUpdate: kanbanUpdateMock,
   kanbanGetCard: kanbanGetCardMock,
   kanbanGetChildren: kanbanGetChildrenMock,
+  kanbanRunningProjectIds: kanbanRunningProjectIdsMock,
   isUnblocked: isUnblockedMock,
   cascadeFail: cascadeFailMock,
 }));
@@ -59,9 +63,9 @@ vi.mock("./executor-lease-store.js", () => ({
 }));
 
 vi.mock("./project-acceptance/project-review-store.js", () => ({
-  ProjectReviewStore: vi.fn().mockImplementation(() => ({
-    contractExists: vi.fn().mockReturnValue(false),
-  })),
+  ProjectReviewStore: vi.fn().mockImplementation(function() {
+    return { contractExists: vi.fn().mockReturnValue(false) };
+  }),
 }));
 
 // Catch-all for retry-service dynamic require — return error
@@ -80,6 +84,9 @@ beforeEach(async () => {
   isUnblockedMock.mockReturnValue(true);
   getLatestAttemptMock.mockReturnValue(null);
   cardHasContractMock.mockReturnValue(false);
+  kanbanRunningProjectIdsMock.mockReturnValue([]);
+  kanbanFailMock.mockReset();
+  kanbanCompleteMock.mockReset();
   mod = await import("./reconciler.js");
 });
 
@@ -252,6 +259,71 @@ describe("Reconciler — #1411 domain guard", () => {
       await flush();
       // No dispatch since Pi service is null, but importantly no crash
       expect(dispatchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("scanActiveProjects (#1414)", () => {
+    it("wakes each running O-type project and returns count", () => {
+      kanbanRunningProjectIdsMock.mockReturnValue([10, 20, 30]);
+      const count = mod.scanActiveProjects();
+      expect(count).toBe(3);
+      // After flush, each should have been reconciled
+    });
+
+    it("returns 0 when no running O-type projects exist", () => {
+      kanbanRunningProjectIdsMock.mockReturnValue([]);
+      const count = mod.scanActiveProjects();
+      expect(count).toBe(0);
+    });
+  });
+
+  describe("zero-child project timeout (#1414)", () => {
+    it("zero-child project before wall-clock deadline stays running", async () => {
+      const card = makeCard({
+        id: 1, status: "running", type: "O",
+        created_at: new Date().toISOString(),
+      });
+      kanbanGetCardMock.mockReturnValue(card);
+      kanbanGetChildrenMock.mockReturnValue([]);
+
+      mod.requestReconcile(1);
+      await flush();
+
+      expect(kanbanFailMock).not.toHaveBeenCalled();
+    });
+
+    it("zero-child project past wall-clock deadline is aborted", async () => {
+      // SQLite datetime('now') has no trailing Z; reconcileProject appends one.
+      const past = new Date(Date.now() - 31 * 60 * 1000).toISOString().replace(/Z$/, "");
+      const card = makeCard({
+        id: 1, status: "running", type: "O",
+        created_at: past,
+      });
+      kanbanGetCardMock.mockReturnValue(card);
+      kanbanGetChildrenMock.mockReturnValue([]);
+
+      mod.requestReconcile(1);
+      await flush();
+
+      expect(kanbanFailMock).toHaveBeenCalledWith(1, expect.stringContaining("wall-clock"));
+    });
+
+    it("non-expired project with all-terminal children completes normally (unsupervised)", async () => {
+      // Unsupervised path: contractExists returns false → legacy completion
+      const card = makeCard({
+        id: 1, status: "running", type: "O",
+        created_at: new Date().toISOString(),
+      });
+      kanbanGetCardMock.mockReturnValue(card);
+      kanbanGetChildrenMock.mockReturnValue([
+        { ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 },
+        { ...makeCard({ id: 3, status: "done", type: "W" }), parent_id: 1 },
+      ]);
+
+      mod.requestReconcile(1);
+      await flush();
+
+      expect(kanbanCompleteMock).toHaveBeenCalledWith(1, null, expect.any(String));
     });
   });
 });

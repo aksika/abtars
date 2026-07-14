@@ -126,9 +126,13 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
 
   heartbeat.registerTask(createUserSessionExpiryTask());
 
-  // Reconciler
-  import("../components/reconciler.js").then(({ startReconciler }) => {
+  // Reconciler — boot scan + periodic resync (#1414)
+  import("../components/reconciler.js").then(({ startReconciler, scanActiveProjects }) => {
     startReconciler();
+    heartbeat.registerTask({
+      name: "reconciler-resync",
+      execute: () => { scanActiveProjects(); },
+    });
   }).catch(err => logAndSwallow(TAG, "reconciler", err));
 
   // Spin tick

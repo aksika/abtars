@@ -407,6 +407,7 @@ export async function tui(args: string[]): Promise<number> {
       case "ready":
         ready = true;
         currentSessionId = frame.sessionId;
+        ui.start();
         return;
       case "error":
         if (!ready) {
@@ -457,11 +458,10 @@ export async function tui(args: string[]): Promise<number> {
     }
   }
 
-  // Hand the terminal over to pi-tui. From this point on, raw mode is
-  // managed by the library. ui.start() itself is non-blocking; we await
-  // the `stopped` promise which resolves in `stop()` (above) when the
-  // session ends (Ctrl-C, Ctrl-D, detach, or error).
-  ui.start();
+  // ui.start() is called inside the `ready` frame handler, not here.
+  // If the attach fails (no Orc session etc.), we never enter raw mode
+  // and avoid terminal escape-sequence leakage on exit.
+  // The `stopped` promise keeps the process alive until stop() is called.
   await stopped;
   return shouldExitCode ?? 0;
 }

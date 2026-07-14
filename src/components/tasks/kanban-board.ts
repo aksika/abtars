@@ -427,6 +427,15 @@ export function resolveRootId(cardId: number): number | undefined {
   return undefined; // depth exceeded
 }
 
+/** #1414: Return IDs of all currently running O-type project cards. */
+export function kanbanRunningProjectIds(): number[] {
+  const d = dbOrNull();
+  if (!d) return [];
+  return d.prepare(
+    `SELECT id FROM kanban_board WHERE status = 'running' AND type = 'O' ORDER BY id`
+  ).all().map((row: Record<string, unknown>) => Number(row.id));
+}
+
 /**
  * #1319: List active (queued/running) direct children of a card, up to `maxCount`.
  * Multi-level descendant resolution is not needed for v1 — Orc's project hierarchy
