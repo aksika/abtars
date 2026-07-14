@@ -94,7 +94,21 @@ export class SubagentRuntime {
   setRegistry(registry: ModelHealthRegistry): void { this._registry = registry; }
 
   /** Set main transport reference for currentModel reads. */
-  setMainTransport(transport: IKiroTransport): void { this._mainTransport = transport; }
+  setMainTransport(transport: IKiroTransport): void {
+    this._mainTransport = transport;
+    // #1418: Wire last-successful-Main tracker from DirectApiTransport
+    const apiTransport = transport as unknown as { lastSuccessfulCandidate: { model: string; provider: string; endpoint: string; maxContext: number } | null; onLastSuccessfulChanged?: (cb: (c: any) => void) => void };
+    if (apiTransport && "lastSuccessfulCandidate" in apiTransport) {
+      this._lastSuccessfulMain = apiTransport.lastSuccessfulCandidate ?? null;
+      if ("onLastSuccessfulChanged" in apiTransport) {
+        (transport as any).onLastSuccessfulChanged = (c: any) => { this._lastSuccessfulMain = c; };
+      }
+    }
+  }
+
+  /** #1418: Last successful Main candidate for specialist fallback ordering. */
+  private _lastSuccessfulMain: { model: string; provider: string } | null = null;
+  get lastSuccessfulMain(): { model: string; provider: string } | null { return this._lastSuccessfulMain; }
 
   /** Set session manager for auto-spawn sub-session creation (#510). */
   setSessionManager(mgr: import("./spin.js").Spin): void { this._sessionManager = mgr; }

@@ -73,10 +73,10 @@ export async function handleModelPickerCallback(
     if (!target) { await api.sendMessage(chatId, "👌 Cancelled."); return; }
     if (target === "a") {
       const AGENT_LABELS = [
-        { key: "professor", label: "Professor" },
+        { key: "main", label: "Main" },
         { key: "dreamy", label: "Dreamy (sleep)" },
         { key: "browsie", label: "Browsie (browse)" },
-        { key: "coding", label: "Cody (coding)" },
+        { key: "cody", label: "Cody (coding)" },
       ];
       const buttons = AGENT_LABELS.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
       buttons.push([{ text: "← Cancel", callback_data: "mb:" }]);
@@ -91,7 +91,7 @@ export async function handleModelPickerCallback(
       let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
       if (providers.length === 0) { await api.sendMessage(chatId, "❌ No compatible providers"); return; }
       const currentProvider = resolveAgent(agent, tc)?.providerName;
-      const prefix = agent === "professor" ? "mprov2:professor" : `mprov:${agent}`;
+      const prefix = agent === "main" ? "mprov2:main" : `mprov:${agent}`;
       const buttons = providers.map(p => {
         const count = getModelsForProvider(p.name).length;
         const label = p.name === currentProvider ? `✓ ${p.name} (${count})` : `${p.name} (${count})`;
@@ -108,14 +108,14 @@ export async function handleModelPickerCallback(
       const tc = loadTransport();
       if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
       let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
-      const currentProvider = resolveAgent("professor", tc)?.providerName;
-      const slotLabel = slot === "professor" ? "Main" : slot.replace("professor_fb", "Fb");
+      const currentProvider = resolveAgent("main", tc)?.providerName;
+      const slotLabel = slot === "main" ? "Main" : "";
       const buttons = providers.map(p => {
         const count = getModelsForProvider(p.name).length;
         const label = p.name === currentProvider ? `✓ ${p.name} (${count})` : `${p.name} (${count})`;
         return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
       });
-      buttons.push([{ text: "← Back", callback_data: "mslot:professor" }]);
+      buttons.push([{ text: "← Back", callback_data: "mslot:main" }]);
       await api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
       return;
     }
@@ -125,17 +125,17 @@ export async function handleModelPickerCallback(
     const tc = loadTransport();
     if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
 
-    if (agent === "professor") {
-      const profResolved = resolveAgent("professor", tc);
-      const fallbacks = tc.agents["professor"]?.fallbacks ?? [];
+    if (agent === "main") {
+      const profResolved = resolveAgent("main", tc);
+      const fallbacks = tc.fallbacks ?? [];
       const slots: Array<{ label: string; key: string }> = [
-        { label: `★ Main: ${profResolved?.model ?? "?"}`, key: `mpos:professor::professor` },
+        { label: `★ Main: ${profResolved?.model ?? "?"}`, key: `mpos:main::main` },
       ];
       for (let i = 0; i < fallbacks.length; i++) {
-        slots.push({ label: `↳ Fb${i + 1}: ${fallbacks[i]!.model}`, key: `mpos:professor::professor_fb${i + 1}` });
+        slots.push({ label: `↳ Fb${i + 1}: ${fallbacks[i]!.model}`, key: `mpos:main::fallback${i + 1}` });
       }
-      if (fallbacks.length < 3) {
-        slots.push({ label: `↳ Fb${fallbacks.length + 1}: (add)`, key: `mpos:professor::professor_fb${fallbacks.length + 1}` });
+      if (fallbacks.length < 5) {
+        slots.push({ label: `↳ Fb${fallbacks.length + 1}: (add)`, key: `mpos:main::fallback${fallbacks.length + 1}` });
       }
       const buttons = slots.map(s => [{ text: s.label, callback_data: s.key }]);
       buttons.push([{ text: "← Back", callback_data: "mb:a" }]);

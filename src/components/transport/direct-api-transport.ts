@@ -90,10 +90,15 @@ export class DirectApiTransport implements IKiroTransport {
   private _outputObserver?: OutputObserver;
 
   /** Agent name for budget tracking (set by caller). */
-  agentLabel = "professor";
+  agentLabel = "main";
 
   /** Currently active model (may differ from config if on fallback). */
   get currentModel(): string { return this.activeModel; }
+
+  /** #1418: Last successful Main candidate (model, provider, endpoint, maxContext). Cleared on rebuild. */
+  private _lastSuccessfulCandidate: { model: string; provider: string; endpoint: string; maxContext: number } | null = null;
+  get lastSuccessfulCandidate(): typeof this._lastSuccessfulCandidate { return this._lastSuccessfulCandidate; }
+  clearSuccessfulCandidate(): void { this._lastSuccessfulCandidate = null; }
 
   onIntermediateResponse?: (text: string) => void;
   onToolCallStart?: (toolName: string) => void;
@@ -105,6 +110,10 @@ export class DirectApiTransport implements IKiroTransport {
   /** #1296: fired when the primary model succeeds after a fallback episode, so the
    *  notification layer can re-arm and notify again on the next fallback. */
   onPrimaryRestored?: () => void;
+  /** #1418: fired after a successful, non-empty Main response — records the working candidate. */
+  onMainSuccess?: (candidate: { model: string; provider: string; endpoint: string; maxContext: number }) => void;
+  /** #1418: callback to signal last-successful-Main change to downstream consumers. */
+  onLastSuccessfulChanged?: (candidate: { model: string; provider: string; endpoint: string; maxContext: number }) => void;
   /** Cooperative pause check — if returns true, agent loop breaks between tool calls. */
   isPaused?: () => boolean;
   /** Returns a pending instruction from parent, if any. Consumed once. */
@@ -328,6 +337,13 @@ export class DirectApiTransport implements IKiroTransport {
           policy.recordSuccess(candidate);
           // #1296: notify the phase-transport layer so it can re-arm the fallback notification
           if (isPrimary(candidate.model) && this.onPrimaryRestored) this.onPrimaryRestored();
+          // #1418: record successful Main candidate for specialist fallback
+          if (result.trim()) {
+            const candidateRecord = { model: candidate.model, provider: this.config.provider, endpoint: candidate.endpoint, maxContext: candidate.maxContext };
+            this._lastSuccessfulCandidate = candidateRecord;
+            this.onLastSuccessfulChanged?.(candidateRecord);
+            this.onMainSuccess?.(candidateRecord);
+          }
         }
         return result;
       } catch (err) {
@@ -368,6 +384,12 @@ export class DirectApiTransport implements IKiroTransport {
             const result = await this.agentLoop(session, signal, imageLoopPolicy);
             this._lastAnswer = result;
             policy.recordSuccess(candidate);
+            if (result.trim()) {
+              const candidateRecord = { model: candidate.model, provider: this.config.provider, endpoint: candidate.endpoint, maxContext: candidate.maxContext };
+              this._lastSuccessfulCandidate = candidateRecord;
+              this.onLastSuccessfulChanged?.(candidateRecord);
+              this.onMainSuccess?.(candidateRecord);
+            }
             return result;
           } catch (retryErr) {
             if (retryErr instanceof ToolBehaviorError) {

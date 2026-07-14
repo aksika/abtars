@@ -16,6 +16,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "status", description: "Operational health (PID, platforms, context)" },
   { name: "software", description: "Version, deploy info, rollback" },
   { name: "model", description: "Model configuration & switching" },
+  { name: "route", description: "Route selection (pi-ai | direct-api | acp)" },
   { name: "doctor", description: "Deep healthcheck (probes all subsystems)" },
   { name: "health", description: "Deep healthcheck (alias for /doctor)" },
   { name: "mcp", description: "MCP server status" },
