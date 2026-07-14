@@ -628,7 +628,7 @@ export class AcpTransport implements IKiroTransport {
   getModel(): string { return this.modelId ?? "unknown"; }
 
   getRuntimeStatus(): RuntimeStatusSnapshot {
-    return { model: this.getModel(), contextPercent: this.contextPercent >= 0 ? this.contextPercent : undefined };
+    return { route: "acp", model: this.getModel(), contextPercent: this.contextPercent >= 0 ? this.contextPercent : undefined };
   }
 
   private handleSessionUpdate(params: SessionNotification): void {

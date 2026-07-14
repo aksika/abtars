@@ -36,6 +36,7 @@ export interface RuntimeUsageSnapshot {
 }
 
 export interface RuntimeStatusSnapshot {
+  route?: import("../transport-config.js").ExecutionRoute;
   provider?: string;
   model?: string;
   contextPercent?: number;

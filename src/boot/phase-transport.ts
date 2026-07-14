@@ -264,6 +264,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     const policy = new FallbackPolicy(candidates, ctx.modelHealthRegistry);
 
     transport = new DirectApiTransport({
+      route: tc?.route,
       provider: resolved.providerName,
       endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
       apiKey,

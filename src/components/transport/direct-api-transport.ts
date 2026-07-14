@@ -37,6 +37,7 @@ export interface AgentLoopPolicy {
 }
 
 export interface DirectApiConfig {
+  route?: import("../transport-config.js").ExecutionRoute;
   provider?: string;
   endpoint: string;
   apiKey?: string;
@@ -70,6 +71,7 @@ export class DirectApiTransport implements IKiroTransport {
   private _intermediateText = "";
   private _promptStartedAt: number | null = null;
   private _lastActivityAt: number | null = null;
+  private activeProvider: string;
   private activeEndpoint: string;
   private activeApiKey?: string;
   private activeModel: string;
@@ -138,25 +140,48 @@ export class DirectApiTransport implements IKiroTransport {
   private emergencyOverride: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null = null;
 
   /** Activate emergency (hailMary) mode — next prompts bypass the fallback policy. */
-  setEmergencyMode(override: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null): void {
-    if (!override && !this.emergencyOverride) return; // no-op if already off
-    this.emergencyOverride = override;
-    if (override) logWarn(TAG, `🚨 EMERGENCY MODE: using ${override.model} (paid) — bypassing fallback chain`);
-    else { this.activeModel = this.config.model; logInfo(TAG, `Emergency mode cleared — restored ${this.config.model}`); }
+  setEmergencyMode(override: { provider: string; endpoint: string; apiKey?: string; model: string; maxContext: number } | null): void {
+    if (!override && !this.emergencyOverride) return;
+    if (override) {
+      this.emergencyOverride = override;
+      this.activateCandidate(override);
+      logWarn(TAG, `🚨 EMERGENCY MODE: using ${override.model} (${override.provider}) — bypassing fallback chain`);
+    } else {
+      this.emergencyOverride = null;
+      this.activateCandidate(this.primaryCandidate);
+      logInfo(TAG, `Emergency mode cleared — restored ${this.primaryCandidate.model} (${this.primaryCandidate.provider})`);
+    }
   }
 
   /** True if emergency (hailMary) mode is active. */
   get isEmergencyMode(): boolean { return this.emergencyOverride !== null; }
 
+  private primaryCandidate: { provider: string; model: string; endpoint: string; apiKey?: string; maxContext: number };
+
   constructor(config: DirectApiConfig, policy?: FallbackPolicy) {
     this.config = config;
+    this.activeProvider = config.provider ?? "unknown";
     this.activeEndpoint = config.endpoint;
     this.activeApiKey = config.apiKey;
     this.activeModel = config.model;
-    this.activeProvider = config.provider;
     this._activeMaxContext = config.maxContext;
     this.useProviderLib = config.useProviderLib ?? false;
     this.policy = policy ?? null;
+    this.primaryCandidate = {
+      provider: this.activeProvider,
+      model: this.activeModel,
+      endpoint: this.activeEndpoint,
+      apiKey: this.activeApiKey,
+      maxContext: this._activeMaxContext,
+    };
+  }
+
+  private activateCandidate(candidate: { provider: string; model: string; endpoint: string; apiKey?: string; maxContext: number }): void {
+    this.activeProvider = candidate.provider;
+    this.activeModel = candidate.model;
+    this.activeEndpoint = candidate.endpoint;
+    this.activeApiKey = candidate.apiKey;
+    this._activeMaxContext = candidate.maxContext;
   }
 
   async initialize(): Promise<void> {
@@ -310,11 +335,7 @@ export class DirectApiTransport implements IKiroTransport {
     // Try each candidate via policy
     let candidate = policy.selectModel(this._lastPromptTokens);
     while (candidate) {
-      this.activeEndpoint = candidate.endpoint;
-      this.activeApiKey = candidate.apiKey;
-      this.activeModel = candidate.model;
-      this.activeProvider = candidate.provider;
-      this._activeMaxContext = candidate.maxContext;
+      this.activateCandidate({ provider: candidate.provider ?? this.config.provider ?? "unknown", model: candidate.model, endpoint: candidate.endpoint, apiKey: candidate.apiKey, maxContext: candidate.maxContext });
       this._lastActivityAt = Date.now();
       logDebug(TAG, `Trying model: ${candidate.model} via ${candidate.provider}`);
 
@@ -1095,7 +1116,8 @@ export class DirectApiTransport implements IKiroTransport {
   getRuntimeStatus(): RuntimeStatusSnapshot {
     const session = this.sessions.get(this._activeSessionKey);
     return {
-      provider: this.activeProvider ?? this.config.provider,
+      route: this.config.route,
+      provider: this.activeProvider,
       model: this.activeModel,
       contextPercent: this._contextPercent >= 0 ? this._contextPercent : undefined,
       contextWindow: this._activeMaxContext > 0 ? this._activeMaxContext : undefined,
@@ -1118,20 +1140,15 @@ export class DirectApiTransport implements IKiroTransport {
     if (this._promptStartedAt !== null) {
       throw new Error("Cannot switch provider while a prompt is in progress — try after the response");
     }
-    this.activeEndpoint = opts.endpoint;
-    this.activeApiKey = opts.apiKey;
-    this.activeModel = opts.model;
-    this._activeMaxContext = opts.maxContext;
-    if (opts.provider) {
-      this.activeProvider = opts.provider;
-      (this.config as { provider?: string }).provider = opts.provider;
-    }
+    const provider = opts.provider ?? this.config.provider ?? "unknown";
+    this.activateCandidate({ provider, model: opts.model, endpoint: opts.endpoint, apiKey: opts.apiKey, maxContext: opts.maxContext });
     (this.config as { model: string; maxContext: number }).model = opts.model;
     (this.config as { maxContext: number }).maxContext = opts.maxContext;
-    // #1418: switching provider invalidates the last-successful Main tuple.
+    if (opts.provider) (this.config as { provider?: string }).provider = opts.provider;
+    this.primaryCandidate = { provider, model: opts.model, endpoint: opts.endpoint, apiKey: opts.apiKey, maxContext: opts.maxContext };
     this._lastSuccessfulCandidate = null;
     this.policy = opts.policy;
-    logInfo(TAG, `Provider switched: ${opts.model} @ ${opts.endpoint} via ${opts.provider ?? this.activeProvider ?? "?"} (maxCtx=${opts.maxContext})`);
+    logInfo(TAG, `Provider switched: ${opts.model} @ ${opts.endpoint} via ${provider} (maxCtx=${opts.maxContext})`);
   }
 
   /** Get current active model name. */

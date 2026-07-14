@@ -84,7 +84,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   // /model emergency — activate hailMary (paid) until /model restore, /reset, or wake-up
   if (arg === "emergency" || arg === "hailmary") {
     if (!ctx.hailMary) { await ctx.reply("❌ hailMary not configured in transport.json"); return true; }
-    const t = ctx.transport as unknown as { setEmergencyMode?: (o: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null) => void };
+    const t = ctx.transport as unknown as { setEmergencyMode?: (o: { provider: string; endpoint: string; apiKey?: string; model: string; maxContext: number } | null) => void };
     if (!t.setEmergencyMode) { await ctx.reply("❌ Transport does not support emergency mode"); return true; }
 
     // #367 — validate hailMary's provider is ready before switching.
@@ -98,7 +98,9 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       }
     }
 
-    t.setEmergencyMode({ ...ctx.hailMary, maxContext: 1_000_000 });
+    const hmEndpoint = ctx.hailMary?.endpoint ?? "";
+    const hmApiKey = ctx.hailMary?.apiKeyEnv ? getEnv().getApiKey(ctx.hailMary.apiKeyEnv) : undefined;
+    t.setEmergencyMode({ provider: tc?.hailMary?.provider ?? "unknown", model: ctx.hailMary?.model ?? "", endpoint: hmEndpoint, apiKey: hmApiKey, maxContext: 1_000_000 });
     await ctx.reply(`🚨 EMERGENCY MODE: using ${ctx.hailMary.model} (paid). Clears on /model restore, /reset, or wake-up.`);
     return true;
   }
@@ -318,22 +320,20 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   }
 
   // /models (no arg) — merged status: model + transport + agents
-  // #1318: ONE consistent transport route line. <route> ✓|✗; 🔌 is the only emoji retained.
-  // route is "pi-ai / <provider>" | "API / <provider>" | "ACP"; mark is ✓ ready / ✗ not ready.
+  // #1416: live snapshot from getRuntimeStatus() — shared formatter.
+  const { resolveRuntimeStatus, formatRuntimeRoute } = await import("../transport/runtime-status.js");
+  const liveStatus = resolveRuntimeStatus(ctx.transport as any, {
+    route: tc?.route,
+    provider: prof?.providerName,
+    model: prof?.model,
+  });
   const ctxPct = ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a";
-  const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
-  const provider = prof?.providerName ?? "unknown";
   const isEmergency = (ctx.transport as unknown as { isEmergencyMode?: boolean }).isEmergencyMode === true;
-  const piActive = prof?.provider.useProviderLib === true;
-  const route =
-    mode === "ACP" ? "ACP"
-    : piActive ? `pi-ai / ${provider}`
-    : `API / ${provider}`;
   const statusMark = ctx.transport.isReady ? "✓" : "✗";
 
   const lines = [
-    `🔌 Transport: ${route} ${statusMark}`,
-    isEmergency ? `EMERGENCY MODE: ${currentModel} (paid)` : `Model: ${currentModel}`,
+    `🔌 Transport: ${formatRuntimeRoute(liveStatus)} ${statusMark}`,
+    isEmergency ? `EMERGENCY MODE: ${liveStatus.model ?? currentModel} (paid)` : `Model: ${liveStatus.model ?? currentModel}`,
     `Context: ${ctxPct}`,
     "",
     "Agents:",
