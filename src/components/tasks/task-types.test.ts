@@ -5,7 +5,7 @@
  * never fall through to agent execution.
  */
 import { describe, it, expect } from "vitest";
-import { normalize, isSystemEntry, SYSTEM_ACTIONS } from "./task-types.js";
+import { normalize, isSystemEntry, SYSTEM_ACTIONS, formatTaskLabel, isValidTaskId } from "./task-types.js";
 
 const NOW = new Date("2026-07-11T02:00:00Z").getTime();
 
@@ -170,5 +170,42 @@ describe("#1321 normalize + validation", () => {
     });
   });
 
+  describe("formatTaskLabel", () => {
+    it("converts kebab-case to Title Case", () => {
+      expect(formatTaskLabel("morning-greeting")).toBe("Morning Greeting");
+    });
+    it("converts single word", () => {
+      expect(formatTaskLabel("backup")).toBe("Backup");
+    });
+    it("handles underscores", () => {
+      expect(formatTaskLabel("hardware_sleep")).toBe("Hardware Sleep");
+    });
+    it("handles numbers", () => {
+      expect(formatTaskLabel("daily-backup-v2")).toBe("Daily Backup V2");
+    });
+  });
 
+  describe("isValidTaskId", () => {
+    it("accepts simple kebab", () => {
+      expect(isValidTaskId("daily-backup")).toBe(true);
+    });
+    it("accepts single letter", () => {
+      expect(isValidTaskId("x")).toBe(false);
+    });
+    it("rejects leading dash", () => {
+      expect(isValidTaskId("-bad")).toBe(false);
+    });
+    it("rejects trailing dash", () => {
+      expect(isValidTaskId("backup-")).toBe(false);
+    });
+    it("rejects leading digit", () => {
+      expect(isValidTaskId("9live")).toBe(false);
+    });
+    it("rejects uppercase", () => {
+      expect(isValidTaskId("Daily-Backup")).toBe(false);
+    });
+    it("rejects empty", () => {
+      expect(isValidTaskId("")).toBe(false);
+    });
+  });
 });

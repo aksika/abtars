@@ -279,7 +279,7 @@ export function validateTaskId(id: string, entries: CronEntry[]): { ok: true; id
   }
   const normalized = id.trim().toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
   if (!isValidTaskId(normalized)) {
-    return { ok: false, error: `invalid task id "${id}" — use lowercase kebab-case, e.g. daily-backup` };
+    return { ok: false, error: `invalid task id "${id}" (normalized: "${normalized}") — use lowercase kebab-case, e.g. daily-backup` };
   }
   if (entries.some(e => e.id === normalized)) {
     return { ok: false, error: `duplicate id "${normalized}"` };

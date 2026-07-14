@@ -24,7 +24,6 @@ const SEED = ["config", "tasks"];
 const LEGACY_CLEANUP = ["core/prompts", "core"];
 
 
-
 /**
  * Reconcile runtime tree from templates source.
  * @param templatesSrc - Path to templates/ (from deployed release or source checkout)
@@ -91,7 +90,7 @@ function seedSleepCycle(templatesSrc: string, home: string): void {
   let sleepEntry: unknown;
   try {
     const raw = JSON.parse(readFileSync(templatePath, "utf-8"));
-    if (Array.isArray(raw)) sleepEntry = raw.find((e: unknown) => (e as { id?: string })?.id === "sleep-cycle");
+    if (Array.isArray(raw)) sleepEntry = raw.find((e: unknown) => e !== null && typeof e === "object" && "id" in (e as Record<string, unknown>) && (e as Record<string, unknown>).id === "sleep-cycle");
   } catch { /* skip */ }
   if (!sleepEntry) return;
 
