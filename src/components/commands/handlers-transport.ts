@@ -72,7 +72,7 @@ export async function handleEmergencyAlias(_text: string, ctx: CommandContext): 
 }
 
 export async function handleModels(text: string, ctx: CommandContext): Promise<boolean> {
-  const { loadTransport, resolveAgent, getModelsForProvider, writeTransportConfig } = await import("../transport-config.js");
+  const { loadTransport, resolveAgent, getModelsForProvider } = await import("../transport-config.js");
   const tc = loadTransport();
   const prof = tc ? resolveAgent("professor", tc) : null;
   const currentModel = ("currentModel" in ctx.transport
@@ -223,9 +223,13 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
     // Write + switch
     tc.agents["professor"]!.model = newModel;
-    const { cleanDemotedModels } = await import("../transport-config.js");
+    const { cleanDemotedModels, writeTransportConfig } = await import("../transport-config.js");
     cleanDemotedModels(tc, newModel);
-    writeTransportConfig(tc, `professor model → ${newModel}`);
+    const result = writeTransportConfig(tc, `professor model → ${newModel}`);
+    if (!result.ok) {
+      await ctx.reply(`❌ Cannot switch: ${result.issues.map(i => i.reason).join("; ")}`);
+      return true;
+    }
     if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
     }
@@ -299,11 +303,16 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
         tc.agents[role] = { model: defaults[role]?.model ?? defaults.professor.model, provider: providerName };
       }
     } else {
-      for (const role of Object.keys(tc.agents)) {
-        tc.agents[role] = { ...tc.agents[role]!, provider: providerName };
-      }
+      // #1415: no provider defaults — don't retain old provider's model IDs
+      await ctx.reply(`❌ ${providerName} has no model defaults. Use /model list ${providerName} and /model quick <model> to pick a compatible model.`);
+      return true;
     }
-    writeTransportConfig(tc, `global provider → ${providerName}`);
+    const { writeTransportConfig } = await import("../transport-config.js");
+    const result = writeTransportConfig(tc, `global provider → ${providerName}`);
+    if (!result.ok) {
+      await ctx.reply(`❌ Cannot switch to ${providerName}: ${result.issues.map(i => i.reason).join("; ")}`);
+      return true;
+    }
     await ctx.reply(`✓ All agents → ${providerName}. Use /reset to apply.`);
     return true;
   }

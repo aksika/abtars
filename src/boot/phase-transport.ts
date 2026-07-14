@@ -79,7 +79,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   let transport: IKiroTransport;
 
-  const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary, clearTransportCache, validateProviderReady } = await import("../components/transport-config.js");
+  const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary, clearTransportCache, validateProviderReady, validateModelProviderPair } = await import("../components/transport-config.js");
   const { existsSync, renameSync } = await import("node:fs");
   const { join: pathJoin } = await import("node:path");
   clearTransportCache();  // always re-read (picks up /models change writes)
@@ -102,12 +102,18 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   const hm = resolveHailMary(tc);
   if (hm) {
-    ctx.hailMary = {
-      model: hm.model,
-      endpoint: hm.endpoint,
-      apiKey: hm.apiKeyEnv ? getEnv().getApiKey(hm.apiKeyEnv) : undefined,
-    };
-    logInfo("main", `🚨 hailMary configured: ${hm.model} (manual /model emergency only)`);
+    const hmCompat = validateModelProviderPair(hm.model, tc?.hailMary?.provider ?? "");
+    if (!hmCompat.ok) {
+      logWarn("main", `hailMary model incompatible: ${hmCompat.reason} — hailMary unavailable`);
+      ctx.hailMary = null;
+    } else {
+      ctx.hailMary = {
+        model: hm.model,
+        endpoint: hm.endpoint,
+        apiKey: hm.apiKeyEnv ? getEnv().getApiKey(hm.apiKeyEnv) : undefined,
+      };
+      logInfo("main", `🚨 hailMary configured: ${hm.model} (manual /model emergency only)`);
+    }
   } else {
     ctx.hailMary = null;
   }
@@ -117,6 +123,14 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   if (!tc) {
     // No transport.json and no .old.json — emergency mode from .env
     const fb = getEnvFallback();
+    // #1415: validate model/provider compatibility before provider readiness
+    const compat = validateModelProviderPair(fb.model, fb.providerName);
+    if (!compat.ok) {
+      logError("main", `No transport.json, no backup, and .env model incompatible: ${compat.reason}`);
+      logWarn("main", "Transport unavailable — running in Tier 2 (no agent responses)");
+      ctx.transport = null;
+      return "skipped";
+    }
     const fbValidation = validateProviderReady(fb.providerName, fb.provider, getEnv());
     if (!fbValidation.ok) {
       logError("main", `No transport.json, no backup, and .env emergency model also invalid: ${fbValidation.reason}`);
@@ -134,15 +148,28 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     }, 10_000);
   } else {
     // transport.json valid — walk primary + fb chain
-    const validation = validateProviderReady(prof!.providerName, prof!.provider, getEnv());
-    if (validation.ok) {
+    // #1415: validate model/provider compatibility before provider readiness
+    let compat = validateModelProviderPair(prof!.model, prof!.providerName);
+    if (!compat.ok) {
+      logDebug("main", `Model incompatible: ${prof!.model} — ${compat.reason}`);
+      logWarn("main", `${prof!.model}: ${compat.reason} — trying fallbacks`);
+    }
+    const validation = compat.ok ? validateProviderReady(prof!.providerName, prof!.provider, getEnv()) : null;
+    if (validation?.ok) {
       logDebug("main", `Model init OK: ${prof!.model} via ${prof!.providerName}`);
       resolved = prof;
     } else {
-      logDebug("main", `Model init failed: ${prof!.model} — ${validation.reason}`);
-      logWarn("main", `${prof!.model}: ${validation.reason} — trying fallbacks`);
+      if (!compat.ok) logDebug("main", `${prof!.model}: skipping (incompatible pair)`);
+      else if (validation) logDebug("main", `Model init failed: ${prof!.model} — ${validation.reason}`);
+      if (!compat.ok) logWarn("main", `${prof!.model}: incompatible with ${prof!.providerName} — trying fallbacks`);
+      else logWarn("main", `${prof!.model}: ${validation!.reason} — trying fallbacks`);
       // Walk fallback chain
       for (const fb of prof!.fallbacks) {
+        const fbCompat = validateModelProviderPair(fb.model, fb.provider);
+        if (!fbCompat.ok) {
+          logDebug("main", `Fallback incompatible: ${fb.model} — ${fbCompat.reason}`);
+          continue;
+        }
         const fbResolved = resolveAgent("_fb", { ...tc!, agents: { ...tc!.agents, _fb: { model: fb.model, provider: fb.provider } } });
         if (!fbResolved) continue;
         const fbVal = validateProviderReady(fbResolved.providerName, fbResolved.provider, getEnv());

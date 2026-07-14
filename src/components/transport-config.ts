@@ -306,7 +306,7 @@ export type EnvFallback = {
 export function getEnvFallback(): EnvFallback {
   const providerName = readEnvWithDefault("DEFAULT_PROVIDER", "openrouter", "default LLM provider");
   const transport = getEnv().defaultTransport as "api" | "acp" | "tmux";
-  const model = readEnvWithDefault("DEFAULT_MODEL", "minimax-m2.5:cloud", "default LLM model");
+  const model = readEnvWithDefault("DEFAULT_MODEL", "minimax/minimax-m2.5", "default LLM model");
 
   const provider: ProviderConfig = { transport };
   if (transport === "api") {
@@ -319,12 +319,85 @@ export function getEnvFallback(): EnvFallback {
   return { provider, providerName, model, contextWindow: 128000, maxOutput: 8192 };
 }
 
+// ── Model/provider compatibility (#1415) ─────────────────────────────────────
+
+export type ModelProviderValidation =
+  | { ok: true }
+  | { ok: false; model: string; provider: string; allowed: string[]; reason: string };
+
+export type AssignmentIssue = {
+  location: string;
+  model: string;
+  provider: string;
+  reason: string;
+};
+
+/** Validate a single model/provider pair against the catalog.
+ *  Returns ok when the model is absent from the catalog (unknown/custom model).
+ *  When the entry exists, returns ok only when entry.transports includes the provider. */
+export function validateModelProviderPair(
+  model: string,
+  provider: string,
+  models?: ModelCatalog,
+): ModelProviderValidation {
+  const mc = models ?? loadModels();
+  const entry = mc[model];
+  if (!entry) return { ok: true };
+  if (entry.transports.includes(provider)) return { ok: true };
+  return {
+    ok: false,
+    model,
+    provider,
+    allowed: [...entry.transports],
+    reason: `Model "${model}" is not available on provider "${provider}" — only supported on: ${entry.transports.join(", ")}`,
+  };
+}
+
+/** Validate every agent primary, fallback, and hail Mary in a transport config.
+ *  Reports all issues in deterministic location order. */
+export function validateTransportAssignments(
+  config: TransportConfig,
+  models?: ModelCatalog,
+): AssignmentIssue[] {
+  const issues: AssignmentIssue[] = [];
+  const mc = models ?? loadModels();
+
+  for (const [role, assignment] of Object.entries(config.agents)) {
+    const result = validateModelProviderPair(assignment.model, assignment.provider, mc);
+    if (!result.ok) {
+      issues.push({ location: `${role}.model`, model: assignment.model, provider: assignment.provider, reason: result.reason });
+    }
+    for (let i = 0; i < (assignment.fallbacks ?? []).length; i++) {
+      const fb = assignment.fallbacks![i]!;
+      const fbResult = validateModelProviderPair(fb.model, fb.provider, mc);
+      if (!fbResult.ok) {
+        issues.push({ location: `${role}.fallbacks[${i}]`, model: fb.model, provider: fb.provider, reason: fbResult.reason });
+      }
+    }
+  }
+
+  if (config.hailMary) {
+    const hmResult = validateModelProviderPair(config.hailMary.model, config.hailMary.provider, mc);
+    if (!hmResult.ok) {
+      issues.push({ location: "hailMary", model: config.hailMary.model, provider: config.hailMary.provider, reason: hmResult.reason });
+    }
+  }
+
+  return issues;
+}
+
 // ── Validation (startup) ────────────────────────────────────────────────────
 
 export function validateAtStartup(): void {
   const tc = loadTransport();
   if (!tc) return;
   const mc = loadModels();
+
+  // #1415: use structured validation for model/provider compatibility
+  const issues = validateTransportAssignments(tc, mc);
+  for (const iss of issues) {
+    logWarn(TAG, `${iss.location}: ${iss.reason}`);
+  }
 
   for (const [role, assignment] of Object.entries(tc.agents)) {
     if (!tc.providers[assignment.provider]) {
@@ -333,8 +406,6 @@ export function validateAtStartup(): void {
     const modelEntry = mc[assignment.model];
     if (!modelEntry) {
       logWarn(TAG, `Agent "${role}": model "${assignment.model}" not in models.json`);
-    } else if (!modelEntry.transports.includes(assignment.provider)) {
-      logWarn(TAG, `Agent "${role}": model "${assignment.model}" not listed for provider "${assignment.provider}" in models.json`);
     }
   }
 
@@ -355,12 +426,22 @@ export function anyProviderUseProviderLib(tc?: TransportConfig | null): boolean 
 
 // ── Write ───────────────────────────────────────────────────────────────────
 
-export function writeTransportConfig(tc: TransportConfig, reason?: string): void {
+export type TransportWriteResult =
+  | { ok: true }
+  | { ok: false; issues: AssignmentIssue[] };
+
+export function writeTransportConfig(tc: TransportConfig, reason?: string): TransportWriteResult {
+  // #1415: reject known-incompatible model/provider pairs before persisting
+  const issues = validateTransportAssignments(tc);
+  if (issues.length > 0) {
+    for (const iss of issues) logWarn(TAG, `Refusing to write — ${iss.reason}`);
+    return { ok: false, issues };
+  }
   // Guard: reject empty model strings before persisting
   for (const [role, agent] of Object.entries(tc.agents)) {
     if (!agent.model?.trim()) {
       logWarn(TAG, `Refusing to write transport.json — agent "${role}" has empty model`);
-      return;
+      return { ok: false, issues: [{ location: role, model: agent.model ?? "", provider: agent.provider, reason: `empty model string` }] };
     }
   }
   const p = join(configDir(), getEnv().transportConfig);
@@ -374,6 +455,7 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): void
   writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
   cachedTransport = tc;
   logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
+  return { ok: true };
 }
 
 /** Remove demoted models from config. Called on user-initiated model switch.

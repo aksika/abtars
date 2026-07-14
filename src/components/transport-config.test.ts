@@ -67,7 +67,7 @@ describe("getEnvFallback", () => {
     const fb = getEnvFallback();
     expect(fb.providerName).toBe("openrouter");
     expect(fb.provider.transport).toBe("api");
-    expect(fb.model).toBe("minimax-m2.5:cloud");
+    expect(fb.model).toBe("minimax/minimax-m2.5");
   });
 });
 
