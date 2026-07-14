@@ -297,10 +297,10 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const validation = validateProviderReady(providerName, provider, getEnv());
     if (!validation.ok) { await ctx.reply(formatValidationError(providerName, validation)); return true; }
     const defaults = loadProviderDefaults(providerName);
-    if (defaults?.professor) {
-      tc.agents["professor"] = { model: defaults.professor.model, provider: providerName, fallbacks: defaults.professor.fallbacks?.map(m => ({ model: m, provider: providerName })) };
-      for (const role of ["dreamy", "browsie", "coding"] as const) {
-        tc.agents[role] = { model: defaults[role]?.model ?? defaults.professor.model, provider: providerName };
+    if (defaults?.main) {
+      tc.agents["main"] = { model: defaults.main.model, provider: providerName };
+      for (const role of ["dreamy", "browsie", "cody"] as const) {
+        tc.agents[role] = { model: defaults[role]?.model ?? defaults.main.model, provider: providerName };
       }
     } else {
       // #1415: no provider defaults — don't retain old provider's model IDs

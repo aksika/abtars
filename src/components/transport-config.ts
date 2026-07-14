@@ -137,23 +137,24 @@ export function loadTransport(): TransportConfig | null {
       logError(TAG, `Config migration failed: ${migrated.error}`);
       return null;
     }
-    cachedTransport = migrated.config!;
+    const config = migrated.config!;
+    // Validate before persisting migration
+    validateShape(config, TRANSPORT_SCHEMA, "transport.json");
+    const repairs = validateAndRepair(config);
+    cachedTransport = config;
     if (raw.schemaVersion !== 2) {
-      // Atomically write migrated config, preserving old as .old
       const oldPath = p.replace(".json", ".old.json");
       try { writeFileSync(oldPath, JSON.stringify(raw, null, 2), "utf-8"); } catch { /* best effort */ }
-      writeFileSync(p, JSON.stringify(cachedTransport, null, 2), "utf-8");
+      writeFileSync(p, JSON.stringify(config, null, 2), "utf-8");
       logInfo(TAG, "Migrated transport config v1 → v2");
     }
-    validateShape(cachedTransport, TRANSPORT_SCHEMA, "transport.json");
-    logInfo(TAG, `Loaded transport config v${cachedTransport.schemaVersion ?? 2} (route: ${cachedTransport.route}, ${Object.keys(cachedTransport.agents).length} agents, ${Object.keys(cachedTransport.providers).length} providers)`);
-    const repairs = validateAndRepair(cachedTransport);
+    logInfo(TAG, `Loaded transport config v${config.schemaVersion ?? 2} (route: ${config.route}, ${Object.keys(config.agents).length} agents, ${Object.keys(config.providers).length} providers)`);
     if (repairs.length > 0) {
       for (const r of repairs) logWarn(TAG, `Auto-repaired: ${r.agent} was on ${r.oldProvider} — ${r.reason}`);
-      writeTransportConfig(cachedTransport, `invariant auto-repair (${repairs.length} agents)`);
+      writeTransportConfig(config, `invariant auto-repair (${repairs.length} agents)`);
       pendingRepairs = repairs;
     }
-    return cachedTransport;
+    return config;
   } catch (err) {
     logAndSwallow(TAG, "loadTransport parse", err);
     // Fallback to transport.default.json
@@ -640,10 +641,9 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): Tran
       return { ok: false, issues: [{ location: role, model: agent.model ?? "", provider: agent.provider, reason: `empty model string` }] };
     }
   }
-  // Set schemaVersion and ensure route
-  (tc as any).schemaVersion = 2;
-  if (!tc.route) { (tc as any).route = "direct-api"; }
   const p = join(configDir(), getEnv().transportConfig);
+  // Ensure output has schemaVersion and route without mutating the input
+  const output = { ...tc, schemaVersion: 2, route: tc.route || ("direct-api" as ExecutionRoute) };
   // Save current as .old before overwriting (enables /model restore)
   // Only overwrite .old if it's >15min old — preserves last-known-good during rapid changes
   const oldPath = p.replace(".json", ".old.json");
@@ -651,8 +651,8 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): Tran
     const oldAge = Date.now() - statSync(oldPath).mtimeMs;
     if (oldAge > 15 * 60_000) writeFileSync(oldPath, readFileSync(p, "utf-8"), "utf-8");
   } catch { try { writeFileSync(oldPath, readFileSync(p, "utf-8"), "utf-8"); } catch (err) { logAndSwallow(TAG, "backup transport.old.json", err); } }
-  writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
-  cachedTransport = tc;
+  writeFileSync(p, JSON.stringify(output, null, 2), "utf-8");
+  cachedTransport = output;
   logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
   return { ok: true };
 }
@@ -734,18 +734,21 @@ export function getAvailableProviders(tc: TransportConfig): Array<{ name: string
   return Object.entries(tc.providers).map(([name, config]) => ({ name, config }));
 }
 
-/** Load a provider's defaults block. Missing subagents inherit professor's model. */
-export function loadProviderDefaults(providerName: string, tc?: TransportConfig | null): Record<string, { model: string; fallbacks?: string[] }> | null {
+/** Load a provider's defaults block. Missing subagents inherit main's model. */
+export function loadProviderDefaults(providerName: string, tc?: TransportConfig | null): Record<string, { model: string }> | null {
   const config = tc ?? loadTransport();
   if (!config) return null;
   const provider = config.providers[providerName];
   if (!provider?.defaults) return null;
   const defaults = provider.defaults;
-  if (!defaults["professor"]) return null;
-  const profModel = defaults["professor"].model;
-  const result: Record<string, { model: string; fallbacks?: string[] }> = { ...defaults };
-  for (const role of ["dreamy", "browsie", "coding"]) {
-    if (!result[role]) result[role] = { model: profModel };
+  if (!defaults["main"]) return null;
+  const mainModel = defaults["main"].model;
+  const result: Record<string, { model: string }> = {};
+  for (const [k, v] of Object.entries(defaults)) {
+    result[k] = { model: v.model };
+  }
+  for (const role of ["dreamy", "browsie", "cody"]) {
+    if (!result[role]) result[role] = { model: mainModel };
   }
   return result;
 }
