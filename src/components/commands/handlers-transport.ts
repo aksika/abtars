@@ -88,6 +88,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     if (!t.setEmergencyMode) { await ctx.reply("❌ Transport does not support emergency mode"); return true; }
 
     // #367 — validate hailMary's provider is ready before switching.
+    let hmApiKey: string | undefined;
     if (tc) {
       const hmProvider = tc.hailMary ? tc.providers[tc.hailMary.provider] : undefined;
       if (hmProvider) {
@@ -95,11 +96,11 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
         const { getEnv } = await import("../env-schema.js");
         const result = validateProviderReady(tc.hailMary!.provider, hmProvider, getEnv());
         if (!result.ok) { await ctx.reply(formatValidationError(tc.hailMary!.provider, result)); return true; }
+        hmApiKey = tc.hailMary?.provider ? getEnv().getApiKey(hmProvider.apiKeyEnv ?? "") : undefined;
       }
     }
 
     const hmEndpoint = ctx.hailMary?.endpoint ?? "";
-    const hmApiKey = ctx.hailMary?.apiKeyEnv ? getEnv().getApiKey(ctx.hailMary.apiKeyEnv) : undefined;
     t.setEmergencyMode({ provider: tc?.hailMary?.provider ?? "unknown", model: ctx.hailMary?.model ?? "", endpoint: hmEndpoint, apiKey: hmApiKey, maxContext: 1_000_000 });
     await ctx.reply(`🚨 EMERGENCY MODE: using ${ctx.hailMary.model} (paid). Clears on /model restore, /reset, or wake-up.`);
     return true;

@@ -137,7 +137,7 @@ export class DirectApiTransport implements IKiroTransport {
   memoryBackend?: { getRecentConversation(userId: string, since: number, limit: number): Array<{ role: string; content: string; timestamp: number }> };
 
   private policy: FallbackPolicy | null;
-  private emergencyOverride: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null = null;
+  private emergencyOverride: { provider: string; endpoint: string; apiKey?: string; model: string; maxContext: number } | null = null;
 
   /** Activate emergency (hailMary) mode — next prompts bypass the fallback policy. */
   setEmergencyMode(override: { provider: string; endpoint: string; apiKey?: string; model: string; maxContext: number } | null): void {
@@ -1130,6 +1130,7 @@ export class DirectApiTransport implements IKiroTransport {
   /** Hot-swap the active model. Takes effect on next API call. */
   setModel(model: string): void {
     this.activeModel = model;
+    this.primaryCandidate.model = model;
     (this.config as { model: string }).model = model;
     logInfo(TAG, `Model switched (user): ${model}`);
   }
