@@ -1,6 +1,7 @@
 [
   {
     "id": "morning-greeting",
+    "title": "Morning Greeting",
     "message": "Good morning! Start a new day with the user. Be warm and personal, use memory to recall something relevant about them or their plans.",
     "schedule": "0 9 * * *",
     "type": "task",
@@ -10,6 +11,7 @@
   },
   {
     "id": "daily-backup",
+    "title": "Daily Backup",
     "message": "abtars backup",
     "schedule": "0 0 * * *",
     "type": "task",

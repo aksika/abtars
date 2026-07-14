@@ -268,12 +268,3 @@ function stripBookkeeping(e: Record<string, unknown>): Partial<CronEntry> {
 export function newTaskId(): string {
   return randomBytes(3).toString("hex");
 }
-
-/** Derive a human-readable label from an entry. Priority: title → formatted id → message → raw id. */
-export function formatTaskLabel(entry: { title?: string; id: string; message?: string }): string {
-  if (entry.title) return entry.title;
-  const fromId = entry.id.replace(/[-_]/g, " ").replace(/\b\w/g, c => c.toUpperCase()).trim();
-  if (fromId && /[a-zA-Z]/.test(fromId)) return fromId;
-  if (entry.message) return entry.message.split("\n")[0]?.replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30) ?? entry.id;
-  return entry.id;
-}
