@@ -98,7 +98,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     }
   }
 
-  const prof = tc ? resolveAgent("professor", tc) : null;
+  const prof = tc ? resolveAgent("main", tc) : null;
 
   const hm = resolveHailMary(tc);
   if (hm) {
