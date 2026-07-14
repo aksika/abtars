@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { currentTestSandbox, assertSandboxPath, isolatedChildEnv } from "./runtime-isolation.js";
+import { currentTestSandbox, assertSandboxPath, isolatedChildEnv, restoreEnvSnapshot } from "./runtime-isolation.js";
 import { resolve, join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 
 describe("runtime-isolation sandbox", () => {
   it("provides a sandbox with all expected directories", () => {
@@ -78,5 +78,36 @@ describe("runtime-isolation sandbox", () => {
     const env = isolatedChildEnv({ MY_API_KEY: "fake-key", CUSTOM_VAR: "hello" });
     expect(env.MY_API_KEY).toBe("fake-key");
     expect(env.CUSTOM_VAR).toBe("hello");
+  });
+
+  it("restoreEnvSnapshot deletes previously-unset keys and preserves empty-string keys", () => {
+    // Distinguishes "was unset" (delete) from "was the empty string" (restore to "").
+    const env: Record<string, string | undefined> = { HOME: "will-be-deleted", KEEP: "v" };
+    const snap = new Map<string, { wasSet: boolean; value: string }>([
+      ["HOME", { wasSet: false, value: "" }],   // originally absent -> removed
+      ["EMPTY", { wasSet: true, value: "" }],     // originally "" -> restored to ""
+      ["KEEP", { wasSet: true, value: "v" }],     // originally "v" -> unchanged
+      ["ABSENT", { wasSet: false, value: "" }],   // originally absent -> removed
+    ]);
+    restoreEnvSnapshot(env, snap);
+    expect(env).toEqual({ KEEP: "v", EMPTY: "" });
+    expect("HOME" in env).toBe(false);
+    expect("ABSENT" in env).toBe(false);
+    expect(env.EMPTY).toBe("");
+  });
+
+  it("currentTestSandbox returns a stable reference (idempotent within the file)", () => {
+    const a = currentTestSandbox();
+    const b = currentTestSandbox();
+    expect(a).toBe(b);
+  });
+
+  it("sandbox root and its application homes exist on disk (cleanup ownership)", () => {
+    const s = currentTestSandbox();
+    expect(statSync(s.root).isDirectory()).toBe(true);
+    expect(existsSync(s.abtarsHome)).toBe(true);
+    expect(existsSync(s.abmindHome)).toBe(true);
+    // The sandbox owns exactly its root; the root itself is never a valid target.
+    expect(() => assertSandboxPath(s.root)).toThrow("outside the test sandbox root");
   });
 });
