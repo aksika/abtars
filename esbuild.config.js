@@ -1,8 +1,7 @@
 /**
  * esbuild.config.js — Bundle abtars into a single ESM output.
  *
- * Produces bundle/ with code-split chunks. Native addons
- * and browser automation (cloakbrowser) are external.
+ * Produces bundle/ with code-split chunks. Native addons are external.
  *
  * Usage: node esbuild.config.js
  */
@@ -53,7 +52,6 @@ function capabilityRegistryPlugin() {
 
 const external = [
   "rettiwt-api",
-  "cloakbrowser",
   "better-sqlite3",
   "abmind",
   "pdf-parse",
@@ -70,8 +68,6 @@ const result = await esbuild.build({
     abtars: "src/main.ts",
     "abtars-cli": "src/cli/abtars.ts",
     "abtars-task": "src/cli/abtars-task.ts",
-    "abtars-browser": "src/cli/abtars-browser.ts",
-    "cloakbrowser": "src/cli/cloakbrowser.ts",
     "abtars-browse": "src/capabilities/browser/abtars-browse.ts",
     "abtars-restart": "src/cli/commands/restart.ts",
     "abtars-rss": "src/cli/abtars-rss.ts",

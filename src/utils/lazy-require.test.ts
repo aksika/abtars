@@ -54,11 +54,9 @@ describe("lazyRequire", { timeout: 30000 }, () => {
 describe("OPTIONAL_DEPS registry", () => {
   it("has expected entries", async () => {
     const { OPTIONAL_DEPS } = await import("./lazy-require.js");
-    expect(OPTIONAL_DEPS.browser).toBeDefined();
     expect(OPTIONAL_DEPS.pdf).toBeDefined();
     expect(OPTIONAL_DEPS.youtube).toBeDefined();
     expect(OPTIONAL_DEPS.image).toBeDefined();
-    expect(OPTIONAL_DEPS.browser.packages).toContain("cloakbrowser");
   });
 
   it("includes the TUI entry (#1315) with a pinned version", async () => {

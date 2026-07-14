@@ -10,26 +10,24 @@ ${TASK}
 
 ## Browser CLI
 
-`abtars-browser` is a locally installed CLI that controls a Chromium instance in Docker.
+`cloakbrowser` is the external browser CLI available on PATH:
 
 ```bash
-abtars-browser --action navigate --url "https://example.com" --session-id browse
-abtars-browser --action click --selector "text=Sign In" --session-id browse
-abtars-browser --action fill --selector "#email" --value "user@example.com" --session-id browse
-abtars-browser --action extract_text --session-id browse
-abtars-browser --action screenshot --session-id browse
-abtars-browser --action get_page_info --session-id browse
-abtars-browser --action set_cookie --cookie-file /run/browser/cookies/x-cookies.json --url "https://x.com" --session-id browse
-abtars-browser --action close_session --session-id browse
+cloakbrowser --action navigate --url "https://example.com" --session-id browse
+cloakbrowser --action click --selector "text=Sign In" --session-id browse
+cloakbrowser --action fill --selector "#email" --value "user@example.com" --session-id browse
+cloakbrowser --action extract_text --session-id browse
+cloakbrowser --action screenshot --session-id browse
+cloakbrowser --action get_page_info --session-id browse
+cloakbrowser --action set_cookie --cookie-file /run/browser/cookies/x-cookies.json --url "https://x.com" --session-id browse
+cloakbrowser --action close_session --session-id browse
 ```
 
 Always use `--session-id browse` to keep state across calls.
 
-If the container is not running: `~/.abtars/browser-docker.sh start`
-
 ### Login state
 
-Navigate to the target site first. If you are not logged in, load the site's cookies with `set_cookie` before navigating again. Available cookie files: `ls /run/browser/cookies/` (visible inside the container, use the path as-is with `--cookie-file`).
+Navigate to the target site first. If you are not logged in, load the site's cookies with `set_cookie` before navigating again. Available cookie files: `ls /run/browser/cookies/` (use the path as-is with `--cookie-file`).
 
 ## Output
 

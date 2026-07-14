@@ -55,10 +55,4 @@ export type {
   SendOpts,
 } from "./platform.js";
 
-export type {
-  BrowserActionType,
-  BrowserAction,
-  BrowserToolResult,
-  PageElement,
-  BrowserSession,
-} from "./browser.js";
+

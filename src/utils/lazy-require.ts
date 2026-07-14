@@ -22,7 +22,7 @@ export interface OptionalDep {
 
 export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
   native:  { packages: ["better-sqlite3", "sqlite-vec"], label: "SQLite native deps (kanban + memory)" },
-  browser: { packages: ["cloakbrowser"], label: "CloakBrowser (stealth Chromium)" },
+
   twitter: { packages: ["rettiwt-api"], label: "Twitter/X integration" },
   pdf:     { packages: ["pdf-parse"], label: "PDF reading" },
   youtube: { packages: ["youtube-transcript"], label: "YouTube transcripts" },

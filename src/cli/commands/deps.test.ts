@@ -34,7 +34,6 @@ describe("abtars deps", () => {
     const code = await deps(["list"]);
     expect(code).toBe(0);
     const output = write.mock.calls.map(c => c[0]).join("");
-    expect(output).toContain("browser");
     expect(output).toContain("pdf");
     expect(output).toContain("youtube");
     expect(output).toContain("image");

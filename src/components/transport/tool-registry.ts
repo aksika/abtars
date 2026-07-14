@@ -335,7 +335,7 @@ const webBrowseTool: ToolDefinition = {
     properties: {
       task: { type: "string", description: "What to do on the web" },
       chat_id: { type: "string", description: "Chat ID for result delivery" },
-      engine: { type: "string", enum: ["cloakbrowser"], description: "Browser engine (default: cloakbrowser)" },
+      engine: { type: "string", description: "Browser engine (optional)" },
     },
     required: ["task", "chat_id"],
   },

@@ -105,19 +105,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "SELFHEAL_ENABLED", type: "bool", default: "false", description: "Enable self-healer task" },
 
   // ── Browser ──
-  { env: "BROWSER_ENGINE", type: "string", default: "cloakbrowser", description: "Browser engine: cloakbrowser" },
-  { env: "BROWSER_HEADED", type: "bool", default: "false", description: "Run browser in headed mode" },
-  { env: "BROWSER_NO_SANDBOX", type: "bool", default: "false", description: "Disable browser sandbox" },
-  { env: "BROWSER_CHANNEL", type: "string", description: "Browser channel (e.g. chrome)" },
-  { env: "BROWSER_DOCKER", type: "bool", default: "false", description: "Use Docker for browser" },
-  { env: "BROWSER_IDLE_STOP_MIN", type: "int", default: "10", description: "Minutes idle before stopping browser container" },
-  { env: "BROWSER_ALLOWED_DOMAINS", type: "string", default: "", description: "Comma-separated allowed domains" },
-  { env: "BROWSER_SOCKET_PATH", type: "string", default: "/run/browser/browser.sock", description: "Browser IPC socket path" },
-  { env: "BROWSER_MAX_SESSIONS", type: "int", default: "3", description: "Max concurrent browser sessions" },
-  { env: "BROWSER_SESSION_TIMEOUT_SEC", type: "int", default: "300", description: "Browser session timeout (seconds)" },
-  { env: "WEB_SCRAPE_USER_AGENT", type: "string", description: "User agent for web scraping" },
-  { env: "WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_SEC", type: "int", default: "30", description: "Playwright page timeout (seconds)" },
-  { env: "SSRF_CHECK", type: "bool", default: "true", description: "Enable SSRF protection for browser" },
   { env: "BROWSING_AGENT", type: "string", description: "Model override for browsing agent" },
 
   // ── Misc ──
@@ -218,19 +205,6 @@ export interface EnvConfig {
   selfhealEnabled: boolean;
 
   // Browser
-  browserEngine: string;
-  browserHeaded: boolean;
-  browserNoSandbox: boolean;
-  browserChannel: string | undefined;
-  browserDocker: boolean;
-  browserIdleStopMin: number;
-  browserAllowedDomains: string;
-  browserSocketPath: string;
-  browserMaxSessions: number;
-  browserSessionTimeoutMs: number;
-  webScrapeUserAgent: string | undefined;
-  webScrapePlaywrightTimeoutMs: number;
-  ssrfCheck: boolean;
   browsingAgent: string | undefined;
 
   // Misc
@@ -376,19 +350,6 @@ export function initEnv(): Readonly<EnvConfig> {
 
     selfhealEnabled: parseBool(readOr("SELFHEAL_ENABLED", "false")),
 
-    browserEngine: readOr("BROWSER_ENGINE", "cloakbrowser"),
-    browserHeaded: parseBool(readOr("BROWSER_HEADED", "false")),
-    browserNoSandbox: parseBool(readOr("BROWSER_NO_SANDBOX", "false")),
-    browserChannel: read("BROWSER_CHANNEL"),
-    browserDocker: parseBool(readOr("BROWSER_DOCKER", "false")),
-    browserIdleStopMin: parseIntSafe(readOr("BROWSER_IDLE_STOP_MIN", "10"), "BROWSER_IDLE_STOP_MIN"),
-    browserAllowedDomains: readOr("BROWSER_ALLOWED_DOMAINS", ""),
-    browserSocketPath: readOr("BROWSER_SOCKET_PATH", "/run/browser/browser.sock"),
-    browserMaxSessions: parseIntSafe(readOr("BROWSER_MAX_SESSIONS", "3"), "BROWSER_MAX_SESSIONS"),
-    browserSessionTimeoutMs: parseIntSafe(readOr("BROWSER_SESSION_TIMEOUT_SEC", "300"), "BROWSER_SESSION_TIMEOUT_SEC") * 1000,
-    webScrapeUserAgent: read("WEB_SCRAPE_USER_AGENT"),
-    webScrapePlaywrightTimeoutMs: parseIntSafe(readOr("WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_SEC", "30"), "WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_SEC") * 1000,
-    ssrfCheck: read("SSRF_CHECK") !== "0",
     browsingAgent: read("BROWSING_AGENT"),
 
     disabledCapabilities: readOr("DISABLED_CAPABILITIES", ""),

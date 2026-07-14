@@ -61,8 +61,8 @@ function routeAcceptedGossipV1(
   payloadStr: string,
   sigBase64: string,
   peerName: string,
-  host: string,
-  port: number,
+  _host: string,
+  _port: number,
 ): void {
   // Legacy v1 has no epoch/sequence.  Wrap into the v1 schema envelope and
   // let the health store parse it.  v1 is treated as lower-authority legacy
@@ -160,7 +160,7 @@ function registerHostCapabilities(): void {
   try { if (execSync("which xcodebuild", { stdio: "pipe" }).toString().trim()) caps.push("xcode"); } catch {}
   try { if (execSync("which ollama", { stdio: "pipe" }).toString().trim()) caps.push("ollama"); } catch {}
   if (existsSync("/usr/bin/nvidia-smi") || process.env["CUDA_VISIBLE_DEVICES"]) caps.push("gpu");
-  if (process.env["BROWSER_ENGINE"]) caps.push("browser");
+  caps.push("browser");
   if (process.env["GROQ_API_KEY"]) caps.push("stt");
   store.capabilities.register("host", caps);
 }

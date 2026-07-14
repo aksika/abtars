@@ -10,8 +10,7 @@
  *     browser-ipc-server relies on the boot umask (0o077). TUI is master-only
  *     and security-sensitive; we set perms directly so the test below is real
  *     and the guarantee doesn't depend on the process umask.
- *   - We do NOT import the browser class — it dispatches BrowserAction and
- *     would couple the two systems.
+ *   - We do NOT import the browser class to avoid coupling.
  *
  * Single-client: one live connection at a time. New-attach-wins: a new
  * connection sends `error` to the existing client and evicts it. The
@@ -611,7 +610,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
       if (event.sequence <= this._activitySequence) return;
       if (this._activityDirty) return;
       this._activitySequence = event.sequence;
-      this._push({ t: "activity", event });
+      this._push({ t: "activity", sequence: event.sequence, event });
     }, () => {
       if (!this._isAttCurrent(capturedConnGen, capturedAttGen)) return;
       this._activityDirty = true;
