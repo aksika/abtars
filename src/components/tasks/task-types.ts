@@ -12,7 +12,6 @@
  * falls through to agent/script/orc execution.
  */
 
-import { randomBytes } from "node:crypto";
 import { CronExpressionParser } from "cron-parser";
 
 // ── Executors + system actions ──────────────────────────────────────────────
@@ -51,7 +50,6 @@ const SYSTEM_FORBIDDEN_FIELDS = [
  */
 export interface CronEntry {
   id: string;
-  title?: string;
   fireAt: number;
   message: string;
   chatId: number;
@@ -247,7 +245,7 @@ function validateSystemEntry(e: Record<string, unknown>, id: string):
 function stripBookkeeping(e: Record<string, unknown>): Partial<CronEntry> {
   const out: Partial<CronEntry> = {};
   const carry: (keyof CronEntry)[] = [
-    "title", "catchUp", "priority", "taskFile", "targetUserId", "agent",
+    "catchUp", "priority", "taskFile", "targetUserId", "agent",
     "deliveryMethod", "deliveryMode", "maxToolRounds", "paused", "maxRunsPerDay",
     "consecutiveFails", "agentFollowUp", "agentMessage", "lastRanAt", "retryAfter",
     "_prevFireAt", "_retrying", "history",
@@ -262,9 +260,29 @@ function stripBookkeeping(e: Record<string, unknown>): Partial<CronEntry> {
   return out;
 }
 
-// ── ID generation (shared with CLI) ─────────────────────────────────────────
+// ── ID validation + formatting ──────────────────────────────────────────────
 
-/** Generate a short random hex ID for a new entry. */
-export function newTaskId(): string {
-  return randomBytes(3).toString("hex");
+const TASK_ID_RE = /^[a-z][a-z0-9-]*[a-z0-9]$/;
+
+export function isValidTaskId(id: string): boolean {
+  return TASK_ID_RE.test(id);
+}
+
+export function formatTaskLabel(id: string): string {
+  return id.replace(/[-_]/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/** Validate and normalize a CLI-supplied task ID. */
+export function validateTaskId(id: string, entries: CronEntry[]): { ok: true; id: string } | { ok: false; error: string } {
+  if (!id || !id.trim()) {
+    return { ok: false, error: "--id is required" };
+  }
+  const normalized = id.trim().toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+  if (!isValidTaskId(normalized)) {
+    return { ok: false, error: `invalid task id "${id}" — use lowercase kebab-case, e.g. daily-backup` };
+  }
+  if (entries.some(e => e.id === normalized)) {
+    return { ok: false, error: `duplicate id "${normalized}"` };
+  }
+  return { ok: true, id: normalized };
 }

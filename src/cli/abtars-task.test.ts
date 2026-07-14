@@ -12,7 +12,7 @@ describe("abtars-task", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "cron-test-"));
     process.env.HOME = tmpDir;
-    delete process.env.ABTARS_HOME; // let abtarsHome() fall through to homedir()
+    delete process.env.ABTARS_HOME;
     mkdirSync(join(tmpDir, ".abtars", "memory"), { recursive: true });
   });
 
@@ -20,14 +20,12 @@ describe("abtars-task", () => {
     process.env.HOME = originalHome;
     if (originalAbtarsHome === undefined) delete process.env.ABTARS_HOME;
     else process.env.ABTARS_HOME = originalAbtarsHome;
-    // Close DB before cleanup
     const { closeDb } = await import("../components/tasks/task-store.js");
     closeDb();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
   async function run(args: string[]): Promise<string> {
-    // Force re-import to pick up new HOME
     const { closeDb } = await import("../components/tasks/task-store.js");
     closeDb();
     const mod = await import("./abtars-task.js");
@@ -43,16 +41,16 @@ describe("abtars-task", () => {
   }
 
   it("add creates entry", async () => {
-    const out = await run(["add", "--at", "2026-12-25T08:00", "--message", "Christmas", "--title", "Christmas", "--chat-id", "123", "--type", "reminder"]);
+    const out = await run(["add", "--id", "christmas", "--at", "2026-12-25T08:00", "--message", "Christmas", "--chat-id", "123", "--type", "reminder"]);
     const parsed = JSON.parse(out);
     expect(parsed.ok).toBe(true);
     expect(parsed.action).toBe("added");
-    expect(parsed.id).toHaveLength(6);
+    expect(parsed.id).toBe("christmas");
   });
 
   it("list shows pending entries", async () => {
-    await run(["add", "--at", "2026-12-25T08:00", "--message", "A", "--title", "A", "--chat-id", "1", "--type", "reminder"]);
-    await run(["add", "--at", "2026-12-26T08:00", "--message", "B", "--title", "B", "--chat-id", "1", "--type", "task"]);
+    await run(["add", "--id", "task-a", "--at", "2026-12-25T08:00", "--message", "A", "--chat-id", "1", "--type", "reminder"]);
+    await run(["add", "--id", "task-b", "--at", "2026-12-26T08:00", "--message", "B", "--chat-id", "1", "--type", "task"]);
     const out = await run(["list"]);
     const parsed = JSON.parse(out);
     expect(parsed.ok).toBe(true);
@@ -66,7 +64,7 @@ describe("abtars-task", () => {
   });
 
   it("remove deletes entry by id", async () => {
-    const addOut = await run(["add", "--at", "2026-12-25T08:00", "--message", "X", "--title", "X", "--chat-id", "1", "--type", "reminder"]);
+    const addOut = await run(["add", "--id", "test-x", "--at", "2026-12-25T08:00", "--message", "X", "--chat-id", "1", "--type", "reminder"]);
     const id = JSON.parse(addOut).id;
     const out = await run(["remove", id]);
     expect(JSON.parse(out)).toEqual({ ok: true, action: "removed", id });
@@ -89,7 +87,7 @@ describe("abtars-task", () => {
     let exitCode: number | undefined;
     process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
     try {
-      await run(["add", "--message", "X", "--chat-id", "1"]);
+      await run(["add", "--id", "test", "--message", "X", "--chat-id", "1"]);
     } catch { /* expected */ } finally {
       process.exit = origExit;
     }
@@ -97,7 +95,68 @@ describe("abtars-task", () => {
   });
 
   it("add defaults type to reminder", async () => {
-    const out = await run(["add", "--at", "2026-12-25T08:00", "--message", "Y", "--title", "Y", "--chat-id", "1"]);
+    const out = await run(["add", "--id", "test-y", "--at", "2026-12-25T08:00", "--message", "Y", "--chat-id", "1"]);
     expect(JSON.parse(out).ok).toBe(true);
+  });
+
+  it("rejects missing --id", async () => {
+    const origExit = process.exit;
+    let exitCode: number | undefined;
+    process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
+    try {
+      await run(["add", "--at", "2026-12-25T08:00", "--message", "Z", "--chat-id", "1"]);
+    } catch { /* expected */ } finally {
+      process.exit = origExit;
+    }
+    expect(exitCode).toBe(1);
+  });
+
+  it("rejects duplicate --id", async () => {
+    await run(["add", "--id", "dup", "--at", "2026-12-25T08:00", "--message", "first", "--chat-id", "1"]);
+    const origExit = process.exit;
+    let exitCode: number | undefined;
+    process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
+    try {
+      await run(["add", "--id", "dup", "--at", "2026-12-26T08:00", "--message", "second", "--chat-id", "1"]);
+    } catch { /* expected */ } finally {
+      process.exit = origExit;
+    }
+    expect(exitCode).toBe(1);
+  });
+
+  it("rejects invalid --id format", async () => {
+    const origExit = process.exit;
+    let exitCode: number | undefined;
+    process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
+    try {
+      await run(["add", "--id", "-bad", "--at", "2026-12-25T08:00", "--message", "bad", "--chat-id", "1"]);
+    } catch { /* expected */ } finally {
+      process.exit = origExit;
+    }
+    expect(exitCode).toBe(1);
+  });
+
+  it("rejects --id starting with digit", async () => {
+    const origExit = process.exit;
+    let exitCode: number | undefined;
+    process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
+    try {
+      await run(["add", "--id", "9live", "--at", "2026-12-25T08:00", "--message", "nine", "--chat-id", "1"]);
+    } catch { /* expected */ } finally {
+      process.exit = origExit;
+    }
+    expect(exitCode).toBe(1);
+  });
+
+  it("rejects --id ending with dash", async () => {
+    const origExit = process.exit;
+    let exitCode: number | undefined;
+    process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
+    try {
+      await run(["add", "--id", "backup-", "--at", "2026-12-25T08:00", "--message", "dash", "--chat-id", "1"]);
+    } catch { /* expected */ } finally {
+      process.exit = origExit;
+    }
+    expect(exitCode).toBe(1);
   });
 });

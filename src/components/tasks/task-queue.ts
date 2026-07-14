@@ -20,7 +20,7 @@ import { recordRun as dbRecordRun, readEntry, writeEntry } from "./task-store.js
 import { recordRun } from "./task-checker.js";
 import { kanbanComplete, kanbanFail } from "./kanban-board.js";
 import type { CronEntry } from "../../components/tasks/task-types.js";
-import { isSystemEntry } from "./task-types.js";
+import { isSystemEntry, formatTaskLabel } from "./task-types.js";
 import { getSystemTaskRegistry } from "./system-task-registry.js";
 import { localDate } from "../../utils/date.js";
 
@@ -309,7 +309,7 @@ export class CronQueue {
     if (entry.consecutiveFails >= 3) {
       entry.paused = true;
       logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${entry.consecutiveFails} consecutive failures`);
-      this.onTaskPaused?.(entry.chatId, entry.title ?? entry.message.slice(0, 60), lastError.slice(0, 200));
+      this.onTaskPaused?.(entry.chatId, formatTaskLabel(entry.id), lastError.slice(0, 200));
       writeEntry(entry);
       return true;
     }
@@ -410,7 +410,7 @@ export class CronQueue {
         if (code !== 0) {
           scheduleRetry(entry, !!entry._retrying);
           if (!paused && code !== 2) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
-          addTaskFailure({ taskName: entry.title ?? entry.message.slice(0, 60), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: Date.now(), consecutiveFailures: entry.consecutiveFails ?? 1 });
+          addTaskFailure({ taskName: formatTaskLabel(entry.id), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: Date.now(), consecutiveFailures: entry.consecutiveFails ?? 1 });
         }
         if (!paused) {
           // Silent success: don't notify user when script exits 0 with no output
@@ -445,7 +445,7 @@ export class CronQueue {
         if (entry.consecutiveFails >= 3) {
           entry.paused = true;
           logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${entry.consecutiveFails} idle-gate deferrals`);
-          this.onTaskPaused?.(entry.chatId, entry.title ?? entry.message.slice(0, 60), `idle-gate hit ${entry.consecutiveFails}× in a row`);
+          this.onTaskPaused?.(entry.chatId, formatTaskLabel(entry.id), `idle-gate hit ${entry.consecutiveFails}× in a row`);
         }
         writeEntry(entry);
         scheduleRetry(entry, !!entry._retrying);
@@ -540,7 +540,7 @@ export class CronQueue {
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
     const sessionType = (AGENT_SESSION[entry.agent ?? ""] ?? "T") as import("../spin-types.js").SessionType;
 
-    spin.dispatchAwait({ type: sessionType, title: entry.title ?? entry.message.slice(0, 80), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM", chatId: String(entry.chatId), deliveryMode: entry.deliveryMode, maxToolRounds: entry.maxToolRounds })
+    spin.dispatchAwait({ type: sessionType, title: formatTaskLabel(entry.id), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM", chatId: String(entry.chatId), deliveryMode: entry.deliveryMode, maxToolRounds: entry.maxToolRounds })
       .then(({ cardId: boardId, result: response }) => {
         // Guard: if model returned raw JSON tool output ({"stdout":...,"exit_code":...}),
         // extract just the meaningful content. This happens when the model echoes its last

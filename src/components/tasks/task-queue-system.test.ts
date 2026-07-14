@@ -32,7 +32,6 @@ import { recordRun as dbRecordRun } from "./task-store.js";
 function systemEntry(overrides: Partial<CronEntry> = {}): CronEntry {
   return {
     id: "sleep-cycle",
-    title: "Nightly memory consolidation",
     fireAt: Date.now() - 1000,
     message: "",
     chatId: 0,

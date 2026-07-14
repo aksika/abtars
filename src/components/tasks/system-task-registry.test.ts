@@ -12,7 +12,6 @@ import type { CronEntry } from "./task-types.js";
 function systemEntry(overrides: Partial<CronEntry> = {}): CronEntry {
   return {
     id: "sleep-cycle",
-    title: "Nightly memory consolidation",
     fireAt: Date.now(),
     message: "",
     chatId: 0,

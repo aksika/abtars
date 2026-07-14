@@ -11,7 +11,7 @@
 
 import { localISO } from "../utils/local-time.js";
 import { readEntries as dbReadEntries, readEntry, writeEntry, removeEntry as dbRemoveEntry } from "../components/tasks/task-store.js";
-import { newTaskId, type CronEntry, type SystemTaskAction, SYSTEM_ACTIONS } from "../components/tasks/task-types.js";
+import { validateTaskId, type CronEntry, type SystemTaskAction, SYSTEM_ACTIONS } from "../components/tasks/task-types.js";
 
 // Re-export so any external import of `CronEntry` from the CLI still resolves.
 // The canonical home is now src/components/tasks/task-types.ts (#1321).
@@ -30,7 +30,6 @@ interface AddArgs {
   executor?: string;
   action?: string;
   schedule?: string;
-  title?: string;
   taskFile?: string;
   agent?: string;
   targetUserId?: string;
@@ -48,7 +47,6 @@ function parseAddArgs(args: string[]): AddArgs {
       case "--executor": parsed.executor = args[++i] ?? ""; break;
       case "--action": parsed.action = args[++i] ?? ""; break;
       case "--schedule": parsed.schedule = args[++i] ?? ""; break;
-      case "--title": parsed.title = args[++i] ?? ""; break;
       case "--task-file": parsed.taskFile = args[++i] ?? ""; break;
       case "--agent": parsed.agent = args[++i] ?? ""; break;
       case "--target-user": parsed.targetUserId = args[++i] ?? ""; break;
@@ -63,7 +61,8 @@ function add(args: string[]): void {
   const parsed = parseAddArgs(args);
   if (!parsed.at && !parsed.schedule) { console.log(JSON.stringify({ ok: false, error: "--at or --schedule is required" })); process.exit(1); }
   if (parsed.at && parsed.schedule) { console.log(JSON.stringify({ ok: false, error: "use --at (one-shot) or --schedule (recurring), not both" })); process.exit(1); }
-  if (!parsed.title) { console.log(JSON.stringify({ ok: false, error: "--title is required" })); process.exit(1); }
+  const idResult = validateTaskId(parsed.id ?? "", dbReadEntries());
+  if (!idResult.ok) { console.log(JSON.stringify({ ok: false, error: idResult.error })); process.exit(1); }
 
   let fireAt: number;
   let schedule: string | undefined;
@@ -114,8 +113,7 @@ function add(args: string[]): void {
   }
 
   const entry: CronEntry = {
-    id: parsed.id || newTaskId(),
-    title: parsed.title,
+    id: idResult.id,
     fireAt: fireAt!,
     message: parsed.message ?? "",
     chatId,
@@ -206,8 +204,8 @@ export function main(argv: string[] = process.argv): void {
     console.log(`abtars-task — schedule time-based reminders and tasks.
 
 Usage:
-  abtars-task add --at "2026-03-16T08:00" --message "..." --chat-id ID --type reminder
-  abtars-task add --schedule "0 9 * * *" --message "..." --chat-id ID --type task
+  abtars-task add --id daily-backup --at "2026-03-16T08:00" --message "..." --chat-id ID --type reminder
+  abtars-task add --id morning-news --schedule "0 9 * * *" --message "..." --chat-id ID --type task
   abtars-task list
   abtars-task remove <id>
   abtars-task pause <id>

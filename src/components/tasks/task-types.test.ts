@@ -5,7 +5,7 @@
  * never fall through to agent execution.
  */
 import { describe, it, expect } from "vitest";
-import { normalize, isSystemEntry, SYSTEM_ACTIONS, newTaskId } from "./task-types.js";
+import { normalize, isSystemEntry, SYSTEM_ACTIONS } from "./task-types.js";
 
 const NOW = new Date("2026-07-11T02:00:00Z").getTime();
 
@@ -24,7 +24,6 @@ function baseAgent(overrides: Record<string, unknown> = {}): Record<string, unkn
 function baseSystem(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: "sleep-cycle",
-    title: "Nightly memory consolidation",
     type: "task",
     executor: "system",
     action: "sleep-cycle",
@@ -69,7 +68,6 @@ describe("#1321 normalize + validation", () => {
     it("accepts the canonical sleep-cycle entry exactly as seeded", () => {
       const canonical = {
         id: "sleep-cycle",
-        title: "Nightly memory consolidation",
         type: "task",
         executor: "system",
         action: "sleep-cycle",
@@ -172,12 +170,5 @@ describe("#1321 normalize + validation", () => {
     });
   });
 
-  describe("newTaskId", () => {
-    it("produces distinct hex ids", () => {
-      const a = newTaskId();
-      const b = newTaskId();
-      expect(a).toMatch(/^[0-9a-f]+$/);
-      expect(a).not.toBe(b);
-    });
-  });
+
 });

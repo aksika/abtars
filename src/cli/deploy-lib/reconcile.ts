@@ -31,7 +31,6 @@ const LEGACY_CLEANUP = ["core/prompts", "core"];
 const CANONICAL_SYSTEM_TASKS: object[] = [
   {
     id: "sleep-cycle",
-    title: "Nightly memory consolidation",
     type: "task",
     executor: "system",
     action: "sleep-cycle",
@@ -43,7 +42,6 @@ const CANONICAL_SYSTEM_TASKS: object[] = [
   },
   {
     id: "hardware-sleep",
-    title: "Suspend Molty when idle",
     type: "task",
     executor: "system",
     action: "hardware-sleep",
@@ -181,6 +179,30 @@ export function migrate(home: string): void {
     if (content.includes('"secure"')) {
       writeFileSync(ircPath, content.replace(/"secure"/g, '"signed"'));
       logInfo(TAG, "Migrated: irc-secure-to-signed");
+    }
+  }
+
+  // #1420: remove legacy title keys from tasks.json entries
+  const tasksPath = join(home, "tasks", "tasks.json");
+  if (existsSync(tasksPath)) {
+    try {
+      const raw = readFileSync(tasksPath, "utf-8");
+      const entries = JSON.parse(raw);
+      if (Array.isArray(entries)) {
+        let changed = false;
+        for (const entry of entries) {
+          if (entry && typeof entry === "object" && "title" in entry) {
+            delete (entry as Record<string, unknown>).title;
+            changed = true;
+          }
+        }
+        if (changed) {
+          writeFileSync(tasksPath, JSON.stringify(entries, null, 2), "utf-8");
+          logInfo(TAG, "Migrated: removed legacy title keys from tasks.json");
+        }
+      }
+    } catch (err) {
+      logInfo(TAG, `tasks.json migration skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
