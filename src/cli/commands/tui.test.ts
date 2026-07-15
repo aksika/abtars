@@ -1,15 +1,13 @@
 /**
- * tui.test.ts — `abtars tui` client tests (#1315 + #1333).
+ * tui.test.ts — `abtars tui` client tests (#1315 + #1333 + #1423).
  *
  * parseAttachMode is pure and tested directly. The Markdown rendering path
  * is covered by:
  *   1. Required-key contract on `TUI_MARKDOWN_THEME`
- *   2. Real pi-tui render() against a representative fixture (skipped if absent)
- *   3. The render error boundary — a forced Markdown constructor throw is
+ *   2. Real pi-tui render() against a representative fixture (unconditional)
+ *   3. Text.setText() surface that exposed the local type-shim drift (#1423)
+ *   4. The render error boundary — a forced Markdown constructor throw is
  *      caught and routed to the cleanup path without uncaught process death.
- *
- * Full raw-mode foreground testing is manual on a live bridge —
- * see specs/1315/tasks.md Task 8.
  */
 
 import { describe, it, expect } from "vitest";
@@ -123,7 +121,7 @@ describe("formatRuntimeStatus (#1355)", () => {
 
 // ── #1333: TUI MarkdownTheme contract ─────────────────────────────────
 
-/** Exact key set pi-tui 0.80.6's Markdown.render() invokes. */
+/** Exact key set pi-tui 0.80's Markdown.render() invokes. */
 const REQUIRED_THEME_KEYS = [
   "heading",
   "link",

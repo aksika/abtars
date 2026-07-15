@@ -114,7 +114,7 @@ export type MessageRole = "user" | "assistant" | "system";
 const passthrough = (text: string): string => text;
 
 /**
- * Complete no-op Markdown theme for pi-tui 0.80.6.
+ * Complete no-op Markdown theme for pi-tui ~0.80.
  *
  * Every key that `Markdown.render()` may invoke is present as the identity
  * function so a non-trivial response (bold, list, quote, hr, italic, etc.)
