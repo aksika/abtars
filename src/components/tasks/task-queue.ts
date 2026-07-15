@@ -334,7 +334,7 @@ export class CronQueue {
       if (result.status === "deferred") {
         // #1322 — Durable deferral: schedule retry at retryAt without counting
         // as failure, auto-pause, or maxRunsPerDay consumption.
-        recordRunToFile(entry.id, 0); // not a failure
+        recordRunToFile(entry.id, 0);
         logInfo(TAG, `⏸ Deferred: "${entry.action}" (${entry.id}) — retry at ${new Date(result.retryAt).toISOString()}: ${result.detail}`);
         try {
           const target = readEntry(entry.id);
@@ -346,6 +346,11 @@ export class CronQueue {
         } catch (err) {
           logWarn(TAG, `Failed to persist deferred retry for "${entry.id}": ${err instanceof Error ? err.message : String(err)}`);
         }
+      } else if (result.status === "noop") {
+        // Noop is not a run — don't count toward maxRunsPerDay.
+        recordRunToFile(entry.id, 0);
+        const detail = "detail" in result && result.detail ? result.detail : "";
+        logInfo(TAG, `■ System noop: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
       } else {
         const ok = result.status !== "failed";
         recordRunToFile(entry.id, ok ? 0 : 1);

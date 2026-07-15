@@ -10,7 +10,7 @@ import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
-import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver } from "./spin-types.js";
+import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver, QueuedSessionInstruction } from "./spin-types.js";
 import { sessionType } from "./spin-types.js";
 import { profileFor, isValidSessionType, type SessionProfile } from "./spin-profiles.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
@@ -514,11 +514,12 @@ export class Spin {
       session.activeRootCardId = resolveRootId(cardId);
       this.orcActivityFeed?.publish({
         kind: "execution.started",
+        timestamp: Date.now(),
         sessionId: session.id,
         executionId: session.activeExecutionId!,
         rootCardId: session.activeRootCardId,
         cardId,
-      });
+      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
     }
 
     // 4-7. Single try/catch so EVERY exit path (pre-exec throws included) flows
@@ -755,11 +756,12 @@ export class Spin {
       this.orcActivityFeed?.publish({
         kind: "execution.completed",
         summary: result.slice(0, 200),
+        timestamp: Date.now(),
         sessionId: session.id,
         executionId: session.activeExecutionId,
         rootCardId: session.activeRootCardId,
         cardId: session.activeCardId,
-      });
+      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
     }
     session.activeExecutionId = undefined;
     session.activeCardId = undefined;
@@ -804,11 +806,12 @@ export class Spin {
       this.orcActivityFeed?.publish({
         kind: "execution.failed",
         error: msg,
+        timestamp: Date.now(),
         sessionId: session.id,
         executionId: session.activeExecutionId,
         rootCardId: session.activeRootCardId,
         cardId: session.activeCardId,
-      });
+      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
     }
     session.activeExecutionId = undefined;
     session.activeCardId = undefined;

@@ -6,6 +6,7 @@
  */
 
 import type { PeerTransport, PeerCard, PeerMessage, TaskResult, PeerDelegateResult } from "./interface.js";
+import type { RemotePiEventsListRequestV1, RemotePiEventsListResponseV1, RemotePiEventsAckRequestV1, RemotePiEventsAckResponseV1, RemotePiControlRequestV1, RemotePiControlResponseV1 } from "./remote-pi-types.js";
 import { getAlivePeers } from "./gossip.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
 import { logInfo, logDebug, logTrace } from "../logger.js";
@@ -91,7 +92,7 @@ export class HttpTransport implements PeerTransport {
     const { buildSignedStatus } = require("./peer-health.js");
     const config = loadPeerConfig();
     const signed = buildSignedStatus(config.self.signingKey);
-    for (const [name, client] of this.wsClients) {
+    for (const [, client] of this.wsClients) {
       if (client.connected) {
         try {
           (client as any).sendPush("peer-status.v1", signed);
@@ -246,7 +247,7 @@ export class HttpTransport implements PeerTransport {
     await this.httpCall(entry, peer, "POST", "/v1/pi-events/push", JSON.stringify(event));
   }
 
-  async listRemotePiEvents(peer: string, request: unknown): Promise<unknown> {
+  async listRemotePiEvents(peer: string, request: RemotePiEventsListRequestV1): Promise<RemotePiEventsListResponseV1> {
     const ws = this.wsClients.get(peer);
     if (ws?.connected) {
       return await ws.call("pi.events.list.v1", request);
@@ -257,7 +258,7 @@ export class HttpTransport implements PeerTransport {
     // input shapes (e.g. encoded run references).
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
-    const req = request as { run_id: string; after_sequence: number; limit?: number };
+    const req = request;
     const params = new URLSearchParams();
     params.set("after_sequence", String(req.after_sequence));
     if (req.limit !== undefined) params.set("limit", String(req.limit));
@@ -265,10 +266,10 @@ export class HttpTransport implements PeerTransport {
       entry, peer, "GET",
       `/v1/pi-runs/${encodeURIComponent(req.run_id)}/events?${params.toString()}`,
     );
-    return JSON.parse(response);
+    return JSON.parse(response) as RemotePiEventsListResponseV1;
   }
 
-  async acknowledgeRemotePiEvents(peer: string, request: unknown): Promise<unknown> {
+  async acknowledgeRemotePiEvents(peer: string, request: RemotePiEventsAckRequestV1): Promise<RemotePiEventsAckResponseV1> {
     const ws = this.wsClients.get(peer);
     if (ws?.connected) {
       return await ws.call("pi.events.ack.v1", request);
@@ -276,11 +277,11 @@ export class HttpTransport implements PeerTransport {
     // Fallback to HTTPS
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
-    const response = await this.httpCall(entry, peer, "POST", `/v1/pi-runs/${(request as any).run_id}/events/acknowledge`, JSON.stringify(request));
-    return JSON.parse(response);
+    const response = await this.httpCall(entry, peer, "POST", `/v1/pi-runs/${request.run_id}/events/acknowledge`, JSON.stringify(request));
+    return JSON.parse(response) as RemotePiEventsAckResponseV1;
   }
 
-  async sendRemotePiControl(peer: string, request: unknown): Promise<unknown> {
+  async sendRemotePiControl(peer: string, request: RemotePiControlRequestV1): Promise<RemotePiControlResponseV1> {
     const ws = this.wsClients.get(peer);
     if (ws?.connected) {
       return await ws.call("pi.control.v1", request);

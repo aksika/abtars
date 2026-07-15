@@ -44,15 +44,16 @@ export function bridgeNerveToFeed(
         if (!orc.activeExecutionId) return;
 
         feed.publish({
-          kind: CARD_EVENT_KINDS[nerveEvent],
+          kind: CARD_EVENT_KINDS[nerveEvent]!,
           title: card.title.slice(0, 200),
           status: card.status,
+          timestamp: Date.now(),
           sessionId: orc.id,
           executionId: orc.activeExecutionId,
           rootCardId: rootId,
           cardId: card.id,
           parentCardId: card.parent_id ?? undefined,
-        });
+        } as Parameters<typeof feed.publish>[0]);
       } catch (err) {
         logWarn(TAG, `card handler error: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -79,11 +80,12 @@ export function bridgeNerveToFeed(
         from: meta.from,
         to: typeof meta.to === "string" ? meta.to : "ALL",
         message: meta.message.slice(0, 200),
+        timestamp: Date.now(),
         sessionId: orc.id,
         executionId: orc.activeExecutionId,
         rootCardId: rootId,
         cardId,
-      });
+      } as Parameters<typeof feed.publish>[0]);
     } catch (err) {
       logWarn(TAG, `channel handler error: ${err instanceof Error ? err.message : String(err)}`);
     }

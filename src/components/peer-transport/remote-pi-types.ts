@@ -470,8 +470,8 @@ export function validateControlRequestV1(request: RemotePiControlRequestV1): voi
       validateResumeApproval(cmd.approval);
       break;
     default:
-      const _exhaustive: never = cmd;
-      throw new Error(`Unsupported command action: ${String(cmd)}`);
+      const _exhaustiveCmd: never = cmd;
+      throw new Error(`Unsupported command action: ${String(_exhaustiveCmd)}`);
   }
 }
 

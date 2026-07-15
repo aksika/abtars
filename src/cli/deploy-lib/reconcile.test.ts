@@ -25,7 +25,7 @@ function seedTemplate(): void {
   ], null, 2), "utf-8");
 }
 
-describe("#1421 reconcile sleep-cycle from template", () => {
+describe("#1321 reconcile sleep-cycle from template", () => {
   beforeEach(() => {
     rmSync(HOME, { recursive: true, force: true });
     mkdirSync(join(HOME, "templates", "config"), { recursive: true });

@@ -131,7 +131,7 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     startReconciler();
     heartbeat.registerTask({
       name: "reconciler-resync",
-      execute: () => { scanActiveProjects(); },
+      execute: async () => { scanActiveProjects(); },
     });
   }).catch(err => logAndSwallow(TAG, "reconciler", err));
 

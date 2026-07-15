@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, chmodSync, lstatSync, mkdirSync, renameSync, unlinkSync, rmdirSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir, hostname } from "node:os";
+import { hostname } from "node:os";
 import { randomBytes, createPrivateKey, createPublicKey, X509Certificate, timingSafeEqual } from "node:crypto";
 
 // ── Typed error codes ───────────────────────────────────────────────────────

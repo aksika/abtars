@@ -11,10 +11,7 @@ import type {
   RemotePiControlRequestV1,
   RemotePiControlResponseV1,
   RemotePiCommandV1,
-  ControlOutcome,
   CommandLedgerState,
-  ControlErrorCode,
-  ResumeApprovalV1,
 } from "./remote-pi-types.js";
 import {
   validateControlRequestV1,
@@ -26,7 +23,7 @@ import {
 } from "./remote-pi-types.js";
 import type { PiRunStore } from "../pi-executor/pi-run-store.js";
 import { buildPublicProjection } from "./remote-pi-projection.js";
-import { logInfo, logDebug, logTrace, logWarn, logError } from "../logger.js";
+import { logInfo, logWarn, logError, logTrace } from "../logger.js";
 
 const TAG = "remote-pi-control-handler";
 
@@ -208,8 +205,8 @@ export class RemotePiControlHandler {
         return this._handleResume(authenticatedPeer, request, run, principal);
 
       default:
-        const _exhaustive: never = request.command;
-        return createControlError(request.command_id, "UNSUPPORTED_ACTION", `Unsupported action: ${String(request.command)}`);
+        const _exhaustiveHandler: never = request.command;
+        return createControlError(request.command_id, "UNSUPPORTED_ACTION", `Unsupported action: ${String(_exhaustiveHandler)}`);
     }
   }
 
@@ -217,7 +214,7 @@ export class RemotePiControlHandler {
    * Handle status command (read-only).
    */
   private async _handleStatus(
-    authenticatedPeer: AuthenticatedPeer,
+    _authenticatedPeer: AuthenticatedPeer,
     request: RemotePiControlRequestV1,
     run: PiRunRecord
   ): Promise<RemotePiControlResponseV1> {
@@ -234,7 +231,7 @@ export class RemotePiControlHandler {
    * Handle reply command.
    */
   private async _handleReply(
-    authenticatedPeer: AuthenticatedPeer,
+    _authenticatedPeer: AuthenticatedPeer,
     request: RemotePiControlRequestV1,
     run: PiRunRecord,
     principal: { userId: string }
@@ -243,12 +240,13 @@ export class RemotePiControlHandler {
       return createControlError(request.command_id, "INVALID_STATE", `Run is not awaiting input (status: ${run.status})`);
     }
 
-    if (run.pendingRequestId !== request.command.request_id) {
+    const cmd = request.command as RemotePiCommandV1 & { request_id?: string; value?: unknown };
+    if (run.pendingRequestId !== cmd.request_id) {
       return createControlError(request.command_id, "MISSING_REQUEST", "Pending request ID mismatch");
     }
 
     // Validate reply value size
-    const valueBytes = Buffer.byteLength(JSON.stringify(request.command.value), "utf-8");
+    const valueBytes = Buffer.byteLength(JSON.stringify(cmd.value), "utf-8");
     if (valueBytes > REMOTE_PI_BOUNDS.MAX_REPLY_VALUE_SIZE) {
       return createControlError(
         request.command_id,
@@ -260,7 +258,7 @@ export class RemotePiControlHandler {
 
     // Call PiRunService.reply
     try {
-      const view = await this.deps.service.reply(request.run_id, request.command.request_id, request.command.value, principal);
+      await this.deps.service.reply(request.run_id, cmd.request_id!, cmd.value! as import("../pi-executor/types.js").PiUiReply, principal);
       const projection = this._buildPublicProjection(this.deps.store.get(request.run_id)!);
       return {
         version: 1,
@@ -287,7 +285,7 @@ export class RemotePiControlHandler {
    * Handle steer command.
    */
   private async _handleSteer(
-    authenticatedPeer: AuthenticatedPeer,
+    _authenticatedPeer: AuthenticatedPeer,
     request: RemotePiControlRequestV1,
     run: PiRunRecord,
     principal: { userId: string }
@@ -296,8 +294,9 @@ export class RemotePiControlHandler {
       return createControlError(request.command_id, "INVALID_STATE", `Run cannot be steered in status: ${run.status}`);
     }
 
+    const cmd = request.command as RemotePiCommandV1 & { instruction?: string };
     try {
-      const view = await this.deps.service.steer(request.run_id, request.command.instruction, principal);
+      await this.deps.service.steer(request.run_id, cmd.instruction ?? "", principal);
       const projection = this._buildPublicProjection(this.deps.store.get(request.run_id)!);
       return {
         version: 1,
@@ -318,7 +317,7 @@ export class RemotePiControlHandler {
    * Handle cancel command.
    */
   private async _handleCancel(
-    authenticatedPeer: AuthenticatedPeer,
+    _authenticatedPeer: AuthenticatedPeer,
     request: RemotePiControlRequestV1,
     run: PiRunRecord,
     principal: { userId: string }
@@ -335,7 +334,7 @@ export class RemotePiControlHandler {
     }
 
     try {
-      const view = await this.deps.service.cancel(request.run_id, principal);
+      await this.deps.service.cancel(request.run_id, principal);
       const projection = this._buildPublicProjection(this.deps.store.get(request.run_id)!);
       return {
         version: 1,
@@ -368,7 +367,8 @@ export class RemotePiControlHandler {
     run: PiRunRecord,
     principal: { userId: string }
   ): Promise<RemotePiControlResponseV1> {
-    const approval = request.command.approval;
+    const cmd = request.command as RemotePiCommandV1 & { approval?: import("./remote-pi-types.js").ResumeApprovalV1 };
+    const approval = cmd.approval!;
 
     // Validate approval structure and bindings
     try {
@@ -434,7 +434,7 @@ export class RemotePiControlHandler {
 
     // Call PiRunService.resume
     try {
-      const ref = await this.deps.service.resume(request.run_id, principal);
+      await this.deps.service.resume(request.run_id, principal);
       const projection = this._buildPublicProjection(this.deps.store.get(request.run_id)!);
       return {
         version: 1,

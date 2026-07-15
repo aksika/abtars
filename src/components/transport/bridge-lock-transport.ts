@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { localISO } from "../../utils/local-time.js";
 
-export type SleepStatus = "awake" | "sleeping" | "hw_sleep";
+export type SleepStatus = "awake" | "sleeping";
 
 /** Add an ACP child PID to bridge.lock tracking. */
 export function trackAcpPid(pid: number): void {

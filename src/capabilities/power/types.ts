@@ -46,6 +46,14 @@ export interface PowerTransitionState {
   expectedWakeAt: number;
 }
 
+/** Fields that the power controller reads from a hardware-sleep task entry. */
+export interface HardwareSleepInspectEntry {
+  readonly idleMinutes?: number;
+  readonly retryMinutes?: number;
+  readonly latestLocalTime?: string;
+  readonly expectedWakeTime?: string;
+}
+
 export interface HardwareSleepInspection {
   safe: boolean;
   reasons: readonly PowerBlockReason[];

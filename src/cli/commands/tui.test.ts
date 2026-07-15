@@ -13,6 +13,7 @@
 import { describe, it, expect } from "vitest";
 import * as piTui from "@earendil-works/pi-tui";
 import {
+  isTuiExitCommand,
   parseAttachMode,
   TUI_MARKDOWN_THEME,
   createMarkdownMessage,
@@ -83,6 +84,33 @@ describe("parseAttachMode", () => {
   it("--new with an invalid type throws", () => {
     expect(() => parseAttachMode(["--new", "O"])).toThrow(/A, B, or C/);
     expect(() => parseAttachMode(["--new=t"])).toThrow(/A, B, or C/);
+  });
+});
+
+describe("isTuiExitCommand", () => {
+  it("matches /exit exactly", () => {
+    expect(isTuiExitCommand("/exit")).toBe(true);
+  });
+
+  it("handles surrounding whitespace", () => {
+    expect(isTuiExitCommand("  /exit  ")).toBe(true);
+    expect(isTuiExitCommand("\t/exit\n")).toBe(true);
+  });
+
+  it("normalizes case", () => {
+    expect(isTuiExitCommand("/EXIT")).toBe(true);
+    expect(isTuiExitCommand("/Exit")).toBe(true);
+  });
+
+  it("rejects near misses", () => {
+    expect(isTuiExitCommand("/exit now")).toBe(false);
+    expect(isTuiExitCommand("exit")).toBe(false);
+    expect(isTuiExitCommand("/exits")).toBe(false);
+    expect(isTuiExitCommand("/quit")).toBe(false);
+  });
+
+  it("rejects empty string", () => {
+    expect(isTuiExitCommand("")).toBe(false);
   });
 });
 

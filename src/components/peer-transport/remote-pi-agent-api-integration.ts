@@ -17,7 +17,6 @@ import type {
 } from "./remote-pi-types.js";
 import {
   validateEventV1,
-  validateControlRequestV1,
   createControlError,
   REMOTE_PI_BOUNDS,
 } from "./remote-pi-types.js";
@@ -25,7 +24,7 @@ import type { RemotePiEventProducer } from "./remote-pi-event-producer.js";
 import type { RemotePiControlHandler } from "./remote-pi-control-handler.js";
 import type { RemotePiDeliveryManager } from "./remote-pi-delivery.js";
 import type { RemotePiOriginReducer } from "./remote-pi-origin-projection.js";
-import { logInfo, logDebug, logTrace, logError, logWarn } from "../logger.js";
+import { logError, logTrace } from "../logger.js";
 
 const TAG = "remote-pi-api";
 
@@ -51,7 +50,7 @@ export interface RemotePiApiDeps {
  */
 export async function handlePushLifecycleEvent(
   deps: RemotePiApiDeps,
-  authenticatedPeer: string,
+  _authenticatedPeer: string,
   event: RemotePiEventV1
 ): Promise<{ success: boolean; error?: string }> {
   if (!deps.originReducer) {
@@ -99,17 +98,21 @@ export async function handleListRemotePiEvents(
   authenticatedPeer: string,
   runId: string,
   afterSequence: number,
-  limit: number = 100
+  limit: number
 ): Promise<RemotePiEventsListResponseV1 | { error: string }> {
   if (!deps.deliveryManager) {
     return { error: "Delivery manager not available" };
+  }
+
+  if (!deps.deliveryManager.listEvents) {
+    return { error: "listEvents not available on delivery manager" };
   }
 
   const request: RemotePiEventsListRequestV1 = {
     version: 1,
     run_id: runId,
     after_sequence: afterSequence,
-    limit: Math.min(limit, REMOTE_PI_BOUNDS.MAX_EVENTS_PER_LIST),
+    limit,
   };
 
   return deps.deliveryManager.listEvents(request, authenticatedPeer);
@@ -128,12 +131,6 @@ export async function handleAcknowledgeRemotePiEvents(
     return { error: "Delivery manager not available" };
   }
 
-  const request: RemotePiEventsAckRequestV1 = {
-    version: 1,
-    run_id: runId,
-    sequence,
-  };
-
   return deps.deliveryManager.acknowledgeEvent(authenticatedPeer, runId, sequence);
 }
 
@@ -144,11 +141,11 @@ export async function handleRemotePiControl(
   deps: RemotePiApiDeps,
   authenticatedPeer: string,
   principalId: string,
-  request: RemotePiControlRequestV1
+  _request: RemotePiControlRequestV1
 ): Promise<RemotePiControlResponseV1> {
   if (!deps.controlHandler) {
     return createControlError(
-      request.command_id,
+      _request.command_id,
       "INTERNAL_ERROR",
       "Control handler not available"
     );
@@ -156,7 +153,7 @@ export async function handleRemotePiControl(
 
   return deps.controlHandler.handleControlRequest(
     { peerName: authenticatedPeer, principalId },
-    request
+    _request
   );
 }
 
@@ -186,7 +183,7 @@ export async function wsHandlePiEventsListV1(
     authenticatedPeer,
     request.run_id,
     request.after_sequence,
-    request.limit
+    request.limit ?? 100
   );
 }
 

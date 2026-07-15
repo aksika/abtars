@@ -5,10 +5,10 @@
  * maintaining cursor, generation, status, and pending input.
  */
 
-import type { RemotePiEventV1, RemotePiPublicProjectionV1, RemotePiEventCursor } from "./remote-pi-types.js";
+import type { RemotePiEventV1, RemotePiEventCursor } from "./remote-pi-types.js";
 import { validateEventV1 } from "./remote-pi-types.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
-import { logInfo, logDebug, logTrace, logWarn, logError } from "../logger.js";
+import { logDebug, logTrace, logWarn, logError } from "../logger.js";
 
 const TAG = "remote-pi-origin-projection";
 

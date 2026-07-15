@@ -47,17 +47,6 @@ export type TuiFrameClass =
   | "chunk"       // model stream delta — coalesce per stream, lowest keep
   | "typing";     // typing indicator — lowest priority
 
-/** Higher = more important to keep under pressure. */
-const CLASS_PRIORITY: Record<TuiFrameClass, number> = {
-  typing: 10,
-  status: 20,
-  progress: 30,
-  chunk: 40,
-  snapshot: 80,
-  terminal: 90,
-  control: 100,
-};
-
 /** Eviction order from lowest priority (drop first) to highest. */
 const EVICT_ORDER: TuiFrameClass[] = ["typing", "status", "progress", "chunk"];
 
@@ -454,7 +443,7 @@ function boundFrame(frame: TuiServerFrame, maxFrameBytes: number, _maxChunkBytes
       case "chunk":
         return { t: "chunk", id: frame.id, delta: truncateUtf8(frame.delta, budget) };
       case "activity":
-        return { t: "activity", event: truncateStringsDeep(frame.event, Math.min(budget, 512)) };
+        return { t: "activity", sequence: frame.sequence, event: truncateStringsDeep(frame.event, Math.min(budget, 512)) };
       case "activity-snapshot":
         return { t: "activity-snapshot", sequence: frame.sequence, snapshot: truncateStringsDeep(frame.snapshot, 512) };
       case "status":

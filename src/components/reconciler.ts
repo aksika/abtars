@@ -24,7 +24,6 @@ import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle } from "./worker-supervision-store.js";
 
 const TAG = "reconciler";
-const MAX_RETRIES = 3;
 const MAX_WORKERS = 10;
 const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 

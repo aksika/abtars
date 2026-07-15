@@ -16,7 +16,7 @@ import { REMOTE_PI_BOUNDS } from "./remote-pi-types.js";
  * for the "..." suffix. Always returns a string ≤ the byte limit (UTF-8
  * length) so the result survives re-encoding on the receiver.
  */
-export function sanitizeString(value: string | null | undefined, fieldName: string, maxBytes: number = REMOTE_PI_BOUNDS.MAX_PROJECTION_STRING): string | undefined {
+export function sanitizeString(value: string | null | undefined, _fieldName: string, maxBytes: number = REMOTE_PI_BOUNDS.MAX_PROJECTION_STRING): string | undefined {
   if (!value) return undefined;
   const bytes = Buffer.byteLength(value, "utf-8");
   if (bytes <= maxBytes) {

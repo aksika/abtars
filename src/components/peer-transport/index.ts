@@ -8,12 +8,11 @@ export { startGossipListener, gossipBroadcast, getAlivePeers, getPeerTable, setG
 export { getHealthStore, getLocalSnapshot, buildSignedStatus, CapabilityRegistry } from "./peer-health.js";
 
 import { HttpTransport } from "./http-transport.js";
-import type { PeerTransport } from "./interface.js";
 
-let _instance: PeerTransport | null = null;
+let _instance: HttpTransport | null = null;
 
 /** Get the singleton PeerTransport instance. */
-export function getPeerTransport(): PeerTransport {
+export function getPeerTransport(): HttpTransport {
   if (!_instance) _instance = new HttpTransport();
   return _instance;
 }

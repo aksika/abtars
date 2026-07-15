@@ -1,9 +1,29 @@
 import type { SystemTaskResult } from "../../components/tasks/system-task-registry.js";
-import type { CronEntry } from "../../components/tasks/task-types.js";
-import type { PowerSafetyProbe, PowerAdapter, HardwareSleepInspection, PowerTransitionState } from "./types.js";
+import type { PowerSafetyProbe, PowerAdapter, HardwareSleepInspection, HardwareSleepInspectEntry, PowerTransitionState } from "./types.js";
 import { PowerTransitionStore } from "./power-transition-store.js";
 
-const TRANSITION_TTL_MS = 12 * 3600_000; // 12 hours max
+/** Defaults matching the canonical paused template entry. */
+const DEFAULTS = {
+  idleMinutes: 20,
+  retryMinutes: 10,
+  latestLocalTime: "05:30",
+  expectedWakeTime: "07:55",
+} as const;
+
+/** Margin after expected wake before the transition marker expires. */
+const POST_WAKE_MARGIN_MS = 2 * 3600_000;
+
+/** Compute the anticipated wake timestamp from a local-time string like "07:55". */
+function computeExpectedWakeAt(expectedWakeTime: string): number {
+  const [h, m] = expectedWakeTime.split(":").map(Number);
+  const now = new Date();
+  const wake = new Date(now);
+  wake.setHours(h!, m!, 0, 0);
+  if (wake.getTime() <= now.getTime()) {
+    wake.setDate(wake.getDate() + 1);
+  }
+  return wake.getTime();
+}
 
 export class HardwareSleepController {
   constructor(
@@ -12,11 +32,12 @@ export class HardwareSleepController {
     private readonly transitionStore: PowerTransitionStore,
   ) {}
 
-  async inspect(entry: Readonly<CronEntry>): Promise<HardwareSleepInspection> {
-    const idleMinutes = entry.idleMinutes ?? 20;
-    const latestLocalTime = entry.latestLocalTime ?? "05:30";
+  async inspect(entry: Readonly<HardwareSleepInspectEntry>): Promise<HardwareSleepInspection> {
+    const idleMinutes = entry.idleMinutes ?? DEFAULTS.idleMinutes;
+    const latestLocalTime = entry.latestLocalTime ?? DEFAULTS.latestLocalTime;
+    const expectedWakeTime = entry.expectedWakeTime ?? DEFAULTS.expectedWakeTime;
     const safety = this.probe.inspect({ idleMinutes, latestLocalTime });
-    const wake = this.adapter ? await this.adapter.verifyWakeSchedule(entry.expectedWakeTime ?? "07:55") : null;
+    const wake = this.adapter ? await this.adapter.verifyWakeSchedule(expectedWakeTime) : null;
     const transition = this.transitionStore.read();
     return {
       safe: safety.safe,
@@ -28,15 +49,15 @@ export class HardwareSleepController {
     };
   }
 
-  async attempt(entry: Readonly<CronEntry>): Promise<SystemTaskResult> {
+  async attempt(entry: Readonly<HardwareSleepInspectEntry>): Promise<SystemTaskResult> {
     if (!this.adapter) {
       return { status: "failed", error: "hardware-sleep not supported on this platform" };
     }
 
-    const idleMinutes = entry.idleMinutes ?? 20;
-    const retryMinutes = entry.retryMinutes ?? 10;
-    const latestLocalTime = entry.latestLocalTime ?? "05:30";
-    const expectedWakeTime = entry.expectedWakeTime ?? "07:55";
+    const idleMinutes = entry.idleMinutes ?? DEFAULTS.idleMinutes;
+    const retryMinutes = entry.retryMinutes ?? DEFAULTS.retryMinutes;
+    const latestLocalTime = entry.latestLocalTime ?? DEFAULTS.latestLocalTime;
+    const expectedWakeTime = entry.expectedWakeTime ?? DEFAULTS.expectedWakeTime;
 
     const now = new Date();
     const [limitH, limitM] = latestLocalTime.split(":").map(Number);
@@ -58,12 +79,13 @@ export class HardwareSleepController {
       return { status: "deferred", retryAt, detail: `blocked: ${safety.reasons.join(", ")}` };
     }
 
+    const expectedWakeAt = computeExpectedWakeAt(expectedWakeTime);
     const transition: PowerTransitionState = {
       state: "suspending",
-      taskId: entry.id,
+      taskId: "hardware-sleep",
       requestedAt: Date.now(),
-      expiresAt: Date.now() + TRANSITION_TTL_MS,
-      expectedWakeAt: Date.now() + 8 * 3600_000,
+      expiresAt: expectedWakeAt + POST_WAKE_MARGIN_MS,
+      expectedWakeAt,
     };
     this.transitionStore.write(transition);
 

@@ -1,7 +1,5 @@
 import type { ManagedSession } from "./spin-types.js";
-import { type KanbanCard, kanbanGetCard, resolveRootId, resolveActiveDescendants, resolveRecentDirectChildren } from "./tasks/kanban-board.js";
-
-const TAG = "orc-snapshot";
+import { type KanbanCard, kanbanGetCard, resolveActiveDescendants, resolveRecentDirectChildren } from "./tasks/kanban-board.js";
 
 export interface ActivityCard {
   id: number;
@@ -41,7 +39,7 @@ function toActivityCard(card: KanbanCard): ActivityCard {
  */
 export function buildOrcActivitySnapshot(
   orcSession: ManagedSession,
-  allSessions: Map<string, ManagedSession>,
+  _allSessions: Map<string, ManagedSession>,
   currentSequence: number,
 ): OrcActivitySnapshot {
   const base: OrcActivitySnapshot = {

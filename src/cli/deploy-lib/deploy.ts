@@ -7,7 +7,7 @@
 import { hostname, homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, mkdirSync, copyFileSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { execSync } from "node:child_process";
 import { acquireLock, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
 

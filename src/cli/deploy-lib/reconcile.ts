@@ -71,7 +71,7 @@ export function reconcile(templatesSrc: string, home: string): void {
   }
   if (seeded > 0) logInfo(TAG, `Seeded ${seeded} missing config/task file(s)`);
 
-  // --- Seed sleep-cycle from template if absent (#1421) ---
+  // --- Seed sleep-cycle from template if absent (#1321) ---
   seedSleepCycle(templatesSrc, home);
 
   // --- Legacy cleanup (remove old paths, idempotent) ---
@@ -83,7 +83,7 @@ export function reconcile(templatesSrc: string, home: string): void {
   }
 }
 
-/** Seed sleep-cycle from template if absent from the user tasks file (#1421). */
+/** Seed sleep-cycle from template if absent from the user tasks file (#1321). */
 function seedSleepCycle(templatesSrc: string, home: string): void {
   const templatePath = join(templatesSrc, "tasks", "tasks.json");
   if (!existsSync(templatePath)) return;

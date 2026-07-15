@@ -35,11 +35,11 @@ function db(): Database {
     const dir = join(abtarsHome(), "kanban");
     mkdirSync(dir, { recursive: true });
     const path = join(dir, "kanban.db");
-    _db = new Database(path);
-    _db.pragma("journal_mode = WAL");
-    ensureSchema(_db);
+    _db = new Database(path) as Database;
+    _db!.pragma("journal_mode = WAL");
+    ensureSchema(_db!);
   }
-  return _db;
+  return _db!;
 }
 
 export const PI_REQUEST_LEDGER_SCHEMA = `CREATE TABLE IF NOT EXISTS pi_api_requests (

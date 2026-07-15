@@ -70,7 +70,7 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
 
   // Wire the PiExecutor transition hook to produce lifecycle events.
   // Only runs for delegated runs (origin_peer set).
-  executor.onTransition((runId, _fromStatus, toStatus) => {
+  executor.onTransition((runId, _fromStatus, _toStatus) => {
     const run = store.get(runId);
     if (!run || !run.originPeer) return; // not a delegated run
     eventProducer.produceFromTransition({

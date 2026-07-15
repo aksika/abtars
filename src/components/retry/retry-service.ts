@@ -235,7 +235,7 @@ export class RetryService {
       },
     );
 
-    const errors = validateDirective(directive);
+    const errors = validateDirective(directive as unknown as Record<string, unknown>);
     if (errors.length > 0) return { error: `directive validation failed: ${errors.join("; ")}` };
 
     const revisedContract = deriveContractRevision(contract, directive);

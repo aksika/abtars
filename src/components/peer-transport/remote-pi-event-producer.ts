@@ -16,7 +16,6 @@ import {
   computeEventHash,
   deriveEventId,
   validatePublicProjection,
-  REMOTE_PI_BOUNDS,
 } from "./remote-pi-types.js";
 import { buildPublicProjection, sanitizeString } from "./remote-pi-projection.js";
 import { logInfo, logDebug, logTrace } from "../logger.js";

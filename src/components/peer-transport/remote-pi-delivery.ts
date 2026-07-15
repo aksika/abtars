@@ -5,8 +5,8 @@
  * of lifecycle events from owner to origin.
  */
 
-import type { RemotePiEventV1, RemotePiEventsListRequestV1, RemotePiEventsListResponseV1, RemotePiEventsAckRequestV1, RemotePiEventsAckResponseV1, RemotePiEventCursor } from "./remote-pi-types.js";
-import { validateEventV1, REMOTE_PI_BOUNDS, deriveEventId, verifyEventHash } from "./remote-pi-types.js";
+import type { RemotePiEventV1, RemotePiEventsListRequestV1, RemotePiEventsListResponseV1, RemotePiEventsAckRequestV1, RemotePiEventsAckResponseV1 } from "./remote-pi-types.js";
+import { validateEventV1, REMOTE_PI_BOUNDS } from "./remote-pi-types.js";
 import type { RemotePiEventProducer } from "./remote-pi-event-producer.js";
 import type { PiRunStore } from "../pi-executor/pi-run-store.js";
 import type { WsPeerClient } from "./ws-peer-client.js";
@@ -57,7 +57,7 @@ export class RemotePiDeliveryManager {
   private readonly config: DeliveryConfig;
   private readonly wsClients = new Map<string, WsPeerClient>();
   private readonly eventListeners = new Map<string, RemotePiEventListener[]>();
-  private readonly activeCatchUp = new Map<string, Promise<void>>(); // run_id -> catch-up promise
+  private readonly activeCatchUp = new Map<string, Promise<number>>(); // run_id -> catch-up promise
 
   constructor(deps: DeliveryDeps, config: Partial<DeliveryConfig> = {}) {
     this.deps = deps;
@@ -174,7 +174,7 @@ export class RemotePiDeliveryManager {
    * event.origin_peer === localPeerName, NOT === authenticatedPeer.
    */
   async handleInboundEvent(
-    authenticatedPeer: string,
+    _authenticatedPeer: string,
     event: RemotePiEventV1,
     onReduce?: (event: RemotePiEventV1) => Promise<void>
   ): Promise<{ accepted: boolean; reason?: string }> {
@@ -259,7 +259,7 @@ export class RemotePiDeliveryManager {
     }
 
     // Get events
-    const events = this.deps.store.getEventsAfter(request.run_id, request.after_sequence, limit);
+    const events = this.deps.store.getEventsAfter({ runId: request.run_id, afterSequence: request.after_sequence, limit });
 
     logDebug(TAG, `Listed ${events.length} events for run ${request.run_id} after seq ${request.after_sequence}`);
 

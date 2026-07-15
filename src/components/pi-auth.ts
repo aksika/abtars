@@ -20,10 +20,7 @@
  */
 
 import { createHash, randomBytes, createPrivateKey, createPublicKey, sign as cryptoSign, verify as cryptoVerify } from "node:crypto";
-import type { IncomingMessage } from "node:http";
-import { readPiRegistration, FIXED_SCOPES, type PiScope, type PiClientRegistration } from "./pi-client-registry.js";
-
-const TAG = "pi-auth";
+import { readPiRegistration, type PiScope, type PiClientRegistration } from "./pi-client-registry.js";
 
 // ── Nonce cache ────────────────────────────────────────────────────────
 

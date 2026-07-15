@@ -2,8 +2,6 @@ import { logWarn, logDebug } from "./logger.js";
 
 const TAG = "orc-activity";
 const MAX_PENDING = 64;
-const TRUNCATE_STRING = 200;
-
 export type CardActivityKind = "card.queued" | "card.running" | "card.completed" | "card.failed" | "card.delivered";
 
 export type OrcActivityPayload =
@@ -40,11 +38,6 @@ function isCardKind(k: string): k is CardActivityKind {
   return k.startsWith("card.");
 }
 
-function truncate(s: string, max = TRUNCATE_STRING): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max) + "...";
-}
-
 interface Subscriber {
   filter: OrcActivityFilter;
   listener: OrcActivityListener;
@@ -66,12 +59,12 @@ export class OrcActivityFeed {
 
   publish(event: UnsequencedOrcActivityEvent): void {
     const seq = this._nextSeq++;
-    const full: OrcActivityEvent = {
+    const full = {
       ...event,
       sequence: seq,
       timestamp: event.timestamp ?? Date.now(),
       executionId: event.executionId,
-    };
+    } as OrcActivityEvent;
 
     for (const sub of this._subscribers) {
       if (!this._matches(sub.filter, full)) continue;
@@ -80,7 +73,7 @@ export class OrcActivityFeed {
         const lastIdx = sub.pending.length - 1;
         if (lastIdx >= 0) {
           const last = sub.pending[lastIdx];
-          if (last.kind === full.kind && last.cardId === full.cardId) {
+          if (last!.kind === full.kind && last!.cardId === full.cardId) {
             sub.pending[lastIdx] = full;
             continue;
           }

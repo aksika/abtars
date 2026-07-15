@@ -10,6 +10,9 @@
  * They exist so #1319 (live mirroring) can extend without a protocol rewrite.
  */
 
+import type { OrcActivitySnapshot } from "../../components/orc-activity-snapshot.js";
+import type { OrcActivityEvent } from "../../components/orc-activity-feed.js";
+
 // ── Wire limits (#1400) ─────────────────────────────────────────────────
 
 /** Maximum encoded JSONL frame size (excluding newline). Matches outbound cap. */
@@ -52,8 +55,8 @@ export type TuiServerFrame =
   | { t: "typing" }
   | { t: "steer-ack"; status: "queued" | "rejected" | "consumed" | "expired" | "failed"; instructionId: string; message: string }  // #1332: steer lifecycle
   // #1319: Orc activity
-  | { t: "activity-snapshot"; sequence: number; snapshot: import("../components/orc-activity-snapshot.js").OrcActivitySnapshot }
-  | { t: "activity"; sequence: number; event: import("../components/orc-activity-feed.js").OrcActivityEvent }
+  | { t: "activity-snapshot"; sequence: number; snapshot: OrcActivitySnapshot }
+  | { t: "activity"; sequence: number; event: OrcActivityEvent }
   | { t: "status"; status: import("./runtime-status.js").TuiRuntimeStatus };
 
 export function encodeFrame(f: TuiServerFrame | TuiClientFrame): string {
@@ -119,7 +122,6 @@ export function createFrameDecoder<T>(options?: FrameDecoderOptions): FrameDecod
     let start = 0;
     for (let i = 0; i < chunk.length; i++) {
       if (chunk[i] === 0x0a) {
-        const lineLen = i - start;
         let end = i;
         if (end > start && chunk[end - 1] === 0x0d) {
           end--;

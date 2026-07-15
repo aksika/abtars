@@ -12,4 +12,5 @@ export type {
   FixedCommandRunner,
   WakeVerification,
   HardwareSleepInspection,
+  HardwareSleepInspectEntry,
 } from "./types.js";

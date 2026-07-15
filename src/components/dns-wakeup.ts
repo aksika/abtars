@@ -11,13 +11,11 @@
  */
 
 import { createSocket, type Socket } from "node:dgram";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import type { PeerConfig } from "./peer-config.js";
 
 const TAG = "dns-wakeup";
-const PREFIX = "ab-";
-const SUFFIX = "._workstation._tcp.local";
 const PATTERN = /^ab-([a-f0-9]{10})\._workstation\._tcp\.local$/;
 const MAX_AGE_S = 60;
 const RATE_LIMIT_MS = 5000;
@@ -39,22 +37,6 @@ function parseMdnsQueryName(buf: Buffer): string | null {
     offset += len;
   }
   return labels.join(".").toLowerCase();
-}
-
-/** Build a minimal mDNS query packet for a PTR record. */
-function buildMdnsQuery(name: string): Buffer {
-  const labels = name.split(".");
-  // Header: ID=0, flags=0 (standard query), QDCOUNT=1
-  const header = Buffer.from([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-  // Question section: labels + null + type PTR (12) + class IN (1)
-  const parts: Buffer[] = [header];
-  for (const label of labels) {
-    parts.push(Buffer.from([label.length]));
-    parts.push(Buffer.from(label, "ascii"));
-  }
-  parts.push(Buffer.from([0])); // root label
-  parts.push(Buffer.from([0, 12, 0, 1])); // type PTR, class IN
-  return Buffer.concat(parts);
 }
 
 /** Build an empty mDNS response (no answers — looks like "not found"). */
@@ -85,7 +67,7 @@ export function startDnsWakeup(
     for (const [peerName, peer] of Object.entries(config.peers)) {
       // #1293: PeerEntry no longer has .token — DNS wakeup is unsupported in Ed25519 model
       // The receiver path is kept for future use but will never match without a token
-      const peerToken = (peer as Record<string, unknown>)["token"] as string | undefined;
+      const peerToken = (peer as unknown as Record<string, unknown>)["token"] as string | undefined;
       if (!peerToken) continue;
       const hmac = createHmac("sha256", peerToken).update(peerName).digest();
       const decoded = Buffer.alloc(5);
@@ -119,7 +101,7 @@ export function startDnsWakeup(
 }
 
 /** Send a wake-up signal to a peer (mDNS-disguised). Skips if no token available. */
-export function sendWakeup(peerName: string, peerHost: string, udpPort: number, _token?: string): void {
+export function sendWakeup(peerName: string, _peerHost: string, _udpPort: number, _token?: string): void {
   // #1293: PeerEntry no longer has a token field. Wake-up via peer.token is removed.
   // DNS wakeup is a best-effort legacy feature; with Ed25519 auth there is no per-peer token.
   logWarn(TAG, `sendWakeup: token-based wakeup not supported in Ed25519 auth model (#1293) — skipping ${peerName}`);

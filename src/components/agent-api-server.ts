@@ -746,7 +746,9 @@ export class AgentApiServer {
     // POST /v1/pi-runs/:runId/control — origin sends control command to owner
     const piRunMatch = url.match(/^\/v1\/pi-runs\/([^/]+)\/(events|control)(?:\/(acknowledge))?$/);
     if (piRunMatch) {
-      const [, runId, subPath, action] = piRunMatch;
+      const runId = piRunMatch[1]!;
+      const subPath = piRunMatch[2]!;
+      const action = piRunMatch[3];
       if (subPath === "events" && action === "acknowledge" && method === "POST") {
         this.handleAsync(req, res, async () => {
           const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
@@ -1360,8 +1362,8 @@ export class AgentApiServer {
       res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi delivery not available" }));
       return;
     }
-    const after_sequence = afterMatch ? parseInt(afterMatch[1], 10) : 0;
-    const limit = limitMatch ? parseInt(limitMatch[1], 10) : 100;
+    const after_sequence = afterMatch ? parseInt(afterMatch[1]!, 10) : 0;
+    const limit = limitMatch ? parseInt(limitMatch[1]!, 10) : 100;
     delivery.listEvents({ version: 1, run_id: runId, after_sequence, limit }, caller).then(result => {
       if ("error" in result) {
         res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: result.error }));
@@ -1406,7 +1408,7 @@ export class AgentApiServer {
   }
 
   /** #1358 — WS push: owner pushes lifecycle event to origin (pi.lifecycle.v1). */
-  private async handleRemotePiLifecyclePush(ownerPeer: string, event: unknown, msgId?: string): Promise<void> {
+  private async handleRemotePiLifecyclePush(ownerPeer: string, event: unknown, _msgId?: string): Promise<void> {
     const { getRemotePiOriginReducer } = await import("./peer-transport/remote-pi-registry.js");
     const reducer = getRemotePiOriginReducer();
     if (!reducer) return; // origin reducer not configured — not an error

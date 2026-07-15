@@ -239,6 +239,11 @@ export function consumeServerFrames(
   }
 }
 
+/** Pure predicate: does `text` request a local TUI exit? */
+export function isTuiExitCommand(text: string): boolean {
+  return text.trim().toLowerCase() === "/exit";
+}
+
 /** Entry point for the `abtars tui` subcommand. */
 export async function tui(args: string[]): Promise<number> {
   let mode: TuiAttachMode;
@@ -387,6 +392,12 @@ export async function tui(args: string[]): Promise<number> {
   editor.onSubmit = (text: string) => {
     if (!ready) return;        // can't send before attach accepted
     if (text.length === 0) return;
+    // #1369: /exit is a local command — exit the client, don't touch the wire.
+    if (isTuiExitCommand(text)) {
+      conn.end();
+      stop(0);
+      return;
+    }
     appendMessage("user", text);
     // #1361: Detect /steer prefix in every attach mode and send a steer frame
     if (text.startsWith("/steer ")) {

@@ -11,7 +11,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { cpus, loadavg } from "node:os";
 import { loadPeerConfig } from "../peer-config.js";
-import { logInfo, logDebug, logWarn, logTrace } from "../logger.js";
+import { logDebug } from "../logger.js";
 
 const TAG = "peer-health";
 

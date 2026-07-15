@@ -17,7 +17,7 @@ vi.mock("./task-store.js", () => ({
   writeEntry: vi.fn(),
 }));
 
-// bridge-lock: mocked so processNext() never short-circuits on hw_sleep and the
+// bridge-lock: mocked so processNext() never short-circuits and the
 // idle gate's readLastPromptAt() returns an old timestamp.
 vi.mock("../transport/bridge-lock-transport.js", () => ({
   readLastPromptAt: vi.fn().mockReturnValue(0),

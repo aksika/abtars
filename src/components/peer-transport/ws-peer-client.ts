@@ -10,10 +10,10 @@
  * - Corrupt checkpoints quarantined, not silently reset.
  */
 import WebSocket from "ws";
-import { randomUUID } from "node:crypto";
+import { randomUUID as _randomUUID } from "node:crypto";
 import { signRequest } from "./peer-auth.js";
 import { createPinnedPeerWsConnection } from "./pinned-peer-tls.js";
-import { loadPeerConfig, deriveVerifyKey, type PeerEntry } from "../peer-config.js";
+import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
@@ -295,7 +295,6 @@ export class WsPeerClient {
 
       let stage = 0;
       let nonceR = "";
-      let pubKeyR = "";
       let enrollTimeout: ReturnType<typeof setTimeout> | null = null;
 
       const onEnrollMessage = async (rawData: import("ws").RawData) => {
@@ -304,7 +303,7 @@ export class WsPeerClient {
 
           if (stage === 1) {
             // Step B: challenge
-            const { pubKey_r, nonce_r, ts, mac_r } = msg as { pubKey_r: string; nonce_r: string; ts: number; mac_r: string };
+            const { pubKey_r, nonce_r, ts: _ts, mac_r } = msg as { pubKey_r: string; nonce_r: string; ts: number; mac_r: string };
             if (!pubKey_r || !nonce_r || !mac_r) { reject(new Error("Invalid challenge")); enrollWs.close(); return; }
 
             // Verify mac_r: HMAC(tribeToken, pubKey_r + nonce_i)
@@ -312,7 +311,6 @@ export class WsPeerClient {
             if (mac_r !== expectedMacR) { reject(new Error("tribe token mismatch — not same tribe")); enrollWs.close(); return; }
 
             nonceR = nonce_r;
-            pubKeyR = pubKey_r;
             stage = 2;
 
             // Step C: enroll
@@ -360,8 +358,8 @@ export class WsPeerClient {
             // Detach enrollment message handler, keep socket as steady-state connection
             enrollWs.removeListener("message", onEnrollMessage);
             this.ws = enrollWs;
-            enrollWs.on("message", (data) => this.handleMessage(data.toString()));
-            enrollWs.on("close", () => { this.cleanup(); if (!this.destroyed) this.scheduleReconnect(); });
+            enrollWs.on("message", (data) => this.handleMessage(data.toString(), this.sockGen));
+            enrollWs.on("close", () => { if (!this.destroyed) this.scheduleReconnect(); });
             enrollWs.on("error", (err) => { logDebug(TAG, `WS error (${this.peerName}): ${err.message}`); this.ws?.close(); });
 
             // Remove handshake-only close handler (steady-state close is installed above)
