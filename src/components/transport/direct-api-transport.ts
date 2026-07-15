@@ -801,22 +801,29 @@ export class DirectApiTransport implements IKiroTransport {
   private parseRetryAfter(err: unknown): number | undefined { return parseRetryAfter(err); }
 
   /**
-   * #1425 — Classify a transport error for L2 health/rotation, honoring the
-   * pi-ai adapter's classification when present.
+   * #1425 — Classify a transport error for L2 health/rotation.
    *
    * The pi-ai adapter tags errors it raises with `piKind`/`piRetryAfterMs`
-   * ("pi classifies, abtars decides"). Those must reach recordError unchanged:
-   * `classifyError(status)` alone cannot express `context_exceeded` (an HTTP 400
-   * context-overflow maps to `transient`), which would wrongly fill a healthy
-   * model's bucket for our own oversized request. When the tags are absent (the
-   * L0 reptile-floor path raises a plain Error), fall back to status/message
-   * parsing exactly as before.
+   * ("pi classifies, abtars decides"). We honor the `context_exceeded` tag — the
+   * one kind `classifyError(status)` is structurally unable to express, since an
+   * HTTP 400 context-overflow maps to `transient` there. Without honoring it, a
+   * healthy model's bucket would be filled for our own oversized request.
+   *
+   * For every other kind, `classifyError(status)` already reproduces the
+   * adapter's intent AND encodes abtars-specific policy the adapter's coarse
+   * mapping doesn't know about (e.g. the sticky `credits` bucket on 402, and
+   * auth demotion on 401/403). So the status-based classification stays
+   * authoritative there; only `context_exceeded` is taken from the tag.
+   * `piRetryAfterMs` is always honored when present (it is the same value the
+   * text-based parse would yield). The L0 reptile-floor path raises plain Errors
+   * with no tags, so it falls through unchanged.
    */
   private classifyTransportError(err: unknown, errMsg: string): { kind: ErrorKind; retryAfterMs?: number } {
     const tagged = err as Error & { piKind?: ErrorKind; piRetryAfterMs?: number };
-    if (tagged?.piKind) return { kind: tagged.piKind, retryAfterMs: tagged.piRetryAfterMs };
     const status = this.parseErrorStatus(err);
-    return { kind: classifyError(status, errMsg), retryAfterMs: this.parseRetryAfter(err) ?? parseUsageLimitCooldown(errMsg) };
+    const kind: ErrorKind = tagged?.piKind === "context_exceeded" ? "context_exceeded" : classifyError(status, errMsg);
+    const retryAfterMs = tagged?.piRetryAfterMs ?? this.parseRetryAfter(err) ?? parseUsageLimitCooldown(errMsg);
+    return { kind, retryAfterMs };
   }
 
   private async streamCompletion(

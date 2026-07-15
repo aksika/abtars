@@ -269,4 +269,35 @@ describe("DirectApiTransport — pi-ai gate (#1311)", () => {
     // transient fills the bucket (0.1 on the first hit) — proving the two kinds diverge.
     expect(registry.getBucketLevel("primary", "https://api.test/v1")).toBeGreaterThan(0);
   });
+
+  // #1425 review — only context_exceeded is taken from the adapter's piKind tag.
+  // For every other kind, classifyError(status) stays authoritative so abtars-specific
+  // policy is preserved. The adapter coarsely maps quota/credit to rate_limit, but a
+  // 402 "credits" error must still classify as the sticky `credits` kind (stays full
+  // until manual /model reset) — NOT rate_limit (0.5, auto-recovers via leak).
+  it("#1425 — pi 402 credits error keeps the sticky `credits` kind (not the adapter's rate_limit tag)", async () => {
+    globalThis.fetch = vi.fn(async () => sseResponse(["x"])) as unknown as typeof globalThis.fetch;
+    // The adapter would tag a quota/credit error as rate_limit; L2 must override to credits.
+    const err = new Error("API error 402: insufficient credits");
+    (err as Error & { piKind?: ErrorKind }).piKind = "rate_limit";
+    mockedStream
+      .mockImplementationOnce(async function* () { throw err; } as never)
+      .mockImplementationOnce(async function* () {
+        yield { type: "chunk", content: "candidate 2 ok" } as never;
+        yield { type: "done", usage: { prompt_tokens: 1, completion_tokens: 1 }, cacheRead: 0, cacheWrite: 0 } as never;
+      } as never);
+    const registry = new ModelHealthRegistry();
+    const policy = new FallbackPolicy([
+      { model: "primary", endpoint: "https://api.test/v1", maxContext: 8000 },
+      { model: "fallback", endpoint: "https://api.test/v1", maxContext: 8000 },
+    ], registry);
+    const t = new DirectApiTransport({
+      endpoint: "https://api.test/v1", model: "primary", maxContext: 8000, maxOutput: 1024, maxTurns: 4,
+      apiFormat: "chat", useProviderLib: true,
+    }, policy);
+    const out = await t.sendPrompt("s", "hi");
+    expect(out).toBe("candidate 2 ok");
+    // credits sets the bucket to 100 (sticky); rate_limit would only fill to 50.
+    expect(registry.getBucketLevel("primary", "https://api.test/v1")).toBe(100);
+  });
 });
