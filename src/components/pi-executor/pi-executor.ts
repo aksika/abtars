@@ -1,17 +1,17 @@
 import { logInfo, logWarn } from "../logger.js";
-import { PiRpcClient, type PiProcessTermination } from "./pi-rpc-client.js";
+import { SupervisedPiRpcClient, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
+import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import { PiRunStore, type PiTerminalOutcome } from "./pi-run-store.js";
 import type { PiExecutorConfig } from "./config.js";
 import { resolveAndValidateWorkspace, buildTrustArgs, buildPluginArgs, buildChildEnv, validateSessionFile } from "./config.js";
 import type { PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim } from "./types.js";
 import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
-import type { PiRpcEvent } from "./pi-rpc-types.js";
 import { nerve } from "../nerve.js";
 
 const TAG = "pi-executor";
 
 interface OwnedProcess {
-  client: PiRpcClient;
+  client: SupervisedPiRpcClient;
   generation: number;
   runId: string;
   workspacePath: string;
@@ -21,6 +21,8 @@ interface OwnedProcess {
   wallClockStart: number;
   settling: boolean;
   unsubTermination: (() => void) | null;
+  unsubEvents: (() => void) | null;
+  unsubUi: (() => void) | null;
 }
 
 export class PiExecutor {
@@ -83,6 +85,8 @@ export class PiExecutor {
       wallClockStart: Date.now(),
       settling: false,
       unsubTermination: null,
+      unsubEvents: null,
+      unsubUi: null,
     };
     this.live.set(runId, placeholder);
 
@@ -173,18 +177,14 @@ export class PiExecutor {
     }
 
     const gen = run.executionGeneration;
-    const client = new PiRpcClient();
+    const client = new SupervisedPiRpcClient();
 
     const args = [
       ...this.config.fixedArgs,
       "--mode", "rpc",
-      "--rpc-version", this.config.supportedRpcVersion,
       ...buildTrustArgs(this.config),
       ...buildPluginArgs(this.config),
     ];
-    if (this.config.sessionStorageRoot) {
-      args.push("--session-storage-root", this.config.sessionStorageRoot);
-    }
 
     const env = buildChildEnv(this.config, run);
 
@@ -206,7 +206,8 @@ export class PiExecutor {
     const unsubTermination = client.onTermination((event) => {
       this._onChildTerminated(run.id, gen, event);
     });
-    client.subscribe((event) => this._onRpcEvent(run.id, event));
+    const unsubEvents = client.subscribe((event) => this._onRpcEvent(run.id, event));
+    const unsubUi = client.onUiRequest((request) => this._onUiRequest(run.id, request));
 
     return {
       client,
@@ -219,6 +220,8 @@ export class PiExecutor {
       wallClockStart: Date.now(),
       settling: false,
       unsubTermination: unsubTermination ?? null,
+      unsubEvents: unsubEvents ?? null,
+      unsubUi: unsubUi ?? null,
     };
   }
 
@@ -253,9 +256,9 @@ export class PiExecutor {
     if (run.modelId && run.modelProvider) {
       try {
         const models = await owned.client.getAvailableModels();
-        const match = models.find(m => m.modelId === run.modelId);
+        const match = models.find(m => m.id === run.modelId);
         if (match) {
-          await owned.client.setModel({ provider: run.modelProvider, modelId: run.modelId, thinking: run.thinking });
+          await owned.client.setModel(run.modelProvider, run.modelId);
         } else {
           logWarn(TAG, `Requested model ${run.modelId} not available in Pi catalogue, using default`);
         }
@@ -309,16 +312,12 @@ export class PiExecutor {
       ok: false, delivery: "written_unacknowledged" as const, error: err.message,
     }));
 
-    switch (rpcResult.delivery) {
-      case "not_written":
-        this.store.restorePendingUi({ runId, generation, requestId, requestType: claim.requestType });
-        break;
-      case "acknowledged":
-        this.store.recordUiReplyOutcome({ runId, generation, requestId, outcome: "acknowledged" });
-        break;
-      case "written_unacknowledged":
-        this.store.recordUiReplyOutcome({ runId, generation, requestId, outcome: "delivery_unknown" });
-        break;
+    // #1426: Pi sends no acknowledgement for extension_ui_response.
+    // On successful write, record delivery_unknown; on failure, restore the UI claim.
+    if (rpcResult.delivery === "not_written") {
+      this.store.restorePendingUi({ runId, generation, requestId, requestType: claim.requestType });
+    } else {
+      this.store.recordUiReplyOutcome({ runId, generation, requestId, outcome: "delivery_unknown" });
     }
     this.store.touchActivity(runId);
     return { claimed: true, requestType: claim.requestType };
@@ -394,6 +393,8 @@ export class PiExecutor {
   private _releaseOwned(owned: OwnedProcess): void {
     if (owned.abortTimer) { clearTimeout(owned.abortTimer); owned.abortTimer = null; }
     if (owned.unsubTermination) { owned.unsubTermination(); owned.unsubTermination = null; }
+    if (owned.unsubEvents) { owned.unsubEvents(); owned.unsubEvents = null; }
+    if (owned.unsubUi) { owned.unsubUi(); owned.unsubUi = null; }
     owned.client.close().catch(() => {});
     if (this.live.get(owned.runId) === owned) {
       this.live.delete(owned.runId);
@@ -426,12 +427,12 @@ export class PiExecutor {
 
   // ── RPC event handler ─────────────────────────────────────────────────────
 
-  private async _onRpcEvent(runId: string, event: PiRpcEvent): Promise<void> {
+  private async _onRpcEvent(runId: string, event: PiAgentEvent): Promise<void> {
     this.store.touchActivity(runId);
 
     switch (event.type) {
       case "agent_start":
-        this.store.addProgress(runId, "agent_start", JSON.stringify(event.data ?? {}));
+        this.store.addProgress(runId, "agent_start", "{}");
         break;
       case "agent_end": {
         const owned = this.live.get(runId);
@@ -439,51 +440,85 @@ export class PiExecutor {
         await this._settleCompletion(runId, owned);
         break;
       }
-      case "tool_start":
-        if (event.data?.name) {
-          this.store.addProgress(runId, "tool_start", JSON.stringify({ name: event.data.name }));
+      case "agent_settled":
+        break;
+      case "tool_execution_start":
+        if (event.toolName && typeof event.toolName === "string") {
+          this.store.addProgress(runId, "tool_execution_start", JSON.stringify({ name: event.toolName }));
         }
         break;
-      case "ui": {
-        const data = event.data as Record<string, unknown> | undefined;
-        const reqId = data?.requestId as string | undefined;
-        const reqType = data?.type as string | undefined;
-        if (reqId && reqType && ["select", "confirm", "input", "editor"].includes(reqType)) {
-          const owned = this.live.get(runId);
-          if (!owned) return;
-          const result = this.store.setPendingUi({
-            runId, generation: owned.generation, requestId: reqId, requestType: reqType as PiPendingRequestType,
-          });
-          if (result.ok) {
-            // Persist the full UI request payload (title/prompt/options/etc) so
-            // the awaiting_input public projection can surface them to the
-            // origin. Without this, the origin sees only request_id+type and
-            // cannot render a choice for the user.
-            this.store.addProgress(runId, "ui", JSON.stringify({
-              requestId: reqId,
-              type: reqType,
-              title: data?.title,
-              description: data?.description ?? data?.prompt,
-              options: data?.options,
-              defaultValue: data?.defaultValue,
-              filePattern: data?.filePattern,
-            }));
-            this._fireTransition(runId, "running", "awaiting_input");
-          } else {
-            logWarn(TAG, `UI request rejected for ${runId} (gen=${owned.generation}, req=${reqId}): ${result.reason}`);
-          }
+      case "tool_execution_update":
+        break;
+      case "tool_execution_end":
+        if (event.toolName && typeof event.toolName === "string") {
+          this.store.addProgress(runId, "tool_execution_end", JSON.stringify({ name: event.toolName }));
         }
         break;
+      case "compaction_start":
+        this.store.addProgress(runId, "compaction", JSON.stringify({ status: "started" }));
+        break;
+      case "compaction_end":
+        this.store.addProgress(runId, "compaction", JSON.stringify({ status: "ended" }));
+        break;
+      case "auto_retry_start":
+        if (typeof event.attempt === "number") {
+          this.store.addProgress(runId, "auto_retry", JSON.stringify({ status: "started", attempt: event.attempt }));
+        }
+        break;
+      case "auto_retry_end":
+        if (typeof event.attempt === "number") {
+          this.store.addProgress(runId, "auto_retry", JSON.stringify({ status: "ended", attempt: event.attempt }));
+        }
+        break;
+      case "turn_start":
+      case "turn_end":
+      case "message_start":
+      case "message_end":
+      case "queue_update":
+      case "entry_appended":
+      case "session_info_changed":
+      case "thinking_level_changed":
+        break;
+      case "extension_error":
+        logWarn(TAG, `Extension error for ${runId}: ${JSON.stringify(event)}`);
+        this.store.addProgress(runId, "extension_error", JSON.stringify({}));
+        break;
+      default:
+        logWarn(TAG, `Unhandled Pi event type for ${runId}: ${event.type}`);
+        break;
+    }
+  }
+
+  /** Handle official extension_ui_request frames. Dialog methods enter awaiting_input;
+   *  fire-and-forget methods are bounded progress/display events. */
+  private async _onUiRequest(runId: string, request: RpcExtensionUIRequest): Promise<void> {
+    this.store.touchActivity(runId);
+
+    const method = request.method;
+    const dialogMethods = new Set(["select", "confirm", "input", "editor"]);
+
+    if (dialogMethods.has(method)) {
+      const owned = this.live.get(runId);
+      if (!owned) return;
+      const result = this.store.setPendingUi({
+        runId, generation: owned.generation, requestId: request.id, requestType: method as PiPendingRequestType,
+      });
+      if (result.ok) {
+        this.store.addProgress(runId, "ui", JSON.stringify({
+          requestId: request.id,
+          type: method,
+          title: (request as any).title,
+          description: (request as any).message ?? (request as any).placeholder ?? (request as any).prefill,
+          options: (request as any).options,
+          defaultValue: (request as any).defaultValue,
+          filePattern: undefined,
+        }));
+        this._fireTransition(runId, "running", "awaiting_input");
+      } else {
+        logWarn(TAG, `UI request rejected for ${runId} (gen=${owned.generation}, req=${request.id}): ${result.reason}`);
       }
-      case "status":
-      case "notify":
-      case "progress":
-        this.store.addProgress(runId, event.type, JSON.stringify(event.data ?? {}));
-        break;
-      case "error":
-        logWarn(TAG, `RPC error event for ${runId}: ${JSON.stringify(event.data)}`);
-        this.store.addProgress(runId, "error", JSON.stringify(event.data ?? {}));
-        break;
+    } else if (method === "notify") {
+      this.store.addProgress(runId, "ui_notify", JSON.stringify({ message: (request as any).message }));
     }
   }
 

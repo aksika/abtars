@@ -17,7 +17,6 @@ export interface PiExecutorConfig {
   projectTrust: "always" | "never";
   sessionStorageRoot: string;
   abmindPlugin: string;
-  supportedRpcVersion: string;
   defaultModel?: { provider: string; modelId: string; thinking?: string };
 }
 
@@ -69,10 +68,17 @@ export function loadPiConfig(): PiExecutorConfig | null {
     if (!raw.command) return null;
     if (!raw.workspaceAliases || Object.keys(raw.workspaceAliases).length === 0) return null;
 
+    const fixedArgs = (raw.fixedArgs ?? []) as readonly string[];
+    const faErrors = validateFixedArgs(fixedArgs);
+    if (faErrors.length > 0) {
+      for (const err of faErrors) logWarn(TAG, err);
+      return null;
+    }
+
     const config: PiExecutorConfig = {
       enabled: true,
       command: raw.command,
-      fixedArgs: raw.fixedArgs ?? [],
+      fixedArgs,
       workspaceAliases: raw.workspaceAliases,
       allowedEnv: raw.allowedEnv ?? [],
       maxConcurrent: raw.maxConcurrent ?? 1,
@@ -81,7 +87,6 @@ export function loadPiConfig(): PiExecutorConfig | null {
       projectTrust: raw.projectTrust ?? "never",
       sessionStorageRoot: raw.sessionStorageRoot ?? "",
       abmindPlugin: raw.abmindPlugin ?? "",
-      supportedRpcVersion: raw.supportedRpcVersion ?? "0.1",
       defaultModel: raw.defaultModel,
     };
 
@@ -121,6 +126,30 @@ export function buildTrustArgs(config: PiExecutorConfig): string[] {
   return config.projectTrust === "always" ? ["--approve"] : ["--no-approve"];
 }
 
+/**
+ * Validate fixed args against the published Pi CLI flags. Returns an array of
+ * error messages for each rejected or conflicting argument. The caller should
+ * treat any non-empty result as a boot-time configuration error.
+ *
+ * Rejects duplicates/conflicts for mode, trust, extension, provider/model, and
+ * session ownership arguments — these are owned by the executor and must not
+ * be overridable via fixedArgs.
+ */
+export function validateFixedArgs(fixedArgs: readonly string[]): string[] {
+  const errors: string[] = [];
+  const FORBIDDEN_FLAGS = new Set([
+    "--mode", "--approve", "--no-approve", "--extension",
+    "--provider", "--model", "--session-storage-root",
+    "--rpc-version",
+  ]);
+  for (const arg of fixedArgs) {
+    if (FORBIDDEN_FLAGS.has(arg)) {
+      errors.push(`Fixed argument "${arg}" is owned by the executor and must not be set in fixedArgs`);
+    }
+  }
+  return errors;
+}
+
 const FIXED_ENV_BASELINE = ["HOME", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"];
 
 const DANGEROUS_NODE_VARS = ["NODE_OPTIONS", "NODE_PATH", "NODE_DEBUG", "NODE_EXTRA_CA_CERTS"];
@@ -136,11 +165,13 @@ export function buildChildEnv(
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of FIXED_ENV_BASELINE) {
-    if (process.env[name]) env[name] = process.env[name]!;
+    const val = process.env[name];
+    if (val) env[name] = val;
   }
   for (const name of config.allowedEnv) {
     if (DANGEROUS_NODE_VARS.includes(name)) continue;
-    if (process.env[name]) env[name] = process.env[name]!;
+    const val = process.env[name];
+    if (val) env[name] = val;
   }
   env["ABMIND_USER_ID"] = run.ownerPrincipalId;
   env["ABMIND_PARENT_EXECUTION_ID"] = `pi-run-${run.id}-gen-${run.executionGeneration}`;
