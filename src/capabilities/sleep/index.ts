@@ -26,10 +26,10 @@ import { startSleepCard, type SleepCard } from "./sleep-card.js";
 import type { CapabilityApi } from "../capability.js";
 
 /** #1429 — Narrow abmind surface injected at construction. No runtime
- *  re-discovery. */
+ *  re-discovery. *sleep-card.ts* uses loadSleepSteps for display metadata. */
 export type SleepApi = Pick<
   typeof import("abmind"),
-  "DEFAULT_LEVEL" | "parseLevel" | "runSleepCycle"
+  "DEFAULT_LEVEL" | "parseLevel" | "runSleepCycle" | "loadSleepSteps"
 >;
 
 export type SleepUnavailableCode =
@@ -127,7 +127,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
     const onEvent = (event: SleepEvent): void => {
       if (event.type === "cycle_started") {
-        sleepCard = startSleepCard();
+        sleepCard = startSleepCard(() => api.loadSleepSteps());
         totalSteps = event.totalSteps;
       }
       if (event.type === "step_started") {

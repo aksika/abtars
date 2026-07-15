@@ -13,10 +13,6 @@ vi.mock("../../components/tasks/kanban-board.js", () => ({
   kanbanComplete: mockComplete,
 }));
 
-vi.mock("../../utils/abmind-lazy.js", () => ({
-  abmind: () => ({ loadSleepSteps: mockLoadSleepSteps }),
-}));
-
 import { startSleepCard } from "./sleep-card.js";
 import type { SleepEvent, SleepStepSummary } from "abmind";
 
@@ -55,7 +51,7 @@ describe("startSleepCard (#1353 — neutral SleepEvent contract)", () => {
   });
 
   it("creates ONE card, type D, running status, checklist mirrors loadSleepSteps()", () => {
-    startSleepCard();
+    startSleepCard(mockLoadSleepSteps);
     expect(mockEnqueue).toHaveBeenCalledTimes(1);
     const [title, source, , opts] = mockEnqueue.mock.calls[0];
     expect(title).toMatch(/^Sleep \d{4}-\d{2}-\d{2}$/);
@@ -69,7 +65,7 @@ describe("startSleepCard (#1353 — neutral SleepEvent contract)", () => {
   });
 
   it("ticks the matching item: step_started -> [~], step_completed -> [x], step_skipped -> [skip], step_failed -> [fail]", () => {
-    const card = startSleepCard();
+    const card = startSleepCard(mockLoadSleepSteps);
     card.onEvent(started("gc-noise", 1));
     expect(lastNotes()).toContain("[~] gc-noise");
     card.onEvent(completed("gc-noise"));
@@ -81,7 +77,7 @@ describe("startSleepCard (#1353 — neutral SleepEvent contract)", () => {
   });
 
   it("cycle_started / cycle_finished events are ignored by the card (no crash, no update)", () => {
-    const card = startSleepCard();
+    const card = startSleepCard(mockLoadSleepSteps);
     vi.clearAllMocks();
     card.onEvent({ type: "cycle_started", runId: "run-1", totalSteps: STEPS.length, resumed: false });
     card.onEvent({
@@ -94,7 +90,7 @@ describe("startSleepCard (#1353 — neutral SleepEvent contract)", () => {
   });
 
   it("complete() marks the card done exactly once (idempotent)", () => {
-    const card = startSleepCard();
+    const card = startSleepCard(mockLoadSleepSteps);
     card.onEvent(completed("gc-noise"));
     card.complete();
     card.complete();
@@ -105,8 +101,7 @@ describe("startSleepCard (#1353 — neutral SleepEvent contract)", () => {
   });
 
   it("no manifest -> no card; onEvent/complete are safe no-ops", () => {
-    mockLoadSleepSteps.mockReturnValue([]);
-    const card = startSleepCard();
+    const card = startSleepCard(() => []);
     expect(mockEnqueue).not.toHaveBeenCalled();
     card.onEvent(started("gc-noise", 1));
     card.complete();
@@ -115,8 +110,8 @@ describe("startSleepCard (#1353 — neutral SleepEvent contract)", () => {
   });
 
   it("loadSleepSteps throwing -> no card, no throw", () => {
-    mockLoadSleepSteps.mockImplementation(() => { throw new Error("prompts missing"); });
-    expect(() => startSleepCard().complete()).not.toThrow();
+    const throwingLoader = () => { throw new Error("prompts missing"); };
+    expect(() => startSleepCard(throwingLoader).complete()).not.toThrow();
     expect(mockEnqueue).not.toHaveBeenCalled();
   });
 });

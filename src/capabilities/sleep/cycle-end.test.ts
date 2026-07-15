@@ -20,15 +20,6 @@ vi.mock("abmind", async () => {
   return { ...actual, runSleepCycle: mockRunSleepCycle };
 });
 
-vi.mock("../../utils/abmind-lazy.js", () => ({
-  abmind: () => ({
-    DEFAULT_LEVEL: "normal",
-    parseLevel: (s: string) => s,
-    runSleepCycle: mockRunSleepCycle,
-  }),
-  loadAbmind: async () => ({}),
-}));
-
 // system-event-buffer is imported lazily on the report path — stub it so no real
 // event is buffered and the dynamic import resolves in tests.
 vi.mock("../../components/system-event-buffer.js", () => ({
@@ -63,6 +54,7 @@ describe("createSleepHandle — onCycleEnd teardown (#1287, #1353)", () => {
     DEFAULT_LEVEL: "normal",
     parseLevel: (s: string) => s,
     runSleepCycle: mockRunSleepCycle,
+    loadSleepSteps: () => [],
   };
 
   function makeHandle(onCycleEnd: () => void) {

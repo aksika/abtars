@@ -15,7 +15,6 @@
 
 import type { SleepEvent } from "abmind";
 import { kanbanEnqueue, kanbanUpdate, kanbanComplete } from "../../components/tasks/kanban-board.js";
-import { abmind } from "../../utils/abmind-lazy.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 
 type StepStatus = "pending" | "running" | "done" | "skipped" | "failed";
@@ -47,17 +46,17 @@ function renderChecklist(items: readonly StepItem[]): string {
 }
 
 /**
- * Create the stepped card for a cycle. Reads the step manifest from abmind so
- * the checklist mirrors loadSleepSteps() (name + order). Returns a no-op card if
- * abmind or the manifest is unavailable — sleep still runs.
+ * Create the stepped card for a cycle. Uses loadSteps to read the step
+ * manifest so the checklist mirrors loadSleepSteps() (name + order).
+ * Returns a no-op card if steps are unavailable — sleep still runs.
  */
-export function startSleepCard(): SleepCard {
+export function startSleepCard(loadSteps?: () => Array<{ name: string }>): SleepCard {
   let cardId = 0;
   let items: StepItem[] = [];
   let completed = false;
 
   try {
-    const steps = abmind()?.loadSleepSteps() ?? [];
+    const steps = loadSteps?.() ?? [];
     items = steps.map(step => ({ name: step.name, status: "pending" as StepStatus }));
     if (items.length > 0) {
       const dateStr = new Date().toISOString().slice(0, 10);
