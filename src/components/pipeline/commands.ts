@@ -86,6 +86,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     enqueueCron: deps.enqueueCron,
     requestShutdown: deps.requestShutdown,
     sleepProgress: deps.sleepProgress,
+    startSleep: deps.startSleep,
     loadedCapabilities: deps.loadedCapabilities,
     selfHealerTask: deps.selfHealerTask,
     hailMary: deps.hailMary,
