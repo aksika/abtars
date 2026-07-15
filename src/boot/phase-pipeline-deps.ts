@@ -26,6 +26,7 @@ import type { BootCtx, PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { TaskCompleteCallback } from "../components/tasks/task-queue.js";
 import { getEnv } from "../components/env-schema.js";
+import { unavailable } from "../capabilities/sleep/index.js";
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, transport } = ctx;
@@ -182,9 +183,10 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     requestShutdown: (code?: number) => ctx.requestShutdownWithCode(code ?? 0),
     sleepProgress: () => ctx.sleepHandle?.progress ?? null,
     startSleep: (o) => {
-      const r = ctx.sleepHandle?.startManual(o);
-      if (!r) return "unavailable";
-      return r.status;
+      if (ctx.sleepHandle) return ctx.sleepHandle.startManual(o);
+      if (ctx.sleepUnavailable) return ctx.sleepUnavailable;
+      logWarn("sleep", "sleep handle absent without boot availability reason");
+      return unavailable("sleep_not_initialized");
     },
     loadedCapabilities: [],
     selfHealerTask: null,

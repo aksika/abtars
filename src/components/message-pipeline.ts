@@ -130,7 +130,7 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   requestShutdown?: (code?: number) => void;
   sleepProgress?: () => { percent: number; step: string } | null;
   /** Admit a manual sleep run directly (/sleep now | /sleep resume). #1321. */
-  startSleep?: (opts: { fresh: boolean; resume: boolean }) => "accepted" | "already_running" | "unavailable";
+  startSleep?: (opts: { fresh: boolean; resume: boolean }) => import("../capabilities/sleep/index.js").SleepStartResult;
   loadedCapabilities?: string[];
   selfHealerTask?: { enabled: boolean } | null;
   hailMary?: { model: string; endpoint: string; apiKey?: string } | null;

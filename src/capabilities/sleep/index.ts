@@ -18,7 +18,6 @@
  */
 
 import type { Level, SleepRunResult, SleepEvent } from "abmind";
-import { abmind } from "../../utils/abmind-lazy.js";
 import type { SleepRuntime, SleepCompletionRequest } from "abmind";
 import { getEnv } from "../../components/env-schema.js";
 import { logInfo, logWarn } from "../../components/logger.js";
@@ -26,11 +25,32 @@ import { writeSleepStatus } from "../../components/transport/bridge-lock-transpo
 import { startSleepCard, type SleepCard } from "./sleep-card.js";
 import type { CapabilityApi } from "../capability.js";
 
+/** #1429 — Narrow abmind surface injected at construction. No runtime
+ *  re-discovery. */
+export type SleepApi = Pick<
+  typeof import("abmind"),
+  "DEFAULT_LEVEL" | "parseLevel" | "runSleepCycle"
+>;
+
+export type SleepUnavailableCode =
+  | "memory_disabled"
+  | "abmind_not_loaded"
+  | "heartbeat_unavailable"
+  | "sleep_not_initialized";
+
+export interface SleepUnavailable {
+  status: "unavailable";
+  code: SleepUnavailableCode;
+  reason: string;
+}
+
 /** Host-owned model runtime factory. abtars wraps its Spin/transport policy;
  *  a rejection here is final for this attempt — abmind does not retry it. */
 export type SleepRuntimeFactory = (request: SleepCompletionRequest) => Promise<string>;
 
 export interface SleepOpts {
+  /** #1429 — Injected narrow abmind API. Validated once at construction. */
+  api: SleepApi;
   memoryEnabled: boolean;
   /** Host-owned model runtime — wraps spin({ type: "D", ... }) (#1271, #1353). */
   runtime: SleepRuntime;
@@ -47,7 +67,18 @@ export interface SleepOpts {
 export type SleepStartResult =
   | { status: "accepted" }
   | { status: "already_running" }
-  | { status: "unavailable"; reason: string };
+  | SleepUnavailable;
+
+/** #1429 — Fixed unavailable reasons keyed by code. */
+export function unavailable(code: SleepUnavailableCode): SleepUnavailable {
+  const reasons: Record<SleepUnavailableCode, string> = {
+    memory_disabled: "memory is disabled",
+    abmind_not_loaded: "abmind did not initialize during boot",
+    heartbeat_unavailable: "heartbeat is unavailable",
+    sleep_not_initialized: "sleep did not initialize during boot",
+  };
+  return { status: "unavailable", code, reason: reasons[code] };
+}
 
 export interface SleepProgress {
   percent: number;
@@ -65,32 +96,21 @@ export interface SleepHandle {
 }
 
 export function createSleepHandle(opts: SleepOpts): SleepHandle {
+  const { api } = opts;
   let running = false;
   let progress: SleepProgress | null = null;
-  // #1353: reserved for host-shutdown cancellation. Wiring an actual bridge
-  // shutdown signal into this controller is out of this ticket's scope (no
-  // existing BootCtx shutdown hook to subscribe to without new boot-lifecycle
-  // API surface) — abmind's own internal timeout still bounds every call.
   const shutdownController = new AbortController();
 
-  /** Resolve the configured sleep quality level from SLEEP_QUALITY env. */
   function scheduledLevel(): Level {
     const raw = getEnv().sleepQuality;
-    if (!raw) return abmind()!.DEFAULT_LEVEL;
-    try { return abmind()!.parseLevel(raw); }
+    if (!raw) return api.DEFAULT_LEVEL;
+    try { return api.parseLevel(raw); }
     catch (err) {
-      logWarn("sleep", `Invalid SLEEP_QUALITY='${raw}', using ${abmind()!.DEFAULT_LEVEL}: ${err instanceof Error ? err.message : String(err)}`);
-      return abmind()!.DEFAULT_LEVEL;
+      logWarn("sleep", `Invalid SLEEP_QUALITY='${raw}', using ${api.DEFAULT_LEVEL}: ${err instanceof Error ? err.message : String(err)}`);
+      return api.DEFAULT_LEVEL;
     }
   }
 
-  /**
-   * Start the async sleep cycle. Never awaited by callers — runs to terminal
-   * in the background. Guards `running` and Dreamy session lifecycle on
-   * every outcome. There is no outer retry loop here — abmind's own bounded
-   * essential-step handling and the task scheduler's auto-pause policy (after
-   * repeated terminal failures) replace the old in-memory MAX_RETRIES/setTimeout.
-   */
   function runCycle(level: Level, fresh: boolean, mode: "scheduled" | "manual" | "resume"): void {
     if (opts.allocateSleepSession) {
       const dateStr = new Date().toISOString().slice(0, 10);
@@ -117,7 +137,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       sleepCard?.onEvent(event);
     };
 
-    abmind()!.runSleepCycle({
+    api.runSleepCycle({
       runtime: opts.runtime,
       level,
       fresh,
@@ -162,13 +182,11 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     get progress() { return progress; },
     startScheduled(): SleepStartResult {
       if (running) return { status: "already_running" };
-      if (!abmind()) return { status: "unavailable", reason: "abmind not available" };
       runCycle(scheduledLevel(), false, "scheduled");
       return { status: "accepted" };
     },
     startManual({ fresh, resume }): SleepStartResult {
       if (running) return { status: "already_running" };
-      if (!abmind()) return { status: "unavailable", reason: "abmind not available" };
       const level = fresh ? ("ultimate" as Level) : scheduledLevel();
       runCycle(level, fresh, resume ? "resume" : "manual");
       return { status: "accepted" };

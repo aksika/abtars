@@ -8,6 +8,12 @@
  * owns cycle *execution*. The system handler registered here is dispatched
  * in-process by CronQueue.runSystem — no shell, no PATH lookup, no force flag.
  *
+ * #1429 — Prerequisite validation with deterministic precedence:
+ *   1. memory disabled → memory_disabled
+ *   2. abmind module not loaded → abmind_not_loaded
+ *   3. no heartbeat → heartbeat_unavailable
+ *   All three record ctx.sleepUnavailable and register a failing scheduled handler.
+ *
  * Populates ctx: sleepHandle.
  */
 
@@ -17,24 +23,52 @@ import type { BootCtx, PhaseResult } from "./context.js";
 import type { SleepRuntime, SleepCompletionRequest } from "abmind";
 import { getSystemTaskRegistry } from "../components/tasks/system-task-registry.js";
 
+/** #1429 — Register a handler that fails with the given reason so the scheduled
+ *  task follows ordinary failure/auto-pause policy. Idempotent. */
+function registerUnavailableHandler(reason: string): void {
+  const registry = getSystemTaskRegistry();
+  if (!registry.has("sleep-cycle")) {
+    registry.register("sleep-cycle", () => ({ status: "failed", error: reason }));
+  }
+}
+
 export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
   const { memoryConfig, sendSystemMessage, sessionManager } = ctx;
+  const { unavailable } = await import("../capabilities/sleep/index.js");
 
-  const registry = getSystemTaskRegistry();
+  // Reset for isolated phase tests and restart correctness.
+  ctx.sleepHandle = null;
+  ctx.sleepUnavailable = null;
 
-  // Unavailable path: no sendSystemMessage means heartbeat isn't up. Register a
-  // handler that fails visibly so the scheduled task follows ordinary
-  // failure/auto-pause policy rather than becoming an unknown action (#1321).
+  // Precedence 1: memory disabled.
+  if (!memoryConfig.memoryEnabled) {
+    ctx.sleepUnavailable = unavailable("memory_disabled");
+    ctx.phaseHealth.set(phaseSleep.name, { status: "skipped", error: "memory disabled" });
+    logWarn("boot", `${phaseSleep.name}: skipping — memory disabled`);
+    registerUnavailableHandler(ctx.sleepUnavailable.reason);
+    return "skipped";
+  }
+
+  // Precedence 2: abmind module not loaded.
+  if (!ctx.abmindModule) {
+    ctx.sleepUnavailable = unavailable("abmind_not_loaded");
+    ctx.phaseHealth.set(phaseSleep.name, { status: "skipped", error: "abmind not loaded" });
+    logWarn("boot", `${phaseSleep.name}: skipping — abmind not loaded`);
+    registerUnavailableHandler(ctx.sleepUnavailable.reason);
+    return "skipped";
+  }
+
+  // Precedence 3: no heartbeat/system-message callback.
   if (!sendSystemMessage) {
+    ctx.sleepUnavailable = unavailable("heartbeat_unavailable");
     ctx.phaseHealth.set(phaseSleep.name, { status: "skipped", error: "no sendSystemMessage" });
     logWarn("boot", `${phaseSleep.name}: skipping — heartbeat not available`);
-    if (!registry.has("sleep-cycle")) {
-      registry.register("sleep-cycle", () => ({ status: "failed", error: "sleep unavailable: heartbeat/memory not initialized" }));
-    }
+    registerUnavailableHandler(ctx.sleepUnavailable.reason);
     return "skipped";
   }
 
   const { createSleepHandle } = await import("../capabilities/sleep/index.js");
+  type SleepApi = import("../capabilities/sleep/index.js").SleepApi;
 
   // #1271/#1353: SleepRuntime adapter — wraps spin({ type: "D", ... }) for the
   // host-neutral orchestrator. ONE nightSessionId is held for the whole cycle
@@ -54,27 +88,23 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
       const { result, sessionId } = await sessionManager.spin({
         type: "D",
         prompt: request.prompt,
-        sessionId: nightSessionId, // undefined on step 1 → transient alloc; reused on steps 2+
+        sessionId: nightSessionId,
         timeoutMs: getEnv().modelApiTimeoutMs * 3,
         await: true,
       });
-      // First successful call: capture the nightSessionId for cross-step reuse.
       if (sessionId && !nightSessionId) nightSessionId = sessionId;
       return result ?? "";
     },
   };
 
   const handle = createSleepHandle({
+    api: ctx.abmindModule as SleepApi,
     memoryEnabled: memoryConfig.memoryEnabled,
     runtime,
     onComplete: () => {
-      // Success + memory only: reset per-chat context-window start markers.
       resetAllCtxStarts(memoryConfig.memoryDir);
     },
     onCycleEnd: () => {
-      // #1287: runs on EVERY cycle outcome (success, partial-failure, throw). End the
-      // night Dreamy session so it doesn't accumulate — pruneEndedSessions reaps ended
-      // sessions hourly. Fresh nightSessionId for the next cycle / retry.
       if (nightSessionId) {
         const s = sessionManager.getSessionById(nightSessionId);
         if (s) s.status = "ended";
@@ -82,20 +112,17 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
       }
     },
     allocateSleepSession: (name: string) => {
-      // Allocate the D session eagerly so it's visible in /session for the full cycle (#1280).
       const s = sessionManager.allocateDreamySession(name);
       nightSessionId = s.id;
     },
   });
   ctx.sleepHandle = handle;
 
-  // Register the allowlisted in-process sleep-cycle action. Dispatch returns
-  // promptly; the long-running cycle continues asynchronously (#1321 req 6/8).
+  const registry = getSystemTaskRegistry();
   if (!registry.has("sleep-cycle")) {
     registry.register("sleep-cycle", () => {
       const result = handle.startScheduled();
       if (result.status === "already_running") {
-        // Idempotent successful no-op — does not create another Dreamy session/card.
         return { status: "noop" as const, detail: "already running" };
       }
       if (result.status === "unavailable") {

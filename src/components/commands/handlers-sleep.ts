@@ -78,24 +78,34 @@ export async function handleSleepSub(text: string, ctx: CommandContext): Promise
       return true;
     }
     const r = ctx.startSleep?.({ fresh: false, resume: true });
-    if (r === "accepted") {
+    if (!r) {
+      await ctx.reply("😴 Sleep unavailable: sleep did not initialize during boot.");
+      return true;
+    }
+    if (r.status === "accepted") {
       await ctx.reply("😴 Sleep resume started");
       logInfo(TAG, "Sleep resume started via /sleep resume");
+    } else if (r.status === "already_running") {
+      await ctx.reply("😴 Sleep already running.");
     } else {
-      await ctx.reply(`😴 Sleep resume not started (${r ?? "unavailable"})`);
+      await ctx.reply(`😴 Sleep unavailable: ${r.reason}.`);
     }
     return true;
   }
 
   if (sub === "now") {
     const r = ctx.startSleep?.({ fresh: true, resume: false });
-    if (r === "accepted") {
+    if (!r) {
+      await ctx.reply("😴 Sleep unavailable: sleep did not initialize during boot.");
+      return true;
+    }
+    if (r.status === "accepted") {
       await ctx.reply("💤 Full sleep cycle started");
       logInfo(TAG, "Fresh sleep started via /sleep now");
-    } else if (r === "already_running") {
+    } else if (r.status === "already_running") {
       await ctx.reply("😴 Sleep already running.");
     } else {
-      await ctx.reply(`😴 Sleep not started (${r ?? "unavailable"})`);
+      await ctx.reply(`😴 Sleep unavailable: ${r.reason}.`);
     }
     return true;
   }

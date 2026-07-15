@@ -56,7 +56,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     idleSave: { reset: vi.fn(), stop: vi.fn(), save: vi.fn().mockResolvedValue(undefined) } as unknown as IdleSave,
     sessionManager: new SessionManager(),
     updateCtxStart: vi.fn(),
-    startSleep: vi.fn().mockReturnValue("accepted"),
+    startSleep: vi.fn().mockReturnValue({ status: "accepted" }),
     ...overrides,
   };
 }
@@ -128,7 +128,7 @@ describe("/sleep commands", () => {
   });
 
   it("/sleep now reports already_running when startSleep itself reports it (race with a scheduled cycle)", async () => {
-    const ctx = makeCtx({ startSleep: vi.fn().mockReturnValue("already_running") });
+    const ctx = makeCtx({ startSleep: vi.fn().mockReturnValue({ status: "already_running" }) });
     await handleCommand("/sleep now", ctx);
     expect(ctx.startSleep).toHaveBeenCalledWith({ fresh: true, resume: false });
     const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
@@ -139,6 +139,6 @@ describe("/sleep commands", () => {
     const ctx = makeCtx({ startSleep: undefined });
     await handleCommand("/sleep now", ctx);
     const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
-    expect(reply).toContain("unavailable");
+    expect(reply).toContain("sleep did not initialize");
   });
 });

@@ -59,9 +59,16 @@ describe("createSleepHandle — onCycleEnd teardown (#1287, #1353)", () => {
     mockRunSleepCycle.mockImplementation(async () => completedResult());
   });
 
+  const stubApi: import("./index.js").SleepApi = {
+    DEFAULT_LEVEL: "normal",
+    parseLevel: (s: string) => s,
+    runSleepCycle: mockRunSleepCycle,
+  };
+
   function makeHandle(onCycleEnd: () => void) {
     return createSleepHandle({
-      memoryEnabled: false,   // onComplete memory path off — teardown must still fire
+      api: stubApi,
+      memoryEnabled: false,
       runtime: stubRuntime,
       onComplete: () => {},
       onCycleEnd,

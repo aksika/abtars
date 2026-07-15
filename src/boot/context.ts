@@ -35,6 +35,7 @@ import { createCapabilityRegistry } from "../capabilities/capability.js";
 type TelegramAdapter = import("../platforms/telegram/telegram-adapter.js").TelegramAdapter;
 type DiscordAdapter = import("../platforms/discord/discord-adapter.js").DiscordAdapter;
 type SleepHandle = import("../capabilities/sleep/index.js").SleepHandle;
+type SleepUnavailable = import("../capabilities/sleep/index.js").SleepUnavailable;
 
 /** Flags parsed from CLI args (--telegram, --discord, --web, --agent, --api|--tmux|--acp). */
 export interface PlatformFlags {
@@ -84,6 +85,10 @@ export interface BootCtx {
   // ── Subsystems ────────────────────────────────────────────────────────
   capabilities: CapabilityRegistry;
   capabilitiesLoaded: string[];
+  /** #1429 — Boot-owned abmind module reference (set by phase-memory). */
+  abmindModule: typeof import("abmind") | null;
+  /** #1429 — Boot-recorded sleep-unavailable reason (set by phase-sleep). */
+  sleepUnavailable: SleepUnavailable | null;
   sleepHandle: SleepHandle | null;
   modelHealthRegistry: ModelHealthRegistry | null;
   hailMary: { model: string; endpoint: string; apiKey?: string } | null;
@@ -167,6 +172,8 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     // Subsystems
     capabilities: createCapabilityRegistry(),
     capabilitiesLoaded: [],
+    abmindModule: null,
+    sleepUnavailable: null,
     sleepHandle: null,
     modelHealthRegistry: null,
     hailMary: null,
