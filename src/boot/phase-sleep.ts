@@ -34,7 +34,8 @@ function registerUnavailableHandler(reason: string): void {
 
 export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
   const { memoryConfig, sendSystemMessage, sessionManager } = ctx;
-  const { unavailable } = await import("../capabilities/sleep/index.js");
+  const { unavailable, createSleepHandle } = await import("../capabilities/sleep/index.js");
+  type SleepApi = import("../capabilities/sleep/index.js").SleepApi;
 
   // Reset for isolated phase tests and restart correctness.
   ctx.sleepHandle = null;
@@ -66,9 +67,6 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
     registerUnavailableHandler(ctx.sleepUnavailable.reason);
     return "skipped";
   }
-
-  const { createSleepHandle } = await import("../capabilities/sleep/index.js");
-  type SleepApi = import("../capabilities/sleep/index.js").SleepApi;
 
   // #1271/#1353: SleepRuntime adapter — wraps spin({ type: "D", ... }) for the
   // host-neutral orchestrator. ONE nightSessionId is held for the whole cycle
