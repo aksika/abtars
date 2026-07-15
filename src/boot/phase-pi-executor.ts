@@ -1,4 +1,4 @@
-import { logInfo, logError } from "../components/logger.js";
+import { logInfo, logWarn, logError } from "../components/logger.js";
 import type { BootCtx } from "./context.js";
 
 const TAG = "boot-pi";
@@ -20,6 +20,16 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     logError(TAG, "Pi executor disabled due to invalid workspace alias(es)");
     return;
   }
+
+  // #1427: Probe the configured executable before constructing services.
+  const { probePiExecutable } = await import("../components/pi-inspector.js");
+  const execStatus = probePiExecutable(config.command);
+  if (execStatus.state !== "ok") {
+    logWarn(TAG, `Pi executor disabled — coding-agent ${execStatus.state}${execStatus.observed ? " (found " + execStatus.observed + ")" : ""}. Expected ${execStatus.expected}`);
+    if (execStatus.remediation) logWarn(TAG, execStatus.remediation);
+    return;
+  }
+  logInfo(TAG, `coding-agent ${execStatus.observed}`);
 
   const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
 

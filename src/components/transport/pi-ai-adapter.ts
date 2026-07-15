@@ -45,6 +45,7 @@ import type {
 
 import { lazyRequire } from "../../utils/lazy-require.js";
 import { logDebug, logWarn, logTrace, isLogLevel } from "../logger.js";
+import { inspectPiPackage } from "../pi-inspector.js";
 import { parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
 import type { ErrorKind } from "./model-health-registry.js";
 import type { SSEEvent } from "./sse-parser.js";
@@ -402,13 +403,24 @@ export interface PiAiStreamDeps {
   loadApi?: (api: Api) => Promise<ProviderStreams>;
 }
 
+function throwIfPiVersionMismatch(): void {
+  const status = inspectPiPackage("ai");
+  if (status.state !== "ok") {
+    throw new PiAiUnavailableError(
+      `Pi AI version mismatch: expected ${status.expected}${status.observed ? `, found ${status.observed}` : ""}. ${status.remediation ?? ""}`,
+    );
+  }
+}
+
 async function defaultLoadApi(api: Api): Promise<ProviderStreams> {
   const mod = await lazyRequire<Record<string, unknown>>(`@earendil-works/pi-ai/api/${api}`, "pi-ai provider engine");
+  throwIfPiVersionMismatch();
   return { stream: mod.stream as ProviderStreams["stream"], streamSimple: mod.streamSimple as ProviderStreams["streamSimple"] };
 }
 
 async function defaultLoadPi(): Promise<PiAiModule> {
   const pi = await lazyRequire<Record<string, unknown>>("@earendil-works/pi-ai", "pi-ai provider engine");
+  throwIfPiVersionMismatch();
   return { createProvider: pi.createProvider as PiAiModule["createProvider"], isRetryableAssistantError: pi.isRetryableAssistantError as PiAiModule["isRetryableAssistantError"] };
 }
 

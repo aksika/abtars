@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { logInfo, logWarn } from "../components/logger.js";
+import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
 
 const TAG = "deps";
 
@@ -27,13 +28,13 @@ export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
   pdf:     { packages: ["pdf-parse"], label: "PDF reading" },
   youtube: { packages: ["youtube-transcript"], label: "YouTube transcripts" },
   image:   { packages: ["jimp"], label: "Image processing" },
-  provider: { packages: ["@earendil-works/pi-ai"], label: "pi-ai unified provider layer (~36 providers + prompt caching)", version: "~0.80" },
+  provider: { packages: [PI_COMPATIBILITY.packages.ai.name], label: "pi-ai unified provider layer (~36 providers + prompt caching)", version: PI_COMPATIBILITY.packages.ai.version },
   // #1315: CLIENT-ONLY dep. The bridge daemon never imports pi-tui — only
   // `abtars tui` (the foreground client) does. Installed via
   // `abtars deps install tui` into the shared ~/.local/lib/node_modules/
   // the same place the daemon reads from, so a single install surfaces to
   // both. Do NOT add as a package.json dependency — esbuild will reject it.
-  tui:     { packages: ["@earendil-works/pi-tui"], label: "pi-tui terminal UI (client-only, abtars tui command)", version: "~0.80" },
+  tui:     { packages: [PI_COMPATIBILITY.packages.tui.name], label: "pi-tui terminal UI (client-only, abtars tui command)", version: PI_COMPATIBILITY.packages.tui.version },
 };
 
 export interface SystemDep {

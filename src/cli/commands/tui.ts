@@ -23,6 +23,7 @@ import { join } from "node:path";
 
 import { abtarsHome } from "../../paths.js";
 import { lazyRequire } from "../../utils/lazy-require.js";
+import { inspectPiPackage } from "../../components/pi-inspector.js";
 import {
   encodeFrame,
   createFrameDecoder,
@@ -268,6 +269,12 @@ export async function tui(args: string[]): Promise<number> {
     "@earendil-works/pi-tui",
     "pi-tui terminal UI",
   );
+
+  // Version check (#1427): warn if installed TUI version differs from release target
+  const tuiStatus = inspectPiPackage("tui");
+  if (tuiStatus.state !== "ok") {
+    stderr(`Warning: pi-tui version mismatch — ${tuiStatus.remediation ?? "expected " + tuiStatus.expected}`);
+  }
 
   // Build the TUI.
   const terminal = new pit.ProcessTerminal();

@@ -63,7 +63,7 @@ describe("OPTIONAL_DEPS registry", () => {
     const { OPTIONAL_DEPS } = await import("./lazy-require.js");
     expect(OPTIONAL_DEPS.tui).toBeDefined();
     expect(OPTIONAL_DEPS.tui!.packages).toContain("@earendil-works/pi-tui");
-    expect(OPTIONAL_DEPS.tui!.version).toMatch(/~\d+\.\d+/);
+    expect(OPTIONAL_DEPS.tui!.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 });
 

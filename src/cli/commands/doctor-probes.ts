@@ -407,6 +407,23 @@ async function probeSharedDeps(): Promise<ProbeResult> {
   }
 }
 
+// ── Pi Compatibility Probe (#1427) ────────────────────────────────────────────
+
+async function probePiCompatibility(): Promise<ProbeResult> {
+  try {
+    const { inspectAllPiComponents } = await import("../../components/pi-inspector.js");
+    const { loadPiConfig } = await import("../../components/pi-executor/config.js");
+    const config = loadPiConfig();
+    const statuses = inspectAllPiComponents({ command: config?.command });
+
+    const details = statuses.map(s => `${s.component}=${s.state}${s.observed ? "(" + s.observed + ")" : ""}`).join(", ");
+    const allOk = statuses.every(s => s.state === "ok");
+    return { name: "pi-compatibility", status: allOk ? "ok" : "failed", detail: details };
+  } catch {
+    return { name: "pi-compatibility", status: "skipped", detail: "Pi inspector unavailable" };
+  }
+}
+
 /** Import `diagnoseSharedNativeDeps` from abmind's deploy-lib using active discovery. */
 async function importSharedDepsModule(): Promise<{ diagnoseSharedNativeDeps: () => import("abmind/deploy-lib/shared-native-deps.js").SharedNativeDepsStatus }> {
   const abmindDir = resolveAbmindPackageDir();
@@ -427,7 +444,7 @@ export async function runAllProbes(): Promise<DoctorOutput> {
   const [body, heart, brain, soul, tribe] = await Promise.all([
     Promise.all([probePlatforms(), probeDashboard(), probeSecurity(), probeWatchdog(), probeBridge(), probeTui()].map(p => timedProbe(() => p))),
     Promise.all([probeHeartbeat()].map(p => timedProbe(() => p))),
-    Promise.all([probeTransport(), probeSpin(), probeKanban(), probeSkills(), probeSha(), probeSharedDeps()].map(p => timedProbe(() => p))),
+    Promise.all([probeTransport(), probeSpin(), probeKanban(), probeSkills(), probeSha(), probeSharedDeps(), probePiCompatibility()].map(p => timedProbe(() => p))),
     Promise.all([probeMind()].map(p => timedProbe(() => p))),
     Promise.all([probeA2a(), probePeers(), probeIdentity(), probeGossip()].map(p => timedProbe(() => p))),
   ]);
