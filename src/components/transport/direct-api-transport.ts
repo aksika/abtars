@@ -10,7 +10,7 @@ import { withRetry, isFatal } from "../retry.js";
 import { ConversationSession, type ToolCall, type ContentPart } from "./conversation-session.js";
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
 import { getToolSchemas, executeToolCall } from "./tool-registry.js";
-import { classifyError } from "./model-health-registry.js";
+import { classifyError, type ErrorKind } from "./model-health-registry.js";
 import { normalizeToolCalls, parseErrorStatus, parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
 import { recordUsage } from "../usage-tracker.js";
 import { recordCacheTelemetry, stableHash, sessionHash, candidateKeyHash, firstChangedMessageIndex } from "../cache-telemetry.js";
@@ -75,10 +75,6 @@ export class DirectApiTransport implements IKiroTransport {
   private activeEndpoint: string;
   private activeApiKey?: string;
   private activeModel: string;
-  /** #1418: provider name of the candidate currently serving requests. Tracked alongside
-   *  the other active* fields so provider switching and success reporting preserve the
-   *  complete candidate tuple rather than the stale configured provider. */
-  private activeProvider: string | undefined;
   /** #1295: maxContext of the model currently serving requests. Used for accurate contextPercent. */
   private _activeMaxContext: number;
   /** #1335: previous turn's stable prefix digest for churn detection. */
@@ -437,16 +433,13 @@ export class DirectApiTransport implements IKiroTransport {
               candidate = policy.selectModel(this._lastPromptTokens);
               continue;
             }
-            const retryStatus = this.parseErrorStatus(retryErr);
             const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-            policy.recordError(candidate, classifyError(retryStatus, retryMsg));
+            policy.recordError(candidate, this.classifyTransportError(retryErr, retryMsg).kind);
             session.rollbackToLastUser();
             throw retryErr;
           }
         }
-        const status = this.parseErrorStatus(err);
-        const kind = classifyError(status, errMsg);
-        const retryAfterMs = this.parseRetryAfter(err) ?? parseUsageLimitCooldown(errMsg);
+        const { kind, retryAfterMs } = this.classifyTransportError(err, errMsg);
         policy.recordError(candidate, kind, retryAfterMs);
         const bucket = policy.registry.getBucketLevel(candidate.model, candidate.endpoint);
         failedAttempts.push({ model: candidate.model, kind, bucket });
@@ -491,10 +484,10 @@ export class DirectApiTransport implements IKiroTransport {
           policy.recordError(smallest, "weak");
           failedAttempts.push({ model: smallest.model, kind: `behavior_${err.reason}`, bucket: policy.registry.getBucketLevel(smallest.model, smallest.endpoint) });
         } else {
-          const status = this.parseErrorStatus(err);
           const errMsg2 = err instanceof Error ? err.message : String(err);
-          policy.recordError(smallest, classifyError(status, errMsg2));
-          failedAttempts.push({ model: smallest.model, kind: classifyError(status, errMsg2), bucket: policy.registry.getBucketLevel(smallest.model, smallest.endpoint) });
+          const compactionKind = this.classifyTransportError(err, errMsg2).kind;
+          policy.recordError(smallest, compactionKind);
+          failedAttempts.push({ model: smallest.model, kind: compactionKind, bucket: policy.registry.getBucketLevel(smallest.model, smallest.endpoint) });
         }
       }
     }
@@ -806,6 +799,25 @@ export class DirectApiTransport implements IKiroTransport {
 
   /** Extract Retry-After from error (seconds or date). Returns ms or undefined. */
   private parseRetryAfter(err: unknown): number | undefined { return parseRetryAfter(err); }
+
+  /**
+   * #1425 — Classify a transport error for L2 health/rotation, honoring the
+   * pi-ai adapter's classification when present.
+   *
+   * The pi-ai adapter tags errors it raises with `piKind`/`piRetryAfterMs`
+   * ("pi classifies, abtars decides"). Those must reach recordError unchanged:
+   * `classifyError(status)` alone cannot express `context_exceeded` (an HTTP 400
+   * context-overflow maps to `transient`), which would wrongly fill a healthy
+   * model's bucket for our own oversized request. When the tags are absent (the
+   * L0 reptile-floor path raises a plain Error), fall back to status/message
+   * parsing exactly as before.
+   */
+  private classifyTransportError(err: unknown, errMsg: string): { kind: ErrorKind; retryAfterMs?: number } {
+    const tagged = err as Error & { piKind?: ErrorKind; piRetryAfterMs?: number };
+    if (tagged?.piKind) return { kind: tagged.piKind, retryAfterMs: tagged.piRetryAfterMs };
+    const status = this.parseErrorStatus(err);
+    return { kind: classifyError(status, errMsg), retryAfterMs: this.parseRetryAfter(err) ?? parseUsageLimitCooldown(errMsg) };
+  }
 
   private async streamCompletion(
     session: ConversationSession,

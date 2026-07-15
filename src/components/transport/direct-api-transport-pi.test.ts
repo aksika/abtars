@@ -16,7 +16,7 @@ vi.mock("./pi-ai-adapter.js", () => {
 
 import { DirectApiTransport } from "./direct-api-transport.js";
 import { FallbackPolicy } from "./fallback-policy.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
+import { ModelHealthRegistry, type ErrorKind } from "./model-health-registry.js";
 import { streamPiAiCompletion, PiAiUnavailableError } from "./pi-ai-adapter.js";
 
 const mockedStream = vi.mocked(streamPiAiCompletion);
@@ -211,5 +211,62 @@ describe("DirectApiTransport — pi-ai gate (#1311)", () => {
     // pi path tried for both candidates (1 mid-stream throw, 1 success). L0 is never hit.
     expect(mockedStream).toHaveBeenCalledTimes(2);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // #1425 review — "pi classifies, abtars decides." The pi-ai adapter tags errors
+  // it raises with piKind/piRetryAfterMs. L2 must honor that classification
+  // instead of re-deriving it from the formatted status, because classifyError(status)
+  // cannot express context_exceeded (HTTP 400 → transient). A context-overflow from
+  // the pi path must reach recordError as context_exceeded (no bucket fill, no
+  // cooldown) — otherwise a healthy model is penalized for our own oversized request.
+  // The pair below proves context_exceeded and transient diverge at the bucket.
+  it("#1425 — pi context-overflow (piKind=context_exceeded) does NOT fill the bucket", async () => {
+    globalThis.fetch = vi.fn(async () => sseResponse(["x"])) as unknown as typeof globalThis.fetch;
+    const err = new Error("API error 400: This model's maximum context length is 262144 tokens.");
+    (err as Error & { piKind?: ErrorKind }).piKind = "context_exceeded";
+    mockedStream
+      .mockImplementationOnce(async function* () { throw err; } as never)
+      .mockImplementationOnce(async function* () {
+        yield { type: "chunk", content: "candidate 2 ok" } as never;
+        yield { type: "done", usage: { prompt_tokens: 1, completion_tokens: 1 }, cacheRead: 0, cacheWrite: 0 } as never;
+      } as never);
+    const registry = new ModelHealthRegistry();
+    const policy = new FallbackPolicy([
+      { model: "primary", endpoint: "https://api.test/v1", maxContext: 8000 },
+      { model: "fallback", endpoint: "https://api.test/v1", maxContext: 8000 },
+    ], registry);
+    const t = new DirectApiTransport({
+      endpoint: "https://api.test/v1", model: "primary", maxContext: 8000, maxOutput: 1024, maxTurns: 4,
+      apiFormat: "chat", useProviderLib: true,
+    }, policy);
+    const out = await t.sendPrompt("s", "hi");
+    expect(out).toBe("candidate 2 ok");
+    // context_exceeded is a static misconfiguration, not live model health → bucket stays 0.
+    expect(registry.getBucketLevel("primary", "https://api.test/v1")).toBe(0);
+  });
+
+  it("#1425 — pi transient error (piKind=transient) DOES fill the bucket", async () => {
+    globalThis.fetch = vi.fn(async () => sseResponse(["x"])) as unknown as typeof globalThis.fetch;
+    const err = new Error("API error 503: overloaded");
+    (err as Error & { piKind?: ErrorKind }).piKind = "transient";
+    mockedStream
+      .mockImplementationOnce(async function* () { throw err; } as never)
+      .mockImplementationOnce(async function* () {
+        yield { type: "chunk", content: "candidate 2 ok" } as never;
+        yield { type: "done", usage: { prompt_tokens: 1, completion_tokens: 1 }, cacheRead: 0, cacheWrite: 0 } as never;
+      } as never);
+    const registry = new ModelHealthRegistry();
+    const policy = new FallbackPolicy([
+      { model: "primary", endpoint: "https://api.test/v1", maxContext: 8000 },
+      { model: "fallback", endpoint: "https://api.test/v1", maxContext: 8000 },
+    ], registry);
+    const t = new DirectApiTransport({
+      endpoint: "https://api.test/v1", model: "primary", maxContext: 8000, maxOutput: 1024, maxTurns: 4,
+      apiFormat: "chat", useProviderLib: true,
+    }, policy);
+    const out = await t.sendPrompt("s", "hi");
+    expect(out).toBe("candidate 2 ok");
+    // transient fills the bucket (0.1 on the first hit) — proving the two kinds diverge.
+    expect(registry.getBucketLevel("primary", "https://api.test/v1")).toBeGreaterThan(0);
   });
 });

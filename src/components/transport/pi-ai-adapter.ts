@@ -130,11 +130,12 @@ export function pickPiApi(apiFormat?: ApiFormat): Api {
   return "openai-completions";
 }
 
-// #1276: align with pi-ai's effort level set verbatim. The abtars-side config, the
-// /effort + /thinking commands, and pi-ai's clampThinkingLevel / thinkingLevelMap
-// all speak the same vocabulary. (We drop "minimal" from the prior list — pi-ai
-// doesn't ship a minimal level that openai-completions understands; users wanting
-// light reasoning pick "low".)
+// #1276: align with pi-ai's effort level vocabulary. pi-ai's ThinkingLevel is
+// "minimal" | "low" | "medium" | "high" | "xhigh" | "max" (ModelThinkingLevel adds
+// "off"). abtars exposes a deliberate subset — the /effort + /thinking commands and
+// DirectApiConfig only speak off|low|medium|high|xhigh — so the validation set
+// below mirrors that abtars subset, not pi-ai's full range. (Adding "minimal"/"max"
+// would be a config-surface change, out of scope for the #1425 boundary review.)
 const EFFORT_LEVELS: readonly string[] = ["off", "low", "medium", "high", "xhigh"];
 
 function mapEffortLevel(s: string | undefined): ModelThinkingLevel | undefined {
