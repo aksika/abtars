@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import * as piTui from "@earendil-works/pi-tui";
 import {
   parseAttachMode,
   TUI_MARKDOWN_THEME,
@@ -181,44 +182,37 @@ const FIXTURE = [
 ].join("\n");
 
 describe("createMarkdownMessage (#1333)", () => {
-  it("renders the fixture at width 80 without throwing", async () => {
-    let pit: typeof import("@earendil-works/pi-tui") | undefined;
-    try {
-      pit = await import("@earendil-works/pi-tui");
-    } catch {
-      // pi-tui is an optional dep; integration test only runs when installed.
-      return;
-    }
-    const md = createMarkdownMessage(pit, "assistant", FIXTURE);
+  it("renders the fixture at width 80 without throwing", () => {
+    const md = createMarkdownMessage(piTui, "assistant", FIXTURE);
     const lines = md.render(80);
     expect(Array.isArray(lines)).toBe(true);
     expect(lines.length).toBeGreaterThan(0);
   });
 
-  it("renders the actual #1333 crash repro (bold + list) without throwing", async () => {
-    let pit: typeof import("@earendil-works/pi-tui") | undefined;
-    try {
-      pit = await import("@earendil-works/pi-tui");
-    } catch {
-      return;
-    }
+  it("renders the actual #1333 crash repro (bold + list) without throwing", () => {
     const repro = "Hey aksika. 👋\n\nIt's been a minute.\n\n- **Sleep** is still broken.\n- **Finance** report needs review.";
-    const md = createMarkdownMessage(pit, "assistant", repro);
+    const md = createMarkdownMessage(piTui, "assistant", repro);
     const lines = md.render(80);
     expect(Array.isArray(lines)).toBe(true);
   });
 
-  it("wraps user-role markdown with a dim '>' prefix and still renders", async () => {
-    let pit: typeof import("@earendil-works/pi-tui") | undefined;
-    try {
-      pit = await import("@earendil-works/pi-tui");
-    } catch {
-      return;
-    }
-    const md = createMarkdownMessage(pit, "user", "/status");
+  it("wraps user-role markdown with a dim '>' prefix and still renders", () => {
+    const md = createMarkdownMessage(piTui, "user", "/status");
     const lines = md.render(80);
     expect(Array.isArray(lines)).toBe(true);
     expect(lines.join("\n")).toContain("/status");
+  });
+});
+
+describe("Text.setText (#1423)", () => {
+  it("setText exists and replaces content", () => {
+    const text = new piTui.Text("old", 0, 0);
+    const linesBefore = text.render(80);
+    expect(linesBefore.join("")).toContain("old");
+    text.setText("new content");
+    const linesAfter = text.render(80);
+    expect(linesAfter.join("")).toContain("new content");
+    expect(linesAfter.join("")).not.toContain("old");
   });
 });
 

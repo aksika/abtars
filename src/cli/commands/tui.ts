@@ -272,21 +272,18 @@ export async function tui(args: string[]): Promise<number> {
   const editorTheme: import("@earendil-works/pi-tui").EditorTheme = {
     borderColor: (s: string) => s,
     selectList: {
-      itemName: (s: string) => s,
-      itemDescription: (s: string) => s,
-      noItems: (s: string) => s,
-      scrollInfo: (s: string) => s,
       selectedPrefix: (s: string) => s,
       selectedText: (s: string) => s,
       description: (s: string) => s,
-      hint: (s: string) => s,
+      scrollInfo: (s: string) => s,
+      noMatch: (s: string) => s,
     },
   };
   const editor = new pit.Editor(ui, editorTheme);
   const footer = new pit.Text("", 0, 0);
   ui.addChild(log);
-  ui.addChild(footer);
   ui.addChild(editor);
+  ui.addChild(footer);
   ui.setFocus(editor);
 
   // Connect.
