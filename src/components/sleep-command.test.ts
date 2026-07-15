@@ -141,4 +141,56 @@ describe("/sleep commands", () => {
     const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
     expect(reply).toContain("sleep did not initialize");
   });
+
+  it("/sleep now reports memory_disabled reason from structured result", async () => {
+    const ctx = makeCtx({
+      startSleep: vi.fn().mockReturnValue({
+        status: "unavailable", code: "memory_disabled", reason: "memory is disabled",
+      }),
+    });
+    await handleCommand("/sleep now", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
+    expect(reply).toContain("Sleep unavailable");
+    expect(reply).toContain("memory is disabled");
+  });
+
+  it("/sleep now reports abmind_not_loaded reason from structured result", async () => {
+    const ctx = makeCtx({
+      startSleep: vi.fn().mockReturnValue({
+        status: "unavailable", code: "abmind_not_loaded", reason: "abmind did not initialize during boot",
+      }),
+    });
+    await handleCommand("/sleep now", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
+    expect(reply).toContain("Sleep unavailable");
+    expect(reply).toContain("abmind did not initialize");
+  });
+
+  it("/sleep now reports heartbeat_unavailable reason from structured result", async () => {
+    const ctx = makeCtx({
+      startSleep: vi.fn().mockReturnValue({
+        status: "unavailable", code: "heartbeat_unavailable", reason: "heartbeat is unavailable",
+      }),
+    });
+    await handleCommand("/sleep now", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
+    expect(reply).toContain("Sleep unavailable");
+    expect(reply).toContain("heartbeat is unavailable");
+  });
+
+  it("/sleep resume reports structured unavailable reason", async () => {
+    fsMock.readdirSync.mockReturnValue(["sleep_20260421.lock"]);
+    fsMock.readFileSync.mockReturnValue(JSON.stringify({
+      status: "suspended", steps: { "gc-noise": { status: "failed" }, "daily-summary": { status: "ok" } },
+    }));
+    const ctx = makeCtx({
+      startSleep: vi.fn().mockReturnValue({
+        status: "unavailable", code: "abmind_not_loaded", reason: "abmind did not initialize during boot",
+      }),
+    });
+    await handleCommand("/sleep resume", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
+    expect(reply).toContain("Sleep unavailable");
+    expect(reply).toContain("abmind did not initialize");
+  });
 });
