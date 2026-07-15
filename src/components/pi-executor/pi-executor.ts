@@ -1,5 +1,6 @@
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo, logWarn, logDebug } from "../logger.js";
 import { SupervisedPiRpcClient, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
+import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import { PiRunStore, type PiTerminalOutcome } from "./pi-run-store.js";
 import type { PiExecutorConfig } from "./config.js";
@@ -428,64 +429,18 @@ export class PiExecutor {
   // ── RPC event handler ─────────────────────────────────────────────────────
 
   private async _onRpcEvent(runId: string, event: PiAgentEvent): Promise<void> {
+    // Every frame from Pi counts as activity (drives timeout/idle logic).
     this.store.touchActivity(runId);
 
-    switch (event.type) {
-      case "agent_start":
-        this.store.addProgress(runId, "agent_start", "{}");
-        break;
-      case "agent_end": {
-        const owned = this.live.get(runId);
-        if (!owned || owned.settling) return;
-        await this._settleCompletion(runId, owned);
-        break;
-      }
-      case "agent_settled":
-        break;
-      case "tool_execution_start":
-        if (event.toolName && typeof event.toolName === "string") {
-          this.store.addProgress(runId, "tool_execution_start", JSON.stringify({ name: event.toolName }));
-        }
-        break;
-      case "tool_execution_update":
-        break;
-      case "tool_execution_end":
-        if (event.toolName && typeof event.toolName === "string") {
-          this.store.addProgress(runId, "tool_execution_end", JSON.stringify({ name: event.toolName }));
-        }
-        break;
-      case "compaction_start":
-        this.store.addProgress(runId, "compaction", JSON.stringify({ status: "started" }));
-        break;
-      case "compaction_end":
-        this.store.addProgress(runId, "compaction", JSON.stringify({ status: "ended" }));
-        break;
-      case "auto_retry_start":
-        if (typeof event.attempt === "number") {
-          this.store.addProgress(runId, "auto_retry", JSON.stringify({ status: "started", attempt: event.attempt }));
-        }
-        break;
-      case "auto_retry_end":
-        if (typeof event.attempt === "number") {
-          this.store.addProgress(runId, "auto_retry", JSON.stringify({ status: "ended", attempt: event.attempt }));
-        }
-        break;
-      case "turn_start":
-      case "turn_end":
-      case "message_start":
-      case "message_end":
-      case "queue_update":
-      case "entry_appended":
-      case "session_info_changed":
-      case "thinking_level_changed":
-        break;
-      case "extension_error":
-        logWarn(TAG, `Extension error for ${runId}: ${JSON.stringify(event)}`);
-        this.store.addProgress(runId, "extension_error", JSON.stringify({}));
-        break;
-      default:
-        logWarn(TAG, `Unhandled Pi event type for ${runId}: ${event.type}`);
-        break;
+    const proj = projectPiEvent(event);
+    for (const p of proj.progress) this.store.addProgress(runId, p.type, p.json);
+    if (proj.log?.level === "warn") logWarn(TAG, `${proj.log.message} [run=${runId}]`);
+    else if (proj.log?.level === "debug") logDebug(TAG, `${proj.log.message} [run=${runId}]`);
+
+    if (proj.settleCompletion) {
+      const owned = this.live.get(runId);
+      if (!owned || owned.settling) return;
+      await this._settleCompletion(runId, owned);
     }
   }
 

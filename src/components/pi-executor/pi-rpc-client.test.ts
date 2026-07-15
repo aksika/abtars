@@ -168,6 +168,16 @@ describe("SupervisedPiRpcClient", () => {
         expect.objectContaining({ type: "tool_execution_start", toolName: "bash", toolCallId: "tc-1" }),
       );
     });
+
+    it("routes high-frequency message_update events to subscribers", async () => {
+      const eventSpy = vi.fn();
+      client.subscribe(eventSpy);
+      child.stdout.write(JSON.stringify({
+        type: "message_update", message: { role: "assistant" }, assistantMessageEvent: {},
+      }) + "\n");
+      expect(eventSpy).toHaveBeenCalledTimes(1);
+      expect(eventSpy).toHaveBeenCalledWith(expect.objectContaining({ type: "message_update" }));
+    });
   });
 
   describe("extension UI request routing", () => {

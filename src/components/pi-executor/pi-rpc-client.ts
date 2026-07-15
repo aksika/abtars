@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { logDebug, logWarn, logError } from "../logger.js";
 import type {
   RpcCommand, RpcResponse, RpcExtensionUIRequest, RpcExtensionUIResponse,
+  RpcEventListener, ExtensionError,
 } from "@earendil-works/pi-coding-agent";
 import type { UiResponseResult, PiUiReply } from "./types.js";
 import { MAX_RPC_LINE_BYTES, MAX_STDERR_BYTES } from "./types.js";
@@ -26,7 +27,15 @@ export type PiProcessTermination =
 
 type TerminationListener = (event: PiProcessTermination) => void;
 
-export type PiAgentEvent = { type: string; [key: string]: unknown };
+/**
+ * Official Pi agent/RPC event delivered on stdout. The agent-session events
+ * come from the package's public RpcEventListener signature; `extension_error`
+ * is emitted directly by Pi's RPC mode (not via the session subscriber) so it is
+ * modelled with the official ExtensionError shape rather than reinvented.
+ */
+export type PiAgentEvent =
+  | Parameters<RpcEventListener>[0]
+  | ({ type: "extension_error" } & ExtensionError);
 type EventListener = (event: PiAgentEvent) => void;
 type UiRequestListener = (request: RpcExtensionUIRequest) => void;
 
