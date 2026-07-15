@@ -1,22 +1,31 @@
 import { describe, it, expect } from "vitest";
+import type {
+  Api, ThinkingLevel, Model, AssistantMessage, AssistantMessageEvent,
+  ProviderStreams, CreateProviderOptions, Provider,
+} from "@earendil-works/pi-ai";
+
 import {
   pickPiApi, buildPiModel, buildPiContext, resolveReasoning,
   translatePiAiEvents, mapPiAiError, streamPiAiCompletion,
   PiAiUnavailableError,
-  type PiAiCandidate, type PiAiConversation, type PiAssistantMessageEvent,
-  type PiAssistantMessage, type PiAiModule, type PiProviderStreams,
+  type PiAiCandidate, type PiAiConversation, type PiAiModule,
 } from "./pi-ai-adapter.js";
 import type { SSEEvent } from "./sse-parser.js";
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 
-const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-
-function assistant(over: Partial<PiAssistantMessage> = {}): PiAssistantMessage {
+function makeAssistantMessage(over: Partial<AssistantMessage> & { content?: AssistantMessage["content"] } = {}): AssistantMessage {
   return {
-    role: "assistant", content: [], usage: ZERO_USAGE, stopReason: "stop",
+    role: "assistant",
+    content: [],
+    api: "openai-completions" as Api,
+    provider: "test",
+    model: "",
+    usage: ZERO_USAGE,
+    stopReason: "stop",
+    timestamp: 0,
     ...over,
-  } as PiAssistantMessage;
+  } as AssistantMessage;
 }
 
 /** Drive an async generator to completion, collecting yielded values (rethrows). */
@@ -26,8 +35,13 @@ async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
   return out;
 }
 
-function fakeEventStream(events: PiAssistantMessageEvent[]): PiProviderStreams["streamSimple"] {
+function fakeEventStream(events: AssistantMessageEvent[]): ProviderStreams["streamSimple"] {
   return async function* _fake() { for (const e of events) yield e; };
+}
+
+/** Wrap a plain array as the minimal AsyncIterable the translator iterates. */
+function fakeAsync<T>(items: T[]): AsyncIterable<T> {
+  return { [Symbol.asyncIterator]() { let i = 0; return { async next() { return i < items.length ? { value: items[i++]!, done: false } : { value: undefined, done: true }; } }; } };
 }
 
 // ── pickPiApi ────────────────────────────────────────────────────────────────
@@ -61,20 +75,14 @@ describe("resolveReasoning", () => {
   it("disables reasoning when nothing is configured", () => {
     expect(resolveReasoning(base)).toEqual({ reasoning: false, level: undefined });
   });
-  // #1311 + #1276: `style: "default"` means "use the model's own default reasoning
-  // level" — reasoning is wanted (true) but no level override is passed. The
-  // adapter's `if (reasoningLevel) options.reasoning = reasoningLevel` leaves the
-  // option unset → pi-ai sends no `reasoning_effort` to the openrouter body → the
-  // upstream model uses its own default. Test pins the contract.
   it('thinking.style: "default" → reasoning: true, level: undefined (no override)', () => {
     expect(resolveReasoning({ ...base, thinking: { style: "default" } })).toEqual({ reasoning: true, level: undefined });
   });
   it('thinking.style: "default" wins over a stale session.reasoningEffort (default takes precedence for the agent\'s mode)', () => {
-    // The agent config ("default" mode) is the structural choice; session override
-    // is the runtime knob. They don't combine — the agent-level style is the mode,
-    // and the session override only applies when the agent opted into a forced
-    // level. resolveReasoning implements the agent's choice first.
     expect(resolveReasoning({ ...base, thinking: { style: "default" }, reasoningEffort: "high" })).toEqual({ reasoning: true, level: undefined });
+  });
+  it('reasoningEffort: "off" → reasoning disabled (ThinkingLevel excludes "off")', () => {
+    expect(resolveReasoning({ ...base, reasoningEffort: "off" })).toEqual({ reasoning: false, level: undefined });
   });
 });
 
@@ -95,9 +103,6 @@ describe("buildPiModel", () => {
     const m = buildPiModel({ model: "m", endpoint: "https://x/v1", maxOutput: 512 }, "openai-completions", true, "x");
     expect(m.input).toEqual(["text", "image"]);
   });
-  // #1311 W2 — abtars gateway wins when declared: pi's Model.baseUrl is overridden by the
-  // abtars candidate's endpoint, so custom gateways (9Router, OpenRouter-gateway, Ollama)
-  // route over the abtars endpoint, not pi's catalog baseUrl.
   it("W2 — Model.baseUrl is the candidate's endpoint (abtars gateway wins)", () => {
     const m = buildPiModel(
       { model: "gpt-4o", endpoint: "https://9router.example.com/v1", maxOutput: 2048, apiFormat: "chat" },
@@ -105,10 +110,6 @@ describe("buildPiModel", () => {
     );
     expect(m.baseUrl).toBe("https://9router.example.com/v1");
   });
-  // #1326 — contextWindow is propagated from the candidate so pi-ai's own
-  // `clampMaxTokensToContext` guard becomes functional (was hardcoded to 0
-  // before, which no-op'd the guard). Legacy fixtures that don't set the
-  // field keep getting contextWindow: 0 (pi's no-op convention).
   it("#1326 — Model.contextWindow reflects candidate.contextWindow when present", () => {
     const m = buildPiModel(
       { model: "m", endpoint: "https://x/v1", maxOutput: 1024, contextWindow: 262144 },
@@ -138,16 +139,16 @@ describe("buildPiContext", () => {
       ],
       tools: [],
     };
-    const ctx = buildPiContext(conv);
+    const ctx = buildPiContext(conv, "openai-completions", "test-provider");
     expect(ctx.systemPrompt).toBe("be brief");
     expect(ctx.messages).toHaveLength(3);
     expect(ctx.messages[0]!.role).toBe("user");
-    // assistant: one text block + one toolCall block with parsed object args
     const a = ctx.messages[1]!;
     expect(a.role).toBe("assistant");
-    expect(a.content[0]).toEqual({ type: "text", text: "hello" });
-    expect(a.content[1]).toEqual({ type: "toolCall", id: "t1", name: "run", arguments: { cmd: "ls" } });
-    // tool message → toolResult
+    if (a.role === "assistant") {
+      expect(a.content[0]).toEqual({ type: "text", text: "hello" });
+      expect(a.content[1]).toEqual({ type: "toolCall", id: "t1", name: "run", arguments: { cmd: "ls" } });
+    }
     const t = ctx.messages[2]!;
     expect(t.role).toBe("toolResult");
     expect(t).toMatchObject({ toolCallId: "t1", toolName: "run", isError: false });
@@ -184,10 +185,10 @@ describe("buildPiContext", () => {
 
 describe("translatePiAiEvents", () => {
   it("turns text deltas into chunks and done into usage+cache", async () => {
-    const events: PiAssistantMessageEvent[] = [
-      { type: "text_delta", contentIndex: 0, delta: "Hel", partial: assistant() },
-      { type: "text_delta", contentIndex: 0, delta: "lo", partial: assistant() },
-      { type: "done", reason: "stop", message: assistant({ usage: { input: 12, output: 2, cacheRead: 5, cacheWrite: 3 } }) },
+    const events: AssistantMessageEvent[] = [
+      { type: "text_delta", contentIndex: 0, delta: "Hel", partial: makeAssistantMessage() },
+      { type: "text_delta", contentIndex: 0, delta: "lo", partial: makeAssistantMessage() },
+      { type: "done", reason: "stop", message: makeAssistantMessage({ usage: { input: 12, output: 2, cacheRead: 5, cacheWrite: 3, totalTokens: 22, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } }) },
     ];
     const out = await collect(translatePiAiEvents(fakeAsync(events)));
     expect(out).toEqual<SSEEvent[]>([
@@ -198,20 +199,18 @@ describe("translatePiAiEvents", () => {
   });
 
   it("R1 — done prompt_tokens = input + cacheRead + cacheWrite (cache is ADDITIVE, not a subset of input)", async () => {
-    // pi's usage.input excludes cache; totalTokens = input+output+cacheRead+cacheWrite.
-    // prompt_tokens must be total input-side so context-% parity holds and budget = totalTokens.
     const out = await collect(translatePiAiEvents(fakeAsync([
-      { type: "done", reason: "stop", message: assistant({ usage: { input: 100, output: 4, cacheRead: 60, cacheWrite: 40 } }) },
+      { type: "done", reason: "stop", message: makeAssistantMessage({ usage: { input: 100, output: 4, cacheRead: 60, cacheWrite: 40, totalTokens: 204, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } }) },
     ])));
     const done = out[0]!;
     expect(done.type).toBe("done");
-    expect((done as { usage: { prompt_tokens: number } }).usage.prompt_tokens).toBe(200); // 100 + 60 + 40
+    expect((done as { usage: { prompt_tokens: number } }).usage.prompt_tokens).toBe(200);
   });
 
   it("routes thinking deltas to 'thinking' events (never chunks)", async () => {
     const out = await collect(translatePiAiEvents(fakeAsync([
-      { type: "thinking_delta", contentIndex: 0, delta: "hm", partial: assistant() },
-      { type: "text_delta", contentIndex: 1, delta: "ans", partial: assistant() },
+      { type: "thinking_delta", contentIndex: 0, delta: "hm", partial: makeAssistantMessage() },
+      { type: "text_delta", contentIndex: 1, delta: "ans", partial: makeAssistantMessage() },
     ])));
     expect(out).toEqual<SSEEvent[]>([
       { type: "thinking", content: "hm" },
@@ -221,8 +220,8 @@ describe("translatePiAiEvents", () => {
 
   it("emits one complete tool_call_delta per toolcall_end", async () => {
     const out = await collect(translatePiAiEvents(fakeAsync([
-      { type: "toolcall_end", contentIndex: 0, toolCall: { type: "toolCall", id: "c1", name: "bash", arguments: { cmd: "ls" } }, partial: assistant() },
-      { type: "done", reason: "stop", message: assistant() },
+      { type: "toolcall_end", contentIndex: 0, toolCall: { type: "toolCall", id: "c1", name: "bash", arguments: { cmd: "ls" } }, partial: makeAssistantMessage() },
+      { type: "done", reason: "stop", message: makeAssistantMessage() },
     ])));
     expect(out[0]).toMatchObject({ type: "tool_call_delta", index: 0, id: "c1", name: "bash" });
     expect((out[0] as { arguments?: string }).arguments).toBe(JSON.stringify({ cmd: "ls" }));
@@ -230,12 +229,11 @@ describe("translatePiAiEvents", () => {
 
   it("flushes delta-only tool calls (no toolcall_end) before done", async () => {
     const out = await collect(translatePiAiEvents(fakeAsync([
-      { type: "toolcall_start", contentIndex: 0, partial: assistant({ content: [{ type: "toolCall", id: "x", name: "bash", arguments: {} }] }) },
-      { type: "toolcall_delta", contentIndex: 0, delta: '{"a":1', partial: assistant() },
-      { type: "toolcall_delta", contentIndex: 0, delta: "}", partial: assistant() },
-      { type: "done", reason: "stop", message: assistant() },
+      { type: "toolcall_start", contentIndex: 0, partial: makeAssistantMessage({ content: [{ type: "toolCall" as const, id: "x", name: "bash", arguments: {} }] }) },
+      { type: "toolcall_delta", contentIndex: 0, delta: '{"a":1', partial: makeAssistantMessage() },
+      { type: "toolcall_delta", contentIndex: 0, delta: "}", partial: makeAssistantMessage() },
+      { type: "done", reason: "stop", message: makeAssistantMessage() },
     ])));
-    // The toolcall_start partial carries the id/name via the running partial — we surface them.
     expect(out[0]).toMatchObject({ type: "tool_call_delta", name: "bash", arguments: '{"a":1}' });
     const last = out[out.length - 1]!;
     expect(last.type).toBe("done");
@@ -243,24 +241,18 @@ describe("translatePiAiEvents", () => {
 
   it("throws an 'API error <status>' Error on a retryable error event", async () => {
     const gen = translatePiAiEvents(fakeAsync([
-      { type: "error", reason: "error", error: assistant({ errorMessage: "overloaded (529): try again", stopReason: "error" }) },
-    ]), () => true); // pi says retryable
+      { type: "error", reason: "error", error: makeAssistantMessage({ errorMessage: "overloaded (529): try again", stopReason: "error" }) },
+    ]), () => true);
     await expect(collect(gen)).rejects.toThrow(/API error 529/);
   });
 
-  // #1311 W4 — a mid-stream throw (after at least one successful chunk) must surface as
-  // an 'API error <status>' Error so L2 (sendWithPolicy) can classify + rotate. A bare
-  // throw with no status would be parsed as status 0 → classifyError(0) = "transient" →
-  // recordError → still rotates, but the L2 contract is "API error <status>".
   it("W4 — a mid-stream throw (after chunks) surfaces as an 'API error <status>' Error", async () => {
-    // Build an async iterable that yields one text chunk, then throws a tagged error.
-    // (Real pi providers do this when the SSE stream dies mid-response.)
-    const stream: AsyncIterable<PiAssistantMessageEvent> = {
+    const stream: AsyncIterable<AssistantMessageEvent> = {
       [Symbol.asyncIterator]() {
         let i = 0;
         return {
           async next() {
-            if (i++ === 0) return { value: { type: "text_delta", contentIndex: 0, delta: "Hel", partial: assistant() } as PiAssistantMessageEvent, done: false };
+            if (i++ === 0) return { value: { type: "text_delta", contentIndex: 0, delta: "Hel", partial: makeAssistantMessage() } as AssistantMessageEvent, done: false };
             throw new Error("API error 502: bad gateway mid-stream");
           },
         };
@@ -268,7 +260,6 @@ describe("translatePiAiEvents", () => {
     };
     const out: SSEEvent[] = [];
     await expect((async () => { for await (const e of translatePiAiEvents(stream)) out.push(e); })()).rejects.toThrow(/API error 502/);
-    // The chunk before the throw was still delivered.
     expect(out[0]).toMatchObject({ type: "chunk", content: "Hel" });
   });
 });
@@ -276,58 +267,54 @@ describe("translatePiAiEvents", () => {
 // ── mapPiAiError ─────────────────────────────────────────────────────────────
 
 describe("mapPiAiError", () => {
+  const errMsg = (errorMessage: string, over: Partial<AssistantMessage> = {}): AssistantMessage =>
+    makeAssistantMessage({ errorMessage, stopReason: "error", ...over });
+
   it("retryable → transient (default 500 when no status)", () => {
-    expect(mapPiAiError(assistant({ errorMessage: "overloaded" }), true))
+    expect(mapPiAiError(errMsg("overloaded"), true))
       .toMatchObject({ status: 500, kind: "transient" });
   });
   it("retryable preserves an extracted status", () => {
-    expect(mapPiAiError(assistant({ errorMessage: "stream ended (503)" }), true))
+    expect(mapPiAiError(errMsg("stream ended (503)"), true))
       .toMatchObject({ status: 503, kind: "transient" });
   });
   it("non-retryable quota → rate_limit + rotate (429)", () => {
-    expect(mapPiAiError(assistant({ errorMessage: "insufficient quota / GoUsageLimitError" }), false))
+    expect(mapPiAiError(errMsg("insufficient quota / GoUsageLimitError"), false))
       .toMatchObject({ status: 429, kind: "rate_limit" });
   });
   it("non-retryable auth (401) → auth", () => {
-    expect(mapPiAiError(assistant({ errorMessage: "401 invalid api key" }), false))
+    expect(mapPiAiError(errMsg("401 invalid api key"), false))
       .toMatchObject({ status: 401, kind: "auth" });
   });
   it("non-retryable generic → rate_limit (safe rotate default)", () => {
-    expect(mapPiAiError(assistant({ errorMessage: "something broke" }), false))
+    expect(mapPiAiError(errMsg("something broke"), false))
       .toMatchObject({ status: 429, kind: "rate_limit" });
   });
-  // #1326 — context-length 400 is a static misconfiguration (maxOutput oversized
-  // for the model's context window), NOT the model's live health. Classifier
-  // must surface it as `context_exceeded` so recordError can leave the health
-  // bucket untouched instead of poisoning it as a `rate_limit`.
   it("non-retryable context-length 400 → context_exceeded (NOT rate_limit)", () => {
     const m = mapPiAiError(
-      assistant({ errorMessage: "400: {\"message\":\"This endpoint's maximum context length is 262144 tokens. However, you requested about 277597 tokens (11...\"" }),
+      errMsg("400: {\"message\":\"This endpoint's maximum context length is 262144 tokens. However, you requested about 277597 tokens (11...\""),
       false,
     );
     expect(m.kind).toBe("context_exceeded");
     expect(m.status).toBe(400);
   });
-  // #1326 — order matters: context-length regex must run BEFORE the isRetryable
-  // branch. A provider that hypothetically marks a context-length error as
-  // retryable must still classify as context_exceeded, not transient.
   it("context-length 400 with isRetryable=true → still context_exceeded (regex wins over isRetryable)", () => {
     const m = mapPiAiError(
-      assistant({ errorMessage: "maximum context length exceeded" }),
+      errMsg("maximum context length exceeded"),
       true,
     );
     expect(m.kind).toBe("context_exceeded");
   });
   it("context_length_exceeded (snake_case variant) → context_exceeded", () => {
-    expect(mapPiAiError(assistant({ errorMessage: "context_length_exceeded" }), false))
+    expect(mapPiAiError(errMsg("context_length_exceeded"), false))
       .toMatchObject({ kind: "context_exceeded" });
   });
   it("detects a retry-after cooldown from the message text", () => {
-    const m = mapPiAiError(assistant({ errorMessage: "rate limited; retry_after: 12 daily limit" }), true);
+    const m = mapPiAiError(errMsg("rate limited; retry_after: 12 daily limit"), true);
     expect(m.retryAfterMs).toBeGreaterThan(0);
   });
   it("emits text in the 'API error <status>: …' shape parseErrorStatus reads", () => {
-    expect(mapPiAiError(assistant({ errorMessage: "boom" }), true).text).toMatch(/^API error 500: boom/);
+    expect(mapPiAiError(errMsg("boom"), true).text).toMatch(/^API error 500: boom/);
   });
 });
 
@@ -337,22 +324,29 @@ describe("streamPiAiCompletion", () => {
   const candidate: PiAiCandidate = { model: "glm-4.6", endpoint: "https://api.z.ai/api/v1", apiKey: "k", apiFormat: "chat", maxOutput: 1024, sessionId: "s1" };
   const conv: PiAiConversation = { messages: [{ role: "user", content: "hi" }], tools: [] };
 
-  function fakePi(streamSimple: PiProviderStreams["streamSimple"], isRetryable = () => false): PiAiModule {
+  function fakePi(streamSimple: ProviderStreams["streamSimple"], isRetryable = () => false): PiAiModule {
     return {
       createProvider: (input) => {
-        const api = input.api as PiProviderStreams;
-        return { streamSimple: (model, ctx, opts) => api.streamSimple(model, ctx, opts) };
+        const api = input.api as ProviderStreams;
+        return {
+          id: input.id,
+          name: input.name ?? input.id,
+          getModels: () => input.models as Model<Api>[],
+          auth: input.auth,
+          stream: (m, ctx, opts) => api.stream(m, ctx, opts as Record<string, unknown>),
+          streamSimple: (m, ctx, opts) => api.streamSimple(m, ctx, opts as Record<string, unknown>),
+        } as unknown as Provider;
       },
       isRetryableAssistantError: isRetryable,
     };
   }
 
   it("builds a provider from the candidate and translates the stream end-to-end", async () => {
-    const events: PiAssistantMessageEvent[] = [
-      { type: "text_delta", contentIndex: 0, delta: "hi back", partial: assistant() },
-      { type: "done", reason: "stop", message: assistant({ usage: { input: 3, output: 2, cacheRead: 0, cacheWrite: 0 } }) },
+    const events: AssistantMessageEvent[] = [
+      { type: "text_delta", contentIndex: 0, delta: "hi back", partial: makeAssistantMessage() },
+      { type: "done", reason: "stop", message: makeAssistantMessage({ usage: { input: 3, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 5, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } }) },
     ];
-    const api: PiProviderStreams = { stream: fakeEventStream(events), streamSimple: fakeEventStream(events) };
+    const api: ProviderStreams = { stream: fakeEventStream(events), streamSimple: fakeEventStream(events) };
     const out = await collect(streamPiAiCompletion(candidate, conv, new AbortController().signal, {
       loadPi: async () => fakePi(api.streamSimple),
       loadApi: async () => api,
@@ -369,10 +363,10 @@ describe("streamPiAiCompletion", () => {
   });
 
   it("propagates a request error as 'API error <status>' (→ L2 rotation)", async () => {
-    const events: PiAssistantMessageEvent[] = [
-      { type: "error", reason: "error", error: assistant({ errorMessage: "429 rate limit", stopReason: "error" }) },
+    const events: AssistantMessageEvent[] = [
+      { type: "error", reason: "error", error: makeAssistantMessage({ errorMessage: "429 rate limit", stopReason: "error" }) },
     ];
-    const api: PiProviderStreams = { stream: fakeEventStream(events), streamSimple: fakeEventStream(events) };
+    const api: ProviderStreams = { stream: fakeEventStream(events), streamSimple: fakeEventStream(events) };
     const gen = streamPiAiCompletion(candidate, conv, new AbortController().signal, {
       loadPi: async () => fakePi(api.streamSimple, () => false),
       loadApi: async () => api,
@@ -380,23 +374,26 @@ describe("streamPiAiCompletion", () => {
     await expect(collect(gen)).rejects.toThrow(/API error 429/);
   });
 
-  // #1311 W2 — abtars's activeEndpoint must be the createProvider baseUrl. Captures the
-  // createProvider input and asserts it matches the candidate's custom endpoint. This is
-  // what makes 9Router/OpenRouter-gateway/Ollama route over the abtars endpoint, not pi's
-  // catalog baseUrl. Pairs with the buildPiModel.baseUrl assertion.
   it("W2 — createProvider is called with candidate.endpoint as baseUrl", async () => {
     const customCandidate: PiAiCandidate = { model: "gpt-4o", endpoint: "https://9router.example.com/v1", apiKey: "k", apiFormat: "chat", maxOutput: 1024 };
-    const events: PiAssistantMessageEvent[] = [
-      { type: "text_delta", contentIndex: 0, delta: "ok", partial: assistant() },
-      { type: "done", reason: "stop", message: assistant() },
+    const events: AssistantMessageEvent[] = [
+      { type: "text_delta", contentIndex: 0, delta: "ok", partial: makeAssistantMessage() },
+      { type: "done", reason: "stop", message: makeAssistantMessage() },
     ];
-    const api: PiProviderStreams = { stream: fakeEventStream(events), streamSimple: fakeEventStream(events) };
+    const api: ProviderStreams = { stream: fakeEventStream(events), streamSimple: fakeEventStream(events) };
     let captured: Record<string, unknown> | null = null;
     const piModule: PiAiModule = {
       createProvider: (input) => {
-        captured = input;
-        const a = input.api as PiProviderStreams;
-        return { streamSimple: (model, ctx, opts) => a.streamSimple(model, ctx, opts) };
+        captured = input as unknown as Record<string, unknown>;
+        const a = input.api as ProviderStreams;
+        return {
+          id: input.id,
+          name: input.name ?? input.id,
+          getModels: () => input.models as Model<Api>[],
+          auth: input.auth,
+          stream: (m, ctx, opts) => a.stream(m, ctx, opts as Record<string, unknown>),
+          streamSimple: (m, ctx, opts) => a.streamSimple(m, ctx, opts as Record<string, unknown>),
+        } as unknown as Provider;
       },
       isRetryableAssistantError: () => false,
     };
@@ -409,19 +406,17 @@ describe("streamPiAiCompletion", () => {
     expect((captured!.models as Array<{ id: string; baseUrl: string }>)[0]!.baseUrl).toBe("https://9router.example.com/v1");
   });
 
-  // #1311 / L1 single call — verify the adapter does not engage the L2 fallback policy
-  // for a single successful call. streamSimple is called exactly once.
   it("L1 single call invokes streamSimple exactly once (L2 fallback policy not engaged)", async () => {
     let streamCount = 0;
-    const events: PiAssistantMessageEvent[] = [
-      { type: "text_delta", contentIndex: 0, delta: "single", partial: assistant() },
-      { type: "done", reason: "stop", message: assistant() },
+    const events: AssistantMessageEvent[] = [
+      { type: "text_delta", contentIndex: 0, delta: "single", partial: makeAssistantMessage() },
+      { type: "done", reason: "stop", message: makeAssistantMessage() },
     ];
-    const api: PiProviderStreams = {
+    const api: ProviderStreams = {
       stream: fakeEventStream(events),
       streamSimple: (() => {
         const inner = fakeEventStream(events);
-        return (model, ctx, opts) => { streamCount++; return inner(model, ctx, opts); };
+        return ((model, ctx, opts) => { streamCount++; return inner(model, ctx, opts); }) as ProviderStreams["streamSimple"];
       })(),
     };
     const out = await collect(streamPiAiCompletion(candidate, conv, new AbortController().signal, {
@@ -432,8 +427,3 @@ describe("streamPiAiCompletion", () => {
     expect(streamCount).toBe(1);
   });
 });
-
-/** Wrap a plain array as the minimal AsyncIterable the translator iterates. */
-function fakeAsync<T>(items: T[]): AsyncIterable<T> {
-  return { [Symbol.asyncIterator]() { let i = 0; return { async next() { return i < items.length ? { value: items[i++]!, done: false } : { value: undefined, done: true }; } }; } };
-}

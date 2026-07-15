@@ -15,46 +15,14 @@
  *   - Precedence (C1): pi wins ONLY when fully resolvable — warmed ∧ provider maps (C2) ∧
  *     getModel() hits. Custom gateways / ollama / kiro never resolve → always models.json.
  *
- * Compile-time pi-free: no `import type` from @earendil-works/pi-ai (not a dependency). The
- * Pi* interfaces mirror pi-ai structurally; the real module is loaded at runtime via lazyRequire.
+ * Contracts verified against @earendil-works/pi-ai@~0.80.7 via devDependency.
  */
 
+import type { Models } from "@earendil-works/pi-ai";
 import { lazyRequire } from "../../utils/lazy-require.js";
 import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
 
 const TAG = "pi-catalog";
-
-// ── pi-ai structural types (compile-time pi-free; structurally compatible) ───
-
-interface PiModel {
-  id: string;
-  contextWindow: number;
-  maxTokens: number;
-  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-  reasoning: boolean;
-  input: ("text" | "image")[];
-}
-interface PiAuthResult {
-  auth: { apiKey?: string; headers?: Record<string, string>; baseUrl?: string };
-  source?: string;
-}
-export interface PiModels {
-  getModel(provider: string, id: string): PiModel | undefined;
-  getModels(provider?: string): readonly PiModel[];
-  getProvider(id: string): { id: string } | undefined;
-  getAuth(model: PiModel): Promise<PiAuthResult | undefined>;
-  refresh?(provider?: string): Promise<void>;
-}
-interface PiAiRoot {
-  createModels(options?: Record<string, unknown>): PiModels;
-}
-
-/** Shape of the `@earendil-works/pi-ai/providers/all` subpath module. */
-interface PiAiProvidersAll {
-  builtinModels(options?: Record<string, unknown>): PiModels;
-  builtinProviders(): unknown[];
-}
-
 // ── C2: provider-id mapping (identity for known pi providers) ────────────────
 
 /** pi-ai's built-in provider ids (KnownProvider). abtars provider names map by identity. */
@@ -77,11 +45,11 @@ export function mapProviderName(name: string): string | null {
 
 // ── C8: boot-warm + cached catalog ───────────────────────────────────────────
 
-let _warmed: PiModels | null = null;
+let _warmed: Models | null = null;
 let _warmAttempted = false;
 
 /** Sync read of the warmed catalog. null if not yet warmed or pi absent. Hot path; never throws. */
-export function getWarmedModels(): PiModels | null {
+export function getWarmedModels(): Models | null {
   return _warmed;
 }
 
@@ -101,7 +69,7 @@ export function isWarmed(): boolean {
  * `builtinModels()` constructs `createModels()` AND registers every built-in
  * provider (1029 static models across 35+ providers as of pi-ai 0.80.3).
  */
-export async function loadPiModels(): Promise<PiModels | null> {
+export async function loadPiModels(): Promise<Models | null> {
   if (_warmAttempted) return _warmed;
   _warmAttempted = true;
   try {
@@ -109,7 +77,7 @@ export async function loadPiModels(): Promise<PiModels | null> {
     // collection. The lazy-require resolves the subpath via the package's
     // `exports` field (./providers/* → ./dist/providers/*.js).
     const t0 = Date.now();
-    const { builtinModels } = await lazyRequire<{ builtinModels: (opts?: Record<string, unknown>) => PiModels }>(
+    const { builtinModels } = await lazyRequire<{ builtinModels: (opts?: Record<string, unknown>) => Models }>(
       "@earendil-works/pi-ai/providers/all",
       "pi-ai provider engine",
     );
@@ -160,7 +128,7 @@ export interface ResolvedModelMeta {
 export function resolveModelMeta(
   modelId: string,
   providerName: string,
-  models: PiModels | null = getWarmedModels(),
+  models: Models | null = getWarmedModels(),
 ): ResolvedModelMeta | null {
   if (!models) return null;
   const piProvider = mapProviderName(providerName);
@@ -253,7 +221,7 @@ export function _resetForTest(): void {
 }
 
 /** @internal Inject a fake warmed catalog (tests). */
-export function _setWarmedForTest(models: PiModels | null): void {
+export function _setWarmedForTest(models: Models | null): void {
   _warmed = models;
   _warmAttempted = true;
 }

@@ -17,10 +17,31 @@
  *     message carries "API error <status>" so sendWithPolicy's existing
  *     parseErrorStatus/classifyError/parseRetryAfter classify them unchanged.
  *
- * Compile-time pi-free: this file never `import type`s from @earendil-works/pi-ai
- * (it is not a dependency). The Pi* interfaces below mirror pi-ai's shapes
- * structurally; the real module is loaded dynamically at runtime via lazyRequire.
+ * Contracts verified against @earendil-works/pi-ai@~0.80.7 via devDependency.
  */
+
+import type {
+  Api,
+  ThinkingLevel,
+  ModelThinkingLevel,
+  Model,
+  Usage,
+  TextContent,
+  ThinkingContent,
+  ImageContent,
+  ToolCall,
+  Tool,
+  Context,
+  Message,
+  UserMessage,
+  ToolResultMessage,
+  AssistantMessage,
+  AssistantMessageEvent,
+  ProviderStreams,
+  SimpleStreamOptions,
+  Provider,
+  CreateProviderOptions,
+} from "@earendil-works/pi-ai";
 
 import { lazyRequire } from "../../utils/lazy-require.js";
 import { logDebug, logWarn, logTrace, isLogLevel } from "../logger.js";
@@ -74,79 +95,12 @@ export interface PiAiConversation {
   tools: OpenAiToolSchema[];
 }
 
-// ─── pi-ai structural types (compile-time pi-free; structurally compatible) ─
+// ─── pi-ai module wrapper (abtars-owned) ─────────────────────────────────────
 
-/** The pi Api families abtars's DirectApi path can target. */
-export type PiApi = "openai-completions" | "openai-responses" | "anthropic-messages" | (string & {});
-
-export type PiThinkingLevel = "off" | "low" | "medium" | "high" | "xhigh";
-
-interface PiUsage {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-}
-
-interface PiTextContent { type: "text"; text: string }
-interface PiThinkingContent { type: "thinking"; thinking: string }
-interface PiToolCallContent { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }
-interface PiImageContent { type: "image"; data: string; mimeType: string }
-type PiContentBlock = PiTextContent | PiThinkingContent | PiToolCallContent;
-
-interface PiAssistantMessage {
-  role: "assistant";
-  content: PiContentBlock[];
-  usage: PiUsage;
-  stopReason: "stop" | "length" | "toolUse" | "error" | "aborted";
-  errorMessage?: string;
-}
-
-type PiAssistantMessageEvent =
-  | { type: "text_delta"; contentIndex: number; delta: string; partial: PiAssistantMessage }
-  | { type: "thinking_delta"; contentIndex: number; delta: string; partial: PiAssistantMessage }
-  | { type: "toolcall_start"; contentIndex: number; partial: PiAssistantMessage }
-  | { type: "toolcall_delta"; contentIndex: number; delta: string; partial: PiAssistantMessage }
-  | { type: "toolcall_end"; contentIndex: number; toolCall: PiToolCallContent; partial: PiAssistantMessage }
-  | { type: "done"; reason: "stop" | "length" | "toolUse"; message: PiAssistantMessage }
-  | { type: "error"; reason: "aborted" | "error"; error: PiAssistantMessage };
-
-/** Subset of pi-ai's Model<TApi> that the api stream functions read. */
-export interface PiModel {
-  id: string;
-  name: string;
-  api: PiApi;
-  provider: string;
-  baseUrl: string;
-  reasoning: boolean;
-  input: ("text" | "image")[];
-  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-  contextWindow: number;
-  maxTokens: number;
-  headers?: Record<string, string>;
-}
-
-/** pi-ai ProviderStreams: every api module exports exactly { stream, streamSimple }. */
-export interface PiProviderStreams {
-  stream(model: PiModel, context: PiContext, options?: Record<string, unknown>): AsyncIterable<PiAssistantMessageEvent>;
-  streamSimple(model: PiModel, context: PiContext, options?: Record<string, unknown>): AsyncIterable<PiAssistantMessageEvent>;
-}
-
-interface PiContext {
-  systemPrompt?: string;
-  messages: PiMessage[];
-  tools?: PiTool[];
-}
-
-type PiMessage = PiUserMessage | PiAssistantMessage | PiToolResultMessage;
-interface PiUserMessage { role: "user"; content: string | (PiTextContent | PiImageContent)[]; timestamp: number }
-interface PiToolResultMessage { role: "toolResult"; toolCallId: string; toolName: string; content: PiTextContent[]; isError: boolean; timestamp: number }
-interface PiTool { name: string; description: string; parameters: Record<string, unknown> }
-
-/** The pi-ai root module surface this adapter uses. */
+/** The pi-ai root module surface this adapter uses, narrowed from the lazy require. */
 export interface PiAiModule {
-  createProvider(input: Record<string, unknown>): { streamSimple(model: PiModel, context: PiContext, options?: Record<string, unknown>): AsyncIterable<PiAssistantMessageEvent> };
-  isRetryableAssistantError(message: PiAssistantMessage): boolean;
+  createProvider(input: CreateProviderOptions): Provider;
+  isRetryableAssistantError(message: AssistantMessage): boolean;
 }
 
 // ─── error tagging ──────────────────────────────────────────────────────────
@@ -170,7 +124,7 @@ export class PiAiUnavailableError extends Error {
 // ─── pure translators ───────────────────────────────────────────────────────
 
 /** Map abtars apiFormat → pi Api family. chat/undefined → openai-completions. */
-export function pickPiApi(apiFormat?: ApiFormat): PiApi {
+export function pickPiApi(apiFormat?: ApiFormat): Api {
   if (apiFormat === "responses") return "openai-responses";
   if (apiFormat === "anthropic") return "anthropic-messages";
   return "openai-completions";
@@ -183,9 +137,9 @@ export function pickPiApi(apiFormat?: ApiFormat): PiApi {
 // light reasoning pick "low".)
 const EFFORT_LEVELS: readonly string[] = ["off", "low", "medium", "high", "xhigh"];
 
-function mapEffortLevel(s: string | undefined): PiThinkingLevel | undefined {
+function mapEffortLevel(s: string | undefined): ModelThinkingLevel | undefined {
   if (!s) return undefined;
-  return EFFORT_LEVELS.includes(s) ? (s as PiThinkingLevel) : "medium";
+  return EFFORT_LEVELS.includes(s) ? (s as ModelThinkingLevel) : "medium";
 }
 
 /** Derive a stable provider id from the endpoint host (cosmetic; pi uses it for logging). */
@@ -211,19 +165,16 @@ function conversationHasImage(messages: ChatMessage[]): boolean {
  * We mirror that — reasoning is enabled only when an effort level is available
  * (session override or effort-style thinking config). Extended-budget style and
  * the responses/anthropic paths defer reasoning to the bake (later task).
+ *
+ * "off" levels are filtered here — pi's SimpleStreamOptions.reasoning uses
+ * ThinkingLevel (which excludes "off"); to disable reasoning, omit the option.
  */
-export function resolveReasoning(candidate: PiAiCandidate): { reasoning: boolean; level: PiThinkingLevel | undefined } {
-  // #1311 + #1276: `style: "default"` — use the model's own default reasoning level.
-  // We return `reasoning: true, level: undefined` so the adapter knows reasoning is
-  // wanted, but it does NOT pass a `reasoning` option to pi-ai → pi-ai sends no
-  // `reasoning_effort` to the openrouter/chat-completions body → the model uses its
-  // own default. The L0 path's `if (this.config.thinking.style === ...)` chain
-  // falls through for "default" and likewise doesn't set `reasoning_effort`.
+export function resolveReasoning(candidate: PiAiCandidate): { reasoning: boolean; level: ThinkingLevel | undefined } {
   if (candidate.thinking?.style === "default") return { reasoning: true, level: undefined };
-
-  const level = candidate.reasoningEffort
+  const rawLevel: ModelThinkingLevel | undefined | null = candidate.reasoningEffort
     ?? (candidate.thinking?.style === "effort" ? mapEffortLevel(candidate.thinking.default) : undefined);
-  return { reasoning: level !== undefined, level };
+  if (!rawLevel || rawLevel === "off") return { reasoning: false, level: undefined };
+  return { reasoning: true, level: rawLevel };
 }
 
 /**
@@ -235,7 +186,7 @@ export function resolveReasoning(candidate: PiAiCandidate): { reasoning: boolean
  * don't set the field (pi-ai's guard no-ops when contextWindow <= 0, matching
  * its own convention for "unknown" windows).
  */
-export function buildPiModel(candidate: PiAiCandidate, api: PiApi, hasImage: boolean, providerId: string): PiModel {
+export function buildPiModel(candidate: PiAiCandidate, api: Api, hasImage: boolean, providerId: string): Model<Api> {
   const { reasoning } = resolveReasoning(candidate);
   return {
     id: candidate.model,
@@ -253,9 +204,9 @@ export function buildPiModel(candidate: PiAiCandidate, api: PiApi, hasImage: boo
 
 const DATA_URL_RE = /^data:([^;,]+);base64,(.+)$/s;
 
-function toPiUserContent(content: string | ContentPart[] | null): string | (PiTextContent | PiImageContent)[] {
+function toPiUserContent(content: string | ContentPart[] | null): string | (TextContent | ImageContent)[] {
   if (typeof content === "string" || content === null) return content ?? "";
-  const parts: (PiTextContent | PiImageContent)[] = [];
+  const parts: (TextContent | ImageContent)[] = [];
   for (const p of content) {
     if (p.type === "text") parts.push({ type: "text", text: p.text });
     else {
@@ -271,15 +222,20 @@ function parseArgsObject(argsStr: string): Record<string, unknown> {
   try { return JSON.parse(argsStr) as Record<string, unknown>; } catch { return {}; }
 }
 
+const ZERO_USAGE: Usage = {
+  input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
 /**
  * Translate an abtars ChatMessage[] conversation → pi Context.
  * system messages collapse into systemPrompt; assistant tool_calls become pi
  * toolCall content blocks (arguments parsed to objects); tool messages become
  * pi toolResult messages.
  */
-export function buildPiContext(conv: PiAiConversation): PiContext {
+export function buildPiContext(conv: PiAiConversation, api?: Api, providerId?: string): Context {
   const systemParts: string[] = [];
-  const messages: PiMessage[] = [];
+  const messages: Message[] = [];
   const now = Date.now();
 
   for (const m of conv.messages) {
@@ -288,22 +244,38 @@ export function buildPiContext(conv: PiAiConversation): PiContext {
       continue;
     }
     if (m.role === "user") {
-      messages.push({ role: "user", content: toPiUserContent(m.content), timestamp: now });
+      messages.push({ role: "user", content: toPiUserContent(m.content), timestamp: now } as UserMessage);
     } else if (m.role === "assistant") {
-      const blocks: PiContentBlock[] = [];
+      const blocks: (TextContent | ThinkingContent | ToolCall)[] = [];
       if (typeof m.content === "string" && m.content) blocks.push({ type: "text", text: m.content });
       for (const tc of m.tool_calls ?? []) {
         blocks.push({ type: "toolCall", id: tc.id, name: tc.function.name, arguments: parseArgsObject(tc.function.arguments) });
       }
-      messages.push({ role: "assistant", content: blocks, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, stopReason: (m.tool_calls?.length ? "toolUse" : "stop"), errorMessage: undefined } as PiAssistantMessage);
+      messages.push({
+        role: "assistant",
+        content: blocks,
+        api: api ?? "openai-completions",
+        provider: providerId ?? "abtars",
+        model: "",
+        usage: ZERO_USAGE,
+        stopReason: (m.tool_calls?.length ? "toolUse" : "stop") as AssistantMessage["stopReason"],
+        timestamp: now,
+      } as AssistantMessage);
     } else if (m.role === "tool") {
       const text = typeof m.content === "string" ? m.content : "";
-      messages.push({ role: "toolResult", toolCallId: m.tool_call_id ?? "", toolName: m.name ?? "", content: [{ type: "text", text }], isError: false, timestamp: now });
+      messages.push({
+        role: "toolResult",
+        toolCallId: m.tool_call_id ?? "",
+        toolName: m.name ?? "",
+        content: [{ type: "text", text }],
+        isError: false,
+        timestamp: now,
+      } as ToolResultMessage);
     }
   }
 
-  const tools: PiTool[] | undefined = conv.tools.length
-    ? conv.tools.map(t => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters }))
+  const tools: Tool[] | undefined = conv.tools.length
+    ? conv.tools.map(t => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters } as Tool))
     : undefined;
 
   return { systemPrompt: systemParts.join("\n\n") || undefined, messages, tools };
@@ -321,17 +293,15 @@ export function buildPiContext(conv: PiAiConversation): PiContext {
  *   via pi's classifier so L2 buckets it correctly.
  */
 export async function* translatePiAiEvents(
-  events: AsyncIterable<PiAssistantMessageEvent>,
-  isRetryable: (m: PiAssistantMessage) => boolean = () => true,
+  events: AsyncIterable<AssistantMessageEvent>,
+  isRetryable: (m: AssistantMessage) => boolean = () => true,
 ): AsyncGenerator<SSEEvent> {
   // contentIndex → accumulated delta-only tool call (fallback when no toolcall_end)
   const partialArgs = new Map<number, { id?: string; name?: string; args: string }>();
-  // #1318: TRACE guard for the per-event flood path — only emit raw-event lines at trace.
   const traceRaw = isLogLevel("trace");
 
   for await (const ev of events) {
     if (traceRaw) {
-      // #1318: raw pi event trace (BEFORE translation) — one line per event.
       logTrace(TAG, `pi raw ev: ${ev.type}${"contentIndex" in ev ? ` idx=${ev.contentIndex}` : ""}${ev.type === "text_delta" || ev.type === "thinking_delta" ? ` Δ=${ev.delta.length}ch` : ""}${ev.type === "toolcall_end" ? ` tool=${ev.toolCall.name} id=${ev.toolCall.id}` : ""}${ev.type === "done" ? ` reason=${ev.reason}` : ""}${ev.type === "error" ? ` reason=${ev.reason}` : ""}`);
     }
     switch (ev.type) {
@@ -344,8 +314,6 @@ export async function* translatePiAiEvents(
       case "toolcall_start":
       case "toolcall_delta": {
         const e = partialArgs.get(ev.contentIndex) ?? { args: "" };
-        // Sync id/name from the running partial — some providers populate them
-        // mid-stream and never emit toolcall_end.
         const blk = ev.partial.content[ev.contentIndex];
         if (blk && blk.type === "toolCall") { e.id = blk.id; e.name = blk.name; }
         if (ev.type === "toolcall_delta") e.args += ev.delta;
@@ -357,8 +325,6 @@ export async function* translatePiAiEvents(
         yield { type: "tool_call_delta", index: ev.contentIndex, id: ev.toolCall.id, name: ev.toolCall.name, arguments: JSON.stringify(ev.toolCall.arguments) };
         break;
       case "done": {
-        // Flush any tool calls that arrived only as deltas (no toolcall_end) first,
-        // so 'done' stays the terminal event.
         if (partialArgs.size > 0 && traceRaw) {
           logTrace(TAG, `flushing ${partialArgs.size} delta-only toolCall(s) at done`);
         }
@@ -366,11 +332,6 @@ export async function* translatePiAiEvents(
           if (e.name) yield { type: "tool_call_delta", index: idx, id: e.id, name: e.name, arguments: e.args };
         }
         const u = ev.message.usage;
-        // #1311/R1: pi's usage.input EXCLUDES cache (totalTokens = input+output+cacheRead+cacheWrite).
-        // prompt_tokens must be total input-side (incl cache): it matches L0 (OpenAI's prompt_tokens
-        // already includes cached) for context-% parity AND makes recordUsage→budget = totalTokens
-        // (cache is additive, not a subset of input).
-        // #1318: stream-complete debug line — concise view of the terminal usage.
         logDebug(TAG, `stream complete: input=${u.input} output=${u.output} cacheRead=${u.cacheRead} cacheWrite=${u.cacheWrite}`);
         yield { type: "done", usage: { prompt_tokens: u.input + u.cacheRead + u.cacheWrite, completion_tokens: u.output }, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite };
         return;
@@ -390,7 +351,7 @@ export interface PiAiErrorMapping { status: number; kind: ErrorKind; retryAfterM
  * the detail text is preserved so parseRetryAfter/parseUsageLimitCooldown can
  * extract cooldowns from the formatted provider message.
  */
-export function mapPiAiError(message: PiAssistantMessage, isRetryable: boolean): PiAiErrorMapping {
+export function mapPiAiError(message: AssistantMessage, isRetryable: boolean): PiAiErrorMapping {
   const detail = message.errorMessage ?? "pi-ai stream error";
   const statusMatch = /\b(\d{3})\b/.exec(detail);
   const parsedStatus = statusMatch ? parseInt(statusMatch[1] as string, 10) : 0;
@@ -398,38 +359,28 @@ export function mapPiAiError(message: PiAssistantMessage, isRetryable: boolean):
 
   let status: number;
   let kind: ErrorKind;
-  // #1326: context-length check runs FIRST (before isRetryable) so a context-length
-  // 400 — whether the provider marks it retryable or not — classifies as
-  // `context_exceeded` rather than transient/rate_limit. The check describes a
-  // static misconfiguration (maxOutput oversized for the model's context window),
-  // not the model's live health; recordError's case for this kind does NOT fill
-  // the health bucket, so a healthy model isn't degraded by a config bug.
   if (/maximum context length|context_length_exceeded/i.test(detail)) {
     kind = "context_exceeded";
     status = parsedStatus || 400;
   } else if (isRetryable) {
-    // Transient (overloaded / 503 / stream-ended / http2) → retry-friendly bucket.
     kind = "transient";
     status = parsedStatus || 500;
   } else if (/\b(quota|credit|usage[ _-]?limit|insufficient|balance|payment|plan[ _-]?limit|GoUsageLimit)\b/i.test(detail)) {
-    // Usage/credit exhaustion → rotate to another model.
     kind = "rate_limit";
     status = parsedStatus || 429;
   } else if (/\b(unauth|forbidden|api[ _-]?key|invalid.{0,8}key|permission)\b/i.test(detail) || parsedStatus === 401 || parsedStatus === 403) {
     kind = "auth";
     status = parsedStatus || 401;
   } else {
-    // Non-retryable, not clearly auth → rotate away (rate_limit) as the safe default.
     kind = "rate_limit";
     status = parsedStatus || 429;
   }
 
-  // #1318: error-map trace (BEFORE returning) — surfaces classifier decisions.
   logTrace(TAG, `error map: detail="${detail.slice(0, 120)}" → status=${status} kind=${kind} retryAfterMs=${retryAfterMs ?? "none"} isRetryable=${isRetryable}`);
   return { status, kind, retryAfterMs, text: `API error ${status}: ${detail}` };
 }
 
-function toL2Error(message: PiAssistantMessage, isRetryable: (m: PiAssistantMessage) => boolean): Error {
+function toL2Error(message: AssistantMessage, isRetryable: (m: AssistantMessage) => boolean): Error {
   const mapping = mapPiAiError(message, isRetryable(message));
   const err = new Error(mapping.text);
   (err as Error & { piKind?: ErrorKind; piRetryAfterMs?: number }).piKind = mapping.kind;
@@ -443,12 +394,12 @@ function toL2Error(message: PiAssistantMessage, isRetryable: (m: PiAssistantMess
 export interface PiAiStreamDeps {
   loadPi?: () => Promise<PiAiModule>;
   /** Load the api module streams for a given pi Api. */
-  loadApi?: (api: PiApi) => Promise<PiProviderStreams>;
+  loadApi?: (api: Api) => Promise<ProviderStreams>;
 }
 
-async function defaultLoadApi(api: PiApi): Promise<PiProviderStreams> {
+async function defaultLoadApi(api: Api): Promise<ProviderStreams> {
   const mod = await lazyRequire<Record<string, unknown>>(`@earendil-works/pi-ai/api/${api}`, "pi-ai provider engine");
-  return { stream: mod.stream as PiProviderStreams["stream"], streamSimple: mod.streamSimple as PiProviderStreams["streamSimple"] };
+  return { stream: mod.stream as ProviderStreams["stream"], streamSimple: mod.streamSimple as ProviderStreams["streamSimple"] };
 }
 
 async function defaultLoadPi(): Promise<PiAiModule> {
@@ -471,11 +422,10 @@ export async function* streamPiAiCompletion(
   const providerId = deriveProviderId(candidate.endpoint);
 
   let pi: PiAiModule;
-  let apiMod: PiProviderStreams;
+  let apiMod: ProviderStreams;
   try {
     pi = await (deps.loadPi ?? defaultLoadPi)();
   } catch (err) {
-    // #1318: never log the candidate's apiKey — only presence.
     if (isLogLevel("trace")) logTrace(TAG, `pi-ai load failed for api=${api} (loadPi): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
     throw new PiAiUnavailableError(
       `pi-ai (${api}) could not be loaded: ${err instanceof Error ? err.message : String(err)}`,
@@ -491,17 +441,14 @@ export async function* streamPiAiCompletion(
       { cause: err, piFunction: "loadApi" },
     );
   }
-  // #1318: resolution + provider-construction trace — one line per major step.
   const hasImage = conversationHasImage(conv.messages);
   logTrace(TAG, `resolve: apiFormat=${candidate.apiFormat ?? "chat"} → piApi=${api} providerId=${providerId} hasImage=${hasImage}`);
   const model = buildPiModel(candidate, api, hasImage, providerId);
   const { reasoning, level: reasoningLevel } = resolveReasoning(candidate);
   logTrace(TAG, `piModel: id=${model.id} baseUrl=${model.baseUrl} reasoning=${reasoning} maxTokens=${model.maxTokens} reasoningLevel=${reasoningLevel ?? "none"}`);
-  const context = buildPiContext(conv);
+  const context = buildPiContext(conv, api, providerId);
   logTrace(TAG, `piContext: systemPromptLen=${context.systemPrompt?.length ?? 0} messages=${context.messages.length} tools=${context.tools?.length ?? 0}`);
 
-  // Build a Provider FROM the candidate (single Model + api-key auth + this api's
-  // streams). This is the Phase 1 boundary: pi's catalog is never consulted.
   const provider = pi.createProvider({
     id: providerId,
     name: providerId,
@@ -518,24 +465,16 @@ export async function* streamPiAiCompletion(
     api: { stream: apiMod.stream, streamSimple: apiMod.streamSimple },
   });
 
-  const options: Record<string, unknown> = {
+  const options: SimpleStreamOptions & Record<string, unknown> = {
     apiKey: candidate.apiKey,
     signal,
     maxTokens: candidate.maxOutput,
-    maxRetries: 0, // D1 — abtars L2 owns the retry budget
+    maxRetries: 0,
     cacheRetention: "short",
   };
   if (candidate.sessionId) options.sessionId = candidate.sessionId;
   if (reasoningLevel) options.reasoning = reasoningLevel;
-  // #1335: optional cache breakpoint — mark the end of the stable historical prefix
-  if (candidate.apiFormat !== "anthropic" && (options as Record<string, unknown>).cacheBreakpoint) {
-    // pi-ai may support a cache_control breakpoint via its provider abstractions;
-    // we pass through the breakpoint parameter if the provider supports it.
-    (options as Record<string, unknown>).cacheBreakpoint = true;
-  }
 
-  // #1318: option dump just before streamSimple — apiKey presence ONLY (never the value).
-  // #1318: resolved-model debug line — concise view of what the candidate resolved to.
   logDebug(TAG, `resolved: piModelId=${model.id} endpoint=${candidate.endpoint} reasoning=${JSON.stringify(reasoning)}`);
   logTrace(TAG, `streamSimple options: maxTokens=${options.maxTokens} maxRetries=${options.maxRetries} cacheRetention=${options.cacheRetention} sessionId=${options.sessionId ?? "none"} reasoning=${options.reasoning ?? "none"} apiKey=${candidate.apiKey ? "***set***" : "none"}`);
 

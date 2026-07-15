@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { Model, Api, Models } from "@earendil-works/pi-ai";
 
 // Mock lazyRequire so loadPiModels() never hits the real installer / network.
 vi.mock("../../utils/lazy-require.js", () => ({ lazyRequire: vi.fn() }));
@@ -8,28 +9,29 @@ import {
   piCostRatesByModel,
   loadPiModels, getWarmedModels, isWarmed,
   _resetForTest, _setWarmedForTest,
-  type PiModels,
 } from "./pi-catalog.js";
 import { lazyRequire } from "../../utils/lazy-require.js";
 
-function fakeModel(over: Partial<{ id: string; contextWindow: number; maxTokens: number; cost: { input: number; output: number; cacheRead: number; cacheWrite: number }; reasoning: boolean }> = {}): NonNullable<ReturnType<PiModels["getModel"]>> {
+function fakeModel(over: Partial<Model<Api>> = {}): Model<Api> {
   return {
-    id: "glm-4.6", contextWindow: 128000, maxTokens: 8192,
-    cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, reasoning: true, input: ["text"],
+    id: "glm-4.6", name: "glm-4.6", api: "openai-completions" as Api, provider: "zai",
+    baseUrl: "https://api.z.ai/v1", reasoning: true,
+    input: ["text"], contextWindow: 128000, maxTokens: 8192,
+    cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
     ...over,
   };
 }
 
-/** Build a fake warmed catalog implementing the PiModels surface. */
-function fakeModels(opts: Partial<PiModels> = {}): PiModels {
+/** Build a fake warmed catalog implementing the Models surface used by pi-catalog. */
+function fakeModels(opts: Partial<Models> = {}): Models {
   const list = opts.list ?? [fakeModel()];
   return {
     getModel: opts.getModel ?? ((_p: string, id: string) => list.find(m => m.id === id)),
     getModels: opts.getModels ?? ((_p?: string) => list),
-    getProvider: opts.getProvider ?? ((_id: string) => ({ id: "zai" })),
+    getProvider: opts.getProvider ?? ((_id: string) => ({ id: "zai", name: "zai", auth: { apiKey: { name: "ZAI_API_KEY", resolve: async () => ({ auth: { apiKey: "k" }, source: "env" }) } }, getModels: () => list, streamSimple: null as unknown as Models["streamSimple"] })),
     getAuth: opts.getAuth ?? (async () => ({ auth: { apiKey: "k" }, source: "env" })),
     refresh: opts.refresh ?? (async () => {}),
-  };
+  } as unknown as Models;
 }
 
 describe("mapProviderName (C2)", () => {
@@ -112,7 +114,7 @@ describe("piCostRatesByModel (C6)", () => {
     _setWarmedForTest(fakeModels({
       list: [
         fakeModel({ id: "glm-4.6", cost: { input: 0.6, output: 2.2, cacheRead: 0.11, cacheWrite: 1.1 } }),
-        fakeModel({ id: "glm-4.6", cost: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 } }), // dup id ignored
+        fakeModel({ id: "glm-4.6", cost: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 } }),
         fakeModel({ id: "glm-4.5", cost: { input: 0.3, output: 1.1, cacheRead: 0.05, cacheWrite: 0.5 } }),
       ],
     }));
@@ -133,15 +135,12 @@ describe("loadPiModels (C8)", () => {
   it("returns null and does not throw when pi cannot be loaded (→ models.json floor)", async () => {
     mocked.mockRejectedValueOnce(new Error("ENOENT: cannot resolve @earendil-works/pi-ai"));
     await expect(loadPiModels()).resolves.toBeNull();
-    expect(isWarmed()).toBe(true);   // attempted…
-    expect(getWarmedModels()).toBeNull(); // …but unavailable
+    expect(isWarmed()).toBe(true);
+    expect(getWarmedModels()).toBeNull();
   });
 
   it("warms and caches the catalog on success", async () => {
     const fm = fakeModels({ list: [fakeModel({ id: "glm-4.6" })] });
-    // The catalog bridge imports `@earendil-works/pi-ai/providers/all` (subpath)
-    // and calls `builtinModels()` on it — the convenience that creates a Models
-    // collection AND registers every built-in provider.
     mocked.mockResolvedValueOnce({ builtinModels: () => fm } as never);
     const out = await loadPiModels();
     expect(out).toBe(fm);
@@ -152,7 +151,7 @@ describe("loadPiModels (C8)", () => {
     const fm = fakeModels();
     mocked.mockResolvedValueOnce({ builtinModels: () => fm } as never);
     await loadPiModels();
-    await loadPiModels(); // second call must not touch lazyRequire again
+    await loadPiModels();
     expect(mocked).toHaveBeenCalledTimes(1);
   });
 });
