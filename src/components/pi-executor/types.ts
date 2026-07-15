@@ -11,8 +11,8 @@ export type ResumeCapability =
 
 export type PiPendingRequestType = "select" | "confirm" | "input" | "editor";
 export type PiUiReply = string | number | boolean | null;
-export type UiReplyOutcome = "claimed" | "acknowledged" | "delivery_unknown";
-export type RpcDelivery = "not_written" | "written_unacknowledged" | "acknowledged";
+export type UiReplyOutcome = "claimed" | "delivery_unknown";
+export type RpcDelivery = "not_written" | "written_unacknowledged";
 
 export type PendingUiClaim =
   | { claimed: true; requestType: PiPendingRequestType }

@@ -176,11 +176,11 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       expect(record.lastUiReplyOutcome).toBeUndefined();
     });
 
-    it("does NOT restore after acknowledged outcome", () => {
+    it("does NOT restore after delivery_unknown outcome", () => {
       const store = makeStore();
       const runId = seedRun(store, { status: "awaiting_input", pendingRequestId: "req-1", pendingRequestType: "input" });
       store.claimPendingUi({ runId, generation: 1, requestId: "req-1" });
-      store.recordUiReplyOutcome({ runId, generation: 1, requestId: "req-1", outcome: "acknowledged" });
+      store.recordUiReplyOutcome({ runId, generation: 1, requestId: "req-1", outcome: "delivery_unknown" });
 
       const restored = store.restorePendingUi({ runId, generation: 1, requestId: "req-1", requestType: "input" });
       expect(restored).toBe(false);
@@ -198,21 +198,9 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
   });
 
   describe("recordUiReplyOutcome", () => {
-    it("records acknowledged outcome", () => {
+    it("records delivery_unknown outcome from 'claimed'", () => {
       const store = makeStore();
       const runId = seedRun(store, { status: "awaiting_input", pendingRequestId: "req-1", pendingRequestType: "select" });
-      store.claimPendingUi({ runId, generation: 1, requestId: "req-1" });
-
-      const ok = store.recordUiReplyOutcome({ runId, generation: 1, requestId: "req-1", outcome: "acknowledged" });
-      expect(ok).toBe(true);
-
-      const record = store.get(runId)!;
-      expect(record.lastUiReplyOutcome).toBe("acknowledged");
-    });
-
-    it("records delivery_unknown outcome", () => {
-      const store = makeStore();
-      const runId = seedRun(store, { status: "awaiting_input", pendingRequestId: "req-1", pendingRequestType: "confirm" });
       store.claimPendingUi({ runId, generation: 1, requestId: "req-1" });
 
       const ok = store.recordUiReplyOutcome({ runId, generation: 1, requestId: "req-1", outcome: "delivery_unknown" });
@@ -226,13 +214,13 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       const store = makeStore();
       const runId = seedRun(store, { status: "awaiting_input", pendingRequestId: "req-1", pendingRequestType: "input" });
       store.claimPendingUi({ runId, generation: 1, requestId: "req-1" });
-      store.recordUiReplyOutcome({ runId, generation: 1, requestId: "req-1", outcome: "acknowledged" });
+      store.recordUiReplyOutcome({ runId, generation: 1, requestId: "req-1", outcome: "delivery_unknown" });
 
       // Try recording again — outcome is no longer 'claimed', should be no-op
       const ok = store.recordUiReplyOutcome({ runId, generation: 1, requestId: "req-1", outcome: "delivery_unknown" });
       expect(ok).toBe(false);
       const record = store.get(runId)!;
-      expect(record.lastUiReplyOutcome).toBe("acknowledged");
+      expect(record.lastUiReplyOutcome).toBe("delivery_unknown");
     });
   });
 
@@ -252,7 +240,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
 
     it("rejects duplicate consumed request ID", () => {
       const store = makeStore();
-      const runId = seedRun(store, { status: "running", lastReplyRequestId: "req-1", lastReplyOutcome: "acknowledged" });
+      const runId = seedRun(store, { status: "running", lastReplyRequestId: "req-1", lastReplyOutcome: "delivery_unknown" });
 
       const result = store.setPendingUi({ runId, generation: 1, requestId: "req-1", requestType: "input" });
       expect(result.ok).toBe(false);

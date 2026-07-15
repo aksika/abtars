@@ -5,7 +5,7 @@ import { MAX_PROGRESS_ENTRIES } from "./types.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
 import { completePendingRequestInTransaction, ensureRequestLedgerSchema } from "../pi-request-ledger.js";
 
-export type RpcDelivery = "not_written" | "written_unacknowledged" | "acknowledged";
+export type RpcDelivery = "not_written" | "written_unacknowledged";
 
 export interface PiRunStoreDeps {
   db: TaskDatabase;
@@ -402,7 +402,7 @@ export class PiRunStore {
     runId: string;
     generation: number;
     requestId: string;
-    outcome: "acknowledged" | "delivery_unknown";
+    outcome: "delivery_unknown";
   }): boolean {
     const result = this.db.prepare(`
       UPDATE pi_runs
