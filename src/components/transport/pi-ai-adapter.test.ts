@@ -426,4 +426,61 @@ describe("streamPiAiCompletion", () => {
     expect(out.map(e => e.type)).toEqual(["chunk", "done"]);
     expect(streamCount).toBe(1);
   });
+
+  // #1425 Task 5 — prove the options CONTRACT actually passed to pi-ai's streamSimple.
+  // Not a source grep: capture the live options object and assert every field the
+  // boundary depends on. abtars owns candidate/config translation + retry budget;
+  // pi-ai must see maxRetries:0 (no retry authority beneath L2), the clamped
+  // maxTokens, short cache retention, the session id for prompt-cache affinity,
+  // the api key, the abort signal, and the resolved reasoning level.
+  it("passes the verified options contract to pi-ai (maxRetries:0, cache/session, maxTokens, reasoning)", async () => {
+    const events: AssistantMessageEvent[] = [
+      { type: "done", reason: "stop", message: makeAssistantMessage() },
+    ];
+    let capturedOpts: Record<string, unknown> | null = null;
+    const inner = fakeEventStream(events);
+    const api: ProviderStreams = {
+      stream: fakeEventStream(events),
+      streamSimple: ((m, _ctx, opts) => { capturedOpts = opts as Record<string, unknown>; return inner(m, _ctx, opts); }) as ProviderStreams["streamSimple"],
+    };
+    const ac = new AbortController();
+    const cand: PiAiCandidate = {
+      model: "glm-4.6", endpoint: "https://api.z.ai/api/v1", apiKey: "sekret",
+      apiFormat: "chat", maxOutput: 2048, contextWindow: 131072, sessionId: "sess-42",
+      reasoningEffort: "high",
+    };
+    await collect(streamPiAiCompletion(cand, conv, ac.signal, {
+      loadPi: async () => fakePi(api.streamSimple),
+      loadApi: async () => api,
+    }));
+    expect(capturedOpts).not.toBeNull();
+    // Retry budget: abtars L2 is the single authority.
+    expect(capturedOpts!.maxRetries).toBe(0);
+    // Candidate/config translation.
+    expect(capturedOpts!.maxTokens).toBe(2048);
+    expect(capturedOpts!.apiKey).toBe("sekret");
+    expect(capturedOpts!.signal).toBe(ac.signal);
+    // Cache/session (prompt-cache affinity is pi-ai's to wire).
+    expect(capturedOpts!.cacheRetention).toBe("short");
+    expect(capturedOpts!.sessionId).toBe("sess-42");
+    // Reasoning level flows through ("high" from reasoningEffort).
+    expect(capturedOpts!.reasoning).toBe("high");
+  });
+
+  it("omits reasoning from options when nothing is configured (no override)", async () => {
+    const events: AssistantMessageEvent[] = [{ type: "done", reason: "stop", message: makeAssistantMessage() }];
+    let capturedOpts: Record<string, unknown> | null = null;
+    const inner = fakeEventStream(events);
+    const api: ProviderStreams = {
+      stream: fakeEventStream(events),
+      streamSimple: ((m, _ctx, opts) => { capturedOpts = opts as Record<string, unknown>; return inner(m, _ctx, opts); }) as ProviderStreams["streamSimple"],
+    };
+    await collect(streamPiAiCompletion(candidate, conv, new AbortController().signal, {
+      loadPi: async () => fakePi(api.streamSimple),
+      loadApi: async () => api,
+    }));
+    expect(capturedOpts).not.toBeNull();
+    expect(capturedOpts!.maxRetries).toBe(0);
+    expect("reasoning" in capturedOpts!).toBe(false);
+  });
 });
