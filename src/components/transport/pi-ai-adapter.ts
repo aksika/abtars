@@ -338,6 +338,10 @@ export async function* translatePiAiEvents(
       }
       case "error":
         throw toL2Error(ev.error, isRetryable);
+      default:
+        if (traceRaw) {
+          logTrace(TAG, `unhandled pi event type: ${(ev as { type: string }).type}`);
+        }
     }
   }
 }

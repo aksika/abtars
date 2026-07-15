@@ -22,7 +22,11 @@ function fakeModel(over: Partial<Model<Api>> = {}): Model<Api> {
   };
 }
 
-/** Build a fake warmed catalog implementing the Models surface used by pi-catalog. */
+/** Build a fake warmed catalog implementing the subset of the Models surface that
+ * pi-catalog uses. The official Models interface has ~13 methods (stream/complete/
+ * getProviders etc.) but the catalog only calls getModel/getModels/getProvider/
+ * getAuth/refresh. The `as unknown as Models` cast skips implementing the
+ * uncovered methods — they are never reached from the production code path. */
 function fakeModels(opts: Partial<Models> = {}): Models {
   const list = opts.list ?? [fakeModel()];
   return {
