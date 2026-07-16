@@ -159,8 +159,6 @@ export async function deployActivationCli(flags: ReadonlyMap<string, string | bo
   }
 }
 
-
-
 /**
  * Activation: stage → releases/<commit> → history → symlink → refresh →
  * manifest → stop → respawn → healthProbe. BRICK-RISK — always runs fresh.
