@@ -41,7 +41,7 @@ describe("abtars-task", () => {
   }
 
   it("add creates entry", async () => {
-    const out = await run(["add", "--id", "christmas", "--at", "2026-12-25T08:00", "--message", "Christmas", "--chat-id", "123", "--type", "reminder"]);
+    const out = await run(["add", "--id", "christmas", "--at", "2026-12-25T08:00", "--message", "Christmas", "--chat-id", "123", "--kind", "reminder"]);
     const parsed = JSON.parse(out);
     expect(parsed.ok).toBe(true);
     expect(parsed.action).toBe("added");
@@ -49,8 +49,8 @@ describe("abtars-task", () => {
   });
 
   it("list shows pending entries", async () => {
-    await run(["add", "--id", "task-a", "--at", "2026-12-25T08:00", "--message", "A", "--chat-id", "1", "--type", "reminder"]);
-    await run(["add", "--id", "task-b", "--at", "2026-12-26T08:00", "--message", "B", "--chat-id", "1", "--type", "task"]);
+    await run(["add", "--id", "task-a", "--at", "2026-12-25T08:00", "--message", "A", "--chat-id", "1", "--kind", "reminder"]);
+    await run(["add", "--id", "task-b", "--at", "2026-12-26T08:00", "--message", "B", "--chat-id", "1", "--kind", "agent"]);
     const out = await run(["list"]);
     const parsed = JSON.parse(out);
     expect(parsed.ok).toBe(true);

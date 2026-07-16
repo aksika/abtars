@@ -1,12 +1,3 @@
-/**
- * CronQueue — sequential job processor for cron tasks.
- *
- * Heartbeat enqueues due tasks. Queue runs them one at a time:
- * scripts sequentially, agents sequentially, never concurrent.
- * Priority-sorted: high jobs jump ahead of pending medium/low.
- * Duplicate prevention: same entry ID can't be queued or running twice.
- */
-
 import { logAndSwallow } from "../log-and-swallow.js";
 import { addTaskFailure } from "./task-failure-buffer.js";
 import { spawn } from "node:child_process";
@@ -16,17 +7,17 @@ import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
-import { recordRun as dbRecordRun, readEntry, writeEntry } from "./task-store.js";
-import { recordRun } from "./task-checker.js";
+import { incrementFailures, resetFailures, setAutoPaused, setRetrying } from "./task-state-store.js";
+import { appendRun } from "./task-history-store.js";
 import { kanbanComplete, kanbanFail } from "./kanban-board.js";
-import type { CronEntry } from "../../components/tasks/task-types.js";
+import type { ScheduledTask } from "./task-types.js";
 import { isSystemEntry, formatTaskLabel } from "./task-types.js";
 import { getSystemTaskRegistry } from "./system-task-registry.js";
 import { localDate } from "../../utils/date.js";
 
 const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
-const RETRY_DELAY_MS = 10 * 60 * 1000; // skip 1 cycle (2 × 5min)
+const RETRY_DELAY_MS = 10 * 60 * 1000;
 const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
 const STATE_FILE = join(homedir(), ".abtars", "state", "task-queue-state.json");
 
@@ -41,7 +32,7 @@ function persistState(current: RunningJob | null, queue: QueuedJob[]): void {
     const state: PersistedState = {
       pid: process.pid,
       currentJob: current ? { entryId: current.entryId, message: current.message, startedAt: current.startedAt, type: current.type } : null,
-      queue: queue.map(j => ({ entryId: j.entry.id, message: j.entry.message, priority: j.entry.priority ?? "medium", manual: j.manual ?? false })),
+      queue: queue.map(j => ({ entryId: j.entry.id, message: getEntryMessage(j.entry), priority: j.entry.priority ?? "medium", manual: j.manual ?? false })),
     };
     writeFileSync(STATE_FILE, JSON.stringify(state), "utf-8");
   } catch (err) { logAndSwallow("cron_queue", "op", err); }
@@ -51,14 +42,18 @@ function loadStaleState(): PersistedState | null {
   try {
     if (!existsSync(STATE_FILE)) return null;
     const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8")) as PersistedState;
-    // If PID matches current process, state is ours (not stale)
     if (raw.pid === process.pid) return null;
     return raw;
   } catch (err) { logAndSwallow(TAG, "loadStaleState", err); return null; }
 }
 
-function recordRunToFile(entryId: string, exitCode?: number): void {
-  dbRecordRun(entryId, exitCode);
+function getEntryMessage(entry: ScheduledTask): string {
+  if (entry.kind === "reminder") return entry.text;
+  if (entry.kind === "agent") return entry.prompt ?? entry.taskFile ?? "";
+  if (entry.kind === "script") return entry.command;
+  if (entry.kind === "orc") return entry.goal;
+  if (entry.kind === "system") return entry.action;
+  return "";
 }
 
 function writeResultFile(entryId: string, content: string): string | null {
@@ -77,7 +72,6 @@ function todayStr(): string {
   return localDate();
 }
 
-/** Read task file, substitute {today}, glob associated _* files, return { prompt, dodPaths }. */
 function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } | null {
   const filePath = resolve(taskFile.replace(/^~/, homedir()));
   if (!existsSync(filePath)) { logWarn(TAG, `Task file not found: ${filePath}`); return null; }
@@ -99,7 +93,6 @@ function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } 
       .map(p => resolve(p.replace(/^~/, homedir())));
   }
 
-  // Glob associated files: {taskname}_* in same directory (cap 10k chars total)
   const dir = dirname(filePath);
   const base = basename(filePath, ".md");
   const associated = readdirSync(dir).filter(f => f !== base + ".md" && !f.startsWith(".")).sort();
@@ -122,10 +115,6 @@ function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } 
   return { prompt, dodPaths };
 }
 
-/** Check DoD: each path must exist and be >= DOD_MIN_BYTES. Returns pass/fail + details.
- *  Re-stats once after a short delay if a file appears missing — tool calls that write files
- *  (send_document, execute_bash) may still be completing when the circuit breaker fires. (#1282)
- */
 function checkDoD(paths: string[]): { passed: boolean; details: string } {
   if (paths.length === 0) return { passed: true, details: "no DoD defined" };
   const results: string[] = [];
@@ -135,11 +124,8 @@ function checkDoD(paths: string[]): { passed: boolean; details: string } {
     if (existsSync(p)) {
       size = statSync(p).size;
     } else {
-      // Re-stat after 1.5s — file may be written by a tool call that completed just as the
-      // agent loop was aborted by the circuit breaker.
       const deadline = Date.now() + 1500;
       while (Date.now() < deadline) {
-        // Synchronous spin — this runs in the task callback, not on the main event loop hot path.
         const remaining = deadline - Date.now();
         if (remaining > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(remaining, 200));
         if (existsSync(p)) { size = statSync(p).size; break; }
@@ -158,21 +144,24 @@ function checkDoD(paths: string[]): { passed: boolean; details: string } {
   return { passed: allPassed, details: results.join("\n") };
 }
 
-/** Schedule a one-time retry after 1 skipped cycle. */
-function scheduleRetry(entry: CronEntry, isRetry: boolean): void {
+function scheduleRetry(entry: ScheduledTask, isRetry: boolean): void {
   if (!entry.schedule || isRetry) return;
-  try {
-    const target = readEntry(entry.id);
-    if (target) {
-      target.fireAt = Date.now() + RETRY_DELAY_MS;
-      target.fired = false;
-      target._retrying = true;
-      writeEntry(target);
-      logInfo(TAG, `Scheduled retry for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
-    }
-  } catch (err) {
-    logWarn(TAG, `Failed to schedule retry: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  setRetrying(entry.id, true, Date.now() + RETRY_DELAY_MS);
+  logInfo(TAG, `Scheduled retry for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
+}
+
+function recordSettledRun(entry: ScheduledTask, outcome: "success" | "failed" | "noop" | "deferred" | "skipped", detail?: string, resultPath?: string, kanbanCardId?: number): void {
+  appendRun({
+    taskId: entry.id,
+    kind: entry.kind,
+    trigger: "schedule",
+    startedAt: Date.now(),
+    finishedAt: Date.now(),
+    outcome,
+    detail,
+    resultPath,
+    kanbanCardId,
+  });
 }
 
 export type TaskCompleteCallback = (chatId: number, message: string, result: string, dodFiles?: string[]) => void;
@@ -180,7 +169,7 @@ export type FailInjectCallback = (entryId: string, command: string, result: stri
 export type TaskPausedCallback = (chatId: number, title: string, reason: string) => void;
 
 interface QueuedJob {
-  entry: CronEntry;
+  entry: ScheduledTask;
   onComplete?: TaskCompleteCallback;
   manual?: boolean;
 }
@@ -204,37 +193,29 @@ export class CronQueue {
   constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback, onTaskPaused?: TaskPausedCallback) {
     this.onFailInject = onFailInject;
     this.onTaskPaused = onTaskPaused;
-    // #267: recover stale state from previous process
     const stale = loadStaleState();
     if (stale) {
       if (stale.currentJob) {
         logWarn(TAG, `Stale in-flight job detected: "${stale.currentJob.entryId}" (PID ${stale.pid} dead) — marking failed`);
-        recordRunToFile(stale.currentJob.entryId, 1);
       }
       if (stale.queue.length > 0) {
         logWarn(TAG, `${stale.queue.length} stale queued job(s) from previous process — dropped`);
       }
-      // Clear stale state
       persistState(null, []);
     }
   }
 
-  /** Currently running job, or null. */
   get currentJob(): RunningJob | null { return this._current; }
-
-  /** Number of jobs waiting. */
   get pending(): number { return this.queue.length; }
 
-  /** Enqueue a task. Returns null on success, error string on failure. */
-  enqueue(entry: CronEntry, onComplete?: TaskCompleteCallback, manual?: boolean): string | null {
+  enqueue(entry: ScheduledTask, onComplete?: TaskCompleteCallback, manual?: boolean): string | null {
     if (this._current?.entryId === entry.id) {
-      return `⏳ Already running: "${entry.message.slice(0, 60)}"`;
+      return `⏳ Already running: "${getEntryMessage(entry).slice(0, 60)}"`;
     }
     if (this.queue.some(j => j.entry.id === entry.id)) {
-      return `⏳ Already queued: "${entry.message.slice(0, 60)}"`;
+      return `⏳ Already queued: "${getEntryMessage(entry).slice(0, 60)}"`;
     }
 
-    // Priority-sorted insert
     const rank = PRIO_RANK[entry.priority ?? "medium"] ?? 1;
     let i = 0;
     while (i < this.queue.length) {
@@ -243,7 +224,7 @@ export class CronQueue {
       i++;
     }
     this.queue.splice(i, 0, { entry, onComplete, manual });
-    logInfo(TAG, `Enqueued "${entry.id}" (${entry.executor ?? "agent"}, ${entry.priority ?? "medium"}${manual ? ", manual" : ""}) — ${this.queue.length} pending`);
+    logInfo(TAG, `Enqueued "${entry.id}" (${entry.kind}, ${entry.priority ?? "medium"}${manual ? ", manual" : ""}) — ${this.queue.length} pending`);
     persistState(this._current, this.queue);
 
     if (!this._current) this.processNext();
@@ -252,25 +233,27 @@ export class CronQueue {
 
   private processNext(): void {
     if (this.queue.length === 0) return;
-
     const job = this.queue.shift()!;
     const { entry } = job;
 
     if (isSystemEntry(entry)) {
       this.runSystem(entry);
-    } else if (entry.executor === "script") {
+    } else if (entry.kind === "script") {
       this.runScript(entry, job.onComplete);
-    } else if (entry.executor === "orc") {
+    } else if (entry.kind === "orc") {
       this.runOrc(entry);
-    } else {
+    } else if (entry.kind === "agent") {
       this.runAgent(entry, job.onComplete, job.manual);
+    } else if (entry.kind === "reminder") {
+      logInfo(TAG, `Reminder "${entry.id}" already delivered — skipping`);
+      this.processNext();
     }
   }
 
-  private setCurrent(entry: CronEntry, pid: number, type: "script" | "agent" | "system"): void {
+  private setCurrent(entry: ScheduledTask, pid: number, type: "script" | "agent" | "system"): void {
     this._current = {
       entryId: entry.id,
-      message: entry.message.slice(0, 80),
+      message: getEntryMessage(entry).slice(0, 80),
       pid,
       startedAt: Date.now(),
       type,
@@ -284,7 +267,7 @@ export class CronQueue {
     persistState(this._current, this.queue);
   }
 
-  private tryInjectFailure(entry: CronEntry, result: string): void {
+  private tryInjectFailure(entry: ScheduledTask, result: string): void {
     if (!this.onFailInject) return;
     const today = localDate();
     const key = entry.id;
@@ -296,89 +279,64 @@ export class CronQueue {
     const count = (fc?.date === today ? fc.count : 0) + 1;
     this.failCounts.set(key, { date: today, count });
     logInfo(TAG, `Injecting failure to agent for "${key}" (attempt ${count}/2)`);
-    this.onFailInject(entry.id, entry.message, result);
+    this.onFailInject(entry.id, getEntryMessage(entry), result);
   }
 
-  private checkAutoPause(entry: CronEntry, exitCode: number, lastError: string): boolean {
+  private checkAutoPause(entry: ScheduledTask, exitCode: number, lastError: string): boolean {
     if (!entry.schedule) return false;
     if (exitCode === 0) {
-      if (entry.consecutiveFails) { entry.consecutiveFails = 0; writeEntry(entry); }
+      resetFailures(entry.id);
       return false;
     }
-    entry.consecutiveFails = (entry.consecutiveFails ?? 0) + 1;
-    if (entry.consecutiveFails >= 3) {
-      entry.paused = true;
-      logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${entry.consecutiveFails} consecutive failures`);
-      this.onTaskPaused?.(entry.chatId, formatTaskLabel(entry.id), lastError.slice(0, 200));
-      writeEntry(entry);
+    const count = incrementFailures(entry.id);
+    if (count >= 3) {
+      setAutoPaused(entry.id, true);
+      logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${count} consecutive failures`);
+      this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), lastError.slice(0, 200));
       return true;
     }
-    writeEntry(entry);
     return false;
   }
 
-  /**
-   * Dispatch a system task to its allowlisted in-process handler (#1321).
-   * Awaits only the short handler result (guards + start the async cycle), records
-   * scheduler history, applies ordinary failure/auto-pause handling, then advances
-   * the queue immediately. The long-running cycle continues asynchronously.
-   * `accepted`/`noop` are successful dispatches; a rejecting/unknown handler is a
-   * visible failure — never a fallthrough to another executor.
-   */
-  private async runSystem(entry: CronEntry): Promise<void> {
+  private async runSystem(entry: ScheduledTask & { kind: "system" }): Promise<void> {
     logInfo(TAG, `▶ System: "${entry.action}" (${entry.id})`);
-    // pid 0 — system actions are in-process; no child to track.
     this.setCurrent(entry, 0, "system");
     try {
       const result = await getSystemTaskRegistry().dispatch(entry);
       if (result.status === "deferred") {
-        // #1322 — Durable deferral: schedule retry at retryAt without counting
-        // as failure, auto-pause, or maxRunsPerDay consumption.
-        recordRunToFile(entry.id, 0);
+        recordSettledRun(entry, "deferred", result.detail);
         logInfo(TAG, `⏸ Deferred: "${entry.action}" (${entry.id}) — retry at ${new Date(result.retryAt).toISOString()}: ${result.detail}`);
-        try {
-          const target = readEntry(entry.id);
-          if (target) {
-            target.fireAt = result.retryAt;
-            target.fired = false;
-            writeEntry(target);
-          }
-        } catch (err) {
-          logWarn(TAG, `Failed to persist deferred retry for "${entry.id}": ${err instanceof Error ? err.message : String(err)}`);
-        }
+        setRetrying(entry.id, true, result.retryAt);
       } else if (result.status === "noop") {
-        // Noop is not a run — don't count toward maxRunsPerDay.
-        recordRunToFile(entry.id, 0);
-        const detail = "detail" in result && result.detail ? result.detail : "";
-        logInfo(TAG, `■ System noop: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
+        recordSettledRun(entry, "noop", result.detail);
+        const detail = result.detail ? ` — ${result.detail}` : "";
+        logInfo(TAG, `■ System noop: "${entry.action}" (${entry.id})${detail}`);
       } else {
-        const ok = result.status !== "failed";
-        recordRunToFile(entry.id, ok ? 0 : 1);
-        if (ok) recordRun(entry, 0); // count toward maxRunsPerDay only on success
-        const detail = "detail" in result && result.detail ? result.detail : "error" in result ? result.error : "";
+        const ok = result.status === "accepted";
+        const detail = ok ? (result as { status: "accepted"; detail?: string }).detail : (result as { status: "failed"; error: string }).error;
+        recordSettledRun(entry, ok ? "success" : "failed", detail);
         logInfo(TAG, `■ System ${ok ? "✓" : "❌"}: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
         if (!ok) {
-          this.checkAutoPause(entry, 1, detail);
-          scheduleRetry(entry, !!entry._retrying);
+          this.checkAutoPause(entry, 1, detail ?? "");
+          scheduleRetry(entry, false);
         }
       }
     } catch (err) {
-      // dispatch() catches handler throws, but guard the await boundary too.
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `System dispatch error for "${entry.action}": ${msg}`);
-      recordRunToFile(entry.id, 1);
+      recordSettledRun(entry, "failed", msg);
       this.checkAutoPause(entry, 1, msg);
-      scheduleRetry(entry, !!entry._retrying);
+      scheduleRetry(entry, false);
     } finally {
       this.clearCurrent();
       this.processNext();
     }
   }
 
-  private runOrc(entry: CronEntry): void {
-    logInfo(TAG, `▶ Orc: "${entry.message.slice(0, 60)}"`);
+  private runOrc(entry: ScheduledTask & { kind: "orc" }): void {
+    logInfo(TAG, `▶ Orc: "${entry.goal.slice(0, 60)}"`);
     import("../spin.js").then(({ spin }) => {
-      spin.dispatch({ type: "O", goal: entry.message, source: "task", priority: entry.priority ?? "MEDIUM", deliveryMode: entry.deliveryMode });
+      spin.dispatch({ type: "O", goal: entry.goal, source: "task", priority: entry.priority ?? "MEDIUM" });
       this.clearCurrent();
       this.processNext();
     }).catch((err) => {
@@ -388,11 +346,10 @@ export class CronQueue {
     });
   }
 
-  private runScript(entry: CronEntry, onComplete?: TaskCompleteCallback): void {
-    logInfo(TAG, `▶ Script: "${entry.message.slice(0, 60)}"`);
+  private runScript(entry: ScheduledTask & { kind: "script" }, onComplete?: TaskCompleteCallback): void {
+    logInfo(TAG, `▶ Script: "${entry.command.slice(0, 60)}"`);
     try {
-      const child = spawn("bash", ["-c", entry.message], { stdio: ["ignore", "pipe", "pipe"] });
-      
+      const child = spawn("bash", ["-c", entry.command], { stdio: ["ignore", "pipe", "pipe"] });
       this.setCurrent(entry, child.pid ?? 0, "script");
 
       let output = "";
@@ -401,26 +358,33 @@ export class CronQueue {
 
       child.on("exit", (code) => {
         const status = code === 0 ? "✓" : `❌ (exit ${code})`;
-        logInfo(TAG, `■ Script ${status}: "${entry.message.slice(0, 60)}"`);
-        recordRunToFile(entry.id, code ?? undefined);
-        if (code === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
+        logInfo(TAG, `■ Script ${status}: "${entry.command.slice(0, 60)}"`);
+        recordSettledRun(entry, code === 0 ? "success" : "failed", output.slice(0, 200));
         const paused = this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
-        if (code === 0 && output.trim() && entry.agentFollowUp && entry.agentMessage) {
+        const followUp = entry.followUp;
+        if (code === 0 && output.trim() && followUp) {
           logInfo(TAG, `■ Gate triggered → enqueuing agent follow-up for "${entry.id}"`);
-          const agentEntry: CronEntry = { ...entry, executor: "agent", message: entry.agentMessage.replace("{{GATE_OUTPUT}}", output.trim()), agentFollowUp: undefined };
           this.clearCurrent();
+          const agentPrompt = followUp.prompt.replace("{{GATE_OUTPUT}}", output.trim());
+          const agentEntry: ScheduledTask = {
+            id: entry.id + "-followup",
+            enabled: true,
+            priority: "medium",
+            delivery: "silent",
+            kind: "agent",
+            prompt: agentPrompt,
+          };
           this.enqueue(agentEntry, onComplete);
           return;
         }
         if (code !== 0) {
-          scheduleRetry(entry, !!entry._retrying);
-          if (!paused && code !== 2) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
-          addTaskFailure({ taskName: formatTaskLabel(entry.id), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: Date.now(), consecutiveFailures: entry.consecutiveFails ?? 1 });
+          scheduleRetry(entry, false);
+          if (!paused) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
+          addTaskFailure({ taskName: formatTaskLabel(entry.id), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: Date.now(), consecutiveFailures: 1 });
         }
         if (!paused) {
-          // Silent success: don't notify user when script exits 0 with no output
           if (code !== 0 || output.trim()) {
-            onComplete?.(entry.chatId, entry.message, `${status}\n${(output || "(no output)").slice(0, 500)}`);
+            onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.command, `${status}\n${(output || "(no output)").slice(0, 500)}`);
           }
         }
         this.clearCurrent();
@@ -429,7 +393,7 @@ export class CronQueue {
 
       child.on("error", (err) => {
         logWarn(TAG, `Script spawn failed: ${err.message}`);
-        onComplete?.(entry.chatId, entry.message, `❌ Failed: ${err.message}`);
+        onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.command, `❌ Failed: ${err.message}`);
         this.clearCurrent();
         this.processNext();
       });
@@ -440,28 +404,25 @@ export class CronQueue {
     }
   }
 
-  private async runAgent(entry: CronEntry, onComplete?: TaskCompleteCallback, manual?: boolean): Promise<void> {
-    // Idle gate: defer agent tasks if user was active in last 90s (skip for manual triggers)
+  private async runAgent(entry: ScheduledTask & { kind: "agent" }, onComplete?: TaskCompleteCallback, manual?: boolean): Promise<void> {
     if (!manual) {
       const idleMs = Date.now() - readLastPromptAt();
       if (idleMs < 90_000) {
         logInfo(TAG, `⏸ Deferring agent task "${entry.id}" — user active ${Math.round(idleMs / 1000)}s ago`);
-        entry.consecutiveFails = (entry.consecutiveFails ?? 0) + 1;
-        if (entry.consecutiveFails >= 3) {
-          entry.paused = true;
-          logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${entry.consecutiveFails} idle-gate deferrals`);
-          this.onTaskPaused?.(entry.chatId, formatTaskLabel(entry.id), `idle-gate hit ${entry.consecutiveFails}× in a row`);
+        const count = incrementFailures(entry.id);
+        if (count >= 3) {
+          setAutoPaused(entry.id, true);
+          logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${count} idle-gate deferrals`);
+          this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), `idle-gate hit ${count}× in a row`);
         }
-        writeEntry(entry);
-        scheduleRetry(entry, !!entry._retrying);
+        scheduleRetry(entry, false);
         this.clearCurrent();
         this.processNext();
         return;
       }
     }
 
-    // Read task file if specified, otherwise use inline message
-    let prompt = entry.message;
+    let prompt = entry.prompt ?? "";
     let dodPaths: string[] = [];
     if (entry.taskFile) {
       const task = readTaskFile(entry.taskFile);
@@ -473,7 +434,6 @@ export class CronQueue {
       }
     }
 
-    // #1141: Inject task-scoped persistent context if it exists
     const contextFile = join(abtarsHome(), "workspace", entry.id, "CONTEXT.md");
     if (existsSync(contextFile)) {
       const raw = readFileSync(contextFile, "utf-8").trim();
@@ -484,24 +444,22 @@ export class CronQueue {
       }
     }
 
-    logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
+    logInfo(TAG, `▶ Agent: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
 
-    // #936 Phase 2: Route to user session via injectGreeting if targetUserId is set
     if (entry.targetUserId) {
       this.setCurrent(entry, 0, "agent");
       try {
         const { spin } = await import("../spin.js");
         const response = await spin.injectGreeting(entry.targetUserId, prompt);
         if (response) {
-          recordRunToFile(entry.id, 0);
-          recordRun(entry, 0);
+          recordSettledRun(entry, "success");
           logInfo(TAG, `✓ Greeting delivered to ${entry.targetUserId}`);
         } else {
-          recordRunToFile(entry.id, 1);
+          recordSettledRun(entry, "failed", "greeting returned no response");
           logWarn(TAG, `Greeting failed for ${entry.targetUserId}`);
         }
       } catch (err) {
-        recordRunToFile(entry.id, 1);
+        recordSettledRun(entry, "failed", err instanceof Error ? err.message : String(err));
         logWarn(TAG, `Greeting error: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         this.clearCurrent();
@@ -510,46 +468,31 @@ export class CronQueue {
       return;
     }
 
-    // Set current BEFORE any await — prevents race where enqueue() sees _current=null
-    // and calls processNext() again while we're awaiting the dynamic import.
     this.setCurrent(entry, 0, "agent");
 
-    // #1141: Skill-trigger task — delegate to launchSkill()
-    if ((entry as any).skill) {
-      const { launchSkill } = await import("../skill-session.js");
-      const userId = entry.targetUserId ?? String(entry.chatId);
-      const err = await launchSkill((entry as any).skill, userId, String(entry.chatId), prompt);
-      if (err) logWarn(TAG, `Skill launch failed for "${entry.id}": ${err}`);
-      else logInfo(TAG, `■ Skill "${(entry as any).skill}" launched for "${entry.id}"`);
-      recordRunToFile(entry.id, err ? 1 : 0);
-      if (!err) recordRun(entry, 0);
-      this.clearCurrent();
-      this.processNext();
-      return;
-    }
-
-    // Kanban board: track this task (Spin handles card lifecycle)
-    // Set $WORKSPACE for agent tool execution — all output goes here
     const workspace = join(abtarsHome(), "workspace", entry.id);
     mkdirSync(workspace, { recursive: true });
     process.env["WORKSPACE"] = workspace;
 
     const { spin } = await import("../spin.js");
 
-    // 30-min hard timeout
     this.timeout = setTimeout(() => {
       logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min)`);
     }, AGENT_TIMEOUT_MS);
 
-    // #935: map agent field to session type (canonical task routing — distinct from TYPE_AGENT in spin-types which maps type→model-role)
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
     const sessionType = (AGENT_SESSION[entry.agent ?? ""] ?? "T") as import("../spin-types.js").SessionType;
 
-    spin.dispatchAwait({ type: sessionType, title: formatTaskLabel(entry.id), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM", chatId: String(entry.chatId), deliveryMode: entry.deliveryMode, maxToolRounds: entry.maxToolRounds })
+    spin.dispatchAwait({
+      type: sessionType,
+      title: formatTaskLabel(entry.id),
+      goal: prompt,
+      source: "task",
+      priority: entry.priority ?? "MEDIUM",
+      chatId: String(entry.chatId),
+      maxToolRounds: entry.maxToolRounds,
+    })
       .then(({ cardId: boardId, result: response }) => {
-        // Guard: if model returned raw JSON tool output ({"stdout":...,"exit_code":...}),
-        // extract just the meaningful content. This happens when the model echoes its last
-        // tool result instead of synthesizing a human-readable response.
         let cleaned = response || "(no output)";
         try {
           const parsed = JSON.parse(cleaned);
@@ -562,58 +505,53 @@ export class CronQueue {
         let dodResult = "";
         if (dodPaths.length > 0) {
           const dod = checkDoD(dodPaths);
-          // If DoD paths missing but model produced substantial output, accept it
           if (!dod.passed && cleaned.length > 200) {
+            // For now keep the 200-char bypass — will be removed in strict DoD task
             dod.passed = true;
             dod.details += "\n✓ accepted: model output written to result file";
           }
           exitCode = dod.passed ? 0 : 1;
           dodResult = `\nDoD: ${dod.passed ? "PASSED" : "FAILED"}\n${dod.details}`;
-          logInfo(TAG, `■ Agent DoD ${dod.passed ? "✓" : "❌"}: "${entry.message.slice(0, 60)}"\n${dod.details}`);
+          logInfo(TAG, `■ Agent DoD ${dod.passed ? "✓" : "❌"}: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"\n${dod.details}`);
         } else {
-          logInfo(TAG, `■ Agent completed: "${entry.message.slice(0, 60)}"`);
+          logInfo(TAG, `■ Agent completed: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
         }
 
-        // Write result file — skip if DoD files exist (they ARE the result)
-        // #1118: inline tasks skip file writing — deliver text directly via kanban
         const producedFiles = dodPaths.filter(p => existsSync(p));
-        const isReport = entry.deliveryMethod === "report";
+        const isReport = entry.delivery === "report";
         const resultPath = producedFiles.length > 0 ? producedFiles[0] : (isReport ? writeResultFile(entry.id, cleaned) : null);
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
-        // Kanban board: mark complete or failed
         if (exitCode === 0) {
-          // #1118: inline tasks store full response as summary (delivered as chat message)
           const kanbanSummary = isReport ? summary : cleaned;
           kanbanComplete(boardId, resultPath ?? null, kanbanSummary);
         } else {
           kanbanFail(boardId, `${summary}${dodResult}`);
         }
 
-        recordRunToFile(entry.id, exitCode);
-        if (exitCode === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
+        recordSettledRun(entry, exitCode === 0 ? "success" : "failed", `${summary}${dodResult}`, resultPath ?? undefined, boardId);
         const paused = this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
         const icon = exitCode === 0 ? "✓" : "❌";
         if (exitCode !== 0) {
-          scheduleRetry(entry, !!entry._retrying);
+          scheduleRetry(entry, false);
           if (!paused) this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);
         }
         if (!paused) {
           const producedFiles = dodPaths.filter(p => existsSync(p));
-          onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`, producedFiles.length > 0 ? producedFiles : undefined);
+          onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.prompt ?? "", `${icon} ${summary}${dodResult}`, producedFiles.length > 0 ? producedFiles : undefined);
         }
       })
       .catch((err: unknown) => {
-        const boardId = 0; // card already tracked by Spin
+        const boardId = 0;
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
         kanbanFail(boardId, err instanceof Error ? err.message : String(err));
-        recordRunToFile(entry.id, 1);
+        recordSettledRun(entry, "failed", err instanceof Error ? err.message : String(err), undefined, boardId);
         const paused = this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
-        scheduleRetry(entry, !!entry._retrying);
+        scheduleRetry(entry, false);
         if (!paused) {
           const errMsg = `❌ Failed: ${err instanceof Error ? err.message : String(err)}`;
           this.tryInjectFailure(entry, errMsg);
-          onComplete?.(entry.chatId, entry.message, errMsg);
+          onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.prompt ?? "", errMsg);
         }
       })
       .finally(() => {

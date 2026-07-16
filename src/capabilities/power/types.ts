@@ -48,6 +48,7 @@ export interface PowerTransitionState {
 
 /** Fields that the power controller reads from a hardware-sleep task entry. */
 export interface HardwareSleepInspectEntry {
+  readonly id: string;
   readonly idleMinutes?: number;
   readonly retryMinutes?: number;
   readonly latestLocalTime?: string;

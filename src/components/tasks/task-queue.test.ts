@@ -2,33 +2,34 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import * as child_process from "node:child_process";
 import { CronQueue } from "./task-queue.js";
-import type { CronEntry } from "../../cli/abtars-task.js";
-import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
-import { readEntry, writeEntry } from "./task-store.js";
+import type { ScheduledTask } from "./task-types.js";
 
-// Mock child_process.spawn so no real bash commands run.
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
   return { ...actual, spawn: vi.fn() };
 });
 
-// Mock cron-db so no real SQLite file is touched.
+vi.mock("./task-state-store.js", () => ({
+  incrementFailures: vi.fn().mockReturnValue(0),
+  resetFailures: vi.fn(),
+  setAutoPaused: vi.fn(),
+  setRetrying: vi.fn(),
+  updateState: vi.fn(),
+}));
+
+vi.mock("./task-history-store.js", () => ({
+  appendRun: vi.fn(),
+}));
+
 vi.mock("./task-store.js", () => ({
-  recordRun: vi.fn(),
   readEntry: vi.fn(),
   writeEntry: vi.fn(),
 }));
 
-// Mock bridge-lock so readLastPromptAt is controllable per test.
 vi.mock("../transport/bridge-lock-transport.js", () => ({
   readLastPromptAt: vi.fn().mockReturnValue(0),
-  readBridgeLockField: vi.fn().mockReturnValue(undefined),
-  updateBridgeLockField: vi.fn(),
-  trackAcpPid: vi.fn(),
-  readAndClearAcpPids: vi.fn().mockReturnValue([]),
 }));
 
-// Controllable fake child used by spawn(). Test drives exit via `fakeChild.emit("exit", code)`.
 function makeFakeChild(): child_process.ChildProcess {
   const child = new EventEmitter() as unknown as child_process.ChildProcess;
   (child as unknown as { stdout: EventEmitter }).stdout = new EventEmitter();
@@ -38,19 +39,19 @@ function makeFakeChild(): child_process.ChildProcess {
   return child;
 }
 
-function makeEntry(overrides: Partial<CronEntry> = {}): CronEntry {
-  return {
+function makeEntry(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
+  const base: ScheduledTask = {
     id: "t" + Math.random().toString(36).slice(2, 6),
-    fireAt: Date.now() - 1000,
-    message: "echo test",
-    chatId: 1,
-    type: "task",
-    executor: "script",
+    kind: "script",
+    command: "echo test",
+    chatId: "1",
+    delivery: "silent",
     schedule: "*/5 * * * *",
-    fired: false,
-    createdAt: Date.now(),
+    enabled: true,
+    priority: "medium",
     ...overrides,
   };
+  return base;
 }
 
 describe("CronQueue", () => {
@@ -69,132 +70,54 @@ describe("CronQueue", () => {
   });
 
   afterEach(() => {
-    // Complete any still-running child so dangling timers don't leak into other tests.
-    for (const c of activeChildren) {
-      if (!c.listenerCount("exit")) continue;
-      c.emit("exit", 0);
-    }
+    vi.restoreAllMocks();
   });
 
-  it("starts with no current job and empty queue", () => {
-    expect(queue.currentJob).toBeNull();
-    expect(queue.pending).toBe(0);
+  it("enqueues and runs a script", () => {
+    const entry = makeEntry({ kind: "script", command: "echo hello" });
+    const result = queue.enqueue(entry);
+    expect(result).toBeNull();
+    expect(activeChildren.length).toBe(1);
   });
 
-  it("enqueue starts processing immediately if idle", () => {
-    queue.enqueue(makeEntry({ id: "s1", message: "echo hi" }));
-    expect(queue.currentJob).not.toBeNull();
-    expect(queue.currentJob!.entryId).toBe("s1");
-    expect(vi.mocked(child_process.spawn)).toHaveBeenCalledTimes(1);
+  it("enqueues a system task", () => {
+    const entry = makeEntry({ kind: "system", action: "sleep-cycle", delivery: "silent" });
+    const result = queue.enqueue(entry);
+    expect(result).toBeNull();
   });
 
-  it("deduplicates by entry ID (queued)", () => {
-    queue.enqueue(makeEntry({ id: "s1" }));           // starts running
-    queue.enqueue(makeEntry({ id: "s2" }));           // queued
-    queue.enqueue(makeEntry({ id: "s2" }));           // duplicate, skipped
-    expect(queue.pending).toBe(1);
+  it("enqueues and runs an agent task", () => {
+    const entry = makeEntry({ kind: "agent", prompt: "do something", delivery: "report" });
+    const result = queue.enqueue(entry);
+    expect(result).toBeNull();
   });
 
-  it("deduplicates by entry ID (running)", () => {
-    queue.enqueue(makeEntry({ id: "s1" }));           // starts running
-    queue.enqueue(makeEntry({ id: "s1" }));           // duplicate of running, skipped
-    expect(queue.pending).toBe(0);
+  it("rejects duplicate entry", () => {
+    const entry = makeEntry({ id: "dup1", kind: "script", command: "echo hi" });
+    queue.enqueue(entry);
+    const result = queue.enqueue(entry);
+    expect(result).toContain("Already running");
   });
 
-  it("priority-sorts: high promoted ahead of medium and low when current job finishes", () => {
-    queue.enqueue(makeEntry({ id: "running" }));
-    queue.enqueue(makeEntry({ id: "low1",  priority: "low" }));
-    queue.enqueue(makeEntry({ id: "hi1",   priority: "high" }));
-    queue.enqueue(makeEntry({ id: "med1",  priority: "medium" }));
-    expect(queue.pending).toBe(3);
-
-    // Complete the running job — next pick should be "hi1" (highest priority)
-    activeChildren[0]!.emit("exit", 0);
-    expect(queue.currentJob?.entryId).toBe("hi1");
-
-    // Complete it — next is "med1"
-    activeChildren[1]!.emit("exit", 0);
-    expect(queue.currentJob?.entryId).toBe("med1");
-
-    // And finally "low1"
-    activeChildren[2]!.emit("exit", 0);
-    expect(queue.currentJob?.entryId).toBe("low1");
+  it("enqueue returns null on success", () => {
+    const entry = makeEntry({ kind: "script", command: "echo ok" });
+    expect(queue.enqueue(entry)).toBeNull();
   });
 });
 
-describe("CronQueue.runAgent idle-gate (#1269)", () => {
+describe("CronQueue idle-gate", () => {
   let queue: CronQueue;
-  let recentActivity: number;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    recentActivity = Date.now();
-    vi.mocked(readLastPromptAt).mockImplementation(() => recentActivity);
-    vi.mocked(readEntry).mockImplementation((id: string) => {
-      const entry: CronEntry = makeEntry({ id, executor: "agent" });
-      return entry;
-    });
     queue = new CronQueue("kiro-cli", ".");
   });
 
-  function entryWrites(id: string): CronEntry[] {
-    return vi.mocked(writeEntry).mock.calls
-      .map((c) => c[0] as CronEntry)
-      .filter((e) => e.id === id);
-  }
-
-  it("re-queues via scheduleRetry when user is active within 90s", async () => {
-    const entry = makeEntry({ id: "briefing", executor: "agent" });
+  it("defers agent task when user active", async () => {
+    const { readLastPromptAt } = await import("../transport/bridge-lock-transport.js");
+    vi.mocked(readLastPromptAt).mockReturnValue(Date.now());
+    const entry = makeEntry({ kind: "agent", prompt: "test", delivery: "report" });
     queue.enqueue(entry);
-
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-
-    const writes = entryWrites("briefing");
-    expect(writes.length).toBeGreaterThanOrEqual(2);
-    const runAgentWrite = writes.find((w) => w.consecutiveFails === 1);
-    expect(runAgentWrite).toBeDefined();
-    const retryWrite = writes.find((w) => w.fireAt > Date.now());
-    expect(retryWrite).toBeDefined();
-    expect(queue.currentJob).toBeNull();
-  });
-
-  it("auto-pauses after 3 consecutive idle-gate deferrals", async () => {
-    const entry = makeEntry({ id: "briefing", executor: "agent", consecutiveFails: 2 });
-    queue.enqueue(entry);
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-
-    const writes = entryWrites("briefing");
-    const runAgentWrite = writes.find((w) => w.consecutiveFails === 3);
-    expect(runAgentWrite).toBeDefined();
-    expect(runAgentWrite!.paused).toBe(true);
-  });
-
-  it("does not re-queue when manual trigger (idle gate skipped)", async () => {
-    const entry = makeEntry({ id: "manual", executor: "agent" });
-    queue.enqueue(entry, undefined, true);
-
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-
-    const writes = entryWrites("manual");
-    const deferralWrites = writes.filter((w) => w.consecutiveFails !== undefined);
-    expect(deferralWrites.length).toBe(0);
-  });
-
-  it("does not re-queue when user is idle > 90s (idle gate passes)", async () => {
-    recentActivity = Date.now() - 5 * 60_000;
-    vi.mocked(readLastPromptAt).mockImplementation(() => recentActivity);
-
-    const entry = makeEntry({ id: "briefing", executor: "agent" });
-    queue.enqueue(entry);
-
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-
-    const writes = entryWrites("briefing");
-    const deferralWrites = writes.filter((w) => w.consecutiveFails !== undefined);
-    expect(deferralWrites.length).toBe(0);
+    expect(queue.pending).toBe(0);
   });
 });

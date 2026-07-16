@@ -184,25 +184,27 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
 }
 
 import { readEntries as readCronEntries } from "../tasks/task-store.js";
+import { readState } from "../tasks/task-state-store.js";
+import { latestOutcomeByTask } from "../tasks/task-history-store.js";
 
 function readCronStatus(): CronEntryStatus[] {
   try {
     const raw = readCronEntries();
+    const outcomes = latestOutcomeByTask();
     return raw
       .filter((e) => e.schedule)
       .map((e) => {
-        const firstLine = (e.message ?? "").split("\n")[0] ?? "";
-        const label = firstLine.length > 60 ? firstLine.slice(0, 57) + "..." : firstLine;
-        const hist = e.history ?? [];
-        const last = hist.length > 0 ? hist[hist.length - 1] : undefined;
+        const state = readState(e.id);
+        const last = outcomes.get(e.id);
+        const label = e.kind === "agent" ? (e.prompt ?? e.taskFile ?? "").split("\n")[0] ?? "" : e.id;
         return {
           id: e.id,
-          label: label || e.id,
+          label: label.slice(0, 60) || e.id,
           schedule: e.schedule!,
-          executor: e.executor ?? "script",
-          fireAt: e.fireAt,
-          paused: Boolean(e.paused),
-          lastRanAt: e.lastRanAt,
+          executor: e.kind,
+          fireAt: state?.nextRunAt ?? 0,
+          paused: state?.autoPaused ?? false,
+          lastRanAt: state?.lastFinishedAt,
           lastExitCode: last?.exitCode ?? null,
           ...(e.priority ? { priority: e.priority } : {}),
         };

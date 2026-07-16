@@ -5,6 +5,7 @@ import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { spawnDetached } from "../spawn-safe.js";
 import { readEntries as cronReadEntries } from "../tasks/task-store.js";
+import { readState } from "../tasks/task-state-store.js";
 import { abtarsHome } from "../../paths.js";
 import { versionBadge } from "../../utils/version-compare.js";
 import type { CommandContext } from "./types.js";
@@ -289,9 +290,9 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     } catch (err) { logAndSwallow("command_handlers", "op", err); }
     try {
       const ce = cronReadEntries();
-      const r = ce.filter(e => e.schedule && !e.paused).length;
-      const p = ce.filter(e => !e.fired && !e.schedule).length;
-      const pa = ce.filter(e => e.paused).length;
+      const r = ce.filter(e => e.schedule && e.enabled).length;
+      const p = ce.filter(e => !e.schedule && e.enabled).length;
+      const pa = ce.filter(e => readState(e.id)?.autoPaused).length;
       lines.push(`⏰ Tasks: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
     } catch (err) { logAndSwallow("command_handlers", "op", err); }
     try {

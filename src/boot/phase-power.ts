@@ -59,7 +59,16 @@ export async function phasePower(ctx: BootCtx): Promise<PhaseResult> {
   const controller = new HardwareSleepController(probe, adapter, transitionStore);
 
   if (!registry.has("hardware-sleep")) {
-    registry.register("hardware-sleep", (entry) => controller.attempt(entry));
+    registry.register("hardware-sleep", (entry) => {
+      const inspectEntry = {
+        id: entry.id,
+        idleMinutes: entry.kind === "system" ? entry.options?.idleMinutes : undefined,
+        retryMinutes: entry.kind === "system" ? entry.options?.retryMinutes : undefined,
+        latestLocalTime: entry.kind === "system" ? entry.options?.latestLocalTime : undefined,
+        expectedWakeTime: entry.kind === "system" ? entry.options?.expectedWakeTime : undefined,
+      };
+      return controller.attempt(inspectEntry);
+    });
     logInfo("boot", "registered system action hardware-sleep");
   }
 

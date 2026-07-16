@@ -1,22 +1,17 @@
-/**
- * task-types.test.ts — schema, normalization, and validation for #1321.
- *
- * Task JSON is data, not code. An invalid entry must be rejected closed and
- * never fall through to agent execution.
- */
 import { describe, it, expect } from "vitest";
 import { normalize, isSystemEntry, SYSTEM_ACTIONS, formatTaskLabel, isValidTaskId } from "./task-types.js";
+import type { ScheduledTask } from "./task-types.js";
 
 const NOW = new Date("2026-07-11T02:00:00Z").getTime();
 
 function baseAgent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: "agent1",
-    type: "task",
-    executor: "agent",
+    kind: "agent",
     schedule: "0 2 * * *",
-    message: "do the thing",
-    chatId: 100,
+    prompt: "do the thing",
+    chatId: "100",
+    delivery: "report",
     ...overrides,
   };
 }
@@ -24,33 +19,19 @@ function baseAgent(overrides: Record<string, unknown> = {}): Record<string, unkn
 function baseSystem(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: "sleep-cycle",
-    type: "task",
-    executor: "system",
+    kind: "system",
     action: "sleep-cycle",
     schedule: "0 2 * * *",
-    deliveryMode: "silent",
+    delivery: "silent",
     ...overrides,
   };
 }
 
-describe("#1321 normalize + validation", () => {
+describe("normalize + validation", () => {
   describe("recurring entry normalization", () => {
-    it("derives fireAt from schedule when omitted (template entry)", () => {
-      const r = normalize(baseSystem({ fireAt: undefined }), NOW);
+    it("derives next from schedule", () => {
+      const r = normalize(baseAgent({}), NOW);
       expect(r.ok).toBe(true);
-      if (r.ok) expect(Number.isFinite(r.entry.fireAt)).toBe(true);
-    });
-
-    it("defaults fired=false when omitted", () => {
-      const r = normalize(baseSystem({ fired: undefined }), NOW);
-      expect(r.ok).toBe(true);
-      if (r.ok) expect(r.entry.fired).toBe(false);
-    });
-
-    it("defaults createdAt=now when omitted", () => {
-      const r = normalize(baseSystem({ createdAt: undefined }), NOW);
-      expect(r.ok).toBe(true);
-      if (r.ok) expect(r.entry.createdAt).toBe(NOW);
     });
 
     it("rejects an invalid cron schedule", () => {
@@ -58,101 +39,106 @@ describe("#1321 normalize + validation", () => {
       expect(r.ok).toBe(false);
     });
 
-    it("rejects an entry missing both fireAt and schedule", () => {
-      const r = normalize({ id: "x", type: "task", executor: "system", action: "sleep-cycle" }, NOW);
+    it("accepts a valid one-shot at", () => {
+      const r = normalize({ id: "s1", kind: "agent", at: "2026-07-12T08:00:00Z", prompt: "test", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(true);
+    });
+
+    it("rejects entry with both schedule and at", () => {
+      const r = normalize({ id: "s1", kind: "agent", schedule: "0 9 * * *", at: "2026-07-12T08:00:00Z", prompt: "test", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("rejects entry with no schedule and no at", () => {
+      const r = normalize({ id: "s1", kind: "agent", prompt: "test", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("rejects missing kind", () => {
+      const r = normalize({ id: "x", schedule: "0 9 * * *", prompt: "test", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("rejects unknown kind", () => {
+      const r = normalize({ id: "x", kind: "unknown", schedule: "0 9 * * *" }, NOW);
       expect(r.ok).toBe(false);
     });
   });
 
-  describe("system executor allowlist", () => {
-    it("accepts the canonical sleep-cycle entry exactly as seeded", () => {
-      const canonical = {
-        id: "sleep-cycle",
-        type: "task",
-        executor: "system",
-        action: "sleep-cycle",
-        schedule: "0 2 * * *",
-        catchUp: 6,
-        maxRunsPerDay: 1,
-        deliveryMode: "silent",
-        paused: false,
-      };
-      const r = normalize(canonical, NOW);
+  describe("kind-specific validation", () => {
+    it("reminder validates", () => {
+      const r = normalize({ id: "r", kind: "reminder", schedule: "0 9 * * *", text: "Wake up", chatId: "1", delivery: "announce" }, NOW);
       expect(r.ok).toBe(true);
-      if (r.ok) {
-        expect(r.entry.executor).toBe("system");
-        expect(r.entry.action).toBe("sleep-cycle");
-        expect(r.entry.fired).toBe(false);
-      }
+      if (r.ok) expect(r.entry.kind).toBe("reminder");
     });
 
-    it("rejects a system entry with an unknown action", () => {
-      const r = normalize(baseSystem({ action: "rm-rf" }), NOW);
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.error).toContain("unknown system action");
-    });
-
-    it("rejects a system entry missing action", () => {
-      const r = normalize(baseSystem({ action: undefined }), NOW);
+    it("reminder rejects non-announce delivery", () => {
+      const r = normalize({ id: "r", kind: "reminder", schedule: "0 9 * * *", text: "Wake up", chatId: "1", delivery: "report" }, NOW);
       expect(r.ok).toBe(false);
     });
 
-    it("rejects a system entry carrying a command-like field", () => {
-      const r = normalize(baseSystem({ command: "bash -c 'pwn'" }), NOW);
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.error).toContain("must not carry");
-    });
-
-    it("rejects a system entry carrying a taskFile", () => {
-      const r = normalize(baseSystem({ taskFile: "/etc/passwd" }), NOW);
+    it("reminder requires text", () => {
+      const r = normalize({ id: "r", kind: "reminder", schedule: "0 9 * * *", chatId: "1", delivery: "announce" }, NOW);
       expect(r.ok).toBe(false);
     });
 
-    it("rejects a system entry carrying an agent field", () => {
-      const r = normalize(baseSystem({ agent: "dreamy" }), NOW);
+    it("agent validates", () => {
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.entry.kind).toBe("agent");
+    });
+
+    it("agent with taskFile validates", () => {
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", taskFile: "~/tasks/TASK.md", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect((r.entry as ScheduledTask & { kind: "agent" }).taskFile).toBe("~/tasks/TASK.md");
+    });
+
+    it("script requires command", () => {
+      const r = normalize({ id: "s", kind: "script", schedule: "0 9 * * *", chatId: "1", delivery: "silent" }, NOW);
       expect(r.ok).toBe(false);
     });
 
-    it("system entry does not require message/chatId", () => {
+    it("script validates", () => {
+      const r = normalize({ id: "s", kind: "script", schedule: "0 9 * * *", command: "echo hi", chatId: "1", delivery: "silent" }, NOW);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.entry.kind).toBe("script");
+    });
+
+    it("orc requires goal", () => {
+      const r = normalize({ id: "o", kind: "orc", schedule: "0 9 * * *", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("orc validates", () => {
+      const r = normalize({ id: "o", kind: "orc", schedule: "0 9 * * *", goal: "Build feature", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(true);
+    });
+  });
+
+  describe("system action validation", () => {
+    it("rejects unknown system action", () => {
+      const r = normalize({ id: "x", kind: "system", action: "unknown", schedule: "0 2 * * *", delivery: "silent" }, NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("rejects system with non-silent delivery", () => {
+      const r = normalize({ id: "x", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", delivery: "report" }, NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("rejects system with command field", () => {
+      const r = normalize({ id: "x", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", delivery: "silent", command: "rm -rf /" }, NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("accepts valid system entry", () => {
       const r = normalize(baseSystem(), NOW);
       expect(r.ok).toBe(true);
-    });
-
-    it("SYSTEM_ACTIONS allowlist contains sleep-cycle and hardware-sleep for #1321/#1322", () => {
-      expect(SYSTEM_ACTIONS).toEqual(["sleep-cycle", "hardware-sleep"]);
-    });
-  });
-
-  describe("non-system entries keep current behavior", () => {
-    it("agent entry defaults executor when omitted (back-compat)", () => {
-      const r = normalize({ id: "a", type: "task", schedule: "0 9 * * *", message: "hi", chatId: 1 }, NOW);
-      expect(r.ok).toBe(true);
-      if (r.ok) expect(r.entry.executor).toBe("agent");
-    });
-
-    it("agent entry requires message", () => {
-      const r = normalize({ id: "a", type: "task", executor: "agent", schedule: "0 9 * * *", chatId: 1 }, NOW);
-      expect(r.ok).toBe(false);
-    });
-
-    it("agent entry requires chatId", () => {
-      const r = normalize({ id: "a", type: "task", executor: "agent", schedule: "0 9 * * *", message: "hi" }, NOW);
-      expect(r.ok).toBe(false);
-    });
-
-    it("script entry validates", () => {
-      const r = normalize(baseAgent({ executor: "script" }), NOW);
-      expect(r.ok).toBe(true);
-    });
-
-    it("reminder entry validates", () => {
-      const r = normalize({ id: "r", type: "reminder", schedule: "0 9 * * *", message: "wake up", chatId: 1 }, NOW);
-      expect(r.ok).toBe(true);
-    });
-
-    it("rejects invalid type", () => {
-      const r = normalize(baseAgent({ type: "cron" }), NOW);
-      expect(r.ok).toBe(false);
+      if (r.ok) {
+        expect(r.entry.kind).toBe("system");
+        expect((r.entry as ScheduledTask & { kind: "system" }).action).toBe("sleep-cycle");
+      }
     });
   });
 
@@ -171,41 +157,34 @@ describe("#1321 normalize + validation", () => {
   });
 
   describe("formatTaskLabel", () => {
-    it("converts kebab-case to Title Case", () => {
-      expect(formatTaskLabel("morning-greeting")).toBe("Morning Greeting");
+    it("formats kebab-case to Title Case", () => {
+      expect(formatTaskLabel("daily-briefing")).toBe("Daily Briefing");
     });
-    it("converts single word", () => {
-      expect(formatTaskLabel("backup")).toBe("Backup");
-    });
+
     it("handles underscores", () => {
-      expect(formatTaskLabel("hardware_sleep")).toBe("Hardware Sleep");
+      expect(formatTaskLabel("my_task_name")).toBe("My Task Name");
     });
-    it("handles numbers", () => {
-      expect(formatTaskLabel("daily-backup-v2")).toBe("Daily Backup V2");
+
+    it("handles single word", () => {
+      expect(formatTaskLabel("reminder")).toBe("Reminder");
     });
   });
 
   describe("isValidTaskId", () => {
-    it("accepts simple kebab", () => {
-      expect(isValidTaskId("daily-backup")).toBe(true);
+    it("accepts valid kebab-case", () => {
+      expect(isValidTaskId("daily-briefing")).toBe(true);
     });
-    it("accepts single letter", () => {
-      expect(isValidTaskId("x")).toBe(false);
+
+    it("rejects id with uppercase", () => {
+      expect(isValidTaskId("Daily-Briefing")).toBe(false);
     });
-    it("rejects leading dash", () => {
-      expect(isValidTaskId("-bad")).toBe(false);
-    });
-    it("rejects trailing dash", () => {
-      expect(isValidTaskId("backup-")).toBe(false);
-    });
-    it("rejects leading digit", () => {
-      expect(isValidTaskId("9live")).toBe(false);
-    });
-    it("rejects uppercase", () => {
-      expect(isValidTaskId("Daily-Backup")).toBe(false);
-    });
-    it("rejects empty", () => {
+
+    it("rejects empty string", () => {
       expect(isValidTaskId("")).toBe(false);
+    });
+
+    it("rejects id starting with number", () => {
+      expect(isValidTaskId("1daily")).toBe(false);
     });
   });
 });

@@ -11,7 +11,7 @@
  */
 
 import { logInfo, logWarn } from "../logger.js";
-import type { CronEntry, SystemTaskAction } from "./task-types.js";
+import type { ScheduledTask, SystemTaskAction } from "./task-types.js";
 
 const TAG = "system-task";
 
@@ -23,7 +23,7 @@ export type SystemTaskResult =
   | { status: "failed"; error: string };
 
 /** A handler for one allowlisted action. Returns promptly. */
-export type SystemTaskHandler = (entry: Readonly<CronEntry>) => SystemTaskResult | Promise<SystemTaskResult>;
+export type SystemTaskHandler = (entry: Readonly<ScheduledTask>) => SystemTaskResult | Promise<SystemTaskResult>;
 
 /**
  * Registry of allowlisted in-process actions. One instance per bridge. Handlers
@@ -49,8 +49,8 @@ export class SystemTaskRegistry {
   }
 
   /** Dispatch a validated system entry to its handler. */
-  async dispatch(entry: Readonly<CronEntry>): Promise<SystemTaskResult> {
-    if (entry.executor !== "system" || !entry.action) {
+  async dispatch(entry: Readonly<ScheduledTask>): Promise<SystemTaskResult> {
+    if (entry.kind !== "system" || !entry.action) {
       return { status: "failed", error: `entry is not a system task` };
     }
     const handler = this.handlers.get(entry.action);

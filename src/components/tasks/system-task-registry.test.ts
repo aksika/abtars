@@ -7,19 +7,17 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { getSystemTaskRegistry, _resetSystemTaskRegistry, type SystemTaskResult } from "./system-task-registry.js";
-import type { CronEntry } from "./task-types.js";
+import type { ScheduledTask } from "./task-types.js";
 
-function systemEntry(overrides: Partial<CronEntry> = {}): CronEntry {
+function systemEntry(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
   return {
     id: "sleep-cycle",
-    fireAt: Date.now(),
-    message: "",
-    chatId: 0,
-    type: "task",
-    executor: "system",
+    kind: "system",
     action: "sleep-cycle",
-    fired: false,
-    createdAt: Date.now(),
+    schedule: "0 2 * * *",
+    enabled: true,
+    priority: "medium",
+    delivery: "silent",
     ...overrides,
   };
 }
@@ -29,16 +27,16 @@ describe("#1321 SystemTaskRegistry", () => {
 
   it("dispatches a registered action and returns its result", async () => {
     const reg = getSystemTaskRegistry();
-    let seen: CronEntry | null = null;
+    let seen: ScheduledTask | null = null;
     reg.register("sleep-cycle", (entry) => {
-      seen = entry as CronEntry;
+      seen = entry as ScheduledTask;
       return { status: "accepted", detail: "started" };
     });
     const entry = systemEntry();
     const result = await reg.dispatch(entry);
     expect(result).toEqual({ status: "accepted", detail: "started" });
     expect(seen).not.toBeNull();
-    expect((seen as CronEntry).id).toBe("sleep-cycle");
+    expect((seen as ScheduledTask).id).toBe("sleep-cycle");
   });
 
   it("rejects duplicate registration", () => {
@@ -84,7 +82,7 @@ describe("#1321 SystemTaskRegistry", () => {
   it("rejects a non-system entry", async () => {
     const reg = getSystemTaskRegistry();
     reg.register("sleep-cycle", () => ({ status: "accepted" }));
-    const result = await reg.dispatch(systemEntry({ executor: "agent" }));
+    const result = await reg.dispatch(systemEntry({ kind: "agent" }));
     expect(result.status).toBe("failed");
   });
 });
