@@ -78,10 +78,8 @@ describe("HardwareSleepController", () => {
   });
 
   it("attempt returns noop when outside window", async () => {
-    const past = new Date(Date.now() - 60 * 60 * 1000);
-    const pastStr = `${String(past.getHours()).padStart(2, "0")}:${String(past.getMinutes()).padStart(2, "0")}`;
     const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), new PowerTransitionStore());
-    const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: pastStr, expectedWakeTime: "07:55" } as any;
+    const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "00:00", expectedWakeTime: "07:55" } as any;
     const r = await ctrl.attempt(entry);
     expect(r.status).toBe("noop");
   });
