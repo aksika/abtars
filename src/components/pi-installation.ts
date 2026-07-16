@@ -44,7 +44,7 @@ export function clearPiCache(): void {
 /**
  * Resolve a `pi` executable path without a shell.
  */
-function resolvePiFromPath(): string | null {
+export function resolvePiFromPath(): string | null {
   const pathDirs = (process.env.PATH ?? "").split(":").filter(Boolean);
   for (const dir of pathDirs) {
     const candidate = join(dir, "pi");

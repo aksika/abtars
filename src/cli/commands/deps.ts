@@ -11,7 +11,7 @@ import {
   readManifest, createEmptyManifest, writeManifest, addConsumer, removeConsumer,
 } from "../deploy-lib/shared-native-deps-manifest.js";
 import {
-  resolvePiInstallation, clearPiCache,
+  resolvePiInstallation, clearPiCache, resolvePiFromPath,
 } from "../../components/pi-installation.js";
 import { PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
 
@@ -267,19 +267,37 @@ function piInstall(): MutationResult {
     }
 
     clearPiCache();
-    const piState = observePi();
-    if (piState.state !== "compatible") {
-      const binDir = findNpmGlobalBin();
-      if (binDir) {
-        process.stdout.write(
-          `Pi installed but not on PATH. Add to your shell profile:\n` +
-          `  export PATH="${binDir}:$PATH"\n`,
-        );
-      }
-      return { group: "pi", ok: false, error: `Pi installation not found on PATH after install` };
+
+    // Try PATH-based discovery first
+    const fromPath = resolvePiFromPath();
+    if (fromPath) {
+      // Re-check with the found executable
+      const piState = observePi();
+      if (piState.state === "compatible") return { group: "pi", ok: true };
     }
 
-    return { group: "pi", ok: true };
+    // PATH didn't have it — try the npm global bin dir directly
+    const binDir = findNpmGlobalBin();
+    if (binDir) {
+      const piInBin = join(binDir, "pi");
+      if (existsSync(piInBin)) {
+        process.stdout.write(
+          `Pi installed at ${piInBin} but not on current PATH.\n` +
+          `Add to your shell profile:\n  export PATH="${binDir}:$PATH"\n`,
+        );
+        return { group: "pi", ok: true };
+      }
+    }
+
+    // Could not locate pi anywhere — report failure
+    if (binDir) {
+      process.stdout.write(
+        `Pi not found on PATH after install.\n` +
+        `The npm global bin directory is ${binDir}.\n` +
+        `Add it to your shell profile:\n  export PATH="${binDir}:$PATH"\n`,
+      );
+    }
+    return { group: "pi", ok: false, error: `Pi installation not found on PATH. Ensure npm global bin is in your PATH.` };
   } catch (err) {
     return { group: "pi", ok: false, error: err instanceof Error ? err.message : String(err) };
   } finally {
@@ -297,6 +315,19 @@ function findNpmGlobalBin(): string | null {
     if (result.status === 0) {
       const dir = (result.stdout ?? "").trim();
       if (dir && existsSync(dir)) return dir;
+    }
+    // Fallback: npm config get prefix + /bin
+    const prefixResult = spawnSync("npm", ["config", "get", "prefix"], {
+      stdio: "pipe",
+      shell: false,
+      encoding: "utf-8",
+    });
+    if (prefixResult.status === 0) {
+      const prefix = (prefixResult.stdout ?? "").trim();
+      if (prefix) {
+        const binDir = join(prefix, "bin");
+        if (existsSync(binDir)) return binDir;
+      }
     }
   } catch {
     // ignore
