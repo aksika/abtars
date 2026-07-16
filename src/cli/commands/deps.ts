@@ -17,10 +17,10 @@ import { existsSync, rmSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import {
   acquireLock, releaseLock, generateLockToken,
-} from "abmind/deploy-lib/shared-native-deps-lock.js";
+} from "../deploy-lib/shared-native-deps-lock.js";
 import {
   readManifest, createEmptyManifest, writeManifest, addConsumer, removeConsumer,
-} from "abmind/deploy-lib/shared-native-deps-manifest.js";
+} from "../deploy-lib/shared-native-deps-manifest.js";
 
 // ── Observation types ─────────────────────────────────────────────────────────
 

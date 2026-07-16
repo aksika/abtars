@@ -424,16 +424,17 @@ async function probePiCompatibility(): Promise<ProbeResult> {
   }
 }
 
+interface SharedDepsModule {
+  diagnoseSharedNativeDeps: () => { manifestGeneration: number; packageCount: number; lockHeld: boolean; lockOwner: string | null; packages: Array<{ name: string; onDisk: boolean }> };
+}
+
 /** Import `diagnoseSharedNativeDeps` from abmind's deploy-lib using active discovery. */
-async function importSharedDepsModule(): Promise<{ diagnoseSharedNativeDeps: () => import("abmind/deploy-lib/shared-native-deps.js").SharedNativeDepsStatus }> {
+async function importSharedDepsModule(): Promise<SharedDepsModule> {
   const abmindDir = resolveAbmindPackageDir();
-  if (abmindDir) {
-    const modPath = join(abmindDir, "dist", "src", "deploy-lib", "shared-native-deps.js");
-    if (existsSync(modPath)) {
-      return import(pathToFileURL(modPath).href);
-    }
-  }
-  return import("abmind/deploy-lib/shared-native-deps.js");
+  if (!abmindDir) throw new Error("abmind not found");
+  const modPath = join(abmindDir, "dist", "src", "deploy-lib", "shared-native-deps.js");
+  if (!existsSync(modPath)) throw new Error(`shared-native-deps.js not found at ${modPath}`);
+  return import(pathToFileURL(modPath).href) as Promise<SharedDepsModule>;
 }
 
 // ── Runner ───────────────────────────────────────────────────────────────────

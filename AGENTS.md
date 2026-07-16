@@ -47,7 +47,7 @@ adding a row, not a new method or branch.
 - `vitest.config.ts` aliases `abmind` → `../abmind/dist/src/index.js`
 - `tsconfig.json` paths `abmind` → `../abmind/dist/src/index.d.ts`
 - **You must build abmind first** (`cd ../abmind && npm run build`) before abmind-dependent tests pass.
-- `npm run check-imports` enforces: no direct `import ... from "abmind/..."` except `abmind/deploy-lib`. All other access goes through `src/utils/abmind-lazy.ts`.
+- `npm run check-imports` enforces: no runtime imports from `abmind/*`. Only `import type` and `src/utils/abmind-lazy.ts` are permitted.
 
 ## Testing patterns
 
