@@ -243,7 +243,8 @@ export class PiRunService {
  */
 function resolveCodingModel(): PiModelSelection | undefined {
   try {
-    const agent = resolveAgent("cody");
+    let agent = resolveAgent("cody");
+    if (!agent) agent = resolveAgent("main");
     if (!agent) {
       logDebug(TAG, "No coding model assignment configured — Pi will use its default model");
       return undefined;

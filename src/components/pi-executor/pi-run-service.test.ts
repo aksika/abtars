@@ -249,6 +249,21 @@ describe("PiRunService.run()", () => {
     expect(record.modelId).toBeUndefined();
   });
 
+  it("falls back to main model when coding agent not configured (#1440)", async () => {
+    // Return null on first call (cody), main model on second
+    mockResolveAgent
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce({ providerName: "openai", model: "gpt-4o-main" });
+    const svc = makeService();
+    const { runId } = await svc.run(
+      { goal: "fallback to main", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
+    );
+    const record = svc.store.get(runId)!;
+    expect(record.modelProvider).toBe("openai");
+    expect(record.modelId).toBe("gpt-4o-main");
+  });
+
   it("persists resolved model durably across config changes (#1440)", async () => {
     mockResolveAgent.mockReturnValue({ providerName: "openai", model: "gpt-4o" });
     const svc = makeService();
