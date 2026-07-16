@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
-import { incrementFailures, resetFailures, setAutoPaused, setRetrying } from "./task-state-store.js";
+import { incrementFailures, resetFailures, setAutoPaused, setRetrying, advanceNextRun, updateState, readState } from "./task-state-store.js";
 import { appendRun } from "./task-history-store.js";
 import { kanbanComplete, kanbanFail } from "./kanban-board.js";
 import type { ScheduledTask } from "./task-types.js";
@@ -54,6 +54,14 @@ function getEntryMessage(entry: ScheduledTask): string {
   if (entry.kind === "orc") return entry.goal;
   if (entry.kind === "system") return entry.action;
   return "";
+}
+
+function settleRun(entry: ScheduledTask, outcome: "success" | "failed" | "noop" | "deferred" | "skipped", startedAt: number, detail?: string, resultPath?: string, kanbanCardId?: number, trigger: "schedule" | "manual" | "retry" = "schedule"): void {
+  appendRun({ taskId: entry.id, kind: entry.kind, trigger, startedAt, finishedAt: Date.now(), outcome, detail, resultPath, kanbanCardId });
+  updateState(entry.id, { lastFinishedAt: Date.now() });
+  if (outcome === "success" || outcome === "noop" || outcome === "deferred") {
+    advanceNextRun(entry.id, entry.schedule);
+  }
 }
 
 function writeResultFile(entryId: string, content: string): string | null {
@@ -162,20 +170,6 @@ function scheduleRetry(entry: ScheduledTask, isRetry: boolean): void {
   logInfo(TAG, `Scheduled retry for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
 }
 
-function recordSettledRun(entry: ScheduledTask, outcome: "success" | "failed" | "noop" | "deferred" | "skipped", startedAt: number, detail?: string, resultPath?: string, kanbanCardId?: number): void {
-  appendRun({
-    taskId: entry.id,
-    kind: entry.kind,
-    trigger: "schedule",
-    startedAt,
-    finishedAt: Date.now(),
-    outcome,
-    detail,
-    resultPath,
-    kanbanCardId,
-  });
-}
-
 export type TaskCompleteCallback = (chatId: number, message: string, result: string, dodFiles?: string[]) => void;
 export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
 export type TaskPausedCallback = (chatId: number, title: string, reason: string) => void;
@@ -192,6 +186,7 @@ export interface RunningJob {
   pid: number;
   startedAt: number;
   type: "script" | "agent" | "system";
+  manual?: boolean;
 }
 
 export class CronQueue {
@@ -246,29 +241,30 @@ export class CronQueue {
   private processNext(): void {
     if (this.queue.length === 0) return;
     const job = this.queue.shift()!;
-    const { entry } = job;
+    const { entry, manual } = job;
 
     if (isSystemEntry(entry)) {
-      this.runSystem(entry);
+      this.runSystem(entry, manual);
     } else if (entry.kind === "script") {
-      this.runScript(entry, job.onComplete);
+      this.runScript(entry, job.onComplete, manual);
     } else if (entry.kind === "orc") {
-      this.runOrc(entry);
+      this.runOrc(entry, manual);
     } else if (entry.kind === "agent") {
-      this.runAgent(entry, job.onComplete, job.manual);
+      this.runAgent(entry, job.onComplete, manual);
     } else if (entry.kind === "reminder") {
       logInfo(TAG, `Reminder "${entry.id}" already delivered — skipping`);
       this.processNext();
     }
   }
 
-  private setCurrent(entry: ScheduledTask, pid: number, type: "script" | "agent" | "system"): void {
+  private setCurrent(entry: ScheduledTask, pid: number, type: "script" | "agent" | "system", manual?: boolean): void {
     this._current = {
       entryId: entry.id,
       message: getEntryMessage(entry).slice(0, 80),
       pid,
       startedAt: Date.now(),
       type,
+      manual,
     };
     persistState(this._current, this.queue);
   }
@@ -310,23 +306,30 @@ export class CronQueue {
     return false;
   }
 
-  private async runSystem(entry: ScheduledTask & { kind: "system" }): Promise<void> {
+  private trigger(): "schedule" | "manual" | "retry" {
+    if (this._current?.manual) return "manual";
+    const state = readState(this._current?.entryId ?? "");
+    if (state?.retrying) return "retry";
+    return "schedule";
+  }
+
+  private async runSystem(entry: ScheduledTask & { kind: "system" }, manual?: boolean): Promise<void> {
     logInfo(TAG, `▶ System: "${entry.action}" (${entry.id})`);
-    this.setCurrent(entry, 0, "system");
+    this.setCurrent(entry, 0, "system", manual);
     try {
       const result = await getSystemTaskRegistry().dispatch(entry);
       if (result.status === "deferred") {
-        recordSettledRun(entry, "deferred", this._current?.startedAt ?? Date.now(), result.detail);
+        settleRun(entry, "deferred", this._current?.startedAt ?? Date.now(), result.detail, undefined, undefined, this.trigger());
         logInfo(TAG, `⏸ Deferred: "${entry.action}" (${entry.id}) — retry at ${new Date(result.retryAt).toISOString()}: ${result.detail}`);
         setRetrying(entry.id, true, result.retryAt);
       } else if (result.status === "noop") {
-        recordSettledRun(entry, "noop", this._current?.startedAt ?? Date.now(), result.detail);
+        settleRun(entry, "noop", this._current?.startedAt ?? Date.now(), result.detail, undefined, undefined, this.trigger());
         const detail = result.detail ? ` — ${result.detail}` : "";
         logInfo(TAG, `■ System noop: "${entry.action}" (${entry.id})${detail}`);
       } else {
         const ok = result.status === "accepted";
         const detail = ok ? (result as { status: "accepted"; detail?: string }).detail : (result as { status: "failed"; error: string }).error;
-        recordSettledRun(entry, ok ? "success" : "failed", this._current?.startedAt ?? Date.now(), detail);
+        settleRun(entry, ok ? "success" : "failed", this._current?.startedAt ?? Date.now(), detail, undefined, undefined, this.trigger());
         logInfo(TAG, `■ System ${ok ? "✓" : "❌"}: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
         if (!ok) {
           this.checkAutoPause(entry, 1, detail ?? "");
@@ -336,7 +339,7 @@ export class CronQueue {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `System dispatch error for "${entry.action}": ${msg}`);
-      recordSettledRun(entry, "failed", this._current?.startedAt ?? Date.now(), msg);
+      settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), msg, undefined, undefined, this.trigger());
       this.checkAutoPause(entry, 1, msg);
       scheduleRetry(entry, false);
     } finally {
@@ -345,7 +348,7 @@ export class CronQueue {
     }
   }
 
-  private runOrc(entry: ScheduledTask & { kind: "orc" }): void {
+  private runOrc(entry: ScheduledTask & { kind: "orc" }, _manual?: boolean): void {
     logInfo(TAG, `▶ Orc: "${entry.goal.slice(0, 60)}"`);
     import("../spin.js").then(({ spin }) => {
       spin.dispatch({ type: "O", goal: entry.goal, source: "task", priority: entry.priority ?? "MEDIUM" });
@@ -358,11 +361,11 @@ export class CronQueue {
     });
   }
 
-  private runScript(entry: ScheduledTask & { kind: "script" }, onComplete?: TaskCompleteCallback): void {
+  private runScript(entry: ScheduledTask & { kind: "script" }, onComplete?: TaskCompleteCallback, manual?: boolean): void {
     logInfo(TAG, `▶ Script: "${entry.command.slice(0, 60)}"`);
     try {
       const child = spawn("bash", ["-c", entry.command], { stdio: ["ignore", "pipe", "pipe"] });
-      this.setCurrent(entry, child.pid ?? 0, "script");
+      this.setCurrent(entry, child.pid ?? 0, "script", manual);
 
       let output = "";
       child.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
@@ -371,7 +374,7 @@ export class CronQueue {
       child.on("exit", (code) => {
         const status = code === 0 ? "✓" : `❌ (exit ${code})`;
         logInfo(TAG, `■ Script ${status}: "${entry.command.slice(0, 60)}"`);
-        recordSettledRun(entry, code === 0 ? "success" : "failed", this._current?.startedAt ?? Date.now(), output.slice(0, 200));
+        settleRun(entry, code === 0 ? "success" : "failed", this._current?.startedAt ?? Date.now(), output.slice(0, 200), undefined, undefined, this.trigger());
         const paused = this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
         const followUp = entry.followUp;
         if (code === 0 && output.trim() && followUp) {
@@ -459,19 +462,19 @@ export class CronQueue {
     logInfo(TAG, `▶ Agent: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
 
     if (entry.targetUserId) {
-      this.setCurrent(entry, 0, "agent");
+      this.setCurrent(entry, 0, "agent", manual);
       try {
         const { spin } = await import("../spin.js");
         const response = await spin.injectGreeting(entry.targetUserId, prompt);
         if (response) {
-          recordSettledRun(entry, "success", this._current?.startedAt ?? Date.now());
+          settleRun(entry, "success", this._current?.startedAt ?? Date.now(), undefined, undefined, undefined, this.trigger());
           logInfo(TAG, `✓ Greeting delivered to ${entry.targetUserId}`);
         } else {
-          recordSettledRun(entry, "failed", this._current?.startedAt ?? Date.now(), "greeting returned no response");
+          settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), "greeting returned no response", undefined, undefined, this.trigger());
           logWarn(TAG, `Greeting failed for ${entry.targetUserId}`);
         }
       } catch (err) {
-        recordSettledRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err));
+        settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err), undefined, undefined, this.trigger());
         logWarn(TAG, `Greeting error: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         this.clearCurrent();
@@ -480,7 +483,7 @@ export class CronQueue {
       return;
     }
 
-    this.setCurrent(entry, 0, "agent");
+    this.setCurrent(entry, 0, "agent", manual);
 
     const workspace = join(abtarsHome(), "workspace", entry.id);
     mkdirSync(workspace, { recursive: true });
@@ -493,7 +496,9 @@ export class CronQueue {
     }, AGENT_TIMEOUT_MS);
 
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
-    const sessionType = (AGENT_SESSION[entry.agent ?? ""] ?? "T") as import("../spin-types.js").SessionType;
+    const sessionType = entry.agent && AGENT_SESSION[entry.agent]
+      ? AGENT_SESSION[entry.agent] as import("../spin-types.js").SessionType
+      : "T" as import("../spin-types.js").SessionType;
 
     spin.dispatchAwait({
       type: sessionType,
@@ -503,6 +508,7 @@ export class CronQueue {
       priority: entry.priority ?? "MEDIUM",
       chatId: String(entry.chatId),
       maxToolRounds: entry.maxToolRounds,
+      delivery: entry.delivery,
     })
       .then(({ cardId: boardId, result: response }) => {
         let cleaned = response || "(no output)";
@@ -536,7 +542,7 @@ export class CronQueue {
           kanbanFail(boardId, `${summary}${dodResult}`);
         }
 
-        recordSettledRun(entry, exitCode === 0 ? "success" : "failed", this._current?.startedAt ?? Date.now(), `${summary}${dodResult}`, resultPath ?? undefined, boardId);
+        settleRun(entry, exitCode === 0 ? "success" : "failed", this._current?.startedAt ?? Date.now(), `${summary}${dodResult}`, resultPath ?? undefined, boardId, this.trigger());
         const paused = this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
         const icon = exitCode === 0 ? "✓" : "❌";
         if (exitCode !== 0) {
@@ -552,7 +558,7 @@ export class CronQueue {
         const boardId = 0;
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
         kanbanFail(boardId, err instanceof Error ? err.message : String(err));
-        recordSettledRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err), undefined, boardId);
+        settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err), undefined, boardId, this.trigger());
         const paused = this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
         scheduleRetry(entry, false);
         if (!paused) {

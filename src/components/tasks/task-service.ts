@@ -48,6 +48,7 @@ export function triggerNow(taskId: string, tasks: ScheduledTask[]): boolean {
   if (!task) return false;
   const now = Date.now();
   stateStore.updateState(taskId, { nextRunAt: now - 1000 });
+  stateStore.setAutoPaused(taskId, false);
   return true;
 }
 

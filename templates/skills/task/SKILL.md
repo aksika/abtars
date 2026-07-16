@@ -6,11 +6,13 @@ Create, edit, and manage scheduled tasks. Tasks live at `~/.abtars/tasks/` — e
 
 ```
 ~/.abtars/tasks/
-├── tasks.json              # Registry: schedule, executor, taskFile path
+├── tasks.json              # Registry: schedule, kind, taskFile path (definitions only)
+├── task-state.json          # Runtime state (auto-managed, do not edit)
+├── task-history.jsonl       # Append-only run log (auto-managed)
 ├── my-task/
-│   ├── TASK.md             # Main prompt (what the agent does)
-│   ├── feeds.json          # Associated data (auto-injected)
-│   └── report-template.md  # Any supporting files
+│   ├── TASK.md              # Main prompt (what the agent does)
+│   ├── feeds.json           # Associated data (auto-injected)
+│   └── report-template.md   # Any supporting files
 ```
 
 All files in a task directory (except TASK.md) are automatically injected as context when the task runs.
@@ -32,11 +34,9 @@ EOF
 ```bash
 abtars-task add \
   --id my-task \
-  --title "My Task" \
   --schedule "0 9 * * *" \
   --message "Run my-task" \
-  --type task \
-  --executor agent \
+  --kind agent \
   --task-file "~/.abtars/tasks/my-task/TASK.md" \
   --chat-id <CHAT_ID>
 ```
@@ -52,40 +52,50 @@ Standard cron: `minute hour day month weekday`
 | `0 0 * * *` | Midnight daily |
 | `0 */6 * * *` | Every 6 hours |
 
-## Executor types
+For one-shot tasks, use `--at "2026-12-25T08:00"` instead of `--schedule`.
 
-| Type | Behavior |
+## Task kinds
+
+| Kind | Behavior |
 |------|----------|
-| `agent` | Agent session runs the TASK.md prompt |
-| `script` | Shell command in `message` field runs directly |
+| `agent` | Agent session runs the prompt or TASK.md |
+| `script` | Shell command runs directly |
+| `reminder` | Simple text reminder at scheduled time |
+| `orc` | Orc project dispatch |
+| `system` | Internal bridge action (sleep-cycle, hardware-sleep) |
 
 ## Delivery modes
 
-Controls how the task result reaches the user. Set `deliveryMode` in tasks.json.
+Set `delivery` in tasks.json. Each kind has a required delivery mode.
 
 | Mode | Behavior | Use for |
 |------|----------|---------|
-| `deliver` | Drop the result file to chat automatically (no LLM) | Reports, generated documents |
-| `announce` | Inject result into agent — agent composes a natural delivery | Greetings, conversational tasks |
-| `silent` | No output to user | Internal housekeeping |
+| `report` | Drop the result file to chat (no model call) | Reports, generated documents |
+| `announce` | Send the agent's response text directly | Greetings, conversational tasks |
+| `silent` | No output to user | Internal housekeeping, scripts |
 
-Default is `deliver` if not specified. Example:
+Example:
 
 ```json
 {
   "id": "finance-report",
-  "deliveryMode": "deliver",
-  "executor": "agent",
-  "schedule": "30 9 * * *"
+  "kind": "agent",
+  "delivery": "report",
+  "schedule": "30 9 * * *",
+  "prompt": "Run the finance report",
+  "chatId": "7773842843",
+  "enabled": true
 }
 ```
 
 ## Managing tasks
 
 ```bash
-abtars-task list                    # Show all tasks
-abtars-task remove --id my-task     # Delete a task
-abtars-task run --id my-task        # Manual trigger
+abtars-task list                # Show all tasks
+abtars-task remove <id>         # Delete a task
+abtars-task pause <id>          # Pause a task
+abtars-task resume <id>         # Resume a paused task
+abtars-task history <id>        # Show run history
 ```
 
 Or via Telegram: `/tasks` (list), `/task run <id>` (trigger), `/task pause <id>`, `/task resume <id>`.
@@ -94,5 +104,5 @@ Or via Telegram: `/tasks` (list), `/task run <id>` (trigger), `/task pause <id>`
 
 - Keep TASK.md focused — one clear instruction per task
 - Put data files (feeds, watchlists, templates) as siblings — they auto-inject
-- Use `--max-runs-per-day 1` to prevent re-firing on restart
-- Script tasks with `agentFollowUp: true` + `agentMessage` field → agent processes the script output
+- Use `schedule` for recurring tasks and `at` for one-shots
+- The DoD section in TASK.md must contain absolute paths only (one per bullet)

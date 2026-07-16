@@ -106,6 +106,9 @@ export function normalize(raw: unknown): NormalizeResult {
   const priority = parsePriority(e["priority"]);
   const chatId = typeof e["chatId"] === "string" ? e["chatId"] : undefined;
   const delivery = e["delivery"];
+  if (delivery !== "report" && delivery !== "announce" && delivery !== "silent") {
+    return { ok: false, error: `invalid delivery "${String(delivery)}" (expected report|announce|silent)`, id };
+  }
 
   const base: TaskBase = {
     id, enabled, priority, chatId,

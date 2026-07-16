@@ -5,7 +5,7 @@ import { abtarsHome } from "../../paths.js";
 import { logInfo } from "../logger.js";
 import { readEntries as dbReadEntries } from "./task-store.js";
 import { advanceNextRun, updateState, readState } from "./task-state-store.js";
-import { todaySuccessCount } from "./task-history-store.js";
+import { todaySuccessCount, appendRun } from "./task-history-store.js";
 import type { ScheduledTask } from "./task-types.js";
 
 const TAG = "cron-checker";
@@ -71,6 +71,7 @@ export function checkCron(): ScheduledTask[] {
 
     if (entry.kind === "reminder") {
       appendReminder({ chatId: parseInt(entry.chatId ?? "0", 10), message: entry.text, createdAt: now });
+      appendRun({ taskId: entry.id, kind: "reminder", trigger: "schedule", startedAt: now, finishedAt: now, outcome: "success" });
       advanceNextRun(entry.id, entry.schedule);
       logInfo(TAG, `⏰ Reminder fired: "${entry.text}"`);
     } else {
