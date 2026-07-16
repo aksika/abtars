@@ -6,8 +6,9 @@ vi.mock("./task-state-store.js", () => ({
   incrementFailures: vi.fn().mockReturnValue(0),
   resetFailures: vi.fn(),
   setAutoPaused: vi.fn(),
-  setRetrying: vi.fn(),
+  advanceNextRun: vi.fn(),
   updateState: vi.fn(),
+  readState: vi.fn(() => null),
 }));
 
 vi.mock("./task-history-store.js", () => ({

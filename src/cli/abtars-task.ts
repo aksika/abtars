@@ -95,7 +95,7 @@ function add(args: string[]): void {
       entry = { ...base, kind: "reminder" as const, text: parsed.message ?? "", delivery: "announce" as const };
       break;
     case "agent":
-      entry = { ...base, kind: "agent" as const, prompt: parsed.message, taskFile: parsed.taskFile, agent: parsed.agent as any, targetUserId: parsed.targetUserId };
+      entry = { ...base, kind: "agent" as const, prompt: parsed.message, taskFile: parsed.taskFile, agent: (parsed.agent as "task" | "professor" | "browsie" | "coding" | "dreamy") || "task", targetUserId: parsed.targetUserId };
       break;
     case "script":
       entry = { ...base, kind: "script" as const, command: parsed.message ?? "" };

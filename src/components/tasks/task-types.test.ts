@@ -10,6 +10,7 @@ function baseAgent(overrides: Record<string, unknown> = {}): Record<string, unkn
     kind: "agent",
     schedule: "0 2 * * *",
     prompt: "do the thing",
+    agent: "task",
     chatId: "100",
     delivery: "report",
     ...overrides,
@@ -40,7 +41,7 @@ describe("normalize + validation", () => {
     });
 
     it("accepts a valid one-shot at", () => {
-      const r = normalize({ id: "s1", kind: "agent", at: "2026-07-12T08:00:00Z", prompt: "test", chatId: "1", delivery: "report" }, NOW);
+      const r = normalize({ id: "s1", kind: "agent", at: "2026-07-12T08:00:00Z", prompt: "test", agent: "task", chatId: "1", delivery: "report" }, NOW);
       expect(r.ok).toBe(true);
     });
 
@@ -83,13 +84,23 @@ describe("normalize + validation", () => {
     });
 
     it("agent validates", () => {
-      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", chatId: "1", delivery: "report" }, NOW);
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", agent: "task", chatId: "1", delivery: "report" }, NOW);
       expect(r.ok).toBe(true);
       if (r.ok) expect(r.entry.kind).toBe("agent");
     });
 
+    it("agent requires an explicit agent field", () => {
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("agent rejects an unknown agent value", () => {
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", agent: "wizard", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(false);
+    });
+
     it("agent with taskFile validates", () => {
-      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", taskFile: "~/tasks/TASK.md", chatId: "1", delivery: "report" }, NOW);
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", taskFile: "~/tasks/TASK.md", agent: "task", chatId: "1", delivery: "report" }, NOW);
       expect(r.ok).toBe(true);
       if (r.ok) expect((r.entry as ScheduledTask & { kind: "agent" }).taskFile).toBe("~/tasks/TASK.md");
     });

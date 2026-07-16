@@ -26,15 +26,15 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     return;
   }
 
-  // "deliver" or "report" — send file (if any) + plain text, no host path
+  // "report" (also stored as legacy "deliver"): attach the artifact exactly once —
+  // no generic confirmation text and no host path. Fall back to a plain completion
+  // message only when there is no artifact to send.
   if (card.result_path) {
-    const caption = card.title;
-    await deps.sendDocument(chatId, card.result_path, caption);
+    await deps.sendDocument(chatId, card.result_path, card.title);
+    kanbanMarkDelivered(card.id);
+    return;
   }
   const summary = card.result_summary ? `\n\n${card.result_summary}` : "";
-  const msg = card.result_path
-    ? `✅ "${card.title}" complete.${summary}`
-    : `✅ "${card.title}" complete.${summary}`;
-  await deps.sendMessage(chatId, msg);
+  await deps.sendMessage(chatId, `✅ "${card.title}" complete.${summary}`);
   kanbanMarkDelivered(card.id);
 }

@@ -4,6 +4,7 @@
     "kind": "agent",
     "schedule": "0 9 * * *",
     "prompt": "Run the daily report",
+    "agent": "task",
     "chatId": "7773842843",
     "delivery": "report",
     "priority": "medium",

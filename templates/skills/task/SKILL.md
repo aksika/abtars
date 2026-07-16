@@ -37,6 +37,7 @@ abtars-task add \
   --schedule "0 9 * * *" \
   --message "Run my-task" \
   --kind agent \
+  --agent task \
   --task-file "~/.abtars/tasks/my-task/TASK.md" \
   --chat-id <CHAT_ID>
 ```
@@ -80,6 +81,7 @@ Example:
 {
   "id": "finance-report",
   "kind": "agent",
+  "agent": "task",
   "delivery": "report",
   "schedule": "30 9 * * *",
   "prompt": "Run the finance report",

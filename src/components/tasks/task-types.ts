@@ -32,7 +32,7 @@ export type ScheduledTask =
       kind: "agent";
       prompt?: string;
       taskFile?: string;
-      agent?: "task" | "professor" | "browsie" | "coding" | "dreamy";
+      agent: "task" | "professor" | "browsie" | "coding" | "dreamy";
       maxToolRounds?: number;
       targetUserId?: string;
     })
@@ -129,8 +129,10 @@ export function normalize(raw: unknown): NormalizeResult {
       const taskFile = typeof e["taskFile"] === "string" ? e["taskFile"] : undefined;
       const prompt = typeof e["prompt"] === "string" ? e["prompt"] : undefined;
       const agentRaw = e["agent"];
-      const agent = typeof agentRaw === "string" && ["task", "professor", "browsie", "coding", "dreamy"].includes(agentRaw)
-        ? agentRaw as "task" | "professor" | "browsie" | "coding" | "dreamy" : undefined;
+      if (typeof agentRaw !== "string" || !["task", "professor", "browsie", "coding", "dreamy"].includes(agentRaw)) {
+        return { ok: false, error: `agent is required for agent kind and must be one of: task, professor, browsie, coding, dreamy`, id };
+      }
+      const agent = agentRaw as "task" | "professor" | "browsie" | "coding" | "dreamy";
       const maxToolRounds = typeof e["maxToolRounds"] === "number" ? e["maxToolRounds"] as number : undefined;
       const targetUserId = typeof e["targetUserId"] === "string" ? e["targetUserId"] : undefined;
       return {

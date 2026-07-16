@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
-import { incrementFailures, resetFailures, setAutoPaused, setRetrying, advanceNextRun, updateState, readState } from "./task-state-store.js";
+import { incrementFailures, resetFailures, setAutoPaused, advanceNextRun, updateState, readState } from "./task-state-store.js";
 import { appendRun } from "./task-history-store.js";
 import { kanbanComplete, kanbanFail } from "./kanban-board.js";
 import type { ScheduledTask } from "./task-types.js";
@@ -56,11 +56,30 @@ function getEntryMessage(entry: ScheduledTask): string {
   return "";
 }
 
+/**
+ * Single settlement point for a run. Appends history and updates the scheduling
+ * cursor. `nextRunAt` is the sole source of truth for the next fire time:
+ *  - success/noop/skipped: advance a recurring task to its next cron occurrence
+ *    (or mark a one-shot completed) and clear any retry flag from a prior failure;
+ *  - deferred: the caller reschedules nextRunAt to the deferral time — do not advance;
+ *  - failed (recurring): reschedule as a bounded retry (checkAutoPause caps attempts);
+ *  - failed (one-shot): terminal — mark completed so it never re-fires.
+ */
 function settleRun(entry: ScheduledTask, outcome: "success" | "failed" | "noop" | "deferred" | "skipped", startedAt: number, detail?: string, resultPath?: string, kanbanCardId?: number, trigger: "schedule" | "manual" | "retry" = "schedule"): void {
-  appendRun({ taskId: entry.id, kind: entry.kind, trigger, startedAt, finishedAt: Date.now(), outcome, detail, resultPath, kanbanCardId });
-  updateState(entry.id, { lastFinishedAt: Date.now() });
-  if (outcome === "success" || outcome === "noop" || outcome === "deferred") {
+  const finishedAt = Date.now();
+  appendRun({ taskId: entry.id, kind: entry.kind, trigger, startedAt, finishedAt, outcome, detail, resultPath, kanbanCardId });
+
+  if (outcome === "success" || outcome === "noop" || outcome === "skipped") {
     advanceNextRun(entry.id, entry.schedule);
+    updateState(entry.id, { lastFinishedAt: finishedAt, retrying: false });
+  } else if (outcome === "deferred") {
+    updateState(entry.id, { lastFinishedAt: finishedAt });
+  } else if (entry.schedule) {
+    const retryAt = finishedAt + RETRY_DELAY_MS;
+    updateState(entry.id, { lastFinishedAt: finishedAt, nextRunAt: retryAt, retryAt, retrying: true });
+    logInfo(TAG, `Retry scheduled for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
+  } else {
+    updateState(entry.id, { lastFinishedAt: finishedAt, completed: true });
   }
 }
 
@@ -164,10 +183,13 @@ function checkDoD(paths: string[]): { passed: boolean; details: string } {
   return { passed: allPassed, details: results.join("\n") };
 }
 
-function scheduleRetry(entry: ScheduledTask, isRetry: boolean): void {
-  if (!entry.schedule || isRetry) return;
-  setRetrying(entry.id, true, Date.now() + RETRY_DELAY_MS);
-  logInfo(TAG, `Scheduled retry for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
+/** Push nextRunAt out by the retry delay for a recurring task. Used by the
+ *  idle-gate deferral, which is not a settled run (the task never executed). */
+function scheduleRetry(entry: ScheduledTask): void {
+  if (!entry.schedule) return;
+  const retryAt = Date.now() + RETRY_DELAY_MS;
+  updateState(entry.id, { nextRunAt: retryAt, retryAt, retrying: true });
+  logInfo(TAG, `Retry scheduled for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
 }
 
 export type TaskCompleteCallback = (chatId: number, message: string, result: string, dodFiles?: string[]) => void;
@@ -321,7 +343,7 @@ export class CronQueue {
       if (result.status === "deferred") {
         settleRun(entry, "deferred", this._current?.startedAt ?? Date.now(), result.detail, undefined, undefined, this.trigger());
         logInfo(TAG, `⏸ Deferred: "${entry.action}" (${entry.id}) — retry at ${new Date(result.retryAt).toISOString()}: ${result.detail}`);
-        setRetrying(entry.id, true, result.retryAt);
+        updateState(entry.id, { nextRunAt: result.retryAt, retryAt: result.retryAt, retrying: true });
       } else if (result.status === "noop") {
         settleRun(entry, "noop", this._current?.startedAt ?? Date.now(), result.detail, undefined, undefined, this.trigger());
         const detail = result.detail ? ` — ${result.detail}` : "";
@@ -333,7 +355,6 @@ export class CronQueue {
         logInfo(TAG, `■ System ${ok ? "✓" : "❌"}: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
         if (!ok) {
           this.checkAutoPause(entry, 1, detail ?? "");
-          scheduleRetry(entry, false);
         }
       }
     } catch (err) {
@@ -341,7 +362,6 @@ export class CronQueue {
       logWarn(TAG, `System dispatch error for "${entry.action}": ${msg}`);
       settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), msg, undefined, undefined, this.trigger());
       this.checkAutoPause(entry, 1, msg);
-      scheduleRetry(entry, false);
     } finally {
       this.clearCurrent();
       this.processNext();
@@ -381,6 +401,9 @@ export class CronQueue {
           logInfo(TAG, `■ Gate triggered → enqueuing agent follow-up for "${entry.id}"`);
           this.clearCurrent();
           const agentPrompt = followUp.prompt.replace("{{GATE_OUTPUT}}", output.trim());
+          const followUpAgent = followUp.agent && ["task", "professor", "browsie", "coding", "dreamy"].includes(followUp.agent)
+            ? followUp.agent as "task" | "professor" | "browsie" | "coding" | "dreamy"
+            : "task";
           const agentEntry: ScheduledTask = {
             id: entry.id + "-followup",
             enabled: true,
@@ -388,12 +411,12 @@ export class CronQueue {
             delivery: "silent",
             kind: "agent",
             prompt: agentPrompt,
+            agent: followUpAgent,
           };
           this.enqueue(agentEntry, onComplete);
           return;
         }
         if (code !== 0) {
-          scheduleRetry(entry, false);
           if (!paused) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
           addTaskFailure({ taskName: formatTaskLabel(entry.id), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: Date.now(), consecutiveFailures: 1 });
         }
@@ -430,7 +453,7 @@ export class CronQueue {
           logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${count} idle-gate deferrals`);
           this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), `idle-gate hit ${count}× in a row`);
         }
-        scheduleRetry(entry, false);
+        scheduleRetry(entry);
         this.clearCurrent();
         this.processNext();
         return;
@@ -496,9 +519,7 @@ export class CronQueue {
     }, AGENT_TIMEOUT_MS);
 
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
-    const sessionType = entry.agent && AGENT_SESSION[entry.agent]
-      ? AGENT_SESSION[entry.agent] as import("../spin-types.js").SessionType
-      : "T" as import("../spin-types.js").SessionType;
+    const sessionType = (AGENT_SESSION[entry.agent] ?? "T") as import("../spin-types.js").SessionType;
 
     spin.dispatchAwait({
       type: sessionType,
@@ -546,7 +567,6 @@ export class CronQueue {
         const paused = this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
         const icon = exitCode === 0 ? "✓" : "❌";
         if (exitCode !== 0) {
-          scheduleRetry(entry, false);
           if (!paused) this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);
         }
         if (!paused) {
@@ -560,7 +580,6 @@ export class CronQueue {
         kanbanFail(boardId, err instanceof Error ? err.message : String(err));
         settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err), undefined, boardId, this.trigger());
         const paused = this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
-        scheduleRetry(entry, false);
         if (!paused) {
           const errMsg = `❌ Failed: ${err instanceof Error ? err.message : String(err)}`;
           this.tryInjectFailure(entry, errMsg);
