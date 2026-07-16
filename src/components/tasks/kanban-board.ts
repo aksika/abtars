@@ -135,10 +135,13 @@ function dbOrNull(): SqliteDb | null {
   return db();
 }
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; blocked_by?: string; chatId?: string; sourcePeer?: string }): number {
+import type { Delivery } from "./task-types.js";
+
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string }): number {
   const d = dbOrNull();
   if (!d) return 0;
-  const deliveryMode = opts?.deliveryMode ?? "deliver";
+  const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
+  const deliveryMode = raw === "report" ? "deliver" : raw;
   const stmt = d.prepare(
     `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`

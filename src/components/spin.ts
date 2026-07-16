@@ -499,7 +499,7 @@ export class Spin {
     if (cardId === undefined && spec.goal !== undefined) {
       cardId = kanbanEnqueue(spec.title ?? spec.goal.slice(0, 80), spec.source ?? "user", undefined, {
         priority: spec.priority ?? "MEDIUM", type: spec.type, parent_id: spec.parentCardId,
-        deliveryMode: spec.deliveryMode, chatId: chatId ? String(chatId) : undefined,
+        deliveryMode: spec.deliveryMode, delivery: spec.delivery, chatId: chatId ? String(chatId) : undefined,
         notes: spec.callbackPeer ? JSON.stringify({ callback_peer: spec.callbackPeer }) : undefined,
         sourcePeer: spec.sourcePeer,
       });
@@ -882,7 +882,7 @@ export class Spin {
     const cardTitle = request.title ?? request.goal.slice(0, 80);
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
       priority: request.priority ?? "MEDIUM", type: request.type,
-      parent_id: request.parentCardId, deliveryMode: request.deliveryMode,
+      parent_id: request.parentCardId, deliveryMode: request.deliveryMode, delivery: request.delivery,
       notes: request.callbackPeer ? JSON.stringify({ callback_peer: request.callbackPeer }) : undefined,
       chatId: request.chatId, sourcePeer: request.sourcePeer,
     });
@@ -906,6 +906,7 @@ export class Spin {
       priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
       source: request.source,
       deliveryMode: request.deliveryMode,
+      delivery: request.delivery,
       agent: request.agent,
       timeoutMs: request.timeoutMs,
       callbackPeer: request.callbackPeer,
@@ -940,6 +941,7 @@ export class Spin {
       priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
       source: request.source,
       deliveryMode: request.deliveryMode,
+      delivery: request.delivery,
       agent: request.agent,
       timeoutMs: request.timeoutMs,
       maxToolRounds: request.maxToolRounds,

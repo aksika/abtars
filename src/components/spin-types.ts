@@ -136,6 +136,7 @@ export interface SpinRequest {
   cardId?: number;
   parentCardId?: number;
   deliveryMode?: "silent" | "deliver" | "announce";
+  delivery?: "report" | "announce" | "silent";
   priority?: string;
   tools?: SandboxPolicy;
   timeoutMs?: number;
@@ -185,6 +186,7 @@ export interface SpinSessionSpec {
 
   // Delivery (continuation / pipeline)
   deliveryMode?: "deliver" | "silent" | "announce";
+  delivery?: "report" | "announce" | "silent";
   imageContent?: unknown;   // → sendPrompt arg 3 (image passthrough)
   callbackPeer?: string;
   sourcePeer?: string;
