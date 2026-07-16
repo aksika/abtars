@@ -14,7 +14,8 @@ vi.mock("../../components/pi-executor/config.js", () => ({
   loadPiConfig: (...args: unknown[]) => mockLoadPiConfig(...args),
 }));
 
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
   spawnSync: (...args: unknown[]) => mockSpawnSync(...args),
 }));
 
