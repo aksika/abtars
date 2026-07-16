@@ -262,14 +262,15 @@ function mutateGroup(action: GroupAction, dep: (typeof OPTIONAL_DEPS)[string]): 
 
 // ── Pi mutation ────────────────────────────────────────────────────────────────
 
-function piInstall(): MutationResult {
+function piInstall(repairExisting: boolean): MutationResult {
   const token = generateLockToken();
   acquireLock("abtars", "install:pi", token);
   try {
-    const result = spawnSync("npm", [
-      "install", "-g", "--ignore-scripts",
-      "@earendil-works/pi-coding-agent",
-    ], {
+    const npmArgs = ["install", "-g", "--ignore-scripts"];
+    if (repairExisting) npmArgs.push("--force");
+    npmArgs.push("@earendil-works/pi-coding-agent");
+
+    const result = spawnSync("npm", npmArgs, {
       stdio: "pipe",
       shell: false,
       encoding: "utf-8",
@@ -543,8 +544,9 @@ function install(names: string[]): number {
     if (piState.state === "compatible") {
       process.stdout.write("✓ pi already installed\n");
     } else {
-      process.stdout.write("→ pi: installing...\n");
-      const result = piInstall();
+      const repairExisting = piState.state !== "absent";
+      process.stdout.write(repairExisting ? "→ pi: repairing installation...\n" : "→ pi: installing...\n");
+      const result = piInstall(repairExisting);
       if (result.ok) {
         process.stdout.write("✓ pi installed\n");
       } else {
