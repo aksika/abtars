@@ -1,5 +1,7 @@
 import { logInfo, logWarn, logError } from "../components/logger.js";
 import type { BootCtx } from "./context.js";
+import { resolvePiInstallation } from "../components/pi-installation.js";
+import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
 
 const TAG = "boot-pi";
 
@@ -21,15 +23,15 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     return;
   }
 
-  // #1427: Probe the configured executable before constructing services.
-  const { probePiExecutable } = await import("../components/pi-inspector.js");
-  const execStatus = probePiExecutable(config.command);
-  if (execStatus.state !== "ok") {
-    logWarn(TAG, `Pi executor disabled — coding-agent ${execStatus.state}${execStatus.observed ? " (found " + execStatus.observed + ")" : ""}. Expected ${execStatus.expected}`);
-    if (execStatus.remediation) logWarn(TAG, execStatus.remediation);
+  // #1438: Use shared installation resolver for executable + version check
+  const piResult = resolvePiInstallation();
+  if (piResult.state !== "compatible") {
+    const obsVer = piResult.state === "absent" ? "" : ` (version ${piResult.observedVersion ?? "?"})`;
+    logWarn(TAG, `Pi executor disabled — Pi ${piResult.state}${obsVer}. Minimum required: ${PI_COMPATIBILITY.minimumPiVersion}`);
+    if (piResult.state !== "absent" && piResult.remediation) logWarn(TAG, piResult.remediation);
     return;
   }
-  logInfo(TAG, `coding-agent ${execStatus.observed}`);
+  logInfo(TAG, `Pi ${piResult.installation.version} (${piResult.installation.source})`);
 
   const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
 

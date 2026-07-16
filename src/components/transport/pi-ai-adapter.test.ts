@@ -348,16 +348,16 @@ describe("streamPiAiCompletion", () => {
     ];
     const api: ProviderStreams = { stream: fakeEventStream(events), streamSimple: fakeEventStream(events) };
     const out = await collect(streamPiAiCompletion(candidate, conv, new AbortController().signal, {
-      loadPi: async () => fakePi(api.streamSimple),
-      loadApi: async () => api,
+      loadPi: () => fakePi(api.streamSimple),
+      loadApi: () => api,
     }));
     expect(out.map(e => e.type)).toEqual(["chunk", "done"]);
   });
 
   it("throws PiAiUnavailableError when pi cannot be loaded", async () => {
     const gen = streamPiAiCompletion(candidate, conv, new AbortController().signal, {
-      loadPi: async () => { throw new Error("ENOENT: cannot resolve @earendil-works/pi-ai"); },
-      loadApi: async () => { throw new Error("not reached"); },
+      loadPi: () => { throw new Error("ENOENT: cannot resolve @earendil-works/pi-ai"); },
+      loadApi: () => { throw new Error("not reached"); },
     });
     await expect(collect(gen)).rejects.toBeInstanceOf(PiAiUnavailableError);
   });
@@ -368,8 +368,8 @@ describe("streamPiAiCompletion", () => {
     ];
     const api: ProviderStreams = { stream: fakeEventStream(events), streamSimple: fakeEventStream(events) };
     const gen = streamPiAiCompletion(candidate, conv, new AbortController().signal, {
-      loadPi: async () => fakePi(api.streamSimple, () => false),
-      loadApi: async () => api,
+      loadPi: () => fakePi(api.streamSimple, () => false),
+      loadApi: () => api,
     });
     await expect(collect(gen)).rejects.toThrow(/API error 429/);
   });
@@ -398,8 +398,8 @@ describe("streamPiAiCompletion", () => {
       isRetryableAssistantError: () => false,
     };
     await collect(streamPiAiCompletion(customCandidate, conv, new AbortController().signal, {
-      loadPi: async () => piModule,
-      loadApi: async () => api,
+      loadPi: () => piModule,
+      loadApi: () => api,
     }));
     expect(captured).not.toBeNull();
     expect(captured!.baseUrl).toBe("https://9router.example.com/v1");
@@ -420,8 +420,8 @@ describe("streamPiAiCompletion", () => {
       })(),
     };
     const out = await collect(streamPiAiCompletion(candidate, conv, new AbortController().signal, {
-      loadPi: async () => fakePi(api.streamSimple),
-      loadApi: async () => api,
+      loadPi: () => fakePi(api.streamSimple),
+      loadApi: () => api,
     }));
     expect(out.map(e => e.type)).toEqual(["chunk", "done"]);
     expect(streamCount).toBe(1);
@@ -450,8 +450,8 @@ describe("streamPiAiCompletion", () => {
       reasoningEffort: "high",
     };
     await collect(streamPiAiCompletion(cand, conv, ac.signal, {
-      loadPi: async () => fakePi(api.streamSimple),
-      loadApi: async () => api,
+      loadPi: () => fakePi(api.streamSimple),
+      loadApi: () => api,
     }));
     expect(capturedOpts).not.toBeNull();
     // Retry budget: abtars L2 is the single authority.
@@ -476,8 +476,8 @@ describe("streamPiAiCompletion", () => {
       streamSimple: ((m, _ctx, opts) => { capturedOpts = opts as Record<string, unknown>; return inner(m, _ctx, opts); }) as ProviderStreams["streamSimple"],
     };
     await collect(streamPiAiCompletion(candidate, conv, new AbortController().signal, {
-      loadPi: async () => fakePi(api.streamSimple),
-      loadApi: async () => api,
+      loadPi: () => fakePi(api.streamSimple),
+      loadApi: () => api,
     }));
     expect(capturedOpts).not.toBeNull();
     expect(capturedOpts!.maxRetries).toBe(0);

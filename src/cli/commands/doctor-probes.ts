@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { abtarsHome } from "../../paths.js";
 import { resolveAbmindPackageDir } from "../../utils/abmind-lazy.js";
+import { PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -407,18 +408,41 @@ async function probeSharedDeps(): Promise<ProbeResult> {
   }
 }
 
-// ── Pi Compatibility Probe (#1427) ────────────────────────────────────────────
+// ── Pi Compatibility Probe (#1438) ────────────────────────────────────────────
 
 async function probePiCompatibility(): Promise<ProbeResult> {
   try {
-    const { inspectAllPiComponents } = await import("../../components/pi-inspector.js");
-    const { loadPiConfig } = await import("../../components/pi-executor/config.js");
-    const config = loadPiConfig();
-    const statuses = inspectAllPiComponents({ command: config?.command });
+    const { resolvePiInstallation } = await import("../../components/pi-installation.js");
+    const result = resolvePiInstallation({ useCache: false });
 
-    const details = statuses.map(s => `${s.component}=${s.state}${s.observed ? "(" + s.observed + ")" : ""}`).join(", ");
-    const allOk = statuses.every(s => s.state === "ok");
-    return { name: "pi-compatibility", status: allOk ? "ok" : "failed", detail: details };
+    switch (result.state) {
+      case "absent":
+        return { name: "pi-compatibility", status: "skipped", detail: "Pi not installed" };
+      case "compatible":
+        return {
+          name: "pi-compatibility",
+          status: "ok",
+          detail: `Pi ${result.installation.version} (minimum ${PI_COMPATIBILITY.minimumPiVersion}), ${result.installation.source}, executable=${result.installation.executable}`,
+        };
+      case "below-minimum":
+        return {
+          name: "pi-compatibility",
+          status: "failed",
+          detail: `Pi ${result.observedVersion} below minimum`,
+        };
+      case "incomplete":
+        return {
+          name: "pi-compatibility",
+          status: "failed",
+          detail: `Pi incomplete: ${result.reason}`,
+        };
+      case "invalid":
+        return {
+          name: "pi-compatibility",
+          status: "failed",
+          detail: `Pi invalid: ${result.reason}`,
+        };
+    }
   } catch {
     return { name: "pi-compatibility", status: "skipped", detail: "Pi inspector unavailable" };
   }

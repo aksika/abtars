@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Model, Api, Models } from "@earendil-works/pi-ai";
 
-// Mock lazyRequire so loadPiModels() never hits the real installer / network.
-vi.mock("../../utils/lazy-require.js", () => ({ lazyRequire: vi.fn() }));
+// Mock pi-installation so loadPiModels() never hits the real filesystem.
+vi.mock("../../components/pi-installation.js", () => ({ resolvePiInstallation: vi.fn(), createPiRequire: vi.fn() }));
 
 import {
   mapProviderName, resolveModelMeta, modelsForProvider, modelsForProviderSync,
@@ -10,7 +10,7 @@ import {
   loadPiModels, getWarmedModels, isWarmed,
   _resetForTest, _setWarmedForTest,
 } from "./pi-catalog.js";
-import { lazyRequire } from "../../utils/lazy-require.js";
+import { resolvePiInstallation, createPiRequire } from "../../components/pi-installation.js";
 
 function fakeModel(over: Partial<Model<Api>> = {}): Model<Api> {
   return {
@@ -129,15 +129,29 @@ describe("piCostRatesByModel (C6)", () => {
 });
 
 describe("loadPiModels (C8)", () => {
-  const mocked = vi.mocked(lazyRequire);
+  const mockedResolve = vi.mocked(resolvePiInstallation);
+  const mockedRequire = vi.mocked(createPiRequire);
 
   beforeEach(() => {
     _resetForTest();
-    mocked.mockReset();
+    mockedResolve.mockReset();
+    mockedRequire.mockReset();
   });
 
   it("returns null and does not throw when pi cannot be loaded (→ models.json floor)", async () => {
-    mocked.mockRejectedValueOnce(new Error("ENOENT: cannot resolve @earendil-works/pi-ai"));
+    mockedResolve.mockReturnValue({ state: "absent" });
+    await expect(loadPiModels()).resolves.toBeNull();
+    expect(isWarmed()).toBe(true);
+    expect(getWarmedModels()).toBeNull();
+  });
+
+  it("returns null when pi is below-minimum", async () => {
+    mockedResolve.mockReturnValue({
+      state: "below-minimum",
+      observedVersion: "0.80.5",
+      reason: "below minimum",
+      remediation: "update",
+    });
     await expect(loadPiModels()).resolves.toBeNull();
     expect(isWarmed()).toBe(true);
     expect(getWarmedModels()).toBeNull();
@@ -145,7 +159,18 @@ describe("loadPiModels (C8)", () => {
 
   it("warms and caches the catalog on success", async () => {
     const fm = fakeModels({ list: [fakeModel({ id: "glm-4.6" })] });
-    mocked.mockResolvedValueOnce({ builtinModels: () => fm } as never);
+    const mockRequire = vi.fn().mockReturnValue({ builtinModels: () => fm });
+    mockedResolve.mockReturnValue({
+      state: "compatible",
+      installation: {
+        executable: "/usr/bin/pi",
+        packageRoot: "/usr/lib/pi-coding-agent",
+        version: "0.80.7",
+        source: "path",
+        moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
+      },
+    });
+    mockedRequire.mockReturnValue(mockRequire as unknown as ReturnType<typeof createPiRequire>);
     const out = await loadPiModels();
     expect(out).toBe(fm);
     expect(getWarmedModels()).toBe(fm);
@@ -153,9 +178,20 @@ describe("loadPiModels (C8)", () => {
 
   it("is idempotent — a second call does not re-load", async () => {
     const fm = fakeModels();
-    mocked.mockResolvedValueOnce({ builtinModels: () => fm } as never);
+    const mockRequire = vi.fn().mockReturnValue({ builtinModels: () => fm });
+    mockedResolve.mockReturnValue({
+      state: "compatible",
+      installation: {
+        executable: "/usr/bin/pi",
+        packageRoot: "/usr/lib/pi-coding-agent",
+        version: "0.80.7",
+        source: "path",
+        moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
+      },
+    });
+    mockedRequire.mockReturnValue(mockRequire as unknown as ReturnType<typeof createPiRequire>);
     await loadPiModels();
     await loadPiModels();
-    expect(mocked).toHaveBeenCalledTimes(1);
+    expect(mockedResolve).toHaveBeenCalledTimes(1);
   });
 });

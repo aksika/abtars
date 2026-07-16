@@ -59,11 +59,10 @@ describe("OPTIONAL_DEPS registry", () => {
     expect(OPTIONAL_DEPS.image).toBeDefined();
   });
 
-  it("includes the TUI entry (#1315) with a pinned version", async () => {
+  it("does not include Pi groups (now a single external distribution)", async () => {
     const { OPTIONAL_DEPS } = await import("./lazy-require.js");
-    expect(OPTIONAL_DEPS.tui).toBeDefined();
-    expect(OPTIONAL_DEPS.tui!.packages).toContain("@earendil-works/pi-tui");
-    expect(OPTIONAL_DEPS.tui!.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(OPTIONAL_DEPS.provider).toBeUndefined();
+    expect(OPTIONAL_DEPS.tui).toBeUndefined();
   });
 });
 

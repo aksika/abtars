@@ -22,8 +22,8 @@ import * as net from "node:net";
 import { join } from "node:path";
 
 import { abtarsHome } from "../../paths.js";
-import { lazyRequire } from "../../utils/lazy-require.js";
-import { inspectPiPackage } from "../../components/pi-inspector.js";
+import { resolvePiInstallation, createPiRequire } from "../../components/pi-installation.js";
+import { PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
 import {
   encodeFrame,
   createFrameDecoder,
@@ -265,15 +265,22 @@ export async function tui(args: string[]): Promise<number> {
     return 1;
   }
 
-  const pit = await lazyRequire<typeof import("@earendil-works/pi-tui")>(
-    "@earendil-works/pi-tui",
-    "pi-tui terminal UI",
-  );
+  const piResult = resolvePiInstallation();
+  if (piResult.state !== "compatible") {
+    stderr(
+      `Pi is ${piResult.state === "absent" ? "not installed" : "in an invalid state (" + piResult.state + ")"}.\n` +
+      `Install Pi with: abtars deps install pi\n` +
+      `Then run 'abtars tui' again.`,
+    );
+    return 1;
+  }
 
-  // Version check (#1427): warn if installed TUI version differs from release target
-  const tuiStatus = inspectPiPackage("tui");
-  if (tuiStatus.state !== "ok") {
-    stderr(`Warning: pi-tui version mismatch — ${tuiStatus.remediation ?? "expected " + tuiStatus.expected}`);
+  const piRequire = createPiRequire(piResult.installation);
+  const pit = piRequire("@earendil-works/pi-tui") as typeof import("@earendil-works/pi-tui");
+
+  // Version check: warn if Pi version differs from target minimum
+  if (piResult.installation.version !== PI_COMPATIBILITY.minimumPiVersion) {
+    stderr(`Warning: Pi ${piResult.installation.version} installed, minimum is ${PI_COMPATIBILITY.minimumPiVersion}`);
   }
 
   // Build the TUI.

@@ -1,22 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { PiComponentStatus } from "../../components/pi-inspector.js";
-import type { SpawnSyncReturns } from "node:child_process";
+import type { PiInstallationState } from "../../components/pi-installation.js";
 
-const mockInspectAll = vi.fn<(...args: unknown[]) => PiComponentStatus[]>();
-const mockLoadPiConfig = vi.fn<(...args: unknown[]) => { command?: string } | undefined>();
-const mockSpawnSync = vi.fn<(...args: unknown[]) => SpawnSyncReturns<string>>();
+const mockResolve = vi.fn<(...args: unknown[]) => PiInstallationState>();
 
-vi.mock("../../components/pi-inspector.js", () => ({
-  inspectAllPiComponents: (...args: unknown[]) => mockInspectAll(...args),
-}));
-
-vi.mock("../../components/pi-executor/config.js", () => ({
-  loadPiConfig: (...args: unknown[]) => mockLoadPiConfig(...args),
-}));
-
-vi.mock("node:child_process", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("node:child_process")>()),
-  spawnSync: (...args: unknown[]) => mockSpawnSync(...args),
+vi.mock("../../components/pi-installation.js", () => ({
+  resolvePiInstallation: (...args: unknown[]) => mockResolve(...args),
 }));
 
 async function captureOutput(fn: () => Promise<number>): Promise<{ exitCode: number; stdout: string; stderr: string }> {
@@ -35,121 +23,106 @@ async function captureOutput(fn: () => Promise<number>): Promise<{ exitCode: num
   }
 }
 
-describe("pi-preflight", () => {
+const compatibleState: PiInstallationState = {
+  state: "compatible",
+  installation: {
+    executable: "/usr/local/bin/pi",
+    packageRoot: "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent",
+    version: "0.80.7",
+    source: "path",
+    moduleRoots: {
+      ai: "/usr/local/lib/node_modules/@earendil-works/pi-ai",
+      tui: "/usr/local/lib/node_modules/@earendil-works/pi-tui",
+      agentCore: "/usr/local/lib/node_modules/@earendil-works/pi-agent-core",
+    },
+  },
+};
+
+describe("pi-preflight (#1438)", () => {
   beforeEach(() => {
-    mockInspectAll.mockReset();
-    mockLoadPiConfig.mockReset();
-    mockSpawnSync.mockReset();
-    mockSpawnSync.mockReturnValue({ status: 0, error: undefined, stderr: "", stdout: "", pid: 0, output: [], signal: null } as SpawnSyncReturns<string>);
+    mockResolve.mockReset();
   });
 
-  it("passes clean when all components compatible", async () => {
-    mockLoadPiConfig.mockReturnValue({ command: "/usr/bin/pi" });
-    mockInspectAll.mockReturnValue([
-      { component: "ai", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "tui", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "coding-agent", expected: "0.80.7", observed: "0.80.7", state: "ok", path: "/usr/bin/pi" },
-    ]);
+  it("passes when Pi is compatible", async () => {
+    mockResolve.mockReturnValue(compatibleState);
 
-    const { exitCode, stdout, stderr } = await captureOutput(async () => {
+    const { exitCode, stdout } = await captureOutput(async () => {
       const { preflightPiCompatibility } = await import("./pi-preflight.js");
       return preflightPiCompatibility();
     });
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("✓ Pi compatibility check passed");
-    expect(stderr).toBe("");
+    expect(stdout).toContain("✓ Pi");
+    expect(stdout).toContain("0.80.7");
   });
 
-  it("warns but does not block on mismatched coding-agent", async () => {
-    mockLoadPiConfig.mockReturnValue({ command: "/usr/bin/pi" });
-    mockInspectAll.mockReturnValue([
-      { component: "ai", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "tui", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "coding-agent", expected: "0.80.7", observed: "0.80.6", state: "mismatch", path: "/usr/bin/pi", remediation: "npm install -g @earendil-works/pi-coding-agent@0.80.7" },
-    ]);
+  it("passes when Pi is absent", async () => {
+    mockResolve.mockReturnValue({ state: "absent" });
 
-    const { exitCode, stdout, stderr } = await captureOutput(async () => {
+    const { exitCode, stdout } = await captureOutput(async () => {
       const { preflightPiCompatibility } = await import("./pi-preflight.js");
       return preflightPiCompatibility();
     });
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("continuing despite coding-agent warning");
-    expect(stderr).toContain("⚠ coding-agent: mismatch");
-    expect(stderr).toContain("0.80.6");
+    expect(stdout).toContain("not installed");
   });
 
-  it("warns but does not block on missing configured binary", async () => {
-    mockLoadPiConfig.mockReturnValue({ command: "/usr/bin/pi" });
-    mockInspectAll.mockReturnValue([
-      { component: "ai", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "tui", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "coding-agent", expected: "0.80.7", state: "missing", path: "/usr/bin/pi", remediation: "npm install -g @earendil-works/pi-coding-agent@0.80.7" },
-    ]);
+  it("passes (non-blocking) when Pi is below minimum", async () => {
+    mockResolve.mockReturnValue({
+      state: "below-minimum",
+      executable: "/usr/bin/pi",
+      packageRoot: "/usr/lib/node_modules/@earendil-works/pi-coding-agent",
+      observedVersion: "0.80.5",
+      reason: "below minimum",
+      remediation: "Update Pi",
+    });
 
-    const { exitCode, stdout, stderr } = await captureOutput(async () => {
+    const { exitCode, stdout } = await captureOutput(async () => {
       const { preflightPiCompatibility } = await import("./pi-preflight.js");
       return preflightPiCompatibility();
     });
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("continuing despite coding-agent warning");
-    expect(stderr).toContain("⚠ coding-agent: missing");
+    expect(stdout).toContain("⚠");
+    expect(stdout).toContain("0.80.5");
   });
 
-  it("warns but does not block on invalid executable", async () => {
-    mockLoadPiConfig.mockReturnValue({ command: "/usr/bin/pi" });
-    mockInspectAll.mockReturnValue([
-      { component: "ai", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "tui", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "coding-agent", expected: "0.80.7", state: "invalid", path: "/usr/bin/pi", remediation: "Install the exact target version" },
-    ]);
+  it("passes (non-blocking) when Pi installation is invalid", async () => {
+    mockResolve.mockReturnValue({
+      state: "invalid",
+      executable: "/usr/bin/pi",
+      observedVersion: "0.80.7",
+      reason: "version mismatch",
+      remediation: "Reinstall Pi",
+    });
 
-    const { exitCode, stdout, stderr } = await captureOutput(async () => {
+    const { exitCode, stdout } = await captureOutput(async () => {
       const { preflightPiCompatibility } = await import("./pi-preflight.js");
       return preflightPiCompatibility();
     });
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("continuing despite coding-agent warning");
-    expect(stderr).toContain("⚠ coding-agent: invalid");
+    expect(stdout).toContain("⚠");
+    expect(stdout).toContain("invalid");
   });
 
-  it("passes silently when no Pi executor configured", async () => {
-    mockLoadPiConfig.mockReturnValue(undefined);
-    mockInspectAll.mockReturnValue([
-      { component: "ai", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "tui", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "coding-agent", expected: "0.80.7", state: "missing", remediation: "Pi executor not configured" },
-    ]);
+  it("passes (non-blocking) when Pi installation is incomplete", async () => {
+    mockResolve.mockReturnValue({
+      state: "incomplete",
+      executable: "/usr/bin/pi",
+      observedVersion: "0.80.7",
+      reason: "Missing nested packages",
+      remediation: "Reinstall Pi",
+    });
 
-    const { exitCode, stdout, stderr } = await captureOutput(async () => {
+    const { exitCode, stdout } = await captureOutput(async () => {
       const { preflightPiCompatibility } = await import("./pi-preflight.js");
       return preflightPiCompatibility();
     });
 
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("✓ Pi compatibility check passed");
-    expect(stdout).not.toContain("coding-agent");
-    expect(stderr).toBe("");
-  });
-
-  it("blocks on shared package refresh failure", async () => {
-    mockLoadPiConfig.mockReturnValue({ command: "/usr/bin/pi" });
-    mockInspectAll.mockReturnValue([
-      { component: "ai", expected: "0.80.7", observed: "0.80.7", state: "ok" },
-      { component: "tui", expected: "0.80.7", state: "mismatch", observed: "0.80.6", remediation: "abtars deps update tui" },
-      { component: "coding-agent", expected: "0.80.7", observed: "0.80.7", state: "ok", path: "/usr/bin/pi" },
-    ]);
-    mockSpawnSync.mockReturnValue({ status: 1, error: undefined, stderr: "npm ERR! failed", stdout: "", pid: 0, output: [], signal: null } as SpawnSyncReturns<string>);
-
-    const { exitCode, stdout, stderr } = await captureOutput(async () => {
-      const { preflightPiCompatibility } = await import("./pi-preflight.js");
-      return preflightPiCompatibility();
-    });
-
-    expect(exitCode).toBe(1);
-    expect(stderr).toContain("✗ Preflight failed — aborting activation");
+    expect(stdout).toContain("⚠");
+    expect(stdout).toContain("incomplete");
   });
 });

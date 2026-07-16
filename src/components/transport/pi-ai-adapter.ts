@@ -43,9 +43,8 @@ import type {
   CreateProviderOptions,
 } from "@earendil-works/pi-ai";
 
-import { lazyRequire } from "../../utils/lazy-require.js";
 import { logDebug, logWarn, logTrace, isLogLevel } from "../logger.js";
-import { inspectPiPackage } from "../pi-inspector.js";
+import { resolvePiInstallation, createPiRequire } from "../pi-installation.js";
 import { parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
 import type { ErrorKind } from "./model-health-registry.js";
 import type { SSEEvent } from "./sse-parser.js";
@@ -398,30 +397,28 @@ function toL2Error(message: AssistantMessage, isRetryable: (m: AssistantMessage)
 
 /** Injectable dependencies (tests pass fakes; production omits → lazyRequire). */
 export interface PiAiStreamDeps {
-  loadPi?: () => Promise<PiAiModule>;
+  loadPi?: () => PiAiModule;
   /** Load the api module streams for a given pi Api. */
-  loadApi?: (api: Api) => Promise<ProviderStreams>;
+  loadApi?: (api: Api) => ProviderStreams;
 }
 
-function throwIfPiVersionMismatch(): void {
-  const status = inspectPiPackage("ai");
-  if (status.state !== "ok") {
-    throw new PiAiUnavailableError(
-      `Pi AI version mismatch: expected ${status.expected}${status.observed ? `, found ${status.observed}` : ""}. ${status.remediation ?? ""}`,
-    );
-  }
-}
-
-async function defaultLoadApi(api: Api): Promise<ProviderStreams> {
-  const mod = await lazyRequire<Record<string, unknown>>(`@earendil-works/pi-ai/api/${api}`, "pi-ai provider engine");
-  throwIfPiVersionMismatch();
+function defaultLoadApi(api: Api): ProviderStreams {
+  const result = resolvePiInstallation();
+  if (result.state !== "compatible") throw new PiAiUnavailableError(`Pi not available: ${result.state}`);
+  const piRequire = createPiRequire(result.installation);
+  const mod = piRequire(`@earendil-works/pi-ai/api/${api}`) as Record<string, unknown>;
   return { stream: mod.stream as ProviderStreams["stream"], streamSimple: mod.streamSimple as ProviderStreams["streamSimple"] };
 }
 
-async function defaultLoadPi(): Promise<PiAiModule> {
-  const pi = await lazyRequire<Record<string, unknown>>("@earendil-works/pi-ai", "pi-ai provider engine");
-  throwIfPiVersionMismatch();
-  return { createProvider: pi.createProvider as PiAiModule["createProvider"], isRetryableAssistantError: pi.isRetryableAssistantError as PiAiModule["isRetryableAssistantError"] };
+function defaultLoadPi(): PiAiModule {
+  const result = resolvePiInstallation();
+  if (result.state !== "compatible") throw new PiAiUnavailableError(`Pi not available: ${result.state}`);
+  const piRequire = createPiRequire(result.installation);
+  const piModule = piRequire("@earendil-works/pi-ai") as Record<string, unknown>;
+  return {
+    createProvider: piModule.createProvider as PiAiModule["createProvider"],
+    isRetryableAssistantError: piModule.isRetryableAssistantError as PiAiModule["isRetryableAssistantError"],
+  };
 }
 
 /**
@@ -441,7 +438,7 @@ export async function* streamPiAiCompletion(
   let pi: PiAiModule;
   let apiMod: ProviderStreams;
   try {
-    pi = await (deps.loadPi ?? defaultLoadPi)();
+    pi = (deps.loadPi ?? defaultLoadPi)();
   } catch (err) {
     if (isLogLevel("trace")) logTrace(TAG, `pi-ai load failed for api=${api} (loadPi): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
     throw new PiAiUnavailableError(
@@ -450,7 +447,7 @@ export async function* streamPiAiCompletion(
     );
   }
   try {
-    apiMod = deps.loadApi ? await deps.loadApi(api) : await defaultLoadApi(api);
+    apiMod = deps.loadApi ? deps.loadApi(api) : defaultLoadApi(api);
   } catch (err) {
     if (isLogLevel("trace")) logTrace(TAG, `pi-ai load failed for api=${api} (loadApi): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
     throw new PiAiUnavailableError(

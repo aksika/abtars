@@ -19,8 +19,8 @@
  */
 
 import type { Models } from "@earendil-works/pi-ai";
-import { lazyRequire } from "../../utils/lazy-require.js";
 import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
+import { resolvePiInstallation, createPiRequire } from "../pi-installation.js";
 
 const TAG = "pi-catalog";
 // ── C2: provider-id mapping (identity for known pi providers) ────────────────
@@ -73,32 +73,30 @@ export async function loadPiModels(): Promise<Models | null> {
   if (_warmAttempted) return _warmed;
   _warmAttempted = true;
   try {
-    // `builtinModels` is the convenience that returns a fully-populated Models
-    // collection. The lazy-require resolves the subpath via the package's
-    // `exports` field (./providers/* → ./dist/providers/*.js).
+    const result = resolvePiInstallation();
+    if (result.state !== "compatible") {
+      logInfo(TAG, `Pi not available (${result.state}) — using models.json floor`);
+      return null;
+    }
+
     const t0 = Date.now();
-    const { builtinModels } = await lazyRequire<{ builtinModels: (opts?: Record<string, unknown>) => Models }>(
-      "@earendil-works/pi-ai/providers/all",
-      "pi-ai provider engine",
-    );
+    const piRequire = createPiRequire(result.installation);
+    const { builtinModels } = piRequire("@earendil-works/pi-ai/providers/all") as { builtinModels: (opts?: Record<string, unknown>) => Models };
     const models = builtinModels();
     try {
       await models.refresh?.();
     } catch (err) {
-      // A dynamic-list refresh failure is non-fatal: static providers are still usable.
       logWarn(TAG, `catalog refresh failed (static providers still usable): ${err instanceof Error ? err.message : String(err)}`);
     }
     _warmed = models;
     const all = models.getModels();
     logInfo(TAG, `pi-ai catalog warmed (${all.length} models)`);
-    // #1318: per-provider breakdown on warm — debug-level detail.
     const byProvider: Record<string, number> = {};
     for (const m of all) {
       const p = (m as { provider?: string }).provider ?? "?";
       byProvider[p] = (byProvider[p] ?? 0) + 1;
     }
     logDebug(TAG, `catalog breakdown: ${Object.entries(byProvider).map(([p, n]) => `${p}:${n}`).join(", ")}`);
-    // #1318: trace the raw fetch timing + first/last model ids as a sanity probe.
     const elapsedMs = Date.now() - t0;
     const sample = all.slice(0, 3).map(m => m.id).join(",");
     logTrace(TAG, `catalog fetch: ${all.length} models in ${elapsedMs}ms; sample=${sample}`);

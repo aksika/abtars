@@ -8,70 +8,58 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..", "..");
 
 describe("PI_COMPATIBILITY constant", () => {
-  it("family is 0.80", () => {
-    expect(PI_COMPATIBILITY.family).toBe("0.80");
+  it("has the coding-agent package name", () => {
+    expect(PI_COMPATIBILITY.packageName).toBe("@earendil-works/pi-coding-agent");
   });
 
-  it("all three packages have the same version", () => {
-    const v = PI_COMPATIBILITY.packages.ai.version;
-    expect(PI_COMPATIBILITY.packages.tui.version).toBe(v);
-    expect(PI_COMPATIBILITY.packages.codingAgent.version).toBe(v);
+  it("has a minimum version in exact patch format", () => {
+    expect(PI_COMPATIBILITY.minimumPiVersion).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it("version is an exact patch (no ranges)", () => {
-    const v = PI_COMPATIBILITY.packages.ai.version;
-    expect(v).toMatch(/^\d+\.\d+\.\d+$/);
-  });
-
-  it("package names are correct", () => {
-    expect(PI_COMPATIBILITY.packages.ai.name).toBe("@earendil-works/pi-ai");
-    expect(PI_COMPATIBILITY.packages.tui.name).toBe("@earendil-works/pi-tui");
-    expect(PI_COMPATIBILITY.packages.codingAgent.name).toBe("@earendil-works/pi-coding-agent");
+  it("has nested package names", () => {
+    expect(PI_COMPATIBILITY.nestedPackages.ai).toBe("@earendil-works/pi-ai");
+    expect(PI_COMPATIBILITY.nestedPackages.tui).toBe("@earendil-works/pi-tui");
+    expect(PI_COMPATIBILITY.nestedPackages.agentCore).toBe("@earendil-works/pi-agent-core");
   });
 });
 
-describe("devDependencies vs PI_COMPATIBILITY (#1427)", () => {
+describe("devDependencies vs PI_COMPATIBILITY (#1438)", () => {
   const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf-8")) as {
     dependencies?: Record<string, string>;
     devDependencies?: Record<string, string>;
   };
 
-  it("all three Pi packages are devDependencies", () => {
-    expect(pkg.dependencies?.[PI_COMPATIBILITY.packages.ai.name]).toBeUndefined();
-    expect(pkg.devDependencies?.[PI_COMPATIBILITY.packages.ai.name]).toBeDefined();
-    expect(pkg.devDependencies?.[PI_COMPATIBILITY.packages.tui.name]).toBeDefined();
-    expect(pkg.devDependencies?.[PI_COMPATIBILITY.packages.codingAgent.name]).toBeDefined();
+  it("pi-coding-agent is a devDependency", () => {
+    expect(pkg.dependencies?.[PI_COMPATIBILITY.packageName]).toBeUndefined();
+    expect(pkg.devDependencies?.[PI_COMPATIBILITY.packageName]).toBeDefined();
   });
 
-  it("devDep specs match PI_COMPATIBILITY exact versions", () => {
-    for (const key of ["ai", "tui", "codingAgent"] as const) {
-      const p = PI_COMPATIBILITY.packages[key];
-      expect(pkg.devDependencies?.[p.name]).toBe(p.version);
-    }
+  it("pi-ai is a devDependency (not runtime)", () => {
+    expect(pkg.dependencies?.[PI_COMPATIBILITY.nestedPackages.ai]).toBeUndefined();
+    expect(pkg.devDependencies?.[PI_COMPATIBILITY.nestedPackages.ai]).toBeDefined();
+  });
+
+  it("pi-tui is a devDependency (not runtime)", () => {
+    expect(pkg.dependencies?.[PI_COMPATIBILITY.nestedPackages.tui]).toBeUndefined();
+    expect(pkg.devDependencies?.[PI_COMPATIBILITY.nestedPackages.tui]).toBeDefined();
   });
 });
 
-describe("lockfile resolutions match PI_COMPATIBILITY (#1427)", () => {
+describe("lockfile resolutions match PI_COMPATIBILITY (#1438)", () => {
   const lock = JSON.parse(readFileSync(resolve(ROOT, "package-lock.json"), "utf-8")) as {
     packages?: Record<string, { version?: string }>;
   };
   const pkg = lock.packages ?? {};
 
-  it("pi-ai resolves to exact version", () => {
-    expect(pkg["node_modules/@earendil-works/pi-ai"]?.version).toBe(
-      PI_COMPATIBILITY.packages.ai.version,
-    );
+  it("pi-coding-agent resolves in lockfile", () => {
+    expect(pkg["node_modules/@earendil-works/pi-coding-agent"]?.version).toBeDefined();
   });
 
-  it("pi-tui resolves to exact version", () => {
-    expect(pkg["node_modules/@earendil-works/pi-tui"]?.version).toBe(
-      PI_COMPATIBILITY.packages.tui.version,
-    );
+  it("pi-ai resolves in lockfile", () => {
+    expect(pkg["node_modules/@earendil-works/pi-ai"]?.version).toBeDefined();
   });
 
-  it("pi-coding-agent resolves to exact version", () => {
-    expect(pkg["node_modules/@earendil-works/pi-coding-agent"]?.version).toBe(
-      PI_COMPATIBILITY.packages.codingAgent.version,
-    );
+  it("pi-tui resolves in lockfile", () => {
+    expect(pkg["node_modules/@earendil-works/pi-tui"]?.version).toBeDefined();
   });
 });

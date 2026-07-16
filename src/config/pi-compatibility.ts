@@ -1,8 +1,9 @@
 export const PI_COMPATIBILITY = {
-  family: "0.80",
-  packages: {
-    ai: { name: "@earendil-works/pi-ai", version: "0.80.7" },
-    tui: { name: "@earendil-works/pi-tui", version: "0.80.7" },
-    codingAgent: { name: "@earendil-works/pi-coding-agent", version: "0.80.7" },
+  packageName: "@earendil-works/pi-coding-agent",
+  minimumPiVersion: "0.80.7",
+  nestedPackages: {
+    ai: "@earendil-works/pi-ai",
+    tui: "@earendil-works/pi-tui",
+    agentCore: "@earendil-works/pi-agent-core",
   },
 } as const;
