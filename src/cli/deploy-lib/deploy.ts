@@ -8,14 +8,13 @@ import { hostname, homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, mkdirSync, copyFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { execSync, spawnSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import { acquireLock, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
 
 import { makeLocalBuildSource } from "../update-sources/dev.js";
 import { makeNpmSource } from "../update-sources/npm.js";
 import type { SourceName, StagedRelease } from "../update-sources/types.js";
-import { PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
-import { inspectAllPiComponents } from "../../components/pi-inspector.js";
+import { preflightPiCompatibility } from "./pi-preflight.js";
 
 export interface DeployOptions {
   readonly source: SourceName;
@@ -160,77 +159,7 @@ export async function deployActivationCli(flags: ReadonlyMap<string, string | bo
   }
 }
 
-/**
- * Pi compatibility preflight (#1427).
- *
- * Runs before activation to ensure installed Pi shared packages match the
- * incoming release's target and the configured executor is compatible.
- * Refreshes installed groups; skips wholly absent optional groups.
- * Aborts before activation on failure.
- */
-async function preflightPiCompatibility(): Promise<number> {
-  process.stdout.write("[pi-preflight] Checking Pi compatibility...\n");
 
-  // Load pi-executor config to probe the configured command
-  let execCommand: string | undefined;
-  try {
-    const { loadPiConfig } = await import("../../components/pi-executor/config.js");
-    const config = loadPiConfig();
-    execCommand = config?.command;
-  } catch { /* config may not be available */ }
-
-  const statuses = inspectAllPiComponents({ command: execCommand });
-  const pkgStatuses = statuses.filter(s => s.component === "ai" || s.component === "tui");
-  const execStatus = statuses.find(s => s.component === "coding-agent");
-  let ok = true;
-
-  for (const s of pkgStatuses) {
-    const group = s.component === "ai" ? "provider" : "tui";
-    if (s.state === "missing") {
-      process.stdout.write(`[pi-preflight] ○ ${group} not installed — skipping\n`);
-      continue;
-    }
-    if (s.state !== "ok") {
-      // Refresh the installed group to the incoming target
-      process.stdout.write(`[pi-preflight] → refreshing ${group} (${s.state})...\n`);
-      const libDir = join(homedir(), ".local", "lib");
-      const args: string[] = [
-        "install", "--prefix", libDir, "--no-audit", "--no-fund",
-        `${s.component === "ai" ? PI_COMPATIBILITY.packages.ai.name : PI_COMPATIBILITY.packages.tui.name}@${s.component === "ai" ? PI_COMPATIBILITY.packages.ai.version : PI_COMPATIBILITY.packages.tui.version}`,
-      ];
-      const result = spawnSync("npm", args, { stdio: "pipe", shell: false, encoding: "utf-8" });
-      if (result.error || result.status !== 0) {
-        process.stderr.write(
-          `[pi-preflight] ✗ ${group} refresh failed: ${result.error?.message ?? result.stderr?.slice(0, 200) ?? `exit ${result.status}`}\n`,
-        );
-        ok = false;
-      } else {
-        process.stdout.write(`[pi-preflight] ✓ ${group} refreshed\n`);
-      }
-    }
-  }
-
-  // Check executor config if present
-  if (execStatus && execStatus.state !== "missing") {
-    if (execStatus.state !== "ok") {
-      process.stderr.write(
-        `[pi-preflight] ✗ coding-agent: ${execStatus.state}${execStatus.observed ? " (found " + execStatus.observed + ")" : ""} — expected ${execStatus.expected}\n`,
-      );
-      process.stderr.write(`  ${execStatus.remediation}\n`);
-      ok = false;
-    } else {
-      process.stdout.write(`[pi-preflight] ✓ coding-agent ${execStatus.observed}\n`);
-    }
-  }
-
-  if (!ok) {
-    process.stderr.write("[pi-preflight] ✗ Preflight failed — aborting activation\n");
-    return 1;
-  }
-
-  process.stdout.write("[pi-preflight] ✓ Pi compatibility check passed\n");
-  return 0;
-}
 
 /**
  * Activation: stage → releases/<commit> → history → symlink → refresh →
