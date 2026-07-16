@@ -64,7 +64,9 @@ export function readEntries(): ScheduledTask[] {
 }
 
 export function readEntry(id: string): ScheduledTask | null {
-  return readAll().find(e => e.id === id) ?? null;
+  const entries = readAll();
+  initializeState(entries);
+  return entries.find(e => e.id === id) ?? null;
 }
 
 export function writeEntry(e: ScheduledTask): void {

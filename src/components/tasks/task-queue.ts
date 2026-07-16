@@ -96,8 +96,7 @@ export function readTaskFile(taskFile: string): TaskFileResult | null {
       .filter(l => l.match(/^- /))
       .map(l => l.replace(/^- /, "").trim())
       .filter(p => {
-        const resolved = resolve(p.replace(/^~/, homedir()));
-        if (p.includes(" ") || p.includes("\t") || p.length === 0 || p.startsWith("/") === false && p.startsWith("~") === false) {
+        if (p.length === 0 || p.includes(" ") || p.includes("\t") || (!p.startsWith("/") && !p.startsWith("~"))) {
           logWarn(TAG, `Rejected malformed DoD path: "${p}" — must be absolute or ~/ path`);
           return false;
         }
@@ -163,12 +162,12 @@ function scheduleRetry(entry: ScheduledTask, isRetry: boolean): void {
   logInfo(TAG, `Scheduled retry for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
 }
 
-function recordSettledRun(entry: ScheduledTask, outcome: "success" | "failed" | "noop" | "deferred" | "skipped", detail?: string, resultPath?: string, kanbanCardId?: number): void {
+function recordSettledRun(entry: ScheduledTask, outcome: "success" | "failed" | "noop" | "deferred" | "skipped", startedAt: number, detail?: string, resultPath?: string, kanbanCardId?: number): void {
   appendRun({
     taskId: entry.id,
     kind: entry.kind,
     trigger: "schedule",
-    startedAt: Date.now(),
+    startedAt,
     finishedAt: Date.now(),
     outcome,
     detail,
@@ -317,17 +316,17 @@ export class CronQueue {
     try {
       const result = await getSystemTaskRegistry().dispatch(entry);
       if (result.status === "deferred") {
-        recordSettledRun(entry, "deferred", result.detail);
+        recordSettledRun(entry, "deferred", this._current?.startedAt ?? Date.now(), result.detail);
         logInfo(TAG, `⏸ Deferred: "${entry.action}" (${entry.id}) — retry at ${new Date(result.retryAt).toISOString()}: ${result.detail}`);
         setRetrying(entry.id, true, result.retryAt);
       } else if (result.status === "noop") {
-        recordSettledRun(entry, "noop", result.detail);
+        recordSettledRun(entry, "noop", this._current?.startedAt ?? Date.now(), result.detail);
         const detail = result.detail ? ` — ${result.detail}` : "";
         logInfo(TAG, `■ System noop: "${entry.action}" (${entry.id})${detail}`);
       } else {
         const ok = result.status === "accepted";
         const detail = ok ? (result as { status: "accepted"; detail?: string }).detail : (result as { status: "failed"; error: string }).error;
-        recordSettledRun(entry, ok ? "success" : "failed", detail);
+        recordSettledRun(entry, ok ? "success" : "failed", this._current?.startedAt ?? Date.now(), detail);
         logInfo(TAG, `■ System ${ok ? "✓" : "❌"}: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
         if (!ok) {
           this.checkAutoPause(entry, 1, detail ?? "");
@@ -337,7 +336,7 @@ export class CronQueue {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `System dispatch error for "${entry.action}": ${msg}`);
-      recordSettledRun(entry, "failed", msg);
+      recordSettledRun(entry, "failed", this._current?.startedAt ?? Date.now(), msg);
       this.checkAutoPause(entry, 1, msg);
       scheduleRetry(entry, false);
     } finally {
@@ -372,7 +371,7 @@ export class CronQueue {
       child.on("exit", (code) => {
         const status = code === 0 ? "✓" : `❌ (exit ${code})`;
         logInfo(TAG, `■ Script ${status}: "${entry.command.slice(0, 60)}"`);
-        recordSettledRun(entry, code === 0 ? "success" : "failed", output.slice(0, 200));
+        recordSettledRun(entry, code === 0 ? "success" : "failed", this._current?.startedAt ?? Date.now(), output.slice(0, 200));
         const paused = this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
         const followUp = entry.followUp;
         if (code === 0 && output.trim() && followUp) {
@@ -465,14 +464,14 @@ export class CronQueue {
         const { spin } = await import("../spin.js");
         const response = await spin.injectGreeting(entry.targetUserId, prompt);
         if (response) {
-          recordSettledRun(entry, "success");
+          recordSettledRun(entry, "success", this._current?.startedAt ?? Date.now());
           logInfo(TAG, `✓ Greeting delivered to ${entry.targetUserId}`);
         } else {
-          recordSettledRun(entry, "failed", "greeting returned no response");
+          recordSettledRun(entry, "failed", this._current?.startedAt ?? Date.now(), "greeting returned no response");
           logWarn(TAG, `Greeting failed for ${entry.targetUserId}`);
         }
       } catch (err) {
-        recordSettledRun(entry, "failed", err instanceof Error ? err.message : String(err));
+        recordSettledRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err));
         logWarn(TAG, `Greeting error: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         this.clearCurrent();
@@ -525,8 +524,9 @@ export class CronQueue {
           logInfo(TAG, `■ Agent completed: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
         }
 
+        const producedFiles = dodPaths.filter(p => existsSync(p));
         const isReport = entry.delivery === "report";
-        const resultPath = isReport ? writeResultFile(entry.id, cleaned) : null;
+        const resultPath = producedFiles.length > 0 ? producedFiles[0] : (isReport ? writeResultFile(entry.id, cleaned) : null);
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         if (exitCode === 0) {
@@ -536,7 +536,7 @@ export class CronQueue {
           kanbanFail(boardId, `${summary}${dodResult}`);
         }
 
-        recordSettledRun(entry, exitCode === 0 ? "success" : "failed", `${summary}${dodResult}`, resultPath ?? undefined, boardId);
+        recordSettledRun(entry, exitCode === 0 ? "success" : "failed", this._current?.startedAt ?? Date.now(), `${summary}${dodResult}`, resultPath ?? undefined, boardId);
         const paused = this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
         const icon = exitCode === 0 ? "✓" : "❌";
         if (exitCode !== 0) {
@@ -552,7 +552,7 @@ export class CronQueue {
         const boardId = 0;
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
         kanbanFail(boardId, err instanceof Error ? err.message : String(err));
-        recordSettledRun(entry, "failed", err instanceof Error ? err.message : String(err), undefined, boardId);
+        recordSettledRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err), undefined, boardId);
         const paused = this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
         scheduleRetry(entry, false);
         if (!paused) {

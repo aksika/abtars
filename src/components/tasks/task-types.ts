@@ -73,7 +73,7 @@ function parsePriority(raw: unknown): "high" | "medium" | "low" {
   return "medium";
 }
 
-export function normalize(raw: unknown, _now: number = Date.now()): NormalizeResult {
+export function normalize(raw: unknown): NormalizeResult {
   if (typeof raw !== "object" || raw === null) {
     return { ok: false, error: "entry is not an object" };
   }
