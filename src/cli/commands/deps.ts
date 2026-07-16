@@ -114,7 +114,15 @@ export function observeGroup(name: string): GroupObservation {
 
 type PiObserveState = "absent" | "compatible" | "below-minimum" | "incomplete" | "invalid";
 
-function observePi(): { state: PiObserveState; version?: string; executable?: string } {
+type PiObservation = {
+  state: PiObserveState;
+  version?: string;
+  executable?: string;
+  reason?: string;
+  remediation?: string;
+};
+
+function observePi(): PiObservation {
   const result = resolvePiInstallation({ useCache: false });
   switch (result.state) {
     case "absent":
@@ -124,7 +132,13 @@ function observePi(): { state: PiObserveState; version?: string; executable?: st
     case "below-minimum":
     case "incomplete":
     case "invalid":
-      return { state: result.state, version: result.observedVersion, executable: result.executable };
+      return {
+        state: result.state,
+        version: result.observedVersion,
+        executable: result.executable,
+        reason: result.reason,
+        remediation: result.remediation,
+      };
   }
 }
 
@@ -274,9 +288,17 @@ function piInstall(): MutationResult {
       // Re-check with the found executable
       const piState = observePi();
       if (piState.state === "compatible") return { group: "pi", ok: true };
+
+      // The executable is present on PATH, but the installation may still be
+      // incomplete/invalid. Do not misreport that as a PATH problem.
+      return {
+        group: "pi",
+        ok: false,
+        error: `Pi found on PATH at ${fromPath}, but the installation is ${piState.state}: ${piState.reason ?? "compatibility check failed"}. ${piState.remediation ?? "Reinstall with: abtars deps install pi"}`,
+      };
     }
 
-    // PATH didn't have it — try the npm global bin dir directly
+    // PATH did not have it — try the npm global bin dir directly.
     const binDir = findNpmGlobalBin();
     if (binDir) {
       const piInBin = join(binDir, "pi");
