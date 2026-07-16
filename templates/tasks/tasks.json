@@ -1,45 +1,40 @@
 [
   {
-    "id": "morning-greeting",
-    "message": "Good morning! Start a new day with the user. Be warm and personal, use memory to recall something relevant about them or their plans.",
+    "id": "example-agent-task",
+    "kind": "agent",
     "schedule": "0 9 * * *",
-    "type": "task",
-    "executor": "agent",
-    "maxRunsPerDay": 1,
-    "deliveryMode": "announce"
+    "prompt": "Run the daily report",
+    "chatId": "7773842843",
+    "delivery": "report",
+    "priority": "medium",
+    "enabled": true
   },
   {
-    "id": "daily-backup",
-    "message": "abtars backup",
-    "schedule": "0 0 * * *",
-    "type": "task",
-    "executor": "script",
-    "maxRunsPerDay": 1,
-    "deliveryMode": "silent"
+    "id": "example-reminder",
+    "kind": "reminder",
+    "schedule": "0 8 * * *",
+    "text": "Time to start the day!",
+    "chatId": "7773842843",
+    "delivery": "announce",
+    "priority": "low",
+    "enabled": true
+  },
+  {
+    "id": "example-backup",
+    "kind": "script",
+    "schedule": "30 0 * * *",
+    "command": "tar -czf ~/backup.tar.gz ~/data",
+    "delivery": "silent",
+    "priority": "low",
+    "enabled": true
   },
   {
     "id": "sleep-cycle",
-    "type": "task",
-    "executor": "system",
+    "kind": "system",
     "action": "sleep-cycle",
     "schedule": "0 2 * * *",
-    "catchUp": 6,
-    "maxRunsPerDay": 1,
-    "deliveryMode": "silent",
-    "paused": false
-  },
-  {
-    "id": "hardware-sleep",
-    "type": "task",
-    "executor": "system",
-    "action": "hardware-sleep",
-    "schedule": "30 3 * * *",
-    "idleMinutes": 20,
-    "retryMinutes": 10,
-    "latestLocalTime": "05:30",
-    "expectedWakeTime": "07:55",
-    "deliveryMode": "silent",
-    "maxRunsPerDay": 1,
-    "paused": true
+    "delivery": "silent",
+    "priority": "medium",
+    "enabled": true
   }
 ]

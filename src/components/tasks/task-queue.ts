@@ -72,7 +72,12 @@ function todayStr(): string {
   return localDate();
 }
 
-function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } | null {
+export interface TaskFileResult {
+  prompt: string;
+  dodPaths: string[];
+}
+
+export function readTaskFile(taskFile: string): TaskFileResult | null {
   const filePath = resolve(taskFile.replace(/^~/, homedir()));
   if (!existsSync(filePath)) { logWarn(TAG, `Task file not found: ${filePath}`); return null; }
   const raw = readFileSync(filePath, "utf-8");
@@ -90,6 +95,14 @@ function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } 
     dodPaths = dodSection.split("\n")
       .filter(l => l.match(/^- /))
       .map(l => l.replace(/^- /, "").trim())
+      .filter(p => {
+        const resolved = resolve(p.replace(/^~/, homedir()));
+        if (p.includes(" ") || p.includes("\t") || p.length === 0 || p.startsWith("/") === false && p.startsWith("~") === false) {
+          logWarn(TAG, `Rejected malformed DoD path: "${p}" — must be absolute or ~/ path`);
+          return false;
+        }
+        return true;
+      })
       .map(p => resolve(p.replace(/^~/, homedir())));
   }
 
@@ -505,11 +518,6 @@ export class CronQueue {
         let dodResult = "";
         if (dodPaths.length > 0) {
           const dod = checkDoD(dodPaths);
-          if (!dod.passed && cleaned.length > 200) {
-            // For now keep the 200-char bypass — will be removed in strict DoD task
-            dod.passed = true;
-            dod.details += "\n✓ accepted: model output written to result file";
-          }
           exitCode = dod.passed ? 0 : 1;
           dodResult = `\nDoD: ${dod.passed ? "PASSED" : "FAILED"}\n${dod.details}`;
           logInfo(TAG, `■ Agent DoD ${dod.passed ? "✓" : "❌"}: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"\n${dod.details}`);
@@ -517,9 +525,8 @@ export class CronQueue {
           logInfo(TAG, `■ Agent completed: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
         }
 
-        const producedFiles = dodPaths.filter(p => existsSync(p));
         const isReport = entry.delivery === "report";
-        const resultPath = producedFiles.length > 0 ? producedFiles[0] : (isReport ? writeResultFile(entry.id, cleaned) : null);
+        const resultPath = isReport ? writeResultFile(entry.id, cleaned) : null;
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         if (exitCode === 0) {
