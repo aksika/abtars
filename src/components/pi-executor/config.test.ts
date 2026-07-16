@@ -2,9 +2,18 @@
  * config.test.ts — #1394 Pi workspace path containment and alias validation.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { posix, win32 } from "node:path";
-import { isPathWithinRoot, resolveAndValidateWorkspace, validatePiWorkspaceAliases, type PiExecutorConfig } from "./config.js";
+import { isPathWithinRoot, resolveAndValidateWorkspace, validatePiWorkspaceAliases, type PiExecutorConfig, loadPiConfig } from "./config.js";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+let mockConfigDir = "/nonexistent";
+
+vi.mock("../transport-config.js", () => ({
+  configDir: () => mockConfigDir,
+}));
 
 // ── Pure path containment tests ─────────────────────────────────────────
 
@@ -239,5 +248,46 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
       rmSync(root, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Loader behavior tests (#1440) ─────────────────────────────────────
+
+describe("loadPiConfig", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-load-config-"));
+  const configPath = join(tmp, "pi-executor.json");
+
+  beforeAll(() => { mockConfigDir = tmp; });
+  afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+
+  it("returns null when file is missing", () => {
+    rmSync(configPath, { force: true });
+    expect(loadPiConfig()).toBeNull();
+  });
+
+  it("returns null when disabled", () => {
+    writeFileSync(configPath, JSON.stringify({ enabled: false, command: "pi", workspaceAliases: {} }), "utf-8");
+    expect(loadPiConfig()).toBeNull();
+  });
+
+  it("returns null and warns when enabled but missing command", () => {
+    writeFileSync(configPath, JSON.stringify({ enabled: true, workspaceAliases: { w: { path: "/tmp" } } }), "utf-8");
+    expect(loadPiConfig()).toBeNull();
+  });
+
+  it("returns null and warns when enabled but no aliases", () => {
+    writeFileSync(configPath, JSON.stringify({ enabled: true, command: "pi", workspaceAliases: {} }), "utf-8");
+    expect(loadPiConfig()).toBeNull();
+  });
+
+  it("returns config when enabled with command and aliases", () => {
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } },
+    }), "utf-8");
+    const cfg = loadPiConfig();
+    expect(cfg).not.toBeNull();
+    expect(cfg!.enabled).toBe(true);
+    expect(cfg!.command).toBe("pi");
+    expect(cfg!.workspaceAliases).toHaveProperty("work");
   });
 });

@@ -2,11 +2,12 @@ import { existsSync } from "node:fs";
 import { PiRunStore } from "./pi-run-store.js";
 import { PiExecutor } from "./pi-executor.js";
 import { resolveAndValidateWorkspace, validateSessionFile, type PiExecutorConfig } from "./config.js";
-import type { PiRunRecord, PiRunView, PiRunRef, PiRunRequest, PiRunStatus, PiUiReply } from "./types.js";
+import type { PiRunRecord, PiRunView, PiRunRef, PiRunRequest, PiRunStatus, PiUiReply, PiModelSelection } from "./types.js";
 import { MAX_GOAL_CHARS } from "./types.js";
 import type { Spin } from "../spin.js";
 import { nerve } from "../nerve.js";
-import { logInfo } from "../logger.js";
+import { logInfo, logDebug } from "../logger.js";
+import { resolveAgent } from "../transport-config.js";
 
 const TAG = "pi-service";
 
@@ -76,6 +77,7 @@ export class PiRunService {
     }
 
     try {
+      const model = input.model ?? resolveCodingModel();
       const created = this.deps.store.createPiCardAndRun({
         runId,
         sessionId: spinSessionId,
@@ -88,9 +90,9 @@ export class PiRunService {
         originPlatform: input.owner.platform,
         originChatId: input.owner.chatId,
         originPeer: input.owner.peer,
-        modelProvider: input.model?.provider,
-        modelId: input.model?.modelId,
-        thinking: input.model?.thinking,
+        modelProvider: model?.provider,
+        modelId: model?.modelId,
+        thinking: model?.thinking,
         idempotency,
       });
 
@@ -232,5 +234,23 @@ export class PiRunService {
     if (run.ownerPrincipalId !== caller.userId) {
       throw new Error(`Run ${run.id} belongs to a different principal`);
     }
+  }
+}
+
+/**
+ * Resolve the effective coding provider and model from transport configuration.
+ * Returns undefined when no assignment is available — Pi will use its default model.
+ */
+function resolveCodingModel(): PiModelSelection | undefined {
+  try {
+    const agent = resolveAgent("cody");
+    if (!agent) {
+      logDebug(TAG, "No coding model assignment configured — Pi will use its default model");
+      return undefined;
+    }
+    return { provider: agent.providerName, modelId: agent.model };
+  } catch {
+    logDebug(TAG, "Failed to resolve coding model");
+    return undefined;
   }
 }

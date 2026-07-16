@@ -15,6 +15,12 @@ import type { PiExecutor } from "./pi-executor.js";
 import type { Spin } from "../spin.js";
 import { PiRunService, type Principal } from "./pi-run-service.js";
 
+const mockResolveAgent = vi.hoisted(() => vi.fn());
+
+vi.mock("../transport-config.js", () => ({
+  resolveAgent: mockResolveAgent,
+}));
+
 const _require = createRequire(import.meta.url);
 const sharedPath = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
 const Database: typeof import("better-sqlite3") = _require(sharedPath);
@@ -118,6 +124,10 @@ const u1Peer = { userId: "peer:remote-host" };
 const u2: Principal = { userId: "usr-2" };
 
 describe("PiRunService.run()", () => {
+  beforeEach(() => {
+    mockResolveAgent.mockReset();
+  });
+
   it("creates a Pi run and returns ref", async () => {
     const svc = makeService();
 
@@ -197,6 +207,60 @@ describe("PiRunService.run()", () => {
       { goal: "x", workspaceAlias: "nonexistent-ws", owner: { principalId: "usr-1", origin: "user" } },
       u1,
     )).rejects.toThrow("Unknown workspace alias");
+  });
+
+  it("resolves coding model when no explicit model (#1440)", async () => {
+    mockResolveAgent.mockReturnValue({ providerName: "openai", model: "gpt-4o" });
+    const svc = makeService();
+    const { runId } = await svc.run(
+      { goal: "test model inheritance", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
+    );
+    const record = svc.store.get(runId)!;
+    expect(record.modelProvider).toBe("openai");
+    expect(record.modelId).toBe("gpt-4o");
+  });
+
+  it("preserves explicit model override (#1440)", async () => {
+    mockResolveAgent.mockReturnValue({ providerName: "openai", model: "gpt-4o" });
+    const svc = makeService();
+    const { runId } = await svc.run(
+      {
+        goal: "explicit override", workspaceAlias: "test-ws",
+        owner: { principalId: "usr-1", origin: "user" },
+        model: { provider: "anthropic", modelId: "claude-4" },
+      },
+      u1,
+    );
+    const record = svc.store.get(runId)!;
+    expect(record.modelProvider).toBe("anthropic");
+    expect(record.modelId).toBe("claude-4");
+  });
+
+  it("leaves model unset when no coding assignment (#1440)", async () => {
+    mockResolveAgent.mockReturnValue(null);
+    const svc = makeService();
+    const { runId } = await svc.run(
+      { goal: "no coding model", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
+    );
+    const record = svc.store.get(runId)!;
+    expect(record.modelProvider).toBeUndefined();
+    expect(record.modelId).toBeUndefined();
+  });
+
+  it("persists resolved model durably across config changes (#1440)", async () => {
+    mockResolveAgent.mockReturnValue({ providerName: "openai", model: "gpt-4o" });
+    const svc = makeService();
+    const { runId } = await svc.run(
+      { goal: "durable model", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
+    );
+    // Change mock to simulate config edit after run creation
+    mockResolveAgent.mockReturnValue({ providerName: "anthropic", model: "claude-4" });
+    const record = svc.store.get(runId)!;
+    expect(record.modelProvider).toBe("openai");
+    expect(record.modelId).toBe("gpt-4o");
   });
 });
 

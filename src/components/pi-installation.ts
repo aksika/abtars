@@ -45,15 +45,34 @@ export function clearPiCache(): void {
  * Resolve a `pi` executable path without a shell.
  */
 export function resolvePiFromPath(): string | null {
+  return resolveExecutableFromPath("pi");
+}
+
+/**
+ * Resolve any bare executable name from PATH without a shell. Returns the
+ * canonical absolute path or null.
+ * - Absolute paths are returned as-is (must exist on disk).
+ * - Bare names are searched across PATH directories.
+ * - Relative names (containing a separator but not absolute) return null.
+ */
+export function resolveExecutableFromPath(command: string): string | null {
+  if (isAbsolute(command)) {
+    try {
+      if (!existsSync(command)) return null;
+      return realpathSync(command);
+    } catch { return null; }
+  }
+  if (command.includes("/") || command.includes("\\")) {
+    // Relative path — reject, not on PATH
+    return null;
+  }
   const pathDirs = (process.env.PATH ?? "").split(":").filter(Boolean);
   for (const dir of pathDirs) {
-    const candidate = join(dir, "pi");
+    const candidate = join(dir, command);
     try {
       if (!existsSync(candidate)) continue;
       return realpathSync(candidate);
-    } catch {
-      continue;
-    }
+    } catch { continue; }
   }
   return null;
 }
@@ -138,7 +157,15 @@ export function resolvePiInstallation(options?: { useCache?: boolean }): PiInsta
     const { loadPiConfig } = require("./pi-executor/config.js") as { loadPiConfig: () => { command?: string } | null };
     const config = loadPiConfig();
     if (config?.command) {
-      executable = config.command;
+      const resolved = resolveExecutableFromPath(config.command);
+      if (!resolved) {
+        return {
+          state: "invalid",
+          reason: `Configured command "${config.command}" not found on PATH`,
+          remediation: `Ensure "${config.command}" is installed and on your PATH, or configure an absolute path in pi-executor.json`,
+        };
+      }
+      executable = resolved;
       source = "configured";
     }
   } catch {

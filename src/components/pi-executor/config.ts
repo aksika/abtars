@@ -1,7 +1,7 @@
+import { configDir } from "../transport-config.js";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { resolve, isAbsolute, relative, sep } from "node:path";
-import { logInfo, logWarn } from "../logger.js";
-import { configDir } from "../transport-config.js";
+import { logInfo, logWarn, logDebug } from "../logger.js";
 
 const TAG = "pi-config";
 
@@ -17,7 +17,6 @@ export interface PiExecutorConfig {
   projectTrust: "always" | "never";
   sessionStorageRoot: string;
   abmindPlugin: string;
-  defaultModel?: { provider: string; modelId: string; thinking?: string };
 }
 
 // ── #1394: Component-aware path containment ─────────────────────────────────
@@ -59,14 +58,17 @@ export function validatePiWorkspaceAliases(config: PiExecutorConfig): Record<str
 export function loadPiConfig(): PiExecutorConfig | null {
   const p = resolve(configDir(), "pi-executor.json");
   if (!existsSync(p)) {
-    logInfo(TAG, "No pi-executor.json found — Pi executor disabled");
+    logDebug(TAG, "No pi-executor.json found — Pi executor disabled");
     return null;
   }
   try {
     const raw = JSON.parse(readFileSync(p, "utf-8")) as Partial<PiExecutorConfig>;
-    if (!raw.enabled) { logInfo(TAG, "Pi executor disabled in config"); return null; }
-    if (!raw.command) return null;
-    if (!raw.workspaceAliases || Object.keys(raw.workspaceAliases).length === 0) return null;
+    if (!raw.enabled) { logDebug(TAG, "Pi executor disabled in config"); return null; }
+    if (!raw.command) { logWarn(TAG, `${p}: enabled but missing "command" — Pi executor will not start`); return null; }
+    if (!raw.workspaceAliases || Object.keys(raw.workspaceAliases).length === 0) {
+      logWarn(TAG, `${p}: enabled but no workspace aliases configured — add at least one alias to enable delegation`);
+      return null;
+    }
 
     const fixedArgs = (raw.fixedArgs ?? []) as readonly string[];
     const faErrors = validateFixedArgs(fixedArgs);
@@ -87,13 +89,12 @@ export function loadPiConfig(): PiExecutorConfig | null {
       projectTrust: raw.projectTrust ?? "never",
       sessionStorageRoot: raw.sessionStorageRoot ?? "",
       abmindPlugin: raw.abmindPlugin ?? "",
-      defaultModel: raw.defaultModel,
     };
 
     logInfo(TAG, `Pi executor loaded: ${config.command} (${Object.keys(config.workspaceAliases).length} aliases, max ${config.maxConcurrent} concurrent)`);
     return config;
   } catch (err) {
-    logWarn(TAG, `Failed to load pi-executor.json: ${err instanceof Error ? err.message : String(err)}`);
+    logWarn(TAG, `${p}: failed to load — ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }

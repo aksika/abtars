@@ -32,6 +32,44 @@ describe("#1321 reconcile sleep-cycle from template", () => {
   });
   afterEach(() => rmSync(HOME, { recursive: true, force: true }));
 
+  const CANONICAL_PI_EXECUTOR = JSON.stringify({
+    enabled: false,
+    command: "pi",
+    fixedArgs: [],
+    allowedEnv: [],
+    maxConcurrent: 1,
+    maxWallClockMs: 1800000,
+    abortGraceMs: 10000,
+    projectTrust: "never",
+    workspaceAliases: {},
+    sessionStorageRoot: "",
+    abmindPlugin: "",
+  }, null, 2) + "\n";
+
+  /** Create templates/config/pi-executor.json in the test HOME. */
+  function seedPiExecutorTemplate(): void {
+    const dir = join(HOME, "templates", "config");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "pi-executor.json"), CANONICAL_PI_EXECUTOR, "utf-8");
+  }
+
+  it("seeds pi-executor.json when absent (#1440)", () => {
+    seedPiExecutorTemplate();
+    reconcile(join(HOME, "templates"), HOME);
+    const seeded = readFileSync(join(HOME, "config", "pi-executor.json"), "utf-8");
+    expect(seeded).toBe(CANONICAL_PI_EXECUTOR);
+  });
+
+  it("preserves existing pi-executor.json (#1440)", () => {
+    seedPiExecutorTemplate();
+    mkdirSync(join(HOME, "config"), { recursive: true });
+    const modified = JSON.stringify({ enabled: true, command: "/custom/pi", workspaceAliases: { work: { path: "/home/me/work" } } });
+    writeFileSync(join(HOME, "config", "pi-executor.json"), modified, "utf-8");
+    reconcile(join(HOME, "templates"), HOME);
+    const result = readFileSync(join(HOME, "config", "pi-executor.json"), "utf-8");
+    expect(result).toBe(modified);
+  });
+
   it("appends sleep-cycle when absent, does not seed hardware-sleep", () => {
     seedTemplate();
     mkdirSync(join(HOME, "tasks"), { recursive: true });

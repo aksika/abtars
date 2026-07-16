@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveNestedPackageRoot } from "./pi-installation.js";
+import { resolveNestedPackageRoot, resolveExecutableFromPath, resolvePiFromPath } from "./pi-installation.js";
 
 const roots: string[] = [];
 
@@ -40,5 +40,67 @@ describe("resolveNestedPackageRoot", () => {
     symlinkSync(externalRoot, join(scopeRoot, "pi-ai"));
 
     expect(resolveNestedPackageRoot(piRoot, "@earendil-works/pi-ai")).toBeNull();
+  });
+});
+
+describe("resolveExecutableFromPath", () => {
+  it("resolves a bare name on PATH", () => {
+    const dir = fixture();
+    const exe = join(dir, "my-pi");
+    writeFileSync(exe, "#!/bin/sh\necho hello\n", "utf-8");
+    chmodSync(exe, 0o755);
+    const origPath = process.env.PATH;
+    process.env.PATH = dir;
+    try {
+      const result = resolveExecutableFromPath("my-pi");
+      expect(result).not.toBeNull();
+      expect(result!).toBe(exe);
+    } finally {
+      process.env.PATH = origPath;
+    }
+  });
+
+  it("returns null for a bare name not on PATH", () => {
+    const origPath = process.env.PATH;
+    process.env.PATH = "/nonexistent-path-1440";
+    try {
+      expect(resolveExecutableFromPath("no-such-tool-1440")).toBeNull();
+    } finally {
+      process.env.PATH = origPath;
+    }
+  });
+
+  it("returns null for a relative path containing /", () => {
+    expect(resolveExecutableFromPath("./pi")).toBeNull();
+    expect(resolveExecutableFromPath("subdir/pi")).toBeNull();
+  });
+
+  it("returns an existing absolute path", () => {
+    const dir = fixture();
+    const exe = join(dir, "custom-pi");
+    writeFileSync(exe, "#!/bin/sh\necho hello\n", "utf-8");
+    chmodSync(exe, 0o755);
+    const result = resolveExecutableFromPath(exe);
+    expect(result).toBe(exe);
+  });
+
+  it("returns null for a nonexistent absolute path", () => {
+    expect(resolveExecutableFromPath("/nonexistent-1440/pi")).toBeNull();
+  });
+
+  it("resolvePiFromPath is a thin wrapper for 'pi'", () => {
+    const dir = fixture();
+    const exe = join(dir, "pi");
+    writeFileSync(exe, "#!/bin/sh\necho hello\n", "utf-8");
+    chmodSync(exe, 0o755);
+    const origPath = process.env.PATH;
+    process.env.PATH = dir;
+    try {
+      const result = resolvePiFromPath();
+      expect(result).not.toBeNull();
+      expect(result!).toBe(exe);
+    } finally {
+      process.env.PATH = origPath;
+    }
   });
 });
