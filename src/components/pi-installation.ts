@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, resolve, relative, isAbsolute } from "node:path";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
@@ -110,16 +110,18 @@ function readPackageVersion(packageRoot: string): string | null {
   }
 }
 
-function resolveNestedModule(packageRoot: string, pkgName: string): string | null {
-  const requireFromPi = createRequire(join(packageRoot, "package.json"));
+export function resolveNestedPackageRoot(packageRoot: string, pkgName: string): string | null {
+  const installRoot = resolve(packageRoot, "node_modules");
+  const candidateRoot = join(installRoot, ...pkgName.split("/"));
   try {
-    const resolved = requireFromPi.resolve(pkgName);
-    const canonical = realpathSync(resolved);
-    const candidateRoot = findPackageRoot(dirname(canonical), pkgName);
-    if (!candidateRoot) return null;
-    const installRoot = resolve(packageRoot, "node_modules");
-    if (!canonical.startsWith(installRoot)) return null;
-    return candidateRoot;
+    const canonicalRoot = realpathSync(candidateRoot);
+    const canonicalInstallRoot = realpathSync(installRoot);
+    const containedPath = relative(canonicalInstallRoot, canonicalRoot);
+    if (containedPath.startsWith("..") || isAbsolute(containedPath)) return null;
+
+    const meta = JSON.parse(readFileSync(join(canonicalRoot, "package.json"), "utf-8")) as { name?: string };
+    if (meta.name !== pkgName) return null;
+    return canonicalRoot;
   } catch {
     return null;
   }
@@ -206,9 +208,9 @@ export function resolvePiInstallation(options?: { useCache?: boolean }): PiInsta
     };
   }
 
-  const aiRoot = resolveNestedModule(packageRoot, PI_COMPATIBILITY.nestedPackages.ai);
-  const tuiRoot = resolveNestedModule(packageRoot, PI_COMPATIBILITY.nestedPackages.tui);
-  const agentCoreRoot = resolveNestedModule(packageRoot, PI_COMPATIBILITY.nestedPackages.agentCore);
+  const aiRoot = resolveNestedPackageRoot(packageRoot, PI_COMPATIBILITY.nestedPackages.ai);
+  const tuiRoot = resolveNestedPackageRoot(packageRoot, PI_COMPATIBILITY.nestedPackages.tui);
+  const agentCoreRoot = resolveNestedPackageRoot(packageRoot, PI_COMPATIBILITY.nestedPackages.agentCore);
 
   const missingNested: string[] = [];
   if (!aiRoot) missingNested.push(PI_COMPATIBILITY.nestedPackages.ai);
