@@ -1129,7 +1129,7 @@ async function fireCallback(peerName: string, taskId: number, status: "done" | "
     const transport = getPeerTransport();
     const payload: Record<string, unknown> = { action: "callback", task_id: taskId, status, result_summary: result, error, tokens_used: tokensUsed ?? 0 };
     if (artifacts?.length) payload.artifacts = artifacts;
-    await transport.send(peerName, { type: "task", payload });
+    await transport.send(peerName, { type: "callback", payload });
     logInfo(TAG, `Callback fired to ${peerName} for card:${taskId} (${status})`);
   } catch (err) {
     logWarn(TAG, `Callback to ${peerName} failed (card:${taskId}): ${err instanceof Error ? err.message : String(err)}`);

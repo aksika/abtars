@@ -10,7 +10,7 @@ export class RemoteWorkerAdapter implements SwarmExecutorAdapter {
   readonly kind = "remote" as const;
 
   async capacity(): Promise<ExecutorCapacity> {
-    return { available: 10, max: 10 };
+    return { available: 5, max: 5 };
   }
 
   async start(claim: ExecutionClaim): Promise<StartObservation> {
@@ -27,13 +27,23 @@ export class RemoteWorkerAdapter implements SwarmExecutorAdapter {
       if (!peer) return { kind: "start_failed", reason: "no peer in card notes", retryable: false };
 
       const transport = getPeerTransport();
-      const result = await transport.delegateTask(peer, card.title || card.notes || "", {
-        priority: card.priority,
-        contract: undefined,
-        attemptId: claim.attemptId,
-      });
+      const request = {
+        version: 1 as const,
+        request_id: claim.attemptId,
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 300_000).toISOString(),
+        goal: card.title || card.goal || card.notes || "",
+        required_capabilities: [] as string[],
+      };
+      const result = await transport.askHelp(peer, request);
 
-      logInfo(TAG, `Delegated ${claim.cardId} to ${peer}: remote#${result.taskId}`);
+      if (result.decision === "accepted") {
+        logInfo(TAG, `Contribution ${claim.cardId} accepted by ${peer}: ref=${result.contribution_ref}`);
+        import("./tasks/kanban-board.js").then(m => m.kanbanUpdate(claim.cardId, {
+          notes: JSON.stringify({ ...notes, remote_contribution_ref: result.contribution_ref, outcome: "accepted" }),
+        })).catch(() => {});
+      }
+
       return { kind: "started", attemptId: claim.attemptId, generation: claim.generation, executorId: claim.executorId };
     } catch (err) {
       logWarn(TAG, `remote start failed for ${claim.attemptId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -48,16 +58,22 @@ export class RemoteWorkerAdapter implements SwarmExecutorAdapter {
 
       const notes = card.notes ? JSON.parse(card.notes) : {};
       const peer = notes.peer as string | undefined;
-      const remoteTaskId = notes.remote_task_id as number | undefined;
-      if (!peer || !remoteTaskId) return { kind: "not_found" };
+      const contributionRef = notes.remote_contribution_ref as string | undefined;
+      const requestId = notes.request_id as string | undefined;
+      if (!peer || !contributionRef || !requestId) return { kind: "not_found" };
 
       const transport = getPeerTransport();
-      await transport.terminateTask(peer, remoteTaskId);
+      await transport.withdrawHelp(peer, {
+        version: 1,
+        request_id: requestId,
+        contribution_ref: contributionRef,
+        reason: "cancelled_by_origin",
+      });
 
       const store = new WorkerSupervisionStore();
       store.requestCancel(claim.attemptId, "operator");
 
-      logInfo(TAG, `Cancelled remote ${claim.cardId} peer=${peer} remote#${remoteTaskId}`);
+      logInfo(TAG, `Withdrew help ${claim.cardId} from peer=${peer}`);
       return { kind: "cancelled", attemptId: claim.attemptId };
     } catch (err) {
       logWarn(TAG, `remote cancel failed for ${claim.attemptId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -72,21 +88,28 @@ export class RemoteWorkerAdapter implements SwarmExecutorAdapter {
 
       const notes = card.notes ? JSON.parse(card.notes) : {};
       const peer = notes.peer as string | undefined;
-      const remoteTaskId = notes.remote_task_id as number | undefined;
-      if (!peer || !remoteTaskId) return { kind: "unknown", message: "no remote correlation" };
+      const contributionRef = notes.remote_contribution_ref as string | undefined;
+      const requestId = notes.request_id as string | undefined;
+      if (!peer || !contributionRef || !requestId) return { kind: "unknown", message: "no remote correlation" };
 
       const transport = getPeerTransport();
-      const result = await transport.checkTask(peer, remoteTaskId);
+      const result = await transport.getHelpStatus(peer, {
+        version: 1,
+        request_id: requestId,
+        contribution_ref: contributionRef,
+      });
 
-      switch (result.status) {
+      switch (result.state) {
         case "running":
+        case "queued":
+        case "awaiting_input":
           return { kind: "running", lifecycle: "running" };
-        case "done":
+        case "completed":
           return { kind: "terminal", lifecycle: "completed" };
         case "failed":
           return { kind: "terminal", lifecycle: "failed" };
         default:
-          return { kind: "unknown", message: `status=${result.status}` };
+          return { kind: "unknown", message: `state=${result.state}` };
       }
     } catch (err) {
       return { kind: "unknown", message: `inspect error: ${err instanceof Error ? err.message : String(err)}` };

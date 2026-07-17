@@ -59,6 +59,9 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         throw err;
       }
 
+      const { getPeerWsBroker } = await import("../components/peer-transport/peer-ws-broker.js");
+      const broker = getPeerWsBroker();
+
       agentApiServer = new AgentApiServer({
         config: agentConfig,
         cliPath: config.transport.agentCliPath,
@@ -75,6 +78,57 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         ),
         piExecutorService: ctx.piExecutorService,
       });
+
+      // #1433: Wire PeerHelpService for sovereign help request handling
+      try {
+        const { PeerHelpService } = await import("../components/peer-help/service.js");
+        const { PeerHelpStore } = await import("../components/peer-help/store.js");
+        const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
+        const { nerve } = await import("../components/nerve.js");
+        const { kanbanEnqueue, kanbanGetCard, kanbanUpdate, kanbanList, kanbanComplete, kanbanFail } = await import("../components/tasks/kanban-board.js");
+        const { getLocalCapabilities } = await import("../components/peer-transport/gossip.js");
+        const db = requireTaskDatabase();
+        const store = new PeerHelpStore(
+          db as any,
+          { kanbanEnqueue, kanbanGetCard, kanbanUpdate, kanbanList, kanbanComplete, kanbanFail },
+          nerve,
+        );
+        const helpService = new PeerHelpService(store, () => getLocalCapabilities());
+        agentApiServer.setPeerHelpService(helpService);
+
+        // Register broker request handler for help wire methods
+        broker.registerRequestHandler(async (peer, method, payload, _frameId) => {
+          if (method === "help.request.v1") return helpService.handleHelpRequest(peer, payload);
+          if (method === "help.status.v1") return helpService.handleHelpStatus(peer, payload);
+          if (method === "help.withdraw.v1") return helpService.handleHelpWithdraw(peer, payload);
+          if (method === "help.event.v1") return helpService.handleContributionEvent(peer, payload);
+          throw new Error(`Unknown help method: ${method}`);
+        });
+
+        // Register push handler for broker (inventory, status, etc.)
+        broker.registerPushHandler(async (peer, method, payload) => {
+          if (method === "peer-status.v1") {
+            try {
+              const { getHealthStore } = await import("../components/peer-transport/peer-health.js");
+              getHealthStore().ingestSignedStatus("wss", peer, payload as any);
+            } catch { /* best effort */ }
+          }
+          if (method === "peer.inventory.v1") {
+            try {
+              const { verifyAndStoreInventory } = await import("../components/peer-transport/peer-inventory.js");
+              const { loadPeerConfig } = await import("../components/peer-config.js");
+              const config = loadPeerConfig();
+              const peerEntry = config.peers[peer];
+              if (peerEntry?.verifyKey) {
+                verifyAndStoreInventory(peer, payload as any, peerEntry.verifyKey);
+              }
+            } catch { /* best effort */ }
+          }
+        });
+      } catch (err) {
+        logError(TAG, `Failed to wire PeerHelpService: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
       ctx.agentApiServer = agentApiServer;
       return {
         async start() { await agentApiServer!.start(); },

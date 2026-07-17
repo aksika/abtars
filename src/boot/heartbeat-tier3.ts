@@ -21,6 +21,7 @@ import { createModelHealthTask } from "./heartbeat-model-health.js";
 import type { BootCtx } from "./context.js";
 
 const TAG = "heartbeat";
+let _lastCapabilityHash = "";
 
 export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   const { heartbeat, transport, cronQueue, memory, memoryConfig, config, pipelineDeps, capabilities } = ctx;
@@ -160,15 +161,32 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   // Peer health broadcast (#1360): UDP gossip + WSS status via heartbeat
   import("../components/peer-transport/gossip.js").then(({ gossipBroadcast }) => {
     heartbeat.registerTask({ name: "peer-health", execute: async () => {
-      // 1. UDP broadcast
       gossipBroadcast();
 
-      // 2. WSS status push to all connected peers
       try {
         const { getPeerTransport } = await import("../components/peer-transport/index.js");
         const transport = getPeerTransport() as import("../components/peer-transport/http-transport.js").HttpTransport;
         if (typeof transport.broadcastStatus === "function") {
           transport.broadcastStatus();
+        }
+      } catch { /* best effort */ }
+
+      // #1433: Inventory anti-entropy — broadcast when capability hash changes
+      try {
+        const { getPeerTransport } = await import("../components/peer-transport/index.js");
+        const transport = getPeerTransport() as import("../components/peer-transport/http-transport.js").HttpTransport;
+        if (typeof transport.broadcastInventory === "function") {
+          const { getInventoryCapabilityHash } = await import("../components/peer-transport/peer-inventory.js");
+          const { loadPeerConfig } = await import("../components/peer-config.js");
+          const { getLocalCapabilities } = await import("../components/peer-transport/gossip.js");
+          const cfg = loadPeerConfig();
+          const caps = getLocalCapabilities();
+          const hash = getInventoryCapabilityHash(cfg.self.signingKey, cfg.self.name, process.env["npm_package_version"] ?? "0.0.0", caps, ["wss", "https"]);
+          const prev = _lastCapabilityHash;
+          if (hash !== prev) {
+            _lastCapabilityHash = hash;
+            transport.broadcastInventory();
+          }
         }
       } catch { /* best effort */ }
     } });

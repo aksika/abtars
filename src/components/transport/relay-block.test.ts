@@ -1,7 +1,7 @@
 /**
  * relay-block.test.ts — #1301: peer-originated requests must not relay through
  * this host to a third peer. The relay tools (peer_session/peer_wakeup/
- * peer_delegate) refuse when the active Orc card is peer-sourced.
+ * peer_ask_help) refuse when the active Orc card is peer-sourced.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -58,12 +58,12 @@ describe("#1301 relay tools refuse on peer-sourced card", () => {
     orc.setActiveOrcCard(null);
   });
 
-  it("peer_delegate refuses", async () => {
+  it("peer_ask_help refuses", async () => {
     const kanban = await import("../tasks/kanban-board.js");
     const orc = await import("./orc-tools.js");
     const { executeToolCall } = await import("./tool-registry.js");
     orc.setActiveOrcCard(kanban.kanbanEnqueue("peer task", "peer"));
-    const out = JSON.parse(await executeToolCall("peer_delegate", { goal: "do x", peer: "xxx" }, { userId: "peer" }));
+    const out = JSON.parse(await executeToolCall("peer_ask_help", { goal: "do x", peer: "xxx" }, { userId: "peer" }));
     expect(out.reason).toBe("peer_relay_blocked");
     orc.setActiveOrcCard(null);
   });
