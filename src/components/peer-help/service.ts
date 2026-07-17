@@ -90,13 +90,28 @@ export class PeerHelpService {
     const requestHash = canonicalRequestHash(request);
 
     const reservation = this.store.reserve(originPeer, request.request_id, requestHash);
-    if (!reservation.ok) {
-      return { version: 1, request_id: request.request_id, decision: "declined", reason_code: "reserve_failed" };
+    if (reservation.status === "replay" && reservation.response) {
+      return reservation.response;
     }
-
-    if (reservation.existing) {
-      return reservation.existing.response;
+    if (reservation.status === "conflict") {
+      logWarn(TAG, `Conflicting reuse of request ${request.request_id} from ${originPeer} (different content)`);
+      return { version: 1, request_id: request.request_id, decision: "declined", reason_code: "conflict", reason: "request_id reused with different content" };
     }
+    if (reservation.status === "in_flight") {
+      // Same request redelivered while the original is still being processed.
+      // Do not create duplicate work; defer so the requester neither fans out
+      // to another peer nor treats this as an acceptance.
+      logDebug(TAG, `Duplicate in-flight delivery of ${request.request_id} from ${originPeer}`);
+      return {
+        version: 1,
+        request_id: request.request_id,
+        decision: "deferred",
+        reason_code: "in_progress",
+        reason: "Original request is still being processed",
+        retry_after: new Date(Date.now() + 30_000).toISOString(),
+      };
+    }
+    // reservation.status === "new" → proceed to admission.
 
     const localCapabilities = new Set(this.capabilityRegistry().map(c => c.toLowerCase()));
     const activePeerProjects = this.countActivePeerProjects();

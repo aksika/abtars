@@ -22,6 +22,7 @@ import type { BootCtx } from "./context.js";
 
 const TAG = "heartbeat";
 let _lastCapabilityHash = "";
+let _lastInventoryBroadcast = 0;
 
 export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   const { heartbeat, transport, cronQueue, memory, memoryConfig, config, pipelineDeps, capabilities } = ctx;
@@ -182,9 +183,11 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
           const cfg = loadPeerConfig();
           const caps = getLocalCapabilities();
           const hash = getInventoryCapabilityHash(cfg.self.signingKey, cfg.self.name, process.env["npm_package_version"] ?? "0.0.0", caps, ["wss", "https"]);
-          const prev = _lastCapabilityHash;
-          if (hash !== prev) {
+          const now = Date.now();
+          const INVENTORY_ANTIENTROPY_MS = 4 * 60 * 60 * 1000;
+          if (hash !== _lastCapabilityHash || (now - _lastInventoryBroadcast) > INVENTORY_ANTIENTROPY_MS) {
             _lastCapabilityHash = hash;
+            _lastInventoryBroadcast = now;
             transport.broadcastInventory();
           }
         }

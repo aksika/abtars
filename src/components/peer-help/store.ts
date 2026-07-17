@@ -18,13 +18,9 @@ interface PeerHelpRow {
 }
 
 export interface ReserveHelpResult {
-  ok: true;
-  existing?: {
-    decision: HelpDecision;
-    response: PeerHelpResponseV1;
-    contribution_ref?: string;
-  };
-  conflict?: true;
+  status: "new" | "replay" | "conflict" | "in_flight";
+  response?: PeerHelpResponseV1;
+  contribution_ref?: string;
 }
 
 export interface AcceptedHelp {
@@ -55,16 +51,18 @@ interface KanbanBoard {
 }
 
 interface NerveEmitter {
-  emit(event: string, ...args: unknown[]): void;
+  fire(event: "card:queued" | "card:running" | "card:done" | "card:failed" | "card:delivered", cardId: number): void;
 }
 
 export class PeerHelpStore {
   private db: import("better-sqlite3").Database;
   private kanban: KanbanBoard;
+  private nerve: NerveEmitter;
 
-  constructor(db: import("better-sqlite3").Database, kanban: KanbanBoard, _nerve: NerveEmitter) {
+  constructor(db: import("better-sqlite3").Database, kanban: KanbanBoard, nerve: NerveEmitter) {
     this.db = db;
     this.kanban = kanban;
+    this.nerve = nerve;
     this.migrate();
   }
 
@@ -90,22 +88,25 @@ export class PeerHelpStore {
 
   reserve(originPeer: string, requestId: string, requestHash: string): ReserveHelpResult {
     const existing = this.db.prepare(
-      "SELECT state, response_json, contribution_ref FROM peer_help_requests WHERE origin_peer = ? AND request_id = ?"
-    ).get(originPeer, requestId) as Pick<PeerHelpRow, "state" | "response_json" | "contribution_ref"> | undefined;
+      "SELECT state, request_hash, response_json, contribution_ref FROM peer_help_requests WHERE origin_peer = ? AND request_id = ?"
+    ).get(originPeer, requestId) as Pick<PeerHelpRow, "state" | "request_hash" | "response_json" | "contribution_ref"> | undefined;
 
     if (existing) {
+      // Same request ID reused with different canonical content → conflict.
+      if (existing.request_hash !== requestHash) {
+        return { status: "conflict" };
+      }
+      // Same content: terminal decision replays; in-flight (pending/unknown)
+      // must not create a second card/run/process.
       if (existing.state === "accepted" || existing.state === "declined" || existing.state === "deferred") {
         const response = JSON.parse(existing.response_json ?? "{}") as PeerHelpResponseV1;
         return {
-          ok: true,
-          existing: {
-            decision: existing.state as HelpDecision,
-            response,
-            contribution_ref: existing.contribution_ref ?? undefined,
-          },
+          status: "replay",
+          response,
+          contribution_ref: existing.contribution_ref ?? undefined,
         };
       }
-      return { ok: true, conflict: true };
+      return { status: "in_flight" };
     }
 
     this.db.prepare(
@@ -113,11 +114,15 @@ export class PeerHelpStore {
        VALUES (?, ?, ?, 'pending', datetime('now'), datetime('now'))`
     ).run(originPeer, requestId, requestHash);
 
-    return { ok: true };
+    return { status: "new" };
   }
 
   acceptGeneric(reservation: { originPeer: string; requestId: string; requestHash: string }, cardInput: CardInput, response: PeerHelpResponseV1): AcceptedHelp {
     const contributionRef = response.contribution_ref ?? generateContributionRef();
+    const VALID_PRIORITIES = new Set(["CRITICAL", "HIGH", "MEDIUM", "LOW"]);
+    const normalizedPriority = cardInput.priority?.toUpperCase();
+    const priority = normalizedPriority && VALID_PRIORITIES.has(normalizedPriority) ? normalizedPriority : "MEDIUM";
+    const deliveryMode = cardInput.deliveryMode === "report" ? "deliver" : cardInput.deliveryMode;
 
     const result = this.db.transaction(() => {
       const row = this.db.prepare(
@@ -131,23 +136,29 @@ export class PeerHelpStore {
         throw new Error(`Request hash mismatch for ${reservation.requestId}`);
       }
 
-      const cardId = this.kanban.kanbanEnqueue(cardInput.title, "peer", cardInput.sourceId, {
-        type: "O",
-        source: "peer",
-        sourcePeer: cardInput.sourcePeer,
-        sourceId: cardInput.sourceId,
-        deliveryMode: cardInput.deliveryMode,
-        goal: cardInput.goal,
-        priority: cardInput.priority ?? "MEDIUM",
-        notes: JSON.stringify({
+      // Insert the local O card directly (not via kanbanEnqueue) so the
+      // card:queued Nerve event fires only after the transaction commits.
+      const insert = this.db.prepare(
+        `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, notes, delivery_mode, source_peer)
+         VALUES (?, ?, ?, ?, 'O', ?, ?, ?, ?)`
+      ).run(
+        cardInput.title,
+        "peer",
+        cardInput.sourceId,
+        priority,
+        cardInput.goal,
+        JSON.stringify({
           origin_peer: reservation.originPeer,
           request_id: reservation.requestId,
           contribution_ref: contributionRef,
           help_decision: "accepted",
         }),
-      });
+        deliveryMode,
+        cardInput.sourcePeer,
+      );
 
-      if (!cardId) throw new Error("Failed to enqueue help card");
+      const cardId = Number(insert.lastInsertRowid);
+      if (!cardId) throw new Error("Failed to insert help card");
 
       this.db.prepare(
         `UPDATE peer_help_requests
@@ -157,6 +168,9 @@ export class PeerHelpStore {
 
       return cardId;
     })();
+
+    // Fire only after commit — a rolled-back transaction must not notify consumers.
+    this.nerve.fire("card:queued", result);
 
     return { contribution_ref: contributionRef, local_card_id: result };
   }
