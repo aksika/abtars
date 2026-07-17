@@ -142,11 +142,14 @@ export function kanbanEnqueue(title: string, source: string, sourceId?: string, 
   if (!d) return 0;
   const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
   const deliveryMode = raw === "report" ? "deliver" : raw;
+  const VALID_PRIORITIES = new Set(["CRITICAL", "HIGH", "MEDIUM", "LOW"]);
+  const normalizedPriority = opts?.priority?.toUpperCase();
+  const priority = normalizedPriority && VALID_PRIORITIES.has(normalizedPriority) ? normalizedPriority : "MEDIUM";
   const stmt = d.prepare(
     `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null);
+  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null);
   const id = Number(result.lastInsertRowid);
   nerve.fire("card:queued", id);
   return id;

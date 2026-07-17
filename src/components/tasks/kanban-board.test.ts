@@ -146,6 +146,24 @@ describe("kanban-board", () => {
     expect(card.due_at).toBe("2026-06-09T00:00:00");
     expect(card.notes).toBe("Do this carefully");
   });
+
+  it("enqueue accepts lowercase priority and normalizes to uppercase", () => {
+    mod.kanbanEnqueue("Lowercase priority", "task", undefined, { priority: "medium" });
+    const card = mod.kanbanList("*")[0];
+    expect(card.priority).toBe("MEDIUM");
+  });
+
+  it("enqueue accepts mixed-case priority and normalizes to uppercase", () => {
+    mod.kanbanEnqueue("Mixed case priority", "task", undefined, { priority: "High" });
+    const card = mod.kanbanList("*")[0];
+    expect(card.priority).toBe("HIGH");
+  });
+
+  it("enqueue falls back to MEDIUM for an invalid priority value", () => {
+    mod.kanbanEnqueue("Invalid priority", "task", undefined, { priority: "urgent" });
+    const card = mod.kanbanList("*")[0];
+    expect(card.priority).toBe("MEDIUM");
+  });
 });
 
 describe("kanbanRetryOrFail (#1411)", () => {
