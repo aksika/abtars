@@ -41,7 +41,7 @@ export interface OutboxStoreDeps {
   maxFileBytes: number;
 }
 
-const SUPPORTED_METHODS = new Set(["delegate", "check", "callback", "channel"]);
+const SUPPORTED_METHODS = new Set(["help.request.v1", "help.status.v1", "help.withdraw.v1", "help.event.v1", "channel"]);
 
 // ── Store ──────────────────────────────────────────────────────────────────
 

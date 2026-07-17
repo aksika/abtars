@@ -36,7 +36,7 @@ describe("WsOutboxStore", () => {
     });
 
     expect(store.length).toBe(0);
-    const entry = store.append("delegate", { goal: "hello" });
+    const entry = store.append("help.request.v1", { goal: "hello" });
     expect(store.length).toBe(1);
     expect(store.peek()!.id).toBe(entry.id);
 
@@ -62,8 +62,8 @@ describe("WsOutboxStore", () => {
       maxFileBytes: 10 * 1024 * 1024,
     });
 
-    const e1 = store.append("delegate", { goal: "a" });
-    store.append("delegate", { goal: "b" });
+    const e1 = store.append("help.request.v1", { goal: "a" });
+    store.append("help.request.v1", { goal: "b" });
     expect(store.length).toBe(2);
 
     store.acknowledge(e1.id);
@@ -92,10 +92,10 @@ describe("WsOutboxStore", () => {
       maxEntryBytes: 512 * 1024,
       maxFileBytes: 10 * 1024 * 1024,
     });
-    store.append("delegate", { i: 0 });
-    store.append("delegate", { i: 1 });
-    store.append("delegate", { i: 2 });
-    expect(() => store.append("delegate", { i: 3 })).toThrow("Outbox full");
+    store.append("help.request.v1", { i: 0 });
+    store.append("help.request.v1", { i: 1 });
+    store.append("help.request.v1", { i: 2 });
+    expect(() => store.append("help.request.v1", { i: 3 })).toThrow("Outbox full");
   });
 
   it("quarantines corrupt files", () => {
@@ -125,7 +125,7 @@ describe("WsOutboxStore", () => {
       maxEntryBytes: 512 * 1024,
       maxFileBytes: 10 * 1024 * 1024,
     });
-    store.append("delegate", { goal: "test" });
+    store.append("help.request.v1", { goal: "test" });
     expect(store.length).toBe(1);
     expect(existsSync(path)).toBe(true);
 

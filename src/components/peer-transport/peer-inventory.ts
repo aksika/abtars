@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { logWarn } from "../logger.js";
 import { signRequest, verifyRequest } from "./peer-auth.js";
 
