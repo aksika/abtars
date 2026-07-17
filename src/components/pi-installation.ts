@@ -85,6 +85,12 @@ function resolveExportTarget(pkgRoot: string, target: string, pkgLabel: string):
  * export map. Supports exact root/subpath and single-wildcard (`./api/*`,
  * `./providers/*`) patterns. Selects the `import`, then `default` executable
  * target. Enforces containment and regular-file existence.
+ *
+ * If the package has no "exports" field (a valid ESM package may still use
+ * only the legacy "main" field, e.g. `{"type":"module","main":"dist/index.js"}`),
+ * falls back to "main" for the package root only — there is no subpath
+ * contract to resolve without an export map. The fallback target is subject
+ * to the same containment and regular-file validation as an export-map target.
  */
 export function resolvePiModuleUrl(installation: PiInstallation, specifier: PiModuleSpecifier): URL {
   const key = PACKAGE_TO_MODULE_KEY[specifier.package];
@@ -93,7 +99,7 @@ export function resolvePiModuleUrl(installation: PiInstallation, specifier: PiMo
   if (!existsSync(pkgJsonPath)) {
     throw new Error(`${specifier.package}: package.json not found at ${pkgRoot}`);
   }
-  let pkgJson: { name?: string; exports?: unknown };
+  let pkgJson: { name?: string; exports?: unknown; main?: string; type?: string };
   try {
     pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf-8")) as typeof pkgJson;
   } catch (err) {
@@ -103,10 +109,23 @@ export function resolvePiModuleUrl(installation: PiInstallation, specifier: PiMo
     throw new Error(`Package name mismatch: expected "${specifier.package}", got "${pkgJson.name ?? "(missing)"}"`);
   }
   const rawExports = pkgJson.exports;
-  if (!rawExports) {
-    throw new Error(`${specifier.package}: no "exports" field in package.json — likely a CommonJS-only package`);
-  }
   const pkgLabel = specifier.subpath ? `${specifier.package}/${specifier.subpath}` : specifier.package;
+
+  if (!rawExports) {
+    // No "exports" field: fall back to the legacy "main" entry (root only —
+    // packages without an export map have no subpath contract to resolve).
+    // Still subject to the same containment + regular-file validation as an
+    // export-map target. A valid ESM package (type: "module") commonly uses
+    // this shape instead of an export map (e.g. pi-tui@0.80.10, #1441 review).
+    if (specifier.subpath) {
+      throw new Error(`${pkgLabel}: no "exports" field in package.json and a subpath was requested — "main" only resolves the package root`);
+    }
+    if (typeof pkgJson.main !== "string" || !pkgJson.main) {
+      throw new Error(`${specifier.package}: no "exports" field and no "main" field in package.json — cannot resolve an entry point`);
+    }
+    const mainTarget = pkgJson.main.startsWith("./") ? pkgJson.main : `./${pkgJson.main}`;
+    return resolveExportTarget(pkgRoot, mainTarget, pkgLabel);
+  }
 
   // Support shorthand string exports: "exports": "./dist/index.js"
   if (typeof rawExports === "string") {

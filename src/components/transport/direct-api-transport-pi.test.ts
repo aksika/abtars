@@ -275,6 +275,25 @@ describe("DirectApiTransport — pi-ai gate (#1311)", () => {
   // policy is preserved. The adapter coarsely maps quota/credit to rate_limit, but a
   // 402 "credits" error must still classify as the sticky `credits` kind (stays full
   // until manual /model reset) — NOT rate_limit (0.5, auto-recovers via leak).
+  it("#1441 — PiAiUnavailableError alone (L0 succeeds) does not fill health bucket", async () => {
+    const fetchMock = vi.fn(async () => sseResponse(["L0 ok"]));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    mockedStream.mockImplementation(async function* () { throw new PiAiUnavailableError("pi not installed"); } as never);
+    const registry = new ModelHealthRegistry();
+    const policy = new FallbackPolicy([
+      { model: "primary", endpoint: "https://api.test/v1", maxContext: 8000 },
+    ], registry);
+    const t = new DirectApiTransport({
+      endpoint: "https://api.test/v1", model: "primary", maxContext: 8000, maxOutput: 1024, maxTurns: 4,
+      apiFormat: "chat", useProviderLib: true,
+    }, policy);
+    const out = await t.sendPrompt("s", "hi");
+    expect(out).toBe("L0 ok");
+    // PiAiUnavailableError is a pre-request loader failure — the gate falls through
+    // to L0 without recording any error in the health registry.
+    expect(registry.getBucketLevel("primary", "https://api.test/v1")).toBe(0);
+  });
+
   it("#1425 — pi 402 credits error keeps the sticky `credits` kind (not the adapter's rate_limit tag)", async () => {
     globalThis.fetch = vi.fn(async () => sseResponse(["x"])) as unknown as typeof globalThis.fetch;
     // The adapter would tag a quota/credit error as rate_limit; L2 must override to credits.

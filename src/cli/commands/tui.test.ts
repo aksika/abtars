@@ -10,7 +10,7 @@
  *      caught and routed to the cleanup path without uncaught process death.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as piTui from "@earendil-works/pi-tui";
 import {
   isTuiExitCommand,
