@@ -43,7 +43,7 @@ function validRequest(overrides?: Partial<PeerHelpRequestV1>): PeerHelpRequestV1
     version: 1,
     request_id: "req1",
     created_at: "2026-07-17T12:00:00Z",
-    expires_at: "2026-07-17T12:05:00Z",
+    expires_at: "2126-07-17T12:05:00Z",
     goal: "do something",
     required_capabilities: [],
     ...overrides,

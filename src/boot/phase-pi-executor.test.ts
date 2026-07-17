@@ -61,7 +61,9 @@ vi.mock("../components/pi-executor/pi-run-service.js", () => ({
 
 vi.mock("../components/peer-transport/peer-health.js", () => ({
   getHealthStore: vi.fn(() => ({
-    capabilities: { register: mockRegister },
+    register: mockRegister,
+    setHealth: vi.fn(),
+    getValues: vi.fn(() => []),
   })),
 }));
 

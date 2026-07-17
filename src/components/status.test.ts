@@ -68,7 +68,6 @@ function makeRuntimeView(overrides: Partial<RuntimeView> = {}): RuntimeView {
     soulBundle: { available: 4, total: 5 },
     a2a: { running: true, port: 7100 },
     peersConfigured: 0,
-    gossip: { configured: false, port: 5355, lastBroadcastSecondsAgo: null },
     tasks: { recurring: 3, pending: 2, paused: 0 },
     lastBackup: null,
     ...overrides,

@@ -67,15 +67,12 @@ export class WsPeerClient {
         socket: this.ws!,
       });
 
-      // Send signed status + inventory on connect
+      // #1434: Send inventory on connect (peer-status.v1 removed)
       try {
         const { loadPeerConfig } = require("../peer-config.js") as typeof import("../peer-config.js");
-        const { buildSignedStatus } = require("./peer-health.js") as typeof import("./peer-health.js");
         const { buildSignedInventory } = require("./peer-inventory.js") as typeof import("./peer-inventory.js");
-        const { getLocalCapabilities } = require("./gossip.js") as typeof import("./gossip.js");
+        const { getLocalCapabilities } = require("./peer-health.js") as typeof import("./peer-health.js");
         const config = loadPeerConfig();
-        const signed = buildSignedStatus(config.self.signingKey);
-        broker.sendPush(this.peerName, "peer-status.v1", signed);
         const inv = buildSignedInventory(config.self.signingKey, config.self.name, process.env["npm_package_version"] ?? "0.0.0", getLocalCapabilities(), ["wss", "https"]);
         broker.sendPush(this.peerName, "peer.inventory.v1", inv);
       } catch { /* best effort */ }

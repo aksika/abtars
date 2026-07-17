@@ -504,32 +504,35 @@ const peerSessionTool: ToolDefinition = {
   },
 };
 
-const peerWakeupTool: ToolDefinition = {
-  name: "peer_wakeup",
-  description: "Send a wake-up signal to a peer that cannot reach us directly (firewall). The peer's bridge will call us back via A2A within seconds.",
+const peerDoorbellTool: ToolDefinition = {
+  name: "peer_doorbell",
+  description: "Ring a peer's doorbell to request a direct WSS connection refresh. Peer must be enrolled in peers.json.",
   parameters: {
     type: "object",
     properties: {
-      peer_name: { type: "string", description: "Name of the peer to wake up (as in peers.json)" },
+      peer_name: { type: "string", description: "Name of the peer to ring (as in peers.json)" },
     },
     required: ["peer_name"],
   },
   async execute(args) {
-    // #1301 — no relay: a peer-originated request must never wake/reach a third peer via us.
+    // #1301 — no relay: a peer-originated request must never reach a third peer via us.
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
     if (await isActiveCardPeerSourced()) {
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
-    const { sendWakeup } = await import("../dns-wakeup.js");
     const { loadPeerConfig } = await import("../peer-config.js");
     const peerName = args.peer_name?.trim();
     if (!peerName) return JSON.stringify({ error: "peer_name required" });
     const config = loadPeerConfig();
     const peer = config.peers[peerName];
     if (!peer) return JSON.stringify({ error: `Unknown peer: ${peerName}` });
-    const udpPort = peer.udpPort ?? 5353;
-    sendWakeup(config.self.name, peer.host, udpPort);
-    return JSON.stringify({ ok: true, message: `Wake-up sent to ${peerName}. Expect callback within seconds.` });
+    const { getPeerTransport } = await import("../peer-transport/index.js");
+    const transport = getPeerTransport();
+    if (typeof transport.ringDoorbell !== "function") {
+      return JSON.stringify({ error: "Doorbell not available" });
+    }
+    const result = await transport.ringDoorbell(peerName);
+    return JSON.stringify({ ok: true, result: result.status, message: `Doorbell rang ${peerName}: ${result.status}` });
   },
 };
 
@@ -588,7 +591,7 @@ import { kanbanTool } from "./kanban-tool.js";
 import { channelPostTool, channelReadTool } from "./channel-tool.js";
 import { artifactPushTool, artifactPullTool, artifactAttachTool } from "./artifact-tools.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
 
 // Conditional: artifact store tools (#929)
 if (process.env["ARTIFACT_S3_ENDPOINT"]) {

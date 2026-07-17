@@ -159,41 +159,28 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     }});
   }
 
-  // Peer health broadcast (#1360): UDP gossip + WSS status via heartbeat
-  import("../components/peer-transport/gossip.js").then(({ gossipBroadcast }) => {
-    heartbeat.registerTask({ name: "peer-health", execute: async () => {
-      gossipBroadcast();
-
+  // #1434: Inventory anti-entropy — broadcast when capability hash changes
+  import("../components/peer-transport/index.js").then(async ({ getPeerTransport }) => {
+    const transport = getPeerTransport() as import("../components/peer-transport/http-transport.js").HttpTransport;
+    heartbeat.registerTask({ name: "peer-inventory", execute: async () => {
+      if (typeof transport.broadcastInventory !== "function") return;
       try {
-        const { getPeerTransport } = await import("../components/peer-transport/index.js");
-        const transport = getPeerTransport() as import("../components/peer-transport/http-transport.js").HttpTransport;
-        if (typeof transport.broadcastStatus === "function") {
-          transport.broadcastStatus();
-        }
-      } catch { /* best effort */ }
-
-      // #1433: Inventory anti-entropy — broadcast when capability hash changes
-      try {
-        const { getPeerTransport } = await import("../components/peer-transport/index.js");
-        const transport = getPeerTransport() as import("../components/peer-transport/http-transport.js").HttpTransport;
-        if (typeof transport.broadcastInventory === "function") {
-          const { getInventoryCapabilityHash } = await import("../components/peer-transport/peer-inventory.js");
-          const { loadPeerConfig } = await import("../components/peer-config.js");
-          const { getLocalCapabilities } = await import("../components/peer-transport/gossip.js");
-          const cfg = loadPeerConfig();
-          const caps = getLocalCapabilities();
-          const hash = getInventoryCapabilityHash(cfg.self.signingKey, cfg.self.name, process.env["npm_package_version"] ?? "0.0.0", caps, ["wss", "https"]);
-          const now = Date.now();
-          const INVENTORY_ANTIENTROPY_MS = 4 * 60 * 60 * 1000;
-          if (hash !== _lastCapabilityHash || (now - _lastInventoryBroadcast) > INVENTORY_ANTIENTROPY_MS) {
-            _lastCapabilityHash = hash;
-            _lastInventoryBroadcast = now;
-            transport.broadcastInventory();
-          }
+        const { getInventoryCapabilityHash } = await import("../components/peer-transport/peer-inventory.js");
+        const { loadPeerConfig } = await import("../components/peer-config.js");
+        const { getLocalCapabilities } = await import("../components/peer-transport/peer-health.js");
+        const cfg = loadPeerConfig();
+        const caps = getLocalCapabilities();
+        const hash = getInventoryCapabilityHash(cfg.self.signingKey, cfg.self.name, process.env["npm_package_version"] ?? "0.0.0", caps, ["wss", "https"]);
+        const now = Date.now();
+        const INVENTORY_ANTIENTROPY_MS = 4 * 60 * 60 * 1000;
+        if (hash !== _lastCapabilityHash || (now - _lastInventoryBroadcast) > INVENTORY_ANTIENTROPY_MS) {
+          _lastCapabilityHash = hash;
+          _lastInventoryBroadcast = now;
+          transport.broadcastInventory();
         }
       } catch { /* best effort */ }
     } });
-  }).catch(err => logAndSwallow(TAG, "peer-health", err));
+  }).catch(err => logAndSwallow(TAG, "peer-inventory", err));
 
   if (transport.healthCheck) {
     heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });

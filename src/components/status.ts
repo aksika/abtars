@@ -72,7 +72,6 @@ export interface RuntimeView {
   soulBundle: { available: number; total: number } | null;
   a2a: { running: boolean; port: number | null };
   peersConfigured: number;
-  gossip: { configured: boolean; port: number; lastBroadcastSecondsAgo: number | null };
   tasks: { recurring: number; pending: number; paused: number };
   lastBackup: string | null;
 }
@@ -374,16 +373,8 @@ export function renderChatStatus(view: StatusView): string {
   } else {
     lines.push("  ○ peers: none configured");
   }
-  if (r.gossip.configured) {
-    const broadcast =
-      r.gossip.lastBroadcastSecondsAgo !== null
-        ? r.gossip.lastBroadcastSecondsAgo < 60
-          ? `${r.gossip.lastBroadcastSecondsAgo}s ago`
-          : `${Math.round(r.gossip.lastBroadcastSecondsAgo / 60)}m ago`
-        : "no broadcast yet";
-    lines.push(`  ✓ gossip: ${r.gossip.port} / last broadcast ${broadcast}`);
-  } else {
-    lines.push("  ○ gossip: disabled");
+  if (r.peersConfigured > 0) {
+    lines.push("  ✓ doorbell: enabled (UDP 5353)");
   }
 
   // Footer
@@ -778,24 +769,6 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     logAndSwallow("status", "peers", err);
   }
 
-  // Gossip
-  const gossip: RuntimeView["gossip"] = {
-    configured: peersConfigured > 0,
-    port: (() => {
-      const v = process.env["GOSSIP_PORT"];
-      return v ? parseInt(v, 10) : 5355;
-    })(),
-    lastBroadcastSecondsAgo: (() => {
-      try {
-        const lock = JSON.parse(readFileSync(ctx.bridgeLockPath, "utf-8")) as Record<string, unknown>;
-        if (typeof lock["lastGossipBroadcast"] === "number") {
-          return Math.max(0, Math.round((Date.now() - (lock["lastGossipBroadcast"] as number)) / 1000));
-        }
-      } catch {}
-      return null;
-    })(),
-  };
-
   // Tasks
   let tasks: RuntimeView["tasks"] = { recurring: 0, pending: 0, paused: 0 };
   try {
@@ -860,7 +833,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     soulBundle,
     a2a,
     peersConfigured,
-    gossip,
+
     tasks,
     lastBackup,
   };

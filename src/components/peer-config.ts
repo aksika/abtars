@@ -28,14 +28,12 @@ export interface PeerEntry {
   allowedRead?: string[];
   allowedWrite?: string[];
   transport?: "http" | "ws-outbound";
-  udpPort?: number;
 }
 
 export interface PeerSelf {
   name: string;
   signingKey: string;                   // Ed25519 private key (base64 PKCS8 DER) — only secret
   tribeToken: string;                   // tribe membership secret (base64, 256-bit random)
-  udpPort?: number;
 }
 
 export interface PeerConfig {
@@ -139,7 +137,6 @@ export function loadPeerConfig(): PeerConfig {
             ...(Array.isArray(e.allowedRead) ? { allowedRead: e.allowedRead as string[] } : {}),
             ...(Array.isArray(e.allowedWrite) ? { allowedWrite: e.allowedWrite as string[] } : {}),
             ...(e.transport === "ws-outbound" ? { transport: "ws-outbound" as const } : {}),
-            ...(typeof e.udpPort === "number" ? { udpPort: e.udpPort } : {}),
           };
         } else {
           logWarn(TAG, `Skipped peer '${name}' — missing host/port/verifyKey`);
@@ -153,7 +150,6 @@ export function loadPeerConfig(): PeerConfig {
         name: typeof selfRaw?.name === "string" ? selfRaw.name : "default",
         signingKey: selfRaw?.signingKey as string,
         tribeToken: selfRaw?.tribeToken as string,
-        ...(typeof selfRaw?.udpPort === "number" ? { udpPort: selfRaw.udpPort } : {}),
       },
       peers,
       maxHops: typeof raw.maxHops === "number" ? raw.maxHops : DEFAULTS.maxHops,

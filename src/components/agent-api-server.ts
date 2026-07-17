@@ -269,15 +269,12 @@ export class AgentApiServer {
       socket: ws,
     });
 
-    // #1433: Send status + inventory on accepted connection
+    // #1434: Send inventory on accepted connection (peer-status.v1 removed)
     try {
       const { loadPeerConfig: lpc } = require("./peer-config.js") as typeof import("./peer-config.js");
-      const { buildSignedStatus: bss } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
       const { buildSignedInventory: bsi } = require("./peer-transport/peer-inventory.js") as typeof import("./peer-transport/peer-inventory.js");
-      const { getLocalCapabilities: glc } = require("./peer-transport/gossip.js") as typeof import("./peer-transport/gossip.js");
+      const { getLocalCapabilities: glc } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
       const cfg = lpc();
-      const statusPayload = bss(cfg.self.signingKey);
-      broker.sendPush(peerName, "peer-status.v1", statusPayload);
       const invPayload = bsi(cfg.self.signingKey, cfg.self.name, process.env["npm_package_version"] ?? "0.0.0", glc(), ["wss", "https"]);
       broker.sendPush(peerName, "peer.inventory.v1", invPayload);
     } catch { /* best effort */ }
@@ -299,12 +296,11 @@ export class AgentApiServer {
    * #1390: Push a non-mutating notification to a connected peer via WS.
    * Unsigned push frames may never settle cards, post channels, deliver results,
    * modify files, or invoke tools. Only notify-type methods are allowed.
-   * #1360: Added peer-status.v1 for signed health status exchange.
    */
   pushToPeer(peerName: string, method: string, payload: unknown): boolean {
     // Strict allowlist of notification-only methods
     // #1358: pi.lifecycle.v1 is a push from owner to origin (read-only lifecycle event)
-    const ALLOWED_PUSH: readonly string[] = ["notify", "heartbeat", "ping", "peer-status.v1", "pi.lifecycle.v1"];
+    const ALLOWED_PUSH: readonly string[] = ["notify", "heartbeat", "ping", "pi.lifecycle.v1"];
     if (!ALLOWED_PUSH.includes(method)) return false;
     const ws = this.peerWsConnections.get(peerName);
     if (!ws || ws.readyState !== ws.OPEN) return false;
@@ -312,31 +308,10 @@ export class AgentApiServer {
     return true;
   }
 
-  /** #1360: Broadcast signed status to all connected WSS peers (server-side). */
-  broadcastStatus(): void {
-    try {
-      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-      const { buildSignedStatus } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
-      const config = loadPeerConfig();
-      const signed = buildSignedStatus(config.self.signingKey);
-      for (const [name] of this.peerWsConnections) {
-        this.pushToPeer(name, "peer-status.v1", signed);
-      }
-    } catch { /* best effort */ }
-  }
-
   /** Handle incoming WS message from a peer. #1433: pushes handled locally, requests go to broker. */
   private handlePeerWsMessage(peerName: string, raw: string): void {
     try {
       const msg = JSON.parse(raw);
-
-      if (msg.type === "push" && msg.method === "peer-status.v1" && msg.payload) {
-        try {
-          const { getHealthStore } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
-          getHealthStore().ingestSignedStatus("wss", peerName, msg.payload);
-        } catch { /* best effort */ }
-        return;
-      }
 
       if (msg.type === "push" && msg.method === "peer.inventory.v1" && msg.payload) {
         try {
@@ -536,7 +511,7 @@ export class AgentApiServer {
     // #898 — GET /v1/agent-card: live capabilities + health
     if (url === "/v1/agent-card" && method === "GET") {
       if (this.authenticateBodylessPeer(req, res) === null) return;
-      const { getLocalCapabilities } = require("./peer-transport/gossip.js") as typeof import("./peer-transport/gossip.js");
+      const { getLocalCapabilities } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
       const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
       const { loadavg, cpus } = require("node:os") as typeof import("node:os");
       const config = loadPeerConfig();
@@ -1556,19 +1531,19 @@ export class AgentApiServer {
     }));
   }
 
-  /** #1313 — GET /v1/pi/peers: secret-free peer presence. */
+  /** #1313 — GET /v1/pi/peers: secret-free peer presence (static config + live broker state). */
   private handlePiPeerList(res: ServerResponse): void {
     try {
-      const { getPeerTable } = require("./peer-transport/gossip.js") as typeof import("./peer-transport/gossip.js");
-      const all = getPeerTable(true);
-      const peers = all.map(h => ({
-        name: h.name,
-        alive: h.alive,
-        lastSeenAge: Date.now() - h.lastSeen,
-        load: h.load,
-        sessions: h.sessions,
-        capabilities: h.capabilities,
-        version: h.version,
+      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+      const { getPeerWsBroker } = require("./peer-transport/peer-ws-broker.js") as typeof import("./peer-transport/peer-ws-broker.js");
+      const config = loadPeerConfig();
+      const broker = getPeerWsBroker();
+      const connected = broker.getConnectedPeers();
+      const peers = Object.entries(config.peers).map(([name, entry]) => ({
+        name,
+        alive: connected.includes(name),
+        host: entry.host,
+        port: entry.port,
       }));
       res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({ peers }));
     } catch {

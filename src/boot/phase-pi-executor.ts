@@ -127,7 +127,7 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
       const normalized = alias.toLowerCase().replace(/[^a-z0-9_.\-]/g, "-");
       capValues.push(`workspace:${normalized}`);
     }
-    store.capabilities.register("pi-executor-boot", capValues);
+    store.register("pi-executor-boot", capValues);
   } catch { /* best effort */ }
 
   logInfo(TAG, `Pi executor ready (${config.command}, ${Object.keys(config.workspaceAliases).length} aliases)`);

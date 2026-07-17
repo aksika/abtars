@@ -4,8 +4,9 @@
 
 export type { PeerTransport, PeerCard, PeerMessage, PeerHelpTransport, PeerHealth } from "./interface.js";
 export { HttpTransport } from "./http-transport.js";
-export { startGossipListener, gossipBroadcast, getAlivePeers, getPeerTable, setGossipInterval, stopGossipListener } from "./gossip.js";
-export { getHealthStore, getLocalSnapshot, buildSignedStatus, CapabilityRegistry } from "./peer-health.js";
+export { getHealthStore, getLocalCapabilities, CapabilityRegistry } from "./peer-health.js";
+export { PeerDoorbellService, type PeerConnectionManager } from "./peer-doorbell.js";
+export type { DoorbellRingResult } from "./peer-doorbell.js";
 
 import { HttpTransport } from "./http-transport.js";
 

@@ -83,7 +83,7 @@ describe("PeerWsBroker", () => {
     const { server, client } = await connectedPair();
     broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
     expect(broker.sendPush("kp", "mutate", {})).toBe(false);
-    expect(broker.sendPush("kp", "peer-status.v1", {})).toBe(true);
+    expect(broker.sendPush("kp", "peer.inventory.v1", {})).toBe(true);
     server.close();
     client.close();
   });
@@ -114,9 +114,9 @@ describe("PeerWsBroker", () => {
     broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
 
     // Simulate inbound push via the socket's message handler
-    client.emit("message", Buffer.from(JSON.stringify({ type: "push", method: "peer-status.v1", payload: { load: 0.5 } })));
+    client.emit("message", Buffer.from(JSON.stringify({ type: "push", method: "peer.inventory.v1", payload: { capabilities: ["bash"] } })));
     await new Promise(r => setTimeout(r, 50));
-    expect(pushHandler).toHaveBeenCalledWith("kp", "peer-status.v1", { load: 0.5 });
+    expect(pushHandler).toHaveBeenCalledWith("kp", "peer.inventory.v1", { capabilities: ["bash"] });
     server.close();
     client.close();
   });

@@ -1,18 +1,56 @@
 import type { PeerTransport, PeerCard, PeerMessage } from "./interface.js";
 import type { PeerHelpRequestV1, PeerHelpResponseV1, PeerHelpStatusRequestV1, PeerHelpStatusV1, PeerHelpWithdrawV1 } from "../peer-help/contract.js";
 import type { RemotePiEventsListRequestV1, RemotePiEventsListResponseV1, RemotePiEventsAckRequestV1, RemotePiEventsAckResponseV1, RemotePiControlRequestV1, RemotePiControlResponseV1 } from "./remote-pi-types.js";
-import { getAlivePeers } from "./gossip.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
 import { logInfo, logDebug } from "../logger.js";
 import type { WsPeerClient } from "./ws-peer-client.js";
 import { createPinnedPeerHttpsAgent } from "./pinned-peer-tls.js";
 import { getPeerWsBroker } from "./peer-ws-broker.js";
+import { PeerDoorbellService, type DoorbellRingResult } from "./peer-doorbell.js";
+import { CONNECT_JITTER_MAX_MS } from "./peer-doorbell-codec.js";
 
 const TAG = "http-transport";
 
 export class HttpTransport implements PeerTransport {
   private handlers: Array<(from: string, message: PeerMessage) => void> = [];
   private wsClients = new Map<string, WsPeerClient>();
+  private doorbell: PeerDoorbellService | null = null;
+
+  /** Set the doorbell service instance for peer wakeup. */
+  setDoorbell(doorbell: PeerDoorbellService): void {
+    this.doorbell = doorbell;
+  }
+
+  /** Ring a peer via doorbell. */
+  async ringDoorbell(peerName: string): Promise<DoorbellRingResult> {
+    if (!this.doorbell) return { status: "unavailable", reason: "doorbell not configured" };
+    return this.doorbell.ring(peerName);
+  }
+
+  /** Ensure a peer WSS connection exists or is being established. */
+  ensurePeerConnection(peerName: string, input: {
+    reason: "startup" | "heartbeat" | "udp-doorbell" | "outbox";
+    jitterMs?: number;
+  }): void {
+    const existing = this.wsClients.get(peerName);
+    if (existing?.connected) return;
+    if (existing && !existing.connected) return; // connecting/reconnecting — coalesce
+
+    const config = loadPeerConfig();
+    const entry = config.peers[peerName];
+    if (!entry || entry.transport !== "ws-outbound") return;
+
+    const jitter = input.jitterMs ?? Math.floor(Math.random() * CONNECT_JITTER_MAX_MS);
+    setTimeout(() => {
+      const { WsPeerClient: Client } = require("./ws-peer-client.js") as typeof import("./ws-peer-client.js");
+      if (this.wsClients.has(peerName)) return;
+      const client = new Client(peerName, entry);
+      this.setupWsClient(peerName, client);
+      client.connect();
+      this.wsClients.set(peerName, client);
+      logInfo(TAG, `WS doorbell: connecting to ${peerName} (reason: ${input.reason})`);
+    }, jitter).unref();
+  }
 
   async initWsConnections(): Promise<void> {
     const config = loadPeerConfig();
@@ -20,84 +58,70 @@ export class HttpTransport implements PeerTransport {
     for (const [name, entry] of Object.entries(config.peers)) {
       if (entry.transport !== "ws-outbound") continue;
       const client = new Client(name, entry);
-      client.onPush((method: string, payload: unknown) => {
-        if (method === "peer-status.v1") {
-          const envelope = payload as { payload: string; signature: string };
-          if (envelope && typeof envelope.payload === "string" && typeof envelope.signature === "string") {
-            import("./peer-health.js").then(({ getHealthStore }) => {
-              getHealthStore().ingestSignedStatus("wss", name, envelope);
-            }).catch(() => {});
-          }
-          return;
-        }
-        if (method === "peer.inventory.v1") {
-          const { verifyAndStoreInventory } = require("./peer-inventory.js") as typeof import("./peer-inventory.js");
-          const config = loadPeerConfig();
-          const peerEntry = config.peers[name];
-          if (peerEntry?.verifyKey) {
-            verifyAndStoreInventory(name, payload as any, peerEntry.verifyKey);
-          }
-          return;
-        }
-        if (method === "pi.lifecycle.v1") {
-          import("./remote-pi-registry.js").then(({ getRemotePiOriginReducer }) => {
-            const reducer = getRemotePiOriginReducer();
-            if (!reducer) return;
-            import("../peer-config.js").then(({ loadPeerConfig }) => {
-              const localPeerName = loadPeerConfig().self.name;
-              import("./remote-pi-agent-api-integration.js").then(({ handlePushLifecycleEvent }) => {
-                handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, name, payload as any).catch(() => {});
-              }).catch(() => {});
-            }).catch(() => {});
-          }).catch(() => {});
-          return;
-        }
-        if (method === "callback") {
-          const p = payload as { task_id: number; status: string; result_summary?: string; error?: string; tokens_used?: number };
-          import("../tasks/kanban-board.js").then(({ kanbanList, kanbanComplete, kanbanFail, kanbanAddTokens }) => {
-            const cards = kanbanList("running", "status").filter(c => {
-              if (c.type !== "remote") return false;
-              try { const m = JSON.parse(c.notes ?? "{}"); return m.peer === name && m.remote_task_id === p.task_id; } catch { return false; }
-            });
-            if (!cards.length) return;
-            const card = cards[0]!;
-            if (p.tokens_used) kanbanAddTokens(card.id, p.tokens_used);
-            if (p.status === "done") kanbanComplete(card.id, null, p.result_summary ?? "");
-            else kanbanFail(card.id, p.error ?? "remote failure");
-            import("../nerve.js").then(({ nerve }) => nerve.emit(p.status === "done" ? "card:done" : "card:failed", card.id));
-          }).catch(() => {});
-        } else if (method === "channel") {
-          const p = payload as { card_id: number; from_agent: string; message: string; created_at: string };
-          import("../tasks/kanban-channel.js").then(({ channelPost }) => {
-            channelPost(p.card_id, p.from_agent, "ALL", p.message);
-          }).catch(() => {});
-        }
-        for (const h of this.handlers) h(name, { type: method as any, payload: payload as any });
-      });
+      this.setupWsClient(name, client);
       client.connect();
       this.wsClients.set(name, client);
       logInfo(TAG, `WS outbound: connecting to ${name}`);
     }
   }
 
-  hasWsConnection(peer: string): boolean {
-    return this.wsClients.get(peer)?.connected ?? false;
+  private setupWsClient(peerName: string, client: WsPeerClient): void {
+    client.onPush((method: string, payload: unknown) => {
+      if (method === "peer.inventory.v1") {
+        const { verifyAndStoreInventory } = require("./peer-inventory.js") as typeof import("./peer-inventory.js");
+        const config = loadPeerConfig();
+        const peerEntry = config.peers[peerName];
+        if (peerEntry?.verifyKey) {
+          verifyAndStoreInventory(peerName, payload as any, peerEntry.verifyKey);
+        }
+        return;
+      }
+      if (method === "pi.lifecycle.v1") {
+        import("./remote-pi-registry.js").then(({ getRemotePiOriginReducer }) => {
+          const reducer = getRemotePiOriginReducer();
+          if (!reducer) return;
+          import("../peer-config.js").then(({ loadPeerConfig }) => {
+            const localPeerName = loadPeerConfig().self.name;
+            import("./remote-pi-agent-api-integration.js").then(({ handlePushLifecycleEvent }) => {
+              handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, peerName, payload as any).catch(() => {});
+            }).catch(() => {});
+          }).catch(() => {});
+        }).catch(() => {});
+        return;
+      }
+      if (method === "callback") {
+        const p = payload as { task_id: number; status: string; result_summary?: string; error?: string; tokens_used?: number };
+        import("../tasks/kanban-board.js").then(({ kanbanList, kanbanComplete, kanbanFail, kanbanAddTokens }) => {
+          const cards = kanbanList("running", "status").filter(c => {
+            if (c.type !== "remote") return false;
+            try { const m = JSON.parse(c.notes ?? "{}"); return m.peer === peerName && m.remote_task_id === p.task_id; } catch { return false; }
+          });
+          if (!cards.length) return;
+          const card = cards[0]!;
+          if (p.tokens_used) kanbanAddTokens(card.id, p.tokens_used);
+          if (p.status === "done") kanbanComplete(card.id, null, p.result_summary ?? "");
+          else kanbanFail(card.id, p.error ?? "remote failure");
+          import("../nerve.js").then(({ nerve }) => nerve.emit(p.status === "done" ? "card:done" : "card:failed", card.id));
+        }).catch(() => {});
+      } else if (method === "channel") {
+        const p = payload as { card_id: number; from_agent: string; message: string; created_at: string };
+        import("../tasks/kanban-channel.js").then(({ channelPost }) => {
+          channelPost(p.card_id, p.from_agent, "ALL", p.message);
+        }).catch(() => {});
+      }
+      for (const h of this.handlers) h(peerName, { type: method as any, payload: payload as any });
+    });
   }
 
-  broadcastStatus(): void {
-    const { loadPeerConfig } = require("../peer-config.js");
-    const { buildSignedStatus } = require("./peer-health.js");
-    const config = loadPeerConfig();
-    const signed = buildSignedStatus(config.self.signingKey);
-    const broker = getPeerWsBroker();
-    broker.pushToAll("peer-status.v1", signed);
+  hasWsConnection(peer: string): boolean {
+    return this.wsClients.get(peer)?.connected ?? false;
   }
 
   broadcastInventory(): void {
     try {
       const { loadPeerConfig } = require("../peer-config.js") as typeof import("../peer-config.js");
       const { buildSignedInventory } = require("./peer-inventory.js") as typeof import("./peer-inventory.js");
-      const { getLocalCapabilities } = require("./gossip.js") as typeof import("./gossip.js");
+      const { getLocalCapabilities } = require("./peer-health.js") as typeof import("./peer-health.js");
       const config = loadPeerConfig();
       const payload = buildSignedInventory(
         config.self.signingKey,
@@ -121,7 +145,12 @@ export class HttpTransport implements PeerTransport {
   }
 
   discover(): PeerCard[] {
-    return getAlivePeers();
+    const config = loadPeerConfig();
+    return Object.entries(config.peers).map(([name, entry]) => ({
+      name,
+      host: entry.host,
+      port: entry.port,
+    }));
   }
 
   async send(peer: string, message: PeerMessage): Promise<unknown> {

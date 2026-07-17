@@ -68,12 +68,12 @@ describe("#1301 relay tools refuse on peer-sourced card", () => {
     orc.setActiveOrcCard(null);
   });
 
-  it("peer_wakeup refuses", async () => {
+  it("peer_doorbell refuses", async () => {
     const kanban = await import("../tasks/kanban-board.js");
     const orc = await import("./orc-tools.js");
     const { executeToolCall } = await import("./tool-registry.js");
     orc.setActiveOrcCard(kanban.kanbanEnqueue("peer task", "peer"));
-    const out = JSON.parse(await executeToolCall("peer_wakeup", { peer_name: "xxx" }, { userId: "peer" }));
+    const out = JSON.parse(await executeToolCall("peer_doorbell", { peer_name: "xxx" }, { userId: "peer" }));
     expect(out.reason).toBe("peer_relay_blocked");
     orc.setActiveOrcCard(null);
   });

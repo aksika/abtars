@@ -45,7 +45,7 @@ interface PeerState {
   nextGen: number;
 }
 
-const PUSH_ALLOWLIST = new Set(["peer-status.v1", "pi.lifecycle.v1", "peer.inventory.v1", "notify", "heartbeat", "ping"]);
+const PUSH_ALLOWLIST = new Set(["pi.lifecycle.v1", "peer.inventory.v1", "notify", "heartbeat", "ping"]);
 
 export class PeerWsBroker {
   private peers = new Map<string, PeerState>();
