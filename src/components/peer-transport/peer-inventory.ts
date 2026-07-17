@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { logWarn } from "../logger.js";
+import { signRequest, verifyRequest } from "./peer-auth.js";
 
 export interface PeerInventoryPayloadV1 {
   version: 1;
@@ -42,7 +43,6 @@ export function buildSignedInventory(signingKey: string, peerName: string, abtar
     capabilities: normalizeList(capabilities, MAX_CAPABILITIES),
   };
   const payloadStr = JSON.stringify(payload);
-  const { signRequest } = require("./peer-auth.js") as typeof import("./peer-auth.js");
   const sig = signRequest("POST", `/${INVENTORY_SIGNATURE_DOMAIN}`, payloadStr, signingKey, peerName);
   return {
     payload: payloadStr,
@@ -78,7 +78,6 @@ export function verifyAndStoreInventory(sourcePeer: string, envelope: SignedPeer
     return false;
   }
 
-  const { verifyRequest } = require("./peer-auth.js") as typeof import("./peer-auth.js");
   const headers: Record<string, string> = {
     "X-Peer-Id": envelope.peer_id ?? sourcePeer,
     "X-Peer-Ts": envelope.peer_ts ?? "",

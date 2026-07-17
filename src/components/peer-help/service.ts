@@ -114,7 +114,7 @@ export class PeerHelpService {
     // reservation.status === "new" → proceed to admission.
 
     const localCapabilities = new Set(this.capabilityRegistry().map(c => c.toLowerCase()));
-    const activePeerProjects = this.countActivePeerProjects();
+    const activePeerProjects = await this.countActivePeerProjects();
 
     const policyDecision = this.policy.decide({
       originPeer,
@@ -233,8 +233,8 @@ export class PeerHelpService {
     return { ok: true };
   }
 
-  private countActivePeerProjects(): number {
-    const { kanbanList } = require("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
+  private async countActivePeerProjects(): Promise<number> {
+    const { kanbanList } = await import("../tasks/kanban-board.js");
     const running = kanbanList("running", "status").filter(c => {
       if (c.type !== "O") return false;
       try {

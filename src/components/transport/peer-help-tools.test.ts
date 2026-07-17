@@ -7,6 +7,7 @@ const mockGetHelpStatus = vi.fn();
 const mockWithdrawHelp = vi.fn();
 const mockGetConnectedPeers = vi.fn();
 const mockHasAllCapabilities = vi.fn();
+const mockHasRoute = vi.fn();
 
 vi.mock("../tasks/kanban-board.js", () => ({
   kanbanEnqueue: (...args: unknown[]) => mockKanbanEnqueue(...args),
@@ -108,6 +109,67 @@ describe("peer_ask_help", () => {
       goal: "do something", peer: "kp", request_id: "req-2",
     }));
     expect(result.decision).toBe("declined");
+  });
+
+  it("stops on accepted — no fallback", async () => {
+    mockKanbanEnqueue.mockReturnValue(1);
+    mockAskHelp.mockResolvedValueOnce({
+      version: 1, request_id: "req-accept", decision: "accepted", contribution_ref: "help_abc",
+    });
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "do something", peer: "kp", request_id: "req-accept",
+    }));
+    expect(result.decision).toBe("accepted");
+    expect(mockAskHelp).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces deferred and stops (no fan-out)", async () => {
+    mockKanbanEnqueue.mockReturnValue(2);
+    mockAskHelp.mockResolvedValue({
+      version: 1, request_id: "req-def", decision: "deferred", reason_code: "queue_full",
+    });
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "do something", peer: "kp", request_id: "req-def",
+    }));
+    expect(result.decision).toBe("deferred");
+    expect(mockAskHelp).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates local contribution card keyed by (peer, request_id)", async () => {
+    mockKanbanEnqueue.mockReturnValue(3);
+    mockAskHelp.mockResolvedValue({
+      version: 1, request_id: "req-card", decision: "accepted", contribution_ref: "help_xyz",
+    });
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "analyze logs", peer: "kp", request_id: "req-card",
+    }));
+    expect(result.local_card_id).toBe(3);
+    // Verify the card was enqueued with type "contribution" and correct metadata
+    const enqueueCall = mockKanbanEnqueue.mock.calls[0];
+    expect(enqueueCall[0]).toContain("[help:kp]");
+    expect(enqueueCall[2]).toBe("req-card");
+    expect(enqueueCall[3]?.type).toBe("contribution");
+    expect(enqueueCall[3]?.sourcePeer).toBe("kp");
+    // No remote ownership fields in notes
+    expect(enqueueCall[3]?.notes).not.toContain("remote_task_id");
+    expect(enqueueCall[3]?.notes).not.toContain("remote_session_id");
+  });
+
+  it("uses distinct request ID for each peer after decline", async () => {
+    mockKanbanEnqueue.mockReturnValue(4);
+    mockGetConnectedPeers.mockReturnValue(["peer1", "peer2"]);
+    mockHasAllCapabilities.mockReturnValue(true);
+    mockAskHelp
+      .mockResolvedValueOnce({ version: 1, request_id: "req-fallback", decision: "declined" })
+      .mockResolvedValueOnce({ version: 1, request_id: "req-fallback-2", decision: "accepted", contribution_ref: "help_final" });
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "do something", requires: ["docker"], request_id: "req-fallback",
+    }));
+    expect(result.decision).toBe("accepted");
+    // Two different request IDs should have been used
+    const firstId = mockAskHelp.mock.calls[0]?.[1]?.request_id;
+    const secondId = mockAskHelp.mock.calls[1]?.[1]?.request_id;
+    expect(firstId).not.toBe(secondId);
   });
 });
 

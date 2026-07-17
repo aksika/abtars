@@ -275,11 +275,14 @@ export function canonicalRequestHash(request: PeerHelpRequestV1): string {
     version: request.version,
     request_id: request.request_id,
     goal: request.goal,
-    required_capabilities: request.required_capabilities,
+    required_capabilities: [...request.required_capabilities].sort(),
   };
   if (request.context) normal.context = request.context;
   if (request.priority) normal.priority = request.priority;
-  if (request.target) normal.target = request.target;
+  if (request.target) {
+    const t = request.target as Record<string, unknown>;
+    normal.target = { executor: t.executor, ...(t.executor === "pi" ? { workspace_alias: t.workspace_alias } : {}) };
+  }
   return createHash("sha256").update(JSON.stringify(normal)).digest("hex");
 }
 
