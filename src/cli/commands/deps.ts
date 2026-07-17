@@ -13,6 +13,7 @@ import {
 import {
   resolvePiInstallation, clearPiCache, resolvePiFromPath,
 } from "../../components/pi-installation.js";
+import { inspectPiRuntimeSurfaces } from "../../components/pi-inspector.js";
 import { PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
 
 // ── Observation types ─────────────────────────────────────────────────────────
@@ -112,7 +113,7 @@ export function observeGroup(name: string): GroupObservation {
 
 // ── Pi observation ────────────────────────────────────────────────────────────
 
-type PiObserveState = "absent" | "compatible" | "below-minimum" | "incomplete" | "invalid";
+type PiObserveState = "absent" | "compatible" | "unloadable" | "below-minimum" | "incomplete" | "invalid";
 
 type PiObservation = {
   state: PiObserveState;
@@ -127,8 +128,21 @@ function observePi(): PiObservation {
   switch (result.state) {
     case "absent":
       return { state: "absent" };
-    case "compatible":
+    case "compatible": {
+      const surfaces = inspectPiRuntimeSurfaces(result.installation);
+      const unloadable = Object.entries(surfaces).filter(([, v]) => v.status === "unloadable");
+      if (unloadable.length > 0) {
+        const reason = unloadable.map(([key, v]) => `${key}: ${(v as { reason: string }).reason}`).join("; ");
+        return {
+          state: "unloadable",
+          version: result.installation.version,
+          executable: result.installation.executable,
+          reason,
+          remediation: `Pi's package structure matches, but ${unloadable.length} runtime module surface(s) failed to resolve. Reinstall with: abtars deps install pi`,
+        };
+      }
       return { state: "compatible", version: result.installation.version, executable: result.installation.executable };
+    }
     case "below-minimum":
     case "incomplete":
     case "invalid":
@@ -463,6 +477,8 @@ function list(): number {
     switch (piState.state) {
       case "compatible":
         return `✓ pi ${piState.version} (${piState.executable})`;
+      case "unloadable":
+        return `✗ pi ${piState.version ?? "?"}  —  installed but unloadable: ${piState.reason ?? "runtime module surface failed"}`;
       case "absent":
         return "○ pi  —  not installed";
       case "below-minimum":

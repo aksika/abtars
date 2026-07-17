@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Model, Api, Models } from "@earendil-works/pi-ai";
 
 // Mock pi-installation so loadPiModels() never hits the real filesystem.
-vi.mock("../../components/pi-installation.js", () => ({ resolvePiInstallation: vi.fn(), createPiRequire: vi.fn() }));
+vi.mock("../../components/pi-installation.js", () => ({ resolvePiInstallation: vi.fn(), loadPiModule: vi.fn() }));
 
 import {
   mapProviderName, resolveModelMeta, modelsForProvider, modelsForProviderSync,
@@ -10,7 +10,7 @@ import {
   loadPiModels, getWarmedModels, isWarmed,
   _resetForTest, _setWarmedForTest,
 } from "./pi-catalog.js";
-import { resolvePiInstallation, createPiRequire } from "../../components/pi-installation.js";
+import { resolvePiInstallation, loadPiModule } from "../../components/pi-installation.js";
 
 function fakeModel(over: Partial<Model<Api>> = {}): Model<Api> {
   return {
@@ -130,12 +130,12 @@ describe("piCostRatesByModel (C6)", () => {
 
 describe("loadPiModels (C8)", () => {
   const mockedResolve = vi.mocked(resolvePiInstallation);
-  const mockedRequire = vi.mocked(createPiRequire);
+  const mockedLoadModule = vi.mocked(loadPiModule);
 
   beforeEach(() => {
     _resetForTest();
     mockedResolve.mockReset();
-    mockedRequire.mockReset();
+    mockedLoadModule.mockReset();
   });
 
   it("returns null and does not throw when pi cannot be loaded (→ models.json floor)", async () => {
@@ -159,7 +159,6 @@ describe("loadPiModels (C8)", () => {
 
   it("warms and caches the catalog on success", async () => {
     const fm = fakeModels({ list: [fakeModel({ id: "glm-4.6" })] });
-    const mockRequire = vi.fn().mockReturnValue({ builtinModels: () => fm });
     mockedResolve.mockReturnValue({
       state: "compatible",
       installation: {
@@ -170,7 +169,7 @@ describe("loadPiModels (C8)", () => {
         moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
       },
     });
-    mockedRequire.mockReturnValue(mockRequire as unknown as ReturnType<typeof createPiRequire>);
+    mockedLoadModule.mockResolvedValue({ builtinModels: () => fm });
     const out = await loadPiModels();
     expect(out).toBe(fm);
     expect(getWarmedModels()).toBe(fm);
@@ -178,7 +177,6 @@ describe("loadPiModels (C8)", () => {
 
   it("is idempotent — a second call does not re-load", async () => {
     const fm = fakeModels();
-    const mockRequire = vi.fn().mockReturnValue({ builtinModels: () => fm });
     mockedResolve.mockReturnValue({
       state: "compatible",
       installation: {
@@ -189,7 +187,7 @@ describe("loadPiModels (C8)", () => {
         moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
       },
     });
-    mockedRequire.mockReturnValue(mockRequire as unknown as ReturnType<typeof createPiRequire>);
+    mockedLoadModule.mockResolvedValue({ builtinModels: () => fm });
     await loadPiModels();
     await loadPiModels();
     expect(mockedResolve).toHaveBeenCalledTimes(1);

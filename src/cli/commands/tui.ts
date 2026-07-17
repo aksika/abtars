@@ -12,9 +12,9 @@
  * v1: whole-message `message` frames only. `chunk`/`chunk-end` are reserved
  * for #1319 (live mirroring) — never sent in v1.
  *
- * Pi-tui is loaded lazily via `lazyRequire` (the same shared install path
- * the daemon uses, ~/.local/lib/node_modules/) — single install surface,
- * daemon never imports it. See `OPTIONAL_DEPS.tui` in utils/lazy-require.ts.
+ * Pi-tui is loaded lazily from the one official Pi installation discovered
+ * by `resolvePiInstallation()` (#1438), via the async ESM export-map loader
+ * `loadPiModule()` (#1441). Single install surface, daemon never imports it.
  */
 
 import { existsSync } from "node:fs";
@@ -22,7 +22,8 @@ import * as net from "node:net";
 import { join } from "node:path";
 
 import { abtarsHome } from "../../paths.js";
-import { resolvePiInstallation, createPiRequire } from "../../components/pi-installation.js";
+import { resolvePiInstallation, loadPiModule } from "../../components/pi-installation.js";
+import type { PiModuleSpecifier } from "../../components/pi-installation.js";
 import { PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
 import {
   encodeFrame,
@@ -275,8 +276,23 @@ export async function tui(args: string[]): Promise<number> {
     return 1;
   }
 
-  const piRequire = createPiRequire(piResult.installation);
-  const pit = piRequire("@earendil-works/pi-tui") as typeof import("@earendil-works/pi-tui");
+  const tuiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-tui" };
+  let pit: typeof import("@earendil-works/pi-tui");
+  try {
+    const mod = await loadPiModule<Record<string, unknown>>(piResult.installation, tuiSpec);
+    const required = ["ProcessTerminal", "TUI", "Container", "Editor", "Text", "Markdown", "matchesKey"] as const;
+    const missing = required.filter(name => typeof mod[name] !== "function");
+    if (missing.length > 0) {
+      throw new Error(`pi-tui: missing required export(s): ${missing.join(", ")}`);
+    }
+    pit = mod as unknown as typeof import("@earendil-works/pi-tui");
+  } catch (err) {
+    stderr(
+      `Pi TUI could not be loaded: ${err instanceof Error ? err.message : String(err)}\n` +
+      `Reinstall Pi with: abtars deps install pi`,
+    );
+    return 1;
+  }
 
   // Version check: warn if Pi version differs from target minimum
   if (piResult.installation.version !== PI_COMPATIBILITY.minimumPiVersion) {

@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, dirname, resolve, relative, isAbsolute } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
@@ -34,6 +35,123 @@ export type PiInstallationState =
       reason: string;
       remediation: string;
     };
+
+// ─── ESM module specifier + resolver ──────────────────────────────────────────
+
+export type PiModulePackage =
+  | "@earendil-works/pi-ai"
+  | "@earendil-works/pi-tui"
+  | "@earendil-works/pi-agent-core";
+
+export interface PiModuleSpecifier {
+  package: PiModulePackage;
+  subpath?: string;
+}
+
+const PACKAGE_TO_MODULE_KEY: Record<PiModulePackage, keyof PiInstallation["moduleRoots"]> = {
+  "@earendil-works/pi-ai": "ai",
+  "@earendil-works/pi-tui": "tui",
+  "@earendil-works/pi-agent-core": "agentCore",
+};
+
+function resolveExportTarget(pkgRoot: string, target: string, pkgLabel: string): URL {
+  if (!target.startsWith("./")) {
+    throw new Error(`${pkgLabel}: export target "${target}" must be a relative "./" path`);
+  }
+  const resolved = join(pkgRoot, target);
+  let canonicalTarget: string;
+  try {
+    canonicalTarget = realpathSync(resolved);
+  } catch {
+    throw new Error(`${pkgLabel}: export target "${target}" does not resolve to an existing file`);
+  }
+  const canonicalRoot = realpathSync(pkgRoot);
+  const rel = relative(canonicalRoot, canonicalTarget);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`${pkgLabel}: export target "${target}" escapes package root`);
+  }
+  try {
+    if (!statSync(canonicalTarget).isFile()) {
+      throw new Error(`${pkgLabel}: export target "${target}" is not a regular file`);
+    }
+  } catch {
+    throw new Error(`${pkgLabel}: export target "${target}" is not a regular file`);
+  }
+  return pathToFileURL(canonicalTarget);
+}
+
+/**
+ * Resolve a Pi module specifier to a canonical file URL using the package's
+ * export map. Supports exact root/subpath and single-wildcard (`./api/*`,
+ * `./providers/*`) patterns. Selects the `import`, then `default` executable
+ * target. Enforces containment and regular-file existence.
+ */
+export function resolvePiModuleUrl(installation: PiInstallation, specifier: PiModuleSpecifier): URL {
+  const key = PACKAGE_TO_MODULE_KEY[specifier.package];
+  const pkgRoot = installation.moduleRoots[key];
+  const pkgJsonPath = join(pkgRoot, "package.json");
+  if (!existsSync(pkgJsonPath)) {
+    throw new Error(`${specifier.package}: package.json not found at ${pkgRoot}`);
+  }
+  let pkgJson: { name?: string; exports?: unknown };
+  try {
+    pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf-8")) as typeof pkgJson;
+  } catch (err) {
+    throw new Error(`${specifier.package}: malformed package.json at ${pkgRoot}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (pkgJson.name !== specifier.package) {
+    throw new Error(`Package name mismatch: expected "${specifier.package}", got "${pkgJson.name ?? "(missing)"}"`);
+  }
+  const rawExports = pkgJson.exports;
+  if (!rawExports) {
+    throw new Error(`${specifier.package}: no "exports" field in package.json — likely a CommonJS-only package`);
+  }
+  const pkgLabel = specifier.subpath ? `${specifier.package}/${specifier.subpath}` : specifier.package;
+
+  // Support shorthand string exports: "exports": "./dist/index.js"
+  if (typeof rawExports === "string") {
+    if (specifier.subpath) {
+      throw new Error(`${pkgLabel}: no executable export target found (package uses shorthand string export)`);
+    }
+    return resolveExportTarget(pkgRoot, rawExports, pkgLabel);
+  }
+
+  const exportMap = rawExports as Record<string, unknown>;
+  const wantKey = specifier.subpath ? `./${specifier.subpath}` : ".";
+  let target: unknown = exportMap[wantKey];
+  let wildcardSuffix: string | null = null;
+  if (target === undefined && specifier.subpath) {
+    for (const [k, v] of Object.entries(exportMap)) {
+      if (k.endsWith("/*") && wantKey.startsWith(k.slice(0, -1))) {
+        target = v;
+        wildcardSuffix = wantKey.slice(k.length - 1);
+        break;
+      }
+    }
+  }
+  if (target && typeof target === "object") {
+    const obj = target as Record<string, unknown>;
+    target = obj["import"] ?? obj["default"];
+  }
+  if (typeof target !== "string") {
+    throw new Error(`${pkgLabel}: no executable export target found`);
+  }
+  const resolvedTarget = wildcardSuffix !== null
+    ? target.replace(/\*/g, wildcardSuffix)
+    : target;
+  return resolveExportTarget(pkgRoot, resolvedTarget, pkgLabel);
+}
+
+/**
+ * Dynamically import a Pi module from the discovered installation using its
+ * ESM export map. Async — uses native `import()` with the resolved file URL.
+ * Throws if the package cannot be resolved or the module fails to load.
+ */
+export async function loadPiModule<T>(installation: PiInstallation, specifier: PiModuleSpecifier): Promise<T> {
+  const url = resolvePiModuleUrl(installation, specifier);
+  const mod = await import(url.href);
+  return mod as T;
+}
 
 let _cachedInstallation: PiInstallation | null = null;
 
@@ -271,11 +389,11 @@ export function resolvePiInstallation(options?: { useCache?: boolean }): PiInsta
   return { state: "compatible", installation };
 }
 
+/**
+ * Create a CJS require function rooted at the Pi installation's package root.
+ * Only intended for CommonJS-compatible packages. ESM-only packages should use
+ * the async `loadPiModule()` with `PiModuleSpecifier` instead.
+ */
 export function createPiRequire(installation: PiInstallation): ReturnType<typeof createRequire> {
   return createRequire(join(installation.packageRoot, "package.json"));
-}
-
-export function loadPiModule<T>(installation: PiInstallation, specifier: string): T {
-  const piRequire = createPiRequire(installation);
-  return piRequire(specifier) as T;
 }

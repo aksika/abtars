@@ -44,7 +44,8 @@ import type {
 } from "@earendil-works/pi-ai";
 
 import { logDebug, logWarn, logTrace, isLogLevel } from "../logger.js";
-import { resolvePiInstallation, createPiRequire } from "../pi-installation.js";
+import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
+import type { PiModuleSpecifier } from "../pi-installation.js";
 import { parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
 import type { ErrorKind } from "./model-health-registry.js";
 import type { SSEEvent } from "./sse-parser.js";
@@ -395,26 +396,32 @@ function toL2Error(message: AssistantMessage, isRetryable: (m: AssistantMessage)
 
 // ─── orchestration ──────────────────────────────────────────────────────────
 
-/** Injectable dependencies (tests pass fakes; production omits → lazyRequire). */
+/** Injectable dependencies (tests pass fakes; production omits → ESM import). */
 export interface PiAiStreamDeps {
-  loadPi?: () => PiAiModule;
+  loadPi?: () => PiAiModule | Promise<PiAiModule>;
   /** Load the api module streams for a given pi Api. */
-  loadApi?: (api: Api) => ProviderStreams;
+  loadApi?: (api: Api) => ProviderStreams | Promise<ProviderStreams>;
 }
 
-function defaultLoadApi(api: Api): ProviderStreams {
+async function defaultLoadApi(api: Api): Promise<ProviderStreams> {
   const result = resolvePiInstallation();
   if (result.state !== "compatible") throw new PiAiUnavailableError(`Pi not available: ${result.state}`);
-  const piRequire = createPiRequire(result.installation);
-  const mod = piRequire(`@earendil-works/pi-ai/api/${api}`) as Record<string, unknown>;
+  const aiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-ai", subpath: `api/${api}` };
+  const mod = await loadPiModule<Record<string, unknown>>(result.installation, aiSpec);
+  if (typeof mod.stream !== "function" || typeof mod.streamSimple !== "function") {
+    throw new PiAiUnavailableError(`pi-ai/api/${api}: missing stream/streamSimple exports`);
+  }
   return { stream: mod.stream as ProviderStreams["stream"], streamSimple: mod.streamSimple as ProviderStreams["streamSimple"] };
 }
 
-function defaultLoadPi(): PiAiModule {
+async function defaultLoadPi(): Promise<PiAiModule> {
   const result = resolvePiInstallation();
   if (result.state !== "compatible") throw new PiAiUnavailableError(`Pi not available: ${result.state}`);
-  const piRequire = createPiRequire(result.installation);
-  const piModule = piRequire("@earendil-works/pi-ai") as Record<string, unknown>;
+  const aiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-ai" };
+  const piModule = await loadPiModule<Record<string, unknown>>(result.installation, aiSpec);
+  if (typeof piModule.createProvider !== "function" || typeof piModule.isRetryableAssistantError !== "function") {
+    throw new PiAiUnavailableError(`pi-ai: missing createProvider/isRetryableAssistantError exports`);
+  }
   return {
     createProvider: piModule.createProvider as PiAiModule["createProvider"],
     isRetryableAssistantError: piModule.isRetryableAssistantError as PiAiModule["isRetryableAssistantError"],
@@ -438,7 +445,7 @@ export async function* streamPiAiCompletion(
   let pi: PiAiModule;
   let apiMod: ProviderStreams;
   try {
-    pi = (deps.loadPi ?? defaultLoadPi)();
+    pi = await (deps.loadPi ?? defaultLoadPi)();
   } catch (err) {
     if (isLogLevel("trace")) logTrace(TAG, `pi-ai load failed for api=${api} (loadPi): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
     throw new PiAiUnavailableError(
@@ -447,7 +454,7 @@ export async function* streamPiAiCompletion(
     );
   }
   try {
-    apiMod = deps.loadApi ? deps.loadApi(api) : defaultLoadApi(api);
+    apiMod = await (deps.loadApi ? deps.loadApi(api) : defaultLoadApi(api));
   } catch (err) {
     if (isLogLevel("trace")) logTrace(TAG, `pi-ai load failed for api=${api} (loadApi): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
     throw new PiAiUnavailableError(

@@ -1,5 +1,8 @@
 import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
-import { resolvePiInstallation, clearPiCache, type PiInstallationState } from "./pi-installation.js";
+import {
+  resolvePiInstallation, clearPiCache, resolvePiModuleUrl,
+  type PiInstallationState, type PiInstallation, type PiModuleSpecifier,
+} from "./pi-installation.js";
 
 export type PiComponentState = "absent" | "compatible" | "below-minimum" | "incomplete" | "invalid";
 
@@ -47,6 +50,44 @@ export function inspectPiInstallation(useCache = true): PiInspection {
     packageRoot: result.packageRoot,
     version: result.observedVersion,
   };
+}
+
+/**
+ * Probe Pi runtime module surfaces without executing provider requests.
+ * Returns a map of component key → "loadable" | "unloadable" with the error
+ * reason for unloadable surfaces. Used by diagnostics (doctor, deps, preflight)
+ * to distinguish a loadable module from one that exists on disk but cannot be
+ * imported due to ESM/CJS contract issues.
+ *
+ * Read-only: resolves export targets and validates manifest/metadata only.
+ * Does not import the module (side-effect-free for preflight safety).
+ */
+export function inspectPiRuntimeSurfaces(
+  installation: PiInstallation,
+): Record<string, { status: "loadable" } | { status: "unloadable"; reason: string }> {
+  const probes: Array<{ key: string; specifier: { package: PiModuleSpecifier["package"]; subpath?: string } }> = [
+    { key: "ai", specifier: { package: "@earendil-works/pi-ai" } },
+    { key: "ai-api", specifier: { package: "@earendil-works/pi-ai", subpath: "api/openai-completions" } },
+    { key: "ai-providers", specifier: { package: "@earendil-works/pi-ai", subpath: "providers/all" } },
+    { key: "tui", specifier: { package: "@earendil-works/pi-tui" } },
+    { key: "agent-core", specifier: { package: "@earendil-works/pi-agent-core" } },
+  ];
+
+  const results: Record<string, { status: "loadable" } | { status: "unloadable"; reason: string }> = {};
+
+  for (const { key, specifier } of probes) {
+    try {
+      resolvePiModuleUrl(installation, specifier);
+      results[key] = { status: "loadable" };
+    } catch (err) {
+      results[key] = {
+        status: "unloadable",
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  return results;
 }
 
 export { resolvePiInstallation, clearPiCache };

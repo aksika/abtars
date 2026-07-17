@@ -5,6 +5,7 @@ const mockResolve = vi.fn<(...args: unknown[]) => PiInstallationState>();
 
 vi.mock("../../components/pi-installation.js", () => ({
   resolvePiInstallation: (...args: unknown[]) => mockResolve(...args),
+  resolvePiModuleUrl: () => new URL("file:///dev/null"),
 }));
 
 async function captureOutput(fn: () => Promise<number>): Promise<{ exitCode: number; stdout: string; stderr: string }> {

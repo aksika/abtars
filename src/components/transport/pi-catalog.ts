@@ -20,7 +20,8 @@
 
 import type { Models } from "@earendil-works/pi-ai";
 import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
-import { resolvePiInstallation, createPiRequire } from "../pi-installation.js";
+import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
+import type { PiModuleSpecifier } from "../pi-installation.js";
 
 const TAG = "pi-catalog";
 // ── C2: provider-id mapping (identity for known pi providers) ────────────────
@@ -80,9 +81,9 @@ export async function loadPiModels(): Promise<Models | null> {
     }
 
     const t0 = Date.now();
-    const piRequire = createPiRequire(result.installation);
-    const { builtinModels } = piRequire("@earendil-works/pi-ai/providers/all") as { builtinModels: (opts?: Record<string, unknown>) => Models };
-    const models = builtinModels();
+    const providerSpec: PiModuleSpecifier = { package: "@earendil-works/pi-ai", subpath: "providers/all" };
+    const mod = await loadPiModule<{ builtinModels: (opts?: Record<string, unknown>) => Models }>(result.installation, providerSpec);
+    const models = mod.builtinModels();
     try {
       await models.refresh?.();
     } catch (err) {

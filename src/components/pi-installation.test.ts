@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveNestedPackageRoot, resolveExecutableFromPath, resolvePiFromPath } from "./pi-installation.js";
+import { fileURLToPath } from "node:url";
+import { resolveNestedPackageRoot, resolveExecutableFromPath, resolvePiFromPath, resolvePiModuleUrl } from "./pi-installation.js";
+import type { PiInstallation, PiModuleSpecifier } from "./pi-installation.js";
 
 const roots: string[] = [];
 
@@ -102,5 +104,225 @@ describe("resolveExecutableFromPath", () => {
     } finally {
       process.env.PATH = origPath;
     }
+  });
+});
+
+function makeInstallation(aiRoot: string, tuiRoot: string, agentCoreRoot: string): PiInstallation {
+  return {
+    executable: "/usr/bin/pi",
+    packageRoot: "/usr/lib/pi-coding-agent",
+    version: "0.80.7",
+    source: "path",
+    moduleRoots: { ai: aiRoot, tui: tuiRoot, agentCore: agentCoreRoot },
+  };
+}
+
+describe("resolvePiModuleUrl", () => {
+  it("resolves root specifier to a file URL via import condition", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(join(aiRoot, "dist"), { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai", type: "module",
+      exports: { ".": { import: "./dist/index.js" } },
+    }));
+    writeFileSync(join(aiRoot, "dist", "index.js"), "export const x = 1;\n");
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    const url = resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" });
+    expect(url.protocol).toBe("file:");
+    expect(fileURLToPath(url)).toBe(join(aiRoot, "dist", "index.js"));
+  });
+
+  it("resolves root specifier via default condition when import is absent", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(join(aiRoot, "dist"), { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai", type: "module",
+      exports: { ".": { default: "./dist/index.js" } },
+    }));
+    writeFileSync(join(aiRoot, "dist", "index.js"), "export const x = 1;\n");
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    const url = resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" });
+    expect(fileURLToPath(url)).toBe(join(aiRoot, "dist", "index.js"));
+  });
+
+  it("resolves root specifier when exports value is a direct string", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(join(aiRoot, "dist"), { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai",
+      exports: "./dist/index.js",
+    }));
+    writeFileSync(join(aiRoot, "dist", "index.js"), "export const x = 1;\n");
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    const url = resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" });
+    expect(fileURLToPath(url)).toBe(join(aiRoot, "dist", "index.js"));
+  });
+
+  it("resolves a subpath via wildcard export (api/openai-completions)", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(join(aiRoot, "dist", "api"), { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai", type: "module",
+      exports: {
+        ".": { import: "./dist/index.js" },
+        "./api/*": { import: "./dist/api/*.js" },
+      },
+    }));
+    writeFileSync(join(aiRoot, "dist", "api", "openai-completions.js"), "export const stream = async function*(){};\n");
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    const url = resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai", subpath: "api/openai-completions" });
+    expect(fileURLToPath(url)).toBe(join(aiRoot, "dist", "api", "openai-completions.js"));
+  });
+
+  it("resolves a providers wildcard subpath", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(join(aiRoot, "dist", "providers"), { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai", type: "module",
+      exports: {
+        ".": { import: "./dist/index.js" },
+        "./providers/*": { import: "./dist/providers/*.js" },
+      },
+    }));
+    writeFileSync(join(aiRoot, "dist", "providers", "all.js"), "export const builtinModels = () => ({});\n");
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    const url = resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai", subpath: "providers/all" });
+    expect(fileURLToPath(url)).toBe(join(aiRoot, "dist", "providers", "all.js"));
+  });
+
+  it("pi-tui specifier resolves from the tui module root", () => {
+    const root = fixture();
+    const tuiRoot = join(root, "pi-tui");
+    mkdirSync(join(tuiRoot, "dist"), { recursive: true });
+    writeFileSync(join(tuiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-tui",
+      exports: { ".": { import: "./dist/index.js" } },
+    }));
+    writeFileSync(join(tuiRoot, "dist", "index.js"), "export class TUI {}\n");
+    const installation = makeInstallation(fixture(), tuiRoot, fixture());
+    const url = resolvePiModuleUrl(installation, { package: "@earendil-works/pi-tui" });
+    expect(fileURLToPath(url)).toBe(join(tuiRoot, "dist", "index.js"));
+  });
+
+  it("rejects when package.json name does not match specifier", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(aiRoot, { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai-old",
+      exports: { ".": { import: "./dist/index.js" } },
+    }));
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" }))
+      .toThrow(/name mismatch/);
+  });
+
+  it("rejects when exports field is missing", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(aiRoot, { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai" }));
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" }))
+      .toThrow(/no "exports" field/);
+  });
+
+  it("rejects a missing subpath export", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(aiRoot, { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai",
+      exports: { ".": { import: "./dist/index.js" } },
+    }));
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai", subpath: "api/nonexistent" }))
+      .toThrow(/no executable export target/);
+  });
+
+  it("rejects a non-relative export target", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(aiRoot, { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai",
+      exports: { ".": { import: "/absolute/path.js" } },
+    }));
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" }))
+      .toThrow(/must be a relative/);
+  });
+
+  it("rejects an export target that escapes the package root via ../", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(aiRoot, { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai",
+      exports: { ".": { import: "../escaped.js" } },
+    }));
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" }))
+      .toThrow(/must be a relative/);
+  });
+
+  it("rejects a symlink that escapes the package root", () => {
+    const root = fixture();
+    const externalRoot = fixture();
+    const escapedTarget = join(externalRoot, "malicious.js");
+    writeFileSync(escapedTarget, "export const x = 1;\n");
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(join(aiRoot, "dist"), { recursive: true });
+    symlinkSync(escapedTarget, join(aiRoot, "dist", "evil.js"));
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai",
+      exports: { ".": { import: "./dist/evil.js" } },
+    }));
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" }))
+      .toThrow(/escapes package root/);
+  });
+
+  it("rejects a missing target file", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(aiRoot, { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai",
+      exports: { ".": { import: "./dist/missing.js" } },
+    }));
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" }))
+      .toThrow(/does not resolve to an existing file/);
+  });
+
+  it("rejects malformed package.json", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(aiRoot, { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), "not json");
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" }))
+      .toThrow(/malformed package\.json/);
+  });
+
+  it("returns a file URL (not a file path)", () => {
+    const root = fixture();
+    const aiRoot = join(root, "pi-ai");
+    mkdirSync(join(aiRoot, "dist"), { recursive: true });
+    writeFileSync(join(aiRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-ai",
+      exports: { ".": { import: "./dist/index.js" } },
+    }));
+    writeFileSync(join(aiRoot, "dist", "index.js"), "export const x = 1;\n");
+    const installation = makeInstallation(aiRoot, fixture(), fixture());
+    const url = resolvePiModuleUrl(installation, { package: "@earendil-works/pi-ai" });
+    expect(url.protocol).toBe("file:");
+    expect(url.pathname).toContain("/dist/index.js");
   });
 });
