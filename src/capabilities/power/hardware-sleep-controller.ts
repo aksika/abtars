@@ -30,13 +30,15 @@ export class HardwareSleepController {
     private readonly probe: PowerSafetyProbe,
     private readonly adapter: PowerAdapter | null,
     private readonly transitionStore: PowerTransitionStore,
+    private readonly isTestRuntime: () => boolean = () =>
+      !!(process.env.VITEST || process.env.NODE_ENV === "test"),
   ) {}
 
   async inspect(entry: Readonly<HardwareSleepInspectEntry>): Promise<HardwareSleepInspection> {
     const idleMinutes = entry.idleMinutes ?? DEFAULTS.idleMinutes;
     const latestLocalTime = entry.latestLocalTime ?? DEFAULTS.latestLocalTime;
     const expectedWakeTime = entry.expectedWakeTime ?? DEFAULTS.expectedWakeTime;
-    const safety = this.probe.inspect({ idleMinutes, latestLocalTime });
+    const safety = this.probe.inspect({ idleMinutes, latestLocalTime, currentEntryId: entry.id });
     const wake = this.adapter ? await this.adapter.verifyWakeSchedule(expectedWakeTime) : null;
     const transition = this.transitionStore.read();
     return {
@@ -73,7 +75,7 @@ export class HardwareSleepController {
       return { status: "failed", error: `wake not verified: ${wake.reason ?? "unknown"}` };
     }
 
-    const safety = this.probe.inspect({ idleMinutes, latestLocalTime });
+    const safety = this.probe.inspect({ idleMinutes, latestLocalTime, currentEntryId: entry.id });
     if (!safety.safe) {
       const retryAt = Date.now() + retryMinutes * 60 * 1000;
       return { status: "deferred", retryAt, detail: `blocked: ${safety.reasons.join(", ")}` };
@@ -89,11 +91,16 @@ export class HardwareSleepController {
     };
     this.transitionStore.write(transition);
 
-    const safety2 = this.probe.inspect({ idleMinutes, latestLocalTime });
+    const safety2 = this.probe.inspect({ idleMinutes, latestLocalTime, currentEntryId: entry.id });
     if (!safety2.safe) {
       this.transitionStore.clear();
       const retryAt = Date.now() + retryMinutes * 60 * 1000;
       return { status: "deferred", retryAt, detail: `second-check blocked: ${safety2.reasons.join(", ")}` };
+    }
+
+    if (this.isTestRuntime()) {
+      this.transitionStore.clear();
+      return { status: "failed", error: "hardware suspend disabled under test runtime" };
     }
 
     try {

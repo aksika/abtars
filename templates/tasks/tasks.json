@@ -37,5 +37,21 @@
     "delivery": "silent",
     "priority": "medium",
     "enabled": true
+  },
+  {
+    "id": "hardware-sleep",
+    "kind": "system",
+    "action": "hardware-sleep",
+    "schedule": "30 3 * * *",
+    "options": {
+      "idleMinutes": 20,
+      "retryMinutes": 10,
+      "latestLocalTime": "05:30",
+      "expectedWakeTime": "07:55"
+    },
+    "maxRunsPerDay": 1,
+    "delivery": "silent",
+    "priority": "medium",
+    "enabled": false
   }
 ]

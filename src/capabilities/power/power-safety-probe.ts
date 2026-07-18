@@ -2,7 +2,7 @@ import type { PowerSafetyProbe, PowerSafetyResult, PowerBlockReason } from "./ty
 
 export interface PowerSafetyReaders {
   lastPromptAt: () => number;
-  isAnyExecutionActive: () => boolean;
+  isAnyExecutionActive: (excludeEntryId?: string) => boolean;
   isSleepCycleActive: () => boolean;
   isTaskQueueEmpty: () => boolean;
   isMaintenanceActive: () => boolean;
@@ -24,7 +24,7 @@ export function createPowerSafetyProbe(readers: PowerSafetyReaders): PowerSafety
         reasons.push("recent_user_activity");
       }
 
-      if (readers.isAnyExecutionActive()) {
+      if (readers.isAnyExecutionActive(entry.currentEntryId)) {
         reasons.push("active_execution");
       }
 

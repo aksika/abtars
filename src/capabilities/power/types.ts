@@ -16,7 +16,7 @@ export interface PowerSafetyResult {
 }
 
 export interface PowerSafetyProbe {
-  inspect(entry: { idleMinutes: number; latestLocalTime: string }): PowerSafetyResult;
+  inspect(entry: { idleMinutes: number; latestLocalTime: string; currentEntryId?: string }): PowerSafetyResult;
 }
 
 export interface WakeVerification {

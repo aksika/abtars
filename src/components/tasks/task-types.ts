@@ -1,6 +1,19 @@
 
 import { CronExpressionParser } from "cron-parser";
 
+const HH_MM_RE = /^\d{1,2}:\d{2}$/;
+
+function isValidHHmm(value: string): boolean {
+  if (!HH_MM_RE.test(value)) return false;
+  const [h, m] = value.split(":").map(Number);
+  return h! >= 0 && h! <= 23 && m! >= 0 && m! <= 59;
+}
+
+function parseMinutes(value: string): number {
+  const [h, m] = value.split(":").map(Number);
+  return h! * 60 + m!;
+}
+
 export type Delivery = "report" | "announce" | "silent";
 
 export interface SchedulePolicy {
@@ -162,15 +175,26 @@ export function normalize(raw: unknown): NormalizeResult {
         if (e[field] !== undefined) return { ok: false, error: `system entry must not carry "${field}"`, id };
       }
       if (action === "hardware-sleep") {
-        const idle = e["options"] && typeof e["options"] === "object"
-          ? (e["options"] as Record<string, unknown>)["idleMinutes"] : undefined;
+        const opts = e["options"] && typeof e["options"] === "object"
+          ? (e["options"] as Record<string, unknown>) : {};
+        const idle = opts["idleMinutes"];
         if (idle !== undefined && (typeof idle !== "number" || !Number.isInteger(idle) || idle < 1 || idle > 240)) {
           return { ok: false, error: "hardware-sleep idleMinutes must be 1-240", id };
         }
-        const retry = e["options"] && typeof e["options"] === "object"
-          ? (e["options"] as Record<string, unknown>)["retryMinutes"] : undefined;
+        const retry = opts["retryMinutes"];
         if (retry !== undefined && (typeof retry !== "number" || !Number.isInteger(retry) || retry < 1 || retry > 60)) {
           return { ok: false, error: "hardware-sleep retryMinutes must be 1-60", id };
+        }
+        const latest = opts["latestLocalTime"];
+        if (latest !== undefined && (typeof latest !== "string" || !isValidHHmm(latest))) {
+          return { ok: false, error: "hardware-sleep latestLocalTime must be HH:mm (00:00-23:59)", id };
+        }
+        const wake = opts["expectedWakeTime"];
+        if (wake !== undefined && (typeof wake !== "string" || !isValidHHmm(wake))) {
+          return { ok: false, error: "hardware-sleep expectedWakeTime must be HH:mm (00:00-23:59)", id };
+        }
+        if (latest && wake && parseMinutes(latest) >= parseMinutes(wake)) {
+          return { ok: false, error: "hardware-sleep latestLocalTime must be before expectedWakeTime", id };
         }
       }
       const sysOptions = (e["options"] && typeof e["options"] === "object")

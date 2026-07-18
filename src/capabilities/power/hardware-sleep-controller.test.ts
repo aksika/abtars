@@ -34,8 +34,10 @@ function makeAdapter(run?: FixedCommandRunner): PowerAdapter {
 const MOLTY_FIXTURE = `Repeating power events:\n  wakepoweron at 7:55AM every day\n`;
 
 describe("HardwareSleepController", () => {
+  const NO_TEST_RUNTIME = () => false;
+
   it("inspect returns safe with all pass", async () => {
-    const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), new PowerTransitionStore());
+    const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), new PowerTransitionStore(), NO_TEST_RUNTIME);
     // latestLocalTime must be in the future relative to test run time
     const entry = { id: "test", idleMinutes: 20, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
     const r = await ctrl.inspect(entry);
@@ -50,7 +52,7 @@ describe("HardwareSleepController", () => {
     const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async (cmd, args) => {
       if (args[0] === "sleepnow") { suspended = true; return { stdout: "", stderr: "", exitCode: 0 }; }
       return { stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 };
-    }), store);
+    }), store, NO_TEST_RUNTIME);
     // latestLocalTime must be in the future relative to test run time
     const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
     const r = await ctrl.attempt(entry);
@@ -69,7 +71,7 @@ describe("HardwareSleepController", () => {
       isTransitionActive: () => false,
       isPlatformSupported: () => true,
     });
-    const ctrl = new HardwareSleepController(probe, makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), new PowerTransitionStore());
+    const ctrl = new HardwareSleepController(probe, makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), new PowerTransitionStore(), NO_TEST_RUNTIME);
     // latestLocalTime must be in the future relative to test run time
     const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
     const r = await ctrl.attempt(entry);
@@ -78,14 +80,14 @@ describe("HardwareSleepController", () => {
   });
 
   it("attempt returns noop when outside window", async () => {
-    const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), new PowerTransitionStore());
+    const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), new PowerTransitionStore(), NO_TEST_RUNTIME);
     const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "00:00", expectedWakeTime: "07:55" } as any;
     const r = await ctrl.attempt(entry);
     expect(r.status).toBe("noop");
   });
 
   it("attempt fails on unsupported platform", async () => {
-    const ctrl = new HardwareSleepController(makeSafeProbe(), null, new PowerTransitionStore());
+    const ctrl = new HardwareSleepController(makeSafeProbe(), null, new PowerTransitionStore(), NO_TEST_RUNTIME);
     const entry = { id: "test" } as any;
     const r = await ctrl.attempt(entry);
     expect(r.status).toBe("failed");
@@ -93,7 +95,7 @@ describe("HardwareSleepController", () => {
   });
 
   it("attempt fails on unverified wake", async () => {
-    const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async () => ({ stdout: "no repeating events", stderr: "", exitCode: 0 })), new PowerTransitionStore());
+    const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async () => ({ stdout: "no repeating events", stderr: "", exitCode: 0 })), new PowerTransitionStore(), NO_TEST_RUNTIME);
     // latestLocalTime must be in the future relative to test run time
     const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
     const r = await ctrl.attempt(entry);
@@ -115,7 +117,7 @@ describe("HardwareSleepController", () => {
       },
       isPlatformSupported: () => true,
     });
-    const ctrl = new HardwareSleepController(probe, makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), store);
+    const ctrl = new HardwareSleepController(probe, makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), store, NO_TEST_RUNTIME);
     // latestLocalTime must be in the future relative to test run time
     const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
     const r = await ctrl.attempt(entry);
@@ -128,7 +130,7 @@ describe("HardwareSleepController", () => {
     const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async (cmd, args) => {
       if (args[0] === "sleepnow") throw new Error("suspend failed");
       return { stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 };
-    }), store);
+    }), store, NO_TEST_RUNTIME);
     // latestLocalTime must be in the future relative to test run time
     const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
     const r = await ctrl.attempt(entry);
@@ -141,10 +143,23 @@ describe("HardwareSleepController", () => {
     const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async (cmd, args) => {
       if (args[0] === "sleepnow") { suspendCalled = true; return { stdout: "", stderr: "", exitCode: 0 }; }
       return { stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 };
-    }), new PowerTransitionStore());
+    }), new PowerTransitionStore(), NO_TEST_RUNTIME);
     // latestLocalTime must be in the future relative to test run time
     const entry = { id: "test", idleMinutes: 20, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
     await ctrl.inspect(entry);
     expect(suspendCalled).toBe(false);
+  });
+
+  it("attempt fails under test runtime with structural interlock", async () => {
+    const ctrl = new HardwareSleepController(
+      makeSafeProbe(),
+      makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })),
+      new PowerTransitionStore(),
+      () => true, // simulate test runtime
+    );
+    const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
+    const r = await ctrl.attempt(entry);
+    expect(r.status).toBe("failed");
+    expect(r).toEqual({ status: "failed", error: "hardware suspend disabled under test runtime" });
   });
 });
