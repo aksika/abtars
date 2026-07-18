@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import type { DoctorOutputV2, ProbeResult, DoctorFixOutputV2 } from "./doctor-types.js";
 
-const ICON: Record<string, string> = { ok: "✓", warning: "!", failed: "✗", skipped: "~" };
+const ICON: Record<string, string> = { ok: "+", warning: "!", failed: "x", skipped: "-" };
 
 export function readEnv(): Map<string, string> {
   const configDir = join(abtarsHome(), "config");
@@ -54,7 +54,7 @@ export function renderHuman(output: DoctorOutputV2): string {
     for (const p of probes) {
       let line = formatProbeLine(p, "  ");
       const statusPrefix = p.status === "warning" ? "!" : ICON[p.status] ?? "?";
-      line = line.replace(/^  [✓!✗~]/, `  ${statusPrefix}`);
+      line = line.replace(/^  [+!x-]/, `  ${statusPrefix}`);
       line += ` ${evidenceTag(p.evidence)}`;
       lines.push(line);
     }
@@ -72,8 +72,8 @@ export function renderHuman(output: DoctorOutputV2): string {
     lines.push("");
     lines.push("Failures:");
     for (const p of failedProbes) {
-      lines.push(`  ✗ ${p.name}: ${p.detail}`);
-      if (p.remediation) lines.push(`    → ${p.remediation}`);
+      lines.push(`  x ${p.name}: ${p.detail}`);
+      if (p.remediation) lines.push(`    -> ${p.remediation}`);
     }
   }
 
@@ -82,7 +82,7 @@ export function renderHuman(output: DoctorOutputV2): string {
     lines.push("Warnings:");
     for (const p of warningProbes) {
       lines.push(`  ! ${p.name}: ${p.detail}`);
-      if (p.remediation) lines.push(`    → ${p.remediation}`);
+      if (p.remediation) lines.push(`    -> ${p.remediation}`);
     }
   }
 
@@ -97,7 +97,7 @@ export function renderHuman(output: DoctorOutputV2): string {
     lines.push("");
     lines.push("Actions:");
     for (const p of deduplicated) {
-      lines.push(`  • ${p.remediation}`);
+      lines.push(`  - ${p.remediation}`);
     }
   }
 

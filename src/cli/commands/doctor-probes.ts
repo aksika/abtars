@@ -16,8 +16,6 @@ const root = abtarsRoot();
 
 const SHARED_NM = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
 
-const ICON = { ok: "✓", warning: "!", failed: "✗", skipped: "~" } as const;
-export { ICON };
 
 async function timedProbe(name: string, evidence: import("./doctor-types.js").EvidenceLevel, fn: () => Promise<ProbeResult>): Promise<ProbeResult> {
   const start = Date.now();
