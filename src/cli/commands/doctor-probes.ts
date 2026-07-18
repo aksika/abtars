@@ -453,6 +453,17 @@ async function probeSoul(): Promise<ProbeResult> {
   return { name: "soul", status, evidence: "filesystem", detail: truncate(issues.join("; ")), ms: 0 };
 }
 
+async function probeMind(): Promise<ProbeResult> {
+  try {
+    const { loadAbmind } = await import("../../utils/abmind-lazy.js");
+    const mod = await loadAbmind();
+    if (!mod) return { name: "mind", status: "skipped", evidence: "runtime", detail: "abmind not installed", ms: 0 };
+    return { name: "mind", status: "ok", evidence: "runtime", detail: "abmind loaded (in-process)", ms: 0 };
+  } catch {
+    return { name: "mind", status: "skipped", evidence: "runtime", detail: "abmind load failed", ms: 0 };
+  }
+}
+
 // ── Runner ──
 
 export async function runAllProbes(): Promise<DoctorOutputV2> {
@@ -482,6 +493,7 @@ export async function runAllProbes(): Promise<DoctorOutputV2> {
     ]),
     Promise.all([
       timedProbe("soul", "filesystem", probeSoul),
+      timedProbe("mind", "runtime", probeMind),
     ]),
     Promise.all([
       timedProbe("peer-api", "reachable", probePeerApi),
