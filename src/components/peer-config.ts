@@ -13,7 +13,7 @@ import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { generateKeyPairSync, randomBytes, createPrivateKey, createPublicKey } from "node:crypto";
 import { abtarsHome } from "../paths.js";
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn, logDebug } from "./logger.js";
 import { validateShape, PEERS_SCHEMA } from "./config-validator.js";
 
 const TAG = "peer-config";
@@ -157,7 +157,7 @@ export function loadPeerConfig(): PeerConfig {
     };
 
     const names = Object.keys(peers);
-    if (names.length > 0) logInfo(TAG, `Loaded ${names.length} peer(s): ${names.join(", ")} (self: ${_config.self.name})`);
+    if (names.length > 0) logDebug(TAG, `Loaded ${names.length} peer(s): ${names.join(", ")} (self: ${_config.self.name})`);
     return _config;
   } catch (err) {
     logWarn(TAG, `Failed to parse peers.json: ${err instanceof Error ? err.message : String(err)}`);
