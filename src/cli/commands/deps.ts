@@ -15,6 +15,7 @@ import {
 } from "../../components/pi-installation.js";
 import { inspectPiRuntimeSurfaces } from "../../components/pi-inspector.js";
 import { PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
+import { ensureNativeConsumer, mutateNativeGroup } from "../deploy-lib/native-group.js";
 
 // ── Observation types ─────────────────────────────────────────────────────────
 
@@ -232,6 +233,10 @@ function versionedArg(pkg: string, dep: (typeof OPTIONAL_DEPS)[string]): string 
 }
 
 function mutateGroup(action: GroupAction, dep: (typeof OPTIONAL_DEPS)[string]): MutationResult {
+  if (action.group === "native") {
+    const result = mutateNativeGroup(action.reason === "refresh" ? "update" : "install");
+    return { group: action.group, ok: result.ok, error: result.error };
+  }
   const token = generateLockToken();
   acquireLock("abtars", `${action.reason === "refresh" ? "update" : "install"}:${action.group}`, token);
   try {
@@ -583,10 +588,18 @@ function install(names: string[]): number {
   if (onlyPi) return failed ? 1 : 0;
 
   try {
+    const nativeRequested = npmNames.length === 0 || npmNames.includes("native") || npmNames.includes("all");
+    if (nativeRequested && observeGroup("native").state === "ready") {
+      const consumer = ensureNativeConsumer();
+      if (!consumer.ok) {
+        process.stdout.write(`✗ native failed: ${consumer.error}\n`);
+        failed = true;
+      }
+    }
     const actions = resolveGroupActions("install", npmNames);
     if (actions.length === 0 && !hasPi) {
       process.stdout.write("All selected groups already up to date.\n");
-      return 0;
+      return failed ? 1 : 0;
     }
 
     for (const action of actions) {
