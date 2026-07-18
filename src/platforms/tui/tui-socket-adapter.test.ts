@@ -1537,12 +1537,13 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
     
     // For this test, just prove the normal flow works:
     drainInstructionBatch(session);
-    await new Promise((r) => setTimeout(r, 30));
-    
-    // The stale instruction gets failed with exec_1 identity — should ack
-    const failedAcks = frames.filter((f: any) => f.t === "steer-ack" && f.status === "failed");
-    expect(failedAcks.length).toBe(1);
-    expect(failedAcks[0]!.instructionId).toBe(ownedId);
+    let expiredAcks: TuiServerFrame[] = [];
+    await waitFor(() => {
+      expiredAcks = frames.filter((f: any) => f.t === "steer-ack" && f.status === "expired");
+      return expiredAcks.length > 0 ? expiredAcks : null;
+    }, 1000);
+    expect(expiredAcks.length).toBe(1);
+    expect(expiredAcks[0]!.instructionId).toBe(ownedId);
     conn.destroy();
   });
 

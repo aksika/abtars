@@ -139,6 +139,7 @@ export async function startBridge(): Promise<number> {
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
   const startReason = process.env["ABTARS_START_REASON"] ?? "unknown";
   const startedAt = Date.now();
+  ctx.startedAt = startedAt;
   initBridgeLock({ pid: process.pid, startedAt, version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2), startReason });
 
   // Initialize runtime health snapshot (#1439). Must reuse the exact same
