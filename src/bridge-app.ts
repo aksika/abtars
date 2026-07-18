@@ -63,9 +63,10 @@ export class Bridge {
     await step("services", () => this.ctx.registry.stopAll());
     await step("pi-executor", () => this.ctx.piExecutorService?.executor.interruptAll());
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
-    await step("runtime", () => this.ctx.runtime.shutdown());
+    await     step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", () => this.ctx.memory?.close());
     await step("transport", () => this.ctx.transport?.destroy());
+    await step("snapshot", () => { const { removeSnapshot } = require("./components/runtime-health-snapshot.js"); removeSnapshot(); });
     this.ctx.sessionManager.clearAll();
     if (this.ctx.mcpDaemonStarted) {
       await step("mcp-daemon", () => { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); });
@@ -124,10 +125,10 @@ export async function startBridge(): Promise<number> {
     }
   }
 
-  // Boot-time doctor fix — chmod secrets, fix dirs (#1180)
+  // Boot-time doctor fix — chmod secrets, fix dirs (#1180, #1439)
   try {
-    const { runFixes } = await import("./cli/commands/doctor-probes.js");
-    await runFixes();
+    const { runBootRepairs } = await import("./cli/commands/doctor-fixes.js");
+    runBootRepairs();
   } catch { /* non-fatal */ }
 
   // Populate version/commit from manifest.json
@@ -138,6 +139,10 @@ export async function startBridge(): Promise<number> {
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
   const startReason = process.env["ABTARS_START_REASON"] ?? "unknown";
   initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2), startReason });
+
+  // Initialize runtime health snapshot (#1439)
+  const { initSnapshot } = await import("./components/runtime-health-snapshot.js");
+  initSnapshot(process.pid, Date.now());
 
   const bridge = new Bridge(ctx);
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;

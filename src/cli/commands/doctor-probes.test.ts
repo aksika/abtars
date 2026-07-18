@@ -27,6 +27,8 @@ vi.mock("node:child_process", async (importOriginal) => {
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "doctor-test-"));
   mkdirSync(join(tmpDir, "logs"), { recursive: true });
+  mkdirSync(join(tmpDir, "config"), { recursive: true });
+  mkdirSync(join(tmpDir, "kanban"), { recursive: true });
   process.env["ABTARS_HOME"] = tmpDir;
   vi.resetModules();
 });
@@ -68,47 +70,46 @@ describe("doctor probeBridge (#1261)", () => {
   });
 });
 
-describe("doctor tribe probes (#1211)", () => {
+describe("doctor tribe probes (#1439)", () => {
   function writeConfig(files: { env?: string; peers?: unknown; lock?: unknown }): void {
-    mkdirSync(join(tmpDir, "config"), { recursive: true });
     if (files.env !== undefined) writeFileSync(join(tmpDir, "config", ".env"), files.env);
     if (files.peers !== undefined) writeFileSync(join(tmpDir, "config", "peers.json"), JSON.stringify(files.peers));
     if (files.lock !== undefined) writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify(files.lock));
   }
 
-  it("tribe layer uses renamed probes: a2a, peers, identity, doorbell", async () => {
+  it("tribe layer uses renamed probes: peer-api, peers, identity, routes, doorbell", async () => {
     const { runAllProbes } = await import("./doctor-probes.js");
     const result = await runAllProbes();
     const names = result.layers.tribe.map((r) => r.name).sort();
-    expect(names).toEqual(["a2a", "doorbell", "identity", "peers"]);
+    expect(names).toEqual(["doorbell", "identity", "peer-api", "peers", "routes"]);
   });
 
-  it("a2a/identity/doorbell skipped when agent-api disabled", async () => {
+  it("peer-api/identity/doorbell skipped when agent-api disabled", async () => {
     writeConfig({ env: "ENABLE_AGENT_API=false\n" });
     const { runAllProbes } = await import("./doctor-probes.js");
     const result = await runAllProbes();
     const byName = Object.fromEntries(result.layers.tribe.map((r) => [r.name, r]));
-    expect(byName["a2a"]?.status).toBe("skipped");
+    expect(byName["peer-api"]?.status).toBe("skipped");
     expect(byName["identity"]?.status).toBe("skipped");
     expect(byName["doorbell"]?.status).toBe("skipped");
   });
 
-  it("doorbell skipped (solo) when agent-api enabled but no peers", async () => {
+  it("doorbell warning (no snapshot) when agent-api enabled but no peers", async () => {
     writeConfig({ env: "ENABLE_AGENT_API=true\n", peers: { self: { signingKey: "x" }, peers: {} } });
     const { runAllProbes } = await import("./doctor-probes.js");
     const result = await runAllProbes();
     const doorbell = result.layers.tribe.find((r) => r.name === "doorbell");
     expect(doorbell?.status).toBe("skipped");
-    expect(doorbell?.detail).toContain("solo");
+    expect(doorbell?.detail).toContain("no peers");
   });
 
-  it("doorbell fails when peers exist but self.signingKey missing", async () => {
-    writeConfig({ env: "ENABLE_AGENT_API=true\n", peers: { self: {}, peers: { kp: { verifyKey: "k" } } } });
+  it("doorbell skipped when no peers exist", async () => {
+    writeConfig({ env: "ENABLE_AGENT_API=true\n", peers: { self: { signingKey: "x" }, peers: {} } });
     const { runAllProbes } = await import("./doctor-probes.js");
     const result = await runAllProbes();
     const doorbell = result.layers.tribe.find((r) => r.name === "doorbell");
-    expect(doorbell?.status).toBe("failed");
-    expect(doorbell?.detail).toContain("signingKey");
+    expect(doorbell?.status).toBe("skipped");
+    expect(doorbell?.detail).toContain("no peers");
   });
 
   it("peers reports solo skip when no peers configured", async () => {
@@ -136,5 +137,46 @@ describe("doctor tribe probes (#1211)", () => {
     const peers = result.layers.tribe.find((r) => r.name === "peers");
     expect(peers?.status).toBe("failed");
     expect(peers?.detail).toContain("molty");
+  });
+
+  it("routes returns warning when no snapshot", async () => {
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const routes = result.layers.tribe.find((r) => r.name === "routes");
+    expect(routes?.status).toBe("warning");
+    expect(routes?.detail).toContain("no runtime snapshot");
+  });
+
+  it("schema version is 2.0", async () => {
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    expect(result.schemaVersion).toBe("2.0");
+  });
+
+  it("output has summary field", async () => {
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    expect(result.summary).toBeDefined();
+    expect(typeof result.summary.ok).toBe("number");
+    expect(typeof result.summary.warning).toBe("number");
+    expect(typeof result.summary.failed).toBe("number");
+    expect(typeof result.summary.skipped).toBe("number");
+  });
+
+  it("output has abtars version info", async () => {
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    expect(result.abtars).toBeDefined();
+    expect(typeof result.abtars.version).toBe("string");
+  });
+
+  it("probes have evidence level", async () => {
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const all = Object.values(result.layers).flat();
+    for (const p of all) {
+      expect(p.evidence).toBeDefined();
+      expect(["configuration", "filesystem", "executable", "reachable", "runtime", "authenticated"]).toContain(p.evidence);
+    }
   });
 });

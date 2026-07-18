@@ -15,14 +15,15 @@ const TAG = "cmd";
 export async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
   const arg = _text.replace(/^\/(doctor|health)\s*/i, "").trim().toLowerCase();
 
-  // /doctor fix → run fixes
-  if (arg === "fix" || arg === "fix-full") {
+  if (arg === "fix") {
     try {
-      const { runFixes, runAllProbes, renderHuman } = await import("../../cli/commands/doctor-probes.js");
-      const fixes = await runFixes();
-      const fixLines = fixes.map(f => `  ${f.success ? "+" : "x"} ${f.action}`).join("\n");
-      const output = await runAllProbes();
-      await ctx.reply(`🩺 Fix:\n${fixLines || "(nothing to fix)"}\n\n${renderHuman(output)}`);
+      const { runAllProbes } = await import("../../cli/commands/doctor-probes.js");
+      const { runDoctorFixes } = await import("../../cli/commands/doctor-fixes.js");
+      const { renderChatFix } = await import("../../cli/commands/doctor-render.js");
+      const before = await runAllProbes();
+      const fixes = runDoctorFixes(before);
+      const after = await runAllProbes();
+      await ctx.reply(renderChatFix({ schemaVersion: "2.0", before, fixes, after }));
     } catch (err) {
       await ctx.reply(`x doctor fix failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -30,9 +31,10 @@ export async function handleDoctor(_text: string, ctx: CommandContext): Promise<
   }
 
   await ctx.reply("🩺 Running diagnostics...");
-  const { runAllProbes, renderHuman } = await import("../../cli/commands/doctor-probes.js");
+  const { runAllProbes } = await import("../../cli/commands/doctor-probes.js");
+  const { renderChatDiagnosis } = await import("../../cli/commands/doctor-render.js");
   const output = await runAllProbes();
-  await ctx.reply(renderHuman(output));
+  await ctx.reply(renderChatDiagnosis(output));
   return true;
 }
 

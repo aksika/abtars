@@ -97,6 +97,17 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   heartbeat.start();
   logInfo("main", `💓 Heartbeat started (${Math.round(hbIntervalMs / 1000)}s interval)`);
 
+  // #1439: Refresh runtime health snapshot on each heartbeat tick
+  heartbeat.registerTask({
+    name: "snapshot-refresh",
+    execute: async () => {
+      try {
+        const { refreshSnapshot } = await import("../components/runtime-health-snapshot.js");
+        refreshSnapshot();
+      } catch { /* best effort */ }
+    },
+  });
+
   // #1293: Per-tick ws-outbound reconnect check (no new timer — driven by HB)
   heartbeat.registerTask({
     name: "ws-reconnect-check",

@@ -1,11 +1,8 @@
-import { printBanner } from './banner.js';
-/**
- * `abtars doctor` — TypeScript health probes grouped by subsystem layer.
- * --json: machine-readable output for /doctor Telegram handler.
- * --fix: diagnose + apply fixes + re-probe.
- */
-
-import { runAllProbes, runFixes, renderHuman, renderJson } from './doctor-probes.js';
+import { printBanner } from "./banner.js";
+import { runAllProbes } from "./doctor-probes.js";
+import { runDoctorFixes } from "./doctor-fixes.js";
+import { renderHuman, renderJson, renderFixHuman, renderFixJson, computeExitCode } from "./doctor-render.js";
+import type { DoctorFixOutputV2 } from "./doctor-types.js";
 
 export async function doctor(args: readonly string[] = []): Promise<number> {
   const json = args.includes("--json");
@@ -13,23 +10,30 @@ export async function doctor(args: readonly string[] = []): Promise<number> {
 
   if (!json) await printBanner("doctor");
 
-  const output = await runAllProbes();
-
   if (fix) {
-    const fixes = await runFixes();
-    output.fixes = fixes;
-    if (!json) {
-      for (const f of fixes) {
-        const icon = f.success ? "+" : "x";
-        process.stdout.write(`  [${icon}] ${f.action}\n`);
-      }
-      if (fixes.length > 0) process.stdout.write(`\n${fixes.filter(f => f.success).length} fix(es) applied.\n\n`);
-      // Re-probe after fixes
-      const recheck = await runAllProbes();
-      process.stdout.write(renderHuman(recheck) + "\n");
-      return Object.values(recheck.layers).flat().filter(r => r.status === "failed").length > 0 ? 1 : 0;
+    const before = await runAllProbes();
+    const fixes = runDoctorFixes(before);
+    const after = await runAllProbes();
+
+    const result: DoctorFixOutputV2 = {
+      schemaVersion: "2.0",
+      before,
+      fixes,
+      after,
+    };
+
+    if (json) {
+      process.stdout.write(renderFixJson(result) + "\n");
+    } else {
+      process.stdout.write(renderFixHuman(result) + "\n");
     }
+
+    const hasFailedFix = fixes.some(f => f.outcome === "failed");
+    const finalFailed = after.summary.failed > 0;
+    return hasFailedFix || finalFailed ? 1 : 0;
   }
+
+  const output = await runAllProbes();
 
   if (json) {
     process.stdout.write(renderJson(output) + "\n");
@@ -37,6 +41,5 @@ export async function doctor(args: readonly string[] = []): Promise<number> {
     process.stdout.write(renderHuman(output) + "\n");
   }
 
-  const failed = Object.values(output.layers).flat().filter(r => r.status === "failed").length;
-  return failed > 0 ? 1 : 0;
+  return computeExitCode(output);
 }
