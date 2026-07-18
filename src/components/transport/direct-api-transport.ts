@@ -563,7 +563,10 @@ export class DirectApiTransport implements IKiroTransport {
       try {
         streamResult = await this.streamCompletion(session, signal);
       } catch (streamErr) {
-        pcHandle?.end({ result: "failure", endedAt: Date.now() });
+        const isAbort = signal.aborted || (streamErr instanceof Error && (
+          streamErr.name === "AbortError" || streamErr.message.includes("abort")
+        ));
+        pcHandle?.end({ result: isAbort ? "aborted" : "failure", endedAt: Date.now() });
         throw streamErr;
       }
       const { content, toolCalls, usage } = streamResult;

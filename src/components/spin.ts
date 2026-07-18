@@ -667,6 +667,9 @@ export class Spin {
           for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
             const batch = leaseInstructions(session);
             if (!batch) { session.steeringAccepting = false; break; }
+            // lease and markDelivered are synchronous here, so restoreBeforeDelivery
+            // (queued after lease, before handoff) is never reached in Phase 1.
+            // Phase 2's Pi adapter will introduce an async gap where it applies.
             markDelivered(batch);
             try {
               result = (await driver.send(renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]), undefined, { userId: spec.userId ?? userId, executionTelemetry })) || "(no output)";
