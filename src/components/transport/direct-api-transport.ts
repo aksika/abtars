@@ -303,6 +303,10 @@ export class DirectApiTransport implements IKiroTransport {
 
   private async sendEmergency(session: ConversationSession, signal: AbortSignal): Promise<string> {
     const em = this.emergencyOverride!;
+    // #1444: record emergency fallback transition for telemetry
+    if (this.activeModel !== em.model) {
+      this._fallbackFrom = this.activeModel;
+    }
     this.activeEndpoint = em.endpoint;
     this.activeApiKey = em.apiKey;
     this.activeModel = em.model;
@@ -466,6 +470,10 @@ export class DirectApiTransport implements IKiroTransport {
 
     if (smallest && this._lastPromptTokens > smallest.maxContext * 0.95) {
       logWarn(TAG, `Compacting session to fit ${smallest.model} (${smallest.maxContext} tokens)`);
+      // #1444: record fallback transition for compaction survivor telemetry
+      if (this.activeModel !== smallest.model) {
+        this._fallbackFrom = this.activeModel;
+      }
       session.truncateToFit(smallest.maxContext);
       this.activeEndpoint = smallest.endpoint;
       this.activeApiKey = smallest.apiKey;
