@@ -552,6 +552,7 @@ export class DirectApiTransport implements IKiroTransport {
       // #1444: one provider call per streamCompletion invocation
       const fallbackFrom = this._fallbackFrom;
       this._fallbackFrom = undefined;
+      const providerCallStartedAt = Date.now();
       const pcHandle = this.executionTelemetry?.beginProviderCall({
         provider: this.activeProvider,
         model: this.activeModel,
@@ -614,7 +615,7 @@ export class DirectApiTransport implements IKiroTransport {
           ordinal: pcHandle.ordinal,
           provider: this.activeProvider,
           candidate: this.activeProvider ? `${this.activeProvider}/${this.activeModel}` : this.activeModel,
-          latencyMs: Date.now() - (this._promptStartedAt ?? Date.now()),
+          latencyMs: Date.now() - providerCallStartedAt,
           result: "success" as const,
           fallbackFrom: fallbackFrom ?? undefined,
         } : undefined;

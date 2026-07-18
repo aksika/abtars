@@ -65,10 +65,12 @@ function expireStaleInstructions(session: ManagedSession): void {
   const current = session.activeExecutionId;
   const stale = session.instructionQueue.filter(i => i.executionId !== current && i.state !== "expired" && i.state !== "failed");
   if (stale.length === 0) return;
+  const staleIds = new Set(stale.map(i => i.id));
   for (const inst of stale) {
     inst.state = "expired";
   }
-  publishMultiGroup(stale, "steer.failed", session.id, "stale_generation");
+  session.instructionQueue = session.instructionQueue.filter(i => !staleIds.has(i.id));
+  publishMultiGroup(stale, "steer.expired", session.id, "stale_generation");
   logDebug(TAG, `expired ${stale.length} stale instructions for ${session.id}`);
 }
 
@@ -148,8 +150,9 @@ export function leaseInstructions(
   const current = session.activeExecutionId;
   if (!current) return null;
 
+  const requestedKind = kind ?? "steer";
   const matching = session.instructionQueue.filter(
-    i => i.executionId === current && i.state === "queued" && (!kind || i.kind === kind),
+    i => i.executionId === current && i.state === "queued" && i.kind === requestedKind,
   );
   if (matching.length === 0) return null;
 
@@ -163,7 +166,7 @@ export function leaseInstructions(
     leaseId,
     sessionId: session.id,
     executionId: current,
-    kind: kind ?? "steer",
+    kind: requestedKind,
     instructions: matching,
   };
 }
@@ -262,14 +265,15 @@ export function drainInstructionBatch(session: ManagedSession): QueuedSessionIns
 export function expireInstructions(session: ManagedSession, reason: string): void {
   if (session.instructionQueue.length === 0) return;
   const records = [...session.instructionQueue];
+  const terminal = records.filter(i => i.state !== "expired" && i.state !== "failed");
   for (const inst of records) {
     if (inst.state !== "expired" && inst.state !== "failed") {
       inst.state = "expired";
     }
   }
   session.instructionQueue = [];
-  publishMultiGroup(records, "steer.expired", session.id, reason);
-  logDebug(TAG, `expired ${records.length} instructions from ${session.id}: ${reason}`);
+  publishMultiGroup(terminal, "steer.expired", session.id, reason);
+  logDebug(TAG, `expired ${terminal.length} instructions from ${session.id}: ${reason}`);
 }
 
 export function failInstructions(session: ManagedSession, ids: string[], reason: string): void {
@@ -278,12 +282,14 @@ export function failInstructions(session: ManagedSession, ids: string[], reason:
   for (const id of ids) {
     const rec = session.instructionQueue.find(i => i.id === id);
     if (rec) {
-      if (rec.state !== "failed" && rec.state !== "expired") {
-        rec.state = "failed";
-      }
+      if (rec.state === "failed" || rec.state === "expired") continue;
+      rec.state = "failed";
       records.push(rec);
     }
   }
+  if (records.length === 0) return;
+  const failed = new Set(records.map(i => i.id));
+  session.instructionQueue = session.instructionQueue.filter(i => !failed.has(i.id));
   publishMultiGroup(records, "steer.failed", session.id, reason);
-  logDebug(TAG, `failed ${ids.length} instructions from ${session.id}: ${reason}`);
+  logDebug(TAG, `failed ${records.length} instructions from ${session.id}: ${reason}`);
 }

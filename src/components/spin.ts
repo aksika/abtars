@@ -665,7 +665,7 @@ export class Spin {
         try {
           let result = (await driver.send(prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
           for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
-            const batch = leaseInstructions(session);
+            const batch = leaseInstructions(session, "steer");
             if (!batch) { session.steeringAccepting = false; break; }
             // lease and markDelivered are synchronous here, so restoreBeforeDelivery
             // (queued after lease, before handoff) is never reached in Phase 1.
@@ -691,7 +691,7 @@ export class Spin {
         executeWithSteering().then(r => {
           const telemetryUsage = executionTelemetry.snapshot();
           executionTelemetry.close();
-          this.finishSpin(spec, profile, session, cardId, stepIndex, started, r, terminate, telemetryUsage);
+          return this.finishSpin(spec, profile, session, cardId, stepIndex, started, r, terminate, telemetryUsage);
         }).catch(e => {
           executionTelemetry.close();
           this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate);

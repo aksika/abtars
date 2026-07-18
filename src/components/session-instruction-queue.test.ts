@@ -244,14 +244,14 @@ describe("session-instruction-queue", () => {
       // Advance generation
       session.activeExecutionId = "exec_new";
 
-      // Drain — old-gen instructions become stale and get failed with their original generation
+      // Drain — old-gen instructions become stale and expire with their original generation
       events.length = 0;
       const batch = drainInstructionBatch(session);
       expect(batch.length).toBe(0);
 
-      const failed = events.filter(e => e.type === "steer.failed");
-      expect(failed.length).toBeGreaterThan(0);
-      for (const e of failed) {
+      const expired = events.filter(e => e.type === "steer.expired");
+      expect(expired.length).toBeGreaterThan(0);
+      for (const e of expired) {
         expect(e.executionId).toBe("exec_old");
         expect(e.sessionId).toBe("sess_G");
       }

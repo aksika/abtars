@@ -77,8 +77,8 @@ describe("leaseInstructions (#1444)", () => {
     expect(lease).not.toBeNull();
     expect(lease!.instructions.length).toBe(1);
     expect(lease!.instructions[0]!.text).toBe("current");
-    // Stale instruction should be expired
-    expect(session.instructionQueue.find(i => i.id === "stale_1")?.state).toBe("expired");
+    // Stale instruction should be expired and removed from the active queue.
+    expect(session.instructionQueue.find(i => i.id === "stale_1")).toBeUndefined();
   });
 
   it("filters by kind", () => {
@@ -227,9 +227,10 @@ describe("expireInstructions + stale generations (#1444)", () => {
     expect(lease).not.toBeNull();
     expect(lease!.instructions.length).toBe(1);
     expect(lease!.instructions[0]!.text).toBe("fresh");
-    const failed = events.filter(e => e.type === "steer.failed");
-    expect(failed.length).toBe(1);
-    expect(failed[0]!.executionId).toBe("exec_old");
+    const expired = events.filter(e => e.type === "steer.expired");
+    expect(expired.length).toBe(1);
+    expect(expired[0]!.executionId).toBe("exec_old");
+    expect(session.instructionQueue.some(i => i.id === "s1")).toBe(false);
   });
 });
 
@@ -248,6 +249,17 @@ describe("followUp kind support (#1444)", () => {
     expect(followLease).not.toBeNull();
     expect(followLease!.instructions.length).toBe(1);
     expect(followLease!.instructions[0]!.text).toBe("follow_1");
+  });
+
+  it("defaults an untyped lease to steer and leaves followUp queued", () => {
+    const session = makeSession();
+    queueInstruction(session, { text: "steer_1", source: "tui", kind: "steer" });
+    queueInstruction(session, { text: "follow_1", source: "tui", kind: "followUp" });
+
+    const lease = leaseInstructions(session);
+    expect(lease!.kind).toBe("steer");
+    expect(lease!.instructions.map(i => i.text)).toEqual(["steer_1"]);
+    expect(session.instructionQueue.find(i => i.text === "follow_1")?.state).toBe("queued");
   });
 });
 
