@@ -4,7 +4,6 @@
 
 import { describe, it, expect } from "vitest";
 import { redactSecrets } from "../components/logger.js";
-import { isPrivateHost } from "../capabilities/browser/ssrf-guard.js";
 import { isWithinRoot } from "../components/path-guard.js";
 
 describe("credential redaction", () => {
@@ -39,40 +38,6 @@ describe("credential redaction", () => {
   it("preserves non-secret text", () => {
     const safe = "User said hello at 2026-04-05T12:00:00";
     expect(redactSecrets(safe)).toBe(safe);
-  });
-});
-
-describe("SSRF protection", () => {
-  it("blocks localhost", async () => {
-    expect(await isPrivateHost("localhost")).toBe(true);
-  });
-
-  it("blocks 127.0.0.1", async () => {
-    expect(await isPrivateHost("127.0.0.1")).toBe(true);
-  });
-
-  it("blocks 10.x.x.x", async () => {
-    expect(await isPrivateHost("10.0.0.1")).toBe(true);
-  });
-
-  it("blocks 172.16.x.x", async () => {
-    expect(await isPrivateHost("172.16.0.1")).toBe(true);
-  });
-
-  it("blocks 192.168.x.x", async () => {
-    expect(await isPrivateHost("192.168.1.1")).toBe(true);
-  });
-
-  it("blocks 169.254.x.x (link-local)", async () => {
-    expect(await isPrivateHost("169.254.169.254")).toBe(true);
-  });
-
-  it("blocks ::1", async () => {
-    expect(await isPrivateHost("::1")).toBe(true);
-  });
-
-  it("allows public IPs", async () => {
-    expect(await isPrivateHost("8.8.8.8")).toBe(false);
   });
 });
 

@@ -181,3 +181,41 @@ describe("ModelHealthRegistry sticky credits (#1296)", () => {
     expect(reg.shouldSkip("kimi", "ep1")).toBe(false);
   });
 });
+
+// #1326 — context_exceeded is a static misconfiguration (maxOutput oversized for the
+// model's context window), NOT the model's live health. recordError must leave
+// the bucket + cooldown untouched so a healthy model is not degraded by a config
+// bug or an incidentally-too-large request. The fallback loop still rotates —
+// that's every ErrorKind's behavior — but the model itself stays healthy.
+describe("ModelHealthRegistry context_exceeded (#1326)", () => {
+  it("leaves bucket level at 0 (does not fill)", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "context_exceeded");
+    expect(reg.getBucketLevel("kimi", "ep1")).toBe(0);
+    expect(reg.shouldSkip("kimi", "ep1")).toBe(false);
+  });
+
+  it("does not set a cooldown", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "context_exceeded", 60_000);
+    // retryAfterMs is ignored for context_exceeded — cooldown stays unset
+    const health = reg.getHealth();
+    expect(health.get("ep1|kimi")?.cooldownUntil).toBeUndefined();
+    expect(reg.shouldSkip("kimi", "ep1")).toBe(false);
+  });
+
+  it("does not poison a previously-healthy model when added to a mix of errors", () => {
+    const reg = new ModelHealthRegistry();
+    // A transient error fills the bucket by 0.1; context_exceeded adds nothing.
+    reg.recordError("kimi", "ep1", "transient");
+    reg.recordError("kimi", "ep1", "context_exceeded");
+    expect(reg.getBucketLevel("kimi", "ep1")).toBe(10); // 0.1 from transient, 0 from context_exceeded
+  });
+
+  it("is treated as a healthy status in getHealth output", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "context_exceeded");
+    const health = reg.getHealth();
+    expect(health.get("ep1|kimi")?.status).toBe("healthy");
+  });
+});

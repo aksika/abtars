@@ -1,6 +1,6 @@
 {
   "name": "abtars",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Agentic framework for connecting LLMs to messaging platforms, with persistent memory, skills, scheduled tasks, self-healing supervision, and distributed multi-agent collaboration",
   "type": "module",
   "main": "bundle/abtars.js",
@@ -10,19 +10,23 @@
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
-    "check-imports": "bash -c '! grep -rE \"from \\\"abmind/|from '\\''abmind/\" src --include=*.ts | grep -vE \"abmind/deploy-lib\\\"|abmind/deploy-lib'\\''\"'",
+    "check-imports": "node scripts/check-imports.mjs",
+    "smoke:deps-standalone": "bash scripts/smoke-deps-standalone.sh",
     "test": "vitest --run",
     "test:watch": "vitest",
     "prepublishOnly": "node -e \"const p=require('./package.json');const d=JSON.stringify(p.dependencies||{});if(d.includes('file:')){console.error('ERROR: file: dependency found');process.exit(1)}\"",
     "test:integration": "vitest --run --dir src/tests/integration"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.19.0"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "^0.25.0",
     "@andresaya/edge-tts": "^1.8.0",
     "@clack/prompts": "^1.2.0",
+    "@earendil-works/pi-ai": "0.80.7",
+    "@earendil-works/pi-coding-agent": "0.80.7",
+    "@earendil-works/pi-tui": "0.80.7",
     "@types/node": "^22.19.17",
     "@types/pdf-parse": "^1.1.5",
     "@types/ws": "^8.18.1",
@@ -42,7 +46,7 @@
   },
   "bin": {
     "abtars": "bundle/abtars-cli.js",
-    "abtars-browser": "bundle/abtars-browser.js",
+    "abtars-browse": "bundle/abtars-browse.js",
     "abtars-restart": "bundle/abtars-restart.js"
   },
   "license": "Apache-2.0",

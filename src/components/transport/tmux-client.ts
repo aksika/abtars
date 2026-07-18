@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { IKiroTransport } from "./kiro-transport.js";
+import type { IKiroTransport, RuntimeStatusSnapshot } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { abtarsHome } from "../../paths.js";
@@ -55,7 +55,13 @@ export class TmuxClient implements IKiroTransport {
 
   readonly transportCommands: string[] = [];
 
-  async sendPrompt(_sessionKey: string, message: string): Promise<string> {
+  /** tmux rebuilds context from its own capture pane; no cursor needed. */
+  async sendPrompt(
+    _sessionKey: string,
+    message: string,
+    _image?: { mime: string; base64: string },
+    _context?: { userId?: string; beforeMessageId?: number },
+  ): Promise<string> {
     if (!this.isReady) {
       throw new Error("tmux session not available");
     }
@@ -257,6 +263,9 @@ export class TmuxClient implements IKiroTransport {
   /** Get the context window usage percentage from the last Kiro prompt (e.g. 10 for "10% >"). Returns -1 if unknown. */
   get contextPercent(): number {
     return this.lastContextPercent;
+  }
+  getRuntimeStatus(): RuntimeStatusSnapshot {
+    return { contextPercent: this.contextPercent >= 0 ? this.contextPercent : undefined };
   }
   /** Get the cumulative text that was delivered via intermediate streaming. */
   get intermediateDeliveredText(): string {

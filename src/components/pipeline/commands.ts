@@ -42,17 +42,19 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
   const trimmed = ctx.text.trim();
   const cmd = trimmed.split(/\s/)[0]!.toLowerCase();
 
-  // Interrupt commands: kill in-progress response first, then handle
-  const activeId = sessionManager.getActiveSessionId(msg.userId, msg.platform);
-  if (INTERRUPT_COMMANDS.has(cmd) && spin.getSessionById(activeId)?.busy) {
+  // #1336: use the effective session (from session-selection middleware) for
+  // interrupt/busy checks so TUI targeting a cross-platform session stops
+  // the correct conversation.
+  const effectiveId = ctx.sessionId ?? sessionManager.getActiveSessionId(msg.userId, msg.platform);
+  if (INTERRUPT_COMMANDS.has(cmd) && spin.getSessionById(effectiveId)?.busy) {
     logInfo("commands", `Interrupt command ${cmd} while busy — stopping current response`);
     await transport.sendInterrupt();
-    const s = spin.getSessionById(activeId);
+    const s = spin.getSessionById(effectiveId);
     if (s) s.busy = false;
   }
 
   // Non-interrupt destructive commands while busy: defer to busy guard (will be queued)
-  if (!INTERRUPT_COMMANDS.has(cmd) && DESTRUCTIVE_COMMANDS.has(cmd) && spin.getSessionById(activeId)?.busy) {
+  if (!INTERRUPT_COMMANDS.has(cmd) && DESTRUCTIVE_COMMANDS.has(cmd) && spin.getSessionById(effectiveId)?.busy) {
     const deferredWording: Record<string, string> = {
       "/compact": "⏳ Will /compact after current response finishes.",
       "/coding": "⏳ Will switch to coding mode after current response finishes.",
@@ -73,7 +75,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     : undefined;
 
   const cmdCtx: CommandContext = {
-    sessionKey: activeId, chatId: ctx.chatId, userId: ctx.userId ?? "unknown", platform: msg.platform, reply: ctx.reply,
+    sessionKey: effectiveId, chatId: ctx.chatId, userId: ctx.userId ?? "unknown", platform: msg.platform, reply: ctx.reply,
     editReply,
     transport, config, startedAt,
     memory, memoryConfig, nlmConfig,
@@ -84,6 +86,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     enqueueCron: deps.enqueueCron,
     requestShutdown: deps.requestShutdown,
     sleepProgress: deps.sleepProgress,
+    startSleep: deps.startSleep,
     loadedCapabilities: deps.loadedCapabilities,
     selfHealerTask: deps.selfHealerTask,
     hailMary: deps.hailMary,

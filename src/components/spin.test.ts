@@ -93,17 +93,26 @@ describe("Spin — unified session router (#943)", () => {
       const s2 = await spin.resolveSession("adrika", "telegram", 222);
       expect(s1).toBe(s2);
     });
+
+    it("rejects paused session even with transport (#1347)", async () => {
+      const transport = mockTransport();
+      spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport });
+      const session = spin.getActiveSession("aksika", "telegram");
+      session.status = "paused";
+
+      await expect(spin.resolveSession("aksika", "telegram", 111))
+        .rejects.toThrow("Session is paused — use /session resume");
+    });
   });
 
   describe("destroySession", () => {
     it("destroys non-master session transport", async () => {
       const session = await spin.resolveSession("adrika", "telegram", 222);
-      const transport = session.transport!;
 
       spin.destroySession("adrika", session.id);
-      expect(transport.destroy).toHaveBeenCalled();
       expect(session.status).toBe("ended");
       expect(session.transport).toBeUndefined();
+      expect(session.releaseTransport).toBeUndefined();
     });
 
     it("refuses to destroy master session", () => {

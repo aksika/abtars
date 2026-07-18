@@ -4,7 +4,7 @@
  */
 
 export type { Reply, CommandContext, CommandHandler, Platform } from "./types.js";
-export { registerCommand, handleCommand, triggerNewSession, triggerResetSession, killWakeInhibit } from "./registry.js";
+export { registerCommand, handleCommand, triggerNewSession, triggerResetSession } from "./registry.js";
 import { registerExact, registerPrefix } from "./registry.js";
 import {
   handleNewReset, handleCompact,
@@ -12,13 +12,17 @@ import {
   handleFull, handleShort, handleHealing, handleFacts,
   handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleKanban,
   handleChannel, handleTodo,
-  handleEmergencyAlias, handleModels, handleHeartbeat, handleReasoning, handleContinue,
-  handleMemory, handleNlm, handleWakeup,
+  handleEmergencyAlias, handleModels, handleHeartbeat, handleEffort, handleContinue, handleRoute,
+  handleMemory, handleNlm,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
   handleHooks, handleMcp, handleUsers, handleUsage, handleOpenRouter, handleWhoami,
   handleSoftware, handlePeers, handleMetrics,
 } from "./handlers.js";
 import { handleSession } from "./session-handler.js";
+import {
+  handlePiRun, handlePiStatus, handlePiList, handlePiReply,
+  handlePiSteer, handlePiCancel, handlePiResume,
+} from "./handlers-pi.js";
 
 // ── Exact-match commands ────────────────────────────────────────────────────
 registerExact("/reset", handleNewReset);
@@ -50,14 +54,15 @@ registerExact("/heartbeat", handleHeartbeat);
 registerExact("/models", handleModels);
 registerExact("/model", handleModels);
 registerExact("/change", (_, ctx) => handleModels("/model change", ctx));
-registerExact("/reasoning", handleReasoning);
+registerExact("/effort", handleEffort);
+registerExact("/thinking", handleEffort);
 registerExact("/continue", handleContinue);
 registerExact("/emergency", handleEmergencyAlias);
+registerExact("/route", handleRoute);
 registerExact("/help", handleHelp);
 registerExact("/users", handleUsers);
 registerExact("/skills", handleSkills);
 registerExact("/skill", handleSkills);
-registerExact("/wakeup", handleWakeup);
 registerExact("/sleep", handleSleep);
 registerExact("/mcp", handleMcp);
 registerExact("/hooks", handleHooks);
@@ -81,3 +86,11 @@ registerPrefix("/task pause ", handleTaskPause);
 registerPrefix("/task resume ", handleTaskPause);
 registerPrefix("/tasks pause ", handleTaskPause);
 registerPrefix("/tasks resume ", handleTaskPause);
+registerPrefix("/pi run ", handlePiRun);
+registerPrefix("/pi status ", handlePiStatus);
+registerPrefix("/pi get ", handlePiStatus);
+registerPrefix("/pi list", handlePiList);
+registerPrefix("/pi reply ", handlePiReply);
+registerPrefix("/pi steer ", handlePiSteer);
+registerPrefix("/pi cancel ", handlePiCancel);
+registerPrefix("/pi resume ", handlePiResume);

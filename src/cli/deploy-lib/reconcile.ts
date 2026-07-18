@@ -23,6 +23,7 @@ const SEED = ["config", "tasks"];
 /** Legacy paths to remove (one-time cleanup, idempotent). */
 const LEGACY_CLEANUP = ["core/prompts", "core"];
 
+
 /**
  * Reconcile runtime tree from templates source.
  * @param templatesSrc - Path to templates/ (from deployed release or source checkout)
@@ -70,6 +71,9 @@ export function reconcile(templatesSrc: string, home: string): void {
   }
   if (seeded > 0) logInfo(TAG, `Seeded ${seeded} missing config/task file(s)`);
 
+  // --- Seed sleep-cycle from template if absent (#1321) ---
+  seedSleepCycle(templatesSrc, home);
+
   // --- Legacy cleanup (remove old paths, idempotent) ---
   for (const rel of LEGACY_CLEANUP) {
     const p = join(home, rel);
@@ -77,6 +81,38 @@ export function reconcile(templatesSrc: string, home: string): void {
     rmSync(p, { recursive: true, force: true });
     logInfo(TAG, `Removed legacy: ${rel}`);
   }
+}
+
+/** Seed sleep-cycle from template if absent from the user tasks file (#1321). */
+function seedSleepCycle(templatesSrc: string, home: string): void {
+  const templatePath = join(templatesSrc, "tasks", "tasks.json");
+  if (!existsSync(templatePath)) return;
+  let sleepEntry: unknown;
+  try {
+    const raw = JSON.parse(readFileSync(templatePath, "utf-8"));
+    if (Array.isArray(raw)) sleepEntry = raw.find((e: unknown) => e !== null && typeof e === "object" && "id" in (e as Record<string, unknown>) && (e as Record<string, unknown>).id === "sleep-cycle");
+  } catch { /* skip */ }
+  if (!sleepEntry) return;
+
+  const tasksPath = join(home, "tasks", "tasks.json");
+  let entries: unknown[] = [];
+  try {
+    if (existsSync(tasksPath)) {
+      const raw = JSON.parse(readFileSync(tasksPath, "utf-8"));
+      if (Array.isArray(raw)) entries = raw;
+    }
+  } catch (err) {
+    logInfo(TAG, `tasks.json unreadable — skipping sleep-cycle seed: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  const exists = entries.some(e => typeof e === "object" && e !== null && (e as { id?: string }).id === "sleep-cycle");
+  if (exists) return;
+
+  entries.push(sleepEntry);
+  mkdirSync(dirname(tasksPath), { recursive: true });
+  writeFileSync(tasksPath, JSON.stringify(entries, null, 2), "utf-8");
+  logInfo(TAG, "Seeded sleep-cycle from template");
 }
 
 /** Recursively list all files under a directory. */
@@ -114,6 +150,30 @@ export function migrate(home: string): void {
     if (content.includes('"secure"')) {
       writeFileSync(ircPath, content.replace(/"secure"/g, '"signed"'));
       logInfo(TAG, "Migrated: irc-secure-to-signed");
+    }
+  }
+
+  // #1420: remove legacy title keys from tasks.json entries
+  const tasksPath = join(home, "tasks", "tasks.json");
+  if (existsSync(tasksPath)) {
+    try {
+      const raw = readFileSync(tasksPath, "utf-8");
+      const entries = JSON.parse(raw);
+      if (Array.isArray(entries)) {
+        let changed = false;
+        for (const entry of entries) {
+          if (entry && typeof entry === "object" && "title" in entry) {
+            delete (entry as Record<string, unknown>).title;
+            changed = true;
+          }
+        }
+        if (changed) {
+          writeFileSync(tasksPath, JSON.stringify(entries, null, 2), "utf-8");
+          logInfo(TAG, "Migrated: removed legacy title keys from tasks.json");
+        }
+      }
+    } catch (err) {
+      logInfo(TAG, `tasks.json migration skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }

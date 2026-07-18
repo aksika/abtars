@@ -7,6 +7,8 @@
 
 export { type MessageContext, type Middleware, runPipeline, createMessageContext } from "./middleware.js";
 export { voiceMiddleware } from "./voice.js";
+export { sessionSelectionMiddleware } from "./session-selection.js";
 export { commandMiddleware } from "./commands.js";
+export { pausedGuardMiddleware } from "./paused-guard.js";
 export { busyGuardMiddleware } from "./busy-guard.js";
 export { buildPrompt, type BuildPromptDeps, type BuildPromptResult } from "./prompt-builder.js";

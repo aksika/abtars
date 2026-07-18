@@ -11,6 +11,23 @@ export interface UsageEntry {
   agent: string;
   in: number;
   out: number;
+  /** #1311 C6: prompt-cache breakdown (pi-ai path; absent on L0 / legacy entries). */
+  cacheRead?: number;
+  cacheWrite?: number;
+  /** #1444: optional correlation metadata (schema v2). Underscore-prefixed — patterns that
+   *  iterate `for (const k in entry)` skip it automatically. */
+  _correlation?: {
+    schemaVersion: 2;
+    sessionId?: string;
+    executionId: string;
+    providerCallId: string;
+    ordinal: number;
+    provider?: string;
+    candidate?: string;
+    latencyMs: number;
+    result: "success" | "failure" | "aborted" | "unknown";
+    fallbackFrom?: string;
+  };
 }
 
 let buffer: UsageEntry[] = [];
@@ -26,13 +43,21 @@ export function initUsageTracker(home: string): void {
   usagePath = join(metricsDir, "usage.jsonl");
 }
 
-export function recordUsage(model: string, inputTokens: number, outputTokens: number, agent = ""): void {
+/**
+ * Record one prompt's usage. `in`/`out` are TOTAL token throughput (on the pi path `in` is
+ * total input-side incl cache, per #1311/R1) — the budget counts `in+out` = totalTokens.
+ * `cache` is the prompt-cache breakdown, stored for cache-aware cost + /usage display only;
+ * it is never added to totals (it is a subset of `in`).
+ */
+export function recordUsage(model: string, inputTokens: number, outputTokens: number, agent = "", cache?: { cacheRead?: number; cacheWrite?: number }, correlation?: UsageEntry["_correlation"]): void {
   _totalTokens += inputTokens + outputTokens;
   if (agent) {
     import("./budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(agent, inputTokens + outputTokens)).catch(() => {});
   }
   if (!usagePath) return;
-  buffer.push({ ts: Date.now(), model, agent, in: inputTokens, out: outputTokens });
+  const entry: UsageEntry = { ts: Date.now(), model, agent, in: inputTokens, out: outputTokens, cacheRead: cache?.cacheRead, cacheWrite: cache?.cacheWrite };
+  if (correlation) entry._correlation = correlation;
+  buffer.push(entry);
   if (buffer.length >= 100) flushUsage();
 }
 
@@ -46,12 +71,17 @@ export function flushUsage(): void {
 export interface UsageSummary {
   inputTokens: number;
   outputTokens: number;
+  cacheRead: number;
+  cacheWrite: number;
   cost: number;
-  byModel: Map<string, { in: number; out: number; cost: number }>;
+  byModel: Map<string, { in: number; out: number; cacheRead: number; cacheWrite: number; cost: number }>;
 }
 
-export function readUsage(since: number, costTable: Map<string, { input: number; output: number }>): UsageSummary {
-  const result: UsageSummary = { inputTokens: 0, outputTokens: 0, cost: 0, byModel: new Map() };
+/** Cost resolver: given a raw entry, return its USD cost. Encodes pi-cache-aware vs models.json pricing. */
+export type CostResolver = (e: { model: string; in: number; out: number; cacheRead?: number; cacheWrite?: number }) => number;
+
+export function readUsage(since: number, costOf: CostResolver): UsageSummary {
+  const result: UsageSummary = { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, cost: 0, byModel: new Map() };
   if (!usagePath) return result;
 
   // Include unflushed buffer
@@ -69,19 +99,20 @@ export function readUsage(since: number, costTable: Map<string, { input: number;
     if (e.ts < since) continue;
     result.inputTokens += e.in;
     result.outputTokens += e.out;
-    const pricing = costTable.get(e.model);
-    const entryCost = pricing
-      ? (e.in * pricing.input + e.out * pricing.output) / 1_000_000
-      : 0;
+    result.cacheRead += e.cacheRead ?? 0;
+    result.cacheWrite += e.cacheWrite ?? 0;
+    const entryCost = costOf(e);
     result.cost += entryCost;
 
     const existing = result.byModel.get(e.model);
     if (existing) {
       existing.in += e.in;
       existing.out += e.out;
+      existing.cacheRead += e.cacheRead ?? 0;
+      existing.cacheWrite += e.cacheWrite ?? 0;
       existing.cost += entryCost;
     } else {
-      result.byModel.set(e.model, { in: e.in, out: e.out, cost: entryCost });
+      result.byModel.set(e.model, { in: e.in, out: e.out, cacheRead: e.cacheRead ?? 0, cacheWrite: e.cacheWrite ?? 0, cost: entryCost });
     }
   }
   return result;

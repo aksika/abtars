@@ -1,4 +1,4 @@
 {
   "name": "browser",
-  "description": "Headless browser agent with SSRF protection"
+  "description": "B-task dispatch via browse-spawn socket"
 }

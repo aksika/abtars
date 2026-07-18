@@ -24,6 +24,7 @@ export interface CommandContext {
   enqueueCron?: PipelineDeps["enqueueCron"];
   requestShutdown?: PipelineDeps["requestShutdown"];
   sleepProgress?: PipelineDeps["sleepProgress"];
+  startSleep?: PipelineDeps["startSleep"];
   loadedCapabilities?: PipelineDeps["loadedCapabilities"];
   selfHealerTask?: { enabled: boolean; resetCircuitBreaker?: () => void; pausedRules?: () => number } | null;
   hailMary?: PipelineDeps["hailMary"];

@@ -387,22 +387,21 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
 
 // ── Cron Control ────────────────────────────────────────────────────────────
 
-import { readEntry as cronReadEntry, writeEntry as cronWriteEntry } from "../tasks/task-store.js";
+import { readEntry as cronReadEntry } from "../tasks/task-store.js";
+import { setAutoPaused, updateState } from "../tasks/task-state-store.js";
 
 function handleCronAction(id: string, action: string): { ok: boolean; error?: string } {
   const entry = cronReadEntry(id);
   if (!entry) return { ok: false, error: `Entry ${id} not found` };
 
   if (action === "pause") {
-    entry.paused = true;
+    setAutoPaused(id, true);
   } else if (action === "resume") {
-    entry.paused = false;
+    setAutoPaused(id, false);
   } else if (action === "trigger") {
-    entry.fireAt = Date.now() - 1000;
-    entry.paused = false;
-    entry.fired = false;
+    setAutoPaused(id, false);
+    updateState(id, { nextRunAt: Date.now() - 1000 });
   }
 
-  cronWriteEntry(entry);
   return { ok: true };
 }

@@ -1,10 +1,16 @@
 {
+  "schemaVersion": 2,
+  "route": "acp",
   "agents": {
-    "professor": { "model": "claude-sonnet-4.6",  "provider": "kiro", "fallbacks": [{ "model": "kimi-k2.5:cloud", "provider": "ollama" }, { "model": "gemini-2.5-flash", "provider": "openrouter" }] },
-    "dreamy":    { "model": "minimax-m2.5:cloud", "provider": "ollama" },
-    "browsie":   { "model": "minimax-m2.5:cloud", "provider": "ollama" },
-    "coding":    { "model": "qwen3.5:cloud",      "provider": "ollama" }
+    "main":    { "model": "claude-sonnet-4.6",  "provider": "kiro" },
+    "dreamy":  { "model": "minimax-m2.5:cloud", "provider": "ollama" },
+    "browsie": { "model": "minimax-m2.5:cloud", "provider": "ollama" },
+    "cody":    { "model": "qwen3.5:cloud",      "provider": "ollama" }
   },
+  "fallbacks": [
+    { "model": "kimi-k2.5:cloud", "provider": "ollama" },
+    { "model": "gemini-2.5-flash", "provider": "openrouter" }
+  ],
   "providers": {
     "kiro":        { "transport": "acp", "cli": "kiro-cli" },
     "gemini":      { "transport": "acp", "cli": "gemini" },

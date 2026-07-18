@@ -36,6 +36,7 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
   ].filter(p => existsSync(p));
 
   const mod = await loadAbmind();
+  ctx.abmindModule = mod;
 
   // #864 (preserved): two bundled abminds → dual DB connections → silent corruption.
   if (legacyAbmindPkgs.length > 1) {

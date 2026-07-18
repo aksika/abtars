@@ -1,7 +1,7 @@
 import { logAndSwallow } from "./log-and-swallow.js";
-import { createServer, IncomingMessage, ServerResponse } from "http";
-import { createServer as createHttpsServer } from "https";
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
+import { IncomingMessage, ServerResponse } from "http";
+import { createServer } from "https";
+import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { abtarsHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
@@ -11,6 +11,7 @@ import { logInfo, logWarn, logDebug, logTrace } from "./logger.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
 import { openaiError } from "./openai-compat-translate.js";
 import { handleModels as v1HandleModels, handleModel as v1HandleModel, handleEmbeddings as v1HandleEmbeddings, writeResult } from "./openai-compat-routes.js";
+import type { ValidatedTlsIdentity } from "./peer-transport/tls-identity.js";
 
 const TAG = "agent-api";
 const MAX_TRAFFIC_LOG = 50;
@@ -31,12 +32,17 @@ interface AgentApiDeps {
   workingDir: string;
   memory: IMemorySystem | null;
   runtime: SubagentRuntime;
+  /** #1305: Validated TLS identity — HTTPS-only, no fallback to plain HTTP. */
+  tls: ValidatedTlsIdentity;
   /** Spin session manager (#1271) — used for /v1/chat/completions main path. */
   sessionManager?: import("./spin.js").Spin;
   /** Optional callback for peer activity notifications (A2A). */
   onPeerActivity?: (msg: string) => void;
   /** A2A platform adapter — routes chat through pipeline/Spin (#978). */
   a2aAdapter?: import("../platforms/agent-api/agent-api-adapter.js").AgentApiAdapter;
+  onPiNotify?: (text: string) => Promise<import("./main-chat.js").SendResult>;
+  /** #1357 — Pi run service for remote Pi delegation on the receiving side. */
+  piExecutorService?: import("./pi-executor/pi-run-service.js").PiRunService;
 }
 
 function normalizeIp(raw: string): string {
@@ -45,61 +51,137 @@ function normalizeIp(raw: string): string {
 
 const MAX_BODY_BYTES = 6 * 1024 * 1024; // 6 MB (artifacts up to 5MB + overhead)
 
-function readBody(req: IncomingMessage): Promise<string> {
+// #1402: Verified peer request body after authentication.
+interface AuthenticatedPeerRequest {
+  caller: string;
+  method: string;
+  path: string;
+  rawBody: string;
+}
+
+type PeerAuthOptions = {
+  maxBodyBytes: number;
+  rateLimited?: boolean;
+};
+
+/**
+ * #1402 — Read request body with a byte limit, single-owner lifecycle.
+ * Checks Content-Length upfront, counts actual bytes on data events,
+ * handles abort/close/error without double settlement, never substitutes
+ * an empty body on failure.
+ */
+function readBodyBounded(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
+    const cl = req.headers["content-length"];
+    if (cl) {
+      const len = parseInt(cl, 10);
+      if (!isNaN(len) && len > maxBytes) {
+        req.resume();
+        reject(new Error("Request body too large"));
+        return;
+      }
+    }
+
     const chunks: Buffer[] = [];
     let size = 0;
-    req.on("data", (c: Buffer) => {
+    let settled = false;
+
+    function settle(err: Error | null, result?: string) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (err) reject(err);
+      else resolve(result!);
+    }
+
+    function cleanup() {
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("error", onError);
+      req.removeListener("close", onClose);
+    }
+
+    function onData(c: Buffer) {
       size += c.length;
-      if (size > MAX_BODY_BYTES) { req.destroy(); reject(new Error("Request body too large")); return; }
+      if (size > maxBytes) {
+        req.resume();
+        settle(new Error("Request body too large"));
+        return;
+      }
       chunks.push(c);
-    });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString()));
-    req.on("error", reject);
+    }
+
+    function onEnd() {
+      settle(null, Buffer.concat(chunks).toString());
+    }
+
+    function onError(err: Error) {
+      settle(err);
+    }
+
+    function onClose() {
+      if (!settled) settle(new Error("Connection closed"));
+    }
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+    req.on("close", onClose);
   });
 }
 
+/** #1313 — Read body with a smaller byte cap (for Pi routes). */
+function readBodyLimited(req: IncomingMessage, maxBytes: number): Promise<string> {
+  return readBodyBounded(req, maxBytes);
+}
+
+/** #1313 — Try reading package version from filesystem. */
+function tryReadVersion(): string | null {
+  try {
+    const { readFileSync } = require("node:fs") as typeof import("node:fs");
+    const { join, dirname } = require("node:path") as typeof import("node:path");
+    const { fileURLToPath } = require("node:url") as typeof import("node:url");
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf-8") as string) as { version?: string };
+    return pkg.version ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export class AgentApiServer {
-  private server!: ReturnType<typeof import("node:http").createServer>;
+  private server: ReturnType<typeof import("node:https").createServer>;
   private config: AgentApiConfig;
   private memory: IMemorySystem | null;
   private trafficLog: TrafficEntry[] = [];
   private onPeerActivity?: (msg: string) => void;
-  private tlsEnabled = false;
   private a2aAdapter?: import("../platforms/agent-api/agent-api-adapter.js").AgentApiAdapter;
   private peerWsConnections = new Map<string, import("ws").WebSocket>();
   private peerWss: import("ws").WebSocketServer | null = null;
+  private peerHelpService: import("./peer-help/service.js").PeerHelpService | null = null;
   /** Rate-limit for /v1/enroll-ws: IP → last attempt timestamp (ms). */
   private enrollRateLimit = new Map<string, number>();
-
+  /** #1313 — Pi notification callback (set by boot phase). */
+  private onPiNotify?: (text: string) => Promise<import("./main-chat.js").SendResult>;
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
     this.memory = deps.memory;
     this.onPeerActivity = deps.onPeerActivity;
+    this.onPiNotify = deps.onPiNotify;
+    void deps.piExecutorService; // kept for compat
     this.a2aAdapter = deps.a2aAdapter;
 
-    // Use HTTPS with self-signed identity cert if available
-    const configDir = join(abtarsHome(), "config");
-    const identityCrtPath = join(configDir, "identity.crt");
-    const identityKeyPath = join(configDir, "identity.tls.key");
-    let hasTls = false;
-    if (existsSync(identityCrtPath) && existsSync(identityKeyPath)) {
-      try {
-        this.server = createHttpsServer({
-          key: readFileSync(identityKeyPath),
-          cert: readFileSync(identityCrtPath),
-          minVersion: "TLSv1.3",
-        }, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
-        hasTls = true;
-        this.tlsEnabled = true;
-        logInfo(TAG, "TLS 1.3 enabled for agent-api (self-signed cert)");
-      } catch (err) { logAndSwallow(TAG, "TLS setup", err); }
-    } else {
-      logWarn(TAG, "identity.crt/identity.tls.key not found — agent-api starting without TLS (plain HTTP)");
-    }
-    if (!hasTls) {
-      this.server = createServer((req, res) => this.handle(req, res));
-    }
+    // HTTPS-only: validated TLS material is a required dependency (#1305)
+    this.server = createServer({
+      key: deps.tls.key,
+      cert: deps.tls.cert,
+      minVersion: "TLSv1.3",
+    }, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
+  }
+
+  /** #1433 — Wire the PeerHelpService for WSS/HTTPS help request handling. */
+  setPeerHelpService(service: import("./peer-help/service.js").PeerHelpService): void {
+    this.peerHelpService = service;
   }
 
   async start(): Promise<void> {
@@ -141,11 +223,8 @@ export class AgentApiServer {
             socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n"); socket.destroy(); return;
           }
           this.peerWss!.handleUpgrade(req, socket, head, (ws) => {
-            this.peerWsConnections.set(peerId, ws);
+            this.registerPeerWs(peerId, ws);
             logInfo(TAG, `Peer WS connected: ${peerId}`);
-            ws.on("close", () => { this.peerWsConnections.delete(peerId); logInfo(TAG, `Peer WS disconnected: ${peerId}`); });
-            ws.on("error", () => { this.peerWsConnections.delete(peerId); });
-            ws.on("message", (data) => this.handlePeerWsMessage(peerId, data.toString()));
           });
         }).catch(() => { socket.destroy(); });
       }).catch(() => { socket.destroy(); });
@@ -164,47 +243,105 @@ export class AgentApiServer {
     return new Promise((resolve) => this.server.close(() => resolve()));
   }
 
-  /** Push a message to a connected peer via WS. Returns true if delivered. */
+  /**
+   * #1391 — Register a WebSocket as the authoritative connection for a peer.
+   * Installs normal message, close, and error handlers with identity-checked
+   * cleanup.  If another socket is already mapped for the same peer, this
+   * one replaces it (new-socket-wins) and the old one is closed.
+   * #1433 — Attaches to shared PeerWsBroker for bidirectional routing.
+   */
+  private registerPeerWs(peerName: string, ws: import("ws").WebSocket): void {
+    const oldWs = this.peerWsConnections.get(peerName);
+    this.peerWsConnections.set(peerName, ws);
+    if (oldWs && oldWs !== ws) {
+      logInfo(TAG, `Replacing WS connection for peer '${peerName}'`);
+      try { oldWs.close(); } catch { /* best effort */ }
+    }
+
+    ws.on("message", (data) => this.handlePeerWsMessage(peerName, data.toString()));
+
+    // #1433: Attach accepted socket to the shared broker
+    const { getPeerWsBroker } = require("./peer-transport/peer-ws-broker.js") as typeof import("./peer-transport/peer-ws-broker.js");
+    const broker = getPeerWsBroker();
+    broker.attachSocket({
+      peer: peerName,
+      direction: "accepted",
+      socket: ws,
+    });
+
+    // #1434: Send inventory on accepted connection (peer-status.v1 removed)
+    try {
+      const { loadPeerConfig: lpc } = require("./peer-config.js") as typeof import("./peer-config.js");
+      const { buildSignedInventory: bsi } = require("./peer-transport/peer-inventory.js") as typeof import("./peer-transport/peer-inventory.js");
+      const { getLocalCapabilities: glc } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
+      const cfg = lpc();
+      const invPayload = bsi(cfg.self.signingKey, cfg.self.name, process.env["npm_package_version"] ?? "0.0.0", glc(), ["wss", "https"]);
+      broker.sendPush(peerName, "peer.inventory.v1", invPayload);
+    } catch { /* best effort */ }
+
+    ws.on("close", () => {
+      if (this.peerWsConnections.get(peerName) === ws) {
+        this.peerWsConnections.delete(peerName);
+        logInfo(TAG, `Peer WS disconnected: ${peerName}`);
+      }
+    });
+    ws.on("error", () => {
+      if (this.peerWsConnections.get(peerName) === ws) {
+        this.peerWsConnections.delete(peerName);
+      }
+    });
+  }
+
+  /**
+   * #1390: Push a non-mutating notification to a connected peer via WS.
+   * Unsigned push frames may never settle cards, post channels, deliver results,
+   * modify files, or invoke tools. Only notify-type methods are allowed.
+   */
   pushToPeer(peerName: string, method: string, payload: unknown): boolean {
+    // Strict allowlist of notification-only methods
+    // #1358: pi.lifecycle.v1 is a push from owner to origin (read-only lifecycle event)
+    const ALLOWED_PUSH: readonly string[] = ["notify", "heartbeat", "ping", "pi.lifecycle.v1"];
+    if (!ALLOWED_PUSH.includes(method)) return false;
     const ws = this.peerWsConnections.get(peerName);
     if (!ws || ws.readyState !== ws.OPEN) return false;
     ws.send(JSON.stringify({ type: "push", method, payload }));
     return true;
   }
 
-  /** Handle incoming WS message from a peer. */
+  /** Handle incoming WS message from a peer. #1433: pushes handled locally, requests go to broker. */
   private handlePeerWsMessage(peerName: string, raw: string): void {
     try {
       const msg = JSON.parse(raw);
-      if (msg.type === "request") {
-        // Peer sending a request over WS — route same as HTTP
-        this.handlePeerWsRequest(peerName, msg).catch(err => logAndSwallow(TAG, "ws-request", err));
+
+      if (msg.type === "push" && msg.method === "peer.inventory.v1" && msg.payload) {
+        try {
+          const { verifyAndStoreInventory } = require("./peer-transport/peer-inventory.js") as typeof import("./peer-transport/peer-inventory.js");
+          const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+          const config = loadPeerConfig();
+          const peerEntry = config.peers[peerName];
+          if (peerEntry?.verifyKey) {
+            verifyAndStoreInventory(peerName, msg.payload, peerEntry.verifyKey);
+          }
+        } catch { /* best effort */ }
+        return;
       }
+
+      // #1358: Handle lifecycle event push (owner → origin)
+      if (msg.type === "push" && msg.method === "pi.lifecycle.v1" && msg.payload) {
+        this.handleRemotePiLifecyclePush(peerName, msg.payload, msg.id).catch(err => logAndSwallow(TAG, "pi.lifecycle.v1", err));
+        return;
+      }
+
+      // Requests are handled by the broker — no longer verified here
+      // The broker owns signature verification and dispatch
     } catch { /* malformed — ignore */ }
   }
 
-  private async handlePeerWsRequest(peerName: string, msg: { id?: string; method: string; payload: unknown }): Promise<void> {
-    const ws = this.peerWsConnections.get(peerName);
-    if (!ws || ws.readyState !== ws.OPEN) return;
-    // Route based on method — same logic as HTTP handlers
-    let result: unknown = { error: "unknown method" };
-    if (msg.method === "delegate") {
-      // Same as POST /v1/tasks
-      const { spin } = await import("./spin.js");
-      const p = msg.payload as { goal: string; priority?: string; context?: string };
-      const { cardId } = spin.dispatch({ type: "W", goal: p.goal, title: p.goal.slice(0, 60), source: "peer", priority: (p.priority as any) ?? "MEDIUM" });
-      result = { ok: true, taskId: cardId };
-    } else if (msg.method === "check") {
-      const { kanbanGetCard } = await import("./tasks/kanban-board.js");
-      const card = kanbanGetCard((msg.payload as any).taskId);
-      result = card ? { taskId: card.id, status: card.status, result: card.result_summary, error: card.error } : { error: "not found" };
-    }
-    ws.send(JSON.stringify({ type: "response", id: msg.id, payload: result }));
-  }
-
   /**
-   * #1293 — Enrollment WS handler (responder side).
-   * Full implementation in Task 6. This is the routing entry point added in Task 3.
+   * #1391 — Enrollment WS handler (responder side).
+   * Uses explicit stages and named listeners so promotion removes only the
+   * enrollment handler and registers the socket for steady-state messaging
+   * BEFORE the acknowledgement is sent.
    */
   private async handleEnrollWs(ws: import("ws").WebSocket, req: IncomingMessage): Promise<void> {
     const ip = normalizeIp(req.socket?.remoteAddress ?? "");
@@ -219,7 +356,7 @@ export class AgentApiServer {
     this.enrollRateLimit.set(ip, Date.now());
 
     const {
-      macTribe, verifyEnroll, verifyRequest: _verifyReq,
+      macTribe, verifyEnroll, signAck,
     } = await import("./peer-transport/peer-auth.js");
     const { loadPeerConfig, deriveVerifyKey, clearPeerConfigCache } = await import("./peer-config.js");
     const { randomBytes } = await import("node:crypto");
@@ -230,14 +367,22 @@ export class AgentApiServer {
     const selfVerifyKey = deriveVerifyKey(config.self.signingKey);
     const nonceR = randomBytes(16).toString("hex");
 
-    let stepADone = false;
+    type EnrollmentStage = "awaiting_knock" | "awaiting_enroll" | "promoting" | "steady_state" | "closed";
+    let stage: EnrollmentStage = "awaiting_knock";
     let pubKeyI = "";
 
-    ws.on("message", async (rawData) => {
+    const onEnrollmentClose = () => {
+      stage = "closed";
+    };
+    const onEnrollmentError = () => {
+      stage = "closed";
+    };
+
+    const onEnrollmentMessage = async (rawData: import("ws").RawData) => {
       try {
         const msg = JSON.parse(rawData.toString());
 
-        if (!stepADone) {
+        if (stage === "awaiting_knock") {
           // Step A: knock
           const { pubKey_i, nonce_i, ts } = msg as { pubKey_i: string; nonce_i: string; ts: number };
           if (!pubKey_i || !nonce_i || !ts) { ws.close(1008, "invalid knock"); return; }
@@ -245,7 +390,7 @@ export class AgentApiServer {
           if (Math.abs(nowSec - ts) > 30) { ws.close(1008, "stale ts"); return; }
 
           pubKeyI = pubKey_i;
-          stepADone = true;
+          stage = "awaiting_enroll";
 
           // Step B: challenge
           const macR = macTribe(config.self.tribeToken, selfVerifyKey + nonce_i);
@@ -253,62 +398,81 @@ export class AgentApiServer {
           return;
         }
 
-        // Step C: enroll
-        const { mac_i, name, nonce_r, ts, selfSig } = msg as { mac_i: string; name: string; nonce_r: string; ts: number; selfSig: string };
-        if (!mac_i || !name || !nonce_r || !selfSig) { ws.close(1008, "invalid enroll msg"); return; }
+        if (stage === "awaiting_enroll") {
+          // Step C: enroll — transition to promoting BEFORE the first await
+          stage = "promoting";
 
-        if (nonce_r !== nonceR) { ws.close(1008, "nonce mismatch"); return; }
+          const { mac_i, name, nonce_r, ts, selfSig } = msg as { mac_i: string; name: string; nonce_r: string; ts: number; selfSig: string };
+          if (!mac_i || !name || !nonce_r || !selfSig) { ws.close(1008, "invalid enroll msg"); return; }
 
-        const nowSec = Math.floor(Date.now() / 1000);
-        if (Math.abs(nowSec - ts) > 30) { ws.close(1008, "stale ts"); return; }
+          if (nonce_r !== nonceR) { ws.close(1008, "nonce mismatch"); return; }
 
-        // Verify mac_i
-        const expectedMacI = macTribe(config.self.tribeToken, pubKeyI + nonceR);
-        if (mac_i !== expectedMacI) { ws.close(1008, "mac mismatch"); return; }
+          const nowSec = Math.floor(Date.now() / 1000);
+          if (Math.abs(nowSec - ts) > 30) { ws.close(1008, "stale ts"); return; }
 
-        // Verify selfSig
-        if (!verifyEnroll(selfSig, pubKeyI, pubKeyI, nonceR, name)) {
-          ws.close(1008, "bad selfSig"); return;
+          // Verify mac_i
+          const expectedMacI = macTribe(config.self.tribeToken, pubKeyI + nonceR);
+          if (mac_i !== expectedMacI) { ws.close(1008, "mac mismatch"); stage = "closed"; return; }
+
+          // Verify selfSig
+          if (!verifyEnroll(selfSig, pubKeyI, pubKeyI, nonceR, name)) {
+            ws.close(1008, "bad selfSig"); stage = "closed"; return;
+          }
+
+          // Pin-and-alert: reject if existing peer has different verifyKey
+          const existing = config.peers[name];
+          if (existing && existing.verifyKey !== pubKeyI) {
+            logWarn(TAG, `Enrollment rejected — peer '${name}' verifyKey changed (pin-and-alert)`);
+            ws.close(1008, "key changed — operator action required"); stage = "closed"; return;
+          }
+
+          // Persist peer (first I/O — stage is already "promoting")
+          const peersPath = join(abtarsHome(), "config", "peers.json");
+          let raw: Record<string, unknown> = {};
+          if (existsSync(peersPath)) { try { raw = JSON.parse(require("fs").readFileSync(peersPath, "utf-8")); } catch { raw = {}; } }
+          if (!raw.peers || typeof raw.peers !== "object") raw.peers = {};
+          (raw.peers as Record<string, unknown>)[name] = {
+            host: ip,
+            port: parseInt(req.headers["x-peer-port"] as string ?? "0", 10) || 0,
+            verifyKey: pubKeyI,
+            trust: 1,
+          };
+          writeFileSync(peersPath, JSON.stringify(raw, null, 2) + "\n", { encoding: "utf-8" });
+          clearPeerConfigCache();
+
+          logInfo(TAG, `Enrolled new peer '${name}' from ${ip} at trust=1`);
+
+          // Build ack payload
+          const ackSig = signAck(config.self.signingKey, config.self.name, selfVerifyKey, nonceR);
+          const ackPayload = JSON.stringify({ name_r: config.self.name, pubKey_r: selfVerifyKey, ackSig });
+
+          // Detach handshake message listener
+          ws.removeListener("message", onEnrollmentMessage);
+          ws.removeListener("close", onEnrollmentClose);
+          ws.removeListener("error", onEnrollmentError);
+
+          // Register for steady-state messaging (BEFORE sending ack)
+          if (ws.readyState === ws.OPEN) {
+            this.registerPeerWs(name, ws);
+            stage = "steady_state";
+            ws.send(ackPayload);
+          } else {
+            stage = "closed";
+          }
+          return;
         }
 
-        // Pin-and-alert: reject if existing peer has different verifyKey
-        const existing = config.peers[name];
-        if (existing && existing.verifyKey !== pubKeyI) {
-          logWarn(TAG, `Enrollment rejected — peer '${name}' verifyKey changed (pin-and-alert)`);
-          ws.close(1008, "key changed — operator action required"); return;
-        }
-
-        // Persist peer
-        const peersPath = join(abtarsHome(), "config", "peers.json");
-        let raw: Record<string, unknown> = {};
-        if (existsSync(peersPath)) { try { raw = JSON.parse(require("fs").readFileSync(peersPath, "utf-8")); } catch { raw = {}; } }
-        if (!raw.peers || typeof raw.peers !== "object") raw.peers = {};
-        (raw.peers as Record<string, unknown>)[name] = {
-          host: ip,
-          port: parseInt(req.headers["x-peer-port"] as string ?? "0", 10) || 0,
-          verifyKey: pubKeyI,
-          trust: 1,
-        };
-        writeFileSync(peersPath, JSON.stringify(raw, null, 2) + "\n", { encoding: "utf-8" });
-        clearPeerConfigCache();
-
-        logInfo(TAG, `Enrolled new peer '${name}' from ${ip} at trust=1`);
-
-        // Step D: ack
-        const { signAck: _signAck } = await import("./peer-transport/peer-auth.js");
-        const ackSig = _signAck(config.self.signingKey, config.self.name, selfVerifyKey, nonceR);
-        ws.send(JSON.stringify({ name_r: config.self.name, pubKey_r: selfVerifyKey, ackSig }));
-
-        // Transition to normal peer connection
-        this.peerWsConnections.set(name, ws);
-        ws.on("close", () => { this.peerWsConnections.delete(name); logInfo(TAG, `Enrolled peer WS closed: ${name}`); });
-        ws.on("error", () => { this.peerWsConnections.delete(name); });
-
+        // Any message in promoting/steady_state/closed is a protocol violation
+        ws.close(1008, "unexpected frame after enrollment");
       } catch (err) {
         logWarn(TAG, `Enrollment error from ${ip}: ${err instanceof Error ? err.message : String(err)}`);
         ws.close(1011, "enrollment error");
       }
-    });
+    };
+
+    ws.on("message", onEnrollmentMessage);
+    ws.on("close", onEnrollmentClose);
+    ws.on("error", onEnrollmentError);
   }
 
   getTrafficLog(): TrafficEntry[] {
@@ -320,6 +484,19 @@ export class AgentApiServer {
     if (this.trafficLog.length > MAX_TRAFFIC_LOG) this.trafficLog.shift();
   }
 
+  /** #1402 — Wrap an async handler so uncaught errors always produce a 500. */
+  private handleAsync(
+    _req: IncomingMessage, res: ServerResponse, fn: () => Promise<void>,
+  ): void {
+    fn().catch((err) => {
+      logWarn(TAG, `Route error: ${err instanceof Error ? err.message : String(err)}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" })
+          .end(JSON.stringify(openaiError("Internal server error", "server_error")));
+      }
+    });
+  }
+
   private handle(req: IncomingMessage, res: ServerResponse): void {
 
     const url = req.url ?? "";
@@ -327,14 +504,14 @@ export class AgentApiServer {
 
     // ── /v1/* routes (#373) ───────────────────────────────────────────────
     if (url === "/v1/models" && method === "GET") {
-      if (this.requireBearer(req, res) === null) return;
+      if (this.authenticateBodylessPeer(req, res) === null) return;
       writeResult(res, v1HandleModels());
       return;
     }
     // #898 — GET /v1/agent-card: live capabilities + health
     if (url === "/v1/agent-card" && method === "GET") {
-      if (this.requireBearer(req, res) === null) return;
-      const { getLocalCapabilities } = require("./peer-transport/gossip.js") as typeof import("./peer-transport/gossip.js");
+      if (this.authenticateBodylessPeer(req, res) === null) return;
+      const { getLocalCapabilities } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
       const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
       const { loadavg, cpus } = require("node:os") as typeof import("node:os");
       const config = loadPeerConfig();
@@ -350,57 +527,82 @@ export class AgentApiServer {
       return;
     }
     if (url.startsWith("/v1/models/") && method === "GET") {
-      if (this.requireBearer(req, res) === null) return;
+      if (this.authenticateBodylessPeer(req, res) === null) return;
       const id = decodeURIComponent(url.slice("/v1/models/".length));
       writeResult(res, v1HandleModel(id));
       return;
     }
     if (url === "/v1/chat/completions" && method === "POST") {
-      const caller = this.requireBearer(req, res);
-      if (caller === null) return;
-      this.handleV1ChatCompletions(req, res, caller).catch((err) => {
-        logWarn(TAG, `/v1/chat/completions error: ${err instanceof Error ? err.message : String(err)}`);
-        if (!res.headersSent) {
-          res.writeHead(500, { "Content-Type": "application/json" })
-            .end(JSON.stringify(openaiError("Internal server error", "server_error")));
-        }
+      this.handleAsync(req, res, async () => {
+        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
+        if (!auth) return;
+        const ip = normalizeIp(req.socket.remoteAddress ?? "");
+        const hopHeader = req.headers["x-peer-hops"];
+        const hopValue = typeof hopHeader === "string" ? parseInt(hopHeader, 10) : null;
+        const sessionId = (req.headers["x-session-id"] as string) || "default";
+        const body = JSON.parse(auth.rawBody);
+        await this.handleV1ChatCompletions(body, res, auth.caller, ip, hopValue, sessionId);
       });
       return;
     }
     if (url === "/v1/embeddings" && method === "POST") {
-      if (this.requireBearer(req, res) === null) return;
-      this.handleV1Embeddings(req, res).catch((err) => {
-        logWarn(TAG, `/v1/embeddings error: ${err instanceof Error ? err.message : String(err)}`);
-        if (!res.headersSent) {
-          res.writeHead(500, { "Content-Type": "application/json" })
-            .end(JSON.stringify(openaiError("Internal server error", "server_error")));
-        }
+      this.handleAsync(req, res, async () => {
+        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
+        if (!auth) return;
+        const body = JSON.parse(auth.rawBody);
+        await this.handleV1Embeddings(body, res);
       });
       return;
     }
-    // #894 — /v1/tasks: async task delegation (fire-and-forget, returns cardId)
-    if (url === "/v1/tasks" && method === "POST") {
-      const caller = this.requireBearerRateLimited(req, res);
+    // #1433 — Peer help routes (replaces old /v1/tasks delegation)
+    if (url === "/v1/help/requests" && method === "POST") {
+      this.handleAsync(req, res, async () => {
+        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
+        if (!auth) return;
+        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
+        const body = JSON.parse(auth.rawBody);
+        const response = await this.peerHelpService.handleHelpRequest(auth.caller, body);
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+      });
+      return;
+    }
+    // GET /v1/help/requests/:requestId?contribution_ref=... — check help status
+    const helpStatusMatch = url.match(/^\/v1\/help\/requests\/([^/?]+)/);
+    if (helpStatusMatch && method === "GET") {
+      const caller = this.authenticateBodylessPeer(req, res);
       if (caller === null) return;
-      this.handleV1Tasks(req, res, caller).catch((err) => {
-        logWarn(TAG, `/v1/tasks error: ${err instanceof Error ? err.message : String(err)}`);
-        if (!res.headersSent) {
-          res.writeHead(500, { "Content-Type": "application/json" })
-            .end(JSON.stringify(openaiError("Internal server error", "server_error")));
-        }
+      this.handleAsync(req, res, async () => {
+        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
+        const requestId = helpStatusMatch[1]!;
+        const contributionRef = new URL(url, `https://${req.headers.host ?? "localhost"}`).searchParams.get("contribution_ref") ?? "";
+        const response = await this.peerHelpService!.handleHelpStatus(caller, { version: 1, request_id: requestId, contribution_ref: contributionRef });
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
       });
       return;
     }
-    // #894 — GET /v1/tasks/:id — poll task status
-    if (url.startsWith("/v1/tasks/") && method === "GET") {
-      if (this.requireBearer(req, res) === null) return;
-      this.handleV1TaskStatus(url, res);
+    // POST /v1/help/requests/:requestId/withdraw — withdraw help
+    const helpWithdrawMatch = url.match(/^\/v1\/help\/requests\/([^/]+)\/withdraw/);
+    if (helpWithdrawMatch && method === "POST") {
+      this.handleAsync(req, res, async () => {
+        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
+        if (!auth) return;
+        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
+        const body = JSON.parse(auth.rawBody);
+        const response = await this.peerHelpService.handleHelpWithdraw(auth.caller, body);
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+      });
       return;
     }
-    // #894 — DELETE /v1/tasks/:id — cancel task
-    if (url.startsWith("/v1/tasks/") && method === "DELETE") {
-      if (this.requireBearerRateLimited(req, res) === null) return;
-      this.handleV1TaskCancel(url, res);
+    // POST /v1/help/events — contribution event delivery
+    if (url === "/v1/help/events" && method === "POST") {
+      this.handleAsync(req, res, async () => {
+        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
+        if (!auth) return;
+        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
+        const body = JSON.parse(auth.rawBody);
+        const response = await this.peerHelpService.handleContributionEvent(auth.caller, body);
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+      });
       return;
     }
 
@@ -408,28 +610,112 @@ export class AgentApiServer {
     // #949 — GET /v1/tasks/:cardId/messages?since=: pull catch-up
     const msgMatch = url.match(/^\/v1\/tasks\/(\d+)\/messages/);
     if (msgMatch && method === "POST") {
-      const caller = this.requireBearerRateLimited(req, res);
-      if (caller === null) return;
-      this.handleChannelPush(req, res, caller, Number(msgMatch[1]));
+      this.handleAsync(req, res, async () => {
+        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
+        if (!auth) return;
+        const body = JSON.parse(auth.rawBody);
+        await this.handleChannelPush(body, res, auth.caller, Number(msgMatch[1]));
+      });
       return;
     }
     if (msgMatch && method === "GET") {
-      if (this.requireBearer(req, res) === null) return;
+      if (this.authenticateBodylessPeer(req, res) === null) return;
       this.handleChannelPull(url, res, Number(msgMatch[1]));
       return;
     }
 
     // #675 — POST /v1/callbacks: peer pushes task result back
     if (url === "/v1/callbacks" && method === "POST") {
-      const caller = this.requireBearerRateLimited(req, res);
-      if (caller === null) return;
-      this.handleV1Callback(req, res, caller);
+      this.handleAsync(req, res, async () => {
+        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
+        if (!auth) return;
+        const body = JSON.parse(auth.rawBody);
+        await this.handleV1Callback(body, res, auth.caller);
+      });
       return;
+    }
+
+    // #1358 — Remote Pi lifecycle and control routes
+    // POST /v1/pi-events/push — owner pushes lifecycle event to origin
+    if (url === "/v1/pi-events/push" && method === "POST") {
+      this.handleAsync(req, res, async () => {
+        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
+        if (!auth) return;
+        await this.handleRemotePiEventPush(JSON.parse(auth.rawBody), res, auth.caller);
+      });
+      return;
+    }
+    // GET /v1/pi-runs/:runId/events — origin pulls catch-up events from owner
+    // POST /v1/pi-runs/:runId/events/acknowledge — origin acknowledges events to owner
+    // POST /v1/pi-runs/:runId/control — origin sends control command to owner
+    const piRunMatch = url.match(/^\/v1\/pi-runs\/([^/]+)\/(events|control)(?:\/(acknowledge))?$/);
+    if (piRunMatch) {
+      const runId = piRunMatch[1]!;
+      const subPath = piRunMatch[2]!;
+      const action = piRunMatch[3];
+      if (subPath === "events" && action === "acknowledge" && method === "POST") {
+        this.handleAsync(req, res, async () => {
+          const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
+          if (!auth) return;
+          await this.handleRemotePiEventsAck(JSON.parse(auth.rawBody), res, auth.caller, runId);
+        });
+        return;
+      }
+      if (subPath === "events" && !action && method === "GET") {
+        const caller = this.authenticateBodylessPeer(req, res);
+        if (caller === null) return;
+        this.handleRemotePiEventsList(url, res, caller, runId);
+        return;
+      }
+      if (subPath === "control" && !action && method === "POST") {
+        this.handleAsync(req, res, async () => {
+          const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
+          if (!auth) return;
+          await this.handleRemotePiControl(JSON.parse(auth.rawBody), res, auth.caller);
+        });
+        return;
+      }
     }
 
     // #1011 — Orc worker management (localhost only, no auth — same process)
     if (url.startsWith("/v1/orc/")) {
       this.handleOrcRoute(url, method, req, res);
+      return;
+    }
+
+    // #955 — Kanban card creation (localhost CLI, uses shared createDispatchableCard)
+    if (url === "/v1/kanban" && method === "POST") {
+      this.handleAsync(req, res, async () => {
+        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
+        const { createDispatchableCard } = await import("./tasks/kanban-board.js");
+        const result = createDispatchableCard({
+          type: body.type,
+          title: body.title,
+          goal: body.goal,
+          source: body.source || "cli",
+          priority: body.priority,
+          labels: body.labels,
+          deliveryMode: body.delivery_mode,
+          chatId: body.chat_id,
+        });
+        if ("error" in result) {
+          res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: result.error }));
+        } else {
+          res.writeHead(201, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, card_id: result.cardId, status: result.status }));
+        }
+      });
+      return;
+    }
+
+    // #1313 — Pi capability bridge (signed, loopback, scoped)
+    if (url.startsWith("/v1/pi/")) {
+      this.handlePiRoute(url, method, req, res).catch((err) => {
+        logWarn(TAG, `/v1/pi error: ${err instanceof Error ? err.message : String(err)}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" })
+            .end(JSON.stringify({ ok: false, error: { code: "internal_error", message: "Internal server error", retryable: false } }));
+        }
+      });
       return;
     }
 
@@ -440,7 +726,7 @@ export class AgentApiServer {
     try {
       const { getOrcTools } = await import("./transport/orc-tools.js");
       if (url === "/v1/orc/spawn" && method === "POST") {
-        const body = JSON.parse(await readBody(req));
+        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
         const tool = getOrcTools().find(t => t.name === "spawn_worker");
         const result = await tool!.execute(body);
         res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
@@ -453,20 +739,27 @@ export class AgentApiServer {
         return;
       }
       if (url === "/v1/orc/cancel" && method === "POST") {
-        const body = JSON.parse(await readBody(req));
+        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
         const tool = getOrcTools().find(t => t.name === "cancel_worker");
         const result = await tool!.execute(body);
         res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
         return;
       }
       if (url === "/v1/orc/delegate" && method === "POST") {
-        const body = JSON.parse(await readBody(req));
-        const { peer, goal, title } = body as { peer?: string; goal?: string; title?: string };
+        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
+        const { peer, goal } = body as { peer?: string; goal?: string };
         if (!peer || !goal) { res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: "peer and goal required" })); return; }
         const { getPeerTransport } = await import("./peer-transport/index.js");
         const transport = getPeerTransport();
-        const remoteId = await transport.delegateTask(peer, goal, { priority: "MEDIUM", context: title });
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result: `Delegated to ${peer} — remote card #${remoteId}` }));
+        const response = await transport.askHelp(peer, {
+          version: 1,
+          request_id: `orc_${Date.now()}`,
+          created_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 300_000).toISOString(),
+          goal,
+          required_capabilities: [],
+        });
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result: `Asked ${peer} for help — ${response.decision}${response.contribution_ref ? ` ref=${response.contribution_ref}` : ""}` }));
         return;
       }
       res.writeHead(404).end();
@@ -476,10 +769,62 @@ export class AgentApiServer {
   }
 
   /**
-   * #1293 — require Ed25519 request signature on /v1/* routes.
-   * Returns caller name (X-Peer-Id) or null (response already written on failure).
+   * #1402 — Authenticate a bodyless peer request (GET/DELETE).
+   * Returns caller name or null (response already written on failure).
    */
-  private requirePeerSig(req: IncomingMessage, res: ServerResponse): string | null {
+  private authenticateBodylessPeer(req: IncomingMessage, res: ServerResponse): string | null {
+    return this.verifyPeerSig(req, res, "");
+  }
+
+  /**
+   * #1402 — Authenticate a body-bearing peer request (POST).
+   * Reads the exact body once, verifies the Ed25519 signature against it,
+   * optionally applies the per-peer POST rate limit, and returns an
+   * AuthenticatedPeerRequest.  On failure writes the response and returns null.
+   */
+  private async authenticatePeerBody(
+    req: IncomingMessage, res: ServerResponse, options: PeerAuthOptions,
+  ): Promise<AuthenticatedPeerRequest | null> {
+    const peerId = req.headers["x-peer-id"];
+    if (typeof peerId !== "string") {
+      res.writeHead(401, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Missing X-Peer-Id header", "authentication_error", "invalid_api_key")));
+      return null;
+    }
+
+    let rawBody: string;
+    try {
+      rawBody = await readBodyBounded(req, options.maxBodyBytes);
+    } catch {
+      res.writeHead(413, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Request body too large", "invalid_request_error", "body_too_large")));
+      return null;
+    }
+
+    const caller = this.verifyPeerSig(req, res, rawBody);
+    if (caller === null) return null;
+
+    if (options.rateLimited) {
+      const { checkPeerPostLimit } = require("./agent-api-rate-limit.js") as typeof import("./agent-api-rate-limit.js");
+      if (!checkPeerPostLimit(caller)) {
+        res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "10" })
+          .end(JSON.stringify(openaiError("Rate limit: max 1 request per 10s per peer", "rate_limit_error", "rate_limited")));
+        return null;
+      }
+    }
+
+    return { caller, method: req.method ?? "POST", path: req.url ?? "/", rawBody };
+  }
+
+  /**
+   * #1402 — Shared peer lookup and Ed25519 signature verification.
+   * Verifies the signature against the given body bytes (empty string for
+   * bodyless GET/DELETE, the actual raw body for POST).  Returns caller name
+   * or null (response already written on failure).
+   */
+  private verifyPeerSig(
+    req: IncomingMessage, res: ServerResponse, body: string,
+  ): string | null {
     const peerId = req.headers["x-peer-id"];
     if (typeof peerId !== "string") {
       res.writeHead(401, { "Content-Type": "application/json" })
@@ -499,14 +844,12 @@ export class AgentApiServer {
       return null;
     }
 
-    const storedVerifyKey = peerEntry.verifyKey;
-
     const result = verifyRequest(
       req.headers as Record<string, string | string[] | undefined>,
       req.method ?? "GET",
       req.url ?? "/",
-      "", // body hash is "" for GET/DELETE; POST routes re-verify with body if needed
-      storedVerifyKey,
+      body,
+      peerEntry.verifyKey,
     );
 
     if (!result.ok) {
@@ -520,36 +863,14 @@ export class AgentApiServer {
     return peerId;
   }
 
-  /**
-   * Legacy alias — routes to requirePeerSig.
-   * @deprecated Use requirePeerSig directly for new routes.
-   */
-  private requireBearer(req: IncomingMessage, res: ServerResponse): string | null {
-    return this.requirePeerSig(req, res);
-  }
-
-  /** #949: requirePeerSig + 10s per-peer rate limit for POST/DELETE. Returns caller or null (response already sent). */
-  private requireBearerRateLimited(req: IncomingMessage, res: ServerResponse): string | null {
-    const caller = this.requirePeerSig(req, res);
-    if (caller === null) return null;
-    const { checkPeerPostLimit } = require("./agent-api-rate-limit.js") as typeof import("./agent-api-rate-limit.js");
-    if (!checkPeerPostLimit(caller)) {
-      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "10" })
-        .end(JSON.stringify(openaiError("Rate limit: max 1 request per 10s per peer", "rate_limit_error", "rate_limited")));
-      return null;
-    }
-    return caller;
-  }
-
-  /** #373 — /v1/chat/completions dispatch. */
-  private async handleV1ChatCompletions(req: IncomingMessage, res: ServerResponse, caller: string): Promise<void> {
+  /** #373 — /v1/chat completions dispatch. Body already authenticated and parsed by caller. */
+  private async handleV1ChatCompletions(
+    body: unknown, res: ServerResponse, caller: string, ip: string, hopValue: number | null, sessionId: string,
+  ): Promise<void> {
     const start = Date.now();
-    const ip = normalizeIp(req.socket.remoteAddress ?? "");
 
     // #392 — hop check. If X-Peer-Hops header is present and value is 0, refuse.
     // If absent, this is a direct call (not forwarded) — always allow.
-    const hopHeader = req.headers["x-peer-hops"];
-    const hopValue = typeof hopHeader === "string" ? parseInt(hopHeader, 10) : null;
     if (hopValue !== null && hopValue <= 0) {
       res.writeHead(429, { "Content-Type": "application/json" })
         .end(JSON.stringify(openaiError("Peer hop limit reached", "loop_detected", "hop_exceeded")));
@@ -570,17 +891,6 @@ export class AgentApiServer {
     // Set module-level hop state so peer_session tool knows the budget for outbound calls
     const { setCurrentPeerHops } = await import("./peer-client.js");
     setCurrentPeerHops(hopValue);
-
-    let body: unknown;
-    try {
-      body = JSON.parse(await readBody(req));
-    } catch (err) {
-      logAndSwallow(TAG, "JSON.parse chat completions body", err);
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Invalid JSON body", "invalid_request_error", "invalid_body")));
-      setCurrentPeerHops(null);
-      return;
-    }
 
     // #416 — Verify digital signature on incoming peer message
     let commsType: "signed" | "plain" | "sig-invalid" = "plain";
@@ -652,7 +962,7 @@ export class AgentApiServer {
     }
 
     logInfo(TAG, `Peer call: ${caller} → ${this.config.agentCodename} [${commsType}]`);
-    const secLabel = `${this.tlsEnabled ? "tls" : "http"}+${commsType === "signed" ? "signed" : "jwt"}`;
+    const secLabel = `tls+${commsType === "signed" ? "signed" : "jwt"}`;
     this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} [${secLabel}]`);
 
     // #991 — Read peer trust level
@@ -692,7 +1002,6 @@ export class AgentApiServer {
       return;
     }
     {
-      const sessionId = (req.headers["x-session-id"] as string) || "default";
       const response = await this.a2aAdapter.handlePeerMessage(caller, sessionId, lastMsg.content);
 
       const { buildChatResponse } = await import("./openai-compat-translate.js");
@@ -707,123 +1016,23 @@ export class AgentApiServer {
     }
   }
 
-  /** #373 — /v1/embeddings dispatch. */
-  private async handleV1Embeddings(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    let body: unknown;
-    try {
-      body = JSON.parse(await readBody(req));
-    } catch (err) {
-      logAndSwallow(TAG, "JSON.parse embeddings body", err);
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Invalid JSON body", "invalid_request_error", "invalid_body")));
-      return;
-    }
+  /** #373 — /v1/embeddings dispatch. Body already authenticated and parsed by caller. */
+  private async handleV1Embeddings(body: unknown, res: ServerResponse): Promise<void> {
     const result = await v1HandleEmbeddings(body, this.memory);
     writeResult(res, result);
   }
 
-  /** #894 — /v1/tasks: async delegation. Returns 202 + cardId immediately. */
-  private async handleV1Tasks(req: IncomingMessage, res: ServerResponse, caller: string): Promise<void> {
-    let body: { goal?: string; priority?: string; context?: string; callback_peer?: string; delivery_mode?: string; artifacts?: Array<{ name: string; content: string }> };
-    try {
-      body = JSON.parse(await readBody(req));
-    } catch (err) {
-      logAndSwallow(TAG, "JSON.parse tasks body", err);
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Invalid JSON body", "invalid_request_error", "invalid_body")));
-      return;
-    }
-
-    const goal = body.goal;
-    if (!goal || typeof goal !== "string") {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Missing 'goal' field", "invalid_request_error", "missing_field")));
-      return;
-    }
-
-    const { spin } = await import("./spin.js");
-    const { cardId, sessionId } = spin.dispatch({
-      type: "O",
-      goal: body.context ? `${goal}\n\nContext: ${body.context}` : goal,
-      source: "peer",
-      priority: body.priority ?? "MEDIUM",
-      deliveryMode: body.delivery_mode as "silent" | "deliver" | "announce" | undefined,
-      callbackPeer: body.callback_peer,
-      sourcePeer: caller,
-    });
-
-    // #928: Write inbound artifacts to card workspace
-    if (body.artifacts?.length) {
-      const { basename: bn } = await import("node:path");
-      const dir = join(abtarsHome(), "workspace", "cards", String(cardId));
-      mkdirSync(dir, { recursive: true });
-      for (const art of body.artifacts) {
-        const safeName = bn(art.name);
-        writeFileSync(join(dir, safeName), Buffer.from(art.content, "base64"));
-      }
-      logDebug(TAG, `Wrote ${body.artifacts.length} artifact(s) to card#${cardId} workspace`);
-    }
-
-    logInfo(TAG, `A2A task from ${caller}: card #${cardId} "${goal.slice(0, 60)}"${body.callback_peer ? ` (callback→${body.callback_peer})` : ""}`);
-    logTrace(TAG, `A2A task from ${caller} full goal: ${goal.slice(0, 500)}`);
-    this.onPeerActivity?.(`📋 A2A task from ${caller}: "${goal.slice(0, 60)}" → card #${cardId}`);
-    this.pushTraffic({
-      ts: Date.now(), ip: (req.socket.remoteAddress ?? "?"),
-      endpoint: "/v1/tasks", prompt: `[${caller}] ${goal.slice(0, 200)}`,
-      response: `card#${cardId}`, durationMs: 0, status: 202,
-    });
-
-    res.writeHead(202, { "Content-Type": "application/json" })
-      .end(JSON.stringify({ task_id: cardId, status: "queued", session_id: sessionId }));
-  }
-
-  /** #894 — GET /v1/tasks/:id — poll task status + result. */
-  private handleV1TaskStatus(url: string, res: ServerResponse): void {
-    const id = parseInt(url.slice("/v1/tasks/".length), 10);
-    if (isNaN(id)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Invalid task ID", "invalid_request_error", "invalid_id")));
-      return;
-    }
-    const { kanbanList } = require("./tasks/kanban-board.js") as typeof import("./tasks/kanban-board.js");
-    const cards = kanbanList("*").filter(c => c.id === id);
-    if (cards.length === 0) {
-      res.writeHead(404, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Task not found", "not_found", "task_not_found")));
-      return;
-    }
-    const card = cards[0]!;
-    res.writeHead(200, { "Content-Type": "application/json" })
-      .end(JSON.stringify({ task_id: card.id, status: card.status, result_summary: card.result_summary, result_path: card.result_path, error: card.error }));
-  }
-
-  /** #894 — DELETE /v1/tasks/:id — cancel a task. */
-  private handleV1TaskCancel(url: string, res: ServerResponse): void {
-    const id = parseInt(url.slice("/v1/tasks/".length), 10);
-    if (isNaN(id)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Invalid task ID", "invalid_request_error", "invalid_id")));
-      return;
-    }
-    const { kanbanFail } = require("./tasks/kanban-board.js") as typeof import("./tasks/kanban-board.js");
-    kanbanFail(id, "Cancelled by peer");
-    res.writeHead(200, { "Content-Type": "application/json" })
-      .end(JSON.stringify({ task_id: id, status: "cancelled" }));
-  }
-
-  /** #949 — POST /v1/tasks/:cardId/messages: receive channel message from remote peer. */
-  private async handleChannelPush(req: IncomingMessage, res: ServerResponse, caller: string, cardId: number): Promise<void> {
-    let body: { from_agent?: string; message?: string; created_at?: string };
-    try { body = JSON.parse(await readBody(req)); } catch {
-      res.writeHead(400).end(JSON.stringify(openaiError("Invalid JSON", "invalid_request_error", "invalid_body")));
-      return;
-    }
-    if (!body.from_agent || !body.message || !body.created_at) {
+  /** #949 — POST /v1/tasks/:cardId/messages: receive channel message from remote peer. Body already authenticated and parsed by caller. */
+  private async handleChannelPush(
+    body: unknown, res: ServerResponse, caller: string, cardId: number,
+  ): Promise<void> {
+    const typedBody = body as { from_agent?: string; message?: string; created_at?: string };
+    if (!typedBody.from_agent || !typedBody.message || !typedBody.created_at) {
       res.writeHead(400).end(JSON.stringify(openaiError("Missing from_agent, message, or created_at", "invalid_request_error", "missing_field")));
       return;
     }
     const { channelPostFromRemote } = require("./tasks/kanban-channel.js") as typeof import("./tasks/kanban-channel.js");
-    channelPostFromRemote(cardId, body.from_agent, body.message, body.created_at, caller);
+    channelPostFromRemote(cardId, typedBody.from_agent, typedBody.message, typedBody.created_at, caller);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
   }
 
@@ -837,27 +1046,112 @@ export class AgentApiServer {
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ messages }));
   }
 
-  /** #675 — POST /v1/callbacks: remote peer delivers task result. */
-  private async handleV1Callback(req: IncomingMessage, res: ServerResponse, caller: string): Promise<void> {
-    const start = Date.now();
-    let body: { task_id?: number; status?: string; result_summary?: string; error?: string; artifacts?: Array<{ name: string; content: string }>; tokens_used?: number };
-    try {
-      body = JSON.parse(await readBody(req));
-    } catch {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(JSON.stringify(openaiError("Invalid JSON", "invalid_request_error", "invalid_body")));
+  // ── #1358 — Remote Pi lifecycle and control route handlers ─────────────
+
+  /** POST /v1/pi-events/push — owner pushes lifecycle event to origin. */
+  private async handleRemotePiEventPush(body: unknown, res: ServerResponse, caller: string): Promise<void> {
+    const { getRemotePiOriginReducer } = await import("./peer-transport/remote-pi-registry.js");
+    const reducer = getRemotePiOriginReducer();
+    if (!reducer) {
+      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi origin reducer not available" }));
       return;
     }
+    const { loadPeerConfig } = await import("./peer-config.js");
+    const localPeerName = loadPeerConfig().self.name;
+    const { handlePushLifecycleEvent } = await import("./peer-transport/remote-pi-agent-api-integration.js");
+    const result = await handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, caller, body as any);
+    if (result.success) {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
+    } else {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: result.error }));
+    }
+  }
 
-    const taskId = body.task_id;
-    if (!taskId || !body.status) {
+  /** GET /v1/pi-runs/:runId/events — origin pulls catch-up events from owner. */
+  private handleRemotePiEventsList(url: string, res: ServerResponse, caller: string, runId: string): void {
+    const afterMatch = url.match(/[?&]after_sequence=([^&]+)/);
+    const limitMatch = url.match(/[?&]limit=([^&]+)/);
+    const { getRemotePiDelivery } = require("./peer-transport/remote-pi-registry.js") as typeof import("./peer-transport/remote-pi-registry.js");
+    const delivery = getRemotePiDelivery();
+    if (!delivery) {
+      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi delivery not available" }));
+      return;
+    }
+    const after_sequence = afterMatch ? parseInt(afterMatch[1]!, 10) : 0;
+    const limit = limitMatch ? parseInt(limitMatch[1]!, 10) : 100;
+    delivery.listEvents({ version: 1, run_id: runId, after_sequence, limit }, caller).then(result => {
+      if ("error" in result) {
+        res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: result.error }));
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
+      }
+    });
+  }
+
+  /** POST /v1/pi-runs/:runId/events/acknowledge — origin acknowledges events to owner. */
+  private async handleRemotePiEventsAck(body: unknown, res: ServerResponse, caller: string, runId: string): Promise<void> {
+    const { getRemotePiDelivery } = await import("./peer-transport/remote-pi-registry.js");
+    const delivery = getRemotePiDelivery();
+    if (!delivery) {
+      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi delivery not available" }));
+      return;
+    }
+    const typed = body as { sequence?: number };
+    if (typeof typed.sequence !== "number") {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Missing sequence" }));
+      return;
+    }
+    const result = delivery.acknowledgeEvent(caller, runId, typed.sequence);
+    if ("error" in result) {
+      res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: result.error }));
+    } else {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
+    }
+  }
+
+  /** POST /v1/pi-runs/:runId/control — origin sends control command to owner. */
+  private async handleRemotePiControl(body: unknown, res: ServerResponse, caller: string): Promise<void> {
+    const { getRemotePiControlHandler } = await import("./peer-transport/remote-pi-registry.js");
+    const handler = getRemotePiControlHandler();
+    if (!handler) {
+      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi control handler not available" }));
+      return;
+    }
+    const principalId = `peer:${caller}`;
+    const response = await handler.handleControlRequest({ peerName: caller, principalId }, body as any);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+  }
+
+  /** #1358 — WS push: owner pushes lifecycle event to origin (pi.lifecycle.v1). */
+  private async handleRemotePiLifecyclePush(ownerPeer: string, event: unknown, _msgId?: string): Promise<void> {
+    const { getRemotePiOriginReducer } = await import("./peer-transport/remote-pi-registry.js");
+    const reducer = getRemotePiOriginReducer();
+    if (!reducer) return; // origin reducer not configured — not an error
+    const { loadPeerConfig } = await import("./peer-config.js");
+    const localPeerName = loadPeerConfig().self.name;
+    const { handlePushLifecycleEvent } = await import("./peer-transport/remote-pi-agent-api-integration.js");
+    await handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, ownerPeer, event as any);
+    // Push frames don't get a correlated response — the durable outbox + ack
+    // protocol handles reliability.
+  }
+
+  /** #675 — POST /v1/callbacks: remote peer delivers task result. Body already authenticated and parsed by caller. */
+  private async handleV1Callback(body: unknown, res: ServerResponse, caller: string): Promise<void> {
+    const start = Date.now();
+    const typedBody = body as {
+      task_id?: number; status?: string; result_summary?: string; error?: string;
+      artifacts?: Array<{ name: string; content: string }>; tokens_used?: number;
+    };
+
+    const taskId = typedBody.task_id;
+    if (!taskId || !typedBody.status) {
       res.writeHead(400, { "Content-Type": "application/json" })
         .end(JSON.stringify(openaiError("Missing task_id or status", "invalid_request_error", "missing_field")));
       return;
     }
 
-    logDebug(TAG, `← callback from ${caller}: task_id=${taskId} status=${body.status}`);
-    logTrace(TAG, `← callback from ${caller} result: ${(body.result_summary ?? "").slice(0, 300)}`);
+    logDebug(TAG, `← callback from ${caller}: task_id=${taskId} status=${typedBody.status}`);
+    logTrace(TAG, `← callback from ${caller} result: ${(typedBody.result_summary ?? "").slice(0, 300)}`);
 
     // Find local kanban card with matching remote_task_id from this peer
     const { kanbanList, kanbanComplete, kanbanFail } = require("./tasks/kanban-board.js") as typeof import("./tasks/kanban-board.js");
@@ -879,29 +1173,29 @@ export class AgentApiServer {
     const card = remoteCards[0]!;
 
     // #928: Write result artifacts to local card workspace
-    if (body.artifacts?.length) {
+    if (typedBody.artifacts?.length) {
       const { basename: bn } = await import("node:path");
       const dir = join(abtarsHome(), "workspace", "cards", String(card.id));
       mkdirSync(dir, { recursive: true });
-      for (const art of body.artifacts) {
+      for (const art of typedBody.artifacts) {
         const safeName = bn(art.name);
         writeFileSync(join(dir, safeName), Buffer.from(art.content, "base64"));
       }
-      logDebug(TAG, `Wrote ${body.artifacts.length} result artifact(s) to local card#${card.id}`);
+      logDebug(TAG, `Wrote ${typedBody.artifacts.length} result artifact(s) to local card#${card.id}`);
     }
 
-    if (body.status === "done") {
-      kanbanComplete(card.id, null, body.result_summary?.slice(0, 500) ?? "completed");
-      logInfo(TAG, `PEER_CALLBACK ${caller}#${taskId} → local#${card.id} done (${(body.result_summary ?? "").length}ch)`);
+    if (typedBody.status === "done") {
+      kanbanComplete(card.id, null, typedBody.result_summary?.slice(0, 500) ?? "completed");
+      logInfo(TAG, `PEER_CALLBACK ${caller}#${taskId} → local#${card.id} done (${(typedBody.result_summary ?? "").length}ch)`);
     } else {
-      kanbanFail(card.id, body.error ?? "remote task failed");
-      logInfo(TAG, `PEER_CALLBACK ${caller}#${taskId} → local#${card.id} failed: ${(body.error ?? "").slice(0, 100)}`);
+      kanbanFail(card.id, typedBody.error ?? "remote task failed");
+      logInfo(TAG, `PEER_CALLBACK ${caller}#${taskId} → local#${card.id} failed: ${(typedBody.error ?? "").slice(0, 100)}`);
     }
 
     // #1026: Track remote token cost on local card (propagates to parent)
-    if (body.tokens_used && typeof body.tokens_used === "number") {
+    if (typedBody.tokens_used && typeof typedBody.tokens_used === "number") {
       const { kanbanAddTokens } = require("./tasks/kanban-board.js") as typeof import("./tasks/kanban-board.js");
-      kanbanAddTokens(card.id, body.tokens_used);
+      kanbanAddTokens(card.id, typedBody.tokens_used);
     }
 
     // #949: Destroy hollow session for this remote worker
@@ -917,13 +1211,433 @@ export class AgentApiServer {
     } catch { /* best-effort cleanup */ }
 
     this.pushTraffic({
-      ts: Date.now(), ip: (req.socket.remoteAddress ?? "?"),
-      endpoint: "/v1/callbacks", prompt: `[${caller}] task_id=${taskId} status=${body.status}`,
+      ts: Date.now(), ip: "?",
+      endpoint: "/v1/callbacks", prompt: `[${caller}] task_id=${taskId} status=${typedBody.status}`,
       response: `local_card=${card.id}`, durationMs: Date.now() - start, status: 200,
     });
 
     res.writeHead(200, { "Content-Type": "application/json" })
-      .end(JSON.stringify({ ok: true, local_card_id: card.id, status: body.status }));
+      .end(JSON.stringify({ ok: true, local_card_id: card.id, status: typedBody.status }));
   }
 
+  // ── Pi capability bridge (#1313) ──────────────────────────────────────────
+
+  /** #1313 — Rate-limiter state for Pi clients (separate from peer rate limits). */
+  private piRateState = new Map<string, { reads: number[]; mutations: number[] }>();
+  private static readonly PI_READ_LIMIT = 120;
+  private static readonly PI_MUTATION_LIMIT = 30;
+
+  private checkPiRateLimit(clientId: string, isMutation: boolean): boolean {
+    const now = Date.now();
+    const window = 60_000;
+    let state = this.piRateState.get(clientId);
+    if (!state) {
+      state = { reads: [], mutations: [] };
+      this.piRateState.set(clientId, state);
+    }
+    const bucket = isMutation ? state.mutations : state.reads;
+    const limit = isMutation
+      ? AgentApiServer.PI_MUTATION_LIMIT
+      : AgentApiServer.PI_READ_LIMIT;
+    const cutoff = now - window;
+    while (bucket.length > 0 && bucket[0]! < cutoff) bucket.shift();
+    if (bucket.length >= limit) return false;
+    bucket.push(now);
+    if (this.piRateState.size > 100) {
+      for (const [k, s] of this.piRateState) {
+        while (s.reads.length > 0 && s.reads[0]! < cutoff) s.reads.shift();
+        while (s.mutations.length > 0 && s.mutations[0]! < cutoff) s.mutations.shift();
+        if (s.reads.length === 0 && s.mutations.length === 0) this.piRateState.delete(k);
+      }
+    }
+    return true;
+  }
+
+  /** #1313 — Uniform Pi API success response. */
+  private piOk(data: unknown, duplicate?: boolean): string {
+    return JSON.stringify({ ok: true, data, ...(duplicate ? { duplicate: true } : {}) });
+  }
+
+  /** #1313 — Uniform Pi API error response. */
+  private piErr(code: string, message: string, retryable: boolean): string {
+    return JSON.stringify({ ok: false, error: { code, message, retryable } });
+  }
+
+  /** #1313 — Route and handle authenticated Pi capability requests. */
+  private async handlePiRoute(
+    url: string, method: string, req: IncomingMessage, res: ServerResponse,
+  ): Promise<void> {
+    const { isLoopbackAddress, PI_MAX_BODY_BYTES, verifyPiRequest, piRouteRequiresScope } = await import("./pi-auth.js");
+
+    // 1. Loopback check
+    const addr = req.socket.remoteAddress;
+    if (!isLoopbackAddress(addr)) {
+      res.writeHead(401, { "Content-Type": "application/json" }).end(this.piErr("unauthorized", "Not authorized", false));
+      return;
+    }
+
+    // 2. Route must be a known /v1/pi/ route
+    const requiredScope = piRouteRequiresScope(url, method);
+    if (!requiredScope) {
+      res.writeHead(404, { "Content-Type": "application/json" }).end(this.piErr("not_found", "Unknown route", false));
+      return;
+    }
+
+    // 3. Read body with Pi-specific size limit (64 KiB)
+    let body = "";
+    try {
+      body = await readBodyLimited(req, PI_MAX_BODY_BYTES);
+    } catch {
+      res.writeHead(413, { "Content-Type": "application/json" }).end(this.piErr("too_large", "Request body too large", false));
+      return;
+    }
+
+    // 4. Verify authentication (registration, nonce, timestamp, body hash, signature)
+    const headers = req.headers as Record<string, string | string[] | undefined>;
+    const auth = verifyPiRequest(method, url, body, headers);
+    if (!auth.ok || !auth.registration) {
+      res.writeHead(401, { "Content-Type": "application/json" }).end(this.piErr("unauthorized", "Not authorized", false));
+      return;
+    }
+
+    // 5. Scope check
+    if (!auth.registration.scopes.includes(requiredScope)) {
+      res.writeHead(403, { "Content-Type": "application/json" }).end(this.piErr("forbidden", "Scope not granted", false));
+      return;
+    }
+
+    // 6. Rate limit (read vs mutation)
+    const isMutation = method === "POST" || method === "DELETE" || method === "PUT" || method === "PATCH";
+    if (!this.checkPiRateLimit(auth.registration.clientId, isMutation)) {
+      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" })
+        .end(this.piErr("rate_limited", "Rate limit exceeded", true));
+      return;
+    }
+
+    // 7. Parse JSON for routes that have a body
+    let parsedBody: Record<string, unknown> | undefined;
+    if (body.length > 0) {
+      try {
+        parsedBody = JSON.parse(body) as Record<string, unknown>;
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" }).end(this.piErr("invalid_json", "Invalid JSON body", false));
+        return;
+      }
+    }
+
+    // 8. Route to handler
+    if (url === "/v1/pi/status" && method === "GET") {
+      return this.handlePiStatus(res);
+    }
+    if (url === "/v1/pi/notify" && method === "POST") {
+      return this.handlePiNotify(res, auth.registration.clientId, parsedBody);
+    }
+    if (url === "/v1/pi/tasks" && method === "POST") {
+      return this.handlePiTaskCreate(res, auth.registration.clientId, parsedBody);
+    }
+    if (url.startsWith("/v1/pi/tasks/") && method === "GET") {
+      return this.handlePiTaskStatus(url, res, auth.registration.clientId);
+    }
+    if (url === "/v1/pi/peers" && method === "GET") {
+      return this.handlePiPeerList(res);
+    }
+    if (url === "/v1/pi/peers/delegate" && method === "POST") {
+      return this.handlePiPeerDelegate(res, auth.registration.clientId, parsedBody);
+    }
+
+    res.writeHead(404, { "Content-Type": "application/json" }).end(this.piErr("not_found", "Unknown route", false));
+  }
+
+  /** #1313 — GET /v1/pi/status: bridge version, uptime, capability availability. */
+  private async handlePiStatus(res: ServerResponse): Promise<void> {
+    const uptime = Math.floor(process.uptime());
+    const pkg = await tryReadVersion();
+    res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({
+      version: pkg ?? "?",
+      uptimeSec: uptime,
+      capabilities: {
+        notify: !!this.onPiNotify,
+        tasks: true,
+        peers: true,
+        delegate: true,
+      },
+    }));
+  }
+
+  /** #1313 — POST /v1/pi/notify: send sanitized text to main chat. */
+  private async handlePiNotify(
+    res: ServerResponse, clientId: string, body: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    if (!body || typeof body.request_id !== "string" || typeof body.text !== "string") {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(this.piErr("invalid_request", "request_id and text are required", false));
+      return;
+    }
+    const text = (body.text as string).slice(0, 4096);
+    const requestId = (body.request_id as string).slice(0, 128);
+
+    if (!/^[A-Za-z0-9._:\-]+$/.test(requestId)) {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(this.piErr("invalid_request", "request_id must match [A-Za-z0-9._:-]+", false));
+      return;
+    }
+
+    const { reserveRequest, completeRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
+    const hash = hashCanonicalJson(body as Record<string, unknown>);
+    const reservation = reserveRequest(clientId, "notify", requestId, hash);
+
+    if (!reservation.ok) {
+      if (reservation.code === "duplicate_conflict") {
+        res.writeHead(409, { "Content-Type": "application/json" })
+          .end(this.piErr("id_conflict", "request_id used with different payload", false));
+        return;
+      }
+      if (reservation.code === "outcome_unknown") {
+        res.writeHead(409, { "Content-Type": "application/json" })
+          .end(this.piErr("outcome_unknown", "Previous request outcome unknown", true));
+        return;
+      }
+    }
+
+    if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
+      return;
+    }
+
+    if (!this.onPiNotify) {
+      completeRequest(clientId, "notify", requestId, this.piErr("not_available", "Main chat not configured", false));
+      res.writeHead(503, { "Content-Type": "application/json" })
+        .end(this.piErr("not_available", "Main chat not configured", false));
+      return;
+    }
+
+    try {
+      const result = await this.onPiNotify(text);
+      if (result.ok) {
+        const resp = this.piOk({ sent: true });
+        completeRequest(clientId, "notify", requestId, resp);
+        res.writeHead(200, { "Content-Type": "application/json" }).end(resp);
+      } else {
+        const errCode = result.reason === "no-chat-id" ? "not_available"
+          : result.reason === "adapter-missing" ? "not_available"
+          : "send_failed";
+        const resp = this.piErr(errCode, "Notification failed", true);
+        completeRequest(clientId, "notify", requestId, resp);
+        res.writeHead(502, { "Content-Type": "application/json" }).end(resp);
+      }
+    } catch (err) {
+      void err;
+      const resp = this.piErr("send_failed", "Notification failed", true);
+      completeRequest(clientId, "notify", requestId, resp);
+      res.writeHead(502, { "Content-Type": "application/json" }).end(resp);
+    }
+  }
+
+  /** #1313/#1407 — POST /v1/pi/tasks: queue an async Kanban task, return tracking ID. */
+  private async handlePiTaskCreate(
+    res: ServerResponse, clientId: string, body: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    if (!body || typeof body.request_id !== "string" || typeof body.goal !== "string") {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(this.piErr("invalid_request", "request_id and goal are required", false));
+      return;
+    }
+    const goal = (body.goal as string).slice(0, 32768);
+    const requestId = (body.request_id as string).slice(0, 128);
+    if (!/^[A-Za-z0-9._:\-]+$/.test(requestId)) {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(this.piErr("invalid_request", "request_id must match [A-Za-z0-9._:-]+", false));
+      return;
+    }
+
+    const context = typeof body.context === "string" ? (body.context as string).slice(0, 16384) : undefined;
+    const priority = typeof body.priority === "string" ? (body.priority as string) : "MEDIUM";
+    const deliveryMode = typeof body.delivery === "string" ? (body.delivery as string) : "silent";
+
+    const { reserveRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
+    const hash = hashCanonicalJson(body as Record<string, unknown>);
+    const reservation = reserveRequest(clientId, "task:create", requestId, hash);
+
+    if (!reservation.ok) {
+      if (reservation.code === "duplicate_conflict") {
+        res.writeHead(409, { "Content-Type": "application/json" })
+          .end(this.piErr("id_conflict", "request_id used with different payload", false));
+        return;
+      }
+      if (reservation.code === "outcome_unknown") {
+        res.writeHead(409, { "Content-Type": "application/json" })
+          .end(this.piErr("outcome_unknown", "Previous request outcome unknown", true));
+        return;
+      }
+    }
+
+    if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
+      return;
+    }
+
+    // #1407: Use PiTaskStore for atomic card+ownership creation
+    try {
+      const { getPiTaskStore } = await import("./pi-task-store.js");
+      const store = await getPiTaskStore();
+      const fullGoal = context ? `${goal}\n\nContext: ${context}` : goal;
+      const result = store.createAndComplete({
+        clientId,
+        requestId,
+        requestHash: hash,
+        title: fullGoal.slice(0, 200),
+        goal: fullGoal,
+        priority: priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+        deliveryMode: deliveryMode as "silent" | "deliver" | "announce",
+      });
+
+      if (result.created) {
+        const { nerve } = await import("./nerve.js");
+        nerve.fire("card:queued", result.cardId);
+        res.writeHead(200, { "Content-Type": "application/json" }).end(result.responseJson);
+      } else {
+        const resp = this.piErr("task_failed", "Task creation failed", true);
+        res.writeHead(500, { "Content-Type": "application/json" }).end(resp);
+      }
+    } catch (err) {
+      const resp = this.piErr("task_failed", "Failed to create task", true);
+      res.writeHead(500, { "Content-Type": "application/json" }).end(resp);
+    }
+  }
+
+  /** #1313/#1407 — GET /v1/pi/tasks/:id — Pi-scoped task status with exact ownership. */
+  private async handlePiTaskStatus(url: string, res: ServerResponse, clientId: string): Promise<void> {
+    const id = parseInt(url.slice("/v1/pi/tasks/".length), 10);
+    if (isNaN(id)) {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(this.piErr("invalid_request", "Invalid task ID", false));
+      return;
+    }
+    const { getPiTaskStore } = await import("./pi-task-store.js");
+    const store = await getPiTaskStore();
+    const view = store.getOwned(id, clientId);
+    if (!view) {
+      res.writeHead(404, { "Content-Type": "application/json" })
+        .end(this.piErr("not_found", "Task not found", false));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({
+      task_id: view.id,
+      status: view.status,
+      created_at: view.createdAt,
+      completed_at: view.completedAt,
+      result_summary: view.resultSummary,
+      error: view.error,
+    }));
+  }
+
+  /** #1313 — GET /v1/pi/peers: secret-free peer presence (static config + live broker state). */
+  private handlePiPeerList(res: ServerResponse): void {
+    try {
+      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+      const { getPeerWsBroker } = require("./peer-transport/peer-ws-broker.js") as typeof import("./peer-transport/peer-ws-broker.js");
+      const config = loadPeerConfig();
+      const broker = getPeerWsBroker();
+      const connected = broker.getConnectedPeers();
+      const peers = Object.entries(config.peers).map(([name, entry]) => ({
+        name,
+        alive: connected.includes(name),
+        host: entry.host,
+        port: entry.port,
+      }));
+      res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({ peers }));
+    } catch {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({ peers: [] }));
+    }
+  }
+
+  /** #1313 — POST /v1/pi/peers/delegate: delegate task to a peer. */
+  private async handlePiPeerDelegate(
+    res: ServerResponse, clientId: string, body: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    if (!body || typeof body.request_id !== "string" || typeof body.goal !== "string") {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(this.piErr("invalid_request", "request_id and goal are required", false));
+      return;
+    }
+    const goal = (body.goal as string).slice(0, 32768);
+    const requestId = (body.request_id as string).slice(0, 128);
+    if (!/^[A-Za-z0-9._:\-]+$/.test(requestId)) {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(this.piErr("invalid_request", "request_id must match [A-Za-z0-9._:-]+", false));
+      return;
+    }
+
+    const peer = typeof body.peer === "string" ? (body.peer as string).slice(0, 128) : undefined;
+    const context = typeof body.context === "string" ? (body.context as string).slice(0, 16384) : undefined;
+    const priority = typeof body.priority === "string" ? (body.priority as string) : "MEDIUM";
+    const requirements = Array.isArray(body.requirements) ? (body.requirements as string[]).slice(0, 20) : [];
+
+    const { reserveRequest, completeRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
+    const hash = hashCanonicalJson(body as Record<string, unknown>);
+    const reservation = reserveRequest(clientId, "peer:delegate", requestId, hash);
+
+    if (!reservation.ok) {
+      if (reservation.code === "duplicate_conflict") {
+        res.writeHead(409, { "Content-Type": "application/json" })
+          .end(this.piErr("id_conflict", "request_id used with different payload", false));
+        return;
+      }
+      if (reservation.code === "outcome_unknown") {
+        res.writeHead(409, { "Content-Type": "application/json" })
+          .end(this.piErr("outcome_unknown", "Previous request outcome unknown", true));
+        return;
+      }
+    }
+
+    if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
+      return;
+    }
+
+    try {
+      const { getPeerTransport } = await import("./peer-transport/index.js");
+      const transport = getPeerTransport();
+      let targetPeer = peer;
+
+      if (!targetPeer) {
+        const { getPeerWsBroker } = await import("./peer-transport/peer-ws-broker.js");
+        const connected = getPeerWsBroker().getConnectedPeers();
+        if (connected.length === 0) {
+          const resp = this.piErr("no_peers", "No connected peers found", true);
+          completeRequest(clientId, "peer:ask", requestId, resp);
+          res.writeHead(503, { "Content-Type": "application/json" }).end(resp);
+          return;
+        }
+        targetPeer = connected[0]!;
+      }
+
+      const fullGoal = context ? `${goal}\n\nContext: ${context}` : goal;
+      const result = await transport.askHelp(targetPeer, {
+        version: 1,
+        request_id: requestId ?? `pi_${Date.now()}`,
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 300_000).toISOString(),
+        goal: fullGoal,
+        required_capabilities: requirements,
+        priority: priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+      });
+
+      const resp = this.piOk({
+        decision: result.decision,
+        peer: targetPeer,
+        contribution_ref: result.contribution_ref,
+        status: result.decision === "accepted" ? "help_accepted" : result.decision,
+      });
+      completeRequest(clientId, "peer:ask", requestId, resp);
+      res.writeHead(200, { "Content-Type": "application/json" }).end(resp);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const resp = this.piErr("ask_failed", `Help request failed: ${msg}`, true);
+      completeRequest(clientId, "peer:ask", requestId, resp);
+      res.writeHead(502, { "Content-Type": "application/json" }).end(resp);
+    }
+  }
 }
+
+// ── Helper functions ────────────────────────────────────────────────────────

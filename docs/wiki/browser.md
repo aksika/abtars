@@ -1,36 +1,17 @@
 # Browser Agent
 
-Browsie is the built-in web browsing capability. When enabled, the agent can navigate websites, extract content, and fill forms.
+Browsie is the built-in web browsing capability. When enabled, the agent can navigate websites, extract content, and fill forms using the external `cloakbrowser` CLI.
 
-## Enable
+## How it works
 
-Set in `.env`:
-```
-BROWSER_ENABLED=true
-```
+- Abtars does not ship or manage a browser binary.
+- The external `cloakbrowser` executable must be installed separately and available on PATH.
+- Abtars provides task dispatch: `abtars-browse` creates a B-type Kanban card for the Browsie agent.
+- The Browsie agent calls `cloakbrowser` directly via shell.
 
 ## Requirements
 
-- Playwright (installed automatically as optional dependency)
-- Chromium (downloaded on first use by Playwright)
-
-## What the agent can do
-
-- Navigate to URLs
-- Extract page text (with character limit)
-- Click elements, fill forms
-- Take screenshots
-- Wait for page load / dynamic content
-
-## Configuration
-
-Optional environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BROWSER_SESSION_TIMEOUT_MS` | 300000 | Session auto-close after inactivity |
-| `BROWSER_MAX_SESSIONS` | 3 | Max concurrent browser sessions |
-| `WEB_SCRAPE_USER_AGENT` | (default Chrome UA) | Custom user agent string |
+- `cloakbrowser` CLI on PATH (installed separately)
 
 ## Usage
 

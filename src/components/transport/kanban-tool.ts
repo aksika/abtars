@@ -3,7 +3,7 @@
  */
 
 import type { ToolDefinition } from "./tool-registry.js";
-import { kanbanEnqueue, kanbanUpdate, kanbanList, type KanbanCard } from "../tasks/kanban-board.js";
+import { createDispatchableCard, kanbanUpdate, kanbanList, type KanbanCard } from "../tasks/kanban-board.js";
 
 function formatCard(c: KanbanCard): string {
   const icon = c.status === "delivered" ? "*" : c.status === "done" ? "*" : c.status === "running" ? "~" : c.status === "failed" ? "x" : "+";
@@ -20,16 +20,23 @@ async function execute(args: Record<string, string>): Promise<string> {
 
   if (action === "create") {
     if (!args.title) return "[err] title required";
-    const id = kanbanEnqueue(args.title, args.source || "agent", undefined, {
-      priority: args.priority,
+    // #1327/#955 — validate type BEFORE calling createDispatchableCard so invalid
+    // types get the same clear error regardless of mock state in tests.
+    if (args.type && !["A", "B", "C", "T", "P", "S", "O", "W", "D", "H"].includes(args.type)) {
+      return `[err] invalid card.type "${args.type}" (#1327): must be a SessionType (A/B/C/T/P/S/O/W/D/H) for dispatchable work, or omit the field for non-dispatchable tickets. Ticket categories (task/bug/feature/...) are not valid SessionTypes.`;
+    }
+    const result = createDispatchableCard({
       type: args.type,
+      title: args.title,
+      goal: args.goal,
+      source: args.source || "agent",
+      priority: args.priority,
       labels: args.labels,
-      due_at: args.due_at,
-      parent_id: args.parent_id ? parseInt(args.parent_id, 10) : undefined,
-      notes: args.notes,
-      blocked_by: args.blocked_by || undefined,
+      deliveryMode: args.delivery_mode as "silent" | "deliver" | "announce" | undefined,
+      chatId: args.chat_id,
     });
-    return `+ Card #${id} created: "${args.title}"${args.blocked_by ? ` (blocked_by: ${args.blocked_by})` : ""}`;
+    if ("error" in result) return `[err] ${result.error}`;
+    return `+ Card #${result.cardId} created: "${args.title}"`;
   }
 
   if (action === "update") {
@@ -59,18 +66,21 @@ export const kanbanTool: ToolDefinition = {
     type: "object",
     properties: {
       action: { type: "string", description: "create | update | list", enum: ["create", "update", "list"] },
-      title: { type: "string", description: "Card title (required for create)" },
+      title: { type: "string", description: "Card title (required for create, max 160 bytes)" },
+      goal: { type: "string", description: "Detailed execution prompt for dispatchable cards (required for type B, max 32 KiB)" },
       id: { type: "string", description: "Card ID (required for update)" },
       source: { type: "string", description: "Who created: user | agent | cron | peer" },
       status: { type: "string", description: "New status (for update): queued | running | done | failed" },
       priority: { type: "string", description: "CRITICAL | HIGH | MEDIUM | LOW" },
-      type: { type: "string", description: "Card type (task, bug, feature, research, report, etc.)" },
+      type: { type: "string", description: "SessionType for dispatchable work (A/B/C/T/P/S/O/W/D/H). Omit for non-dispatchable tickets." },
+      delivery_mode: { type: "string", description: "silent | deliver | announce" },
       labels: { type: "string", description: "Comma-separated tags" },
       due_at: { type: "string", description: "ISO deadline (e.g. 2026-06-08T12:00:00)" },
       parent_id: { type: "string", description: "Parent card ID for subtasks" },
       notes: { type: "string", description: "Additional context" },
       blocked_by: { type: "string", description: "Comma-separated card IDs this card depends on, or 'children' to wait for all child cards" },
       approval: { type: "string", description: "pending | approved | rejected" },
+      chat_id: { type: "string", description: "Chat ID for result delivery" },
     },
     required: ["action"],
   },

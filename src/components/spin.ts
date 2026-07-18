@@ -5,27 +5,44 @@
 
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, kanbanGetCard, isUnblocked } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, kanbanGetCard, isUnblocked, resolveRootId } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
-import type { IKiroTransport } from "./transport/kiro-transport.js";
+import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
-import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions } from "./spin-types.js";
+import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver, QueuedSessionInstruction } from "./spin-types.js";
 import { sessionType } from "./spin-types.js";
-import { profileFor, type SessionProfile } from "./spin-profiles.js";
+import { profileFor, isValidSessionType, type SessionProfile } from "./spin-profiles.js";
+import { WorkerSupervisionService } from "./worker-supervision-service.js";
+import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
+import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expireInstructions } from "./session-instruction-queue.js";
+import { createExecutionTelemetryScope } from "./execution-telemetry.js";
+import type { OrcActivityFeed } from "./orc-activity-feed.js";
+import type { SessionOutputFeed } from "./session-output-feed.js";
+import { createOutputObserver } from "./session-output-feed.js";
 
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
 export { isHollow };
 
 const TAG = "spin";
+
+/** #1364: Returns true if a card has an active supervision contract. */
+function cardHasSupervision(cardId: number): boolean {
+  try {
+    const store = new WorkerSupervisionStore();
+    return store.contractExists(cardId) && store.hasLiveClaim(cardId);
+  } catch { return false; }
+}
 const USER_SESSION_IDLE_MS = parseInt(process.env["USER_SESSION_IDLE_MS"] ?? "7200000", 10);
 const GUEST_SESSION_IDLE_MS = parseInt(process.env["GUEST_SESSION_IDLE_MS"] ?? "1800000", 10);
 const MAX_TOTAL_SESSIONS = parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10);
 const SESSION_CREATE_TIMEOUT_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 30 * 60_000;
+
+const MAX_STEER_ROUNDS = 10;
 
 const MAX_CONCURRENT: Partial<Record<SessionType, number>> = {
   T: 1, O: 1, B: 1, D: 1, H: 1, W: 3,
@@ -40,9 +57,13 @@ export class Spin {
   private orcSession: AgentSession | null = null;
   private _lastHealerDoneAt = 0;
   private _housekeepCounter = 0;
+  private orcActivityFeed?: OrcActivityFeed;
+  private sessionOutputFeed?: SessionOutputFeed;
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
   setMemory(memory: Spin["memory"]): void { this.memory = memory; }
+  setOrcActivityFeed(feed: OrcActivityFeed): void { this.orcActivityFeed = feed; }
+  setSessionOutputFeed(feed: SessionOutputFeed): void { this.sessionOutputFeed = feed; }
 
   // ── Session CRUD ───────────────────────────────────────────────────────
 
@@ -96,6 +117,43 @@ export class Spin {
     return r.session;
   }
 
+  /**
+   * #1405 — Allocate a non-active, transportless C session for an external Pi
+   * execution generation. Visible in global session listing and TUI attachment
+   * but has no transport, no idle timeout, and no memory recording.
+   */
+  allocateExternalSession(spec: {
+    type: "C";
+    userId: string;
+    platform: string;
+    name: string;
+    workingDir: string;
+    metadata: { runId: string; generation: number; executor: string };
+  }): ManagedSession {
+    const r = Sessions.allocateSession(this.sessions, this.nextIndex, spec.type, spec.userId, spec.platform, 0, { active: false });
+    this.nextIndex = r.nextIndex;
+    r.session.name = spec.name;
+    r.session.workingDir = spec.workingDir;
+    (r.session as unknown as Record<string, unknown>).externalMetadata = spec.metadata;
+    return r.session;
+  }
+
+  /**
+   * #1405 — End an external Pi generation session. Validates the immutable
+   * metadata to ensure the caller owns this exact generation.
+   */
+  endExternalSession(sessionId: string, expected: { runId: string; generation: number }): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    const meta = (session as unknown as Record<string, unknown>).externalMetadata as { runId?: string; generation?: number } | undefined;
+    if (!meta || meta.runId !== expected.runId || meta.generation !== expected.generation) return false;
+    const r = Sessions.endSession(this.sessions, this.nextIndex, session.userId, session.platform, session.shortIndex);
+    if (typeof r === "string") return false;
+    this.nextIndex = r.nextIndex;
+    this.releaseSessionTransport(r.ended);
+    return true;
+  }
+
   switchSession(userId: string, platform: string, index: number): ManagedSession | string {
     return Sessions.switchSession(this.sessions, userId, platform, index);
   }
@@ -104,6 +162,7 @@ export class Spin {
     const r = Sessions.endSession(this.sessions, this.nextIndex, userId, platform, index);
     if (typeof r === "string") return r;
     this.nextIndex = r.nextIndex;
+    this.releaseSessionTransport(r.ended);
     return r.ended;
   }
 
@@ -111,6 +170,7 @@ export class Spin {
     const r = Sessions.killSession(this.sessions, this.nextIndex, userId, platform, index);
     if (typeof r === "string") return r;
     this.nextIndex = r.nextIndex;
+    this.releaseSessionTransport(r.killed);
     return r.killed;
   }
 
@@ -136,6 +196,19 @@ export class Spin {
     return this.sessions.get(sessionId);
   }
 
+  /** #1336: Look up a session by global shortIndex across all platforms. Returns undefined if not found or ended. */
+  getSessionByGlobalIndex(index: number): ManagedSession | undefined {
+    for (const s of this.sessions.values()) {
+      if (s.shortIndex === index && s.status !== "ended") return s;
+    }
+    return undefined;
+  }
+
+  /** #1319: Expose session map for snapshot builder. */
+  getSessions(): Map<string, ManagedSession> {
+    return this.sessions;
+  }
+
   formatList(userId: string, platform: string, showAll = false): string {
     return Sessions.formatList(this.sessions, userId, platform, showAll);
   }
@@ -150,6 +223,7 @@ export class Spin {
   registerMasterSession(opts: { userId: string; chatId: number; platform: string; transport: IKiroTransport }): void {
     const session = this.getActiveSession(opts.userId, opts.platform);
     session.transport = opts.transport;
+    session.transportOwner = "bridge";
     session.delivery = "streaming";
     session.idleTimeoutMs = Infinity;
     session.chatId = opts.chatId;
@@ -222,11 +296,13 @@ export class Spin {
   async resolveSession(userId: string, platform: string, chatId: number): Promise<ManagedSession> {
     const session = this.getActiveSession(userId, platform);
 
+    if (session.status === "paused") throw new Error("Session is paused — use /session resume");
+    if (session.status === "ended") throw new Error("Session ended — use /session new");
+
     if (session.transport) {
       session.lastActiveAt = Date.now();
       return session;
     }
-    if (session.status === "ended") throw new Error("Session ended — use /session new");
 
     const total = this.listAllSessions().filter(s => s.transport).length;
     if (total >= MAX_TOTAL_SESSIONS) throw new Error("System busy, try again in a few minutes.");
@@ -243,24 +319,58 @@ export class Spin {
     logInfo(TAG, `Creating transport for ${userId} (${role})`);
 
     try {
-      const agentSession = await Promise.race([
-        this.runtime!.session("professor", userId),
-        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
-      ]);
-      session.transport = agentSession.transport!;
-      session.status = "ready";
-      session.lastActiveAt = Date.now();
-      const t = session.transport as any;
-      session.pid = t?._rawClient?.pid ?? t?.agent?.pid ?? undefined;
-      pushLog(session, "transport ready");
-      logInfo(TAG, `Session ready: ${userId} id=${session.id}${session.pid ? ` pid=${session.pid}` : ""}`);
+      await this._attachRuntimeTransport(session, userId);
       return session;
     } catch (err) {
-      session.status = "ended";
+      this.finalizeSession(session, "creation_failed");
       pushLog(session, `error: ${err instanceof Error ? err.message : String(err)}`);
       logWarn(TAG, `Session creation failed for ${userId}: ${err instanceof Error ? err.message : String(err)}`);
       throw err;
     }
+  }
+
+  /**
+   * #1336: Ensure a transport for an already-selected session by ID.
+   * Unlike resolveSession, this does NOT resolve by platform-active session —
+   * it operates on the exact session passed in. Reuses an existing transport
+   * if present, or creates a new runtime transport for the session.
+   */
+  async ensureSessionTransport(session: ManagedSession): Promise<void> {
+    if (session.transport) {
+      session.lastActiveAt = Date.now();
+      return;
+    }
+    if (session.status === "paused") throw new Error("Session is paused — use /session resume");
+    if (session.status === "ended") throw new Error("Session ended — use /session new");
+
+    const total = this.listAllSessions().filter(s => s.transport).length;
+    if (total >= MAX_TOTAL_SESSIONS) throw new Error("System busy, try again in a few minutes.");
+
+    await this._attachRuntimeTransport(session, session.userId);
+  }
+
+  /** Shared — attach a runtime (SubagentRuntime) transport to a session with #1348 ownership metadata. */
+  private async _attachRuntimeTransport(session: ManagedSession, userId: string): Promise<void> {
+    session.status = "creating";
+    let agentSession: import("./subagent-runtime.js").AgentSession;
+    try {
+      agentSession = await Promise.race([
+        this.runtime!.session("professor", userId),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
+      ]);
+    } catch (err) {
+      this.finalizeSession(session, "transport_attach_failed");
+      throw err;
+    }
+    session.transport = agentSession.transport!;
+    session.transportOwner = "runtime";
+    session.releaseTransport = () => agentSession.destroy();
+    session.status = "ready";
+    session.lastActiveAt = Date.now();
+    const t = session.transport as any;
+    session.pid = t?._rawClient?.pid ?? t?.agent?.pid ?? undefined;
+    pushLog(session, "transport ready");
+    logInfo(TAG, `Session ready: ${session.userId} id=${session.id}${session.pid ? ` pid=${session.pid}` : ""}`);
   }
 
   destroySession(userId: string, sessionId?: string): void {
@@ -268,17 +378,14 @@ export class Spin {
       if (s.userId !== userId) continue;
       if (sessionId && s.id !== sessionId) continue;
       if (s.idleTimeoutMs === Infinity) continue;
-      if (s.transport) { try { s.transport.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } s.transport = undefined; }
-      s.status = "ended";
-      s.active = false;
-      pushLog(s, "destroyed");
+      this.finalizeSession(s, "destroyed");
       logInfo(TAG, `Session destroyed: ${userId} id=${s.id}`);
     }
   }
 
   destroyAll(): void {
     for (const s of this.sessions.values()) {
-      if (s.transport) { try { s.transport.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } }
+      this.releaseSessionTransport(s);
     }
     if (this.orcSession) { try { this.orcSession.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } this.orcSession = null; }
     this.sessions.clear();
@@ -339,6 +446,25 @@ export class Spin {
     if (!this.runtime) throw new Error("Spin: runtime not set");
     const profile = profileFor(spec.type);
 
+    // #1327: defensive against an unknown SessionType. A kanban card with
+    // type="bug" (a ticket category, not a SessionType) used to crash the
+    // bridge on `spec.agent ?? profile.agent` because profile was undefined
+    // — the unhandled rejection killed the process. Now: log + mark the
+    // card failed (if from kanban) + return a sensible empty result. The
+    // crash no longer reaches main.ts's unhandledRejection handler.
+    if (!profile) {
+      const note = `invalid type for Spin dispatch: "${spec.type}" is not a SessionType (#1327)`;
+      logWarn(TAG, `spin: no profile for type "${spec.type}" (cardId=${spec.cardId ?? "n/a"}, source=${spec.source ?? "n/a"}) — failing soft`);
+      if (spec.cardId !== undefined) {
+        try { kanbanFail(spec.cardId, note); } catch { /* best effort */ }
+      }
+      return {
+        sessionId: spec.sessionId ?? "",
+        cardId: spec.cardId,
+        result: `[SYSTEM BUG] ${note}`,
+      };
+    }
+
     // 1. Defaults
     const userId   = spec.userId ?? getMasterUserId();
     const platform = spec.platform ?? "background";
@@ -366,18 +492,38 @@ export class Spin {
     }
     const stepIndex = (session.messageCount >> 1) + 1;
 
+    // #1332: Assign execution generation for steering continuity
+    session.activeExecutionId = `${session.id}_${stepIndex}_${Date.now()}`;
+
+    // #1444: Execution telemetry scope — tracks provider calls for this generation
+    const executionTelemetry = createExecutionTelemetryScope(session.activeExecutionId);
+
     // 3. Kanban card (user-facing work only)
     let cardId = spec.cardId;
     if (cardId === undefined && spec.goal !== undefined) {
       cardId = kanbanEnqueue(spec.title ?? spec.goal.slice(0, 80), spec.source ?? "user", undefined, {
         priority: spec.priority ?? "MEDIUM", type: spec.type, parent_id: spec.parentCardId,
-        deliveryMode: spec.deliveryMode, chatId: chatId ? String(chatId) : undefined,
+        deliveryMode: spec.deliveryMode, delivery: spec.delivery, chatId: chatId ? String(chatId) : undefined,
         notes: spec.callbackPeer ? JSON.stringify({ callback_peer: spec.callbackPeer }) : undefined,
         sourcePeer: spec.sourcePeer,
       });
     }
     if (cardId !== undefined && this.canDispatch(spec.type, cardId)) {
       this.markRunning(spec.type, cardId); kanbanRunning(cardId);
+    }
+
+    // #1319: Track card association and publish execution.started for Orc
+    if (cardId !== undefined && spec.type === "O") {
+      session.activeCardId = cardId;
+      session.activeRootCardId = resolveRootId(cardId);
+      this.orcActivityFeed?.publish({
+        kind: "execution.started",
+        timestamp: Date.now(),
+        sessionId: session.id,
+        executionId: session.activeExecutionId!,
+        rootCardId: session.activeRootCardId,
+        cardId,
+      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
     }
 
     // 4-7. Single try/catch so EVERY exit path (pre-exec throws included) flows
@@ -398,6 +544,8 @@ export class Spin {
         const agentSession = await this.runtime.session(agent, profile.resolution === "active" ? userId : undefined);
         sessionTransport = agentSession.transport as IKiroTransport;
         session.transport = sessionTransport;
+        session.transportOwner = "runtime";
+        session.releaseTransport = () => agentSession.destroy();
         session.status = "ready";
       }
 
@@ -406,23 +554,157 @@ export class Spin {
       for (const decorate of profile.decorators) {
         prompt = await decorate(prompt, { session, cardId, parentCardId: spec.parentCardId });
       }
+      // #1366: Inject Worker contract into prompt when contractId is set
+      if (spec.contractId && cardId !== undefined) {
+        try {
+          const sup = new WorkerSupervisionService();
+          const contract = sup.getContractForCard(cardId);
+          if (contract) {
+            prompt = sup.renderContractForPrompt(contract) + "\n\n" + prompt;
+          }
+        } catch { /* best effort — non-supervised cards pass through unchanged */ }
+      }
       pushLog(session, `spin type=${spec.type} agent=${agent} step=${stepIndex}`);
 
       // 7. Execute — persistent/continuation sends via the session's own transport
       //    (key = session.id preserves the Orc sneak-in); oneshot uses runtime.complete.
-      const exec = sessionTransport
-        ? sessionTransport.sendPrompt(session.id, prompt, spec.imageContent as { mime: string; base64: string } | undefined, spec.userId ?? userId)
-        : this.runtime.complete(agent, prompt, { timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds });
+      //    #1329: thread the just-persisted raw user message ID through as the
+      //    beforeMessageId cursor so DirectApiTransport can bound its DB-backed
+      //    context assembly to history only.
+      //    #1332: wrap with steering continuation loop for persistent sessions.
+      const promptContext: import("./transport/kiro-transport.js").PromptRequestContext = {
+        userId: spec.userId ?? userId,
+        beforeMessageId: spec.currentMessageId,
+        directContextTurn: spec.directContextTurn,
+        executionTelemetry,
+      };
+      // #1338: wrap each model call/round in a fresh call-local observer so the
+      // output feed receives a unique stream per turn. The observer publishes
+      // `start` on creation and `end`+invalidate on every exit path; the
+      // transport invokes onDelta/onToolStart during streaming.
+      const observe = async (
+        transport: IKiroTransport,
+        key: string,
+        msg: string,
+        image?: { mime: string; base64: string },
+        ctx?: import("./transport/kiro-transport.js").PromptRequestContext,
+      ): Promise<string> => {
+        if (!this.sessionOutputFeed || !session.activeExecutionId) {
+          return await transport.sendPrompt(key, msg, image, ctx);
+        }
+        const obs = createOutputObserver(this.sessionOutputFeed, {
+          sessionId: session.id,
+          executionId: session.activeExecutionId,
+        });
+        const enriched = { ...(ctx ?? {}), outputObserver: obs };
+        let result: string;
+        try {
+          result = await transport.sendPrompt(key, msg, image, enriched);
+          obs.end("complete");
+        } catch (err) {
+          obs.end("error");
+          throw err;
+        } finally {
+          obs.invalidate();
+        }
+        return result;
+      };
+      // #1361: Resolve a continuation-capable execution driver for this session.
+      // Persistent sessions wrap the existing session transport; one-shot sessions
+      // open a fresh RuntimeExecution handle keyed by session.id.
+      const resolveDriver = async (): Promise<SpinExecutionDriver> => {
+        if (sessionTransport) {
+          return {
+            send: (msg, img, ctx) => observe(sessionTransport!, session.id, msg, img, ctx),
+            close: async () => {},
+            ephemeral: false,
+          };
+        }
+        const executor = await this.runtime!.openExecution(agent, session.id, {
+          timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds,
+        });
+        // #1248: Bind execution control to runtime cancel mechanism
+        if (spec.executionControl) {
+          spec.executionControl.bind(async (reason) => {
+            await executor.cancel(reason);
+          });
+        }
+        sessionTransport = executor.transport as IKiroTransport;
+        session.transport = sessionTransport;
+        session.transportOwner = "runtime";
+        return {
+          send: async (msg, img, ctx) => {
+            if (!this.sessionOutputFeed || !session.activeExecutionId) {
+              return (await executor.send(msg, img, ctx)) || "(no output)";
+            }
+            const obs = createOutputObserver(this.sessionOutputFeed, {
+              sessionId: session.id, executionId: session.activeExecutionId,
+            });
+            const enriched = { ...(ctx ?? {}), outputObserver: obs };
+            try {
+              const r = (await executor.send(msg, img, enriched)) || "(no output)";
+              obs.end("complete");
+              return r;
+            } catch (err) {
+              obs.end("error");
+              throw err;
+            } finally {
+              obs.invalidate();
+            }
+          },
+          close: async () => {
+            await executor.close();
+            sessionTransport = undefined;
+          },
+          ephemeral: true,
+        };
+      };
+      const executeWithSteering = async (): Promise<string> => {
+        const driver = await resolveDriver();
+        session.steeringAccepting = true;
+        try {
+          let result = (await driver.send(prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
+          for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
+            const batch = leaseInstructions(session, "steer");
+            if (!batch) { session.steeringAccepting = false; break; }
+            // lease and markDelivered are synchronous here, so restoreBeforeDelivery
+            // (queued after lease, before handoff) is never reached in Phase 1.
+            // Phase 2's Pi adapter will introduce an async gap where it applies.
+            markDelivered(batch);
+            try {
+              result = (await driver.send(renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]), undefined, { userId: spec.userId ?? userId, executionTelemetry })) || "(no output)";
+              markConsumed(batch, session);
+            } catch (steerErr) {
+              failAfterDelivery(batch, session, "steer_failed");
+              throw steerErr;
+            }
+          }
+          session.steeringAccepting = false;
+          if (session.instructionQueue.length > 0) expireInstructions(session, "round_limit");
+          return result;
+        } finally {
+          await driver.close();
+        }
+      };
 
       if (!spec.await) {
-        exec.then(r => this.finishSpin(spec, profile, session, cardId, stepIndex, started, r || "(no output)", terminate))
-            .catch(e => this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate));
+        executeWithSteering().then(r => {
+          const telemetryUsage = executionTelemetry.snapshot();
+          executionTelemetry.close();
+          return this.finishSpin(spec, profile, session, cardId, stepIndex, started, r, terminate, telemetryUsage);
+        }).catch(e => {
+          executionTelemetry.close();
+          this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate);
+        });
         return { sessionId: session.id, cardId };
       }
-      const result = (await exec) || "(no output)";
-      await this.finishSpin(spec, profile, session, cardId, stepIndex, started, result, terminate);
+      const result = await executeWithSteering();
+      const telemetryUsage = executionTelemetry.snapshot();
+      executionTelemetry.close();
+      await this.finishSpin(spec, profile, session, cardId, stepIndex, started, result, terminate, telemetryUsage);
       return { sessionId: session.id, cardId, result };
     } catch (err) {
+      executionTelemetry.close();
       // Covers: pre-exec throws (steps 4-6) AND awaited execution failures (step 7).
       // failSpin calls markDone + drainQueued — concurrency slot always released.
       await this.failSpin(spec, profile, session, cardId, stepIndex, started, err, terminate);
@@ -435,15 +717,29 @@ export class Spin {
     spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession,
     cardId: number | undefined, stepIndex: number, started: number, result: string,
     terminate: "call" | "response" | "external",
+    telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
   ): Promise<void> {
-    // Persistent sends go through session.transport (runtime.lastUsage is only
-    // updated by runtime.complete). Prefer the transport's own usage; fall back
-    // to runtime for oneshot.
-    const usage = (session.transport as { lastUsage?: () => { input: number; output: number } | null } | undefined)?.lastUsage?.()
+    // #1444: prefer telemetry scope aggregate (spans all tool rounds + continuations),
+    // then transport lastUsage(), then runtime fallback.
+    const status = (session.transport as { getRuntimeStatus?: () => { lastTurnUsage?: RuntimeUsageSnapshot } } | undefined)?.getRuntimeStatus?.();
+    const fallbackUsage = status?.lastTurnUsage
+      ?? (session.transport as { lastUsage?: () => RuntimeUsageSnapshot | null } | undefined)?.lastUsage?.()
       ?? this.runtime?.lastUsage ?? null;
+    const usage = telemetryUsage ?? fallbackUsage;
     session.messageCount += 2;
     session.lastActiveAt = Date.now();
-    session.tokenCount = usage ? usage.input + usage.output : session.tokenCount;
+    if (usage) {
+      session.lastTurnUsage = { ...usage };
+      session.sessionUsage = {
+        input: (session.sessionUsage?.input ?? 0) + usage.input,
+        output: (session.sessionUsage?.output ?? 0) + usage.output,
+        cacheRead: session.sessionUsage?.cacheRead !== undefined || usage.cacheRead !== undefined
+          ? (session.sessionUsage?.cacheRead ?? 0) + (usage.cacheRead ?? 0) : undefined,
+        cacheWrite: session.sessionUsage?.cacheWrite !== undefined || usage.cacheWrite !== undefined
+          ? (session.sessionUsage?.cacheWrite ?? 0) + (usage.cacheWrite ?? 0) : undefined,
+      };
+      session.tokenCount = usage.input + usage.output;
+    }
     pushLog(session, "complete");
 
     if (this.memory) {
@@ -452,20 +748,49 @@ export class Spin {
       this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
     }
     if (cardId !== undefined) {
-      // drainArtifacts lives in transport/artifact-tools — wrapped in try/catch
-      // for test envs where the module's transitive deps (artifact-store) may not
-      // resolve. In production this always succeeds.
+      // #1248: If cancellation already won, skip normal completion settlement
+      if (spec.executionControl?.terminal) {
+        logInfo(TAG, `Card ${cardId}: execution control already terminal — skipping finishSpin settlement`);
+        this.markDone(spec.type, cardId);
+        return;
+      }
+
       let artifacts: Array<{ name: string; content: string }> = [];
       try {
         const { drainArtifacts } = require("./transport/artifact-tools.js") as typeof import("./transport/artifact-tools.js");
         artifacts = drainArtifacts(cardId) ?? [];
       } catch { /* artifact-tools unavailable (e.g. test env) — skip */ }
-      kanbanComplete(cardId, null, result.slice(0, 500));
+      // #1366: Collect evidence and settle for supervised Workers
+      let workerSummary = result.slice(0, 500);
+      if (spec.contractId || spec.type === "W") {
+        try {
+          const svc = new WorkerSupervisionService();
+          const outcome = svc.collectAndSettle(cardId, result, session.workingDir);
+          if (outcome.settled) workerSummary = outcome.summary;
+        } catch { /* non-supervised Workers pass through unchanged */ }
+      }
+      kanbanComplete(cardId, null, workerSummary);
       if (spec.callbackPeer) {
         const card = kanbanGetCard(cardId);
         fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
       }
     }
+
+    // #1319: Publish execution.completed before clearing association
+    if (spec.type === "O" && session.activeExecutionId) {
+      this.orcActivityFeed?.publish({
+        kind: "execution.completed",
+        summary: result.slice(0, 200),
+        timestamp: Date.now(),
+        sessionId: session.id,
+        executionId: session.activeExecutionId,
+        rootCardId: session.activeRootCardId,
+        cardId: session.activeCardId,
+      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
+    }
+    session.activeExecutionId = undefined;
+    session.activeCardId = undefined;
+    session.activeRootCardId = undefined;
 
     await profile.afterPrompt?.(session, cardId);
     const stepEvent: StepEvent = {
@@ -484,13 +809,39 @@ export class Spin {
     cardId: number | undefined, stepIndex: number, started: number, err: unknown,
     terminate: "call" | "response" | "external",
   ): Promise<void> {
+    // #1332: Expire remaining queued instructions when execution fails
+    if (session.instructionQueue.length > 0) expireInstructions(session, "execution_failed");
+
     const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
     logWarn(TAG, `${spec.type} spin failed: ${msg}`);
     pushLog(session, `failed: ${msg.slice(0, 80)}`);
     if (cardId !== undefined) {
+      // #1248: If terminal already won (cancellation), skip fail settlement
+      if (spec.executionControl?.terminal) {
+        logInfo(TAG, `Card ${cardId}: execution control already terminal — skipping failSpin settlement`);
+        this.markDone(spec.type, cardId);
+        return;
+      }
       kanbanRetryOrFail(cardId, msg);
       if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
     }
+
+    // #1319: Publish execution.failed before clearing association
+    if (spec.type === "O" && session.activeExecutionId) {
+      this.orcActivityFeed?.publish({
+        kind: "execution.failed",
+        error: msg,
+        timestamp: Date.now(),
+        sessionId: session.id,
+        executionId: session.activeExecutionId,
+        rootCardId: session.activeRootCardId,
+        cardId: session.activeCardId,
+      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
+    }
+    session.activeExecutionId = undefined;
+    session.activeCardId = undefined;
+    session.activeRootCardId = undefined;
+
     await profile.afterPrompt?.(session, cardId);
     const stepEvent: StepEvent = {
       sessionId: session.id, cardId, stepIndex,
@@ -503,9 +854,18 @@ export class Spin {
     if (cardId !== undefined) { this.markDone(spec.type, cardId); this.drainQueued(); }
   }
 
+  private releaseSessionTransport(session: ManagedSession): void {
+    if (session.transportOwner === "runtime" && session.releaseTransport) {
+      try { void session.releaseTransport(); } catch (err) { logAndSwallow(TAG, "releaseTransport", err); }
+    }
+    session.transportOwner = undefined;
+    session.releaseTransport = undefined;
+    session.transport = undefined;
+  }
+
   private applyTerminate(session: ManagedSession, terminate: "call" | "response" | "external"): void {
-    if (terminate === "call") this.sessions.delete(session.id);
-    else if (terminate === "response") { session.status = "ended"; session.active = false; }
+    if (terminate === "call") { this.finalizeSession(session, "call_terminated"); this.sessions.delete(session.id); }
+    else if (terminate === "response") { this.finalizeSession(session, "response_terminated"); }
     // "external" → stays alive (Orc, persistent D); 1hr housekeeping prunes ended ones
   }
 
@@ -547,7 +907,7 @@ export class Spin {
     const cardTitle = request.title ?? request.goal.slice(0, 80);
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
       priority: request.priority ?? "MEDIUM", type: request.type,
-      parent_id: request.parentCardId, deliveryMode: request.deliveryMode,
+      parent_id: request.parentCardId, deliveryMode: request.deliveryMode, delivery: request.delivery,
       notes: request.callbackPeer ? JSON.stringify({ callback_peer: request.callbackPeer }) : undefined,
       chatId: request.chatId, sourcePeer: request.sourcePeer,
     });
@@ -571,12 +931,16 @@ export class Spin {
       priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
       source: request.source,
       deliveryMode: request.deliveryMode,
+      delivery: request.delivery,
       agent: request.agent,
       timeoutMs: request.timeoutMs,
       callbackPeer: request.callbackPeer,
       sourcePeer: request.sourcePeer,
       chatId: request.chatId ? Number(request.chatId) : undefined,
       await: false,
+      contractId: request.contract?.id,
+      attemptId: request.attemptId,
+      executionControl: request.executionControl,
     });
     return { cardId };
   }
@@ -602,6 +966,7 @@ export class Spin {
       priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
       source: request.source,
       deliveryMode: request.deliveryMode,
+      delivery: request.delivery,
       agent: request.agent,
       timeoutMs: request.timeoutMs,
       maxToolRounds: request.maxToolRounds,
@@ -614,7 +979,24 @@ export class Spin {
 
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {
     if (request.type === "O") throw new Error("Cannot nest orchestrators");
-    return this.dispatch({ ...request, type: "W", parentCardId }).cardId;
+    const cardId = this.dispatch({ ...request, type: "W", parentCardId }).cardId;
+    if (request.contract && cardId) {
+      try {
+        const service = new WorkerSupervisionService();
+        const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+        service.createChild(request.goal, cardId, rootCardId, "orc", {
+          criteria: request.contract.criteria as Array<{ id: string; description: string }>,
+          expectedArtifacts: request.contract.expected_artifacts as Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>,
+          verificationCommands: request.contract.verification_commands as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
+          requiredCapabilities: [...request.contract.required_capabilities],
+          supportsRootCriteria: request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : undefined,
+          limits: { ...request.contract.limits },
+        });
+      } catch (err) {
+        logWarn(TAG, `spawnChild: failed to create contract for card ${cardId}: ${err}`);
+      }
+    }
+    return cardId;
   }
 
   // ── Internal ───────────────────────────────────────────────────────────
@@ -623,48 +1005,42 @@ export class Spin {
     const queued = kanbanList("queued");
     const now = new Date().toISOString();
     for (const card of queued) {
+      // #1364: Supervised cards go through Reconciler — skip them here
+      if (cardHasSupervision(card.id)) continue;
       // #897: respect retry backoff
       if ((card as any).next_retry_at && (card as any).next_retry_at > now) continue;
       // #677: respect DAG dependencies
       if (!isUnblocked(card)) continue;
-      const type = (card.type as SessionType) ?? "T";
+      // #1327: validate card.type is a real SessionType BEFORE dispatching.
+      // Without this, an unknown type (e.g. ticket category "bug") reaches
+      // spin() and crashes the bridge on profile.agent access. Fail the card
+      // with a clear note instead — Layer A in spin() is the second line of
+      // defense if this ever regresses.
+      const type = card.type as string;
+      if (!isValidSessionType(type)) {
+        const note = `invalid type for Spin dispatch: "${type}" is not a SessionType (#1327)`;
+        logWarn(TAG, `drainQueued: card ${card.id} has invalid type "${type}" — failing (Layer B)`);
+        kanbanFail(card.id, note);
+        continue;
+      }
       if (this.canDispatch(type, card.id)) {
-        this.dispatch({ type, goal: card.title, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id });
+        const goal = (card as any).goal || card.title;
+        this.dispatch({ type, goal, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id });
       }
     }
   }
 
   /** Periodic housekeeping — registered as HB task (#980). */
   async tick(): Promise<void> {
+    // #1364: drain only non-supervised cards; supervised dispatch goes through Reconciler
     this.drainQueued();
-    this.checkStaleWorkers();
-    await this.pollRemoteCards();
+    // #1248: Legacy stale scanner removed — execution timeout is the real bound
     this._housekeepCounter++;
     if (this._housekeepCounter % 72 === 0) {
       this.pruneSkillTrash();
       this.rotateAuditLog();
       this.pruneEndedSessions();
     }
-  }
-
-  private checkStaleWorkers(): void {
-    const STALE_MS = parseInt(process.env["WORKER_STALE_MS"] || "300000", 10);
-    const now = Date.now();
-    let freed = false;
-    for (const [type, cardIds] of this.running) {
-      for (const cardId of [...cardIds]) {           // snapshot — markDone mutates the Set
-        const card = kanbanGetCard(cardId);
-        if (!card || card.status !== "running") continue;
-        const lastActivity = new Date(card.updated_at + "Z").getTime();
-        if (now - lastActivity > STALE_MS) {
-          logWarn(TAG, `Stale card ${cardId} (${Math.round((now - lastActivity) / 1000)}s no activity) — failing`);
-          kanbanFail(cardId, "stale — no activity");
-          this.markDone(type, cardId);               // release in-memory slot (#1274)
-          freed = true;
-        }
-      }
-    }
-    if (freed) this.drainQueued();                   // reuse freed slot without waiting a tick
   }
 
   /** #613: Prune .trash/ entries older than 7 days (~hourly). */
@@ -719,37 +1095,27 @@ export class Spin {
     } catch (err) { logAndSwallow(TAG, "audit prune", err); }
   }
 
+  /** #1364: Idempotent session finalization — records endedAt, releases resources exactly once. */
+  private finalizeSession(session: ManagedSession, reason: string): void {
+    if (session.status === "ended") return; // already finalized
+    this.releaseSessionTransport(session);
+    session.active = false;
+    (session as unknown as Record<string, unknown>)["endedAt"] = Date.now();
+    session.status = "ended";
+    pushLog(session, `finalized: ${reason}`);
+    logDebug(TAG, `Session finalized: ${session.userId} id=${session.id} reason=${reason}`);
+  }
+
   /** #1248: Prune ended sessions older than 1 hour (~hourly). Prevents unbounded Map growth. */
   private pruneEndedSessions(): void {
     const ONE_HOUR_MS = 60 * 60 * 1000;
     const now = Date.now();
     for (const [id, s] of this.sessions) {
-      if (s.status === "ended" && now - s.lastActiveAt > ONE_HOUR_MS) {
+      const endedAt = ((s as unknown as Record<string, unknown>)["endedAt"] as number | undefined) ?? s.lastActiveAt;
+      if (s.status === "ended" && now - endedAt > ONE_HOUR_MS) {
         this.sessions.delete(id);
         logDebug(TAG, `Pruned ended session: ${s.userId} id=${id}`);
       }
-    }
-  }
-
-  private async pollRemoteCards(): Promise<void> {
-    const remoteCards = kanbanList("running", "status").filter(c => c.type === "remote");
-    if (remoteCards.length === 0) return;
-    const { getPeerTransport } = await import("./peer-transport/index.js");
-    const transport = getPeerTransport();
-    const REMOTE_MAX_AGE_MS = 15 * 60 * 1000;
-    for (const card of remoteCards) {
-      try {
-        const meta = JSON.parse(card.notes ?? "{}") as { peer?: string; remote_task_id?: number };
-        if (!meta.peer || !meta.remote_task_id) continue;
-        const cardAge = Date.now() - new Date(card.created_at + "Z").getTime();
-        if (cardAge > REMOTE_MAX_AGE_MS) {
-          kanbanFail(card.id, `remote task timeout (${Math.round(cardAge / 60000)}min)`);
-          continue;
-        }
-        const result = await transport.checkTask(meta.peer, meta.remote_task_id);
-        if (result.status === "done") kanbanComplete(card.id, null, result.result?.slice(0, 500) ?? "completed");
-        else if (result.status === "failed") kanbanFail(card.id, result.error ?? "remote task failed");
-      } catch (err) { logAndSwallow(TAG, "pollRemote", err); }
     }
   }
 
@@ -764,12 +1130,44 @@ export class Spin {
   private markRunning(type: SessionType, cardId: number): void {
     if (!this.running.has(type)) this.running.set(type, new Set());
     this.running.get(type)!.add(cardId);
+    this.publishActiveCardIds();
   }
 
   private markDone(type: SessionType, cardId: number): void {
     this.running.get(type)?.delete(cardId);
     if (type === "H") this._lastHealerDoneAt = Date.now();
+    this.publishActiveCardIds();
   }
+
+  /**
+   * #1439: Complete set of card IDs Spin currently considers running, across
+   * every session type. This is the single authoritative source doctor's
+   * Kanban probe correlates against — publish on every lifecycle transition
+   * plus once per heartbeat (see phase-heartbeat.ts) so an abrupt process
+   * exit cannot leave a stale entry indefinitely "active".
+   */
+  getActiveCardIds(): number[] {
+    const ids: number[] = [];
+    for (const set of this.running.values()) {
+      for (const id of set) ids.push(id);
+    }
+    return ids;
+  }
+
+  private publishActiveCardIds(): void {
+    import("./runtime-health-snapshot.js").then(({ updateActiveCardIds }) => {
+      updateActiveCardIds(this.getActiveCardIds());
+    }).catch(() => { /* best effort — snapshot is a health surface, not authoritative */ });
+  }
+}
+
+/**
+ * #1332: Render a steering continuation prompt from a batch of instructions.
+ * Non-deceptive — the model sees these as user input received while it was busy.
+ */
+export function renderSteeringContinuation(batch: QueuedSessionInstruction[]): string {
+  const items = batch.map((i, idx) => `${idx + 1}. ${i.text}`).join("\n");
+  return `[USER STEERING — received while you were working]\n${items}\n[/USER STEERING]\n\nIncorporate this direction into the current project. Do not restart completed work unnecessarily. Report the updated result.`;
 }
 
 /** #675: Fire result callback to the delegating peer. Fire-and-forget. */
@@ -779,7 +1177,7 @@ async function fireCallback(peerName: string, taskId: number, status: "done" | "
     const transport = getPeerTransport();
     const payload: Record<string, unknown> = { action: "callback", task_id: taskId, status, result_summary: result, error, tokens_used: tokensUsed ?? 0 };
     if (artifacts?.length) payload.artifacts = artifacts;
-    await transport.send(peerName, { type: "task", payload });
+    await transport.send(peerName, { type: "callback", payload });
     logInfo(TAG, `Callback fired to ${peerName} for card:${taskId} (${status})`);
   } catch (err) {
     logWarn(TAG, `Callback to ${peerName} failed (card:${taskId}): ${err instanceof Error ? err.message : String(err)}`);

@@ -85,6 +85,22 @@ export async function wireIrc(ctx: BootCtx): Promise<void> {
   }
 }
 
+/** Wire the full TUI pipeline onto the TUI socket adapter (#1315). Idempotent. */
+export async function wireTui(ctx: BootCtx): Promise<void> {
+  const adapter = ctx.platformAdapters.get("tui");
+  if (!adapter || !ctx.pipelineDeps) return;
+
+  const pipelineDeps = ctx.pipelineDeps;
+
+  if ("setMessageHandler" in adapter) {
+    const { handleInboundMessage } = await import("../components/message-pipeline.js");
+    (adapter as unknown as { setMessageHandler(cb: (msg: unknown) => void): void })
+      .setMessageHandler((msg) => { void handleInboundMessage(msg as never, adapter as never, pipelineDeps); });
+
+    logInfo(TAG, "TUI: full pipeline wired");
+  }
+}
+
 /** Drain messages queued by the recovery handler while the pipeline was down. */
 export async function drainRecoveryQueue(ctx: BootCtx): Promise<void> {
   const queue = (ctx as unknown as { _recoveryQueue?: Array<{ msg: unknown; adapter: unknown }> })._recoveryQueue;

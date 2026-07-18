@@ -12,7 +12,7 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
 import { HeartbeatSystem, setHeartbeatInstance } from "../components/heartbeat-system.js";
 import { classifyResume } from "../components/platform-detect.js";
 import {
-  writeRestartReason, readAndClearRestartRequested, readBridgeLockField, updateBridgeLockField, writeSleepStatus,
+  writeRestartReason, readAndClearRestartRequested, updateBridgeLockField,
 } from "../components/transport/bridge-lock-transport.js";
 import { createUpdateCheckTask, createSkillStatsFlushTask, createSkillReloadTask } from "../components/heartbeat-tasks.js";
 import { loadUsers } from "../components/user-registry.js";
@@ -54,9 +54,6 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
       }
       // #548: any non-dark resume → restart for clean state
       // In-flight prompts are dead, sessions stuck busy, connections dropped.
-      if (readBridgeLockField("sleepStatus") === "hw_sleep") {
-        writeSleepStatus("awake");
-      }
       writeRestartReason(`resume after ${gapMin}min suspend`);
       logInfo("main", `⏸️ Resume (${gapMin}min, ${resumeKind}) — restarting for clean state`);
       process.exit(0);
@@ -100,6 +97,22 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   heartbeat.start();
   logInfo("main", `💓 Heartbeat started (${Math.round(hbIntervalMs / 1000)}s interval)`);
 
+  // #1439: Refresh runtime health snapshot on each heartbeat tick
+  heartbeat.registerTask({
+    name: "snapshot-refresh",
+    execute: async () => {
+      try {
+        const { refreshSnapshot, updateActiveCardIds } = await import("../components/runtime-health-snapshot.js");
+        refreshSnapshot();
+        // Republish the complete active-card set every tick (not just on
+        // lifecycle transitions) so an abrupt state change or missed
+        // markRunning/markDone call cannot leave a stale, indefinitely
+        // "active" entry in the snapshot doctor's Kanban probe trusts.
+        updateActiveCardIds(spin.getActiveCardIds());
+      } catch { /* best effort */ }
+    },
+  });
+
   // #1293: Per-tick ws-outbound reconnect check (no new timer — driven by HB)
   heartbeat.registerTask({
     name: "ws-reconnect-check",
@@ -111,6 +124,24 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
           transport.checkWsConnections();
         }
       } catch { /* best effort — transport may not be up yet */ }
+
+      // #1358: Drain unacknowledged remote Pi lifecycle events to connected peers.
+      // Uses the existing HB tick — no new recurring timer.
+      try {
+        const { getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
+        const delivery = getRemotePiDelivery();
+        if (delivery) {
+          // Register WS clients from the transport so delivery can push
+          const { getPeerTransport } = await import("../components/peer-transport/index.js");
+          const transport = getPeerTransport() as any;
+          if (transport?.wsClients) {
+            for (const [name, client] of transport.wsClients as Map<string, any>) {
+              delivery.registerWsClient(name, client);
+            }
+          }
+          await delivery.drainOutbox();
+        }
+      } catch { /* best effort */ }
     },
   });
 

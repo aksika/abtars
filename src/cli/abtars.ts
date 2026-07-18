@@ -183,7 +183,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       case 'doctor':
         return await doctor(argv.slice(1).filter((a) => a !== ''));
       case 'status':
-        return await status();
+        return await status(argv.slice(1));
       case 'restart':
         return await restart({ cold: flags.get('cold') === true });
       case 'stop':
@@ -212,9 +212,21 @@ export async function main(argv: readonly string[]): Promise<number> {
         const { configShow } = await import('./commands/config-show.js');
         return await configShow();
       }
+      case 'tui': {
+        const { tui: tuiCmd } = await import('./commands/tui.js');
+        return await tuiCmd(argv.slice(1));
+      }
       case 'tribe': {
         const { tribe: tribeCmd } = await import('./commands/tribe.js');
         return await tribeCmd(argv.slice(1));
+      }
+      case 'pi': {
+        const { pi: piCmd } = await import('./commands/pi.js');
+        return await piCmd(argv.slice(1));
+      }
+      case 'kanban': {
+        const { kanban: kanbanCmd } = await import('./commands/kanban.js');
+        return await kanbanCmd(argv.slice(1));
       }
       case '':
       case 'help':

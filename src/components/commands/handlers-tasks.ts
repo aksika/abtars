@@ -1,6 +1,7 @@
 import { execAsync } from "./exec-async.js";
 import { logError } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
+import { formatTaskLabel } from "../tasks/task-types.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd_tasks";
@@ -47,7 +48,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
       const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
       const running = ctx.cronCurrentJob?.entryId === e.id;
       const tick = e.paused ? "⏸" : !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
-      const label = e.title || e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
+      const label = formatTaskLabel(e.id);
       const name = label.length > 18 ? label.slice(0, 18) : label;
       return `${tick}  ${name.padEnd(20)}${sched.padEnd(16)}${label}`;
     });
@@ -71,27 +72,17 @@ export async function handleTasksTrigger(text: string, ctx: CommandContext): Pro
   const raw = text.replace(/^\/(tasks?|cron) run /, "").trim();
   if (!raw) { await ctx.reply("Usage: /task run <cron-id>"); return true; }
 
-  // Resolve ID: try exact, then normalized (spaces→hyphens, lowercase), then title match
+  // Resolve ID: try exact, then normalized (spaces→hyphens, lowercase)
   let id = raw;
-  const { readEntry, readEntries } = await import("../tasks/task-store.js");
+  const { readEntry } = await import("../tasks/task-store.js");
   if (!readEntry(id)) {
     const normalized = raw.toLowerCase().replace(/\s+/g, "-");
-    if (readEntry(normalized)) {
-      id = normalized;
-    } else {
-      const byTitle = readEntries().find(e => e.title?.toLowerCase() === raw.toLowerCase());
-      if (byTitle) id = byTitle.id;
-    }
+    if (readEntry(normalized)) id = normalized;
   }
 
   const err = ctx.enqueueCron?.(id, true);
   if (err) { await ctx.reply(err); return true; }
-  // Resolve display name
-  let name = id;
-  try {
-    const entry = readEntry(id);
-    if (entry) name = entry.title || (entry.message.split("\n")[0] ?? "").slice(0, 30);
-  } catch { /* fallback to id */ }
+  const name = formatTaskLabel(id);
   await ctx.reply(`Running task: ${name}`);
   return true;
 }

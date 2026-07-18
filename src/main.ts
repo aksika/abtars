@@ -26,7 +26,7 @@ import { checkCircuitBreaker } from "./boot/circuit-breaker.js";
 checkCircuitBreaker();
 
 // #1050: Prevent duplicate bridge instances
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 try {
   const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
@@ -53,6 +53,19 @@ process.on("uncaughtException", (err) => {
 process.on("exit", (code) => {
   const stack = new Error("exit trace").stack?.split("\n").slice(1, 6).join("\n") ?? "";
   console.error(`[EXIT] code=${code} at ${new Date().toISOString()}\n${stack}`);
+  // #1328: self-report the real exit code into bridge.lock — the external watchdog's
+  // `wait $PID` always reports 0 due to `disown` (kept intentionally for #1050 survival +
+  // SIGTERM/INT-trap isolation, see resilience.asbuilt.md). Synchronous write only —
+  // process.on("exit") permits no async work. Never throw: a failed lock write during
+  // shutdown must not mask or alter the exit itself.
+  try {
+    const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
+    const lockPath = join(home, "bridge.lock");
+    const lock = JSON.parse(readFileSync(lockPath, "utf-8"));
+    lock.lastExitCode = code;
+    lock.lastExitAt = Date.now();
+    writeFileSync(lockPath, JSON.stringify(lock));
+  } catch { /* lock missing/corrupt during exit — do not mask the exit */ }
 });
 
 process.on("unhandledRejection", (reason) => {

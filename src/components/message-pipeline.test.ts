@@ -9,7 +9,7 @@ vi.mock("../utils/abmind-lazy.js", () => ({
   abmind: () => abmindReturn,
   loadAbmind: vi.fn(),
   resetAbmindCache: vi.fn(),
-  ABMIND_MIN: [0, 3, 0],
+  ABMIND_MIN: [0, 2, 7],
   isSupportedVersion: vi.fn().mockReturnValue(true),
   parseSemver: vi.fn(),
 }));
@@ -119,24 +119,32 @@ describe("handleInboundMessage", () => {
   beforeEach(async () => {
     transport = mockTransport();
     setUserRegistryOverride(MASTER_REGISTRY);
-    // Mock spin.getSessionById so pipeline can resolve sessions for any session ID
+    // Mock spin methods so pipeline can resolve sessions for any session ID
     const spinMod = await import("./spin.js");
-    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
-      id, userId: "master", platform: "telegram", chatId: 100,
-      delivery: "simple", active: true, status: "ready",
-      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
-      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
-    }));
-    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
+    const mockSession: ManagedSession = {
       id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
-      delivery: "simple", active: true, status: "ready",
+      delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    };
+    // #1348: Pipeline calls ensureSessionTransport if session.transport is missing.
+    // Mock it to wire the describe-block's transport (recreated fresh per test) so
+    // ctx.transport and deps.transport resolve to the same object.
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      session.transport = transport;
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
+      ...mockSession, id,
     }));
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => ({ ...mockSession }));
+    // resolveSession mock returns a routable session with streaming delivery.
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+      async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
+        ...mockSession, delivery: "streaming",
+      }),
+    );
   });
 
   afterEach(() => {
@@ -172,10 +180,9 @@ describe("handleInboundMessage", () => {
   });
 
   it("handles empty response", async () => {
-    const emptyTransport = mockTransport();
-    (emptyTransport.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue("");
+    transport.sendPrompt = vi.fn().mockResolvedValue("") as any;
     const adapter = mockAdapter();
-    const deps = mockDeps(emptyTransport);
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg({ messageId: 3 }), adapter, deps);
 
@@ -183,11 +190,10 @@ describe("handleInboundMessage", () => {
   });
 
   it("suppresses empty-response fallback when tool calls succeeded", async () => {
-    const t = mockTransport();
-    (t.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue("");
-    Object.defineProperty(t, "toolCallsSucceeded", { get: () => 1 });
+    transport.sendPrompt = vi.fn().mockResolvedValue("") as any;
+    Object.defineProperty(transport, "toolCallsSucceeded", { get: () => 1 });
     const adapter = mockAdapter();
-    const deps = mockDeps(t);
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg({ messageId: 4 }), adapter, deps);
 
@@ -196,10 +202,9 @@ describe("handleInboundMessage", () => {
   });
 
   it("handles [NO_REPLY]", async () => {
-    const noReplyTransport = mockTransport();
-    (noReplyTransport.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue("[NO_REPLY]");
+    transport.sendPrompt = vi.fn().mockResolvedValue("[NO_REPLY]") as any;
     const adapter = mockAdapter();
-    const deps = mockDeps(noReplyTransport);
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
@@ -208,10 +213,9 @@ describe("handleInboundMessage", () => {
   });
 
   it("handles [REACT:emoji] response", async () => {
-    const reactTransport = mockTransport();
-    (reactTransport.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue("[REACT:👍]");
+    transport.sendPrompt = vi.fn().mockResolvedValue("[REACT:👍]") as any;
     const adapter = mockAdapter();
-    const deps = mockDeps(reactTransport);
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg({ messageId: 7 }), adapter, deps);
 
@@ -230,10 +234,9 @@ describe("handleInboundMessage", () => {
   });
 
   it("handles transport error gracefully", async () => {
-    const errorTransport = mockTransport();
-    (errorTransport.sendPrompt as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
+    transport.sendPrompt = vi.fn().mockRejectedValue(new Error("boom")) as any;
     const adapter = mockAdapter();
-    const deps = mockDeps(errorTransport);
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
@@ -243,10 +246,9 @@ describe("handleInboundMessage", () => {
 
   // #1294: a synthetic boot greeting that fails must NOT send a user-facing error reply.
   it("suppresses user-facing error for synthetic [SESSION START] greeting failures", async () => {
-    const errorTransport = mockTransport();
-    (errorTransport.sendPrompt as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("All models exhausted:\nno candidates"));
+    transport.sendPrompt = vi.fn().mockRejectedValue(new Error("All models exhausted:\nno candidates")) as any;
     const adapter = mockAdapter();
-    const deps = mockDeps(errorTransport);
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg({ text: "[SESSION START] You just came online. Greet the user." }), adapter, deps);
 
@@ -257,10 +259,9 @@ describe("handleInboundMessage", () => {
 
   // #1298: [SYSTEM] and [TASK COMPLETE] synthetic prompts must also suppress errors
   it("suppresses user-facing error for [SYSTEM] scheduled messages", async () => {
-    const errorTransport = mockTransport();
-    (errorTransport.sendPrompt as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("All models exhausted"));
+    transport.sendPrompt = vi.fn().mockRejectedValue(new Error("All models exhausted")) as any;
     const adapter = mockAdapter();
-    const deps = mockDeps(errorTransport);
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg({ text: "[SYSTEM] Daily briefing failed" }), adapter, deps);
 
@@ -268,10 +269,9 @@ describe("handleInboundMessage", () => {
   });
 
   it("suppresses user-facing error for [TASK COMPLETE] announce delivery", async () => {
-    const errorTransport = mockTransport();
-    (errorTransport.sendPrompt as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("All models exhausted"));
+    transport.sendPrompt = vi.fn().mockRejectedValue(new Error("All models exhausted")) as any;
     const adapter = mockAdapter();
-    const deps = mockDeps(errorTransport);
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg({ text: "[TASK COMPLETE] \"my task\" done.\nResult:\nsome output\n\nDeliver this to the user naturally." }), adapter, deps);
 
@@ -279,10 +279,9 @@ describe("handleInboundMessage", () => {
   });
 
   it("does NOT suppress errors for real user messages", async () => {
-    const errorTransport = mockTransport();
-    (errorTransport.sendPrompt as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("All models exhausted"));
+    transport.sendPrompt = vi.fn().mockRejectedValue(new Error("All models exhausted")) as any;
     const adapter = mockAdapter();
-    const deps = mockDeps(errorTransport);
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg({ text: "hello there" }), adapter, deps);
 
@@ -356,9 +355,12 @@ describe("citation detection (#1270)", () => {
     detectCitationsSpy.mockReturnValue([1]);
     abmindReturn = { detectCitations: detectCitationsSpy };
     const spinMod = await import("./spin.js");
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      session.transport = transport;
+    });
     vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
       id, userId: "master", platform: "telegram", chatId: 100,
-      delivery: "simple", active: true, status: "ready",
+      delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
@@ -366,12 +368,22 @@ describe("citation detection (#1270)", () => {
     }));
     vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
       id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
-      delivery: "simple", active: true, status: "ready",
+      delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
     }));
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+      async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
+        id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+        delivery: "streaming", active: true, status: "ready",
+        idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+        log: [], shortIndex: 1,
+        busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      }),
+    );
     const pipelineMod = await import("./pipeline/prompt-builder.js");
     buildPromptSpy = vi.spyOn(pipelineMod, "buildPrompt").mockResolvedValue({
       prompt: "hello",

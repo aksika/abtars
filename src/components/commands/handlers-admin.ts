@@ -236,10 +236,9 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/session <#> — Switch / /session end [#] — End / /session kill <#> — Kill",
     "/nlm — Knowledge base (list/create/sources/query)",
     "/restart — Restart bridge",
-    "/wakeup — Wake Mac from sleep",
     "/sleep — Sleep status / /sleep resume / /sleep now",
     "/whoami — Your user info & clearance",
-    "/reasoning — Reasoning effort (low/medium/high/none) + show/hide thinking",
+    "/effort (alias /thinking) — Reasoning effort (off/low/medium/high/xhigh) + show/hide thinking",
     "/kanban — Kanban board",
   ];
   if (ctx.platform === "telegram") {
@@ -251,24 +250,26 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
 }
 
 export async function handlePeers(_text: string, ctx: CommandContext): Promise<boolean> {
-  const { getPeerTable } = await import("../peer-transport/gossip.js");
-  const peers = getPeerTable(true);
-  if (peers.length === 0) {
-    await ctx.reply("No peers configured or gossip not started.");
+  const { loadPeerConfig } = await import("../peer-config.js");
+  const config = loadPeerConfig();
+  const peerNames = Object.keys(config.peers);
+  if (peerNames.length === 0) {
+    await ctx.reply("No peers configured.");
     return true;
   }
-  const now = Date.now();
-  const lines = peers
-    .sort((a, b) => (a.alive === b.alive ? a.name.localeCompare(b.name) : a.alive ? -1 : 1))
-    .map(p => {
-      const age = Math.round((now - p.lastSeen) / 1000);
-      const ageStr = age < 60 ? `${age}s ago` : `${Math.round(age / 60)}min ago`;
-      const icon = p.alive ? "🟢" : "🔴";
-      const caps = p.capabilities.length ? ` [${p.capabilities.join(", ")}]` : "";
-      return `${icon} **${p.name}** (${ageStr}) — load ${p.load}${caps}`;
-    });
-  const alive = peers.filter(p => p.alive).length;
-  lines.push(`\n${peers.length} peer(s) (${alive} alive, ${peers.length - alive} dead)`);
+  const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
+  const broker = getPeerWsBroker();
+  const connected = broker.getConnectedPeers();
+  const lines = peerNames.map(n => {
+    const entry = config.peers[n];
+    const isConnected = connected.includes(n);
+    const icon = isConnected ? "🟢" : "🔴";
+    const host = entry?.host ?? "?";
+    const port = entry?.port ?? 0;
+    return `${icon} **${n}** — ${host}:${port}${isConnected ? "" : " (disconnected)"}`;
+  });
+  const alive = connected.length;
+  lines.push(`\n${peerNames.length} peer(s) (${alive} connected, ${peerNames.length - alive} disconnected)`);
   await ctx.reply(lines.join("\n"));
   return true;
 }

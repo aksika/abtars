@@ -7,7 +7,7 @@
  * Missing fields fall back to hardcoded defaults.
  */
 
-export type ErrorKind = "rate_limit" | "credits" | "auth" | "transient" | "weak" | "empty" | "truncated";
+export type ErrorKind = "rate_limit" | "credits" | "auth" | "transient" | "weak" | "empty" | "truncated" | "context_exceeded";
 export type ModelStatus = "healthy" | "degraded" | "exhausted" | "auth_failed";
 
 export interface HealthPolicyConfig {
@@ -138,7 +138,6 @@ export class ModelHealthRegistry {
         break;
       }
       case "rate_limit":
-      case "credits":
         b.level = Math.min(1.0, b.level + this.rateLimitFill);
         if (retryAfterMs && retryAfterMs > 0) b.cooldownUntil = now + retryAfterMs;
         break;
@@ -155,6 +154,14 @@ export class ModelHealthRegistry {
         break;
       case "truncated":
         if (this.truncatedFill > 0) b.level = Math.min(1.0, b.level + this.truncatedFill);
+        break;
+      // #1326: context_exceeded describes a static misconfiguration (maxOutput
+      // oversized for the model's context window) or a genuine over-the-limit
+      // request — NOT the model's live health. Do not fill the bucket, do not
+      // set cooldown. The fallback loop still rotates to the next candidate
+      // (every ErrorKind does today); a healthy model is not degraded by our
+      // own config bug or by an incidentally-too-large request.
+      case "context_exceeded":
         break;
     }
 

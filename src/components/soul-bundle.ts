@@ -7,13 +7,13 @@ import { getEnv } from "./env-schema.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logDebug, logWarn, logError } from "./logger.js";
-import { abtarsHome, abtarsRoot } from "../paths.js";
+import { abtarsHome, abtarsRoot, abmindHome } from "../paths.js";
 import { loadUsers, buildUsersBlock } from "./user-registry.js";
+import { describeSoulInputs } from "./soul-input-manifest.js";
 import type { MemoryManager } from "abmind";
 import type { SessionType } from "./spin-types.js";
 
 const TAG = "soul-bundle";
-const HOST_CORE_DIR = abtarsRoot();
 
 function readOr(path: string): string {
   try { return existsSync(path) ? readFileSync(path, "utf-8").trim() : ""; } catch { return ""; }
@@ -66,9 +66,18 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
       memory.available = false;
     }
 
+    const memoryMode = memory?.available !== false ? "available" : "unavailable";
+    const inputs = describeSoulInputs({
+      memoryMode,
+      abtarsHome: abtarsHome(),
+      abtarsRoot: abtarsRoot(),
+      abmindHome: abmindHome(),
+    });
+
     if (!memory || memory.available === false) {
       // No memory provider — use default-minimal.md fallback bundle (#1164)
-      const minimal = readOr(join(abtarsHome(), "prompts", "default-minimal.md"));
+      const fallback = inputs.find(i => i.id === "main.minimal-fallback");
+      const minimal = fallback ? readOr(fallback.path) : "";
       if (minimal) parts.push(minimal);
       else parts.push("[SYSTEM] Memory unavailable. Operate without persistent memory.");
     } else {
@@ -100,12 +109,24 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
       if (registry.users.length > 0) parts.push(buildUsersBlock(registry));
     } catch (err) { logAndSwallow(TAG, "op", err); }
   } else if (type === "W") {
-    // Worker: dedicated prompt file only
-    const workerPrompt = readOr(join(HOST_CORE_DIR, "prompts", "worker.md"));
+    const inputs = describeSoulInputs({
+      memoryMode: "unavailable",
+      abtarsHome: abtarsHome(),
+      abtarsRoot: abtarsRoot(),
+      abmindHome: abmindHome(),
+    });
+    const w = inputs.find(i => i.id === "worker.prompt");
+    const workerPrompt = w ? readOr(w.path) : "";
     if (workerPrompt) parts.push(workerPrompt);
   } else if (type === "O") {
-    // Orc: dedicated prompt file only
-    const orcPrompt = readOr(join(HOST_CORE_DIR, "prompts", "orc.md"));
+    const inputs = describeSoulInputs({
+      memoryMode: "unavailable",
+      abtarsHome: abtarsHome(),
+      abtarsRoot: abtarsRoot(),
+      abmindHome: abmindHome(),
+    });
+    const o = inputs.find(i => i.id === "orc.prompt");
+    const orcPrompt = o ? readOr(o.path) : "";
     if (orcPrompt) parts.push(orcPrompt);
   } else {
     // Lightweight bundle: identity + skills

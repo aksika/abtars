@@ -10,9 +10,39 @@ import { mkdirSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 import { logWarn } from "../logger.js";
+import { isValidSessionType } from "../spin-profiles.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
-type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void };
+type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
+
+/** #1393 — Typed capability for components that need durable SQLite access alongside kanban. */
+export interface TaskDatabase {
+  prepare(sql: string): {
+    run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+    get(...params: unknown[]): Record<string, unknown> | undefined;
+    all(...params: unknown[]): Record<string, unknown>[];
+  };
+  exec(sql: string): void;
+  transaction<T>(fn: () => T): T;
+}
+
+/** #1393 — Get the canonical task database. Throws if unavailable (fail-explicit for Pi). */
+export function requireTaskDatabase(): TaskDatabase {
+  const d = db();
+  if (!d) throw new Error("Kanban database unavailable — better-sqlite3 not installed");
+  return {
+    prepare(sql: string) {
+      const stmt = d.prepare(sql);
+      return {
+          run(...params: unknown[]) { return stmt.run(...params); },
+          get(...params: unknown[]) { return stmt.get(...params) as Record<string, unknown> | undefined; },
+          all(...params: unknown[]) { return stmt.all(...params) as Record<string, unknown>[]; },
+      };
+    },
+    exec(sql: string) { d.exec(sql); },
+    transaction<T>(fn: () => T): T { return d.transaction(fn)(); },
+  };
+}
 
 export interface KanbanCard {
   id: number;
@@ -23,6 +53,7 @@ export interface KanbanCard {
   priority: string;
   status: string;
   type: string | null;
+  goal: string | null;
   notes: string | null;
   result_summary: string | null;
   result_path: string | null;
@@ -89,6 +120,7 @@ function db(): SqliteDb | null {
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN source_peer TEXT`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN goal TEXT`); } catch {}
   } catch {
     logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
     _db = null;
@@ -103,18 +135,67 @@ function dbOrNull(): SqliteDb | null {
   return db();
 }
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; blocked_by?: string; chatId?: string; sourcePeer?: string }): number {
+import type { Delivery } from "./task-types.js";
+
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string }): number {
   const d = dbOrNull();
   if (!d) return 0;
-  const deliveryMode = opts?.deliveryMode ?? "deliver";
+  const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
+  const deliveryMode = raw === "report" ? "deliver" : raw;
+  const VALID_PRIORITIES = new Set(["CRITICAL", "HIGH", "MEDIUM", "LOW"]);
+  const normalizedPriority = opts?.priority?.toUpperCase();
+  const priority = normalizedPriority && VALID_PRIORITIES.has(normalizedPriority) ? normalizedPriority : "MEDIUM";
   const stmt = d.prepare(
-    `INSERT INTO kanban_board (title, source, source_id, priority, type, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null);
+  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null);
   const id = Number(result.lastInsertRowid);
   nerve.fire("card:queued", id);
   return id;
+}
+
+export interface CreateCardInput {
+  type?: string;
+  title: string;
+  goal?: string;
+  source?: string;
+  sourceId?: string;
+  priority?: string;
+  labels?: string;
+  deliveryMode?: "silent" | "deliver" | "announce";
+  chatId?: string;
+  sourcePeer?: string;
+}
+
+/** #955 — Shared create operation for dispatchable cards. Validates SessionType,
+ *  applies bounds, requires goal for B cards. Returns card ID or error. */
+export function createDispatchableCard(input: CreateCardInput): { cardId: number; status: "queued" } | { error: string } {
+  const { type, title, goal } = input;
+  if (!title || !title.trim()) return { error: "title required" };
+  const titleBytes = Buffer.byteLength(title, "utf-8");
+  if (titleBytes > 160) return { error: `title exceeds 160 bytes (${titleBytes})` };
+  if (type && !isValidSessionType(type)) {
+    return { error: `invalid type "${type}": must be a SessionType (A/B/C/T/P/S/O/W/D/H)` };
+  }
+  if (type === "B" && (!goal || !goal.trim())) {
+    return { error: "goal is required for type B (Browsie) cards" };
+  }
+  if (goal) {
+    const goalBytes = Buffer.byteLength(goal, "utf-8");
+    if (goalBytes > 32768) return { error: `goal exceeds 32 KiB (${goalBytes} bytes)` };
+  }
+  const cardId = kanbanEnqueue(title, input.source || "agent", input.sourceId, {
+    priority: input.priority,
+    type,
+    goal,
+    labels: input.labels,
+    deliveryMode: input.deliveryMode,
+    chatId: input.chatId,
+    sourcePeer: input.sourcePeer,
+  });
+  if (cardId === 0) return { error: "kanban database unavailable" };
+  return { cardId, status: "queued" };
 }
 
 export function kanbanRunning(id: number): void {
@@ -249,6 +330,17 @@ export function kanbanGetCard(id: number): KanbanCard | undefined {
   return d.prepare(`SELECT * FROM kanban_board WHERE id = ?`).get(id) as KanbanCard | undefined;
 }
 
+/** Find a durable remote-delegation proxy by its peer-scoped request ID. */
+export function kanbanFindRemoteDelegation(peer: string, requestId: string): KanbanCard | undefined {
+  const d = dbOrNull();
+  if (!d) return undefined;
+  return d.prepare(
+    `SELECT * FROM kanban_board
+     WHERE source = 'peer' AND type = 'remote' AND source_id = ? AND source_peer = ?
+     ORDER BY id DESC LIMIT 1`,
+  ).get(requestId, peer) as KanbanCard | undefined;
+}
+
 /** Test-only: run a raw SQL statement against the kanban DB (avoids direct better-sqlite3 require in tests). */
 export function _kanbanExecForTest(sql: string, params: unknown[] = []): void {
   const d = dbOrNull();
@@ -318,4 +410,59 @@ export function cascadeFail(failedId: number, projectCards: KanbanCard[]): void 
       cascadeFail(card.id, projectCards);
     }
   }
+}
+
+const MAX_ANCESTOR_DEPTH = 100;
+
+/**
+ * #1319: Walk parent_id chain to find the root card. Returns undefined if the
+ * chain exceeds MAX_ANCESTOR_DEPTH or contains a cycle (detected via visited set).
+ */
+export function resolveRootId(cardId: number): number | undefined {
+  const visited = new Set<number>();
+  let current: number | undefined = cardId;
+  for (let i = 0; i < MAX_ANCESTOR_DEPTH; i++) {
+    if (current === undefined || current === null) return undefined;
+    if (visited.has(current)) return undefined; // cycle
+    visited.add(current);
+    const card = kanbanGetCard(current);
+    if (!card) return current;
+    if (card.parent_id === undefined || card.parent_id === null) return current;
+    current = card.parent_id;
+  }
+  return undefined; // depth exceeded
+}
+
+/** #1414: Return IDs of all currently running O-type project cards. */
+export function kanbanRunningProjectIds(): number[] {
+  const d = dbOrNull();
+  if (!d) return [];
+  return d.prepare(
+    `SELECT id FROM kanban_board WHERE status = 'running' AND type = 'O' ORDER BY id`
+  ).all().map((row: Record<string, unknown>) => Number(row.id));
+}
+
+/**
+ * #1319: List active (queued/running) direct children of a card, up to `maxCount`.
+ * Multi-level descendant resolution is not needed for v1 — Orc's project hierarchy
+ * is one level deep (root → direct child cards).
+ */
+export function resolveActiveDescendants(rootId: number, maxCount = 50): KanbanCard[] {
+  const d = dbOrNull();
+  if (!d) return [];
+  return d.prepare(
+    `SELECT * FROM kanban_board WHERE parent_id = ? AND status IN ('queued', 'running') ORDER BY id LIMIT ?`,
+  ).all(rootId, maxCount) as KanbanCard[];
+}
+
+/**
+ * #1319: Get the most recent direct children with terminal states,
+ * at most `maxCount`.
+ */
+export function resolveRecentDirectChildren(parentId: number, maxCount = 20): KanbanCard[] {
+  const d = dbOrNull();
+  if (!d) return [];
+  return d.prepare(
+    `SELECT * FROM kanban_board WHERE parent_id = ? AND status IN ('done', 'failed', 'delivered') ORDER BY updated_at DESC LIMIT ?`,
+  ).all(parentId, maxCount) as KanbanCard[];
 }

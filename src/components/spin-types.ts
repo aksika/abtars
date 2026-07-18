@@ -4,11 +4,77 @@
  */
 
 import type { AgentName } from "./subagent-runtime.js";
-import type { IKiroTransport } from "./transport/kiro-transport.js";
+import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
 import { logError } from "./logger.js";
 
 export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H";
+
+// #1444: instruction kinds and delivery states
+export type ExecutionInstructionKind = "steer" | "followUp";
+export type ExecutionInstructionState =
+  | "queued"
+  | "leased"
+  | "delivered"
+  | "consumed"
+  | "expired"
+  | "failed";
+
+export interface QueuedSessionInstruction {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly kind: ExecutionInstructionKind;
+  readonly source: "tui" | "platform" | "system";
+  readonly text: string;
+  readonly bytes: number;
+  readonly createdAt: number;
+  state: ExecutionInstructionState;
+}
+
+export type QueueInstructionResult =
+  | { ok: true; instruction: QueuedSessionInstruction }
+  | { ok: false; reason: "not_found" | "not_orc" | "not_busy" |
+      "not_local" | "not_active" | "not_steerable" | "closing" |
+      "stale_execution" | "too_large" | "queue_full" };
+
+// #1444: instruction lease
+export interface InstructionLease {
+  readonly leaseId: string;
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly kind: ExecutionInstructionKind;
+  readonly instructions: readonly QueuedSessionInstruction[];
+}
+
+// #1444: next-turn admission (separate from active-execution instruction ledger)
+export interface NextTurnAdmission {
+  admit(sessionId: string, message: { text: string }): QueueInstructionResult;
+}
+
+export type SteerEventType = "steer.queued" | "steer.consumed" | "steer.rejected" | "steer.expired" | "steer.failed";
+
+export interface SteerEvent {
+  type: SteerEventType;
+  instructionIds: string[];
+  sessionId: string;
+  executionId: string;
+  timestamp: number;
+  description: string;
+}
+
+// ── #1248: Bounded /wait FIFO ─────────────────────────────────────────────────
+
+export const MAX_WAIT_ITEMS = 20;
+export const MAX_WAIT_ITEM_BYTES = 4 * 1024;
+export const MAX_WAIT_TOTAL_BYTES = 32 * 1024;
+
+export interface PendingWaitInstruction {
+  readonly id: string;
+  readonly text: string;
+  readonly createdAt: number;
+  readonly bytes: number;
+}
 
 export interface ManagedSession {
   id: string;                    // "1749563282_A_01"
@@ -19,6 +85,8 @@ export interface ManagedSession {
 
   // Transport
   transport?: IKiroTransport;
+  transportOwner?: "bridge" | "runtime";
+  releaseTransport?: () => Promise<void>;
   delivery: "streaming" | "simple";
   model?: string;
   provider?: string;
@@ -41,6 +109,10 @@ export interface ManagedSession {
   // Metrics
   messageCount: number;
   tokenCount: number;
+  /** Usage for the most recently completed sendPrompt turn, when reported. */
+  lastTurnUsage?: RuntimeUsageSnapshot;
+  /** In-memory usage total for this managed session. Not persisted. */
+  sessionUsage?: RuntimeUsageSnapshot;
   toolCallCount: number;
 
   // Session event log (last 5 events)
@@ -59,7 +131,8 @@ export interface ManagedSession {
   ctxWarned: boolean;
   compactFailures: number;
   primingTerms: string[];
-  pendingWait?: string;
+  /** #1248: Bounded FIFO for /wait instructions (replaced unbounded string). */
+  pendingWait: PendingWaitInstruction[];
 
   // Completion buffer (#1040 — merged from completion-buffer.ts)
   completions: Array<{ sessionId: string; goal: string; status: string; result: string; elapsedMs: number; inputTokens: number; outputTokens: number }>;
@@ -68,6 +141,16 @@ export interface ManagedSession {
   // `SpinSessionSpec.metadata`; never merged on `sessionId` reuse. Use
   // `onStepComplete`'s event for per-step data.
   metadata?: Record<string, unknown>;
+
+  // #1332/#1361: Cooperative steering queue for any active execution
+  instructionQueue: QueuedSessionInstruction[];
+  activeExecutionId?: string;
+  /** #1361: True while the current execution is accepting steering continuations. */
+  steeringAccepting: boolean;
+
+  // #1319: Orc activity correlation
+  activeCardId?: number;
+  activeRootCardId?: number;
 }
 
 export interface SpinRequest {
@@ -75,10 +158,12 @@ export interface SpinRequest {
   agent?: import("./subagent-runtime.js").AgentName; // override typeAgent() default
   goal: string;
   title?: string;
+  executionControl?: import("./execution-control.js").WorkerExecutionControl;
   source: "task" | "user" | "agent" | "peer";
   cardId?: number;
   parentCardId?: number;
   deliveryMode?: "silent" | "deliver" | "announce";
+  delivery?: "report" | "announce" | "silent";
   priority?: string;
   tools?: SandboxPolicy;
   timeoutMs?: number;
@@ -86,6 +171,10 @@ export interface SpinRequest {
   sourcePeer?: string;   // #949: which peer delegated this task
   chatId?: string;      // #1008: delivery target chat (fallback: masterChatId)
   maxToolRounds?: number; // #1283: per-task circuit breaker override
+  /** #1366: Worker acceptance contract (supervised dispatch). */
+  contract?: import("./worker-contract.js").WorkerAcceptanceContractV1;
+  /** #1366: Pre-allocated attempt ID for supervision correlation. */
+  attemptId?: string;
 }
 
 // ── #1271: unified session API ──────────────────────────────────────────
@@ -124,13 +213,30 @@ export interface SpinSessionSpec {
 
   // Delivery (continuation / pipeline)
   deliveryMode?: "deliver" | "silent" | "announce";
+  delivery?: "report" | "announce" | "silent";
   imageContent?: unknown;   // → sendPrompt arg 3 (image passthrough)
   callbackPeer?: string;
   sourcePeer?: string;
+  // #1329: just-persisted raw user message ID (from BuildPromptResult.currentMessageId).
+  // Carried through to DirectApiTransport.sendPrompt as the exclusive
+  // `beforeMessageId` cursor so the augmented current turn is appended
+  // exactly once. Undefined on no-write paths (memory disabled, etc.).
+  currentMessageId?: number;
+  /** #1335: structured current turn components for Direct API cache-stable assembly. */
+  directContextTurn?: {
+    rawUserText: string;
+    volatileBlocks: ReadonlyArray<{ kind: string; content: string }>;
+  };
   // NOTE: no `stream` field. Streaming is a transport property
   // (transport.onIntermediateResponse / onToolCallStart / onSegmentBreak) that the
   // PIPELINE sets before calling spin() and resets in its finally — Spin never touches it.
-  // sendPrompt is (sessionKey, message, image?, userId?) — 4 args, no stream.
+  // sendPrompt is (sessionKey, message, image?, context?: PromptRequestContext) — 4 args, no stream.
+
+  // #1366: Worker supervision contract and attempt ID
+  contractId?: string;
+  attemptId?: string;
+  // #1248: Execution control for cancellation
+  executionControl?: import("./execution-control.js").WorkerExecutionControl;
 
   // Extension / future-proofing
   metadata?: Record<string, unknown>;  // session-scoped initial data, set ONCE at allocation
@@ -158,6 +264,13 @@ export interface SpinResult {
   sessionId: string;
   cardId?: number;
   result?: string;          // present when await: true
+}
+
+/** #1361: Per-execution continuation-capable driver for Spin's execution loop. */
+export interface SpinExecutionDriver {
+  send(prompt: string, image?: { mime: string; base64: string }, context?: import("./transport/kiro-transport.js").PromptRequestContext): Promise<string>;
+  close(): Promise<void>;
+  readonly ephemeral: boolean;
 }
 
 export interface DispatchBackgroundOptions {

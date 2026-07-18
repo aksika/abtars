@@ -30,8 +30,14 @@ type AbmindModule = typeof import("abmind");
  * Minimum abmind version that provides the supported contract surface
  * (abmind SUPPORTED-SURFACE.md, #1243). Below this → memory disabled loudly.
  * Bump only when abtars starts relying on newer surface.
+ *
+ * 0.2.7 (#1353): host-neutral sleep contract — SleepCompletionRequest,
+ * SleepRunOptions, SleepRunResult, SleepEvent. abtars' sleep capability
+ * (src/capabilities/sleep/index.ts) requires this surface; an abmind below
+ * this floor does not export it and sleep would fail at runtime rather than
+ * at this boot-time check.
  */
-export const ABMIND_MIN: readonly [number, number, number] = [0, 3, 0];
+export const ABMIND_MIN: readonly [number, number, number] = [0, 2, 7];
 
 let _mod: AbmindModule | null = null;
 let _loaded = false;
@@ -162,6 +168,31 @@ export function abmindStrategies(): Strategy[] {
       },
     },
   ];
+}
+
+// ── Package-dir resolver (used by both loadAbmind and resolveAbmindBin) ──────
+
+/**
+ * Walk the discovery strategies and return the first candidate abmind package
+ * directory whose `package.json` exists and is at or above the supported
+ * version floor. Returns null if no candidate qualifies.
+ *
+ * Unlike `loadAbmind()`, this does NOT cache and does NOT import the module —
+ * it just returns the directory. The same per-candidate guards (existsSync,
+ * version-floor) apply, so a below-floor candidate is a hard stop (not a
+ * fall-through to a lower-priority stale copy). #1308 follow-up.
+ */
+export function resolveAbmindPackageDir(): string | null {
+  for (const strategy of abmindStrategies()) {
+    const dir = strategy.resolve();
+    if (!dir) continue;
+    const pkgPath = join(dir, "package.json");
+    if (!existsSync(pkgPath)) continue;
+    const ver = readVersion(pkgPath);
+    if (!ver || !isSupportedVersion(ver)) return null; // hard stop — matches loadAbmind
+    return dir;
+  }
+  return null;
 }
 
 // ── Loader ───────────────────────────────────────────────────────────────────

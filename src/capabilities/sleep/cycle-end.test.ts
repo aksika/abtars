@@ -1,53 +1,41 @@
 /**
  * cycle-end.test.ts — #1287: the night Dreamy session tears down on EVERY cycle
  * outcome. createSleepHandle must invoke opts.onCycleEnd exactly once per cycle on
- * success, partial-failure (!ok), and thrown-error paths — regardless of onComplete.
+ * every terminal SleepRunResult status and on a thrown error — regardless of
+ * onComplete.
+ *
+ * #1353: runSleepCycle now returns a structured SleepRunResult, not {ok, failCount}.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
-
-const { HOME, BRIDGE_LOCK, SLEEP_DIR } = vi.hoisted(() => {
-  const { join } = require("node:path") as typeof import("node:path");
-  const { tmpdir } = require("node:os") as typeof import("node:os");
-  const HOME = join(tmpdir(), `ab-cycleend-test-${process.pid}`);
-  return { HOME, BRIDGE_LOCK: join(HOME, "bridge.lock"), SLEEP_DIR: join(HOME, "sleep") };
-});
-
-vi.mock("../../paths.js", () => ({
-  abtarsHome: () => HOME,
-  reportsDir: (cat: string) => join(HOME, "reports", cat),
-}));
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const { mockRunSleepCycle } = vi.hoisted(() => ({
-  mockRunSleepCycle: vi.fn(async () => ({ ok: true, failCount: 0 })),
+  mockRunSleepCycle: vi.fn(async () => ({
+    runId: "run-1", status: "completed" as const, startedAt: 0, finishedAt: 0, llmCalls: 0,
+    steps: [], essentialFailures: [], resumable: false, watermarkAdvanced: true, report: "ok",
+  })),
 }));
 
 vi.mock("abmind", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("abmind");
-  return { ...actual, runSleepCycle: mockRunSleepCycle, hasSleepAuditToday: vi.fn(() => false) };
+  return { ...actual, runSleepCycle: mockRunSleepCycle };
 });
 
-vi.mock("../../utils/abmind-lazy.js", () => ({
-  abmind: () => ({
-    hasSleepAuditToday: () => false,
-    DEFAULT_LEVEL: "normal",
-    parseLevel: (s: string) => s,
-    runSleepCycle: mockRunSleepCycle,
-  }),
-  loadAbmind: async () => ({}),
+// system-event-buffer is imported lazily on the report path — stub it so no real
+// event is buffered and the dynamic import resolves in tests.
+vi.mock("../../components/system-event-buffer.js", () => ({
+  bufferSystemEvent: vi.fn(),
 }));
 
 import { createSleepHandle } from "./index.js";
 
 const stubRuntime = { complete: async () => "" };
 
-/** Force-sleep bypasses the sleep-window/audit guards so runSleepCycle actually runs. */
-function armForceSleep(): void {
-  const today = new Date();
-  const dateStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
-  writeFileSync(join(SLEEP_DIR, `sleep_${dateStr}_0900.md`), "# Audit");
-  writeFileSync(BRIDGE_LOCK, JSON.stringify({ pid: 1, startedAt: Date.now(), forceSleep: "2026-04-19T12:00:00 test" }));
+function completedResult(overrides: Partial<Awaited<ReturnType<typeof mockRunSleepCycle>>> = {}) {
+  return {
+    runId: "run-1", status: "completed" as const, startedAt: 0, finishedAt: 0, llmCalls: 0,
+    steps: [], essentialFailures: [], resumable: false, watermarkAdvanced: true, report: "ok",
+    ...overrides,
+  };
 }
 
 async function settle(): Promise<void> {
@@ -56,49 +44,96 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 5));
 }
 
-describe("createSleepHandle — onCycleEnd teardown (#1287)", () => {
+describe("createSleepHandle — onCycleEnd teardown (#1287, #1353)", () => {
   beforeEach(() => {
-    rmSync(HOME, { recursive: true, force: true });
-    mkdirSync(SLEEP_DIR, { recursive: true });
     vi.clearAllMocks();
-    mockRunSleepCycle.mockImplementation(async () => ({ ok: true, failCount: 0 }));
+    mockRunSleepCycle.mockImplementation(async () => completedResult());
   });
-  afterEach(() => rmSync(HOME, { recursive: true, force: true }));
+
+  const stubApi: import("./index.js").SleepApi = {
+    DEFAULT_LEVEL: "normal",
+    parseLevel: (s: string) => s,
+    runSleepCycle: mockRunSleepCycle,
+    loadSleepSteps: () => [],
+  };
 
   function makeHandle(onCycleEnd: () => void) {
     return createSleepHandle({
-      sleepHour: 0,
-      sleepAuditDir: SLEEP_DIR,
-      memoryEnabled: false,   // onComplete memory path off — teardown must still fire
+      api: stubApi,
+      memoryEnabled: false,
       runtime: stubRuntime,
       onComplete: () => {},
       onCycleEnd,
     });
   }
 
-  it("fires onCycleEnd on the success path", async () => {
-    armForceSleep();
+  it("fires onCycleEnd on the completed path", async () => {
+    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "completed" }));
     const onCycleEnd = vi.fn();
-    makeHandle(onCycleEnd).spawn();
+    const r = makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
+    expect(r.status).toBe("accepted");
     await settle();
     expect(onCycleEnd).toHaveBeenCalledTimes(1);
   });
 
-  it("fires onCycleEnd on the partial-failure (!ok) path", async () => {
-    armForceSleep();
-    mockRunSleepCycle.mockImplementation(async () => ({ ok: false, failCount: 2 }));
+  it("fires onCycleEnd on the partial path", async () => {
+    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "partial", essentialFailures: ["retrospective"] }));
     const onCycleEnd = vi.fn();
-    makeHandle(onCycleEnd).spawn();
+    makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
+    await settle();
+    expect(onCycleEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires onCycleEnd on the failed path", async () => {
+    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "failed", essentialFailures: ["daily-summary"] }));
+    const onCycleEnd = vi.fn();
+    makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
+    await settle();
+    expect(onCycleEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires onCycleEnd on the cancelled path", async () => {
+    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "cancelled", resumable: true }));
+    const onCycleEnd = vi.fn();
+    makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
     await settle();
     expect(onCycleEnd).toHaveBeenCalledTimes(1);
   });
 
   it("fires onCycleEnd on the thrown-error path", async () => {
-    armForceSleep();
     mockRunSleepCycle.mockImplementation(async () => { throw new Error("boom"); });
     const onCycleEnd = vi.fn();
-    makeHandle(onCycleEnd).spawn();
+    makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
     await settle();
     expect(onCycleEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("startScheduled also tears down on completed (#1321, #1353)", async () => {
+    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "completed" }));
+    const onCycleEnd = vi.fn();
+    const r = makeHandle(onCycleEnd).startScheduled();
+    expect(r.status).toBe("accepted");
+    await settle();
+    expect(onCycleEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("already_running when a cycle is active (#1321 req 8)", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>(r => { release = r; });
+    mockRunSleepCycle.mockImplementation(async () => { await gate; return completedResult(); });
+    const handle = makeHandle(vi.fn());
+    expect(handle.startScheduled().status).toBe("accepted");
+    expect(handle.startScheduled().status).toBe("already_running");
+    expect(handle.startManual({ fresh: true, resume: false }).status).toBe("already_running");
+    release();
+    await settle();
+  });
+
+  it("no_work / already_running results do not buffer a report (nothing new to say)", async () => {
+    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "no_work", report: "nothing to do" }));
+    const { bufferSystemEvent } = await import("../../components/system-event-buffer.js");
+    makeHandle(vi.fn()).startManual({ fresh: true, resume: false });
+    await settle();
+    expect(bufferSystemEvent).not.toHaveBeenCalled();
   });
 });

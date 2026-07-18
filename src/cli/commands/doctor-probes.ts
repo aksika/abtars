@@ -1,56 +1,42 @@
-/**
- * doctor-probes.ts — structured health probes grouped by subsystem layer.
- * Replaces scripts/doctor.sh entirely.
- */
-
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { abtarsHome } from "../../paths.js";
-
-// ── Types ────────────────────────────────────────────────────────────────────
-
-export interface ProbeResult {
-  name: string;
-  status: "ok" | "failed" | "skipped";
-  detail?: string;
-  ms?: number;
-}
-
-export interface FixResult {
-  probe: string;
-  action: string;
-  success: boolean;
-}
-
-export type LayerName = "body" | "heart" | "brain" | "soul" | "tribe";
-
-export interface DoctorOutput {
-  version: "1.0";
-  totalMs: number;
-  layers: Record<LayerName, ProbeResult[]>;
-  fixes?: FixResult[];
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
+import { abtarsHome, abtarsRoot, abmindHome, getDeployedVersion } from "../../paths.js";
+import { resolveAbmindPackageDir } from "../../utils/abmind-lazy.js";
+import { pathToFileURL } from "node:url";
+import { readEnv } from "./doctor-render.js";
+import { getPiVersion } from "./pi-version-access.js";
+import { describeSoulInputs } from "../../components/soul-input-manifest.js";
+import { readSnapshot } from "../../components/runtime-health-snapshot.js";
+import { KANBAN_STALE_CANDIDATE_MS } from "../../components/executor-progress.js";
+import type { ProbeResult, DoctorOutputV2, SnapshotTrust, RuntimeHealthSnapshotV1 } from "./doctor-types.js";
+import { truncate } from "./doctor-types.js";
 
 const home = abtarsHome();
-const configDir = join(home, "config");
-const TTL_MS = 180_000; // gossip: 3 missed 60s broadcasts → stale (matches gossip.ts)
+const root = abtarsRoot();
 
-function readJson(path: string): any | null {
-  try { return JSON.parse(readFileSync(path, "utf-8")); } catch { return null; }
+const SHARED_NM = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
+
+
+async function timedProbe(name: string, evidence: import("./doctor-types.js").EvidenceLevel, fn: () => Promise<ProbeResult>): Promise<ProbeResult> {
+  const start = Date.now();
+  try {
+    const r = await fn();
+    r.ms = r.ms ?? (Date.now() - start);
+    r.name = name;
+    r.evidence = r.evidence ?? evidence;
+    r.detail = truncate(r.detail);
+    if (r.remediation) r.remediation = truncate(r.remediation);
+    return r;
+  } catch (err) {
+    return { name, status: "failed", evidence, detail: truncate(String(err)), ms: Date.now() - start };
+  }
 }
 
-function readEnv(): Map<string, string> {
-  const envPath = join(configDir, ".env");
-  const map = new Map<string, string>();
-  if (!existsSync(envPath)) return map;
-  for (const line of readFileSync(envPath, "utf-8").split("\n")) {
-    const m = line.match(/^([A-Z_]+)=(.*)$/);
-    if (m) map.set(m[1]!, m[2]!.replace(/^["']|["']$/g, ""));
-  }
-  return map;
+// ── Helpers ──
+
+function readJson(path: string): unknown | null {
+  try { return JSON.parse(readFileSync(path, "utf-8")); } catch { return null; }
 }
 
 function pidAlive(pid: number): boolean {
@@ -63,95 +49,64 @@ function ago(ms: number): string {
   return `${Math.round(s / 60)}m ago`;
 }
 
-async function timedProbe(fn: () => Promise<ProbeResult>): Promise<ProbeResult> {
-  const start = Date.now();
-  try {
-    const r = await fn();
-    r.ms = r.ms ?? (Date.now() - start);
-    return r;
-  } catch (err) {
-    return { name: "unknown", status: "failed", detail: String(err), ms: Date.now() - start };
-  }
-}
-
-// ── Body Probes ──────────────────────────────────────────────────────────────
+// ── Body Probes ──
 
 async function probePlatforms(): Promise<ProbeResult> {
-  const { readSecret, initSecretsKey } = await import("../../components/secrets.js");
-  initSecretsKey();
+  const env = readEnv();
+  const results: Array<{ name: string; status: "ok" | "warning" | "failed" | "skipped"; detail: string }> = [];
 
-  const results: Array<{ name: string; status: "ok" | "failed" | "skipped"; detail: string }> = [];
-
-  // Telegram: read token, call getMe
-  const telegramToken = readSecret("TELEGRAM_BOT_TOKEN") ?? readSecret("TELEGRAM_TOKEN");
-  if (telegramToken) {
-    const r = await verifyTelegram(telegramToken);
-    results.push({ name: "telegram", ...r });
+  if (env.get("TELEGRAM_BOT_TOKEN") || env.get("TELEGRAM_TOKEN")) {
+    const tok = env.get("TELEGRAM_BOT_TOKEN") ?? env.get("TELEGRAM_TOKEN") ?? "";
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`https://api.telegram.org/bot${tok}/getMe`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) results.push({ name: "telegram", status: "ok", detail: "verified" });
+      else if (res.status === 401 || res.status === 403) results.push({ name: "telegram", status: "failed", detail: "invalid token" });
+      else results.push({ name: "telegram", status: "warning", detail: `http ${res.status}` });
+    } catch { results.push({ name: "telegram", status: "warning", detail: "unreachable" }); }
   }
 
-  // Discord: read token, call gateway
-  const discordToken = readSecret("DISCORD_BOT_TOKEN") ?? readSecret("DISCORD_TOKEN");
-  if (discordToken) {
-    const r = await verifyDiscord(discordToken);
-    results.push({ name: "discord", ...r });
+  if (env.get("DISCORD_BOT_TOKEN") || env.get("DISCORD_TOKEN")) {
+    const tok = env.get("DISCORD_BOT_TOKEN") ?? env.get("DISCORD_TOKEN") ?? "";
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch("https://discord.com/api/v10/users/@me", {
+        headers: { Authorization: `Bot ${tok}` },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok) results.push({ name: "discord", status: "ok", detail: "verified" });
+      else if (res.status === 401 || res.status === 403) results.push({ name: "discord", status: "failed", detail: "invalid token" });
+      else results.push({ name: "discord", status: "warning", detail: `http ${res.status}` });
+    } catch { results.push({ name: "discord", status: "warning", detail: "unreachable" }); }
   }
 
-  // IRC: skip real verification (connection-based), just check if configured
-  const ircServer = readSecret("IRC_SERVER");
-  if (ircServer) {
-    results.push({ name: "irc", status: "ok", detail: "server configured (connection not verified)" });
-  }
+  const ircServer = readSecretEnv("IRC_SERVER", env);
+  if (ircServer) results.push({ name: "irc", status: "ok", detail: "server configured" });
 
-  if (results.length === 0) return { name: "platforms", status: "skipped", detail: "no platform configured" };
+  if (results.length === 0) return { name: "platforms", status: "skipped", evidence: "configuration", detail: "no platform configured", ms: 0 };
 
   const failed = results.filter(r => r.status === "failed");
-  const skipped = results.filter(r => r.status === "skipped");
-  const allOk = failed.length === 0 && skipped.length === 0;
-  const status = allOk ? "ok" : failed.length > 0 ? "failed" : "ok";
-  const detail = results.map(r => `${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`).join(", ");
-  return { name: "platforms", status, detail };
+  const status = failed.length > 0 ? "failed" : results.every(r => r.status === "ok") ? "ok" : "ok";
+  return { name: "platforms", status, evidence: "reachable", detail: results.map(r => `${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`).join(", "), ms: 0 };
 }
 
-async function verifyTelegram(token: string): Promise<{ status: "ok" | "failed" | "skipped"; detail: string }> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (res.ok) return { status: "ok", detail: "getMe ok" };
-    if (res.status === 401 || res.status === 403) return { status: "failed", detail: "invalid token" };
-    return { status: "skipped", detail: `http ${res.status}` };
-  } catch {
-    return { status: "skipped", detail: "unreachable" };
-  }
-}
-
-async function verifyDiscord(token: string): Promise<{ status: "ok" | "failed" | "skipped"; detail: string }> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch("https://discord.com/api/v10/users/@me", {
-      headers: { "Authorization": `Bot ${token}` },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (res.ok) return { status: "ok", detail: "gateway ok" };
-    if (res.status === 401 || res.status === 403) return { status: "failed", detail: "invalid token" };
-    return { status: "skipped", detail: `http ${res.status}` };
-  } catch {
-    return { status: "skipped", detail: "unreachable" };
-  }
+function readSecretEnv(key: string, env: Map<string, string>): string | undefined {
+  return env.get(key);
 }
 
 async function probeDashboard(): Promise<ProbeResult> {
   const env = readEnv();
-  if (env.get("ENABLE_DASHBOARD") !== "true") return { name: "dashboard", status: "skipped", detail: "not enabled" };
+  if (env.get("ENABLE_DASHBOARD") !== "true") return { name: "dashboard", status: "skipped", evidence: "configuration", detail: "not enabled", ms: 0 };
   const port = env.get("DASHBOARD_PORT") || env.get("WEB_PORT") || "3000";
   try {
     const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) });
-    return { name: "dashboard", status: res.ok ? "ok" : "failed", detail: `:${port}` };
+    return { name: "dashboard", status: res.ok ? "ok" : "failed", evidence: "reachable", detail: `:${port}`, ms: 0 };
   } catch {
-    return { name: "dashboard", status: "failed", detail: `:${port} unreachable` };
+    return { name: "dashboard", status: "failed", evidence: "reachable", detail: `:${port} unreachable`, ms: 0 };
   }
 }
 
@@ -159,11 +114,10 @@ async function probeSecurity(): Promise<ProbeResult> {
   const env = readEnv();
   const mode = env.get("SECURITY_MODE") || "off";
   const validModes = ["off", "guardrails", "seatbelt", "docker"];
-  if (!validModes.includes(mode)) return { name: "security", status: "failed", detail: `invalid mode: ${mode}` };
+  if (!validModes.includes(mode)) return { name: "security", status: "failed", evidence: "configuration", detail: `invalid mode: ${mode}`, ms: 0 };
 
-  // Check secret file perms
-  const secretDir = join(home, "secret");
   let permIssues = 0;
+  const secretDir = join(home, "secret");
   if (existsSync(secretDir)) {
     for (const f of readdirSync(secretDir)) {
       const st = statSync(join(secretDir, f));
@@ -173,113 +127,189 @@ async function probeSecurity(): Promise<ProbeResult> {
 
   const parts = [mode];
   if (existsSync(join(home, "auth", "rules.json"))) parts.push("ActionGate");
-  if (permIssues > 0) return { name: "security", status: "failed", detail: `${mode}, ${permIssues} file(s) not 600` };
-  return { name: "security", status: "ok", detail: parts.join(", ") };
+  if (permIssues > 0) return { name: "security", status: "failed", evidence: "filesystem", detail: `${mode}, ${permIssues} file(s) not 600`, ms: 0 };
+  return { name: "security", status: "ok", evidence: "configuration", detail: parts.join(", "), ms: 0 };
 }
 
 async function probeWatchdog(): Promise<ProbeResult> {
-  const lock = readJson(join(home, "bridge.lock"));
-  if (!lock) return { name: "watchdog", status: "failed", detail: "bridge.lock missing" };
+  const lock = readJson(join(home, "bridge.lock")) as Record<string, unknown> | null;
+  if (!lock) return { name: "watchdog", status: "failed", evidence: "filesystem", detail: "bridge.lock missing", ms: 0 };
 
-  const bridgePid = lock.pid ?? 0;
-  const wdPid = lock.watchdogPid ?? 0;
+  const bridgePid = (lock.pid as number) ?? 0;
+  const wdPid = (lock.watchdogPid as number) ?? 0;
   const bridgeAlive = bridgePid > 0 && pidAlive(bridgePid);
   const wdAlive = wdPid > 0 && pidAlive(wdPid);
 
-  if (bridgeAlive && wdAlive) return { name: "watchdog", status: "ok", detail: `bridge:${bridgePid}, wd:${wdPid}` };
-  if (!bridgeAlive && !wdAlive) return { name: "watchdog", status: "failed", detail: `bridge:${bridgePid} dead, wd:${wdPid} dead` };
-  if (!wdAlive) return { name: "watchdog", status: "failed", detail: `bridge:${bridgePid} alive, wd:${wdPid} dead (unprotected)` };
-  return { name: "watchdog", status: "failed", detail: `bridge:${bridgePid} dead, wd:${wdPid} alive (will restart)` };
+  if (bridgeAlive && wdAlive) return { name: "watchdog", status: "ok", evidence: "runtime", detail: `${bridgePid}, wd:${wdPid}`, ms: 0 };
+  if (!bridgeAlive && !wdAlive) return { name: "watchdog", status: "failed", evidence: "runtime", detail: `${bridgePid} dead, wd:${wdPid} dead`, remediation: "Run abtars start", ms: 0 };
+  if (!wdAlive) return { name: "watchdog", status: "failed", evidence: "runtime", detail: `${bridgePid} alive, wd:${wdPid} dead`, remediation: "Check watchdog configuration", ms: 0 };
+  return { name: "watchdog", status: "failed", evidence: "runtime", detail: `${bridgePid} dead, wd:${wdPid} alive`, remediation: "Bridge crash detected", ms: 0 };
 }
 
-// ── Heart Probes ─────────────────────────────────────────────────────────────
-
-async function probeHeartbeat(): Promise<ProbeResult> {
-  const lock = readJson(join(home, "bridge.lock"));
-  if (!lock?.lastHeartbeat) return { name: "heartbeat", status: "skipped", detail: "no bridge.lock" };
-  const ageMs = Date.now() - lock.lastHeartbeat;
-  if (ageMs > 120_000) return { name: "heartbeat", status: "failed", detail: `stale (${ago(ageMs)})` };
-  return { name: "heartbeat", status: "ok", detail: ago(ageMs) };
-}
-
-// #1261: single-bridge invariant — catches duplicate-bridge regressions at runtime.
-// pgrep counts the bridge processes. >1 means a second bridge is running (likely orphaned).
-async function probeSingleBridge(): Promise<ProbeResult> {
+async function probeBridge(): Promise<ProbeResult> {
   const { spawnSync } = await import("node:child_process");
   const pgrep = spawnSync("pgrep", ["-f", "app/bundle/abtars.js"], { encoding: "utf-8" });
   const pids = pgrep.stdout ? pgrep.stdout.trim().split("\n").filter(Boolean) : [];
-  if (pids.length === 0) return { name: "single-bridge", status: "skipped", detail: "no bridge running" };
-  if (pids.length === 1) return { name: "single-bridge", status: "ok", detail: `pid:${pids[0]}` };
-  return { name: "single-bridge", status: "failed", detail: `${pids.length} bridges running: ${pids.join(",")}` };
+  if (pids.length === 0) return { name: "bridge", status: "skipped", evidence: "runtime", detail: "no bridge running", ms: 0 };
+  if (pids.length === 1) return { name: "bridge", status: "ok", evidence: "runtime", detail: `pid:${pids[0]}`, ms: 0 };
+  return { name: "bridge", status: "failed", evidence: "runtime", detail: `${pids.length} bridges: ${pids.join(",")}`, remediation: "Run abtars restart", ms: 0 };
 }
 
-// ── Brain Probes ─────────────────────────────────────────────────────────────
+async function probeTui(): Promise<ProbeResult> {
+  const sockPath = join(home, "tui.sock");
+  if (!existsSync(sockPath)) return { name: "tui", status: "skipped", evidence: "filesystem", detail: "no socket", ms: 0 };
+  try {
+    const { connect } = await import("node:net");
+    await new Promise<void>((resolve, reject) => {
+      const s = connect(sockPath, () => { s.end(); resolve(); });
+      s.on("error", (e) => { s.destroy(); reject(e); });
+      s.on("timeout", () => { s.destroy(); reject(new Error("connect timeout")); });
+    });
+    return { name: "tui", status: "ok", evidence: "reachable", detail: "socket responding", ms: 0 };
+  } catch {
+    return { name: "tui", status: "failed", evidence: "reachable", detail: "socket exists but not responding", ms: 0 };
+  }
+}
+
+// ── Heart Probes ──
+
+async function probeHeartbeat(): Promise<ProbeResult> {
+  const lock = readJson(join(home, "bridge.lock")) as Record<string, unknown> | null;
+  if (!lock?.lastHeartbeat) return { name: "heartbeat", status: "skipped", evidence: "configuration", detail: "no bridge.lock", ms: 0 };
+  const ageMs = Date.now() - (lock.lastHeartbeat as number);
+  const detail = ago(ageMs);
+  if (ageMs > 120_000) return { name: "heartbeat", status: "failed", evidence: "runtime", detail: `stale (${detail})`, ms: 0 };
+  return { name: "heartbeat", status: "ok", evidence: "runtime", detail, ms: 0 };
+}
+
+// ── Brain Probes ──
 
 async function probeTransport(): Promise<ProbeResult> {
-  const tPath = join(configDir, "transport.json");
-  const t = readJson(tPath);
-  if (!t) return { name: "transport", status: "failed", detail: "transport.json missing or invalid" };
-  const agents = Object.keys(t.agents ?? {});
-  if (agents.length === 0) return { name: "transport", status: "failed", detail: "no agents configured" };
-  return { name: "transport", status: "ok", detail: `${agents.length} agent(s): ${agents.join(", ")}` };
+  const tPath = join(home, "config", "transport.json");
+  const t = readJson(tPath) as Record<string, unknown> | null;
+  if (!t) return { name: "transport", status: "failed", evidence: "filesystem", detail: "transport.json missing", ms: 0 };
+  const agents = Object.keys((t.agents as Record<string, unknown>) ?? {});
+  if (agents.length === 0) return { name: "transport", status: "failed", evidence: "configuration", detail: "no agents configured", ms: 0 };
+  return { name: "transport", status: "ok", evidence: "configuration", detail: `${agents.length} agent(s): ${agents.join(", ")}`, ms: 0 };
 }
 
 async function probeSpin(): Promise<ProbeResult> {
-  const lock = readJson(join(home, "bridge.lock"));
-  if (!lock?.pid || !pidAlive(lock.pid)) return { name: "spin", status: "failed", detail: "bridge not running" };
-  return { name: "spin", status: "ok", detail: "bridge alive" };
+  const lock = readJson(join(home, "bridge.lock")) as Record<string, unknown> | null;
+  if (!lock?.pid || !pidAlive(lock.pid as number)) return { name: "spin", status: "failed", evidence: "runtime", detail: "bridge not running", remediation: "Run abtars start", ms: 0 };
+  return { name: "spin", status: "ok", evidence: "runtime", detail: "bridge alive", ms: 0 };
 }
 
 async function probeKanban(): Promise<ProbeResult> {
   const dbPath = join(home, "kanban", "kanban.db");
-  if (!existsSync(dbPath)) return { name: "kanban", status: "skipped", detail: "kanban.db not found" };
-  const sharedNm = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
-  if (!existsSync(sharedNm)) return { name: "kanban", status: "skipped", detail: "better-sqlite3 not installed (run: abtars deps install)" };
-  let Db: any;
+  if (!existsSync(dbPath)) return { name: "kanban", status: "skipped", evidence: "filesystem", detail: "no kanban.db", ms: 0 };
+  if (!existsSync(SHARED_NM)) return { name: "kanban", status: "skipped", evidence: "filesystem", detail: "better-sqlite3 not installed", remediation: "Run abtars deps install", ms: 0 };
+
+  let Db: new (path: string, opts: { readonly: boolean }) => {
+    prepare: (sql: string) => { get: () => Record<string, unknown>; all: (...params: unknown[]) => Array<Record<string, unknown>> };
+    close: () => void;
+  };
   try {
     const { createRequire } = await import("node:module");
     const _require = createRequire(import.meta.url);
-    Db = _require(sharedNm);
-  } catch (err) {
-    return { name: "kanban", status: "skipped", detail: `better-sqlite3 not loadable: ${err instanceof Error ? err.message : String(err)}` };
+    Db = _require(SHARED_NM);
+  } catch {
+    return { name: "kanban", status: "skipped", evidence: "filesystem", detail: "better-sqlite3 not loadable", ms: 0 };
   }
+
   try {
     const db = new Db(dbPath, { readonly: true });
-    const row = db.prepare("SELECT COUNT(*) as cnt FROM kanban_board").get() as { cnt: number };
-    const stuck = db.prepare("SELECT COUNT(*) as cnt FROM kanban_board WHERE status='running' AND updated_at < datetime('now', '-10 minutes')").get() as { cnt: number };
+    const total = (db.prepare("SELECT COUNT(*) as cnt FROM kanban_board").get() as { cnt: number }).cnt;
+    const byStatus = db.prepare("SELECT status, COUNT(*) as cnt FROM kanban_board GROUP BY status").all() as Array<{ status: string; cnt: number }>;
+    // #1439: candidate-staleness threshold is shared with the lease-based
+    // reconciler (executor-progress.ts KANBAN_STALE_CANDIDATE_MS) rather
+    // than a doctor-only literal — age alone still never decides failure,
+    // it only decides which cards get checked against the runtime snapshot.
+    const staleCutoffIso = new Date(Date.now() - KANBAN_STALE_CANDIDATE_MS).toISOString();
+    const oldRunning = db.prepare("SELECT id FROM kanban_board WHERE status='running' AND updated_at < ?").all(staleCutoffIso) as Array<{ id: number }>;
     db.close();
-    const detail = stuck.cnt > 0 ? `${row.cnt} cards, ${stuck.cnt} stuck` : `${row.cnt} cards`;
-    return { name: "kanban", status: stuck.cnt > 0 ? "failed" : "ok", detail };
-  } catch (err) {
-    return { name: "kanban", status: "skipped", detail: `kanban.db query failed: ${err instanceof Error ? err.message : String(err)}` };
+
+    if (oldRunning.length === 0) {
+      const statusDetail = byStatus.map(s => `${s.status}: ${s.cnt}`).join(", ");
+      return { name: "kanban", status: "ok", evidence: "filesystem", detail: `${total} cards (${statusDetail})`, ms: 0 };
+    }
+
+    const snapshotResult = readSnapshot();
+    if (snapshotResult.trust === "trusted" && snapshotResult.data) {
+      const activeIds = new Set(snapshotResult.data.activeCardIds);
+      const abandoned = oldRunning.filter(c => !activeIds.has(c.id));
+
+      if (abandoned.length === 0) {
+        return { name: "kanban", status: "ok", evidence: "runtime", detail: `${total} cards, ${oldRunning.length} old running (verified active)`, ms: 0 };
+      }
+      const ids = abandoned.slice(0, 5).map(c => `#${c.id}`).join(", ");
+      return {
+        name: "kanban",
+        status: "failed",
+        evidence: "runtime",
+        detail: `${total} cards, ${abandoned.length} abandoned (${ids}${abandoned.length > 5 ? ", ..." : ""})`,
+        remediation: "Check active work: abtars kanban running",
+        ms: 0,
+      };
+    }
+
+    const ids = oldRunning.slice(0, 5).map(c => `#${c.id}`).join(", ");
+    return {
+      name: "kanban",
+      status: "warning",
+      evidence: "filesystem",
+      detail: `${total} cards, ${oldRunning.length} old running unverified (${ids}${oldRunning.length > 5 ? ", ..." : ""})`,
+      remediation: "Check: abtars kanban running",
+      ms: 0,
+    };
+  } catch {
+    return { name: "kanban", status: "failed", evidence: "filesystem", detail: "kanban.db query failed", ms: 0 };
   }
 }
 
 async function probeSkills(): Promise<ProbeResult> {
   const catalog = join(home, "skills", "skills_catalog.md");
-  if (!existsSync(catalog)) return { name: "skills", status: "failed", detail: "skills_catalog.md missing" };
+  if (!existsSync(catalog)) return { name: "skills", status: "failed", evidence: "filesystem", detail: "skills_catalog.md missing", ms: 0 };
   const content = readFileSync(catalog, "utf-8");
   const count = (content.match(/^## /gm) || []).length;
-  if (count === 0) return { name: "skills", status: "failed", detail: "catalog empty" };
-  return { name: "skills", status: "ok", detail: `${count} loaded` };
+  if (count === 0) return { name: "skills", status: "failed", evidence: "filesystem", detail: "catalog empty", ms: 0 };
+  return { name: "skills", status: "ok", evidence: "filesystem", detail: `${count} loaded`, ms: 0 };
 }
 
-async function probeSha(): Promise<ProbeResult> {
-  // Check if healer skill exists in catalog
-  const catalog = join(home, "skills", "skills_catalog.md");
-  if (!existsSync(catalog)) return { name: "sha", status: "skipped", detail: "no catalog" };
-  const content = readFileSync(catalog, "utf-8");
-  if (/self.heal|healer|auto.fix/i.test(content)) return { name: "sha", status: "ok", detail: "rules loaded" };
-  // Check sha-policy.json
-  if (existsSync(join(configDir, "sha-policy.json"))) return { name: "sha", status: "ok", detail: "rules loaded" };
-  return { name: "sha", status: "skipped", detail: "no healer rules configured" };
+async function probeSharedDeps(): Promise<ProbeResult> {
+  try {
+    const abmindDir = resolveAbmindPackageDir();
+    if (!abmindDir) return { name: "shared-deps", status: "skipped", evidence: "filesystem", detail: "abmind not found", ms: 0 };
+    const modPath = join(abmindDir, "dist", "src", "deploy-lib", "shared-native-deps.js");
+    if (!existsSync(modPath)) return { name: "shared-deps", status: "skipped", evidence: "filesystem", detail: "module not found", ms: 0 };
+    const mod = await import(pathToFileURL(modPath).href) as {
+      diagnoseSharedNativeDeps: () => { manifestGeneration: number; packageCount: number; lockHeld: boolean; lockOwner: string | null; packages: Array<{ name: string; onDisk: boolean }> };
+    };
+    const status = mod.diagnoseSharedNativeDeps();
+    const detail = `gen ${status.manifestGeneration}, ${status.packageCount} pkg(s)`;
+    const mismatches = status.packages.filter(p => !p.onDisk);
+    if (mismatches.length > 0) {
+      return { name: "shared-deps", status: "failed", evidence: "filesystem", detail: `${detail}, ${mismatches.length} missing`, ms: 0 };
+    }
+    return { name: "shared-deps", status: "ok", evidence: "filesystem", detail, ms: 0 };
+  } catch {
+    return { name: "shared-deps", status: "skipped", evidence: "filesystem", detail: "manifest not available", ms: 0 };
+  }
 }
 
-// ── Tribe Probes ─────────────────────────────────────────────────────────────
+async function probePi(): Promise<ProbeResult> {
+  const result = getPiVersion();
+  if (!result.found) {
+    if (result.error) return { name: "pi", status: "failed", evidence: "executable", detail: `Pi unavailable (${result.error})`, remediation: "Install Pi or check PATH", ms: 0 };
+    return { name: "pi", status: "warning", evidence: "executable", detail: "Pi not installed (optional)", ms: 0 };
+  }
+  return { name: "pi", status: "ok", evidence: "executable", detail: `Pi ${result.version}`, ms: 0 };
+}
 
-async function probeA2a(): Promise<ProbeResult> {
+// ── Tribe Probes ──
+
+async function probePeerApi(): Promise<ProbeResult> {
   const env = readEnv();
-  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "a2a", status: "skipped", detail: "not enabled" };
+  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "peer-api", status: "skipped", evidence: "configuration", detail: "not enabled", ms: 0 };
   const port = parseInt(env.get("AGENT_API_PORT") || "7100", 10);
   try {
     const { createConnection } = await import("node:net");
@@ -288,321 +318,204 @@ async function probeA2a(): Promise<ProbeResult> {
       sock.on("error", reject);
       sock.setTimeout(2000, () => { sock.destroy(); reject(new Error("timeout")); });
     });
-    return { name: "a2a", status: "ok", detail: `${port}` };
-  } catch {
-    return { name: "a2a", status: "failed", detail: `${port} not listening` };
+    return { name: "peer-api", status: "ok", evidence: "reachable", detail: `:${port} listening`, ms: 0 };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("timeout")) return { name: "peer-api", status: "failed", evidence: "reachable", detail: `:${port} timed out`, ms: 0 };
+    return { name: "peer-api", status: "failed", evidence: "reachable", detail: `:${port} refused`, ms: 0 };
   }
 }
 
 async function probePeers(): Promise<ProbeResult> {
-  const peersPath = join(configDir, "peers.json");
-  const peers = readJson(peersPath) as { peers?: Record<string, { verifyKey?: string; trust?: number }>; self?: { signingKey?: string; tribeToken?: string } } | null;
-  if (!peers) return { name: "peers", status: "skipped", detail: "peers.json missing" };
-  if (!peers.self?.signingKey) return { name: "peers", status: "failed", detail: "self.signingKey missing — run: abtars install" };
+  const peersPath = join(home, "config", "peers.json");
+  const peers = readJson(peersPath) as { peers?: Record<string, unknown>; self?: { signingKey?: string } } | null;
+  if (!peers) return { name: "peers", status: "skipped", evidence: "configuration", detail: "peers.json missing", ms: 0 };
+  if (!peers.self?.signingKey) return { name: "peers", status: "failed", evidence: "configuration", detail: "self.signingKey missing — run: abtars install", ms: 0 };
 
   const peerEntries = Object.entries(peers.peers ?? {});
   const peerCount = peerEntries.length;
-  if (peerCount === 0) return { name: "peers", status: "skipped", detail: "no peers (solo)" };
+  if (peerCount === 0) return { name: "peers", status: "skipped", evidence: "configuration", detail: "no peers (solo)", ms: 0 };
 
-  // Check that all peers have verifyKey
-  const missingKey = peerEntries.filter(([, e]) => !e.verifyKey).map(([n]) => n);
-  if (missingKey.length > 0) return { name: "peers", status: "failed", detail: `missing verifyKey: ${missingKey.join(", ")}` };
+  const missingKey = peerEntries.filter(([, e]) => !(e as Record<string, unknown>).verifyKey).map(([n]) => n);
+  if (missingKey.length > 0) return { name: "peers", status: "failed", evidence: "configuration", detail: `missing verifyKey: ${missingKey.join(", ")}`, ms: 0 };
 
-  return { name: "peers", status: "ok", detail: `${peerCount} enrolled (all keys valid)` };
+  return { name: "peers", status: "ok", evidence: "configuration", detail: `${peerCount} enrolled (all keys valid)`, ms: 0 };
 }
 
 async function probeIdentity(): Promise<ProbeResult> {
   const env = readEnv();
-  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "identity", status: "skipped", detail: "a2a disabled" };
+  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "identity", status: "skipped", evidence: "configuration", detail: "peer-api disabled", ms: 0 };
 
-  const certPath = join(configDir, "identity.crt");
-  const keyPath = join(configDir, "identity.tls.key");
-  const certExists = existsSync(certPath);
-  const keyExists = existsSync(keyPath);
-  if (!certExists || !keyExists) {
-    const missing = [!certExists && "identity.crt", !keyExists && "identity.tls.key"].filter(Boolean);
-    return { name: "identity", status: "failed", detail: `missing: ${missing.join(", ")}` };
-  }
-
-  // Verify cert public key matches self.signingKey (#1293)
   try {
-    const { loadPeerConfig, deriveVerifyKey } = require("../../components/peer-config.js") as typeof import("../../components/peer-config.js");
-    const { verifyServerCert } = require("../../components/peer-transport/peer-auth.js") as typeof import("../../components/peer-transport/peer-auth.js");
+    const { loadPeerConfig } = await import("../../components/peer-config.js");
     const config = loadPeerConfig();
-    const expectedVerifyKey = deriveVerifyKey(config.self.signingKey);
-    const certPem = readFileSync(certPath, "utf-8");
-    if (!verifyServerCert(certPem, expectedVerifyKey)) {
-      return { name: "identity", status: "failed", detail: "cert pubkey mismatch — re-run: abtars install --force" };
-    }
-    return { name: "identity", status: "ok", detail: "cert matches signing key" };
-  } catch {
-    return { name: "identity", status: "ok", detail: "cert present (key-match skipped)" };
+    const { deriveVerifyKey } = await import("../../components/peer-config.js");
+    deriveVerifyKey(config.self.signingKey);
+    return { name: "identity", status: "ok", evidence: "authenticated", detail: "signing key valid", ms: 0 };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { name: "identity", status: "failed", evidence: "configuration", detail: truncate(msg), ms: 0 };
   }
 }
 
-async function probeGossip(): Promise<ProbeResult> {
-  const env = readEnv();
-  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "gossip", status: "skipped", detail: "a2a disabled" };
+async function probeRoutes(snapshot: { trust: SnapshotTrust; data: RuntimeHealthSnapshotV1 | null }): Promise<ProbeResult> {
+  if (snapshot.trust !== "trusted" || !snapshot.data) {
+    return { name: "routes", status: "warning", evidence: "runtime", detail: snapshot.trust === "missing" ? "no runtime snapshot" : "snapshot unavailable", ms: 0 };
+  }
 
-  const peers = readJson(join(configDir, "peers.json")) as { peers?: Record<string, unknown>; self?: { signingKey?: string } } | null;
-  const peerCount = Object.keys(peers?.peers ?? {}).length;
-  if (peerCount === 0) return { name: "gossip", status: "skipped", detail: "no peers (solo)" };
-  if (!peers?.self?.signingKey) return { name: "gossip", status: "failed", detail: "self.signingKey missing — Ed25519 gossip requires identity" };
+  const routes = snapshot.data.routes;
+  const peerNames = [...new Set(routes.map(r => r.peer))];
+  if (peerNames.length === 0) return { name: "routes", status: "warning", evidence: "runtime", detail: "no authenticated routes active", ms: 0 };
 
-  const port = parseInt(env.get("GOSSIP_PORT") || "5355", 10);
-
-  // Bind-test: if the port is already in use, gossip is live (EADDRINUSE = good).
-  // If we can bind it, nothing is listening → gossip not running.
-  const inUse = await new Promise<boolean>((resolve) => {
-    import("node:dgram").then(({ createSocket }) => {
-      const sock = createSocket("udp4");
-      sock.once("error", (err: NodeJS.ErrnoException) => { sock.close(); resolve(err.code === "EADDRINUSE"); });
-      sock.bind(port, "0.0.0.0", () => { sock.close(); resolve(false); });
-    }).catch(() => resolve(false));
+  const dirCounts = peerNames.map(p => {
+    const pr = routes.filter(r => r.peer === p);
+    const dirs = [...new Set(pr.flatMap(r => r.directions))];
+    return `${p} (${dirs.join("/")})`;
   });
-  if (!inUse) return { name: "gossip", status: "failed", detail: `${port} not listening` };
-
-  // Live — report broadcast freshness.
-  const lock = readJson(join(home, "bridge.lock"));
-  const last = typeof lock?.lastGossipBroadcast === "number" ? lock.lastGossipBroadcast : 0;
-  if (!last) return { name: "gossip", status: "ok", detail: `${port} / no broadcast yet` };
-  const age = Date.now() - last;
-  if (age > TTL_MS) return { name: "gossip", status: "failed", detail: `${port} / stale (${ago(age)})` };
-  return { name: "gossip", status: "ok", detail: `${port} / last broadcast ${ago(age)}` };
+  return { name: "routes", status: "ok", evidence: "authenticated", detail: `${peerNames.length}/${peerNames.length} enrolled: ${dirCounts.join(", ")}`, ms: 0 };
 }
 
-// ── Soul Probes ──────────────────────────────────────────────────────────────
+async function probeDoorbell(snapshot: { trust: SnapshotTrust; data: RuntimeHealthSnapshotV1 | null }): Promise<ProbeResult> {
+  const env = readEnv();
+  if (env.get("ENABLE_AGENT_API") !== "true") return { name: "doorbell", status: "skipped", evidence: "configuration", detail: "peer-api disabled", ms: 0 };
+
+  const peersPath = join(home, "config", "peers.json");
+  const peers = readJson(peersPath) as { peers?: Record<string, unknown> } | null;
+  const peerCount = Object.keys(peers?.peers ?? {}).length;
+  if (peerCount === 0) return { name: "doorbell", status: "skipped", evidence: "configuration", detail: "no peers (solo)", ms: 0 };
+
+  if (snapshot.trust !== "trusted" || !snapshot.data) {
+    return { name: "doorbell", status: "warning", evidence: "runtime", detail: snapshot.trust === "missing" ? "no runtime snapshot" : "snapshot unavailable", ms: 0 };
+  }
+
+  const ds = snapshot.data.doorbell;
+  switch (ds.state) {
+    case "listening":
+      return { name: "doorbell", status: "ok", evidence: "runtime", detail: "listening (authenticated WSS doorbell)", ms: 0 };
+    case "disabled":
+      return { name: "doorbell", status: "skipped", evidence: "configuration", detail: "doorbell disabled", ms: 0 };
+    case "starting":
+      return { name: "doorbell", status: "warning", evidence: "runtime", detail: "starting", ms: 0 };
+    case "degraded":
+      return { name: "doorbell", status: "failed", evidence: "runtime", detail: ds.lastError ? `degraded: ${ds.lastError}` : "degraded", ms: 0 };
+  }
+}
+
+// ── Soul Probes ──
+
+async function probeSoul(): Promise<ProbeResult> {
+  // Probe disk directly: if abmind's core memory dir has the core SOUL.md,
+  // memory is effectively available regardless of env flags or bridge state.
+  const abmHome = abmindHome();
+  const coreDir = join(abmHome, "memory", "core");
+  const abmindCoreExists = existsSync(join(coreDir, "SOUL.md"));
+  const memoryMode = abmindCoreExists ? "available" : "unavailable";
+
+  const inputs = describeSoulInputs({
+    memoryMode,
+    abtarsHome: home,
+    abtarsRoot: root,
+    abmindHome: abmHome,
+  });
+
+  const issues: string[] = [];
+  let status: import("./doctor-types.js").ProbeStatus = "ok";
+
+  for (const input of inputs) {
+    const exists = existsSync(input.path);
+    if (!exists) {
+      if (input.required) { status = "failed"; issues.push(`${input.id}: missing`); }
+      else issues.push(`${input.id}: missing (optional)`);
+      continue;
+    }
+
+    try {
+      const st = statSync(input.path);
+      if (!st.isFile()) {
+        if (input.required) { status = "failed"; issues.push(`${input.id}: not a regular file`); }
+        continue;
+      }
+      const content = readFileSync(input.path, "utf-8");
+      if (content.trim().length === 0) {
+        if (input.required) { status = "failed"; issues.push(`${input.id}: empty`); }
+        else issues.push(`${input.id}: empty (optional)`);
+        continue;
+      }
+    } catch {
+      if (input.required) { status = "failed"; issues.push(`${input.id}: unreadable`); }
+    }
+  }
+
+  if (issues.length === 0) return { name: "soul", status: "ok", evidence: "filesystem", detail: "all inputs present", ms: 0 };
+  if (status === "ok" && issues.every(i => i.includes("optional"))) {
+    return { name: "soul", status: "ok", evidence: "filesystem", detail: issues.join("; "), ms: 0 };
+  }
+  return { name: "soul", status, evidence: "filesystem", detail: truncate(issues.join("; ")), ms: 0 };
+}
 
 async function probeMind(): Promise<ProbeResult> {
   try {
     const { loadAbmind } = await import("../../utils/abmind-lazy.js");
     const mod = await loadAbmind();
-    if (!mod) return { name: "mind", status: "skipped", detail: "abmind not installed" };
-    return { name: "mind", status: "ok", detail: "abmind loaded (in-process)" };
+    if (!mod) return { name: "mind", status: "skipped", evidence: "runtime", detail: "abmind not installed", ms: 0 };
+    return { name: "mind", status: "ok", evidence: "runtime", detail: "abmind loaded (in-process)", ms: 0 };
   } catch {
-    return { name: "mind", status: "skipped", detail: "abmind load failed" };
+    return { name: "mind", status: "skipped", evidence: "runtime", detail: "abmind load failed", ms: 0 };
   }
 }
 
-// ── Runner ───────────────────────────────────────────────────────────────────
+// ── Runner ──
 
-export async function runAllProbes(): Promise<DoctorOutput> {
+export async function runAllProbes(): Promise<DoctorOutputV2> {
   const start = Date.now();
+  const versionInfo = getDeployedVersion();
+  const snapshotResult = readSnapshot();
 
   const [body, heart, brain, soul, tribe] = await Promise.all([
-    Promise.all([probePlatforms(), probeDashboard(), probeSecurity(), probeWatchdog(), probeSingleBridge()].map(p => timedProbe(() => p))),
-    Promise.all([probeHeartbeat()].map(p => timedProbe(() => p))),
-    Promise.all([probeTransport(), probeSpin(), probeKanban(), probeSkills(), probeSha()].map(p => timedProbe(() => p))),
-    Promise.all([probeMind()].map(p => timedProbe(() => p))),
-    Promise.all([probeA2a(), probePeers(), probeIdentity(), probeGossip()].map(p => timedProbe(() => p))),
+    Promise.all([
+      timedProbe("platforms", "configuration", () => probePlatforms().then(r => ({ ...r, evidence: "reachable" as const }))),
+      timedProbe("dashboard", "reachable", probeDashboard),
+      timedProbe("security", "configuration", probeSecurity),
+      timedProbe("watchdog", "runtime", probeWatchdog),
+      timedProbe("bridge", "runtime", probeBridge),
+      timedProbe("tui", "filesystem", probeTui),
+    ]),
+    Promise.all([
+      timedProbe("heartbeat", "runtime", probeHeartbeat),
+    ]),
+    Promise.all([
+      timedProbe("transport", "configuration", probeTransport),
+      timedProbe("spin", "runtime", probeSpin),
+      timedProbe("kanban", "filesystem", probeKanban),
+      timedProbe("skills", "filesystem", probeSkills),
+      timedProbe("shared-deps", "filesystem", probeSharedDeps),
+      timedProbe("pi", "executable", probePi),
+    ]),
+    Promise.all([
+      timedProbe("soul", "filesystem", probeSoul),
+      timedProbe("mind", "runtime", probeMind),
+    ]),
+    Promise.all([
+      timedProbe("peer-api", "reachable", probePeerApi),
+      timedProbe("peers", "configuration", probePeers),
+      timedProbe("identity", "configuration", probeIdentity),
+      timedProbe("routes", "runtime", () => probeRoutes(snapshotResult)),
+      timedProbe("doorbell", "runtime", () => probeDoorbell(snapshotResult)),
+    ]),
   ]);
 
-  return { version: "1.0", totalMs: Date.now() - start, layers: { body, heart, brain, soul, tribe } };
-}
+  const all = [...body, ...heart, ...brain, ...soul, ...tribe];
+  const ok = all.filter(r => r.status === "ok").length;
+  const warning = all.filter(r => r.status === "warning").length;
+  const failed = all.filter(r => r.status === "failed").length;
+  const skipped = all.filter(r => r.status === "skipped").length;
 
-// ── Fix Logic ────────────────────────────────────────────────────────────────
-
-export async function runFixes(): Promise<FixResult[]> {
-  const { chmodSync, unlinkSync, mkdirSync, existsSync: ex, readdirSync: rd, statSync: st, readFileSync: rf, writeFileSync: wf } = await import("node:fs");
-  const { spawnSync } = await import("node:child_process");
-  const fixes: FixResult[] = [];
-
-  function fix(probe: string, action: string, fn: () => void): void {
-    try { fn(); fixes.push({ probe, action, success: true }); }
-    catch { fixes.push({ probe, action, success: false }); }
-  }
-
-  // 1. chmod 700 sensitive dirs
-  for (const dir of ["config", "secret", "auth", "hooks"]) {
-    const p = join(home, dir);
-    if (ex(p) && (st(p).mode & 0o777) !== 0o700) {
-      fix("security", `${dir}/ → 700`, () => chmodSync(p, 0o700));
-    }
-  }
-
-  // 2. chmod 600 secret files
-  const secretDir = join(home, "secret");
-  if (ex(secretDir)) {
-    for (const f of rd(secretDir)) {
-      const fp = join(secretDir, f);
-      if (st(fp).isFile() && (st(fp).mode & 0o777) !== 0o600) {
-        fix("security", `${f} → 600`, () => chmodSync(fp, 0o600));
-      }
-    }
-  }
-
-  // 3. chmod 600 config files
-  if (ex(configDir)) {
-    for (const f of rd(configDir)) {
-      const fp = join(configDir, f);
-      if (st(fp).isFile() && (st(fp).mode & 0o777) !== 0o600) {
-        fix("security", `config/${f} → 600`, () => chmodSync(fp, 0o600));
-      }
-    }
-  }
-
-  // 4. Stale deploy.lock
-  const deployLock = join(home, "deploy.lock");
-  if (ex(deployLock)) {
-    const lock = readJson(deployLock);
-    const lockAge = lock?.startedAt ? (Date.now() - new Date(lock.startedAt).getTime()) / 1000 : 9999;
-    const lockPid = lock?.pid ?? 0;
-    if (lockAge > 300 && (lockPid === 0 || !pidAlive(lockPid))) {
-      fix("watchdog", "removed stale deploy.lock", () => unlinkSync(deployLock));
-    }
-  }
-
-  // 5. Stale .start-reason
-  const startReason = join(home, ".start-reason");
-  if (ex(startReason)) {
-    const age = (Date.now() - st(startReason).mtimeMs) / 1000;
-    if (age > 300) fix("watchdog", "removed stale .start-reason", () => unlinkSync(startReason));
-  }
-
-  // 6. Create missing dirs
-  for (const dir of ["logs", "workspace", "overflow", "received"]) {
-    const p = join(home, dir);
-    if (!ex(p)) fix("watchdog", `created ${dir}/`, () => mkdirSync(p, { recursive: true }));
-  }
-
-  // 7. Kill orphan CLI processes
-  try {
-    const lock = readJson(join(home, "bridge.lock"));
-    const bridgePid = lock?.pid ?? 0;
-    const wdPid = lock?.watchdogPid ?? 0;
-
-    // Orphan kiro-cli
-    const kiro = spawnSync("pgrep", ["-f", "kiro-cli.*acp"], { encoding: "utf-8" });
-    if (kiro.stdout) {
-      for (const pid of kiro.stdout.trim().split("\n").filter(Boolean).map(Number)) {
-        if (pid > 0 && pid !== bridgePid && pid !== wdPid && pid !== process.pid) {
-          fix("brain", `killed orphan kiro-cli ${pid}`, () => process.kill(pid, "SIGTERM"));
-        }
-      }
-    }
-
-    // Orphan abtars-sleep
-    const sleep = spawnSync("pgrep", ["-f", "abtars-sleep"], { encoding: "utf-8" });
-    if (sleep.stdout) {
-      for (const pid of sleep.stdout.trim().split("\n").filter(Boolean).map(Number)) {
-        if (pid > 0 && pid !== bridgePid) {
-          fix("brain", `killed orphan abtars-sleep ${pid}`, () => process.kill(pid, "SIGTERM"));
-        }
-      }
-    }
-  } catch { /* pgrep not available or no orphans */ }
-
-  // 8. Stale locks/sockets
-  for (const f of ["sleep.lock", "memory.sock"]) {
-    const p = join(home, f);
-    if (ex(p)) {
-      const age = (Date.now() - st(p).mtimeMs) / 1000;
-      const lock = readJson(join(home, "bridge.lock"));
-      if (age > 600 && (!lock?.pid || !pidAlive(lock.pid))) {
-        fix("watchdog", `removed stale ${f}`, () => unlinkSync(p));
-      }
-    }
-  }
-
-  // 9. Retention: delete old logs/overflow/media
-  const LOGS_KEEP_DAYS = 7;
-  const DATA_KEEP_DAYS = 30;
-  try {
-    const cutoffLogs = Date.now() - LOGS_KEEP_DAYS * 86400_000;
-    const cutoffData = Date.now() - DATA_KEEP_DAYS * 86400_000;
-
-    for (const [dir, cutoff] of [[join(home, "logs"), cutoffLogs], [join(home, "overflow"), cutoffData], [join(home, "received", "media"), cutoffLogs]] as const) {
-      if (!ex(dir)) continue;
-      let deleted = 0;
-      for (const f of rd(dir)) {
-        const fp = join(dir, f);
-        if (st(fp).isFile() && st(fp).mtimeMs < cutoff) { unlinkSync(fp); deleted++; }
-      }
-      if (deleted > 0) fixes.push({ probe: "retention", action: `deleted ${deleted} stale file(s) from ${dir.split("/").pop()}`, success: true });
-    }
-
-    // Truncate audit.jsonl if >10MB
-    const auditPath = join(home, "auth", "audit.jsonl");
-    if (ex(auditPath) && st(auditPath).size > 10_000_000) {
-      const lines = rf(auditPath, "utf-8").split("\n");
-      wf(auditPath, lines.slice(-1000).join("\n"));
-      fixes.push({ probe: "retention", action: "truncated audit.jsonl", success: true });
-    }
-  } catch { /* retention errors non-fatal */ }
-
-  // 10. Kill duplicate bridges
-  try {
-    const lock = readJson(join(home, "bridge.lock"));
-    const expectedPid = lock?.pid ?? 0;
-    const pgrep = spawnSync("pgrep", ["-f", "abtars.*main"], { encoding: "utf-8" });
-    if (pgrep.stdout) {
-      for (const pid of pgrep.stdout.trim().split("\n").filter(Boolean).map(Number)) {
-        if (pid > 0 && pid !== expectedPid && pid !== process.pid) {
-          fix("watchdog", `killed duplicate bridge ${pid}`, () => process.kill(pid, "SIGTERM"));
-        }
-      }
-    }
-  } catch { /* non-fatal */ }
-
-  // 11. Hooks dir perms
-  const hooksDir = join(home, "hooks");
-  if (ex(hooksDir) && (st(hooksDir).mode & 0o777) !== 0o700) {
-    fix("security", "hooks/ → 700", () => chmodSync(hooksDir, 0o700));
-  }
-
-  // 12. Install watchdog service if missing
-  try {
-    const manifest = readJson(join(home, "manifest.json"));
-    if (manifest?.installMode === "daemon") {
-      const { platform } = await import("node:os");
-      if (platform() === "darwin") {
-        const plist = `${home}/com.abtars.watchdog.plist`;
-        const dst = `${process.env["HOME"]}/Library/LaunchAgents/com.abtars.watchdog.plist`;
-        if (ex(plist) && !ex(dst)) {
-          fix("watchdog", "installed LaunchAgent", () => {
-            const { copyFileSync } = require("node:fs");
-            copyFileSync(plist, dst);
-            spawnSync("launchctl", ["load", dst]);
-          });
-        }
-      } else {
-        const svc = `${home}/abtars-watchdog.service`;
-        const dst = `${process.env["HOME"]}/.config/systemd/user/abtars-watchdog.service`;
-        if (ex(svc) && !ex(dst)) {
-          fix("watchdog", "installed systemd unit", () => {
-            mkdirSync(join(process.env["HOME"]!, ".config", "systemd", "user"), { recursive: true });
-            const { copyFileSync } = require("node:fs");
-            copyFileSync(svc, dst);
-            spawnSync("systemctl", ["--user", "enable", "--now", "abtars-watchdog.service"]);
-          });
-        }
-      }
-    }
-  } catch { /* non-fatal */ }
-
-  return fixes;
-}
-
-// ── Renderer ─────────────────────────────────────────────────────────────────
-
-const ICON = { ok: "✓", failed: "✗", skipped: "~" } as const;
-
-export function renderHuman(output: DoctorOutput): string {
-  const lines: string[] = [];
-  for (const [layer, probes] of Object.entries(output.layers) as [string, ProbeResult[]][]) {
-    lines.push(`${layer.charAt(0).toUpperCase() + layer.slice(1)}:`);
-    for (const p of probes) {
-      const ms = p.ms && p.ms > 500 ? ` (${p.ms}ms)` : "";
-      const detail = p.detail ? ` — ${p.detail}` : "";
-      lines.push(`  ${ICON[p.status]} ${p.name}${ms}${detail}`);
-    }
-  }
-  const total = Object.values(output.layers).flat();
-  const okCount = total.filter(r => r.status === "ok").length;
-  lines.push(`\n${okCount}/${total.length} ok (${(output.totalMs / 1000).toFixed(1)}s)`);
-  return lines.join("\n");
-}
-
-export function renderJson(output: DoctorOutput): string {
-  return JSON.stringify(output, null, 2);
+  return {
+    schemaVersion: "2.0",
+    abtars: { version: versionInfo.version, commit: versionInfo.commit || null },
+    generatedAt: new Date().toISOString(),
+    totalMs: Date.now() - start,
+    layers: { body, heart, brain, soul, tribe },
+    summary: { ok, warning, failed, skipped },
+  };
 }

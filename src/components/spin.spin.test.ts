@@ -39,6 +39,44 @@ vi.mock("./tasks/kanban-channel.js", () => ({
   channelUnread: () => [],
 }));
 
+// Mock kanban-board so spin() tests never write to the real ~/.abtars/kanban/kanban.db.
+// Without this mock, every test that calls spin({ type:"O"/"T", goal, source:"user" }) enqueues
+// real cards into the production DB, which the running bridge reconciler then delivers to
+// Telegram as `Task "X" complete.` spam (boom×60, first×60, init×140, …).
+let _nextId = 1;
+interface MockCard { id: number; title: string; source: string; status: string; type: string; [key: string]: unknown; }
+const _cards = new Map<number, MockCard>();
+vi.mock("./tasks/kanban-board.js", () => ({
+  kanbanEnqueue: (title: string, source: string) => {
+    const id = _nextId++;
+    _cards.set(id, { id, title, source, status: "queued", type: "task" });
+    return id;
+  },
+  kanbanRunning: (id: number) => { const c = _cards.get(id); if (c) c.status = "running"; },
+  kanbanComplete: (id: number) => { const c = _cards.get(id); if (c) c.status = "done"; },
+  kanbanFail: (id: number) => { const c = _cards.get(id); if (c) c.status = "failed"; },
+  kanbanRetryOrFail: (id: number) => { const c = _cards.get(id); if (c) c.status = "failed"; return "failed"; },
+  kanbanList: (filter?: string) => {
+    const cards = Array.from(_cards.values());
+    if (filter === "*") return cards;
+    return cards.filter(c => c.status === (filter || "queued"));
+  },
+  kanbanGetCard: (id: number) => _cards.get(id) ?? null,
+  isUnblocked: () => true,
+  resolveRootId: (id: number) => id,
+  resolveActiveDescendants: () => [],
+  resolveRecentDirectChildren: () => [],
+  kanbanGetChildren: () => [],
+  kanbanAddTokens: () => {},
+  kanbanProgress: () => {},
+  // #1411: internal card data accessor for test assertions
+  _kanbanGetCardRaw: (id: number) => _cards.get(id) ?? null,
+  _kanbanSetCardField: (id: number, field: string, value: unknown) => {
+    const c = _cards.get(id);
+    if (c) (c as any)[field] = value;
+  },
+}));
+
 vi.mock("../utils/local-time.js", () => ({
   localDateTime: () => "2026-07-01 12:00",
 }));
@@ -48,8 +86,9 @@ vi.mock("./soul-bundle.js", () => ({
 }));
 
 import { Spin } from "./spin.js";
+import { kanbanEnqueue } from "./tasks/kanban-board.js";
 import { setUserRegistryOverride, type UserRegistry, type UserEntry } from "./user-registry.js";
-import { profileFor, SESSION_PROFILES } from "./spin-profiles.js";
+import { profileFor, isValidSessionType, SESSION_PROFILES } from "./spin-profiles.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { AgentSession } from "./subagent-runtime.js";
 
@@ -84,8 +123,9 @@ function mockTransport(overrides: Partial<IKiroTransport> = {}): IKiroTransport 
 
 function makeRuntime(opts: {
   completeResponse?: string;
+  completeImpl?: (agent: string, prompt: string, o?: any) => Promise<string>;
   sendPromptResponse?: string;
-  sendPromptImpl?: (sessionKey: string, prompt: string) => Promise<string>;
+  sendPromptImpl?: (sessionKey: string, prompt: string, image?: { mime: string; base64: string }, context?: any) => Promise<string>;
   lastUsage?: { input: number; output: number } | null;
 } = {}) {
   const lastUsage = opts.lastUsage ?? null;
@@ -93,11 +133,38 @@ function makeRuntime(opts: {
     sendPrompt: vi.fn(opts.sendPromptImpl ?? (async () => opts.sendPromptResponse ?? "agent response")),
     destroy: vi.fn(),
     get isReady() { return true; },
-    get transport() { return mockTransport({ lastUsage: vi.fn().mockReturnValue(lastUsage) }); },
+    get transport() {
+      const overrides: Partial<IKiroTransport> = {
+        lastUsage: vi.fn().mockReturnValue(lastUsage),
+      };
+      if (opts.sendPromptImpl) {
+        overrides.sendPrompt = vi.fn(opts.sendPromptImpl);
+      }
+      return mockTransport(overrides);
+    },
+  };
+  const sendPromptFn = opts.sendPromptImpl
+    ? vi.fn(opts.sendPromptImpl)
+    : vi.fn(async () => opts.sendPromptResponse ?? opts.completeResponse ?? "agent response");
+  const mockTransportInstance = mockTransport({
+    lastUsage: vi.fn().mockReturnValue(lastUsage),
+    sendPrompt: sendPromptFn,
+  });
+  const mockExec = {
+    send: vi.fn(async (prompt: string, image?: any, context?: any) => {
+      const response = await mockTransportInstance.sendPrompt("mock:exec", prompt, image, context);
+      return response ?? "(no output)";
+    }),
+    close: vi.fn(),
+    transport: mockTransportInstance,
+    sessionKey: "mock:exec",
+    ephemeral: true,
+    lastUsage: () => lastUsage,
   };
   return {
     session: vi.fn().mockResolvedValue(agentSession),
-    complete: vi.fn(async () => opts.completeResponse ?? "(no output)"),
+    complete: vi.fn(opts.completeImpl ?? (async () => opts.completeResponse ?? "(no output)")),
+    openExecution: vi.fn(async () => mockExec),
     lastUsage,
   };
 }
@@ -127,18 +194,18 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
 
     it("O profile uses browsie (not professor)", () => {
-      expect(profileFor("O").agent).toBe("browsie");
+      expect(profileFor("O")!.agent).toBe("browsie");
     });
 
     it("A profile is active + persistent + no decorators", () => {
-      const p = profileFor("A");
+      const p = profileFor("A")!;
       expect(p.resolution).toBe("active");
       expect(p.transportMode).toBe("persistent");
       expect(p.decorators).toEqual([]);
     });
 
     it("O profile is singleton with bridge-lock hooks", () => {
-      const p = profileFor("O");
+      const p = profileFor("O")!;
       expect(p.resolution).toBe("singleton");
       expect(p.transportMode).toBe("persistent");
       expect(p.terminateAfter).toBe("external");
@@ -147,19 +214,74 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
 
     it("D profile is external (multi-step persistent)", () => {
-      const p = profileFor("D");
+      const p = profileFor("D")!;
       expect(p.terminateAfter).toBe("external");
       expect(p.transportMode).toBe("persistent");
     });
 
     it("S profile is call-terminate (deleted from Map after)", () => {
-      const p = profileFor("S");
+      const p = profileFor("S")!;
       expect(p.terminateAfter).toBe("call");
       expect(p.transportMode).toBe("oneshot");
     });
 
     it("T profile gets channel decorator", () => {
-      expect(profileFor("T").decorators.length).toBeGreaterThanOrEqual(2);
+      expect(profileFor("T")!.decorators.length).toBeGreaterThanOrEqual(2);
+    });
+
+    // #1327: profileFor is now type-safe — returns undefined for unknown types.
+    it("profileFor returns undefined for unknown SessionType (#1327)", () => {
+      expect(profileFor("bug" as any)).toBeUndefined();
+      expect(profileFor("Z" as any)).toBeUndefined();
+      expect(profileFor("" as any)).toBeUndefined();
+    });
+
+    it("isValidSessionType accepts every registered SessionType (#1327)", () => {
+      const valid = ["A", "B", "C", "T", "P", "S", "O", "W", "D", "H"];
+      for (const t of valid) {
+        expect(isValidSessionType(t)).toBe(true);
+      }
+    });
+
+    it("isValidSessionType rejects ticket categories and garbage (#1327)", () => {
+      expect(isValidSessionType("bug")).toBe(false);
+      expect(isValidSessionType("feature")).toBe(false);
+      expect(isValidSessionType("task")).toBe(false);
+      expect(isValidSessionType("")).toBe(false);
+      expect(isValidSessionType(undefined)).toBe(false);
+      expect(isValidSessionType(null)).toBe(false);
+      expect(isValidSessionType(42)).toBe(false);
+    });
+  });
+
+  // #1327: spin() with an unknown type used to throw TypeError on
+  // `profile.agent` and crash the bridge via unhandledRejection. Now it
+  // returns a sensible SpinResult with an error message and (if cardId is
+  // provided) marks the card failed.
+  describe("defensive guards (Layer A in spin) — #1327", () => {
+    it("spin with unknown type returns a fail-soft SpinResult (no crash, no unhandled rejection)", async () => {
+      spin.setRuntime(makeRuntime() as any);
+      const r = await spin.spin({ type: "bug" as any, prompt: "anything", await: true, userId: "aksika", platform: "telegram", source: "user" });
+      expect(r.sessionId).toBe("");
+      expect(r.result).toMatch(/\[SYSTEM BUG\] invalid type for Spin dispatch: "bug" is not a SessionType/);
+    });
+
+    it("spin with unknown type and a cardId marks the card failed in kanban", async () => {
+      spin.setRuntime(makeRuntime() as any);
+      // Enqueue a card with a bad type (the mock stores it with type="task" by default;
+      // we re-mutate to simulate the real-world "type=bug" card that was the trigger).
+      const cardId = kanbanEnqueue("stale card", "agent");
+      _cards.get(cardId)!.type = "bug";
+      const r = await spin.spin({ type: "bug" as any, goal: "stale", cardId, await: true });
+      expect(r.result).toMatch(/invalid type for Spin dispatch/);
+      expect(_cards.get(cardId)!.status).toBe("failed");
+    });
+
+    it("spin with valid type still works (regression guard)", async () => {
+      spin.setRuntime(makeRuntime() as any);
+      const r = await spin.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+      expect(r.sessionId).toBeTruthy();
+      expect(r.result).not.toMatch(/\[SYSTEM BUG\]/);
     });
   });
 
@@ -268,7 +390,14 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
     it("fires on failure path with error", async () => {
       const runtime = makeRuntime();
-      runtime.complete = vi.fn(async () => { throw new Error("boom"); });
+      runtime.openExecution = vi.fn(async () => ({
+        send: vi.fn(async () => { throw new Error("boom"); }),
+        close: vi.fn(),
+        transport: mockTransport(),
+        sessionKey: "mock:boom",
+        ephemeral: true,
+        lastUsage: () => null,
+      }));
       spin.setRuntime(runtime as any);
       const events: any[] = [];
       await expect(spin.spin({
@@ -316,15 +445,17 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const runtime = makeRuntime({ completeResponse: "ok" });
       spin.setRuntime(runtime as any);
       await spin.dispatchBackground({ prompt: "x" });
-      // S = coding agent
-      expect(runtime.complete).toHaveBeenCalledWith("coding", "x", expect.objectContaining({ session: "fresh" }));
+      // S = coding agent → openExecution called with agent="coding"
+      const call = (runtime.openExecution as any).mock.calls[0];
+      expect(call[0]).toBe("coding");
     });
 
     it("agent override routes to that agent", async () => {
       const runtime = makeRuntime({ completeResponse: "ok" });
       spin.setRuntime(runtime as any);
       await spin.dispatchBackground({ prompt: "compact", agent: "dreamy" });
-      expect(runtime.complete).toHaveBeenCalledWith("dreamy", "compact", expect.objectContaining({ session: "fresh" }));
+      const call = (runtime.openExecution as any).mock.calls[0];
+      expect(call[0]).toBe("dreamy");
     });
   });
 
@@ -478,18 +609,62 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(unhandled).toBe(false);
     });
 
-    it("checkStaleWorkers releases slot so next dispatch of that type proceeds", async () => {
-      // The stale-worker path requires mocking kanban-board at module level —
-      // tested in spin-stale.test.ts (separate file due to module-mock scoping).
-      // Here we just verify the slot-tracking invariant directly without a kanban stub:
-      // if a cardId is in running but its DB card is not "running", checkStaleWorkers
-      // must leave the slot alone (no crash, no spurious release).
+    it("tick calls drainQueued (no crash when running set is empty)", async () => {
+      spin.setRuntime(makeRuntime() as any);
+      // tick is the replacement for the stale scanner — must be safe to call at any time
+      await expect((spin as any).tick()).resolves.toBeUndefined();
+    });
+
+    it("markDone removes card from running set", async () => {
       spin.setRuntime(makeRuntime() as any);
       const runningMap: Map<string, Set<number>> = (spin as any).running;
-      runningMap.set("W", new Set([99999])); // fake id — kanbanGetCard returns undefined
-      expect(() => (spin as any).checkStaleWorkers()).not.toThrow();
-      // Card not found → no action; slot stays as-is (safe no-op for unknown ids)
-      expect(runningMap.get("W")?.has(99999)).toBe(true);
+      runningMap.set("W", new Set([99999]));
+      (spin as any).markDone("W", 99999);
+      expect(runningMap.get("W")?.has(99999)).toBe(false);
+    });
+  });
+
+  describe("#1411 — drainQueued legacy retry path", () => {
+    beforeEach(() => {
+      spin.setRuntime(makeRuntime() as any);
+    });
+
+    it("skips card with future next_retry_at", async () => {
+      const id = kanbanEnqueue("future", "user");
+      const future = new Date(Date.now() + 86_400_000).toISOString();
+      const mod = await import("./tasks/kanban-board.js");
+      (mod as any)._kanbanSetCardField(id, "next_retry_at", future);
+      const runningMap: Map<string, Set<number>> = (spin as any).running;
+      runningMap.set("W", new Set());
+      await (spin as any).tick();
+      expect(runningMap.get("W")?.size ?? 0).toBe(0);
+    });
+
+    it("dispatches due card with stored type B, not W", async () => {
+      const id = kanbanEnqueue("due-b", "user");
+      const mod = await import("./tasks/kanban-board.js");
+      (mod as any)._kanbanSetCardField(id, "type", "B");
+      (mod as any)._kanbanSetCardField(id, "goal", "test goal");
+      const past = new Date(Date.now() - 86_400_000).toISOString();
+      (mod as any)._kanbanSetCardField(id, "next_retry_at", past);
+      const dispatchSpy = vi.spyOn(spin, "dispatch");
+      await (spin as any).tick();
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      expect(dispatchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ cardId: id, type: "B", goal: "test goal" }),
+      );
+    });
+
+    it("skips card with no next_retry_at and dispatches via stored type", async () => {
+      const id = kanbanEnqueue("no-retry", "user");
+      const mod = await import("./tasks/kanban-board.js");
+      (mod as any)._kanbanSetCardField(id, "type", "C");
+      const dispatchSpy = vi.spyOn(spin, "dispatch");
+      await (spin as any).tick();
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      expect(dispatchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ cardId: id, type: "C" }),
+      );
     });
   });
 
@@ -537,5 +712,82 @@ describe("spin(spec) — unified session API (#1271)", () => {
         spin.dispatchAwait({ type: "W", goal: "overflow", source: "user" }),
       ).rejects.toThrow(/System busy/);
     });
+  });
+});
+
+// ── #1338 live attached-session output mirroring ───────────────────────
+
+import { SessionOutputFeed, type SessionOutputEvent } from "./session-output-feed.js";
+
+class RecordingFeed extends SessionOutputFeed {
+  events: SessionOutputEvent[] = [];
+  publish(e: SessionOutputEvent): void {
+    this.events.push(e);
+    super.publish(e);
+  }
+}
+
+describe("spin() — #1338 output mirroring", () => {
+  it("threads a call-local observer to the feed for a persistent session", async () => {
+    const feed = new RecordingFeed();
+    const runtime = makeRuntime({
+      sendPromptImpl: async (_key: string, _prompt: string, _image?: { mime: string; base64: string }, ctx?: any) => {
+        expect(ctx?.outputObserver).toBeDefined();
+        ctx.outputObserver.onDelta({ kind: "text", text: "Hi from model" });
+        ctx.outputObserver.onDelta({ kind: "thinking", text: "secret thought" }); // must be excluded
+        ctx.outputObserver.onToolStart({ name: "search" });
+        return "Hi from model";
+      },
+    });
+    const spin2 = new Spin();
+    setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
+    spin2.setRuntime(runtime as any);
+    spin2.setSessionOutputFeed(feed);
+    const r = await spin2.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+
+    const types = feed.events.map((e) => e.type);
+    expect(types).toContain("start");
+    expect(types).toContain("delta");
+    expect(types).toContain("tool-start");
+    expect(types).toContain("end");
+
+    const delta = feed.events.find((e) => e.type === "delta") as Extract<SessionOutputEvent, { type: "delta" }>;
+    expect(delta.text).toBe("Hi from model");
+    // thinking never entered the feed
+    expect(feed.events.some((e) => e.type === "delta" && (e as any).text === "secret thought")).toBe(false);
+    // end is terminal-complete for the same stream
+    const end = feed.events.find((e) => e.type === "end") as Extract<SessionOutputEvent, { type: "end" }>;
+    expect(end.reason).toBe("complete");
+    // every event is tagged with the executed session
+    expect(feed.events.every((e) => e.sessionId === r.sessionId)).toBe(true);
+  });
+
+  it("threads the observer through the oneshot runtime.complete path", async () => {
+    const feed = new RecordingFeed();
+    const runtime = makeRuntime({
+      sendPromptImpl: async (_key: string, _p: string, _img?: any, ctx?: any) => {
+        expect(ctx?.outputObserver).toBeDefined();
+        ctx.outputObserver.onDelta({ kind: "text", text: "one-shot text" });
+        return "one-shot text";
+      },
+    });
+    const spin2 = new Spin();
+    setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
+    spin2.setRuntime(runtime as any);
+    spin2.setSessionOutputFeed(feed);
+    await spin2.spin({ type: "S", prompt: "x", await: true, userId: "aksika", platform: "telegram" });
+
+    const delta = feed.events.find((e) => e.type === "delta") as Extract<SessionOutputEvent, { type: "delta" }>;
+    expect(delta?.text).toBe("one-shot text");
+  });
+
+  it("does not publish when no output feed is wired", async () => {
+    const runtime = makeRuntime({ sendPromptImpl: async () => "ok" });
+    const spin2 = new Spin();
+    setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
+    spin2.setRuntime(runtime as any);
+    // No setSessionOutputFeed — must not throw and must still return the result.
+    const r = await spin2.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+    expect(r.result).toBe("ok");
   });
 });

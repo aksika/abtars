@@ -1,3 +1,5 @@
+import type { ModelCandidate } from "../components/transport/model-candidates.js";
+import { buildCandidates } from "../components/transport/model-candidates.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { getEnv } from "../components/env-schema.js";
 /**
@@ -10,7 +12,7 @@ import { getEnv } from "../components/env-schema.js";
 import { execSync } from "node:child_process";
 import { TmuxClient } from "../components/transport/tmux-client.js";
 import { createAgentTransport } from "../components/agent-registry.js";
-import { logDebug, logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
+import { logDebug, logInfo, logWarn, logError } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
 import { abmind } from "../utils/abmind-lazy.js";
@@ -21,6 +23,14 @@ const TAG = "transport";
 
 export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
   const { memoryConfig } = ctx;
+
+  // #1311 C8: warm pi-ai's catalog before buildTransport() resolves agents — resolveAgent is a
+  // sync hot path that reads the warmed cache. Skipped entirely when no provider opts in.
+  const { anyProviderUseProviderLib } = await import("../components/transport-config.js");
+  if (anyProviderUseProviderLib()) {
+    const { loadPiModels } = await import("../components/transport/pi-catalog.js");
+    await loadPiModels();
+  }
 
   await buildTransport(ctx);
 
@@ -70,7 +80,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   let transport: IKiroTransport;
 
-  const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary, clearTransportCache, validateProviderReady } = await import("../components/transport-config.js");
+  const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary, clearTransportCache, validateProviderReady, validateModelProviderPair } = await import("../components/transport-config.js");
   const { existsSync, renameSync } = await import("node:fs");
   const { join: pathJoin } = await import("node:path");
   clearTransportCache();  // always re-read (picks up /models change writes)
@@ -89,16 +99,22 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     }
   }
 
-  const prof = tc ? resolveAgent("professor", tc) : null;
+  const prof = tc ? resolveAgent("main", tc) : null;
 
   const hm = resolveHailMary(tc);
   if (hm) {
-    ctx.hailMary = {
-      model: hm.model,
-      endpoint: hm.endpoint,
-      apiKey: hm.apiKeyEnv ? getEnv().getApiKey(hm.apiKeyEnv) : undefined,
-    };
-    logInfo("main", `🚨 hailMary configured: ${hm.model} (manual /model emergency only)`);
+    const hmCompat = validateModelProviderPair(hm.model, tc?.hailMary?.provider ?? "");
+    if (!hmCompat.ok) {
+      logWarn("main", `hailMary model incompatible: ${hmCompat.reason} — hailMary unavailable`);
+      ctx.hailMary = null;
+    } else {
+      ctx.hailMary = {
+        model: hm.model,
+        endpoint: hm.endpoint,
+        apiKey: hm.apiKeyEnv ? getEnv().getApiKey(hm.apiKeyEnv) : undefined,
+      };
+      logInfo("main", `🚨 hailMary configured: ${hm.model} (manual /model emergency only)`);
+    }
   } else {
     ctx.hailMary = null;
   }
@@ -108,6 +124,14 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   if (!tc) {
     // No transport.json and no .old.json — emergency mode from .env
     const fb = getEnvFallback();
+    // #1415: validate model/provider compatibility before provider readiness
+    const compat = validateModelProviderPair(fb.model, fb.providerName);
+    if (!compat.ok) {
+      logError("main", `No transport.json, no backup, and .env model incompatible: ${compat.reason}`);
+      logWarn("main", "Transport unavailable — running in Tier 2 (no agent responses)");
+      ctx.transport = null;
+      return "skipped";
+    }
     const fbValidation = validateProviderReady(fb.providerName, fb.provider, getEnv());
     if (!fbValidation.ok) {
       logError("main", `No transport.json, no backup, and .env emergency model also invalid: ${fbValidation.reason}`);
@@ -125,15 +149,28 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     }, 10_000);
   } else {
     // transport.json valid — walk primary + fb chain
-    const validation = validateProviderReady(prof!.providerName, prof!.provider, getEnv());
-    if (validation.ok) {
+    // #1415: validate model/provider compatibility before provider readiness
+    let compat = validateModelProviderPair(prof!.model, prof!.providerName);
+    if (!compat.ok) {
+      logDebug("main", `Model incompatible: ${prof!.model} — ${compat.reason}`);
+      logWarn("main", `${prof!.model}: ${compat.reason} — trying fallbacks`);
+    }
+    const validation = compat.ok ? validateProviderReady(prof!.providerName, prof!.provider, getEnv()) : null;
+    if (validation?.ok) {
       logDebug("main", `Model init OK: ${prof!.model} via ${prof!.providerName}`);
       resolved = prof;
     } else {
-      logDebug("main", `Model init failed: ${prof!.model} — ${validation.reason}`);
-      logWarn("main", `${prof!.model}: ${validation.reason} — trying fallbacks`);
+      if (!compat.ok) logDebug("main", `${prof!.model}: skipping (incompatible pair)`);
+      else if (validation) logDebug("main", `Model init failed: ${prof!.model} — ${validation.reason}`);
+      if (!compat.ok) logWarn("main", `${prof!.model}: incompatible with ${prof!.providerName} — trying fallbacks`);
+      else logWarn("main", `${prof!.model}: ${validation!.reason} — trying fallbacks`);
       // Walk fallback chain
       for (const fb of prof!.fallbacks) {
+        const fbCompat = validateModelProviderPair(fb.model, fb.provider);
+        if (!fbCompat.ok) {
+          logDebug("main", `Fallback incompatible: ${fb.model} — ${fbCompat.reason}`);
+          continue;
+        }
         const fbResolved = resolveAgent("_fb", { ...tc!, agents: { ...tc!.agents, _fb: { model: fb.model, provider: fb.provider } } });
         if (!fbResolved) continue;
         const fbVal = validateProviderReady(fbResolved.providerName, fbResolved.provider, getEnv());
@@ -186,18 +223,32 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     const { FallbackPolicy } = await import("../components/transport/fallback-policy.js");
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
 
-    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number }> = [
-      { endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: resolved.model, maxContext: resolved.contextWindow },
-    ];
-    for (const fb of resolved.fallbacks) {
+    // #1418: build the Main candidate chain through the shared pure builder so
+    // every candidate carries its complete identity tuple (provider/endpoint/
+    // apiKey/maxContext). Last-successful-Main is not relevant at boot.
+    const fallbackCandidates: ModelCandidate[] = (resolved.fallbacks ?? []).map(fb => {
       const fbResolved = tc ? resolveAgent("_fallback", { ...tc, agents: { ...tc.agents, _fallback: { model: fb.model, provider: fb.provider } } }) : null;
-      candidates.push({
-        endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint!,
-        apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
+      return {
         model: fb.model,
+        provider: fbResolved?.providerName ?? fb.provider,
+        endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint ?? "http://localhost:11434/v1",
+        apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
         maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
-      });
-    }
+        source: "agent_fallback",
+      };
+    });
+    const candidates = buildCandidates({
+      role: "main",
+      configured: {
+        model: resolved.model,
+        provider: resolved.providerName,
+        endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
+        apiKey,
+        maxContext: resolved.contextWindow,
+        source: "primary",
+      },
+      fallbacks: fallbackCandidates,
+    });
 
     if (!ctx.modelHealthRegistry) {
       ctx.modelHealthRegistry = new ModelHealthRegistry(tc?.healthPolicy);
@@ -213,6 +264,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     const policy = new FallbackPolicy(candidates, ctx.modelHealthRegistry);
 
     transport = new DirectApiTransport({
+      route: tc?.route,
+      provider: resolved.providerName,
       endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
       apiKey,
       model: resolved.model,
@@ -220,9 +273,13 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       maxOutput: resolved.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
       maxToolRounds: tc?.maxToolRounds ?? 25,
+      maxFallbackToolRounds: tc?.maxFallbackToolRounds ?? 5,
       apiFormat: resolved.provider.apiFormat,
+      useProviderLib: resolved.provider.useProviderLib,
       thinking: resolved.provider.thinking,
     }, policy);
+    // #1318: debug line showing the L1/L0 route decision at transport-construction time.
+    logDebug("boot", `DirectApiTransport: provider=${resolved.providerName} model=${resolved.model} useProviderLib=${resolved.provider.useProviderLib ?? false}`);
     logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {
     // Kill stale ACP processes from previous run (#921, #1012)
@@ -251,7 +308,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       if (killed) logDebug("main", `CWD-checked kill: ${killed} orphan(s)`);
     } catch { /* best effort */ }
     logInfo("main", `🔌 ACP transport (${resolved.provider.cli ?? "kiro-cli"}, model=${resolved.model})`);
-    transport = createAgentTransport("professor", {
+    transport = createAgentTransport("main", {
       cliPath: resolved.provider.cli ?? config.transport.agentCliPath,
       workingDir: config.transport.workingDir,
       agentCli: resolved.provider.cli ?? "kiro-cli",

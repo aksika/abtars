@@ -1,0 +1,13 @@
+{
+  "enabled": false,
+  "command": "pi",
+  "fixedArgs": [],
+  "allowedEnv": [],
+  "maxConcurrent": 1,
+  "maxWallClockMs": 1800000,
+  "abortGraceMs": 10000,
+  "projectTrust": "never",
+  "workspaceAliases": {},
+  "sessionStorageRoot": "",
+  "abmindPlugin": ""
+}

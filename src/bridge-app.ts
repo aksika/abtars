@@ -61,16 +61,21 @@ export class Bridge {
     await step("agent-api", () => this.ctx.agentApiServer?.stop());
     await step("dashboard", () => this.ctx.dashboardServer?.stop());
     await step("services", () => this.ctx.registry.stopAll());
+    await step("pi-executor", () => this.ctx.piExecutorService?.executor.interruptAll());
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
-    await step("runtime", () => this.ctx.runtime.shutdown());
+    await     step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", () => this.ctx.memory?.close());
     await step("transport", () => this.ctx.transport?.destroy());
+    await step("snapshot", () => { const { removeSnapshot } = require("./components/runtime-health-snapshot.js"); removeSnapshot(); });
     this.ctx.sessionManager.clearAll();
     if (this.ctx.mcpDaemonStarted) {
       await step("mcp-daemon", () => { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); });
     }
     const { flushUsage } = await import("./components/usage-tracker.js");
     flushUsage();
+    const { flushCacheTelemetry, pruneCacheTelemetryFile } = await import("./components/cache-telemetry.js");
+    flushCacheTelemetry();
+    pruneCacheTelemetryFile();
     clearTimeout(forceTimer);
     this._resolve?.(this._exitCode);
   }
@@ -120,10 +125,10 @@ export async function startBridge(): Promise<number> {
     }
   }
 
-  // Boot-time doctor fix — chmod secrets, fix dirs (#1180)
+  // Boot-time doctor fix — chmod secrets, fix dirs (#1180, #1439)
   try {
-    const { runFixes } = await import("./cli/commands/doctor-probes.js");
-    await runFixes();
+    const { runBootRepairs } = await import("./cli/commands/doctor-fixes.js");
+    runBootRepairs();
   } catch { /* non-fatal */ }
 
   // Populate version/commit from manifest.json
@@ -133,7 +138,18 @@ export async function startBridge(): Promise<number> {
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
   const startReason = process.env["ABTARS_START_REASON"] ?? "unknown";
-  initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2), startReason });
+  const startedAt = Date.now();
+  ctx.startedAt = startedAt;
+  initBridgeLock({ pid: process.pid, startedAt, version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2), startReason });
+
+  // Initialize runtime health snapshot (#1439). Must reuse the exact same
+  // startedAt value written to bridge.lock above — the snapshot reader
+  // trusts a snapshot only when its bridge.pid/startedAt match bridge.lock
+  // exactly, and two independent Date.now() calls could differ by the
+  // milliseconds between statements, permanently marking every snapshot
+  // "wrong-process" for the life of the process.
+  const { initSnapshot } = await import("./components/runtime-health-snapshot.js");
+  initSnapshot(process.pid, startedAt);
 
   const bridge = new Bridge(ctx);
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;

@@ -2,10 +2,20 @@
 
 export type Platform = "telegram" | "discord" | (string & {});
 
+/** #1397: Internal delivery correlation — not serialized to external platforms. */
+export interface DeliveryCorrelation {
+  sessionId: string;
+  executionId: string;
+  kind: "final_assistant" | "system" | "tool_status" | "error";
+}
+
 export interface SendOpts {
   threadId?: string;
   parseMode?: string;
   reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+  /** #1397: Internal execution correlation for stream-suppression decisions.
+   *  Set only on final assistant delivery. Other adapters ignore it. */
+  deliveryCorrelation?: DeliveryCorrelation;
 }
 
 /** Normalized inbound message from any platform. */
@@ -24,6 +34,8 @@ export interface InboundMessage {
   voiceFileId?: string;      // platform file ID for voice download
   mediaPath?: string;         // path to saved media file on disk
   rawPlatformData?: unknown;
+  /** #1336: Internal routing hint — only TuiSocketAdapter sets it. Untrusted routing request. */
+  targetSessionId?: string;
 }
 
 /** What a platform adapter can do — pipeline checks these. */

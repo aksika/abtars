@@ -90,6 +90,22 @@ which abtars
 abtars --version
 ```
 
+### `abtars` resolves to a stale version after update
+
+After `abtars update`, the CLI wrapper is refreshed at `~/.local/bin/abtars`. But a previous `npm install -g abtars` may still be on your PATH and shadow the updated wrapper.
+
+Check where the shell resolves abtars:
+```bash
+which abtars
+```
+
+If it shows `~/.npm-global/bin/abtars` or any path outside `~/.local/bin/` and `~/.abtars/`, remove the stale global install:
+```bash
+npm uninstall -g abtars && hash -r && which abtars
+```
+
+Should now resolve to `~/.local/bin/abtars` — the wrapper script that always points at the current release.
+
 ### `abtars: Permission denied`
 
 The npm symlink lost its execute bit:

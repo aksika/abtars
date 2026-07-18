@@ -40,11 +40,21 @@ Step 3 automatically clones source, builds, deploys, and starts the bridge (daem
 
 ### System dependencies (optional)
 
+`abtars deps` manages two distinct kinds of optional dependency:
+
+- **Npm packages** (`browser`, `pdf`, `youtube`, `image`, `native`) — auto-installed:
+  `abtars deps install <name>` (or `all`) downloads and installs them for you.
+- **System binaries** (`ollama`, `bwrap`, `lightpanda`) — installed manually. abtars
+  does **not** run system installers or `sudo` for you. `abtars deps install ollama`
+  prints the exact upstream command to run yourself; it does not install the binary.
+
 ```bash
-abtars deps list    # shows what's available + install hints
+abtars deps list          # shows both kinds + install hints
+abtars deps install all   # installs the npm packages
+abtars deps install ollama # prints ollama's manual install command (does not run it)
 ```
 
-| Dependency | What for | Install |
+| System binary | What for | Install manually |
 |-----------|----------|---------|
 | ollama | Local embeddings + local models | `curl -fsSL https://ollama.ai/install.sh \| sh` |
 | bwrap | Sandbox (Linux) | `apt install bubblewrap` |
@@ -107,6 +117,8 @@ abtars update    # pulls latest source, rebuilds, deploys, restarts (daemon mode
 ```
 
 In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
+
+If `abtars` still behaves like the old version after updating, a stale `npm install -g abtars` may be shadowing the updated wrapper. See [troubleshooting](./troubleshooting.md#abtars-resolves-to-a-stale-version-after-update).
 
 ## What gets created
 

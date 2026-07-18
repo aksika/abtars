@@ -54,10 +54,66 @@ describe("lazyRequire", { timeout: 30000 }, () => {
 describe("OPTIONAL_DEPS registry", () => {
   it("has expected entries", async () => {
     const { OPTIONAL_DEPS } = await import("./lazy-require.js");
-    expect(OPTIONAL_DEPS.browser).toBeDefined();
     expect(OPTIONAL_DEPS.pdf).toBeDefined();
     expect(OPTIONAL_DEPS.youtube).toBeDefined();
     expect(OPTIONAL_DEPS.image).toBeDefined();
-    expect(OPTIONAL_DEPS.browser.packages).toContain("cloakbrowser");
+  });
+
+  it("does not include Pi groups (now a single external distribution)", async () => {
+    const { OPTIONAL_DEPS } = await import("./lazy-require.js");
+    expect(OPTIONAL_DEPS.provider).toBeUndefined();
+    expect(OPTIONAL_DEPS.tui).toBeUndefined();
+  });
+});
+
+// #1311: ESM can't import a directory path — lazy-require resolves the package's main
+// entry from package.json before importing. The tests below pin each branch of
+// resolvePackageEntry without depending on a real package install.
+describe("resolvePackageEntry (package.json → entry file)", () => {
+  it('honors exports["."]["import"] (ESM, conditional)', async () => {
+    const { lazyRequire } = await import("./lazy-require.js");
+    // Stage a fixture ESM package under the mocked lib path.
+    const staged = join(tmpDir, ".local", "lib", "node_modules", "fixture-exi");
+    mkdirSync(join(staged, "dist"), { recursive: true });
+    writeFileSync(join(staged, "package.json"), JSON.stringify({
+      type: "module",
+      exports: { ".": { "import": "./dist/index.js" } },
+    }));
+    writeFileSync(join(staged, "dist", "index.js"), "export const marker = 'ok-from-exports-import';");
+    const mod = await lazyRequire("fixture-exi") as { marker?: string };
+    expect(mod.marker).toBe("ok-from-exports-import");
+  });
+
+  it("resolves a subpath import via exports wildcard (./api/* → ./dist/api/*.js)", async () => {
+    const { lazyRequire } = await import("./lazy-require.js");
+    // Stage a fixture that mirrors pi-ai's exports: { "./api/*": { "import": "./dist/api/*.js" } }
+    const staged = join(tmpDir, ".local", "lib", "node_modules", "fixture-sub");
+    mkdirSync(join(staged, "dist", "api"), { recursive: true });
+    writeFileSync(join(staged, "package.json"), JSON.stringify({
+      type: "module",
+      exports: {
+        ".": { "import": "./dist/index.js" },
+        "./api/*": { "import": "./dist/api/*.js" },
+      },
+    }));
+    writeFileSync(join(staged, "dist", "index.js"), "export const root = 'ok';");
+    writeFileSync(join(staged, "dist", "api", "openai-completions.js"), "export const family = 'openai-completions';");
+    const mod = await lazyRequire("fixture-sub/api/openai-completions") as { family?: string };
+    expect(mod.family).toBe("openai-completions");
+  });
+
+  it("resolves a scoped subpath import (@scope/name/sub)", async () => {
+    const { lazyRequire } = await import("./lazy-require.js");
+    // Stage a scoped fixture like @earendil-works/pi-ai/api/openai-completions
+    const staged = join(tmpDir, ".local", "lib", "node_modules", "@earendil-works", "fixture-scope");
+    mkdirSync(join(staged, "dist"), { recursive: true });
+    writeFileSync(join(staged, "package.json"), JSON.stringify({
+      name: "@earendil-works/fixture-scope",
+      type: "module",
+      exports: { ".": { "import": "./dist/index.js" } },
+    }));
+    writeFileSync(join(staged, "dist", "index.js"), "export const tag = 'scoped-root';");
+    const mod = await lazyRequire("@earendil-works/fixture-scope") as { tag?: string };
+    expect(mod.tag).toBe("scoped-root");
   });
 });

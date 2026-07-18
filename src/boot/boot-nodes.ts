@@ -15,8 +15,10 @@ import { phasePlatformsConnect } from "./phase-platforms-connect.js";
 import { phaseCapabilities } from "./phase-capabilities.js";
 import { phaseHeartbeat } from "./phase-heartbeat.js";
 import { phaseSleep } from "./phase-sleep.js";
+import { phasePower } from "./phase-power.js";
 import { phaseDashboard } from "./phase-dashboard.js";
 import { phaseAgentApi } from "./phase-agent-api.js";
+import { phasePiExecutor } from "./phase-pi-executor.js";
 
 // phaseShutdown is special (takes bridge arg) — wired separately in startBridge()
 
@@ -40,6 +42,8 @@ export const BOOT_NODES: BootNode[] = [
   { name: "capabilities", deps: ["pipelineDeps"],             optionalDeps: ["memory"], optional: true,  run: phaseCapabilities },
   { name: "memoryIpc",    deps: ["memory", "transport"],     optional: true,  run: phaseMemoryIpc },
   { name: "sleep",        deps: ["memory", "heartbeat"],     optional: true,  run: phaseSleep },
+  { name: "power",        deps: ["heartbeat"],              optionalDeps: ["sleep"], optional: true, run: phasePower },
   { name: "dashboard",    deps: ["heartbeat"],               optionalDeps: ["transport"], optional: true, run: phaseDashboard },
   { name: "agentApi",     deps: ["pipelineDeps"],            optional: true,  run: phaseAgentApi },
+  { name: "piExecutor",   deps: ["pipelineDeps", "heartbeat"], optionalDeps: ["memory"], optional: true, run: phasePiExecutor },
 ];

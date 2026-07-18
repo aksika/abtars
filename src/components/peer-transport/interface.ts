@@ -1,9 +1,13 @@
-/**
- * peer-transport/interface.ts — PeerTransport abstraction (#911).
- *
- * Unified interface for all peer-to-peer communication. Initial impl: HTTP.
- * Future: libp2p, GossipSub, etc. — swap implementation, same API.
- */
+import type {
+  RemotePiEventV1,
+  RemotePiEventsListRequestV1,
+  RemotePiEventsListResponseV1,
+  RemotePiEventsAckRequestV1,
+  RemotePiEventsAckResponseV1,
+  RemotePiControlRequestV1,
+  RemotePiControlResponseV1,
+} from "./remote-pi-types.js";
+import type { PeerHelpRequestV1, PeerHelpResponseV1, PeerHelpStatusRequestV1, PeerHelpStatusV1, PeerHelpWithdrawV1 } from "../peer-help/contract.js";
 
 export interface PeerHealth {
   name: string;
@@ -23,40 +27,26 @@ export interface PeerCard {
 }
 
 export interface PeerMessage {
-  type: "task" | "check" | "terminate" | "ask";
+  type: "ask" | "callback" | "channel";
   payload: Record<string, unknown>;
 }
 
-export interface TaskResult {
-  taskId: number;
-  status: "queued" | "running" | "done" | "failed";
-  result?: string;
-  error?: string;
-  tokensUsed?: number;
+export interface PeerHelpTransport {
+  askHelp(peer: string, request: PeerHelpRequestV1): Promise<PeerHelpResponseV1>;
+  getHelpStatus(peer: string, request: PeerHelpStatusRequestV1): Promise<PeerHelpStatusV1>;
+  withdrawHelp(peer: string, request: PeerHelpWithdrawV1): Promise<{ acknowledged: boolean; owner_action?: string }>;
 }
 
-export interface PeerTransport {
-  /** Send a message to a specific peer. */
+export interface PeerTransport extends PeerHelpTransport {
   send(peer: string, message: PeerMessage): Promise<unknown>;
-
-  /** Broadcast a message to all known peers. */
   broadcast(message: PeerMessage): Promise<void>;
-
-  /** Discover available peers (static from peers.json for now). */
   discover(): PeerCard[];
-
-  /** Register handler for incoming peer messages. */
   onMessage(handler: (from: string, message: PeerMessage) => void): void;
 
-  /** Delegate a task to a remote peer. Returns remote cardId. */
-  delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }> }): Promise<{ taskId: number; remoteSessionId?: string }>;
-
-  /** Check status of a remote task. */
-  checkTask(peer: string, taskId: number): Promise<TaskResult>;
-
-  /** Terminate a remote task. */
-  terminateTask(peer: string, taskId: number): Promise<void>;
-
-  /** #949: Push a channel message to a remote peer. */
   pushChannelMessage(peer: string, cardId: number, from: string, message: string, createdAt: string): Promise<void>;
+
+  pushLifecycleEvent(peer: string, event: RemotePiEventV1): Promise<void>;
+  listRemotePiEvents(peer: string, request: RemotePiEventsListRequestV1): Promise<RemotePiEventsListResponseV1>;
+  acknowledgeRemotePiEvents(peer: string, request: RemotePiEventsAckRequestV1): Promise<RemotePiEventsAckResponseV1>;
+  sendRemotePiControl(peer: string, request: RemotePiControlRequestV1): Promise<RemotePiControlResponseV1>;
 }

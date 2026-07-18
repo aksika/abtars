@@ -40,19 +40,19 @@ Check `~/.abtars/config/peers.json` for configured peer names. If no peers confi
 
 ## If peer_ask fails (connection refused / timeout)
 
-The peer may be behind a firewall that blocks inbound TCP. Use the UDP wake-up:
+The peer may be behind a firewall that blocks inbound TCP. Use the doorbell:
 
 ```
-peer_wakeup(peer_name="<peer>")
+peer_doorbell(peer_name="<peer>")
 ```
 
-This sends a DNS-disguised UDP packet that tells the peer to call YOU back. Flow:
+This sends a signed UDP doorbell on port 5353 that tells the peer to establish a direct WSS connection. Flow:
 1. `peer_ask("<peer>", "your question")` → fails (ECONNREFUSED)
-2. `peer_wakeup("<peer>")` → sends mDNS wake-up signal
-3. Peer receives wake-up → initiates outbound callback to you
-4. You receive the callback and can respond
+2. `peer_doorbell("<peer>")` → sends signed doorbell query
+3. Peer receives doorbell → initiates outbound WSS connect to you
+4. WSS route established — retry `peer_ask`
 
-**Always try `peer_ask` first.** Only use `peer_wakeup` if direct call fails. The wake-up is a doorbell — it triggers a callback, not a direct answer to your question.
+**Always try `peer_ask` first.** Only use `peer_doorbell` if direct call fails. The doorbell requests a WSS refresh, not a direct answer.
 
 ## Authentication (CRITICAL)
 

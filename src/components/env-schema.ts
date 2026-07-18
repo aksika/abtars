@@ -16,7 +16,7 @@ import { logInfo, logWarn } from "./logger.js";
 
 // ── Schema definition ───────────────────────────────────────────────────────
 
-type EnvType = "string" | "int" | "bool" | "time";
+type EnvType = "string" | "int" | "bool";
 
 interface EnvVarDef {
   env: string;
@@ -92,10 +92,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "COMPACTION_LLM_ENABLED", type: "bool", default: "false", description: "LLM refinement for middle-tier rendering (#348 Phase 2)" },
 
   // ── Sleep ──
-  { env: "BED_TIME", type: "time", default: "0:30", description: "Daily sleep trigger time (H:MM or HH:MM)" },
-  { env: "WAKE_TIME", type: "time", default: "7:00", description: "Wake time for platform detection" },
-  { env: "BED_QUIET_MIN", type: "int", default: "7", description: "Quiet minutes before sleep (rounds up to nearest heartbeat cycle)" },
-  { env: "HARDWARE_SLEEP_AFTER_DREAMY", type: "bool", default: "false", description: "Enable hardware sleep after Dreamy completes" },
   { env: "SLEEP_MODEL", type: "string", description: "Model override for Dreamy sleep agent" },
   { env: "SLEEP_QUALITY", type: "string", description: "Sleep quality override" },
 
@@ -109,19 +105,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "SELFHEAL_ENABLED", type: "bool", default: "false", description: "Enable self-healer task" },
 
   // ── Browser ──
-  { env: "BROWSER_ENGINE", type: "string", default: "cloakbrowser", description: "Browser engine: cloakbrowser" },
-  { env: "BROWSER_HEADED", type: "bool", default: "false", description: "Run browser in headed mode" },
-  { env: "BROWSER_NO_SANDBOX", type: "bool", default: "false", description: "Disable browser sandbox" },
-  { env: "BROWSER_CHANNEL", type: "string", description: "Browser channel (e.g. chrome)" },
-  { env: "BROWSER_DOCKER", type: "bool", default: "false", description: "Use Docker for browser" },
-  { env: "BROWSER_IDLE_STOP_MIN", type: "int", default: "10", description: "Minutes idle before stopping browser container" },
-  { env: "BROWSER_ALLOWED_DOMAINS", type: "string", default: "", description: "Comma-separated allowed domains" },
-  { env: "BROWSER_SOCKET_PATH", type: "string", default: "/run/browser/browser.sock", description: "Browser IPC socket path" },
-  { env: "BROWSER_MAX_SESSIONS", type: "int", default: "3", description: "Max concurrent browser sessions" },
-  { env: "BROWSER_SESSION_TIMEOUT_SEC", type: "int", default: "300", description: "Browser session timeout (seconds)" },
-  { env: "WEB_SCRAPE_USER_AGENT", type: "string", description: "User agent for web scraping" },
-  { env: "WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_SEC", type: "int", default: "30", description: "Playwright page timeout (seconds)" },
-  { env: "SSRF_CHECK", type: "bool", default: "true", description: "Enable SSRF protection for browser" },
   { env: "BROWSING_AGENT", type: "string", description: "Model override for browsing agent" },
 
   // ── Misc ──
@@ -138,6 +121,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "TELEGRAM_ENABLED", type: "bool", default: "", description: "Enable Telegram platform (fallback: token presence)" },
   { env: "DISCORD_ENABLED", type: "bool", default: "", description: "Enable Discord platform (fallback: token presence)" },
   { env: "IRC_ENABLED", type: "bool", default: "", description: "Enable IRC platform (fallback: irc.json presence)" },
+  { env: "TUI_ENABLED", type: "bool", default: "true", description: "Enable TUI socket server at ~/.abtars/tui.sock (#1315)" },
   { env: "ENABLE_DASHBOARD", type: "bool", default: "false", description: "Enable web dashboard (exposes port)" },
   { env: "ENABLE_AGENT_API", type: "bool", default: "false", description: "Enable A2A agent API (exposes port)" },
   { env: "ENABLE_ASYNC_DELEGATION", type: "bool", default: "false", description: "Enable async session delegation tools (spawn/check/terminate)" },
@@ -152,9 +136,6 @@ const SCHEMA: readonly EnvVarDef[] = [
 ] as const;
 
 // ── Parsed config type ──────────────────────────────────────────────────────
-
-/** Parsed time value from "H:MM" or "HH:MM" format. */
-export interface TimeValue { hour: number; minute: number; raw: string; }
 
 export interface EnvConfig {
   // Core
@@ -210,11 +191,7 @@ export interface EnvConfig {
   activeMemory: boolean;
   primingModelTopics: boolean;
 
-  // Sleep
-  bedTime: TimeValue;
-  wakeTime: TimeValue;
-  bedQuietMin: number;
-  hardwareSleepAfterDreamy: boolean;
+  // Sleep (scheduling is owned by tasks.json #1321; only model/quality remain)
   sleepModel: string | undefined;
   sleepQuality: string | undefined;
 
@@ -228,19 +205,6 @@ export interface EnvConfig {
   selfhealEnabled: boolean;
 
   // Browser
-  browserEngine: string;
-  browserHeaded: boolean;
-  browserNoSandbox: boolean;
-  browserChannel: string | undefined;
-  browserDocker: boolean;
-  browserIdleStopMin: number;
-  browserAllowedDomains: string;
-  browserSocketPath: string;
-  browserMaxSessions: number;
-  browserSessionTimeoutMs: number;
-  webScrapeUserAgent: string | undefined;
-  webScrapePlaywrightTimeoutMs: number;
-  ssrfCheck: boolean;
   browsingAgent: string | undefined;
 
   // Misc
@@ -264,16 +228,6 @@ export interface EnvConfig {
 }
 
 // ── Parsing helpers ─────────────────────────────────────────────────────────
-
-function parseTime(raw: string, varName: string): TimeValue {
-  const parts = raw.split(":");
-  const hour = parseInt(parts[0] ?? "", 10);
-  const minute = parseInt(parts[1] ?? "0", 10);
-  if (isNaN(hour) || isNaN(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-    throw new Error(`Invalid ${varName}: "${raw}" — expected H:MM or HH:MM (e.g. "0:30", "14:00")`);
-  }
-  return { hour, minute, raw };
-}
 
 function parseIntSafe(raw: string, varName: string): number {
   const n = parseInt(raw, 10);
@@ -386,10 +340,6 @@ export function initEnv(): Readonly<EnvConfig> {
     memory: readOr("MEMORY", "auto"),
     primingModelTopics: read("PRIMING_MODEL_TOPICS") !== "false",
 
-    bedTime: parseTime(readOr("BED_TIME", "0:30"), "BED_TIME"),
-    wakeTime: parseTime(readOr("WAKE_TIME", "7:00"), "WAKE_TIME"),
-    bedQuietMin: parseIntSafe(readOr("BED_QUIET_MIN", "7"), "BED_QUIET_MIN"),
-    hardwareSleepAfterDreamy: parseBool(readOr("HARDWARE_SLEEP_AFTER_DREAMY", "false")),
     sleepModel: read("SLEEP_MODEL"),
     sleepQuality: read("SLEEP_QUALITY"),
 
@@ -400,19 +350,6 @@ export function initEnv(): Readonly<EnvConfig> {
 
     selfhealEnabled: parseBool(readOr("SELFHEAL_ENABLED", "false")),
 
-    browserEngine: readOr("BROWSER_ENGINE", "cloakbrowser"),
-    browserHeaded: parseBool(readOr("BROWSER_HEADED", "false")),
-    browserNoSandbox: parseBool(readOr("BROWSER_NO_SANDBOX", "false")),
-    browserChannel: read("BROWSER_CHANNEL"),
-    browserDocker: parseBool(readOr("BROWSER_DOCKER", "false")),
-    browserIdleStopMin: parseIntSafe(readOr("BROWSER_IDLE_STOP_MIN", "10"), "BROWSER_IDLE_STOP_MIN"),
-    browserAllowedDomains: readOr("BROWSER_ALLOWED_DOMAINS", ""),
-    browserSocketPath: readOr("BROWSER_SOCKET_PATH", "/run/browser/browser.sock"),
-    browserMaxSessions: parseIntSafe(readOr("BROWSER_MAX_SESSIONS", "3"), "BROWSER_MAX_SESSIONS"),
-    browserSessionTimeoutMs: parseIntSafe(readOr("BROWSER_SESSION_TIMEOUT_SEC", "300"), "BROWSER_SESSION_TIMEOUT_SEC") * 1000,
-    webScrapeUserAgent: read("WEB_SCRAPE_USER_AGENT"),
-    webScrapePlaywrightTimeoutMs: parseIntSafe(readOr("WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_SEC", "30"), "WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_SEC") * 1000,
-    ssrfCheck: read("SSRF_CHECK") !== "0",
     browsingAgent: read("BROWSING_AGENT"),
 
     disabledCapabilities: readOr("DISABLED_CAPABILITIES", ""),

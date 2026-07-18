@@ -36,6 +36,11 @@ export function allocateSession(
     busy: false, queue: [], fullMode: false, pendingStart: false,
     seen: false, compacting: false, ctxWarned: false, compactFailures: 0,
     primingTerms: [], completions: [],
+    // #1248: Bounded /wait FIFO
+    pendingWait: [],
+    // #1332/#1361: Steering queue and acceptance gate
+    instructionQueue: [],
+    steeringAccepting: false,
   };
   sessions.set(session.id, session);
   pushLog(session, "created");
@@ -75,6 +80,24 @@ export function createSubSession(
   return allocateSession(sessions, nextIndex, type, userId, platform, chatId, { active: false, motherId: active?.id });
 }
 
+/**
+ * #1330: Find a session addressable by the owner of (userId, platform).
+ * All indexed lifecycle commands (switch, end, kill, pause, resume) must
+ * select a target within the caller's platform scope. A globally visible
+ * index does not authorize another platform to mutate or attach to a session.
+ */
+function findAddressableSession(
+  sessions: Map<string, ManagedSession>,
+  userId: string, platform: string, index: number,
+): ManagedSession | undefined {
+  return [...sessions.values()].find(s =>
+    s.shortIndex === index &&
+    s.userId === userId &&
+    s.platform === platform &&
+    s.status !== "ended",
+  );
+}
+
 export function isHollow(session: ManagedSession): boolean { return !!session.peer; }
 
 export function createHollowSession(
@@ -93,70 +116,78 @@ export function createHollowSession(
 }
 
 export function switchSession(sessions: Map<string, ManagedSession>, userId: string, platform: string, index: number): ManagedSession | string {
-  const target = [...sessions.values()].find(s => s.shortIndex === index && s.status !== "ended" && s.userId === userId);
-  if (!target) return `Session #${index} not found or not switchable.`;
+  const target = findAddressableSession(sessions, userId, platform, index);
+  if (!target) return `Session #${index} not found on ${platform}.`;
   const cur = getActiveSession(sessions, userId, platform);
-  if (cur) cur.active = false;
+  if (cur && cur.id !== target.id) cur.active = false;
   target.active = true;
   return target;
+}
+
+/**
+ * Post-termination reconciliation — shared by endSession and killSession.
+ * Scope is the target's (userId, platform) only. Maintains exactly one local
+ * Main, activates a replacement when the target was active or no local active
+ * remains, and allocates a new Main only when none exists locally.
+ */
+function reconcileAfterTermination(
+  sessions: Map<string, ManagedSession>,
+  nextIndex: number,
+  userId: string,
+  platform: string,
+  chatId: number,
+  wasActive: boolean,
+): number {
+  const localLive = [...sessions.values()].filter(
+    s => s.userId === userId && s.platform === platform && s.status !== "ended",
+  );
+  const localActive = localLive.find(s => s.active);
+  let localMain = localLive.find(s => sessionType(s) === "A");
+
+  if (!localMain) {
+    const replacementActive = wasActive || !localActive;
+    const result = allocateSession(sessions, nextIndex, "A", userId, platform, chatId, { active: replacementActive });
+    nextIndex = result.nextIndex;
+  } else if ((wasActive || !localActive) && !localMain.active) {
+    localMain.active = true;
+  }
+
+  return nextIndex;
 }
 
 export function endSession(sessions: Map<string, ManagedSession>, nextIndex: number, userId: string, platform: string, index?: number): { ended: ManagedSession; nextIndex: number } | string {
   const targetIdx = index ?? getActiveSession(sessions, userId, platform)?.shortIndex;
   if (!targetIdx) return `No active session found.`;
-  const target = [...sessions.values()].find(s => s.shortIndex === targetIdx && s.status !== "ended" && s.userId === userId);
-  if (!target) return `Session #${targetIdx} not found.`;
+  const target = findAddressableSession(sessions, userId, platform, targetIdx);
+  if (!target) return `Session #${targetIdx} not found on ${platform}.`;
 
-  const aliveMains = [...sessions.values()].filter(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
-
+  const wasActive = target.active;
   target.status = "ended";
   target.active = false;
   pushLog(target, "ended");
 
-  // If ended the last Main, create a replacement
-  if (sessionType(target) === "A" && aliveMains.length <= 1) {
-    const result = allocateSession(sessions, nextIndex, "A", userId, platform, target.chatId, { active: true });
-    return { ended: target, nextIndex: result.nextIndex };
-  }
-
-  // If ended the active session, activate first available Main
-  if (index === undefined || target.active) {
-    const main = [...sessions.values()].find(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
-    if (main) main.active = true;
-  }
-
+  nextIndex = reconcileAfterTermination(sessions, nextIndex, userId, platform, target.chatId, wasActive);
   return { ended: target, nextIndex };
 }
 
 export function killSession(sessions: Map<string, ManagedSession>, nextIndex: number, userId: string, platform: string, index: number): { killed: ManagedSession; nextIndex: number } | string {
-  const target = [...sessions.values()].find(s => s.shortIndex === index && s.status !== "ended" && s.userId === userId);
-  if (!target) return `Session #${index} not found.`;
+  const target = findAddressableSession(sessions, userId, platform, index);
+  if (!target) return `Session #${index} not found on ${platform}.`;
 
+  const wasActive = target.active;
   target.status = "ended";
   target.active = false;
   pushLog(target, "killed");
 
-  // If killed a Main and it was the last, create replacement
-  const aliveMains = [...sessions.values()].filter(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
-  if (sessionType(target) === "A" && aliveMains.length === 0) {
-    const result = allocateSession(sessions, nextIndex, "A", userId, platform, target.chatId, { active: true });
-    return { killed: target, nextIndex: result.nextIndex };
-  }
-
-  // If killed the active, activate a Main
-  if (!getActiveSession(sessions, userId, platform)) {
-    const main = [...sessions.values()].find(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
-    if (main) main.active = true;
-  }
-
+  nextIndex = reconcileAfterTermination(sessions, nextIndex, userId, platform, target.chatId, wasActive);
   return { killed: target, nextIndex };
 }
 
 export function pauseSession(sessions: Map<string, ManagedSession>, userId: string, platform: string, index?: number): ManagedSession | string {
   const targetIdx = index ?? getActiveSession(sessions, userId, platform)?.shortIndex;
   if (!targetIdx) return `No active session found.`;
-  const target = [...sessions.values()].find(s => s.shortIndex === targetIdx && s.status !== "ended" && s.userId === userId);
-  if (!target) return `Session #${targetIdx} not found.`;
+  const target = findAddressableSession(sessions, userId, platform, targetIdx);
+  if (!target) return `Session #${targetIdx} not found on ${platform}.`;
   if (target.status === "paused") return `Session #${targetIdx} is already paused.`;
   target.status = "paused";
   pushLog(target, "paused");
@@ -166,8 +197,8 @@ export function pauseSession(sessions: Map<string, ManagedSession>, userId: stri
 export function resumeSession(sessions: Map<string, ManagedSession>, userId: string, platform: string, index?: number): ManagedSession | string {
   const targetIdx = index ?? getActiveSession(sessions, userId, platform)?.shortIndex;
   if (!targetIdx) return `No active session found.`;
-  const target = [...sessions.values()].find(s => s.shortIndex === targetIdx && s.status !== "ended" && s.userId === userId);
-  if (!target) return `Session #${targetIdx} not found.`;
+  const target = findAddressableSession(sessions, userId, platform, targetIdx);
+  if (!target) return `Session #${targetIdx} not found on ${platform}.`;
   if (target.status !== "paused") return `Session #${targetIdx} is not paused.`;
   target.status = "ready";
   pushLog(target, "resumed");

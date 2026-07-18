@@ -54,7 +54,8 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
-import type { IKiroTransport } from "./kiro-transport.js";
+import type { IKiroTransport, RuntimeStatusSnapshot, PromptRequestContext } from "./kiro-transport.js";
+import type { OutputObserver } from "../../components/session-output-feed.js";
 import { logInfo, logDebug, logWarn, logError, logTrace } from "../logger.js";
 import { writeRestartReason } from "../transport/bridge-lock-transport.js";
 import { TransportStateMachine } from "./transport-state.js";
@@ -73,6 +74,8 @@ export class AcpTransport implements IKiroTransport {
   private client: ClientSideConnection | null = null;
   private sessions = new Map<string, string>(); // sessionKey → acpSessionId
   private responseChunks = new Map<string, string[]>(); // sessionId → chunks
+  /** #1338: acpSessionId → call-local output observer (removed in finally). */
+  private outputObservers = new Map<string, OutputObserver | undefined>();
   private lastContextPercent = -1;
   private static _rawMode = false;
   private _rawClient: import("./acp-raw-client.js").AcpRawClient | null = null;
@@ -326,7 +329,19 @@ export class AcpTransport implements IKiroTransport {
   private _pendingPrompt?: { sessionKey: string; message: string; resolve: (r: string) => void; reject: (e: Error) => void };
   private _processDeadRetries = 0;
 
-  async sendPrompt(sessionKey: string, message: string, _image?: { mime: string; base64: string }, _userId?: string): Promise<string> {
+  /**
+   * ACP rebuilds context from its own internal history (CLI-owned
+   * window), so `beforeMessageId` is unused here. `userId` is
+   * accepted for interface conformance with the chokepoint at
+   * `IKiroTransport.sendPrompt` but the ACP transport doesn't yet
+   * deliver it to tool execution.
+   */
+  async sendPrompt(
+    sessionKey: string,
+    message: string,
+    _image?: { mime: string; base64: string },
+    _context?: PromptRequestContext,
+  ): Promise<string> {
     if (!this.client && !(AcpTransport._rawMode && this._rawClient?.alive)) {
       logWarn(this.tag, "ACP client dead — reinitializing");
       await Promise.race([
@@ -379,6 +394,9 @@ export class AcpTransport implements IKiroTransport {
       this.responseChunks.delete(sessionId);
       return chunks.join("") || "(no response)";
     } finally {
+      // #1338: drop the observer association so late events from a completed
+      // call cannot publish into a newer attachment.
+      this.outputObservers.delete(sessionId);
       // AfterPrompt hook — observe-only
       const durationMs = Date.now() - this.promptStartedAt;
       // #832: metrics
@@ -532,8 +550,8 @@ export class AcpTransport implements IKiroTransport {
       clearTransportCache();
       const tc = loadTransport();
       if (tc) {
-        const prof = resolveAgent("professor", tc);
-        if (prof?.model) this.modelId = prof.model;
+        const main = resolveAgent("main", tc);
+        if (main?.model) this.modelId = main.model;
       }
     } catch (err) { logAndSwallow("acp_transport", "op", err); }
     this.destroy();
@@ -609,6 +627,10 @@ export class AcpTransport implements IKiroTransport {
 
   getModel(): string { return this.modelId ?? "unknown"; }
 
+  getRuntimeStatus(): RuntimeStatusSnapshot {
+    return { route: "acp", model: this.getModel(), contextPercent: this.contextPercent >= 0 ? this.contextPercent : undefined };
+  }
+
   private handleSessionUpdate(params: SessionNotification): void {
     const update = params.update;
     if (!("sessionUpdate" in update)) return;
@@ -631,6 +653,8 @@ export class AcpTransport implements IKiroTransport {
           if (this.onIntermediateResponse && text.trim()) {
             this.onIntermediateResponse(text);
           }
+          // #1338: mirror text deltas to the live output feed.
+          this.outputObservers.get(sessionId)?.onDelta?.({ kind: "text", text });
         } else if ((content as { type?: string })?.type === "thinking") {
           const text = (content as { text?: string }).text ?? "";
           const chunks = this.responseChunks.get(sessionId);
@@ -646,6 +670,8 @@ export class AcpTransport implements IKiroTransport {
         this.lastContentAt = Date.now();
         this.toolMeta = { title: update.title ?? "unknown", startedAt: Date.now() }; this.sm.toolStarted();
         this.onToolCallStart?.(update.title ?? "tool");
+        // #1338: mirror bounded tool-start name to the live output feed.
+        this.outputObservers.get(sessionId)?.onToolStart?.({ name: update.title ?? "tool" });
         break;
       }
       case "tool_call_update": {

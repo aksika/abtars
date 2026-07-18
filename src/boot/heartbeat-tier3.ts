@@ -9,7 +9,7 @@ import { getEnv } from "../components/env-schema.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
 import {
-  createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask,
+  createIdleCompactTask, createDbIntegrityTask,
   createKanbanCleanupTask, createUserSessionExpiryTask, createMetricsTask,
 } from "../components/heartbeat-tasks.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
@@ -18,10 +18,11 @@ import { logInfo, logWarn } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
 import { createCronCallback } from "./phase-pipeline-deps.js";
 import { createModelHealthTask } from "./heartbeat-model-health.js";
-import { readEnvWithDefault } from "../components/env.js";
 import type { BootCtx } from "./context.js";
 
 const TAG = "heartbeat";
+let _lastCapabilityHash = "";
+let _lastInventoryBroadcast = 0;
 
 export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   const { heartbeat, transport, cronQueue, memory, memoryConfig, config, pipelineDeps, capabilities } = ctx;
@@ -63,8 +64,12 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     },
   });
 
-  const SLEEP_HOUR = parseInt(readEnvWithDefault("BED_TIME", "2", "bedtime hour").split(":")[0] ?? "2", 10);
-  const SLEEP_MINUTE = parseInt(readEnvWithDefault("BED_TIME", "2", "bedtime hour").split(":")[1] ?? "0", 10);
+  // #1353: the in-cycle stuck-run guard was removed. abmind's runSleepCycle
+  // now owns its own wall-clock timeout internally (combined into the
+  // request signal) and its returned promise always settles — the host's
+  // `running` flag can no longer desync from an actually-stuck cycle without
+  // the host reading abmind's private lock-file format, which the contract
+  // forbids. See src/capabilities/sleep/index.ts.
 
   if (getEnv().ctxIdleCompactMin > 0) {
     heartbeat.registerTask(createIdleCompactTask({
@@ -73,20 +78,6 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
       isSleepActive: ctx.isSleepActive,
     }));
   }
-
-  heartbeat.registerTask(createAgeCheckTask({
-    memory,
-    bridgeLockPath: ctx.bridgeLockPath,
-    sleepAuditDir: ctx.sleepAuditDir,
-    sleepHour: SLEEP_HOUR,
-    sleepMinute: SLEEP_MINUTE,
-    isSleepActive: ctx.isSleepActive,
-    // doctorPath removed — runFixes() called directly from heartbeat-tasks.ts
-    startSleep: () => { ctx.sleepHandle?.spawn(); },
-    checkHwSleep: () => { ctx.sleepHandle?.checkHwSleep(); },
-    checkStaleSleep: () => { ctx.sleepHandle?.checkStale(); },
-    cronBusy: () => cronQueue.currentJob !== null || cronQueue.pending > 0,
-  }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
 
@@ -137,9 +128,13 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
 
   heartbeat.registerTask(createUserSessionExpiryTask());
 
-  // Reconciler
-  import("../components/reconciler.js").then(({ startReconciler }) => {
+  // Reconciler — boot scan + periodic resync (#1414)
+  import("../components/reconciler.js").then(({ startReconciler, scanActiveProjects }) => {
     startReconciler();
+    heartbeat.registerTask({
+      name: "reconciler-resync",
+      execute: async () => { scanActiveProjects(); },
+    });
   }).catch(err => logAndSwallow(TAG, "reconciler", err));
 
   // Spin tick
@@ -164,11 +159,28 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     }});
   }
 
-  // Gossip
-  import("../components/peer-transport/gossip.js").then(({ gossipBroadcast, setGossipInterval }) => {
-    setGossipInterval(heartbeat.intervalMs);
-    heartbeat.registerTask({ name: "gossip-health", execute: async () => { gossipBroadcast(); } });
-  }).catch(err => logAndSwallow(TAG, "gossip", err));
+  // #1434: Inventory anti-entropy — broadcast when capability hash changes
+  import("../components/peer-transport/index.js").then(async ({ getPeerTransport }) => {
+    const transport = getPeerTransport() as import("../components/peer-transport/http-transport.js").HttpTransport;
+    heartbeat.registerTask({ name: "peer-inventory", execute: async () => {
+      if (typeof transport.broadcastInventory !== "function") return;
+      try {
+        const { getInventoryCapabilityHash } = await import("../components/peer-transport/peer-inventory.js");
+        const { loadPeerConfig } = await import("../components/peer-config.js");
+        const { getLocalCapabilities } = await import("../components/peer-transport/peer-health.js");
+        const cfg = loadPeerConfig();
+        const caps = getLocalCapabilities();
+        const hash = getInventoryCapabilityHash(cfg.self.signingKey, cfg.self.name, process.env["npm_package_version"] ?? "0.0.0", caps, ["wss", "https"]);
+        const now = Date.now();
+        const INVENTORY_ANTIENTROPY_MS = 4 * 60 * 60 * 1000;
+        if (hash !== _lastCapabilityHash || (now - _lastInventoryBroadcast) > INVENTORY_ANTIENTROPY_MS) {
+          _lastCapabilityHash = hash;
+          _lastInventoryBroadcast = now;
+          transport.broadcastInventory();
+        }
+      } catch { /* best effort */ }
+    } });
+  }).catch(err => logAndSwallow(TAG, "peer-inventory", err));
 
   if (transport.healthCheck) {
     heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });

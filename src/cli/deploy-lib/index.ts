@@ -1,12 +1,12 @@
 /**
  * Deploy-lib: shared install/update/rollback primitives.
  *
- * Consumed by both `abmind` CLI (its own runtime at ~/.abmind) and by
- * `abtars` (via file:../abmind dependency, managing ~/.abtars).
+ * Consumed locally by abtars CLI commands. Mirrors the abmind deploy-lib
+ * protocol for #1388 shared native-dependency management.
  *
  * Entry points are the module files directly:
- *   import { resolveAbtarsHome } from 'abmind/deploy-lib/paths.js'
- *   import { readManifest, writeManifest } from 'abmind/deploy-lib/manifest.js'
+ *   import { resolveAbtarsHome } from './paths.js'
+ *   import { readManifest, writeManifest } from './manifest.js'
  *   etc.
  *
  * See abproject/docs/plans/158-deploy-rewrite.md for the full contract.

@@ -45,19 +45,20 @@ describe("deliverCard — deliver mode", () => {
     await deliverCard(card, deps);
     expect(deps.sendMessage).toHaveBeenCalledOnce();
     expect(deps.sendMessage.mock.calls[0]![1]).toContain("Test task");
+    expect(deps.sendMessage.mock.calls[0]![1]).toContain("ok");
     expect(deps.announce).not.toHaveBeenCalled();
     expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
   });
 
-  it("sends sendDocument + confirmation when result_path is set", async () => {
+  it("sends only the document (no confirmation text, no host path) when result_path is set", async () => {
     const card = makeCard({ delivery_mode: "deliver", result_path: "/tmp/report.md" });
     const deps = makeDeps();
     await deliverCard(card, deps);
     expect(deps.sendDocument).toHaveBeenCalledOnce();
     expect(deps.sendDocument.mock.calls[0]![1]).toBe("/tmp/report.md");
-    expect(deps.sendMessage).toHaveBeenCalledOnce();
-    expect(deps.sendMessage.mock.calls[0]![1]).toContain("File delivered");
+    expect(deps.sendMessage).not.toHaveBeenCalled();
     expect(deps.announce).not.toHaveBeenCalled();
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
   });
 
   it("marks card as delivered", async () => {
@@ -68,14 +69,14 @@ describe("deliverCard — deliver mode", () => {
 });
 
 describe("deliverCard — announce mode", () => {
-  it("calls announce() with [TASK COMPLETE] prompt, does NOT send direct message", async () => {
+  it("sends direct message with result_summary, does NOT call announce model", async () => {
     const card = makeCard({ delivery_mode: "announce", result_summary: "analysis complete" });
     const deps = makeDeps();
     await deliverCard(card, deps);
-    expect(deps.announce).toHaveBeenCalledOnce();
-    expect(deps.announce.mock.calls[0]![0]).toContain("[TASK COMPLETE]");
-    expect(deps.announce.mock.calls[0]![0]).toContain("Test task");
-    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(deps.sendMessage).toHaveBeenCalledOnce();
+    expect(deps.sendMessage.mock.calls[0]![1]).toContain("Test task");
+    expect(deps.sendMessage.mock.calls[0]![1]).toContain("analysis complete");
+    expect(deps.announce).not.toHaveBeenCalled();
     expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
   });
 });

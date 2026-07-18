@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const originalHome = process.env.HOME;
+const originalAbtarsHome = process.env.ABTARS_HOME;
 
 describe("browse-delivery", () => {
   let tmpDir: string;
@@ -14,6 +15,7 @@ describe("browse-delivery", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "browsechk-test-"));
     process.env.HOME = tmpDir;
+    delete process.env.ABTARS_HOME; // let abtarsHome() fall through to homedir()
     memDir = join(tmpDir, ".abtars", "workspace", "browse");
     mkdirSync(memDir, { recursive: true });
     mkdirSync(join(tmpDir, ".abtars", "state"), { recursive: true });
@@ -23,6 +25,8 @@ describe("browse-delivery", () => {
 
   afterEach(() => {
     process.env.HOME = originalHome;
+    if (originalAbtarsHome === undefined) delete process.env.ABTARS_HOME;
+    else process.env.ABTARS_HOME = originalAbtarsHome;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

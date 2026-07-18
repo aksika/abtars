@@ -58,6 +58,7 @@ describe('deploy-lib/paths', () => {
   it('packagePaths composes all sub-paths under home and releasesDir', () => {
     process.env['ABTARS_HOME'] = '/x/ab';
     process.env['ABTARS_RELEASES'] = '/x/releases';
+    delete process.env['ABTARS_BIN']; // use default resolution
     const p = packagePaths('abtars');
     expect(p.home).toBe('/x/ab');
     expect(p.config).toBe('/x/ab/config');

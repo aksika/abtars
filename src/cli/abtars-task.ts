@@ -1,51 +1,10 @@
-/**
- * abtars-task — schedule time-based reminders and tasks.
- *
- * Usage:
- *   abtars-task add --at "2026-03-16T08:00" --message "Remind about cookies" --chat-id 7773842843 --type reminder
- *   abtars-task list
- *   abtars-task remove <id>
- *
- * File: ~/.abtars/tasks/tasks.json
- */
-
 import { localISO } from "../utils/local-time.js";
-import { randomBytes } from "node:crypto";
-import { readEntries as dbReadEntries, readEntry, writeEntry, removeEntry as dbRemoveEntry } from "../components/tasks/task-store.js";
+import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "../components/tasks/task-store.js";
+import { readState, updateState, setAutoPaused, resetFailures, removeState } from "../components/tasks/task-state-store.js";
+import { recentRuns } from "../components/tasks/task-history-store.js";
+import { validateTaskId, type ScheduledTask, type SystemTaskAction, SYSTEM_ACTIONS } from "../components/tasks/task-types.js";
 
-
-export interface CronEntry {
-  id: string;
-  title?: string;
-  fireAt: number;
-  message: string;
-  chatId: number;
-  type: "reminder" | "task";
-  executor?: "agent" | "script" | "orc";
-  schedule?: string;
-  catchUp?: number;  // hours: max delay after fireAt before skipping to next. 0 = no catch-up (default).
-  priority?: "high" | "medium" | "low";
-  taskFile?: string;
-  targetUserId?: string; // #936: route task output to this user's session via spin.injectGreeting()
-  agent?: string; // #935: session type — professor, browsie, coding, dreamy
-  deliveryMethod?: "inline" | "report"; // #1118: inline = chat message, report = file document
-  deliveryMode?: "silent" | "deliver" | "announce"; // #1193: silent = no output, deliver = drop to chat, announce = agent speaks
-  maxToolRounds?: number; // #1283: per-task circuit breaker override (default: 25)
-  paused?: boolean;
-  maxRunsPerDay?: number;
-  consecutiveFails?: number;
-  agentFollowUp?: boolean;
-  agentMessage?: string;
-  fired: boolean;
-  createdAt: number;
-  lastRanAt?: number;
-  retryAfter?: number;
-  _prevFireAt?: number;
-  _retrying?: boolean;
-  history?: { ts: number; exitCode?: number }[];
-}
-
-export function readEntries(): CronEntry[] {
+export function readEntries(): ScheduledTask[] {
   return dbReadEntries();
 }
 
@@ -54,10 +13,9 @@ interface AddArgs {
   at?: string;
   message?: string;
   chatId?: string;
-  type?: string;
-  executor?: string;
+  kind?: string;
+  action?: string;
   schedule?: string;
-  title?: string;
   taskFile?: string;
   agent?: string;
   targetUserId?: string;
@@ -71,10 +29,9 @@ function parseAddArgs(args: string[]): AddArgs {
       case "--at": parsed.at = args[++i] ?? ""; break;
       case "--message": parsed.message = args[++i] ?? ""; break;
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
-      case "--type": parsed.type = args[++i] ?? ""; break;
-      case "--executor": parsed.executor = args[++i] ?? ""; break;
+      case "--kind": parsed.kind = args[++i] ?? ""; break;
+      case "--action": parsed.action = args[++i] ?? ""; break;
       case "--schedule": parsed.schedule = args[++i] ?? ""; break;
-      case "--title": parsed.title = args[++i] ?? ""; break;
       case "--task-file": parsed.taskFile = args[++i] ?? ""; break;
       case "--agent": parsed.agent = args[++i] ?? ""; break;
       case "--target-user": parsed.targetUserId = args[++i] ?? ""; break;
@@ -89,126 +46,141 @@ function add(args: string[]): void {
   const parsed = parseAddArgs(args);
   if (!parsed.at && !parsed.schedule) { console.log(JSON.stringify({ ok: false, error: "--at or --schedule is required" })); process.exit(1); }
   if (parsed.at && parsed.schedule) { console.log(JSON.stringify({ ok: false, error: "use --at (one-shot) or --schedule (recurring), not both" })); process.exit(1); }
-  if (!parsed.message) { console.log(JSON.stringify({ ok: false, error: "--message is required" })); process.exit(1); }
-  if (!parsed.title) { console.log(JSON.stringify({ ok: false, error: "--title is required" })); process.exit(1); }
-  if (!parsed.chatId) { console.log(JSON.stringify({ ok: false, error: "--chat-id is required" })); process.exit(1); }
+  const idResult = validateTaskId(parsed.id ?? "", dbReadEntries());
+  if (!idResult.ok) { console.log(JSON.stringify({ ok: false, error: idResult.error })); process.exit(1); }
 
-  let fireAt: number;
   let schedule: string | undefined;
-
+  let at: string | undefined;
   if (parsed.schedule) {
-    try {
-      const expr = CronExpressionParser.parse(parsed.schedule);
-      fireAt = expr.next().getTime();
-      schedule = parsed.schedule;
-    } catch {
+    try { CronExpressionParser.parse(parsed.schedule); } catch {
       console.log(JSON.stringify({ ok: false, error: "Invalid --schedule cron expression" })); process.exit(1);
     }
+    schedule = parsed.schedule;
   } else {
-    fireAt = new Date(parsed.at!).getTime();
-    if (!Number.isFinite(fireAt)) { console.log(JSON.stringify({ ok: false, error: "Invalid --at date" })); process.exit(1); }
+    at = parsed.at;
+    const ts = Date.parse(at ?? "");
+    if (isNaN(ts)) { console.log(JSON.stringify({ ok: false, error: "Invalid --at date" })); process.exit(1); }
+    at = new Date(ts).toISOString();
   }
 
-  const chatId = parseInt(parsed.chatId, 10);
-  if (!Number.isFinite(chatId)) { console.log(JSON.stringify({ ok: false, error: "Invalid --chat-id" })); process.exit(1); }
+  const kind = parsed.kind ?? "agent";
+  const validKinds = ["reminder", "agent", "script", "orc", "system"];
+  if (!validKinds.includes(kind)) { console.log(JSON.stringify({ ok: false, error: `--kind must be one of: ${validKinds.join(", ")}` })); process.exit(1); }
 
-  const type = (parsed.type ?? "reminder") as CronEntry["type"];
-  if (type !== "reminder" && type !== "task") { console.log(JSON.stringify({ ok: false, error: "--type must be reminder or task" })); process.exit(1); }
+  const isSystem = kind === "system";
+  let action: SystemTaskAction | undefined;
+  if (isSystem) {
+    if (!parsed.action) { console.log(JSON.stringify({ ok: false, error: "--action is required for system kind" })); process.exit(1); }
+    if (!SYSTEM_ACTIONS.includes(parsed.action as SystemTaskAction)) {
+      console.log(JSON.stringify({ ok: false, error: `--action must be one of: ${SYSTEM_ACTIONS.join(", ")}` })); process.exit(1);
+    }
+    action = parsed.action as SystemTaskAction;
+  }
 
-  const executor = (parsed.executor ?? "agent") as NonNullable<CronEntry["executor"]>;
-  if (executor !== "agent" && executor !== "script" && executor !== "orc") { console.log(JSON.stringify({ ok: false, error: "--executor must be agent, script, or orc" })); process.exit(1); }
+  const chatId = parsed.chatId ?? "0";
 
-  const entry: CronEntry = {
-    id: parsed.id || randomBytes(3).toString("hex"),
-    title: parsed.title,
-    fireAt: fireAt!,
-    message: parsed.message,
+  let entry: ScheduledTask;
+  const base = {
+    id: idResult.id,
+    enabled: true,
+    priority: "medium" as const,
     chatId,
-    type,
-    executor,
-    ...(schedule ? { schedule } : {}),
-    ...(parsed.taskFile ? { taskFile: parsed.taskFile } : {}),
-    ...(parsed.agent ? { agent: parsed.agent } : {}),
-    ...(parsed.targetUserId ? { targetUserId: parsed.targetUserId } : {}),
-    fired: false,
-    createdAt: Date.now(),
+    delivery: isSystem ? "silent" as const : (kind === "reminder" ? "announce" as const : "report" as const),
+    schedule,
+    at,
   };
 
-  const entries = dbReadEntries();
+  switch (kind) {
+    case "reminder":
+      entry = { ...base, kind: "reminder" as const, text: parsed.message ?? "", delivery: "announce" as const };
+      break;
+    case "agent":
+      entry = { ...base, kind: "agent" as const, prompt: parsed.message, taskFile: parsed.taskFile, agent: (parsed.agent as "task" | "professor" | "browsie" | "coding" | "dreamy") || "task", targetUserId: parsed.targetUserId };
+      break;
+    case "script":
+      entry = { ...base, kind: "script" as const, command: parsed.message ?? "" };
+      break;
+    case "orc":
+      entry = { ...base, kind: "orc" as const, goal: parsed.message ?? "" };
+      break;
+    case "system":
+      entry = { ...base, kind: "system" as const, action: action!, delivery: "silent" as const };
+      break;
+    default:
+      console.log(JSON.stringify({ ok: false, error: `unknown kind ${kind}` })); process.exit(1);
+  }
 
-  // Dedup: reject if a recurring entry with same schedule+message+chatId already exists
-  if (schedule) {
-    const dup = entries.find(e => e.schedule === schedule && e.message === entry.message && e.chatId === chatId && !e.paused);
-    if (dup) { console.log(JSON.stringify({ ok: false, error: "duplicate", existing_id: dup.id })); process.exit(1); }
+  const entries = dbReadEntries();
+  if (entries.find(e => e.id === entry.id)) {
+    console.log(JSON.stringify({ ok: false, error: "duplicate", existing_id: entry.id })); process.exit(1);
   }
 
   writeEntry(entry);
-  console.log(JSON.stringify({ ok: true, action: "added", id: entry.id, fireAt: localISO(new Date(fireAt!)), ...(schedule ? { schedule } : {}) }));
+  const nextRunAt = schedule ? CronExpressionParser.parse(schedule).next().getTime() : (at ? Date.parse(at) : Date.now());
+  updateState(entry.id, { nextRunAt });
+  console.log(JSON.stringify({ ok: true, action: "added", id: entry.id, ...(schedule ? { schedule } : { at }) }));
 }
 
 function listEntries(): void {
-  const entries = readEntries().filter(e => !e.fired || e.schedule);
+  const entries = readEntries();
   if (entries.length === 0) {
     console.log(JSON.stringify({ ok: true, entries: [], message: "No pending cron entries" }));
     return;
   }
-  const display = entries.map(e => ({
-    id: e.id,
-    fireAt: localISO(new Date(e.fireAt)),
-    message: e.message,
-    chatId: e.chatId,
-    type: e.type,
-    ...(e.executor ? { executor: e.executor } : {}),
-    ...(e.schedule ? { schedule: e.schedule } : {}),
-    ...(e.priority ? { priority: e.priority } : {}),
-    ...(e.paused ? { paused: true } : {}),
-    ...(e.lastRanAt ? { lastRanAt: localISO(new Date(e.lastRanAt)) } : {}),
-    ...(e.history?.length ? { history: e.history } : {}),
-  }));
+  const display = entries.map(e => {
+    const state = readState(e.id);
+    return {
+      id: e.id,
+      kind: e.kind,
+      enabled: e.enabled,
+      ...(e.schedule ? { schedule: e.schedule } : {}),
+      ...(e.priority ? { priority: e.priority } : {}),
+      ...(state?.autoPaused ? { autoPaused: true } : {}),
+      ...(state?.nextRunAt ? { nextRunAt: localISO(new Date(state.nextRunAt)) } : {}),
+    };
+  });
   console.log(JSON.stringify({ ok: true, entries: display }));
 }
 
 function remove(id: string): void {
   if (!dbRemoveEntry(id)) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
+  removeState(id);
   console.log(JSON.stringify({ ok: true, action: "removed", id }));
 }
 
 function pause(id: string): void {
-  const entry = readEntry(id);
+  const entry = dbReadEntries().find(e => e.id === id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
-  entry.paused = true;
-  writeEntry(entry);
+  setAutoPaused(id, true);
   console.log(JSON.stringify({ ok: true, action: "paused", id }));
 }
 
 function resume(id: string): void {
-  const entry = readEntry(id);
+  const entry = dbReadEntries().find(e => e.id === id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
-  entry.paused = false;
-  entry.consecutiveFails = 0;
-  writeEntry(entry);
+  setAutoPaused(id, false);
+  resetFailures(id);
   console.log(JSON.stringify({ ok: true, action: "resumed", id }));
 }
 
 function showHistory(id: string): void {
-  const entry = readEntry(id);
+  const entry = dbReadEntries().find(e => e.id === id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
-  const runs = (entry.history ?? []).map(h => ({
-    ranAt: localISO(new Date(h.ts)),
+  const runs = recentRuns(id, 20).map(h => ({
+    ranAt: localISO(new Date(h.finishedAt)),
+    outcome: h.outcome,
     ...(h.exitCode !== undefined ? { exitCode: h.exitCode } : {}),
   }));
-  console.log(JSON.stringify({ ok: true, id, message: entry.message.slice(0, 80), runs }));
+  const label = entry.kind === "agent" ? (entry.prompt ?? entry.taskFile ?? "") : entry.kind === "script" ? entry.command : entry.kind;
+  console.log(JSON.stringify({ ok: true, id, label: label.slice(0, 80), runs }));
 }
-
-// --- CLI entry point ---
 
 export function main(argv: string[] = process.argv): void {
   if (argv.includes('--help')) {
     console.log(`abtars-task — schedule time-based reminders and tasks.
 
 Usage:
-  abtars-task add --at "2026-03-16T08:00" --message "..." --chat-id ID --type reminder
-  abtars-task add --schedule "0 9 * * *" --message "..." --chat-id ID --type task
+  abtars-task add --id <id> --schedule "0 9 * * *" --message "..." --chat-id ID
   abtars-task list
   abtars-task remove <id>
   abtars-task pause <id>

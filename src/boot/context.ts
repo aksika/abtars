@@ -35,12 +35,15 @@ import { createCapabilityRegistry } from "../capabilities/capability.js";
 type TelegramAdapter = import("../platforms/telegram/telegram-adapter.js").TelegramAdapter;
 type DiscordAdapter = import("../platforms/discord/discord-adapter.js").DiscordAdapter;
 type SleepHandle = import("../capabilities/sleep/index.js").SleepHandle;
+type SleepUnavailable = import("../capabilities/sleep/index.js").SleepUnavailable;
 
 /** Flags parsed from CLI args (--telegram, --discord, --web, --agent, --api|--tmux|--acp). */
 export interface PlatformFlags {
   telegram: boolean;
   discord: boolean;
   irc: boolean;
+  /** #1315: abtars-native TUI socket adapter (unix-domain socket at ~/.abtars/tui.sock). */
+  tui: boolean;
   web: boolean;
   agent: boolean;
   transport?: "tmux" | "acp" | "api";
@@ -82,6 +85,10 @@ export interface BootCtx {
   // ── Subsystems ────────────────────────────────────────────────────────
   capabilities: CapabilityRegistry;
   capabilitiesLoaded: string[];
+  /** #1429 — Boot-owned abmind module reference (set by phase-memory). */
+  abmindModule: typeof import("abmind") | null;
+  /** #1429 — Boot-recorded sleep-unavailable reason (set by phase-sleep). */
+  sleepUnavailable: SleepUnavailable | null;
   sleepHandle: SleepHandle | null;
   modelHealthRegistry: ModelHealthRegistry | null;
   hailMary: { model: string; endpoint: string; apiKey?: string } | null;
@@ -108,6 +115,17 @@ export interface BootCtx {
   modelName: string;
   modelProvider: string;
   fallbackChain: string[];
+
+  // ── #1319: Orc activity feed ──────────────────────────────────────────
+  orcActivityFeed?: import("../components/orc-activity-feed.js").OrcActivityFeed;
+  /** Cleanup function returned by bridgeNerveToFeed — called on shutdown. */
+  _orcActivityBridgeCleanup?: () => void;
+
+  // ── #1338: Live attached-session output feed ─────────────────────────
+  sessionOutputFeed?: import("../components/session-output-feed.js").SessionOutputFeed;
+
+  // ── #1314: Pi coding executor ──────────────────────────────────────────
+  piExecutorService?: import("../components/pi-executor/pi-run-service.js").PiRunService;
 }
 
 /**
@@ -120,7 +138,7 @@ export interface BootCtx {
 export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
   const defaults: BootCtx = {
     // Static — must be overridden in phase-config before use
-    platforms: { telegram: false, discord: false, irc: false, web: false, agent: false },
+    platforms: { telegram: false, discord: false, irc: false, tui: false, web: false, agent: false },
     config: null as unknown as Config,           // set in phase-config
     memoryConfig: null as unknown as MemoryConfig, // set in phase-config
     startedAt: Date.now(),
@@ -154,6 +172,8 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     // Subsystems
     capabilities: createCapabilityRegistry(),
     capabilitiesLoaded: [],
+    abmindModule: null,
+    sleepUnavailable: null,
     sleepHandle: null,
     modelHealthRegistry: null,
     hailMary: null,

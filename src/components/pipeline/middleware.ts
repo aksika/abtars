@@ -43,6 +43,10 @@ export interface MessageContext {
   transport: IKiroTransport;
   /** Delivery mode for this session. */
   delivery: "streaming" | "simple";
+  /** #1336: Validated effective session — set by session-selection middleware. */
+  session?: import("../spin-types.js").ManagedSession;
+  /** #1336: Validated effective session ID — set by session-selection middleware. */
+  sessionId?: string;
 }
 
 /** A middleware function in the message pipeline. */

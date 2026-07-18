@@ -13,7 +13,7 @@ import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { generateKeyPairSync, randomBytes, createPrivateKey, createPublicKey } from "node:crypto";
 import { abtarsHome } from "../paths.js";
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn, logDebug } from "./logger.js";
 import { validateShape, PEERS_SCHEMA } from "./config-validator.js";
 
 const TAG = "peer-config";
@@ -28,14 +28,12 @@ export interface PeerEntry {
   allowedRead?: string[];
   allowedWrite?: string[];
   transport?: "http" | "ws-outbound";
-  udpPort?: number;
 }
 
 export interface PeerSelf {
   name: string;
   signingKey: string;                   // Ed25519 private key (base64 PKCS8 DER) — only secret
   tribeToken: string;                   // tribe membership secret (base64, 256-bit random)
-  udpPort?: number;
 }
 
 export interface PeerConfig {
@@ -101,26 +99,6 @@ export function bootstrapIdentity(): void {
     writeFileSync(p, serialized, { encoding: "utf-8" });
     try { chmodSync(p, 0o600); } catch { /* best effort */ }
   }
-
-  // Lazy-generate TLS cert from identity key if missing (idempotent).
-  // Must run AFTER signingKey is ensured so the cert derives from the stable key.
-  const certPath = join(abtarsHome(), "config", "identity.crt");
-  const keyPath = join(abtarsHome(), "config", "identity.tls.key");
-  if (!existsSync(certPath) || !existsSync(keyPath)) {
-    try {
-      const { hostname } = require("node:os") as typeof import("node:os");
-      const { generateTlsCert } = require("./peer-transport/peer-auth.js") as typeof import("./peer-transport/peer-auth.js");
-      const cn = (typeof self.name === "string" && self.name) ? self.name : hostname();
-      const signingKey = self.signingKey as string;
-      const { key: tlsKeyPem, cert: certPem } = generateTlsCert(signingKey, cn);
-      writeFileSync(keyPath, tlsKeyPem, { encoding: "utf-8" });
-      writeFileSync(certPath, certPem, { encoding: "utf-8" });
-      try { chmodSync(keyPath, 0o600); } catch { /* best effort */ }
-      logInfo(TAG, "Generated TLS identity cert (10yr self-signed)");
-    } catch (err) {
-      logWarn(TAG, `TLS cert generation failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
 }
 
 export function loadPeerConfig(): PeerConfig {
@@ -159,7 +137,6 @@ export function loadPeerConfig(): PeerConfig {
             ...(Array.isArray(e.allowedRead) ? { allowedRead: e.allowedRead as string[] } : {}),
             ...(Array.isArray(e.allowedWrite) ? { allowedWrite: e.allowedWrite as string[] } : {}),
             ...(e.transport === "ws-outbound" ? { transport: "ws-outbound" as const } : {}),
-            ...(typeof e.udpPort === "number" ? { udpPort: e.udpPort } : {}),
           };
         } else {
           logWarn(TAG, `Skipped peer '${name}' — missing host/port/verifyKey`);
@@ -173,7 +150,6 @@ export function loadPeerConfig(): PeerConfig {
         name: typeof selfRaw?.name === "string" ? selfRaw.name : "default",
         signingKey: selfRaw?.signingKey as string,
         tribeToken: selfRaw?.tribeToken as string,
-        ...(typeof selfRaw?.udpPort === "number" ? { udpPort: selfRaw.udpPort } : {}),
       },
       peers,
       maxHops: typeof raw.maxHops === "number" ? raw.maxHops : DEFAULTS.maxHops,
@@ -181,7 +157,7 @@ export function loadPeerConfig(): PeerConfig {
     };
 
     const names = Object.keys(peers);
-    if (names.length > 0) logInfo(TAG, `Loaded ${names.length} peer(s): ${names.join(", ")} (self: ${_config.self.name})`);
+    if (names.length > 0) logDebug(TAG, `Loaded ${names.length} peer(s): ${names.join(", ")} (self: ${_config.self.name})`);
     return _config;
   } catch (err) {
     logWarn(TAG, `Failed to parse peers.json: ${err instanceof Error ? err.message : String(err)}`);

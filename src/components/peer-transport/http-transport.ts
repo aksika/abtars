@@ -1,66 +1,140 @@
-/**
- * peer-transport/http-transport.ts — HTTP implementation of PeerTransport (#911).
- *
- * Wraps existing peer-client.ts (JWT auth, TLS, Ed25519 signing) behind the
- * PeerTransport interface. discover() reads peers.json (static).
- */
-
-import type { PeerTransport, PeerCard, PeerMessage, TaskResult } from "./interface.js";
-import { getAlivePeers } from "./gossip.js";
+import type { PeerTransport, PeerCard, PeerMessage } from "./interface.js";
+import type { PeerHelpRequestV1, PeerHelpResponseV1, PeerHelpStatusRequestV1, PeerHelpStatusV1, PeerHelpWithdrawV1 } from "../peer-help/contract.js";
+import type { RemotePiEventsListRequestV1, RemotePiEventsListResponseV1, RemotePiEventsAckRequestV1, RemotePiEventsAckResponseV1, RemotePiControlRequestV1, RemotePiControlResponseV1 } from "./remote-pi-types.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
-import { logInfo, logDebug, logTrace } from "../logger.js";
+import { logInfo, logDebug } from "../logger.js";
 import type { WsPeerClient } from "./ws-peer-client.js";
+import { createPinnedPeerHttpsAgent } from "./pinned-peer-tls.js";
+import { getPeerWsBroker } from "./peer-ws-broker.js";
+import { PeerDoorbellService, type DoorbellRingResult } from "./peer-doorbell.js";
+import { CONNECT_JITTER_MAX_MS } from "./peer-doorbell-codec.js";
 
 const TAG = "http-transport";
 
 export class HttpTransport implements PeerTransport {
   private handlers: Array<(from: string, message: PeerMessage) => void> = [];
   private wsClients = new Map<string, WsPeerClient>();
+  private doorbell: PeerDoorbellService | null = null;
 
-  /** Init WS connections for all ws-outbound peers. Call on boot. */
+  /** Set the doorbell service instance for peer wakeup. */
+  setDoorbell(doorbell: PeerDoorbellService): void {
+    this.doorbell = doorbell;
+  }
+
+  /** Ring a peer via doorbell. */
+  async ringDoorbell(peerName: string): Promise<DoorbellRingResult> {
+    if (!this.doorbell) return { status: "unavailable", reason: "doorbell not configured" };
+    return this.doorbell.ring(peerName);
+  }
+
+  /** Ensure a peer WSS connection exists or is being established. */
+  ensurePeerConnection(peerName: string, input: {
+    reason: "startup" | "heartbeat" | "udp-doorbell" | "outbox";
+    jitterMs?: number;
+  }): void {
+    const existing = this.wsClients.get(peerName);
+    if (existing?.connected) return;
+    if (existing && !existing.connected) return; // connecting/reconnecting — coalesce
+
+    const config = loadPeerConfig();
+    const entry = config.peers[peerName];
+    if (!entry || entry.transport !== "ws-outbound") return;
+
+    const jitter = input.jitterMs ?? Math.floor(Math.random() * CONNECT_JITTER_MAX_MS);
+    setTimeout(() => {
+      const { WsPeerClient: Client } = require("./ws-peer-client.js") as typeof import("./ws-peer-client.js");
+      if (this.wsClients.has(peerName)) return;
+      const client = new Client(peerName, entry);
+      this.setupWsClient(peerName, client);
+      client.connect();
+      this.wsClients.set(peerName, client);
+      logInfo(TAG, `WS doorbell: connecting to ${peerName} (reason: ${input.reason})`);
+    }, jitter).unref();
+  }
+
   async initWsConnections(): Promise<void> {
     const config = loadPeerConfig();
     const { WsPeerClient: Client } = await import("./ws-peer-client.js");
     for (const [name, entry] of Object.entries(config.peers)) {
       if (entry.transport !== "ws-outbound") continue;
       const client = new Client(name, entry);
-      client.onPush((method, payload) => {
-        if (method === "callback") {
-          // Inbound callback from peer — fire as if it arrived via HTTP /v1/callbacks
-          const p = payload as { task_id: number; status: string; result_summary?: string; error?: string; tokens_used?: number };
-          import("../tasks/kanban-board.js").then(({ kanbanList, kanbanComplete, kanbanFail, kanbanAddTokens }) => {
-            const cards = kanbanList("running", "status").filter(c => {
-              if (c.type !== "remote") return false;
-              try { const m = JSON.parse(c.notes ?? "{}"); return m.peer === name && m.remote_task_id === p.task_id; } catch { return false; }
-            });
-            if (!cards.length) return;
-            const card = cards[0]!;
-            if (p.tokens_used) kanbanAddTokens(card.id, p.tokens_used);
-            if (p.status === "done") kanbanComplete(card.id, null, p.result_summary ?? "");
-            else kanbanFail(card.id, p.error ?? "remote failure");
-            import("../nerve.js").then(({ nerve }) => nerve.emit(p.status === "done" ? "card:done" : "card:failed", card.id));
-          }).catch(() => {});
-        } else if (method === "channel") {
-          // Inbound channel message from peer
-          const p = payload as { card_id: number; from_agent: string; message: string; created_at: string };
-          import("../tasks/kanban-channel.js").then(({ channelPost }) => {
-            channelPost(p.card_id, p.from_agent, "ALL", p.message);
-          }).catch(() => {});
-        }
-        for (const h of this.handlers) h(name, { type: method as any, payload: payload as any });
-      });
+      this.setupWsClient(name, client);
       client.connect();
       this.wsClients.set(name, client);
       logInfo(TAG, `WS outbound: connecting to ${name}`);
     }
   }
 
-  /** Check if a peer is reachable via WS. */
+  private setupWsClient(peerName: string, client: WsPeerClient): void {
+    client.onPush((method: string, payload: unknown) => {
+      if (method === "peer.inventory.v1") {
+        const { verifyAndStoreInventory } = require("./peer-inventory.js") as typeof import("./peer-inventory.js");
+        const config = loadPeerConfig();
+        const peerEntry = config.peers[peerName];
+        if (peerEntry?.verifyKey) {
+          verifyAndStoreInventory(peerName, payload as any, peerEntry.verifyKey);
+        }
+        return;
+      }
+      if (method === "pi.lifecycle.v1") {
+        import("./remote-pi-registry.js").then(({ getRemotePiOriginReducer }) => {
+          const reducer = getRemotePiOriginReducer();
+          if (!reducer) return;
+          import("../peer-config.js").then(({ loadPeerConfig }) => {
+            const localPeerName = loadPeerConfig().self.name;
+            import("./remote-pi-agent-api-integration.js").then(({ handlePushLifecycleEvent }) => {
+              handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, peerName, payload as any).catch(() => {});
+            }).catch(() => {});
+          }).catch(() => {});
+        }).catch(() => {});
+        return;
+      }
+      if (method === "callback") {
+        const p = payload as { task_id: number; status: string; result_summary?: string; error?: string; tokens_used?: number };
+        import("../tasks/kanban-board.js").then(({ kanbanList, kanbanComplete, kanbanFail, kanbanAddTokens }) => {
+          const cards = kanbanList("running", "status").filter(c => {
+            if (c.type !== "remote") return false;
+            try { const m = JSON.parse(c.notes ?? "{}"); return m.peer === peerName && m.remote_task_id === p.task_id; } catch { return false; }
+          });
+          if (!cards.length) return;
+          const card = cards[0]!;
+          if (p.tokens_used) kanbanAddTokens(card.id, p.tokens_used);
+          if (p.status === "done") kanbanComplete(card.id, null, p.result_summary ?? "");
+          else kanbanFail(card.id, p.error ?? "remote failure");
+          import("../nerve.js").then(({ nerve }) => nerve.emit(p.status === "done" ? "card:done" : "card:failed", card.id));
+        }).catch(() => {});
+      } else if (method === "channel") {
+        const p = payload as { card_id: number; from_agent: string; message: string; created_at: string };
+        import("../tasks/kanban-channel.js").then(({ channelPost }) => {
+          channelPost(p.card_id, p.from_agent, "ALL", p.message);
+        }).catch(() => {});
+      }
+      for (const h of this.handlers) h(peerName, { type: method as any, payload: payload as any });
+    });
+  }
+
   hasWsConnection(peer: string): boolean {
     return this.wsClients.get(peer)?.connected ?? false;
   }
 
-  /** #1293 — Called by HB tick to check and reconnect stale ws-outbound connections. */
+  broadcastInventory(): void {
+    try {
+      const { loadPeerConfig } = require("../peer-config.js") as typeof import("../peer-config.js");
+      const { buildSignedInventory } = require("./peer-inventory.js") as typeof import("./peer-inventory.js");
+      const { getLocalCapabilities } = require("./peer-health.js") as typeof import("./peer-health.js");
+      const config = loadPeerConfig();
+      const payload = buildSignedInventory(
+        config.self.signingKey,
+        config.self.name,
+        process.env["npm_package_version"] ?? "0.0.0",
+        getLocalCapabilities(),
+        ["wss", "https"],
+      );
+      const broker = getPeerWsBroker();
+      broker.pushToAll("peer.inventory.v1", payload);
+    } catch { /* best effort */ }
+  }
+
   checkWsConnections(): void {
     for (const [name, client] of this.wsClients) {
       if (!client.connected) {
@@ -71,7 +145,12 @@ export class HttpTransport implements PeerTransport {
   }
 
   discover(): PeerCard[] {
-    return getAlivePeers();
+    const config = loadPeerConfig();
+    return Object.entries(config.peers).map(([name, entry]) => ({
+      name,
+      host: entry.host,
+      port: entry.port,
+    }));
   }
 
   async send(peer: string, message: PeerMessage): Promise<unknown> {
@@ -80,28 +159,20 @@ export class HttpTransport implements PeerTransport {
       const config = loadPeerConfig();
       return callPeer(peer, message.payload.prompt as string, config.maxHops);
     }
-    if (message.type === "task" && message.payload.action === "callback") {
+    if (message.type === "callback") {
       const config = loadPeerConfig();
       const entry = resolvePeer(config.peers, peer);
-      logDebug(TAG, `→ callback ${peer}: task_id=${message.payload.task_id} status=${message.payload.status}`);
-      logTrace(TAG, `→ callback ${peer} result: ${String(message.payload.result_summary ?? "").slice(0, 200)}`);
+      logDebug(TAG, `→ callback ${peer}: task_id=${message.payload.task_id}`);
       const payload: Record<string, unknown> = { task_id: message.payload.task_id, status: message.payload.status, result_summary: message.payload.result_summary, error: message.payload.error };
-      if (message.payload.artifacts) payload.artifacts = message.payload.artifacts;
-
-      // #972: Push via WS if connected
       const ws = this.wsClients.get(peer);
       if (ws?.connected) {
         await ws.send("callback", payload);
-        logInfo(TAG, `CALLBACK ${peer} (ws) task_id=${message.payload.task_id}`);
         return;
       }
-
       const body = JSON.stringify(payload);
       return this.httpCall(entry, peer, "POST", "/v1/callbacks", body);
     }
-    if (message.type === "task") return this.delegateTask(peer, message.payload.goal as string, message.payload as any);
-    if (message.type === "check") return this.checkTask(peer, message.payload.taskId as number);
-    if (message.type === "terminate") return this.terminateTask(peer, message.payload.taskId as number);
+    if (message.type === "channel") return this.pushChannelMessage(peer, message.payload.cardId as number, message.payload.from as string, message.payload.message as string, message.payload.createdAt as string);
     throw new Error(`Unknown message type: ${message.type}`);
   }
 
@@ -114,84 +185,139 @@ export class HttpTransport implements PeerTransport {
     this.handlers.push(handler);
   }
 
-  /** Called by agent-api-server when an inbound peer message arrives. */
   dispatchInbound(from: string, message: PeerMessage): void {
     for (const h of this.handlers) { try { h(from, message); } catch {} }
   }
 
-  async delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }> }): Promise<{ taskId: number; remoteSessionId?: string }> {
+  // ── Peer Help Transport ──────────────────────────────────────────────────
+
+  async askHelp(peer: string, request: PeerHelpRequestV1): Promise<PeerHelpResponseV1> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
+    const { parseHelpResponse } = await import("../peer-help/contract.js");
 
-    // Callback: remote peer looks us up in its peers.json by name
+    const payload: Record<string, unknown> = { ...request as any };
 
-    logDebug(TAG, `→ peer_delegate ${peer}: priority=${opts?.priority ?? "MEDIUM"}, goal=${goal.length}ch`);
-    logTrace(TAG, `→ peer_delegate ${peer} goal: ${goal.slice(0, 300)}`);
-
-    // Size guard for artifacts (#928)
-    if (opts?.artifacts?.length) {
-      const MAX_SINGLE = 1_400_000; // 1.4MB base64 per artifact
-      const MAX_TOTAL = 5_000_000;  // 5MB total
-      let total = 0;
-      for (const a of opts.artifacts) {
-        if (a.content.length > MAX_SINGLE) throw new Error(`Artifact '${a.name}' exceeds 1.4MB limit (${a.content.length} bytes)`);
-        total += a.content.length;
-      }
-      if (total > MAX_TOTAL) throw new Error(`Total artifacts exceed 5MB limit (${total} bytes)`);
-    }
-
-    const payload: Record<string, unknown> = { goal, priority: opts?.priority ?? "MEDIUM", context: opts?.context, callback_peer: config.self.name };
-    if (opts?.artifacts?.length) payload.artifacts = opts.artifacts;
-
-    // #972: Route via WS if connected, otherwise HTTP
     const ws = this.wsClients.get(peer);
     if (ws?.connected) {
-      const result = await ws.send("delegate", payload) as any;
-      logInfo(TAG, `PEER_DELEGATE ${peer} (ws) → remote#${result.taskId} (${goal.length}ch)`);
-      return { taskId: result.taskId, remoteSessionId: result.session_id };
+      const result = await ws.send("help.request.v1", payload) as any;
+      const parsed = parseHelpResponse(result);
+      if (!parsed.ok) throw new Error(`Invalid help response: ${parsed.error}`);
+      return parsed.value;
     }
 
     const body = JSON.stringify(payload);
-    const response = await this.httpCall(entry, peer, "POST", "/v1/tasks", body);
-    const parsed = JSON.parse(response);
-    logInfo(TAG, `PEER_DELEGATE ${peer} → remote#${parsed.task_id} (${goal.length}ch)`);
-    return { taskId: parsed.task_id, remoteSessionId: parsed.session_id };
+    const response = await this.httpCall(entry, peer, "POST", "/v1/help/requests", body);
+    const parsed = parseHelpResponse(JSON.parse(response));
+    if (!parsed.ok) throw new Error(`Invalid help response: ${parsed.error}`);
+    return parsed.value;
   }
 
-  async checkTask(peer: string, taskId: number): Promise<TaskResult> {
+  async getHelpStatus(peer: string, request: PeerHelpStatusRequestV1): Promise<PeerHelpStatusV1> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
-    logDebug(TAG, `→ peer_check ${peer}#${taskId}`);
-    const response = await this.httpCall(entry, peer, "GET", `/v1/tasks/${taskId}`);
-    const parsed = JSON.parse(response);
-    logDebug(TAG, `← peer_check ${peer}#${taskId}: status=${parsed.status}`);
-    logTrace(TAG, `← peer_check ${peer}#${taskId} result: ${(parsed.result_summary ?? "").slice(0, 200)}`);
-    return {
-      taskId: parsed.id ?? taskId,
-      status: parsed.status,
-      result: parsed.result_summary,
-      error: parsed.error,
-      tokensUsed: parsed.tokens_used,
-    };
+    const { parseHelpStatus } = await import("../peer-help/contract.js");
+
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      const result = await ws.send("help.status.v1", request) as any;
+      if (result.error) throw new Error(String(result.error));
+      const parsed = parseHelpStatus(result);
+      if (!parsed.ok) throw new Error(`Invalid status response: ${parsed.error}`);
+      return parsed.value;
+    }
+
+    const params = new URLSearchParams({ contribution_ref: request.contribution_ref });
+    const response = await this.httpCall(entry, peer, "GET", `/v1/help/requests/${encodeURIComponent(request.request_id)}?${params.toString()}`);
+    const parsed = parseHelpStatus(JSON.parse(response));
+    if (!parsed.ok) throw new Error(`Invalid status response: ${parsed.error}`);
+    return parsed.value;
   }
 
-  async terminateTask(peer: string, taskId: number): Promise<void> {
+  async withdrawHelp(peer: string, request: PeerHelpWithdrawV1): Promise<{ acknowledged: boolean; owner_action?: string }> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
-    logDebug(TAG, `→ peer_terminate ${peer}#${taskId}`);
-    await this.httpCall(entry, peer, "DELETE", `/v1/tasks/${taskId}`);
-    logInfo(TAG, `PEER_TERMINATE ${peer}#${taskId}`);
+
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      return await ws.send("help.withdraw.v1", request) as any;
+    }
+
+    const body = JSON.stringify(request);
+    const response = await this.httpCall(entry, peer, "POST", `/v1/help/requests/${encodeURIComponent(request.request_id)}/withdraw`, body);
+    return JSON.parse(response);
   }
 
-  /** #949: Push a channel message to a remote peer. */
   async pushChannelMessage(peer: string, cardId: number, from: string, message: string, createdAt: string): Promise<void> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
     await this.httpCall(entry, peer, "POST", `/v1/tasks/${cardId}/messages`, JSON.stringify({ from_agent: from, message, created_at: createdAt }));
+    return;
+  }
+
+  deliverHelpEvent(peer: string, event: unknown): Promise<void> {
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      return ws.send("help.event.v1", event).then(() => {}) as Promise<void>;
+    }
+    return Promise.resolve();
+  }
+
+  // ── Remote Pi ────────────────────────────────────────────────────────────
+
+  async pushLifecycleEvent(peer: string, event: unknown): Promise<void> {
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      ws.sendPush("pi.lifecycle.v1", event);
+      return;
+    }
+    const config = loadPeerConfig();
+    const entry = resolvePeer(config.peers, peer);
+    await this.httpCall(entry, peer, "POST", "/v1/pi-events/push", JSON.stringify(event));
+  }
+
+  async listRemotePiEvents(peer: string, request: RemotePiEventsListRequestV1): Promise<RemotePiEventsListResponseV1> {
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      return await ws.call("pi.events.list.v1", request);
+    }
+    const config = loadPeerConfig();
+    const entry = resolvePeer(config.peers, peer);
+    const req = request;
+    const params = new URLSearchParams();
+    params.set("after_sequence", String(req.after_sequence));
+    if (req.limit !== undefined) params.set("limit", String(req.limit));
+    const response = await this.httpCall(
+      entry, peer, "GET",
+      `/v1/pi-runs/${encodeURIComponent(req.run_id)}/events?${params.toString()}`,
+    );
+    return JSON.parse(response) as RemotePiEventsListResponseV1;
+  }
+
+  async acknowledgeRemotePiEvents(peer: string, request: RemotePiEventsAckRequestV1): Promise<RemotePiEventsAckResponseV1> {
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      return await ws.call("pi.events.ack.v1", request);
+    }
+    const config = loadPeerConfig();
+    const entry = resolvePeer(config.peers, peer);
+    const response = await this.httpCall(entry, peer, "POST", `/v1/pi-runs/${request.run_id}/events/acknowledge`, JSON.stringify(request));
+    return JSON.parse(response) as RemotePiEventsAckResponseV1;
+  }
+
+  async sendRemotePiControl(peer: string, request: RemotePiControlRequestV1): Promise<RemotePiControlResponseV1> {
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      return await ws.call("pi.control.v1", request);
+    }
+    const config = loadPeerConfig();
+    const entry = resolvePeer(config.peers, peer);
+    const response = await this.httpCall(entry, peer, "POST", `/v1/pi-runs/${(request as any).run_id}/control`, JSON.stringify(request));
+    return JSON.parse(response);
   }
 
   private async httpCall(entry: PeerEntry, peerName: string, method: string, path: string, body?: string): Promise<string> {
-    const { signRequest, verifyServerCert } = await import("./peer-auth.js");
+    const { signRequest } = await import("./peer-auth.js");
     const { loadPeerConfig } = await import("../peer-config.js");
     const config = loadPeerConfig();
 
@@ -203,6 +329,7 @@ export class HttpTransport implements PeerTransport {
     const sigHeaders = signRequest(method, path, bodyStr, config.self.signingKey, config.self.name);
 
     const http = await import("node:https");
+    const agent = createPinnedPeerHttpsAgent({ peerName, verifyKey: entry.verifyKey });
 
     return new Promise((resolve, reject) => {
       const headers: Record<string, string> = {
@@ -219,24 +346,7 @@ export class HttpTransport implements PeerTransport {
         headers,
         timeout: 60_000,
         minVersion: "TLSv1.3" as const,
-        rejectUnauthorized: true,
-        checkServerIdentity: (_host: string, cert: { raw?: Buffer }) => {
-          if (!cert.raw) return new Error("No cert presented by peer");
-          try {
-            const { createPublicKey } = require("node:crypto") as typeof import("node:crypto");
-            const keyObj = createPublicKey({ key: cert.raw, format: "der", type: "spki" });
-            const certPem = keyObj.export({ type: "spki", format: "pem" }) as string;
-            // Reconstruct as X.509 for verifyServerCert: use the raw DER cert to build PEM
-            const certDerB64 = cert.raw.toString("base64");
-            const certPemBlock = `-----BEGIN CERTIFICATE-----\n${certDerB64.match(/.{1,64}/g)!.join("\n")}\n-----END CERTIFICATE-----\n`;
-            if (!verifyServerCert(certPemBlock, entry.verifyKey)) {
-              return new Error(`Peer ${peerName} cert key does not match enrolled verifyKey`);
-            }
-          } catch (e) {
-            return new Error(`Cert verify error: ${e instanceof Error ? e.message : String(e)}`);
-          }
-          return undefined;
-        },
+        agent,
       } as any, (res: any) => {
         let data = "";
         res.on("data", (c: any) => data += c);

@@ -13,6 +13,7 @@ import { join, dirname, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createCipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
+import { resolveAbmindBin } from "../../utils/abmind-bin.js";
 
 const DEFAULT_PRUNE_DAYS = 7;
 
@@ -128,7 +129,7 @@ function runAbmindBackup(abmindHome: string): string | null {
   const backupsDir = join(abmindHome, "backups");
   mkdirSync(backupsDir, { recursive: true });
 
-  const result = spawnSync("abmind", ["backup"], { encoding: "utf-8", env: { ...process.env } });
+  const result = spawnSync(resolveAbmindBin() ?? "abmind", ["backup"], { encoding: "utf-8", env: { ...process.env } });
   if (result.status !== 0) return null;
 
   // Full backup produces .zip; fallback to .abm for backward compat

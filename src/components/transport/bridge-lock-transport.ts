@@ -1,7 +1,7 @@
 /**
  * bridge.lock — single source of truth for bridge runtime state.
  * Fields: pid, startedAt, lastHeartbeat, lastPromptAt, version,
- *         sleepStatus, restartReason, restartRequested, forceSleep.
+ *         sleepStatus, restartReason, restartRequested.
  */
 import { logAndSwallow } from "../log-and-swallow.js";
 import { readFileSync } from "node:fs";
@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { localISO } from "../../utils/local-time.js";
 
-export type SleepStatus = "awake" | "sleeping" | "hw_sleep";
+export type SleepStatus = "awake" | "sleeping";
 
 /** Add an ACP child PID to bridge.lock tracking. */
 export function trackAcpPid(pid: number): void {
@@ -92,21 +92,6 @@ export function appendRestartTimestamp(): void {
 /** Read recent restart timestamps from bridge.lock. */
 export function readRestartTimestamps(): number[] {
   return readBridgeLockField<number[]>("restartTimestamps") ?? [];
-}
-
-/** Request a forced sleep cycle on the next heartbeat tick.
- *  See src/capabilities/sleep/index.ts spawnSleep() + src/components/daily-cycle.ts isDailyCycleDue().
- *  Pattern mirrors writeRestartRequested/readAndClearRestartRequested. */
-export function writeForceSleep(reason: string): void {
-  updateBridgeLockField("forceSleep", `${localISO()} ${reason}`);
-}
-
-/** Read and clear the force-sleep request from bridge.lock.
- *  Sole deleter: spawnSleep. isDailyCycleDue peeks via readBridgeLockField. */
-export function readAndClearForceSleep(): string | null {
-  const v = readBridgeLockField<string>("forceSleep");
-  if (v) updateBridgeLockField("forceSleep", null);
-  return v;
 }
 
 /** Initialize bridge.lock with full boot state. Single writer for initial creation. */

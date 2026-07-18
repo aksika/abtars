@@ -1,3 +1,5 @@
+import type { CandidateSpec, ModelCandidate } from "./transport/model-candidates.js";
+import { buildCandidates } from "./transport/model-candidates.js";
 import { getEnv } from "./env-schema.js";
 /**
  * agent-registry.ts — Centralized agent role configuration.
@@ -8,7 +10,7 @@ import { AcpTransport } from "./transport/acp-transport.js";
 import { logInfo, logWarn } from "./logger.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
-export type AgentRole = "professor" | "dreamy" | "browsie" | "coding" | "task";
+export type AgentRole = "main" | "professor" | "dreamy" | "browsie" | "coding" | "cody" | "task";
 
 export interface AgentRoleConfig {
   agent: string | null;
@@ -18,19 +20,21 @@ export interface AgentRoleConfig {
   trust: number;
 }
 
-const AGENT_ROLES: Record<AgentRole, AgentRoleConfig> = {
+const AGENT_ROLES: Record<string, AgentRoleConfig> = {
+  main: { agent: "professor", model: null, autoReinit: true, tag: "acp-main", trust: 3 },
   professor: { agent: "professor", model: null, autoReinit: true, tag: "acp-main", trust: 3 },
   dreamy: { agent: "dreamy", model: null, autoReinit: false, tag: "acp-sleep", trust: 2 },
   coding: { agent: "coding-agent", model: null, autoReinit: true, tag: "acp-coding", trust: 2 },
+  cody: { agent: "coding-agent", model: null, autoReinit: true, tag: "acp-coding", trust: 2 },
   browsie: { agent: "browsie", model: null, autoReinit: false, tag: "acp-browsie", trust: 1 },
   task: { agent: "professor", model: null, autoReinit: false, tag: "acp-task", trust: 2 },
 };
 
-function resolveModel(role: AgentRole): string | undefined {
+function resolveModel(role: string): string | undefined {
   switch (role) {
     case "dreamy": return getEnv().sleepModel;
     case "browsie": return getEnv().browsingAgent;
-    case "coding": return getEnv().codingModel;
+    case "coding": case "cody": return getEnv().codingModel;
     default: return undefined;
   }
 }
@@ -65,8 +69,8 @@ export type SubagentRole = "sleep" | "browse" | "coding" | "task";
 const SUBAGENT_TO_AGENT: Record<SubagentRole, string> = {
   sleep: "dreamy",
   browse: "browsie",
-  coding: "coding",
-  task: "professor",
+  coding: "cody",
+  task: "main",
 };
 
 const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
@@ -78,15 +82,15 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
 
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 /** @internal Used only by SubagentRuntime. Do not call directly. */
-export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, currentModel?: string): Promise<{ transport: IKiroTransport; model: string }> {
+export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, lastSuccessfulMain?: CandidateSpec | null): Promise<{ transport: IKiroTransport; model: string }> {
   const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
   const tc = loadTransport();
   const agentName = SUBAGENT_TO_AGENT[role];
   const resolved = tc ? resolveAgent(agentName, tc) : null;
 
-  // Fallback: use professor's config. If that also fails, use .env defaults.
-  const profResolved = resolved ?? (tc ? resolveAgent("professor", tc) : null);
-  const agent = profResolved ?? (() => {
+  // Fallback: use main's config. If that also fails, use .env defaults.
+  const mainResolved = resolved ?? (tc ? resolveAgent("main", tc) : null);
+  const agent = mainResolved ?? (() => {
     const fb = getEnvFallback();
     return { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
   })();
@@ -96,136 +100,91 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const { FallbackPolicy } = await import("./transport/fallback-policy.js");
     const apiKey = getEnv().getApiKey(agent.provider.apiKeyEnv ?? "API_KEY");
 
-    // Use main transport's active model if available, else static config
-    const startModel = currentModel ?? agent.model;
+    // #1418: build the specialist candidate chain through the shared pure builder.
+    // Order: configured role → last successful Main candidate (or configured Main
+    // before the first success) → top-level fallback chain. Every candidate carries
+    // its complete identity tuple so provider switching preserves the right endpoint.
+    const primaryEndpoint = agent.provider.endpoint ?? "http://localhost:11434/v1";
 
-    /**
-     * Resolve the correct endpoint + apiKey for a given model by scanning the full
-     * transport.json candidate space: all agents' primary + fallback entries.
-     * This is needed when startModel was inherited from Main and may belong to a
-     * different provider than agent.provider (e.g. Main fell back to Ollama while
-     * the task agent's primary provider is OpenRouter).
-     */
-    function resolveModelEndpoint(model: string): { endpoint: string; apiKey: string | undefined } | null {
-      if (!tc) return null;
-      for (const [, agentEntry] of Object.entries(tc.agents)) {
-        // Check primary
-        const primaryProvider = tc.providers[agentEntry.provider];
-        if (primaryProvider?.transport === "api" && agentEntry.model === model && primaryProvider.endpoint) {
-          return {
-            endpoint: primaryProvider.endpoint,
-            apiKey: primaryProvider.apiKeyEnv ? getEnv().getApiKey(primaryProvider.apiKeyEnv) : undefined,
-          };
-        }
-        // Check fallbacks
-        for (const fb of agentEntry.fallbacks ?? []) {
-          if (fb.model !== model) continue;
-          const fbProvider = tc.providers[fb.provider];
-          if (fbProvider?.transport === "api" && fbProvider.endpoint) {
-            return {
-              endpoint: fbProvider.endpoint,
-              apiKey: fbProvider.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : undefined,
-            };
-          }
-        }
-      }
-      return null;
-    }
-
-    // Resolve the correct endpoint for startModel. When startModel was inherited
-    // from Main and belongs to a different provider, this finds the right endpoint
-    // instead of blindly using agent.provider.endpoint (#1307).
-    const startModelResolved = startModel !== agent.model ? resolveModelEndpoint(startModel) : null;
-    const startEndpoint = startModelResolved?.endpoint ?? agent.provider.endpoint ?? "http://localhost:11434/v1";
-    const startApiKey = startModelResolved?.apiKey ?? apiKey;
-
-    // Build per-agent candidate list
-    // Dedup key is model+endpoint pair — same model on different providers is a distinct candidate.
-    const candidateKey = (model: string, endpoint: string): string => `${model}@${endpoint}`;
-    const seenCandidates = new Set<string>();
-    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number }> = [];
-
-    const addCandidate = (model: string, endpoint: string, candidateApiKey: string | undefined, maxContext: number): void => {
-      const key = candidateKey(model, endpoint);
-      if (seenCandidates.has(key)) return;
-      seenCandidates.add(key);
-      candidates.push({ model, endpoint, apiKey: candidateApiKey, maxContext });
+    const configured: ModelCandidate = {
+      model: agent.model,
+      provider: agent.providerName,
+      endpoint: primaryEndpoint,
+      apiKey,
+      maxContext: agent.contextWindow,
+      source: "primary",
     };
 
-    addCandidate(startModel, startEndpoint, startApiKey, agent.contextWindow);
-
-    // Add static config model if different from startModel
-    if (agent.model !== startModel) {
-      addCandidate(agent.model, agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, agent.contextWindow);
+    // Last successful Main (secret-free tuple) — fall back to configured Main when
+    // none has succeeded yet this process. Resolve apiKey from its provider config.
+    const mainAgent = tc ? resolveAgent("main", tc) : null;
+    const configuredMainSpec: CandidateSpec | null = mainAgent
+      ? {
+          model: mainAgent.model,
+          provider: mainAgent.providerName,
+          endpoint: mainAgent.provider.endpoint ?? primaryEndpoint,
+          maxContext: mainAgent.contextWindow,
+        }
+      : null;
+    const inheritedSpec = lastSuccessfulMain ?? configuredMainSpec;
+    let inheritedCandidate: ModelCandidate | null = null;
+    if (inheritedSpec) {
+      const inheritedProvider = tc?.providers[inheritedSpec.provider];
+      inheritedCandidate = {
+        model: inheritedSpec.model,
+        provider: inheritedSpec.provider,
+        endpoint: inheritedSpec.endpoint,
+        apiKey: inheritedProvider?.apiKeyEnv ? getEnv().getApiKey(inheritedProvider.apiKeyEnv) : apiKey,
+        maxContext: inheritedSpec.maxContext,
+        source: "inherited_chain",
+      };
     }
 
-    // Add professor's model as fallback if different and transport-compatible
-    const profAgent = tc ? resolveAgent("professor", tc) : null;
-    const agentTransport = agent.provider.transport ?? "api";
-    if (profAgent && profAgent.model !== startModel) {
-      const profTransport = profAgent.provider.transport ?? "api";
-      if (profTransport === agentTransport && profAgent.provider.endpoint) {
-        addCandidate(
-          profAgent.model,
-          profAgent.provider.endpoint,
-          profAgent.provider.apiKeyEnv ? getEnv().getApiKey(profAgent.provider.apiKeyEnv) : apiKey,
-          profAgent.contextWindow,
-        );
-      }
-    }
+    // Top-level fallback chain as complete candidates.
+    const fallbackCandidates: ModelCandidate[] = (tc?.fallbacks ?? []).map(fb => {
+      const fbProvider = tc!.providers[fb.provider];
+      const fbEndpoint = fbProvider?.endpoint ?? primaryEndpoint;
+      return {
+        model: fb.model,
+        provider: fb.provider,
+        endpoint: fbEndpoint,
+        apiKey: fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey,
+        maxContext: mainAgent?.contextWindow ?? agent.contextWindow,
+        source: "agent_fallback",
+      };
+    });
 
-    // Inherit professor's full fallback chain (fb1→fb2→fb3)
-    if (profAgent) {
-      for (const fb of profAgent.fallbacks ?? []) {
-        const fbProvider = tc?.providers[fb.provider];
-        const fbEndpoint = fbProvider?.endpoint ?? profAgent.provider.endpoint;
-        if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
-        const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
-        addCandidate(fb.model, fbEndpoint, fbApiKey, profAgent.contextWindow);
-      }
-      for (const chainModel of profAgent.provider.fallbackChain ?? []) {
-        if (!profAgent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
-        addCandidate(chainModel, profAgent.provider.endpoint, apiKey, profAgent.contextWindow);
-      }
-    }
-
-    // Append agent-level cross-provider fallbacks
-    for (const fb of agent.fallbacks) {
-      const fbProvider = tc?.providers[fb.provider];
-      const fbEndpoint = fbProvider?.endpoint ?? agent.provider.endpoint;
-      if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
-      const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
-      addCandidate(fb.model, fbEndpoint, fbApiKey, agent.contextWindow);
-    }
-
-    // Append fallbackChain entries as last-resort candidates
-    const chain = agent.provider.fallbackChain ?? [];
-    for (const chainModel of chain) {
-      if (!agent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
-      addCandidate(chainModel, agent.provider.endpoint, apiKey, agent.contextWindow);
-    }
+    const candidates = buildCandidates({
+      role: "specialist",
+      configured,
+      lastSuccessfulMain: inheritedCandidate,
+      fallbacks: fallbackCandidates,
+    });
 
     // Use shared registry if provided, otherwise create isolated one
     const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
     const policy = new FallbackPolicy(candidates, registry ?? new ModelHealthRegistry());
 
     const transport = new DirectApiTransport({
-      endpoint: startEndpoint,
-      apiKey: startApiKey, model: startModel,
+      provider: agent.providerName,
+      endpoint: primaryEndpoint,
+      apiKey, model: agent.model,
       maxContext: agent.contextWindow, maxOutput: agent.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
       maxToolRounds: tc?.maxToolRounds ?? 25,
+      maxFallbackToolRounds: tc?.maxFallbackToolRounds ?? 5,
+      useProviderLib: agent.provider.useProviderLib,
     }, policy);
     await transport.initialize();
-    logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${startModel}, ${candidates.length} candidates, shared registry: ${!!registry})`);
+    logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${agent.model}, ${candidates.length} candidates, shared registry: ${!!registry})`);
     return { transport, model: agent.model };
   }
 
-  // ACP path — try configured model, then fallbackChain on failure
+  // ACP path — try configured model, then top-level fallbacks on failure
   const { loadAndValidateConfig } = await import("./config.js");
   const config = await loadAndValidateConfig();
-  const chain = agent.provider.fallbackChain ?? [];
-  const modelsToTry = [agent.model, ...chain.filter(m => m !== agent.model)];
+  const fallbackModels = (tc?.fallbacks ?? []).map(f => f.model).filter(m => m !== agent.model);
+  const modelsToTry = [agent.model, ...fallbackModels];
 
   for (let i = 0; i < modelsToTry.length; i++) {
     const model = modelsToTry[i]!;

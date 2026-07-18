@@ -36,6 +36,16 @@ export interface BuildPromptResult {
   isSessionStart: boolean;
   imageContent?: { mime: string; base64: string; path: string };
   recalledHits?: Array<{ id: number; contentEn: string }>;
+  /** #1329: the SQLite message ID assigned to the just-persisted raw user row. */
+  currentMessageId?: number;
+  /** #1335: structured current turn components for Direct API cache-stable assembly. */
+  currentTurn?: {
+    rawText: string;
+    volatileContext: Array<{
+      kind: "timestamp" | "recall" | "session_start" | "runtime" | "other";
+      content: string;
+    }>;
+  };
 }
 
 export async function buildPrompt(
@@ -52,8 +62,13 @@ export async function buildPrompt(
   const { spin } = await import("../spin.js");
   const pSession = spin.getSessionById(sessionKey);
 
+  // #1335: collect volatile context blocks separately from raw user text
+  const volatileContext: Array<{ kind: "timestamp" | "recall" | "session_start" | "runtime" | "other"; content: string }> = [];
+
   // --- Timestamp prefix ---
-  let prompt = `[${localTime()}] ${text}`;
+  const tsPrefix = `[${localTime()}]`;
+  let prompt = `${tsPrefix} ${text}`;
+  volatileContext.push({ kind: "timestamp", content: tsPrefix });
   let imageContent: { mime: string; base64: string; path: string } | undefined;
   if (msg.mediaPath) {
     if (deps.isAcp) {
@@ -90,6 +105,7 @@ export async function buildPrompt(
   if (isGroup) {
     const context = conversationBuffer.drain(bufKey);
     if (context) {
+      volatileContext.push({ kind: "other", content: context });
       prompt = context + text;
       logDebug(TAG, "Prepended group context to prompt");
     }
@@ -100,7 +116,13 @@ export async function buildPrompt(
   const isSessionStart = !entry || entry.pendingStart || !entry.seen;
   logTrace(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart}`);
   if (isSessionStart && memory) {
-    prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey, deps.maxContext, msg.platform);
+    const sessionCtx = buildSessionStartRaw(memory, userId, sessionKey, deps.maxContext, msg.platform);
+    if (sessionCtx) {
+      volatileContext.push({ kind: "session_start", content: sessionCtx });
+    }
+    // Rebuild combined prompt with session context
+    const sessionParts = volatileContext.map(v => v.content);
+    prompt = `[CONTEXT — do not respond to this section]\n${sessionParts.join("\n\n")}\n[/CONTEXT]\n\n${tsPrefix} ${text}`;
   }
   if (entry) {
     entry.seen = true;
@@ -110,9 +132,11 @@ export async function buildPrompt(
   // Record user message to memory
   const userRole = registry.byUserId.get(userId)?.role;
   logTrace(TAG, `recordMessage gate: memory=${!!memory} userId=${userId} userRole=${userRole}`);
+  let currentMessageId: number | undefined;
   if (memory && userRole !== "guest" && !text.startsWith("[SESSION START]")) {
     const numericMsgId = typeof msg.messageId === "number" ? msg.messageId : undefined;
-    memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId: numericMsgId });
+    const id = memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId: numericMsgId });
+    if (typeof id === "number") currentMessageId = id;
   }
 
   // --- Active recall ---
@@ -138,7 +162,6 @@ export async function buildPrompt(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const hits = recall.results.filter((h: any) => {
           if (h.score <= 0.70) return false;
-          // Stale trivial fact: old + no signal + weak match → filter
           if (h.memoryType === "fact" && h.score < 1.0 && h.createdAt && nowMs - h.createdAt > TRIVIAL_TTL_MS) {
             if (!h.emotionTags && !h.importanceFlags) return false;
           }
@@ -155,9 +178,9 @@ export async function buildPrompt(
             confidence: h.confidence ?? undefined,
             createdAt: h.createdAt,
           }));
-          const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]\n\n`;
-          prompt = block + prompt;
-          // #824: track recalled hits for citation detection
+          const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]`;
+          volatileContext.push({ kind: "recall", content: block });
+          prompt = `${block}\n\n${prompt}`;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           recalledHits = hits.filter((h: any) => h.id != null).map((h: any) => ({ id: h.id as number, contentEn: h.content as string }));
           logDebug(TAG, `Active recall: ${hits.length} hits, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
@@ -169,7 +192,7 @@ export async function buildPrompt(
     }
   }
 
-  // --- Intercept oversized prompts (skip on session-start — those are expected to be large) ---
+  // --- Intercept oversized prompts (skip on session-start) ---
   if (!isSessionStart) {
     prompt = interceptLargeMessage(prompt).text;
   }
@@ -181,25 +204,47 @@ export async function buildPrompt(
       const scan = scanFn(text);
       if (!scan.safe) {
         logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map((f: { category: string }) => f.category).join(", ")}`);
-      // Return a sentinel — caller checks and sends the block message
-      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined };
+      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined, currentMessageId: undefined };
     }
     }
   }
 
-  return { prompt, isSessionStart, imageContent, recalledHits };
+  // #1335: structured current turn for Direct API cache-stable assembly
+  const currentTurn: BuildPromptResult["currentTurn"] = {
+    rawText: text,
+    volatileContext,
+  };
+
+  return { prompt, isSessionStart, imageContent, recalledHits, currentMessageId, currentTurn };
 }
 
-/** Single path for session-start injection: SOUL + memory wake-up + context + user identity + restart reason. */
-export function buildSessionStartPrompt(
-  prompt: string,
+/**
+ * Build the raw session-start context parts (SOUL + memory wake-up + context +
+ * user identity + restart reason). Returns the combined context block string
+ * or empty string if no context. Used by #1335 volatile context decomposition.
+ */
+export function buildSessionStartRaw(
   memory: MemoryManager,
   userId: string,
   sessionKey?: string,
   maxContext?: number,
   platform?: string,
 ): string {
+  const contextParts = buildSessionStartParts(memory, userId, sessionKey, maxContext, platform);
+  if (contextParts.length === 0) return "";
+  return contextParts.join("\n\n");
+}
+
+/** Build session-start context parts, used by both combined and decomposed paths. */
+function buildSessionStartParts(
+  memory: MemoryManager,
+  userId: string,
+  sessionKey?: string,
+  maxContext?: number,
+  platform?: string,
+): string[] {
   const contextParts: string[] = [];
+  const isCodeSession = sessionKey ? sessionKey.includes("_C_") : false;
 
   const reason = readAndClearRestartReason();
   if (reason) {
@@ -207,12 +252,10 @@ export function buildSessionStartPrompt(
     logInfo(TAG, `Injected restart reason: ${reason}`);
   }
 
-  // Session identity (#624)
-  let sessionType = "A"; // default Main
   if (sessionKey) {
     const parts = sessionKey.split("_");
     if (parts.length === 3) {
-      sessionType = parts[1]!;
+      const sessionType = parts[1]!;
       const typeMap: Record<string, string> = { A: "Main", B: "Browse", C: "Code", T: "Task" };
       const type = typeMap[sessionType] ?? sessionType;
       const index = parseInt(parts[2]!, 10);
@@ -221,9 +264,6 @@ export function buildSessionStartPrompt(
     }
   }
 
-  const isCodeSession = sessionType === "C";
-
-  // Soul bundle: full for Main, minimal for Code (#658)
   if (isCodeSession) {
     const minimal = loadMinimalSoul(memory);
     if (minimal) {
@@ -252,21 +292,17 @@ export function buildSessionStartPrompt(
         contextParts.push(userBlock);
         logInfo(TAG, `Injected [CURRENT USER] for ${user.userId} (${user.role})`);
       } else {
-        logInfo(TAG, `[CURRENT USER] skipped — userId "${userId}" not found in registry (${registry.byUserId.size} users loaded)`);
+        logInfo(TAG, `[CURRENT USER] skipped — userId "${userId}" not found in registry`);
       }
     } catch (err) { logAndSwallow("prompt_builder", "op", err); }
-  } else {
-    logInfo(TAG, `[CURRENT USER] skipped — no sessionKey`);
   }
 
-  // Platform capabilities (#834 → #646)
   if (platform) {
     const CAPS: Record<string, string> = { telegram: "voice, reactions, typing, TTS, groups", discord: "reactions, typing, threads", irc: "text only" };
     contextParts.push(`[SYSTEM] Platform: ${platform} (${CAPS[platform] ?? "unknown"})`);
     logInfo(TAG, `Injected platform: ${platform}`);
   }
 
-  // Runtime identity (#879) — prevent agent misidentifying itself
   const transportType = getEnv().defaultTransport === "acp" ? "ACP" : "Direct API";
   const runtimeLine = `[SYSTEM] Runtime: abtars bridge (${transportType}). All registered bridge tools are available.`;
   contextParts.push(runtimeLine);
@@ -281,7 +317,6 @@ export function buildSessionStartPrompt(
       const s = ctxResult!.stats;
       const ctxPct = maxContext ? Math.round(ctx.length / maxContext * 100) : -1;
       logInfo(TAG, `Session start: ${s.messages} messages + ${s.dailies}d ${s.weeklies}w ${s.quarterlies}q (${(s.usedBytes / 1024).toFixed(1)}KB / ${(s.budget / 1024).toFixed(0)}KB budget, ${ctxPct}% ctx${isCodeSession ? ", Code" : ""})`);
-      logDebug(TAG, `Session context: ${s.messages} msgs, ${s.dailies}d ${s.weeklies}w ${s.quarterlies}q, ${s.usedBytes}B / ${s.budget}B budget, ${ctxPct}% ctx`);
       logTrace(TAG, `session-start content: ${ctx.slice(0, 500)}...`);
     }
 
@@ -292,15 +327,11 @@ export function buildSessionStartPrompt(
       } else if (userRole === "user") {
         contextParts.push("[SESSION START] Returning user. Be friendly and helpful.");
       } else if (!isCodeSession && memory.available !== false) {
-        // Wake-up only for Main sessions with live memory
         const wakeUp = memory.buildWakeUp();
         if (wakeUp) {
           contextParts.push(wakeUp);
           logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars)`);
-          logTrace(TAG, `wake-up content: ${wakeUp}`);
         }
-
-        // #646 — system status (skip for Code sessions)
         if (sessionKey && !sessionKey.includes("_C_")) {
           const status = abmind()!.buildStatusBlock(memory);
           if (status) { contextParts.push(status); logInfo(TAG, `Injected system status (${status.length} chars)`); }
@@ -309,13 +340,26 @@ export function buildSessionStartPrompt(
     } catch (err) { logAndSwallow("prompt_builder", "op", err); }
   }
 
+  return contextParts;
+}
+
+/** Single path for session-start injection: SOUL + memory wake-up + context + user identity + restart reason. */
+export function buildSessionStartPrompt(
+  prompt: string,
+  memory: MemoryManager,
+  userId: string,
+  sessionKey?: string,
+  maxContext?: number,
+  platform?: string,
+): string {
+  const contextParts = buildSessionStartParts(memory, userId, sessionKey, maxContext, platform);
+
   const contextBlock = contextParts.length > 0
     ? `[CONTEXT — do not respond to this section]\n${contextParts.join("\n\n")}\n[/CONTEXT]\n\n`
     : "";
 
   const result = contextBlock + prompt;
   logTrace(TAG, `session-start assembled: ${contextParts.length} parts, context=${contextBlock.length} chars, prompt=${prompt.length} chars, total=${result.length} chars`);
-  logTrace(TAG, `session-start injections:\n${contextParts.filter(p => p.startsWith("[")).map(p => "  " + p.slice(0, 120)).join("\n")}`);
   if (result.length < 5000) {
     logInfo(TAG, `Session-start prompt suspiciously small (${result.length} chars) — SOUL may be missing`);
   }

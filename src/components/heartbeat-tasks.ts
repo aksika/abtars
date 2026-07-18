@@ -9,7 +9,6 @@ import { setIdleCompactReset } from "./message-pipeline.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind";
 import type { HeartbeatTask } from "../types/index.js";
-import { isDailyCycleDue, type DailyCycleDeps } from "./daily-cycle.js";
 
 const TAG = "heartbeat_tasks";
 export interface IdleCompactDeps {
@@ -30,25 +29,9 @@ export function createIdleCompactTask(_deps: IdleCompactDeps): HeartbeatTask {
   };
 }
 
-export type AgeCheckDeps = DailyCycleDeps & { startSleep?: () => void; checkHwSleep?: () => void; checkStaleSleep?: () => void; cronBusy?: () => boolean };
-
-/** Daily cycle — spawn Dreamy after BED_TIME + quiet ticks, then hw sleep after more quiet ticks. */
-export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
-  let counter = 0;
-  return {
-    name: "age-check",
-    execute: async () => {
-      counter++;
-      if (counter % 5 !== 0) return; // every 5 ticks (~5 min)
-      if (deps.checkStaleSleep) deps.checkStaleSleep();
-      if (deps.checkHwSleep && !deps.cronBusy?.()) deps.checkHwSleep();
-      if (!isDailyCycleDue(deps)) return;
-      logInfo("age-check", `😴 BED_TIME (${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}) — spawning Dreamy`);
-      try { import("../cli/commands/doctor-probes.js").then(m => m.runFixes()).catch(() => {}); } catch (err) { logAndSwallow("heartbeat_tasks", "op", err); }
-      if (deps.startSleep) { deps.startSleep(); }
-    },
-  };
-}
+/** #1353: the periodic in-cycle stuck-run guard (createSleepStaleCheckTask) was
+ *  removed — abmind's runSleepCycle owns its own wall-clock timeout internally
+ *  and its returned promise always settles. See src/capabilities/sleep/index.ts. */
 
 /** DB integrity check — runs every ~1 hour (time-based, independent of tick interval). */
 export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTask {

@@ -25,6 +25,44 @@ export function isModelPickerCallback(data: string): boolean {
   return MODEL_PREFIXES.some(p => data.startsWith(p));
 }
 
+/**
+ * Build the normalized model list for a provider's picker page.
+ *
+ * Tiered (#1320):
+ * - When the provider opts into pi-ai and the catalog is small (≤ PICKER_MAX), use the live
+ *   pi-catalog directly (most accurate, includes models not yet in models.json).
+ * - When the pi-catalog is large (> PICKER_MAX) or the provider doesn't opt in / catalog is
+ *   cold, fall back to the curated `models.json` list. We DO NOT validate curated ids
+ *   against the live pi-catalog: pi-ai passes through any model id we build into our
+ *   `Model` object directly to the upstream provider, so a curated id missing from
+ *   pi-ai's snapshot is still a valid call. model-scout's invariant ("Professor only puts
+ *   working models into models.json") is the safety net. If a curated id is wrong, use
+ *   `/model doctor` to find it.
+ * - Always cap at PICKER_MAX as a hard backstop against the Telegram inline-keyboard size
+ *   limit (~80 buttons, ~9KB markup JSON). Empty result is the caller's problem.
+ */
+const PICKER_MAX = 50;
+
+async function buildModelEntries(providerName: string, providerConfig: { transport?: string; useProviderLib?: boolean } | undefined): Promise<Array<{ id: string; label: string }>> {
+  const { getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
+
+  // Tier 1: pi-catalog (small list → use directly)
+  let pi: Array<{ id: string; cost: { input: number; output: number } }> | null = null;
+  if (providerConfig?.useProviderLib) {
+    const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
+    pi = modelsForProviderSync(providerName);
+  }
+  if (pi && pi.length > 0 && pi.length <= PICKER_MAX) {
+    return pi.map(m => ({ id: m.id, label: `${m.id} (${formatCost(m.cost)})` }));
+  }
+
+  // Tier 2: curated models.json, alive-filtered. No catalog validation — pi-ai passes
+  // through whatever model id we hand it. (See function header.)
+  const curated = getModelsForProvider(providerName);
+  const filtered = providerConfig?.transport === "api" ? curated.filter(m => !m.entry.status || m.entry.status === "alive") : curated;
+  return filtered.slice(0, PICKER_MAX).map(m => ({ id: m.id, label: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})` }));
+}
+
 export async function handleModelPickerCallback(
   data: string, chatId: number, api: TelegramApi, state: PickerState, deps: PickerDeps,
 ): Promise<void> {
@@ -34,10 +72,10 @@ export async function handleModelPickerCallback(
     if (!target) { await api.sendMessage(chatId, "👌 Cancelled."); return; }
     if (target === "a") {
       const AGENT_LABELS = [
-        { key: "professor", label: "Professor" },
+        { key: "main", label: "Main" },
         { key: "dreamy", label: "Dreamy (sleep)" },
         { key: "browsie", label: "Browsie (browse)" },
-        { key: "coding", label: "Cody (coding)" },
+        { key: "cody", label: "Cody (coding)" },
       ];
       const buttons = AGENT_LABELS.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
       buttons.push([{ text: "← Cancel", callback_data: "mb:" }]);
@@ -52,7 +90,7 @@ export async function handleModelPickerCallback(
       let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
       if (providers.length === 0) { await api.sendMessage(chatId, "❌ No compatible providers"); return; }
       const currentProvider = resolveAgent(agent, tc)?.providerName;
-      const prefix = agent === "professor" ? "mprov2:professor" : `mprov:${agent}`;
+      const prefix = agent === "main" ? "mprov2:main" : `mprov:${agent}`;
       const buttons = providers.map(p => {
         const count = getModelsForProvider(p.name).length;
         const label = p.name === currentProvider ? `✓ ${p.name} (${count})` : `${p.name} (${count})`;
@@ -69,14 +107,14 @@ export async function handleModelPickerCallback(
       const tc = loadTransport();
       if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
       let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
-      const currentProvider = resolveAgent("professor", tc)?.providerName;
-      const slotLabel = slot === "professor" ? "Main" : slot.replace("professor_fb", "Fb");
+      const currentProvider = resolveAgent("main", tc)?.providerName;
+      const slotLabel = slot === "main" ? "Main" : "";
       const buttons = providers.map(p => {
         const count = getModelsForProvider(p.name).length;
         const label = p.name === currentProvider ? `✓ ${p.name} (${count})` : `${p.name} (${count})`;
         return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
       });
-      buttons.push([{ text: "← Back", callback_data: "mslot:professor" }]);
+      buttons.push([{ text: "← Back", callback_data: "mslot:main" }]);
       await api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
       return;
     }
@@ -86,17 +124,17 @@ export async function handleModelPickerCallback(
     const tc = loadTransport();
     if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
 
-    if (agent === "professor") {
-      const profResolved = resolveAgent("professor", tc);
-      const fallbacks = tc.agents["professor"]?.fallbacks ?? [];
+    if (agent === "main") {
+      const profResolved = resolveAgent("main", tc);
+      const fallbacks = tc.fallbacks ?? [];
       const slots: Array<{ label: string; key: string }> = [
-        { label: `★ Main: ${profResolved?.model ?? "?"}`, key: `mpos:professor::professor` },
+        { label: `★ Main: ${profResolved?.model ?? "?"}`, key: `mpos:main::main` },
       ];
       for (let i = 0; i < fallbacks.length; i++) {
-        slots.push({ label: `↳ Fb${i + 1}: ${fallbacks[i]!.model}`, key: `mpos:professor::professor_fb${i + 1}` });
+        slots.push({ label: `↳ Fb${i + 1}: ${fallbacks[i]!.model}`, key: `mpos:main::fallback${i + 1}` });
       }
-      if (fallbacks.length < 3) {
-        slots.push({ label: `↳ Fb${fallbacks.length + 1}: (add)`, key: `mpos:professor::professor_fb${fallbacks.length + 1}` });
+      if (fallbacks.length < 5) {
+        slots.push({ label: `↳ Fb${fallbacks.length + 1}: (add)`, key: `mpos:main::fallback${fallbacks.length + 1}` });
       }
       const buttons = slots.map(s => [{ text: s.label, callback_data: s.key }]);
       buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
@@ -117,15 +155,18 @@ export async function handleModelPickerCallback(
 
   } else if (data.startsWith("mprov:")) {
     const [, agent, providerName] = data.split(":");
-    const { loadTransport, getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
+    const { loadTransport } = await import("../../components/transport-config.js");
     const tc = loadTransport();
-    let models = getModelsForProvider(providerName!);
     const providerConfig = tc?.providers[providerName!];
-    if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
-    if (models.length === 0) { await api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
+    const entries = await buildModelEntries(providerName!, providerConfig);
+    if (entries.length === 0) {
+      // #1320: big un-curated pi-ai provider — defer to the modern TUI switcher + text escape.
+      await api.sendMessage(chatId, `📋 No curated models for ${providerName} yet. Use the TUI to browse the full catalog, or \`/models quick <id>\`.`);
+      return;
+    }
     state._pendingSlot = agent;
-    state._modelPickerCache = models.map(m => m.id);
-    const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
+    state._modelPickerCache = entries.map(e => e.id);
+    const buttons = entries.map((e, i) => [{ text: e.label, callback_data: `mset:${providerName}:${i}` }]);
     buttons.push([{ text: "← Back", callback_data: `mb:p:${agent}` }]);
     await api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
 
@@ -135,35 +176,44 @@ export async function handleModelPickerCallback(
     const tc = loadTransport();
     if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
     let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
-    const profResolved = resolveAgent("professor", tc);
-    const mainTransport = profResolved?.provider.transport;
-    if (slot && slot.startsWith("professor_fb") && mainTransport) {
+    const mainResolved = resolveAgent("main", tc);
+    const mainTransport = mainResolved?.provider.transport;
+    const isFallbackSlot = !!slot && slot.startsWith("fallback");
+    if (isFallbackSlot && mainTransport) {
       if (mainTransport === "api") { providers = providers.filter(p => p.config.transport === "api"); }
-      else { providers = providers.filter(p => p.name === profResolved!.providerName); }
+      else { providers = providers.filter(p => p.name === mainResolved!.providerName); }
     }
     if (providers.length === 0) { await api.sendMessage(chatId, "❌ No compatible providers for this slot"); return; }
-    const currentProvider = profResolved?.providerName;
-    const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
+    let currentProvider: string | undefined;
+    if (slot === "main") currentProvider = mainResolved?.providerName;
+    else if (isFallbackSlot) {
+      const fbIdx = parseInt(slot!.replace("fallback", ""), 10) - 1;
+      currentProvider = tc.fallbacks?.[fbIdx]?.provider;
+    }
+    const slotLabel = slot === "main" ? "Main" : isFallbackSlot ? slot!.replace("fallback", "Fb") : slot!;
     const buttons = providers.map(p => {
       const count = getModelsForProvider(p.name).length;
       const label = p.name === currentProvider ? `✓ ${p.name} (${count})` : `${p.name} (${count})`;
       return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
     });
-    buttons.push([{ text: "← Back", callback_data: "mslot:professor" }]);
+    buttons.push([{ text: "← Back", callback_data: "mslot:main" }]);
     await api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
   } else if (data.startsWith("mprov2:")) {
     const [, slot, providerName] = data.split(":");
-    const { getModelsForProvider, formatRank, formatCost, loadTransport } = await import("../../components/transport-config.js");
+    const { loadTransport } = await import("../../components/transport-config.js");
     const tc = loadTransport();
     const providerConfig = tc?.providers[providerName!];
-    let models = getModelsForProvider(providerName!);
-    if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
-    if (models.length === 0) { await api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
+    const entries = await buildModelEntries(providerName!, providerConfig);
+    if (entries.length === 0) {
+      // #1320: big un-curated pi-ai provider — defer to the modern TUI switcher + text escape.
+      await api.sendMessage(chatId, `📋 No curated models for ${providerName} yet. Use the TUI to browse the full catalog, or \`/models quick <id>\`.`);
+      return;
+    }
     state._pendingSlot = slot;
-    const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
-    state._modelPickerCache = models.map(m => m.id);
-    const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
+    const slotLabel = slot === "main" ? "Main" : slot!.startsWith("fallback") ? slot!.replace("fallback", "Fb") : slot!;
+    state._modelPickerCache = entries.map(e => e.id);
+    const buttons = entries.map((e, i) => [{ text: e.label, callback_data: `mset:${providerName}:${i}` }]);
     buttons.push([{ text: "← Back", callback_data: `mb:s:${slot}` }]);
     await api.sendMessage(chatId, `📋 Pick model for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
@@ -174,18 +224,20 @@ export async function handleModelPickerCallback(
     const model = Number.isFinite(modelIdx) && state._modelPickerCache[modelIdx]
       ? state._modelPickerCache[modelIdx]!
       : parts.slice(2).join(":");
-    const slot = state._pendingSlot ?? "professor";
+    const slot = state._pendingSlot ?? "main";
     state._pendingSlot = undefined;
     state._modelPickerCache = [];
     const { loadTransport, writeTransportConfig, resolveAgent, getModelsForProvider, validateProviderReady, formatValidationError } = await import("../../components/transport-config.js");
     const tc = loadTransport();
     if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
 
-    const validModels = getModelsForProvider(providerName);
-    if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
-
     const providerConfig = tc.providers[providerName];
     if (!providerConfig) { await api.sendMessage(chatId, `❌ Provider ${providerName} not found`); return; }
+    // #1311: pi-sourced models aren't in models.json — trust the picker cache for pi providers.
+    if (!providerConfig.useProviderLib) {
+      const validModels = getModelsForProvider(providerName);
+      if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
+    }
     const validation = validateProviderReady(providerName, providerConfig, getEnv());
     if (!validation.ok) { await api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
 
@@ -200,31 +252,29 @@ export async function handleModelPickerCallback(
       } catch (err) { logAndSwallow(TAG, "provider reachability check", err); await api.sendMessage(chatId, `⚠️ ${providerName} unreachable. Try another?`); return; }
     }
 
-    const agentKey = slot.startsWith("professor_fb") ? "professor" : slot;
-    const fbIndex = slot === "professor_fb1" ? 0 : slot === "professor_fb2" ? 1 : slot === "professor_fb3" ? 2 : -1;
-
-    if (fbIndex >= 0) {
-      if (!tc.agents["professor"]) tc.agents["professor"] = { model: "", provider: "" };
-      if (!tc.agents["professor"]!.fallbacks) tc.agents["professor"]!.fallbacks = [];
-      tc.agents["professor"]!.fallbacks[fbIndex] = { model, provider: providerName };
+    const fbMatch = slot.match(/^fallback(\d+)$/);
+    if (fbMatch) {
+      const fbIndex = parseInt(fbMatch[1]!, 10) - 1;
+      if (!tc.fallbacks) tc.fallbacks = [];
+      tc.fallbacks[fbIndex] = { model, provider: providerName };
       const { cleanDemotedModels } = await import("../../components/transport-config.js");
       cleanDemotedModels(tc, model);
-      writeTransportConfig(tc, `professor fallback ${fbIndex + 1} → ${model} (${providerName})`);
+      writeTransportConfig(tc, `fallback ${fbIndex + 1} → ${model} (${providerName})`);
       await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`);
     } else {
-      const oldProvider = tc.agents[agentKey]?.provider;
-      tc.agents[agentKey] = { ...tc.agents[agentKey]!, model, provider: providerName };
+      const oldProvider = tc.agents[slot]?.provider;
+      tc.agents[slot] = { ...tc.agents[slot]!, model, provider: providerName };
       const { cleanDemotedModels } = await import("../../components/transport-config.js");
       cleanDemotedModels(tc, model);
-      writeTransportConfig(tc, `${agentKey} → ${model} (${providerName})`);
+      writeTransportConfig(tc, `${slot} → ${model} (${providerName})`);
 
       const providerChanged = oldProvider !== providerName;
-      const isProfessor = agentKey === "professor";
+      const isMain = slot === "main";
 
       let oldType: string | undefined;
       let newType: string | undefined;
       let newResolved: ReturnType<typeof resolveAgent> | undefined;
-      if (isProfessor && providerChanged) {
+      if (isMain && providerChanged) {
         const oldResolved = resolveAgent("_old", { ...tc, agents: { ...tc.agents, _old: { model: "", provider: oldProvider! } } });
         newResolved = resolveAgent("_new", { ...tc, agents: { ...tc.agents, _new: { model, provider: providerName } } });
         oldType = oldResolved?.provider.transport ?? "api";
@@ -232,7 +282,7 @@ export async function handleModelPickerCallback(
         if (oldType !== newType) {
           const resetAgents: string[] = [];
           for (const [a, assignment] of Object.entries(tc.agents)) {
-            if (a === "professor") continue;
+            if (a === "main") continue;
             const ap = tc.providers[assignment.provider];
             if (ap && ap.transport !== newType) { tc.agents[a] = { model, provider: providerName }; resetAgents.push(a); }
           }
@@ -240,28 +290,42 @@ export async function handleModelPickerCallback(
         }
       }
 
-      if (isProfessor && !providerChanged && "setModel" in deps.transport) {
+      if (isMain && !providerChanged && "setModel" in deps.transport) {
         await (deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
         await api.sendMessage(chatId, `✓ Switched to ${model}`);
-      } else if (isProfessor && providerChanged && oldType === newType && "switchProvider" in deps.transport) {
+      } else if (isMain && providerChanged && oldType === newType && "switchProvider" in deps.transport) {
         try {
           const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
           const { ModelHealthRegistry } = await import("../../components/transport/model-health-registry.js");
+          const { buildCandidates } = await import("../../components/transport/model-candidates.js");
           const apiKey = getEnv().getApiKey(newResolved?.provider.apiKeyEnv ?? "API_KEY");
-          const candidates = [{ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow }];
-          for (const fb of (tc.agents["professor"]?.fallbacks ?? [])) {
+          // #1418: build candidates through the shared builder so each carries its
+          // complete identity tuple (provider/endpoint/apiKey/maxContext).
+          const fallbackCandidates = (tc.fallbacks ?? []).map(fb => {
             const fbRes = resolveAgent("_fb", { ...tc, agents: { ...tc.agents, _fb: { model: fb.model, provider: fb.provider } } });
-            if (fbRes) candidates.push({ endpoint: fbRes.provider.endpoint!, apiKey: fbRes.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey, model: fb.model, maxContext: fbRes.contextWindow });
-          }
+            return {
+              model: fb.model,
+              provider: fb.provider,
+              endpoint: fbRes?.provider.endpoint ?? newResolved!.provider.endpoint!,
+              apiKey: fbRes?.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey,
+              maxContext: fbRes?.contextWindow ?? newResolved!.contextWindow,
+              source: "agent_fallback" as const,
+            };
+          });
+          const candidates = buildCandidates({
+            role: "main",
+            configured: { model, provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey, maxContext: newResolved!.contextWindow, source: "primary" },
+            fallbacks: fallbackCandidates,
+          });
           const registry = (deps.transport as unknown as { policy?: { registry: InstanceType<typeof ModelHealthRegistry> } }).policy?.registry ?? new ModelHealthRegistry();
           const policy = new FallbackPolicy(candidates, registry);
-          (deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
+          (deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
         } catch (err) {
           await api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
           return;
         }
         try { await api.sendMessage(chatId, `✓ Switched to ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "sendMessage model switch confirm", err); }
-      } else if (isProfessor && providerChanged) {
+      } else if (isMain && providerChanged) {
         const cascadeNote = oldType !== newType ? " Subagents also reset." : "";
         try {
           if (deps.pipeline.rebuildTransport) await deps.pipeline.rebuildTransport();
@@ -271,7 +335,7 @@ export async function handleModelPickerCallback(
           await api.sendMessage(chatId, `⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}. Try /reset manually.`);
         }
       } else {
-        await api.sendMessage(chatId, `✓ ${agentKey} → ${model} (${providerName})`);
+        await api.sendMessage(chatId, `✓ ${slot} → ${model} (${providerName})`);
       }
     }
   } else if (data.startsWith("model:")) {

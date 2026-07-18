@@ -166,49 +166,6 @@ async function daemonControl(action: "start" | "stop" | "restart"): Promise<numb
   return 0;
 }
 
-// ── status ──
-
-async function daemonStatus(): Promise<number> {
-  const scope = detectScope();
-  if (!scope) {
-    process.stdout.write("No daemon service installed.\n");
-    process.stdout.write("  Install: sudo $(which abtars) daemon install\n");
-    return 0;
-  }
-
-  const { spawnSync } = await import("node:child_process");
-  const unit = unitName(scope);
-  const args = scope === "user" ? ["--user", "status", unit] : ["status", unit];
-  const r = spawnSync("systemctl", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
-  const output = r.stdout || r.stderr || "";
-
-  // Parse active state
-  const activeMatch = output.match(/Active:\s+(.+)/);
-  const pidMatch = output.match(/Main PID:\s+(\d+)/);
-
-  process.stdout.write(`● ${unit} (${scope} scope)\n`);
-  process.stdout.write(`  ${activeMatch?.[1] ?? "unknown"}\n`);
-  if (pidMatch) process.stdout.write(`  PID: ${pidMatch[1]}\n`);
-
-  // Bridge info from bridge.lock
-  const home = abtarsHome();
-  const lockPath = join(home, "bridge.lock");
-  if (existsSync(lockPath)) {
-    try {
-      const lock = JSON.parse(readFileSync(lockPath, "utf-8"));
-      if (lock.pid) process.stdout.write(`  Bridge PID: ${lock.pid}\n`);
-      if (lock.startedAt) {
-        const upMs = Date.now() - new Date(lock.startedAt).getTime();
-        const upMin = Math.round(upMs / 60000);
-        process.stdout.write(`  Uptime: ${upMin >= 60 ? `${Math.floor(upMin / 60)}h ${upMin % 60}m` : `${upMin}m`}\n`);
-      }
-      if (lock.version) process.stdout.write(`  Version: ${lock.version}\n`);
-      if (lock.restartReason) process.stdout.write(`  Last restart: ${lock.restartReason}\n`);
-    } catch { /* ignore */ }
-  }
-  return 0;
-}
-
 // ── router ──
 
 export async function daemon(args: string[]): Promise<number> {
@@ -220,9 +177,8 @@ export async function daemon(args: string[]): Promise<number> {
     case "start": return daemonControl("start");
     case "stop": return daemonControl("stop");
     case "restart": return daemonControl("restart");
-    case "status": return daemonStatus();
     default:
-      process.stderr.write(`Unknown: abtars daemon ${sub}\nUsage: abtars daemon [install|uninstall|start|stop|restart|status]\n`);
+      process.stderr.write(`Unknown: abtars daemon ${sub}\nUsage: abtars daemon [install|uninstall|start|stop|restart]\n`);
       return 1;
   }
 }

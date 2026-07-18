@@ -72,9 +72,9 @@ export async function handleEmergencyAlias(_text: string, ctx: CommandContext): 
 }
 
 export async function handleModels(text: string, ctx: CommandContext): Promise<boolean> {
-  const { loadTransport, resolveAgent, getModelsForProvider, writeTransportConfig } = await import("../transport-config.js");
+  const { loadTransport, resolveAgent, getModelsForProvider } = await import("../transport-config.js");
   const tc = loadTransport();
-  const prof = tc ? resolveAgent("professor", tc) : null;
+  const prof = tc ? resolveAgent("main", tc) : null;
   const currentModel = ("currentModel" in ctx.transport
     ? (ctx.transport as unknown as { currentModel: string }).currentModel
     : undefined) ?? prof?.model ?? "unknown";
@@ -84,10 +84,11 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   // /model emergency — activate hailMary (paid) until /model restore, /reset, or wake-up
   if (arg === "emergency" || arg === "hailmary") {
     if (!ctx.hailMary) { await ctx.reply("❌ hailMary not configured in transport.json"); return true; }
-    const t = ctx.transport as unknown as { setEmergencyMode?: (o: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null) => void };
+    const t = ctx.transport as unknown as { setEmergencyMode?: (o: { provider: string; endpoint: string; apiKey?: string; model: string; maxContext: number } | null) => void };
     if (!t.setEmergencyMode) { await ctx.reply("❌ Transport does not support emergency mode"); return true; }
 
     // #367 — validate hailMary's provider is ready before switching.
+    let hmApiKey: string | undefined;
     if (tc) {
       const hmProvider = tc.hailMary ? tc.providers[tc.hailMary.provider] : undefined;
       if (hmProvider) {
@@ -95,10 +96,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
         const { getEnv } = await import("../env-schema.js");
         const result = validateProviderReady(tc.hailMary!.provider, hmProvider, getEnv());
         if (!result.ok) { await ctx.reply(formatValidationError(tc.hailMary!.provider, result)); return true; }
+        hmApiKey = tc.hailMary?.provider ? getEnv().getApiKey(hmProvider.apiKeyEnv ?? "") : undefined;
       }
     }
 
-    t.setEmergencyMode({ ...ctx.hailMary, maxContext: 1_000_000 });
+    const hmEndpoint = ctx.hailMary?.endpoint ?? "";
+    t.setEmergencyMode({ provider: tc?.hailMary?.provider ?? "unknown", model: ctx.hailMary?.model ?? "", endpoint: hmEndpoint, apiKey: hmApiKey, maxContext: 1_000_000 });
     await ctx.reply(`🚨 EMERGENCY MODE: using ${ctx.hailMary.model} (paid). Clears on /model restore, /reset, or wake-up.`);
     return true;
   }
@@ -152,9 +155,9 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const models = new Set<string>();
     for (const [, agent] of Object.entries(tc!.agents)) {
       if (agent.provider === prof.providerName) models.add(agent.model);
-      for (const fb of agent.fallbacks ?? []) {
-        if (fb.provider === prof.providerName) models.add(fb.model);
-      }
+    }
+    for (const fb of tc!.fallbacks ?? []) {
+      if (fb.provider === prof.providerName) models.add(fb.model);
     }
     if (tc!.hailMary?.provider === prof.providerName) models.add(tc!.hailMary.model);
 
@@ -222,10 +225,14 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     }
 
     // Write + switch
-    tc.agents["professor"]!.model = newModel;
-    const { cleanDemotedModels } = await import("../transport-config.js");
+    tc.agents["main"]!.model = newModel;
+    const { cleanDemotedModels, writeTransportConfig } = await import("../transport-config.js");
     cleanDemotedModels(tc, newModel);
-    writeTransportConfig(tc, `professor model → ${newModel}`);
+    const result = writeTransportConfig(tc, `main model → ${newModel}`);
+    if (!result.ok) {
+      await ctx.reply(`❌ Cannot switch: ${result.issues.map(i => i.reason).join("; ")}`);
+      return true;
+    }
     if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
     }
@@ -253,7 +260,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       // List models for a specific provider
       const models = getModels(providerArg);
       if (models.length === 0) { await ctx.reply(`❌ No models found for provider "${providerArg}"`); return true; }
-      const lines = [`📋 Models on ${providerArg}:`];
+      const lines = [`Models on ${providerArg}:`];
       for (const m of models) {
         const current = m.id === currentModel ? " ✓" : "";
         lines.push(`  • ${m.id}${current}`);
@@ -271,10 +278,10 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       return true;
     }
     const AGENT_LABELS: Array<{ key: string; label: string }> = [
-      { key: "professor", label: "Professor" },
+      { key: "main", label: "Main" },
       { key: "dreamy", label: "Dreamy (sleep)" },
       { key: "browsie", label: "Browsie (browse)" },
-      { key: "coding", label: "Cody (coding)" },
+      { key: "cody", label: "Cody (coding)" },
     ];
     const buttons = AGENT_LABELS.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
     buttons.push([{ text: "← Cancel", callback_data: "mb:" }]);
@@ -293,69 +300,101 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const validation = validateProviderReady(providerName, provider, getEnv());
     if (!validation.ok) { await ctx.reply(formatValidationError(providerName, validation)); return true; }
     const defaults = loadProviderDefaults(providerName);
-    if (defaults?.professor) {
-      tc.agents["professor"] = { model: defaults.professor.model, provider: providerName, fallbacks: defaults.professor.fallbacks?.map(m => ({ model: m, provider: providerName })) };
-      for (const role of ["dreamy", "browsie", "coding"] as const) {
-        tc.agents[role] = { model: defaults[role]?.model ?? defaults.professor.model, provider: providerName };
+    if (defaults?.main) {
+      tc.agents["main"] = { model: defaults.main.model, provider: providerName };
+      for (const role of ["dreamy", "browsie", "cody"] as const) {
+        tc.agents[role] = { model: defaults[role]?.model ?? defaults.main.model, provider: providerName };
       }
     } else {
-      for (const role of Object.keys(tc.agents)) {
-        tc.agents[role] = { ...tc.agents[role]!, provider: providerName };
-      }
+      // #1415: no provider defaults — don't retain old provider's model IDs
+      await ctx.reply(`❌ ${providerName} has no model defaults. Use /model list ${providerName} and /model quick <model> to pick a compatible model.`);
+      return true;
     }
-    writeTransportConfig(tc, `global provider → ${providerName}`);
+    const { writeTransportConfig } = await import("../transport-config.js");
+    const result = writeTransportConfig(tc, `global provider → ${providerName}`);
+    if (!result.ok) {
+      await ctx.reply(`❌ Cannot switch to ${providerName}: ${result.issues.map(i => i.reason).join("; ")}`);
+      return true;
+    }
     await ctx.reply(`✓ All agents → ${providerName}. Use /reset to apply.`);
     return true;
   }
 
   // /models (no arg) — merged status: model + transport + agents
-  const transportStatus = ctx.transport.isReady ? "✓ Connected" : "❌ Disconnected";
+  // #1416: live snapshot from getRuntimeStatus() — shared formatter.
+  const { resolveRuntimeStatus, formatRuntimeRoute } = await import("../transport/runtime-status.js");
+  const liveStatus = resolveRuntimeStatus(ctx.transport as any, {
+    route: tc?.route,
+    provider: prof?.providerName,
+    model: prof?.model,
+  });
   const ctxPct = ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a";
-  const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
-  const provider = prof?.providerName ?? "unknown";
   const isEmergency = (ctx.transport as unknown as { isEmergencyMode?: boolean }).isEmergencyMode === true;
+  const statusMark = ctx.transport.isReady ? "✓" : "✗";
 
   const lines = [
-    `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`,
-    isEmergency ? `🚨 EMERGENCY MODE: ${currentModel} (paid)` : `🤖 Model: ${currentModel}`,
-    `📊 Context: ${ctxPct}`,
+    `🔌 Transport: ${formatRuntimeRoute(liveStatus)} ${statusMark}`,
+    isEmergency ? `EMERGENCY MODE: ${liveStatus.model ?? currentModel} (paid)` : `Model: ${liveStatus.model ?? currentModel}`,
+    `Context: ${ctxPct}`,
     "",
-    "📋 Agents:",
+    "Agents:",
   ];
-  const agents = ["professor", "dreamy", "browsie", "coding"] as const;
-  const names: Record<string, string> = { professor: "Professor", dreamy: "Dreamy", browsie: "Browsie", coding: "Cody" };
+  const agents = ["main", "dreamy", "browsie", "cody"] as const;
+  const names: Record<string, string> = { main: "Main", dreamy: "Dreamy", browsie: "Browsie", cody: "Cody" };
   for (const a of agents) {
     const r = tc ? resolveAgent(a, tc) : null;
     let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`;
-    if (a === "professor" && r?.fallbacks.length) {
+    if (a === "main" && r?.fallbacks.length) {
       line += "\n" + r.fallbacks.map((f, i) => `    ↳ fb${i + 1}: ${f.model} (${f.provider})`).join("\n");
     }
     lines.push(line);
   }
-  if (prof?.provider.fallbackChain?.length) {
-    lines.push(`\n🛟 Fallback chain: ${prof.provider.fallbackChain.join(" → ")}`);
+  if (tc?.fallbacks?.length) {
+    lines.push(`\nFallback chain: ${tc.fallbacks.map(f => f.model).join(" → ")}`);
+  }
+  // #1386: Show effective candidate order from the transport's policy
+  const transport = ctx.transport as unknown as { policy?: { candidates: Array<{ model: string; endpoint: string; source: string }> } };
+  if (transport.policy?.candidates && transport.policy.candidates.length > 1) {
+    const { formatCandidateChain } = await import("../transport/model-candidates.js");
+    lines.push(`\nEffective chain:\n${formatCandidateChain(transport.policy.candidates as any)}`);
   }
   if (ctx.hailMary) {
-    lines.push(`🚨 hailMary: ${ctx.hailMary.model} `);
+    lines.push(`hailMary: ${ctx.hailMary.model} `);
   }
   lines.push("\nUse /models change to switch.");
   await ctx.reply(lines.join("\n"));
   return true;
 }
 
-export async function handleReasoning(text: string, ctx: CommandContext): Promise<boolean> {
-  const arg = text.replace(/^\/(reasoning)\s*/i, "").trim().toLowerCase();
-  const session = ctx.transport.getActiveSession?.();
+// #1276: /effort (primary) + /thinking (alias). Both names route here via
+// registerExact in commands/index.ts. The arg regex strips the command word
+// for either name. The level set is pi-ai's verbatim (off|low|medium|high|xhigh)
+// — see #1311 for the transport-side wiring.
+//
+// `off` is an effort level, NOT a display-toggle alias. We dropped the prior
+// `on`/`off` display aliases (frees `off` for the effort branch) — bare
+// `/effort` still echoes current state, `/effort show`/`/effort hide` toggle
+// the display only.
+export async function handleEffort(text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = text.replace(/^\/(?:effort|thinking)\s*/i, "").trim().toLowerCase();
+  // #1276: ACP transport doesn't implement getActiveSession — reply with the
+  // accurate "not supported" message rather than the generic "No active
+  // session." fallback. This check is structural (capability-based), not state.
+  if (!ctx.transport.getActiveSession) {
+    await ctx.reply("not supported on this transport");
+    return true;
+  }
+  const session = ctx.transport.getActiveSession();
   if (!session) { await ctx.reply("No active session."); return true; }
 
-  if (arg === "show" || arg === "on") {
+  if (arg === "show") {
     session.showReasoning = true;
     await ctx.reply("Reasoning display: on");
-  } else if (arg === "hide" || arg === "off") {
+  } else if (arg === "hide") {
     session.showReasoning = false;
     await ctx.reply("Reasoning display: off");
-  } else if (["none", "low", "medium", "high"].includes(arg)) {
-    session.reasoningEffort = arg === "none" ? null : arg as "low" | "medium" | "high";
+  } else if (["off", "low", "medium", "high", "xhigh"].includes(arg)) {
+    session.reasoningEffort = arg as "off" | "low" | "medium" | "high" | "xhigh";
     await ctx.reply(`Reasoning effort: ${arg}`);
   } else {
     await ctx.reply(`Reasoning: effort=${session.reasoningEffort ?? "default"}, display=${session.showReasoning ? "show" : "hide"}`);
@@ -371,5 +410,65 @@ export async function handleContinue(_text: string, ctx: CommandContext): Promis
     userId: ctx.userId, await: true,
   });
   if (response) await ctx.reply(response);
+  return true;
+}
+
+// ── /route handler (#1418) ───────────────────────────────────────────────────
+
+export async function handleRoute(args: string, ctx: CommandContext): Promise<boolean> {
+  const { loadTransport, writeTransportConfig, providersForRoute, allAssignmentsMatchRoute, providerSupportsRoute } = await import("../transport-config.js");
+  const tc = loadTransport();
+  if (!tc) { await ctx.reply("❌ transport.json not loaded"); return true; }
+
+  const arg = args.replace(/^\/route\s*/i, "").trim().toLowerCase();
+
+  if (!arg) {
+    const routeLabels: Record<string, string> = { "pi-ai": "pi-ai API", "direct-api": "Direct API", acp: "ACP" };
+    await ctx.reply(
+      `Current route: **${routeLabels[tc.route] ?? tc.route}**\n\n` +
+      `Choose a route:\n${["pi-ai", "direct-api", "acp"].map(r => `• \`/route ${r}\` — ${routeLabels[r]}`).join("\n")}\n\n` +
+      `_Provider filter: ${providersForRoute(tc, tc.route).length} compatible providers_`
+    );
+    return true;
+  }
+
+  const validRoutes = ["pi-ai", "direct-api", "acp"] as const;
+  if (!validRoutes.includes(arg as any)) {
+    await ctx.reply(`❌ Unknown route "${arg}". Choose: pi-ai, direct-api, or acp.`);
+    return true;
+  }
+
+  const newRoute = arg as "pi-ai" | "direct-api" | "acp";
+
+  if (newRoute === tc.route) {
+    await ctx.reply(`✓ Already on ${newRoute} route.`);
+    return true;
+  }
+
+  if (allAssignmentsMatchRoute(tc, newRoute)) {
+    tc.route = newRoute;
+    const result = writeTransportConfig(tc, `route → ${newRoute}`);
+    if (!result.ok) {
+      await ctx.reply(`❌ Cannot switch to ${newRoute}: ${result.issues.map(i => i.reason).join("; ")}`);
+      return true;
+    }
+    await ctx.reply(`✓ Route switched to ${newRoute}. Use /reset to apply.`);
+  } else {
+    const incompatible: string[] = [];
+    for (const [role, a] of Object.entries(tc.agents)) {
+      const p = tc.providers[a.provider];
+      if (!p || !providerSupportsRoute(p, newRoute)) incompatible.push(role);
+    }
+    for (let i = 0; i < (tc.fallbacks ?? []).length; i++) {
+      const fb = tc.fallbacks![i]!;
+      const p = tc.providers[fb.provider];
+      if (!p || !providerSupportsRoute(p, newRoute)) incompatible.push(`fallback[${i}]`);
+    }
+    await ctx.reply(
+      `❌ Cannot switch to ${newRoute}: incompatible assignments found.\n` +
+      `Incompatible: ${incompatible.join(", ") || "none"}\n` +
+      `Use the interactive /model change picker to reassign them, or edit transport.json manually.`
+    );
+  }
   return true;
 }

@@ -70,6 +70,7 @@ describe("Contract: ACP session update handling", () => {
     transport.lastContentAt = 0;
     transport.toolMeta = null;
     transport.sm = { state: "idle", toolStarted: vi.fn(), toolCompleted: vi.fn() };
+    transport.outputObservers = new Map();
     return transport;
   }
 

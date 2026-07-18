@@ -95,7 +95,23 @@ while true; do
     fi
     # Bridge alive?
     if ! kill -0 "$PID" 2>/dev/null; then
-      wait "$PID" 2>/dev/null; EXIT_CODE=$?
+      wait "$PID" 2>/dev/null   # reap the child; its return is ignored below (always 0 due to disown)
+      # #1328: prefer the bridge's self-reported exit code from bridge.lock. `wait` always
+      # reports 0 here because of `disown` (kept intentionally — #1050 survival +
+      # SIGTERM/INT-trap isolation, see resilience.asbuilt.md). Only trust the lock's
+      # lastExitCode if it was written AFTER this bridge instance was spawned — otherwise
+      # it's a stale value from a prior death (or the lock predates this fix).
+      EXIT_CODE=$(python3 -c "
+import json
+try:
+    d = json.load(open('$LOCK'))
+    ec = d.get('lastExitCode')
+    ea = d.get('lastExitAt', 0)
+    print(ec if (ec is not None and ea / 1000 > $SPAWNED_AT) else '')
+except Exception:
+    print('')
+" 2>/dev/null)
+      [[ -z "$EXIT_CODE" ]] && EXIT_CODE="unknown"
       DEATH_REASON="process-gone:exit=$EXIT_CODE"
       break
     fi
@@ -110,22 +126,50 @@ while true; do
     fi
   done
 
-  # Log death + update deploy.state restartCount
+  # Log death + update deploy.state restartCount + crash-window death log
   echo "$(date +%FT%T) Bridge died: $DEATH_REASON (PID=$PID)" >> "$AB/logs/watchdog.log"
   python3 -c "
-import json
+import json, time
 p='$STATE'
 try: d=json.load(open(p))
 except: d={}
 d['restartCount'] = d.get('restartCount', 0) + 1
 d['lastDeath'] = '$(date +%FT%T)'
+# #1328: rolling window of recent death timestamps (epoch seconds), for the
+# crash-with-heartbeat failsafe below. Keep only the last 10 — plenty for a
+# 4-in-N-minutes check without unbounded growth.
+window = d.get('deathWindow', [])
+window.append(int(time.time()))
+d['deathWindow'] = window[-10:]
 with open(p,'w') as f: json.dump(d,f)
 " 2>/dev/null
 
-  # Failsafe: 4+ deaths in 7min with no heartbeat ever → give up
+  # Failsafe A: 4+ deaths in 7min with no heartbeat ever → give up
   HB_CHECK=$(grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*')
   RESTART_COUNT=$(python3 -c "import json; print(json.load(open('$STATE')).get('restartCount',0))" 2>/dev/null || echo 0)
   if (( RESTART_COUNT >= 4 )) && [[ -z "$HB_CHECK" || "$HB_CHECK" == "0" ]]; then
+    echo "stopped" > "$AB/.start-reason"
+    exit 2
+  fi
+
+  # Failsafe B (#1328): 4+ deaths within a 10min window, REGARDLESS of heartbeat state.
+  # Catches the #1327 pattern — bridge heartbeats fine for ~2min each cycle then dies on
+  # the same bug every time. Failsafe A never fires in this case because heartbeat IS
+  # present; the boot-side circuit breaker (boot/circuit-breaker.ts) eventually catches it
+  # via restartCount, but only after a full rollback cycle. This trips sooner, same terminal
+  # action (stopped, exit 2) as Failsafe A.
+  CRASH_WINDOW_COUNT=$(python3 -c "
+import json, time
+try:
+    d = json.load(open('$STATE'))
+    window = d.get('deathWindow', [])
+    now = time.time()
+    print(sum(1 for t in window if now - t <= 600))
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+  if (( CRASH_WINDOW_COUNT >= 4 )); then
+    echo "$(date +%FT%T) Failsafe B: $CRASH_WINDOW_COUNT deaths within 10min (heartbeat present) — giving up" >> "$AB/logs/watchdog.log"
     echo "stopped" > "$AB/.start-reason"
     exit 2
   fi

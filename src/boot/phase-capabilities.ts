@@ -36,7 +36,7 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
   try {
     ({ capabilities: staticCaps } = await import("../capabilities/_registry.generated.js"));
   } catch (err) {
-    // Registry chunk failed (missing runtime dep like patchright). Load each independently.
+    // Registry chunk failed (missing runtime dep). Load each independently.
     logError("capabilities", `Registry import failed: ${err instanceof Error ? err.message : String(err)}. Loading individually.`);
     staticCaps = [];
     const individualCaps = [

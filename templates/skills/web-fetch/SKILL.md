@@ -45,22 +45,47 @@ Use when:
 
 10x faster than Chrome. Handles most JS-rendered pages. No login/interaction.
 
-## Level 4 — Browsie (full Chrome session, interaction)
+## Level 4 — CloakBrowser (full browser, interaction)
 
-```bash
-# Via tool call:
-web_browse(task="description of what to do", chat_id="CHAT_ID")
+Escalate to a managed Browsie session. Create a B-type kanban card with a detailed goal and report the card ID. Do NOT invoke a browser CLI from Main.
+
+### Goal checklist
+
+Include in the goal:
+- Objective and expected outcome
+- Starting URL(s) and any prior fetch results
+- Required interactions (login, forms, clicks, navigation)
+- Expected artifacts (screenshots, extracted text, page info)
+- Success criteria and stopping condition
+
+### Direct API
+
+```
+kanban_manage action=create type=B title="<short title>" goal="<detailed goal>"
 ```
 
-Spawns a dedicated Chrome session (patchright). Use when ANY of:
-- Levels 1-3 all failed or returned garbage
-- Need to authenticate / log in
-- Need to interact (click buttons, fill forms, scroll to load)
-- Multi-page navigation (follow links, paginate)
-- Research task requiring correlating multiple pages
-- Need screenshots or visual verification
+### ACP
 
-Handoff: describe the goal + starting URL(s) + what to extract.
+```bash
+abtars kanban create --type B --title "short title" --goal "$(cat <<'GOAL'
+detailed goal text
+GOAL
+)"
+```
+
+Or pass a goal file:
+
+```bash
+abtars kanban create --type B --title "short title" --goal-file /tmp/goal.txt
+```
+
+### Acknowledgement
+
+When the card is queued, say: `"Browsie task #<id> queued — result will appear here when complete."` Do NOT proceed with inline browser commands.
+
+### Emergency direct operation
+
+If the user explicitly requests that Main use the browser directly (and ONLY if they do), see the browser skill Emergency Direct Mode section. A slow/queued card or suspected session trouble does not authorize fallback.
 
 ## Decision summary
 
@@ -69,5 +94,5 @@ Handoff: describe the goal + starting URL(s) + what to extract.
 | Single URL, open site | 1 (curl) |
 | Single URL, CF-protected | 2 (Jina) |
 | Single URL, JS-rendered | 3 (lightpanda) |
-| Login, forms, multi-page, interaction | 4 (Browsie) |
+| Full browser (login, forms, interaction) | 4 (B kanban card) |
 | Previous level failed | Try next level up |

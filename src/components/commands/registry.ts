@@ -1,4 +1,3 @@
-import { logInfo } from "../logger.js";
 import { resetAndPrepare } from "../message-pipeline.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext, CommandHandler } from "./types.js";
@@ -109,21 +108,6 @@ export async function triggerResetSession(ctx: CommandContext): Promise<void> {
   if (hasHooks("SessionStart")) {
     await fireHook("SessionStart", { event: "SessionStart", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason: "reset-transport" }).catch(err => logAndSwallow(TAG, "fireHook session", err));
   }
-}
-
-let _wakeInhibitPid: number | null = null;
-
-/** Kill the wake inhibitor process (called before hw sleep). */
-export function killWakeInhibit(): void {
-  if (_wakeInhibitPid) {
-    try { process.kill(_wakeInhibitPid); } catch (err) { logAndSwallow("command_handlers", "op", err); }
-    logInfo("wakeup", `Killed wake inhibitor pid=${_wakeInhibitPid}`);
-    _wakeInhibitPid = null;
-  }
-}
-
-export function setWakeInhibitPid(pid: number): void {
-  _wakeInhibitPid = pid;
 }
 
 function levenshtein(a: string, b: string): number {

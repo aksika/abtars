@@ -26,6 +26,7 @@ import type { BootCtx, PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { TaskCompleteCallback } from "../components/tasks/task-queue.js";
 import { getEnv } from "../components/env-schema.js";
+import { unavailable } from "../capabilities/sleep/index.js";
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, transport } = ctx;
@@ -110,6 +111,22 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   spin.setRuntime(ctx.runtime);
   if (ctx.memory) spin.setMemory(ctx.memory as any);
 
+  // #1319: Create Orc activity feed and wire Spin producer + Nerve bridge
+  const { OrcActivityFeed } = await import("../components/orc-activity-feed.js");
+  const feed = new OrcActivityFeed();
+  spin.setOrcActivityFeed(feed);
+  ctx.orcActivityFeed = feed;
+
+  // #1338: Create the live attached-session output feed and wire Spin producer.
+  const { SessionOutputFeed } = await import("../components/session-output-feed.js");
+  const outputFeed = new SessionOutputFeed();
+  spin.setSessionOutputFeed(outputFeed);
+  ctx.sessionOutputFeed = outputFeed;
+  const { bridgeNerveToFeed } = await import("../components/orc-activity-bridge.js");
+  ctx._orcActivityBridgeCleanup = bridgeNerveToFeed(feed, () =>
+    spin.listAllSessions().filter(s => s.id.includes("_O_") && s.status !== "ended"),
+  );
+
   // #936: Register master session in Spin
   const { loadUsers } = await import("../components/user-registry.js");
   const registry = loadUsers();
@@ -165,6 +182,12 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     enqueueCron,
     requestShutdown: (code?: number) => ctx.requestShutdownWithCode(code ?? 0),
     sleepProgress: () => ctx.sleepHandle?.progress ?? null,
+    startSleep: (o) => {
+      if (ctx.sleepHandle) return ctx.sleepHandle.startManual(o);
+      if (ctx.sleepUnavailable) return ctx.sleepUnavailable;
+      logWarn("sleep", "sleep handle absent without boot availability reason");
+      return unavailable("sleep_not_initialized");
+    },
     loadedCapabilities: [],
     selfHealerTask: null,
     hailMary: ctx.hailMary,
@@ -179,7 +202,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       try {
         const tc = loadTransport();
         if (tc) {
-          const prof = resolveAgent("professor", tc);
+          const prof = resolveAgent("main", tc);
           if (prof?.contextWindow) return prof.contextWindow;
         }
       } catch { /* fallback */ }
@@ -191,10 +214,11 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // #944 Step C + #1306: Wire full message handler on already-connected platforms.
   // Extracted into wire-platform.ts so the retry path in phasePlatformsConnect can
   // call the same functions when a new adapter is created after this phase completes.
-  const { wireTelegram, wireDiscord, wireIrc, drainRecoveryQueue } = await import("./wire-platform.js");
+  const { wireTelegram, wireDiscord, wireIrc, wireTui, drainRecoveryQueue } = await import("./wire-platform.js");
   await wireTelegram(ctx);
   await wireDiscord(ctx);
   await wireIrc(ctx);
+  await wireTui(ctx);
   await drainRecoveryQueue(ctx);
 
   // #1000: "Back online" notification moved to bridge-app.ts (fires before greeting)

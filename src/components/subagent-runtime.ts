@@ -5,11 +5,12 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import type { IKiroTransport } from "./transport/kiro-transport.js";
-import { logInfo, logWarn } from "./logger.js";
+import type { IKiroTransport, PromptRequestContext, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
+import { logInfo, logDebug, logWarn } from "./logger.js";
 import { randomBytes } from "node:crypto";
 
 import type { ModelHealthRegistry } from "./transport/model-health-registry.js";
+import type { CandidateSpec } from "./transport/model-candidates.js";
 
 const TAG = "runtime";
 
@@ -26,6 +27,21 @@ export interface AgentOpts {
   sessionType?: import("./spin-types.js").SessionType;
   /** Override tool-loop circuit breaker limit for this call. */
   maxToolRounds?: number;
+  /** #1338: call-local observer for live TUI output mirroring. Forwarded to the transport. */
+  outputObserver?: import("./session-output-feed.js").OutputObserver;
+}
+
+/** #1361: Per-execution handle for one-shot or continuation-capable LLM calls. */
+export interface RuntimeExecution {
+  send(prompt: string, image?: { mime: string; base64: string }, context?: PromptRequestContext): Promise<string>;
+  cancel(reason: import("./swarm-executor-types.js").CancelReason): Promise<void>;
+  close(): Promise<void>;
+  readonly transport: IKiroTransport;
+  readonly sessionKey: string;
+  readonly ephemeral: boolean;
+  /** #1364: Per-execution abort signal. Abort the controller to cancel the execution. */
+  readonly abortSignal?: AbortSignal;
+  lastUsage(): RuntimeUsageSnapshot | null;
 }
 
 /** Persistent transport handle for multi-turn callers. */
@@ -67,19 +83,34 @@ export class SubagentRuntime {
   private readonly cache = new Map<AgentName, CachedAgent>();
   private readonly activeSpawns = new Map<string, { abort: AbortController; startedAt: number }>();
   private _registry: ModelHealthRegistry | null = null;
-  private _mainTransport: IKiroTransport | null = null;
-  private _lastUsage: { input: number; output: number } | null = null;
+  private _lastUsage: RuntimeUsageSnapshot | null = null;
 
   /** Token usage from last complete() call. */
-  get lastUsage(): { input: number; output: number } | null { return this._lastUsage; }
+  get lastUsage(): RuntimeUsageSnapshot | null { return this._lastUsage; }
   private _sessionManager: import("./spin.js").Spin | null = null;
   private _sandboxEnabled = false;
 
   /** Set shared model health registry (from boot ctx). */
   setRegistry(registry: ModelHealthRegistry): void { this._registry = registry; }
 
-  /** Set main transport reference for currentModel reads. */
-  setMainTransport(transport: IKiroTransport): void { this._mainTransport = transport; }
+  /** Set main transport reference and wire the #1418 last-successful-Main tracker. */
+  setMainTransport(transport: IKiroTransport): void {
+    // #1418: Wire last-successful-Main tracker from DirectApiTransport. The tracker
+    // stores the complete secret-free candidate tuple (provider/model/endpoint/
+    // maxContext) so specialists can reuse the exact Main candidate that worked.
+    const apiTransport = transport as unknown as { lastSuccessfulCandidate: CandidateSpec | null; onLastSuccessfulChanged?: (candidate: CandidateSpec) => void };
+    if (apiTransport && "lastSuccessfulCandidate" in apiTransport) {
+      this._lastSuccessfulMain = apiTransport.lastSuccessfulCandidate ?? null;
+      if ("onLastSuccessfulChanged" in apiTransport) {
+        apiTransport.onLastSuccessfulChanged = (c: CandidateSpec) => { this._lastSuccessfulMain = c; };
+      }
+    }
+  }
+
+  /** #1418: Last successful Main candidate (complete secret-free tuple) for
+   *  specialist fallback ordering. Null until Main produces a non-empty response. */
+  private _lastSuccessfulMain: CandidateSpec | null = null;
+  get lastSuccessfulMain(): CandidateSpec | null { return this._lastSuccessfulMain; }
 
   /** Set session manager for auto-spawn sub-session creation (#510). */
   setSessionManager(mgr: import("./spin.js").Spin): void { this._sessionManager = mgr; }
@@ -92,6 +123,23 @@ export class SubagentRuntime {
 
   /** Send a prompt to a named agent and get the response. */
   async complete(agent: AgentName, prompt: string, opts?: AgentOpts): Promise<string> {
+    const exec = await this.openExecution(agent, agent, opts);
+    try {
+      const response = await exec.send(prompt, undefined, { outputObserver: opts?.outputObserver });
+      this._lastUsage = exec.lastUsage();
+      return response ?? "";
+    } catch (err) {
+      logWarn(TAG, `${agent} complete failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.cache.delete(agent);
+      throw err;
+    } finally {
+      await exec.close();
+    }
+  }
+
+  /** #1361: Open a uniquely-keyed execution handle. Key must be unique per concurrent
+   *  execution (use ManagedSession ID for one-shot sessions, not the agent name alone). */
+  async openExecution(agent: AgentName, key: string, opts?: AgentOpts): Promise<RuntimeExecution> {
     const { checkBudget, sendBudgetNotification } = await import("./budget.js");
     const budgetCheck = checkBudget(agent);
     if (!budgetCheck.allowed) {
@@ -101,44 +149,68 @@ export class SubagentRuntime {
     }
 
     const sessionStrategy = opts?.session ?? DEFAULT_SESSION[agent] ?? "fresh";
-    const start = Date.now();
 
-    const cached = this.cache.get(agent);
+    const cached = this.cache.get(key as AgentName);
     if (cached && sessionStrategy === "fresh") {
       await cached.transport.resetSession?.(cached.sessionKey);
       (await import("./transport/tool-registry.js")).resetStoreCounter();
     }
 
-    const { transport, model, sessionKey } = cached ?? await this.createAgent(agent, opts?.sessionType);
+    const cacheKey = key as AgentName;
+    const entry = this.cache.get(cacheKey) ?? await this.createAgent(agent, opts?.sessionType, key);
+    const { transport, model } = entry;
+    const sessionKey = entry.sessionKey;
 
-    // Per-call timeout override (e.g. dreamy sleep steps need longer than default)
+    // Per-call timeout override
     if (opts?.timeoutMs && transport.setTimeoutOverride) {
       transport.setTimeoutOverride(opts.timeoutMs);
     }
-
-    // Per-call tool-round circuit breaker override (e.g. long-running task agents)
+    // Per-call tool-round circuit breaker override
     if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
       transport.setMaxToolRoundsOverride(opts.maxToolRounds);
     }
 
-    try {
-      const response = await transport.sendPrompt(sessionKey, prompt);
-      const elapsed = Date.now() - start;
-      this._lastUsage = transport.lastUsage?.() ?? null;
-      logInfo(TAG, `${agent} complete: ${prompt.length}ch → ${response?.length ?? 0}ch (${elapsed}ms, ${model})`);
-      return response ?? "";
-    } catch (err) {
-      logWarn(TAG, `${agent} complete failed: ${err instanceof Error ? err.message : String(err)}`);
-      this.cache.delete(agent);
-      throw err;
-    } finally {
-      if (opts?.timeoutMs && transport.setTimeoutOverride) {
-        transport.setTimeoutOverride(null);
-      }
-      if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
-        transport.setMaxToolRoundsOverride(null);
-      }
-    }
+    let closed = false;
+    const start = Date.now();
+
+    const exec: RuntimeExecution = {
+      transport,
+      sessionKey,
+      ephemeral: sessionStrategy === "fresh",
+      lastUsage: () => transport.lastUsage?.() ?? null,
+
+      send: async (prompt, image, context) => {
+        const response = await transport.sendPrompt(sessionKey, prompt, image, context);
+        logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
+        return response ?? "";
+      },
+
+      cancel: async (_reason: import("./swarm-executor-types.js").CancelReason) => {
+        // Logical cancellation: mark closed so future send() is a no-op
+        // No shared transport interrupt to avoid affecting sibling executions
+        if (closed) return;
+        logDebug(TAG, `${key} exec.cancel (${_reason})`);
+        closed = true;
+      },
+
+      close: async () => {
+        if (closed) return;
+        closed = true;
+
+        // Reset overrides — transport stays in cache (cleaned by shutdown())
+        if (opts?.timeoutMs && transport.setTimeoutOverride) {
+          transport.setTimeoutOverride(null);
+        }
+        if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+          transport.setMaxToolRoundsOverride(null);
+        }
+
+        const elapsed = Date.now() - start;
+        logDebug(TAG, `${key} exec closed (${elapsed}ms, ${model})`);
+      },
+    };
+
+    return exec;
   }
 
   /** Get a persistent session handle for multi-turn callers. */
@@ -231,10 +303,10 @@ export class SubagentRuntime {
 
     const { createSubagentTransport } = await import("./agent-registry.js");
     const role = AGENT_TO_ROLE[agent];
-    const mainModel = this._mainTransport && "currentModel" in this._mainTransport
-      ? (this._mainTransport as unknown as { currentModel: string }).currentModel
-      : undefined;
-    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, mainModel);
+    // #1418: pass the complete last-successful Main candidate (secret-free tuple)
+    // into specialist construction so fallback ordering reuses the exact Main
+    // candidate that last produced a non-empty response.
+    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
     // DirectApi only — ACP transport uses its own this.agentName. The "professor"

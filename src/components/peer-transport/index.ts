@@ -2,17 +2,18 @@
  * peer-transport/index.ts — Factory + singleton (#911).
  */
 
-export type { PeerTransport, PeerCard, PeerMessage, TaskResult, PeerHealth } from "./interface.js";
+export type { PeerTransport, PeerCard, PeerMessage, PeerHelpTransport, PeerHealth } from "./interface.js";
 export { HttpTransport } from "./http-transport.js";
-export { startGossipListener, gossipBroadcast, getAlivePeers, getPeerTable, setGossipInterval, stopGossipListener } from "./gossip.js";
+export { getHealthStore, getLocalCapabilities, CapabilityRegistry } from "./peer-health.js";
+export { PeerDoorbellService, type PeerConnectionManager } from "./peer-doorbell.js";
+export type { DoorbellRingResult } from "./peer-doorbell.js";
 
 import { HttpTransport } from "./http-transport.js";
-import type { PeerTransport } from "./interface.js";
 
-let _instance: PeerTransport | null = null;
+let _instance: HttpTransport | null = null;
 
 /** Get the singleton PeerTransport instance. */
-export function getPeerTransport(): PeerTransport {
+export function getPeerTransport(): HttpTransport {
   if (!_instance) _instance = new HttpTransport();
   return _instance;
 }

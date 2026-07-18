@@ -5,7 +5,9 @@ import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { spawnDetached } from "../spawn-safe.js";
 import { readEntries as cronReadEntries } from "../tasks/task-store.js";
+import { readState } from "../tasks/task-state-store.js";
 import { abtarsHome } from "../../paths.js";
+import { versionBadge } from "../../utils/version-compare.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd";
@@ -13,14 +15,15 @@ const TAG = "cmd";
 export async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
   const arg = _text.replace(/^\/(doctor|health)\s*/i, "").trim().toLowerCase();
 
-  // /doctor fix → run fixes
-  if (arg === "fix" || arg === "fix-full") {
+  if (arg === "fix") {
     try {
-      const { runFixes, runAllProbes, renderHuman } = await import("../../cli/commands/doctor-probes.js");
-      const fixes = await runFixes();
-      const fixLines = fixes.map(f => `  ${f.success ? "+" : "x"} ${f.action}`).join("\n");
-      const output = await runAllProbes();
-      await ctx.reply(`🩺 Fix:\n${fixLines || "(nothing to fix)"}\n\n${renderHuman(output)}`);
+      const { runAllProbes } = await import("../../cli/commands/doctor-probes.js");
+      const { runDoctorFixes } = await import("../../cli/commands/doctor-fixes.js");
+      const { renderChatFix } = await import("../../cli/commands/doctor-render.js");
+      const before = await runAllProbes();
+      const fixes = runDoctorFixes(before);
+      const after = await runAllProbes();
+      await ctx.reply(renderChatFix({ schemaVersion: "2.0", before, fixes, after }));
     } catch (err) {
       await ctx.reply(`x doctor fix failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -28,24 +31,25 @@ export async function handleDoctor(_text: string, ctx: CommandContext): Promise<
   }
 
   await ctx.reply("🩺 Running diagnostics...");
-  const { runAllProbes, renderHuman } = await import("../../cli/commands/doctor-probes.js");
+  const { runAllProbes } = await import("../../cli/commands/doctor-probes.js");
+  const { renderChatDiagnosis } = await import("../../cli/commands/doctor-render.js");
   const output = await runAllProbes();
-  await ctx.reply(renderHuman(output));
+  await ctx.reply(renderChatDiagnosis(output));
   return true;
 }
 
 export async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.phaseHealth && ctx.registry) {
-    const { getSystemStatus, renderStatusText } = await import("../system-status.js");
-    const status = await getSystemStatus({
+    const { getStatus, renderChatStatus } = await import("../status.js");
+    const view = await getStatus({
       phaseHealth: ctx.phaseHealth,
       registry: ctx.registry,
       transport: ctx.transport,
       startedAt: ctx.startedAt,
       bridgeLockPath: ctx.bridgeLockPath ?? "",
-      heartbeat: { intervalMs: Math.max(60, parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "60", 10)) * 1000 },
+      heartbeatIntervalMs: Math.max(60, parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "60", 10)) * 1000,
     });
-    let text = renderStatusText(status);
+    let text = renderChatStatus(view);
     // #255: append sanitized env dump on /status full
     if (_text.trim().toLowerCase() === "full") {
       const { envDump } = await import("../env-schema.js");
@@ -229,7 +233,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   } else {
     const { loadTransport, resolveAgent } = await import("../transport-config.js");
     const tc = loadTransport();
-    const prof = tc ? resolveAgent("professor", tc) : null;
+    const prof = tc ? resolveAgent("main", tc) : null;
     model = prof?.model ?? "unknown";
   }
 
@@ -244,7 +248,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   // Transport details from transport.json
   const { loadTransport: lt, resolveAgent: ra } = await import("../transport-config.js");
   const tc = lt();
-  const prof = tc ? ra("professor", tc) : null;
+  const prof = tc ? ra("main", tc) : null;
   const provider = prof?.providerName ?? "unknown";
   const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
   const transportLine = `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`;
@@ -288,9 +292,9 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     } catch (err) { logAndSwallow("command_handlers", "op", err); }
     try {
       const ce = cronReadEntries();
-      const r = ce.filter(e => e.schedule && !e.paused).length;
-      const p = ce.filter(e => !e.fired && !e.schedule).length;
-      const pa = ce.filter(e => e.paused).length;
+      const r = ce.filter(e => e.schedule && e.enabled).length;
+      const p = ce.filter(e => !e.schedule && e.enabled).length;
+      const pa = ce.filter(e => readState(e.id)?.autoPaused).length;
       lines.push(`⏰ Tasks: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
     } catch (err) { logAndSwallow("command_handlers", "op", err); }
     try {
@@ -329,21 +333,32 @@ export async function handleUsage(_text: string, ctx: CommandContext): Promise<b
   }
 
   const models = loadModels();
-  const costTable = new Map<string, { input: number; output: number }>();
-  for (const [id, entry] of Object.entries(models)) {
-    costTable.set(id, entry.cost);
-  }
+  // #1311 C6: cache-aware cost resolver. Pi catalog rates (4-component) when warmed; else models.json.
+  // `e.in` is cache-inclusive (R1: prompt_tokens = uncached input + cacheRead + cacheWrite), so on the
+  // pi path we price the UNCACHED remainder at input rate + cacheRead/cacheWrite at their own rates.
+  const { piCostRatesByModel } = await import("../transport/pi-catalog.js");
+  const piRates = piCostRatesByModel();
+  const costOf = (e: { model: string; in: number; out: number; cacheRead?: number; cacheWrite?: number }): number => {
+    const pi = piRates?.get(e.model);
+    if (pi) {
+      const uncachedIn = Math.max(0, e.in - (e.cacheRead ?? 0) - (e.cacheWrite ?? 0));
+      return (uncachedIn * pi.input + e.out * pi.output
+        + (e.cacheRead ?? 0) * pi.cacheRead + (e.cacheWrite ?? 0) * pi.cacheWrite) / 1_000_000;
+    }
+    const mj = models[e.model]?.cost;
+    return mj ? (e.in * mj.input + e.out * mj.output) / 1_000_000 : 0;
+  };
 
   const now = Date.now();
   const startOfToday = new Date().setHours(0, 0, 0, 0);
   const startOfYesterday = startOfToday - 86_400_000;
   const startOfDayBefore = startOfYesterday - 86_400_000;
 
-  const today = readUsage(startOfToday, costTable);
-  const yesterday = readUsage(startOfYesterday, costTable);
-  const dayBefore = readUsage(startOfDayBefore, costTable);
-  const week = readUsage(now - 7 * 86_400_000, costTable);
-  const month = readUsage(now - 30 * 86_400_000, costTable);
+  const today = readUsage(startOfToday, costOf);
+  const yesterday = readUsage(startOfYesterday, costOf);
+  const dayBefore = readUsage(startOfDayBefore, costOf);
+  const week = readUsage(now - 7 * 86_400_000, costOf);
+  const month = readUsage(now - 30 * 86_400_000, costOf);
 
   // Subtract to get single-day values
   const yIn = yesterday.inputTokens - today.inputTokens;
@@ -362,11 +377,15 @@ export async function handleUsage(_text: string, ctx: CommandContext): Promise<b
   msg += `Day before: ${fmt(dbIn)} / ${fmt(dbOut)} — ${fmtCost(dbCost)}\n`;
   msg += `Last 7d:    ${fmt(week.inputTokens)} / ${fmt(week.outputTokens)} — ${fmtCost(week.cost)}\n`;
   msg += `Last 30d:   ${fmt(month.inputTokens)} / ${fmt(month.outputTokens)} — ${fmtCost(month.cost)}\n`;
+  if (today.cacheRead || today.cacheWrite) {
+    msg += `Cache today: ${fmt(today.cacheRead)} read / ${fmt(today.cacheWrite)} write\n`;
+  }
 
   if (arg === "detail") {
     msg += `\n📋 Today by model:\n`;
     for (const [model, stats] of today.byModel) {
-      msg += `  ${model}: ${fmt(stats.in)}/${fmt(stats.out)} — ${fmtCost(stats.cost)}\n`;
+      const cacheStr = (stats.cacheRead || stats.cacheWrite) ? ` [cache ${fmt(stats.cacheRead)}r/${fmt(stats.cacheWrite)}w]` : "";
+      msg += `  ${model}: ${fmt(stats.in)}/${fmt(stats.out)} — ${fmtCost(stats.cost)}${cacheStr}\n`;
     }
   }
 
@@ -562,16 +581,28 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     await ctx.reply("Updating abmind from dev (pull + build + install)...");
     logInfo("update", "abmind dev update requested");
     const { spawn } = await import("node:child_process");
-    // Non-detached spawn + piped stderr + on("close") reply — mirrors the
-    // alpha/stable branches. Non-blocking (event-driven), and the reply is
-    // what surfaces failure to chat (the silent-failure gap #1308 closes).
-    const child = spawn("abmind", ["update", "--dev"], { stdio: ["ignore", "pipe", "pipe"] });
+    const { resolveAbmindBin } = await import("../../utils/abmind-bin.js");
+    // Absolute bin path (#1308 follow-up): bridge PATH doesn't include the nvm
+    // bin dir, so bare "abmind" ENOENTs. Resolver reuses abmind-lazy's discovery.
+    // Fallback to bare name keeps behaviour for callers that set PATH; the new
+    // close handler turns the eventual ENOENT into a clear diagnostic.
+    const abmindCmd = resolveAbmindBin() ?? "abmind";
+    const child = spawn(abmindCmd, ["update", "--dev"], { stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
     child.on("error", (err) => logWarn("update", `spawn abmind failed (non-fatal): ${err.message}`));
     child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     child.on("close", (code) => {
-      if (code !== 0 && code !== null) ctx.reply(`x abmind update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {});
-      else ctx.reply("+ abmind update complete — check /software").catch(() => {});
+      // Three-arm close handler — the actual silent-success fix (#1308 follow-up):
+      // code===0 → success; code===null with empty stderr → binary not found;
+      // else → exit code + stderr tail. Closes the class where ENOENT used to
+      // route to the success branch.
+      if (code === 0) {
+        ctx.reply("+ abmind update complete — check /software").catch(() => {});
+      } else if (code === null && !stderr) {
+        ctx.reply("x abmind update failed: binary not found. Check `abmind --version` on this host, or set ABMIND_PATH.").catch(() => {});
+      } else {
+        ctx.reply(`x abmind update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {});
+      }
     });
     return true;
   }
@@ -665,7 +696,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       const { execFileSync } = await import("node:child_process");
       const raw = execFileSync("npm", ["view", "abtars", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
       const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
-      if (latest) lines.push(`  npm latest: abtars@${latest} ${latest === ver.version || ver.version.startsWith(latest) ? "✓" : "⚠️"}`);
+      if (latest) lines.push(`  npm latest: abtars@${latest} ${versionBadge(ver.version, latest)}`);
     } catch { /* timeout or offline — skip */ }
   } catch {
     lines.push("  abtars: unknown");
@@ -695,7 +726,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const { execFileSync } = await import("node:child_process");
         const raw = execFileSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
         const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
-        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === pkg.version || pkg.version.startsWith(latest) ? "✓" : "⚠️"}`);
+        if (latest) lines.push(`  npm latest: abmind@${latest} ${versionBadge(pkg.version, latest)}`);
       } catch { /* timeout or offline — skip */ }
     } catch { lines.push("  abmind: installed (version unknown)"); }
   } else if (existsSync(abmindManifest)) {
@@ -708,7 +739,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const { execFileSync } = await import("node:child_process");
         const raw = execFileSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
         const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
-        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === m.version || m.version.startsWith(latest) ? "✓" : "⚠️"}`);
+        if (latest) lines.push(`  npm latest: abmind@${latest} ${versionBadge(m.version, latest)}`);
       } catch { /* timeout or offline — skip */ }
     } catch { lines.push("  abmind: installed (version unknown)"); }
   } else {

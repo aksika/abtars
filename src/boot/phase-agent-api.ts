@@ -9,9 +9,9 @@
 
 import { AgentApiServer } from "../components/agent-api-server.js";
 import { loadAgentApiConfig } from "../components/agent-api-config.js";
-import { logAndSwallow } from "../components/log-and-swallow.js";
 import { logInfo, logError } from "../components/logger.js";
 import { sendNotification } from "../components/notification.js";
+import { sendToMainChat } from "../components/main-chat.js";
 import { setPeerActivityCallback } from "../components/transport/tool-registry.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
@@ -23,6 +23,8 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
   let agentApiServer: AgentApiServer | null = null;
 
+  const { updatePeerApiState, updateDoorbellState } = await import("../components/runtime-health-snapshot.js");
+
   const notifyPeer = (msg: string): void => { sendNotification(ctx, msg); };
   setPeerActivityCallback(notifyPeer);
 
@@ -30,24 +32,98 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const { AgentApiAdapter } = await import("../platforms/agent-api/agent-api-adapter.js");
   const a2aAdapter = new AgentApiAdapter();
 
-  // Ensure Ed25519 identity + TLS cert exist before AgentApiServer constructor reads them.
-  // bootstrapIdentity() is idempotent — no-op when files already present.
-  const { bootstrapIdentity } = await import("../components/peer-config.js");
+  // Ensure stable peer identity (signingKey + tribeToken) before TLS prep
+  const { bootstrapIdentity, loadPeerConfig } = await import("../components/peer-config.js");
   bootstrapIdentity();
 
   registry.register("agent-api", {
     configured: Boolean(agentConfig.port),
     async create() {
+      // #1305: Prepare validated TLS identity before server construction.
+      // Must run inside create() (not at phase level) so that Agent API can be
+      // disabled without requiring OpenSSL or TLS files.
+      let tlsIdentity: import("../components/peer-transport/tls-identity.js").ValidatedTlsIdentity;
+      try {
+        const { abtarsHome } = await import("../paths.js");
+        const { join } = await import("node:path");
+        const { ensureAgentApiTlsIdentity } = await import("../components/peer-transport/tls-identity.js");
+        const peerConfig = loadPeerConfig();
+        tlsIdentity = ensureAgentApiTlsIdentity(
+          join(abtarsHome(), "config"),
+          peerConfig.self.signingKey,
+          peerConfig.self.name,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logError(TAG, `Agent API TLS identity preparation failed: ${msg}`);
+        // Fail closed — no listener opens without validated TLS (#1305)
+        throw err;
+      }
+
+      const { getPeerWsBroker } = await import("../components/peer-transport/peer-ws-broker.js");
+      const broker = getPeerWsBroker();
+
       agentApiServer = new AgentApiServer({
         config: agentConfig,
         cliPath: config.transport.agentCliPath,
         workingDir: config.transport.workingDir,
         memory,
         runtime,
+        tls: tlsIdentity,
         sessionManager: ctx.sessionManager,
         onPeerActivity: notifyPeer,
         a2aAdapter,
+        onPiNotify: (text) => sendToMainChat(
+          { telegram: ctx.telegramAdapter, discord: ctx.discordAdapter },
+          text,
+        ),
+        piExecutorService: ctx.piExecutorService,
       });
+
+      // #1433: Wire PeerHelpService for sovereign help request handling
+      try {
+        const { PeerHelpService } = await import("../components/peer-help/service.js");
+        const { PeerHelpStore } = await import("../components/peer-help/store.js");
+        const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
+        const { nerve } = await import("../components/nerve.js");
+        const { kanbanEnqueue, kanbanGetCard, kanbanUpdate, kanbanList, kanbanComplete, kanbanFail } = await import("../components/tasks/kanban-board.js");
+        const { getLocalCapabilities } = await import("../components/peer-transport/peer-health.js");
+        const db = requireTaskDatabase();
+        const store = new PeerHelpStore(
+          db as any,
+          { kanbanEnqueue, kanbanGetCard, kanbanUpdate, kanbanList, kanbanComplete, kanbanFail },
+          nerve,
+        );
+        const helpService = new PeerHelpService(store, () => getLocalCapabilities());
+        agentApiServer.setPeerHelpService(helpService);
+
+        // Register broker request handler for help wire methods
+        broker.registerRequestHandler(async (peer, method, payload, _frameId) => {
+          if (method === "help.request.v1") return helpService.handleHelpRequest(peer, payload);
+          if (method === "help.status.v1") return helpService.handleHelpStatus(peer, payload);
+          if (method === "help.withdraw.v1") return helpService.handleHelpWithdraw(peer, payload);
+          if (method === "help.event.v1") return helpService.handleContributionEvent(peer, payload);
+          throw new Error(`Unknown help method: ${method}`);
+        });
+
+        // Register push handler for broker (inventory, etc.)
+        broker.registerPushHandler(async (peer, method, payload) => {
+          if (method === "peer.inventory.v1") {
+            try {
+              const { verifyAndStoreInventory } = await import("../components/peer-transport/peer-inventory.js");
+              const { loadPeerConfig } = await import("../components/peer-config.js");
+              const config = loadPeerConfig();
+              const peerEntry = config.peers[peer];
+              if (peerEntry?.verifyKey) {
+                verifyAndStoreInventory(peer, payload as any, peerEntry.verifyKey);
+              }
+            } catch { /* best effort */ }
+          }
+        });
+      } catch (err) {
+        logError(TAG, `Failed to wire PeerHelpService: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
       ctx.agentApiServer = agentApiServer;
       return {
         async start() { await agentApiServer!.start(); },
@@ -59,53 +135,31 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   if (platforms.agent) {
     const result = await registry.start("agent-api");
     if (result.ok) {
-      logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port}`);    } else {
+      logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port}`);
+      updatePeerApiState("listening");
+    } else {
       logError("main", `Agent API failed to start: ${result.error}`);
+      updatePeerApiState("failed", result.error);
     }
 
-    // Start mDNS wake-up listener (#425)
-    const { loadPeerConfig } = await import("../components/peer-config.js");
-    const { startDnsWakeup } = await import("../components/dns-wakeup.js");
-    const { startGossipListener } = await import("../components/peer-transport/gossip.js");
-    const { callPeer } = await import("../components/peer-client.js");
-    const peerConfig = loadPeerConfig();
-    const udpPort = peerConfig.self.udpPort ?? 5353;
-
-    // #971: Start gossip health listener
-    if (Object.keys(peerConfig.peers).length > 0) {
-      startGossipListener();
-    }
-
-    // #972: Start persistent outbound WS connections
-    if (Object.keys(peerConfig.peers).length > 0) {
-      import("../components/peer-transport/index.js").then(({ initPeerTransport }) => initPeerTransport()).catch(() => {});
-    }
-
-    if (Object.keys(peerConfig.peers).length > 0) {
-      startDnsWakeup(udpPort, peerConfig, async (peerName) => {
-        try {
-          notifyPeer(`🤖 Agents: ${peerName} → UDP callback request received`);
-          // Call peer to get their pending prompt
-          const prompt = await callPeer(peerName, "callback: you requested a call-back via wake-up signal", peerConfig.maxHops, { skipWakeup: true });
-          if (!prompt || prompt.trim() === "") return;
-          // Process the prompt via local agent-api (self-call localhost)
-          const http = await import("node:http");
-          const answer = await new Promise<string>((resolve, reject) => {
-            const body = JSON.stringify({ model: "default", messages: [{ role: "user", content: prompt }] });
-            const req = http.request({ hostname: "127.0.0.1", port: agentConfig.port, path: "/v1/chat/completions", method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), "Authorization": `Bearer ${process.env["AGENT_API_TOKEN"] ?? ""}`  }, timeout: 55000 }, (res) => {
-              let data = ""; res.on("data", c => data += c); res.on("end", () => { try { resolve(JSON.parse(data)?.choices?.[0]?.message?.content ?? ""); } catch (err) { logAndSwallow(TAG, "JSON.parse agent-api response", err); resolve(""); } });
-            });
-            req.on("error", reject); req.on("timeout", () => { req.destroy(); reject(new Error("self-call timeout")); });
-            req.write(body); req.end();
-          });
-          // Deliver answer back to the requesting peer
-          notifyPeer(`🤖 Agents: ${peerConfig.self.name} → ${peerName} messaged. [callback]`);
-          await callPeer(peerName, `[CB-RESPONSE] ${answer}`, peerConfig.maxHops, { skipWakeup: true });
-        } catch (err) {
-          logError("dns-wakeup", `Callback to ${peerName} failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      });
-    }
+    // #1434: Start doorbell service + persistent outbound WS
+    updateDoorbellState("starting");
+    import("../components/peer-transport/index.js").then(async ({ getPeerTransport, PeerDoorbellService }) => {
+      const transport = getPeerTransport();
+      const doorbell = new PeerDoorbellService(transport);
+      transport.setDoorbell(doorbell);
+      await doorbell.start();
+      updateDoorbellState(doorbell.isRunning ? "listening" : "degraded", doorbell.isRunning ? undefined : "bind/start failed");
+      if (Object.keys(loadPeerConfig().peers).length > 0) {
+        await transport.initWsConnections();
+      }
+    }).catch((err) => {
+      logError(TAG, `Peer init failed: ${err.message}`);
+      updateDoorbellState("degraded", err instanceof Error ? err.message : String(err));
+    });
+  } else {
+    updatePeerApiState("disabled");
+    updateDoorbellState("disabled");
   }
   return "ran";
 }

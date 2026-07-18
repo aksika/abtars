@@ -23,19 +23,6 @@
       "kiro"
     ]
   },
-  "claude-haiku-4.5": {
-    "contextWindow": 200000,
-    "maxOutput": 8192,
-    "rank": 3,
-    "cost": {
-      "input": 0.25,
-      "output": 1.25
-    },
-    "transports": [
-      "kiro"
-    ],
-    "description": "Claude Haiku model"
-  },
   "deepseek-3.2": {
     "contextWindow": 128000,
     "maxOutput": 8192,
@@ -105,8 +92,7 @@
       "output": 0.6
     },
     "transports": [
-      "gemini",
-      "openrouter"
+      "gemini"
     ]
   },
   "gemini-2.5-pro": {
@@ -115,7 +101,7 @@
     "rank": 2,
     "cost": {
       "input": 1.25,
-      "output": 10.0
+      "output": 10
     },
     "transports": [
       "gemini"
@@ -126,12 +112,11 @@
     "maxOutput": 16384,
     "rank": 2,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
-      "ollama",
-      "openrouter"
+      "ollama"
     ]
   },
   "minimax-m2.5:cloud": {
@@ -139,12 +124,11 @@
     "maxOutput": 8192,
     "rank": 3,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
-      "ollama",
-      "openrouter"
+      "ollama"
     ]
   },
   "qwen3.5:cloud": {
@@ -152,12 +136,11 @@
     "maxOutput": 8192,
     "rank": 3,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
-      "ollama",
-      "openrouter"
+      "ollama"
     ]
   },
   "google/gemma-4-26b-a4b-it:free": {
@@ -165,8 +148,8 @@
     "maxOutput": 16384,
     "rank": 2,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
       "openrouter"
@@ -179,12 +162,11 @@
     "maxOutput": 16384,
     "rank": 2,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
-      "ollama",
-      "openrouter"
+      "ollama"
     ],
     "description": "Nvidia Nemotron 3 Super 120B MoE. Free Ollama cloud + OpenRouter.",
     "validatedAt": "2026-04-24"
@@ -194,8 +176,8 @@
     "maxOutput": 16384,
     "rank": 2,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 0,
+      "output": 0
     },
     "transports": [
       "openrouter"
@@ -204,52 +186,43 @@
     "validatedAt": "2026-04-24"
   },
   "google/gemini-2.5-flash": {
-    "contextWindow": 1000000,
+    "contextWindow": 1048576,
     "maxOutput": 65536,
     "rank": 3,
     "cost": {
-      "input": 0.15,
-      "output": 0.6
+      "input": 3e-7,
+      "output": 0.0000025
     },
     "transports": [
       "openrouter"
-    ]
+    ],
+    "validatedAt": "2026-07-10"
   },
-  "moonshotai/kimi-k2.5:cloud": {
+  "tencent/hy3-preview": {
     "contextWindow": 262144,
     "maxOutput": 16384,
-    "rank": 2,
-    "cost": {
-      "input": 0.0,
-      "output": 0.0
-    },
-    "transports": [
-      "openrouter"
-    ]
-  },
-  "minimax/minimax-m2.5:cloud": {
-    "contextWindow": 128000,
-    "maxOutput": 8192,
     "rank": 3,
     "cost": {
-      "input": 0.0,
-      "output": 0.0
+      "input": 6.3e-8,
+      "output": 2.1e-7
     },
     "transports": [
       "openrouter"
-    ]
+    ],
+    "validatedAt": "2026-07-10"
   },
   "deepseek/deepseek-v4-flash": {
     "contextWindow": 1048576,
     "maxOutput": 131072,
     "rank": 2,
     "cost": {
-      "input": 0.0983,
-      "output": 0.1966
+      "input": 9e-8,
+      "output": 1.8e-7
     },
     "transports": [
       "openrouter"
-    ]
+    ],
+    "validatedAt": "2026-07-10"
   },
   "qwen/qwen3-235b-a22b-2507": {
     "contextWindow": 262144,
@@ -263,13 +236,576 @@
       "openrouter"
     ]
   },
-  "tencent/hy3-preview": {
-    "contextWindow": 262144,
+  "nvidia/nemotron-3-ultra-550b-a55b": {
+    "contextWindow": 131072,
     "maxOutput": 16384,
+    "rank": 1,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "nvidia"
+    ],
+    "description": "Nvidia Nemotron Ultra 550B MoE (55B active). Reasoning-capable.",
+    "validatedAt": "2026-06-08"
+  },
+  "deepseek/deepseek-v4-pro": {
+    "contextWindow": 1048576,
+    "maxOutput": 131072,
+    "rank": 1,
+    "cost": {
+      "input": 4.35e-7,
+      "output": 8.7e-7
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "DeepSeek V4 Pro - strongest DeepSeek model. 1M context. $0.435/$0.87 per 1M tokens.",
+    "validatedAt": "2026-07-10"
+  },
+  "qwen/qwen3-coder:free": {
+    "contextWindow": 1048576,
+    "maxOutput": 262000,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "nvidia/nemotron-3-ultra-550b-a55b:free": {
+    "contextWindow": 1000000,
+    "maxOutput": 65536,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "nvidia/nemotron-3-super-120b-a12b:free": {
+    "contextWindow": 1000000,
+    "maxOutput": 262144,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "tencent/hy3:free": {
+    "contextWindow": 262144,
+    "maxOutput": 262144,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Tencent Hy3 (295B MoE, 21B active, 192 experts top-8). Reasoning support (high/low/none). Free via OpenRouter — single provider: Novita (99.9%% uptime, 44 tok/s p50, 262K maxOut).",
+    "validatedAt": "2026-07-10",
+    "status": "alive",
+    "providers": {
+      "Novita": {
+        "status": 0,
+        "uptime_30m": 99.91,
+        "uptime_1d": 99.87,
+        "latency_p50": 2756,
+        "throughput_p50": 44,
+        "quant": "unknown",
+        "max_completion_tokens": 262144
+      }
+    }
+  },
+  "poolside/laguna-xs-2.1:free": {
+    "contextWindow": 262144,
+    "maxOutput": 32768,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "poolside/laguna-m.1:free": {
+    "contextWindow": 262144,
+    "maxOutput": 32768,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "google/gemma-4-31b-it:free": {
+    "contextWindow": 262144,
+    "maxOutput": 8192,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "qwen/qwen3-next-80b-a3b-instruct:free": {
+    "contextWindow": 262144,
+    "maxOutput": 0,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "cohere/north-mini-code:free": {
+    "contextWindow": 256000,
+    "maxOutput": 64000,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
+    "contextWindow": 256000,
+    "maxOutput": 65536,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "nvidia/nemotron-3-nano-30b-a3b:free": {
+    "contextWindow": 256000,
+    "maxOutput": 0,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "openai/gpt-oss-120b:free": {
+    "contextWindow": 131072,
+    "maxOutput": 131072,
     "rank": 3,
     "cost": {
-      "input": 0.063,
-      "output": 0.21
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "openai/gpt-oss-20b:free": {
+    "contextWindow": 131072,
+    "maxOutput": 32768,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "meta-llama/llama-3.3-70b-instruct:free": {
+    "contextWindow": 131072,
+    "maxOutput": 0,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "meta-llama/llama-3.2-3b-instruct:free": {
+    "contextWindow": 131072,
+    "maxOutput": 0,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "nousresearch/hermes-3-llama-3.1-405b:free": {
+    "contextWindow": 131072,
+    "maxOutput": 0,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "nvidia/nemotron-3.5-content-safety:free": {
+    "contextWindow": 128000,
+    "maxOutput": 8192,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "nvidia/nemotron-nano-12b-v2-vl:free": {
+    "contextWindow": 128000,
+    "maxOutput": 128000,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "nvidia/nemotron-nano-9b-v2:free": {
+    "contextWindow": 128000,
+    "maxOutput": 0,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "liquid/lfm-2.5-1.2b-thinking:free": {
+    "contextWindow": 32768,
+    "maxOutput": 0,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "liquid/lfm-2.5-1.2b-instruct:free": {
+    "contextWindow": 32768,
+    "maxOutput": 0,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "cognitivecomputations/dolphin-mistral-24b-venice-edition:free": {
+    "contextWindow": 32768,
+    "maxOutput": 0,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Scouted 2026-07-10",
+    "validatedAt": "2026-07-10",
+    "status": "dead"
+  },
+  "xiaomi/mimo-v2.5": {
+    "contextWindow": 1048576,
+    "maxOutput": 8192,
+    "rank": 1,
+    "cost": {
+      "input": 1.05e-7,
+      "output": 2.8e-7
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 2)",
+    "validatedAt": "2026-07-10"
+  },
+  "minimax/minimax-m3": {
+    "contextWindow": 1048576,
+    "maxOutput": 8192,
+    "rank": 1,
+    "cost": {
+      "input": 3e-7,
+      "output": 0.0000012
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 3)",
+    "validatedAt": "2026-07-10"
+  },
+  "z-ai/glm-5.2": {
+    "contextWindow": 1048576,
+    "maxOutput": 8192,
+    "rank": 1,
+    "cost": {
+      "input": 5.32e-7,
+      "output": 0.000001672
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 4)",
+    "validatedAt": "2026-07-10"
+  },
+  "anthropic/claude-opus-4.7": {
+    "contextWindow": 1000000,
+    "maxOutput": 16384,
+    "rank": 1,
+    "cost": {
+      "input": 0.000005,
+      "output": 0.000025
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 6)",
+    "validatedAt": "2026-07-10"
+  },
+  "anthropic/claude-opus-4.8": {
+    "contextWindow": 1000000,
+    "maxOutput": 16384,
+    "rank": 1,
+    "cost": {
+      "input": 0.000005,
+      "output": 0.000025
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 8)",
+    "validatedAt": "2026-07-10"
+  },
+  "stepfun/step-3.7-flash": {
+    "contextWindow": 256000,
+    "maxOutput": 8192,
+    "rank": 2,
+    "cost": {
+      "input": 2e-7,
+      "output": 0.00000115
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 10)",
+    "validatedAt": "2026-07-10"
+  },
+  "anthropic/claude-sonnet-4.6": {
+    "contextWindow": 1000000,
+    "maxOutput": 16384,
+    "rank": 1,
+    "cost": {
+      "input": 0.000003,
+      "output": 0.000015
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 11)",
+    "validatedAt": "2026-07-10"
+  },
+  "openai/gpt-5.5": {
+    "contextWindow": 1050000,
+    "maxOutput": 16384,
+    "rank": 1,
+    "cost": {
+      "input": 0.000005,
+      "output": 0.00003
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 12)",
+    "validatedAt": "2026-07-10"
+  },
+  "google/gemini-3-flash-preview": {
+    "contextWindow": 1048576,
+    "maxOutput": 65536,
+    "rank": 1,
+    "cost": {
+      "input": 5e-7,
+      "output": 0.000003
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 14)",
+    "validatedAt": "2026-07-10"
+  },
+  "anthropic/claude-sonnet-5": {
+    "contextWindow": 1000000,
+    "maxOutput": 16384,
+    "rank": 1,
+    "cost": {
+      "input": 0.000002,
+      "output": 0.00001
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 15)",
+    "validatedAt": "2026-07-10"
+  },
+  "google/gemini-2.5-flash-lite": {
+    "contextWindow": 1048576,
+    "maxOutput": 65536,
+    "rank": 1,
+    "cost": {
+      "input": 1e-7,
+      "output": 4e-7
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 17)",
+    "validatedAt": "2026-07-10"
+  },
+  "xiaomi/mimo-v2.5-pro": {
+    "contextWindow": 1048576,
+    "maxOutput": 8192,
+    "rank": 1,
+    "cost": {
+      "input": 4.35e-7,
+      "output": 8.7e-7
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 18)",
+    "validatedAt": "2026-07-10"
+  },
+  "openai/gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutput": 131072,
+    "rank": 2,
+    "cost": {
+      "input": 3.6e-8,
+      "output": 1.8e-7
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "OpenRouter leaderboard top 20 (rank 20)",
+    "validatedAt": "2026-07-10"
+  },
+  "moonshotai/kimi-k2.5": {
+    "contextWindow": 262144,
+    "maxOutput": 16384,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ]
+  },
+  "minimax/minimax-m2.5": {
+    "contextWindow": 128000,
+    "maxOutput": 8192,
+    "rank": 3,
+    "cost": {
+      "input": 0,
+      "output": 0
     },
     "transports": [
       "openrouter"
