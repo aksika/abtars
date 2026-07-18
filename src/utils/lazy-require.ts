@@ -19,10 +19,19 @@ export interface OptionalDep {
   readonly postInstall?: string;
   /** #1311 C7: pin spec (e.g. "~0.80"). When set, installs `pkg@version` for reproducibility. */
   readonly version?: string;
+  /**
+   * Per-package target versions for multi-package groups (e.g. native).
+   * Overrides `version` for individual packages. Key must exist in `packages`.
+   */
+  readonly targets?: Record<string, string>;
 }
 
 export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
-  native:  { packages: ["better-sqlite3", "sqlite-vec"], label: "SQLite native deps (kanban + memory)" },
+  native:  {
+    packages: ["better-sqlite3", "sqlite-vec"],
+    label: "SQLite native deps (kanban + memory)",
+    targets: { "better-sqlite3": "12.11.1", "sqlite-vec": "0.1.9" },
+  },
 
   twitter: { packages: ["rettiwt-api"], label: "Twitter/X integration" },
   pdf:     { packages: ["pdf-parse"], label: "PDF reading" },

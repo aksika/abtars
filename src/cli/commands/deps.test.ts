@@ -187,11 +187,12 @@ describe("abtars deps", () => {
   });
 
   it("install with no args defaults to native group", async () => {
-    // Pre-create native packages so they appear "ready" — install reuses them
+    // Pre-create native packages at their exact targets so they appear "ready"
+    const versions: Record<string, string> = { "better-sqlite3": "12.11.1", "sqlite-vec": "0.1.9" };
     for (const pkg of ["better-sqlite3", "sqlite-vec"]) {
       const pkgDir = join(tmpDir, ".local", "lib", "node_modules", pkg);
       mkdirSync(pkgDir, { recursive: true });
-      writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "latest" }));
+      writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: versions[pkg] }));
     }
 
     const { deps } = await import("./deps.js");

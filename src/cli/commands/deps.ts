@@ -84,17 +84,23 @@ export function observePackage(pkgName: string): PackageObservation {
   }
 }
 
+function pkgTarget(pkg: string, dep: (typeof OPTIONAL_DEPS)[string]): string {
+  if (dep.targets?.[pkg]) return dep.targets[pkg];
+  if (dep.version) return dep.version;
+  return "latest";
+}
+
 export function observeGroup(name: string): GroupObservation {
   const dep = OPTIONAL_DEPS[name];
   if (!dep) throw new Error(`Unknown dep group: ${name}`);
 
   const packages = dep.packages.map(pkg => {
-    const target = dep.version ?? "latest";
+    const target = pkgTarget(pkg, dep);
     return { name: pkg, target, observed: observePackage(pkg) };
   });
 
   const absent = packages.every(p => p.observed.state === "absent");
-  const hasVersionPin = !!dep.version;
+  const hasVersionPin = !packages.every(p => p.target === "latest");
   const allReady = hasVersionPin
     ? packages.every(p => p.observed.state === "installed" && p.observed.version === p.target)
     : packages.every(p => p.observed.state === "installed");
@@ -220,6 +226,7 @@ export function resolveGroupActions(
 type MutationResult = { group: string; ok: boolean; error?: string };
 
 function versionedArg(pkg: string, dep: (typeof OPTIONAL_DEPS)[string]): string {
+  if (dep.targets?.[pkg]) return `${pkg}@${dep.targets[pkg]}`;
   if (dep.version) return `${pkg}@${dep.version}`;
   return pkg;
 }
