@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createEmptyManifest, upsertRecord, writeManifest } from "../deploy-lib/shared-native-deps-manifest.js";
+import { hashContent } from "../deploy-lib/native-group.js";
 
 let tmpDir: string;
 vi.mock("node:os", async (importOriginal) => {
@@ -199,7 +200,7 @@ describe("abtars deps", () => {
     for (const pkg of ["better-sqlite3", "sqlite-vec"] as const) {
       manifest = upsertRecord(manifest, pkg, {
         version: versions[pkg], nodeAbi: process.versions.modules, nodeVersion: process.version,
-        platform: process.platform, arch: process.arch, contentHash: "test", installedAt: new Date().toISOString(),
+        platform: process.platform, arch: process.arch, contentHash: hashContent(join(tmpDir, ".local", "lib", "node_modules", pkg)), installedAt: new Date().toISOString(),
         installedBy: "abtars", consumers: ["abtars"], probe: pkg === "better-sqlite3" ? "sqlite-open-select-v1" : "sqlite-vec-load-query-v1",
       });
     }

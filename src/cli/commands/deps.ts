@@ -592,8 +592,12 @@ function install(names: string[]): number {
     if (nativeRequested && observeGroup("native").state === "ready") {
       const consumer = ensureNativeConsumer();
       if (!consumer.ok) {
-        process.stdout.write(`✗ native failed: ${consumer.error}\n`);
-        failed = true;
+        process.stdout.write(`→ native: repairing stale shared state\n`);
+        const repaired = mutateNativeGroup("install");
+        if (!repaired.ok) {
+          process.stdout.write(`✗ native failed: ${repaired.error ?? consumer.error}\n`);
+          failed = true;
+        }
       }
     }
     const actions = resolveGroupActions("install", npmNames);

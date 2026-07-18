@@ -14,6 +14,9 @@ export interface NativeGroupMutationResult {
 }
 
 export function ensureNativeConsumer(): NativeGroupMutationResult {
+  if (Number(process.version.match(/^v(\d+)/)?.[1]) !== NATIVE_TARGET_CONTRACT.nodeMajor) {
+    return { ok: false, error: `Native targets require Node ${NATIVE_TARGET_CONTRACT.nodeMajor}; running ${process.version}.` };
+  }
   const token = generateLockToken();
   acquireLock("abtars", "native:consumer", token);
   try {
@@ -23,6 +26,9 @@ export function ensureNativeConsumer(): NativeGroupMutationResult {
     for (const name of NATIVE_TARGET_NAMES) {
       const record = updated.packages[name];
       if (!record) return { ok: false, error: `Native package "${name}" is not tracked in the manifest.` };
+      if (record.version !== nativeTargetVersion(name) || record.nodeAbi !== process.versions.modules || record.platform !== process.platform || record.arch !== process.arch || record.probe !== nativeTargetProbeId(name) || record.contentHash !== hashContent(join(resolveSharedNativeRoot(), name))) {
+        return { ok: false, error: `Native package "${name}" manifest or disk integrity is stale.` };
+      }
       const consumers = [...new Set([...record.consumers, "abtars"])].sort() as NativePackageRecord["consumers"];
       updated = { ...updated, packages: { ...updated.packages, [name]: { ...record, consumers } }, generation: updated.generation + 1, updatedAt: new Date().toISOString() };
     }
@@ -36,7 +42,7 @@ export function ensureNativeConsumer(): NativeGroupMutationResult {
 type ClosureEntry = { name: string; version: string; hash: string };
 type JournalEntry = { name: string; previous: string | null };
 
-function hashContent(dir: string): string {
+export function hashContent(dir: string): string {
   const hash = createHash("sha256");
   if (!existsSync(dir)) return "";
   const entries = readdirSync(dir, { recursive: true }) as string[];
