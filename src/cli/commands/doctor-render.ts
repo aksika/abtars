@@ -139,8 +139,8 @@ export function renderChatDiagnosis(output: DoctorOutputV2): string {
     lines.push("");
     lines.push(`${layerName.charAt(0).toUpperCase() + layerName.slice(1)}:`);
     for (const p of probes) {
-      const iconMap: Record<string, string> = { ok: "✓", warning: "⚠️", failed: "❌", skipped: "➖" };
-      const icon = iconMap[p.status] ?? "❓";
+      const iconMap: Record<string, string> = { ok: "+", warning: "!", failed: "x", skipped: "-" };
+      const icon = iconMap[p.status] ?? "?";
       lines.push(`  ${icon} ${p.name}${p.detail ? ` — ${p.detail}` : ""}`);
     }
   }
