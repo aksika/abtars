@@ -14,6 +14,20 @@ export interface UsageEntry {
   /** #1311 C6: prompt-cache breakdown (pi-ai path; absent on L0 / legacy entries). */
   cacheRead?: number;
   cacheWrite?: number;
+  /** #1444: optional correlation metadata (schema v2). Underscore-prefixed — patterns that
+   *  iterate `for (const k in entry)` skip it automatically. */
+  _correlation?: {
+    schemaVersion: 2;
+    sessionId?: string;
+    executionId: string;
+    providerCallId: string;
+    ordinal: number;
+    provider?: string;
+    candidate?: string;
+    latencyMs: number;
+    result: "success" | "failure" | "aborted" | "unknown";
+    fallbackFrom?: string;
+  };
 }
 
 let buffer: UsageEntry[] = [];
@@ -35,13 +49,15 @@ export function initUsageTracker(home: string): void {
  * `cache` is the prompt-cache breakdown, stored for cache-aware cost + /usage display only;
  * it is never added to totals (it is a subset of `in`).
  */
-export function recordUsage(model: string, inputTokens: number, outputTokens: number, agent = "", cache?: { cacheRead?: number; cacheWrite?: number }): void {
+export function recordUsage(model: string, inputTokens: number, outputTokens: number, agent = "", cache?: { cacheRead?: number; cacheWrite?: number }, correlation?: UsageEntry["_correlation"]): void {
   _totalTokens += inputTokens + outputTokens;
   if (agent) {
     import("./budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(agent, inputTokens + outputTokens)).catch(() => {});
   }
   if (!usagePath) return;
-  buffer.push({ ts: Date.now(), model, agent, in: inputTokens, out: outputTokens, cacheRead: cache?.cacheRead, cacheWrite: cache?.cacheWrite });
+  const entry: UsageEntry = { ts: Date.now(), model, agent, in: inputTokens, out: outputTokens, cacheRead: cache?.cacheRead, cacheWrite: cache?.cacheWrite };
+  if (correlation) entry._correlation = correlation;
+  buffer.push(entry);
   if (buffer.length >= 100) flushUsage();
 }
 

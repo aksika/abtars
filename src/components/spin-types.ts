@@ -10,13 +10,26 @@ import { logError } from "./logger.js";
 
 export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H";
 
+// #1444: instruction kinds and delivery states
+export type ExecutionInstructionKind = "steer" | "followUp";
+export type ExecutionInstructionState =
+  | "queued"
+  | "leased"
+  | "delivered"
+  | "consumed"
+  | "expired"
+  | "failed";
+
 export interface QueuedSessionInstruction {
   readonly id: string;
   readonly sessionId: string;
   readonly executionId: string;
+  readonly kind: ExecutionInstructionKind;
   readonly source: "tui" | "platform" | "system";
   readonly text: string;
+  readonly bytes: number;
   readonly createdAt: number;
+  state: ExecutionInstructionState;
 }
 
 export type QueueInstructionResult =
@@ -24,6 +37,20 @@ export type QueueInstructionResult =
   | { ok: false; reason: "not_found" | "not_orc" | "not_busy" |
       "not_local" | "not_active" | "not_steerable" | "closing" |
       "stale_execution" | "too_large" | "queue_full" };
+
+// #1444: instruction lease
+export interface InstructionLease {
+  readonly leaseId: string;
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly kind: ExecutionInstructionKind;
+  readonly instructions: readonly QueuedSessionInstruction[];
+}
+
+// #1444: next-turn admission (separate from active-execution instruction ledger)
+export interface NextTurnAdmission {
+  admit(sessionId: string, message: { text: string }): QueueInstructionResult;
+}
 
 export type SteerEventType = "steer.queued" | "steer.consumed" | "steer.rejected" | "steer.expired" | "steer.failed";
 

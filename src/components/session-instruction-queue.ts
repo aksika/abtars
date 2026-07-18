@@ -1,5 +1,5 @@
 import { logDebug } from "./logger.js";
-import type { QueuedSessionInstruction, QueueInstructionResult, ManagedSession, SteerEvent, SteerEventType } from "./spin-types.js";
+import type { QueuedSessionInstruction, QueueInstructionResult, ManagedSession, SteerEvent, SteerEventType, InstructionLease, ExecutionInstructionKind } from "./spin-types.js";
 import { isHollow } from "./spin-sessions.js";
 
 const TAG = "steer-queue";
@@ -9,6 +9,7 @@ const MAX_BYTES_PER_ITEM = 4 * 1024;
 const MAX_TOTAL_BYTES = 32 * 1024;
 
 let instructionSeq = 0;
+let leaseSeq = 0;
 
 /** #1362: Scoped multi-subscriber steering event bus. Replaces the singleton steerListener. */
 interface SteerSub {
@@ -60,10 +61,21 @@ function publishMultiGroup(records: QueuedSessionInstruction[], type: SteerEvent
   }
 }
 
+function expireStaleInstructions(session: ManagedSession): void {
+  const current = session.activeExecutionId;
+  const stale = session.instructionQueue.filter(i => i.executionId !== current && i.state !== "expired" && i.state !== "failed");
+  if (stale.length === 0) return;
+  for (const inst of stale) {
+    inst.state = "expired";
+  }
+  publishMultiGroup(stale, "steer.failed", session.id, "stale_generation");
+  logDebug(TAG, `expired ${stale.length} stale instructions for ${session.id}`);
+}
+
 /** #1361: Generalized validation — supports any local active steerable session. */
 export function queueInstruction(
   session: ManagedSession,
-  input: { text: string; source: QueuedSessionInstruction["source"] },
+  input: { text: string; source: QueuedSessionInstruction["source"]; kind?: ExecutionInstructionKind },
 ): QueueInstructionResult {
   // Reject hollow (remote) sessions
   if (session.peer || isHollow(session)) {
@@ -101,13 +113,17 @@ export function queueInstruction(
   }
 
   const id = `steer_${Date.now()}_${++instructionSeq}`;
+  const bytes = Buffer.byteLength(input.text, "utf-8");
   const instruction: QueuedSessionInstruction = {
     id,
     sessionId: session.id,
     executionId: session.activeExecutionId,
+    kind: input.kind ?? "steer",
     source: input.source,
     text: input.text,
+    bytes,
     createdAt: Date.now(),
+    state: "queued",
   };
 
   session.instructionQueue.push(instruction);
@@ -116,36 +132,141 @@ export function queueInstruction(
   return { ok: true, instruction };
 }
 
-/** #1361: Drain instructions matching the current execution generation only. */
-export function drainInstructionBatch(session: ManagedSession): QueuedSessionInstruction[] {
-  if (session.instructionQueue.length === 0) return [];
+/**
+ * #1444: Lease instructions for the current execution generation.
+ * Marks matching entries as "leased" and returns a lease handle.
+ * Stale (old generation) entries are expired first.
+ */
+export function leaseInstructions(
+  session: ManagedSession,
+  kind?: ExecutionInstructionKind,
+): InstructionLease | null {
+  if (session.instructionQueue.length === 0) return null;
 
-  // Filter to current generation only, expire stale ones
+  expireStaleInstructions(session);
+
   const current = session.activeExecutionId;
-  const stale: QueuedSessionInstruction[] = [];
-  const fresh: QueuedSessionInstruction[] = [];
-  for (const inst of session.instructionQueue) {
-    if (inst.executionId === current) {
-      fresh.push(inst);
-    } else {
-      stale.push(inst);
+  if (!current) return null;
+
+  const matching = session.instructionQueue.filter(
+    i => i.executionId === current && i.state === "queued" && (!kind || i.kind === kind),
+  );
+  if (matching.length === 0) return null;
+
+  const leaseId = `lease_${Date.now()}_${++leaseSeq}`;
+  for (const inst of matching) {
+    inst.state = "leased";
+  }
+
+  logDebug(TAG, `leased ${matching.length} instructions for ${session.id} (${leaseId})`);
+  return {
+    leaseId,
+    sessionId: session.id,
+    executionId: current,
+    kind: kind ?? "steer",
+    instructions: matching,
+  };
+}
+
+/**
+ * #1444: Mark leased instructions as delivered.
+ * Call immediately before backend handoff (driver.send()).
+ */
+export function markDelivered(lease: InstructionLease): void {
+  for (const inst of lease.instructions) {
+    if (inst.state === "leased") {
+      inst.state = "delivered";
     }
   }
-  if (stale.length > 0) {
-    failInstructions(session, stale.map(i => i.id), "stale_generation");
+  logDebug(TAG, `marked ${lease.instructions.length} instructions delivered for ${lease.sessionId} (${lease.leaseId})`);
+}
+
+/**
+ * #1444: Mark delivered instructions as consumed (success).
+ * Removes from queue and publishes steer.consumed.
+ */
+export function markConsumed(lease: InstructionLease, session: ManagedSession): void {
+  const ids: string[] = [];
+  for (const inst of lease.instructions) {
+    if (inst.state === "delivered") {
+      inst.state = "consumed";
+      ids.push(inst.id);
+    }
   }
+  if (ids.length === 0) return;
+  const consumed = new Set(ids);
+  session.instructionQueue = session.instructionQueue.filter(i => !consumed.has(i.id));
+  publish("steer.consumed", ids, lease.sessionId, lease.executionId, `batch of ${ids.length}`);
+  logDebug(TAG, `consumed ${ids.length} instructions for ${lease.sessionId} (${lease.leaseId})`);
+}
 
-  if (fresh.length === 0) return [];
+/**
+ * #1444: Restore leased instructions to queued (abort before handoff).
+ */
+export function restoreBeforeDelivery(lease: InstructionLease): void {
+  const ids: string[] = [];
+  for (const inst of lease.instructions) {
+    if (inst.state === "leased") {
+      inst.state = "queued";
+      ids.push(inst.id);
+    }
+  }
+  if (ids.length > 0) {
+    logDebug(TAG, `restored ${ids.length} instructions for ${lease.sessionId} (${lease.leaseId})`);
+  }
+}
 
-  session.instructionQueue = session.instructionQueue.filter(i => !fresh.includes(i));
-  publish("steer.consumed", fresh.map(i => i.id), session.id, session.activeExecutionId ?? "", `batch of ${fresh.length}`);
-  logDebug(TAG, `drained ${fresh.length} instructions from ${session.id}`);
-  return fresh;
+/**
+ * #1444: Mark delivered instructions as failed (delivery uncertain after handoff).
+ * Publishes steer.failed and removes from queue.
+ */
+export function failAfterDelivery(lease: InstructionLease, session: ManagedSession, reason: string): void {
+  const ids: string[] = [];
+  for (const inst of lease.instructions) {
+    if (inst.state === "delivered") {
+      inst.state = "failed";
+      ids.push(inst.id);
+    }
+  }
+  if (ids.length === 0) return;
+  const failed = new Set(ids);
+  session.instructionQueue = session.instructionQueue.filter(i => !failed.has(i.id));
+  publish("steer.failed", ids, lease.sessionId, lease.executionId, reason);
+  logDebug(TAG, `failed ${ids.length} instructions for ${lease.sessionId}: ${reason}`);
+}
+
+/**
+ * #1361: Drain instructions matching the current execution generation only.
+ * Legacy compat — delegates to leaseInstructions + markDelivered + emit consumed.
+ * Prefer leaseInstructions() for new code.
+ */
+export function drainInstructionBatch(session: ManagedSession): QueuedSessionInstruction[] {
+  const lease = leaseInstructions(session);
+  if (!lease) return [];
+  markDelivered(lease);
+  const result = [...lease.instructions];
+  // Legacy compat: publish consumed immediately and remove from queue
+  for (const inst of result) {
+    inst.state = "consumed";
+  }
+  const ids = result.map(i => i.id);
+  const consumed = new Set(ids);
+  const kept = session.instructionQueue.filter(i => !consumed.has(i.id));
+  session.instructionQueue.length = 0;
+  session.instructionQueue.push(...kept);
+  publish("steer.consumed", ids, lease.sessionId, lease.executionId, `batch of ${ids.length}`);
+  logDebug(TAG, `drained ${result.length} instructions from ${session.id}`);
+  return result;
 }
 
 export function expireInstructions(session: ManagedSession, reason: string): void {
   if (session.instructionQueue.length === 0) return;
   const records = [...session.instructionQueue];
+  for (const inst of records) {
+    if (inst.state !== "expired" && inst.state !== "failed") {
+      inst.state = "expired";
+    }
+  }
   session.instructionQueue = [];
   publishMultiGroup(records, "steer.expired", session.id, reason);
   logDebug(TAG, `expired ${records.length} instructions from ${session.id}: ${reason}`);
@@ -153,11 +274,15 @@ export function expireInstructions(session: ManagedSession, reason: string): voi
 
 export function failInstructions(session: ManagedSession, ids: string[], reason: string): void {
   if (ids.length === 0) return;
-  // Derive execution identity from queued records (still in queue at call time)
   const records: QueuedSessionInstruction[] = [];
   for (const id of ids) {
     const rec = session.instructionQueue.find(i => i.id === id);
-    if (rec) records.push(rec);
+    if (rec) {
+      if (rec.state !== "failed" && rec.state !== "expired") {
+        rec.state = "failed";
+      }
+      records.push(rec);
+    }
   }
   publishMultiGroup(records, "steer.failed", session.id, reason);
   logDebug(TAG, `failed ${ids.length} instructions from ${session.id}: ${reason}`);

@@ -17,7 +17,8 @@ import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
-import { drainInstructionBatch, expireInstructions } from "./session-instruction-queue.js";
+import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expireInstructions } from "./session-instruction-queue.js";
+import { createExecutionTelemetryScope } from "./execution-telemetry.js";
 import type { OrcActivityFeed } from "./orc-activity-feed.js";
 import type { SessionOutputFeed } from "./session-output-feed.js";
 import { createOutputObserver } from "./session-output-feed.js";
@@ -494,6 +495,9 @@ export class Spin {
     // #1332: Assign execution generation for steering continuity
     session.activeExecutionId = `${session.id}_${stepIndex}_${Date.now()}`;
 
+    // #1444: Execution telemetry scope — tracks provider calls for this generation
+    const executionTelemetry = createExecutionTelemetryScope(session.activeExecutionId);
+
     // 3. Kanban card (user-facing work only)
     let cardId = spec.cardId;
     if (cardId === undefined && spec.goal !== undefined) {
@@ -572,6 +576,7 @@ export class Spin {
         userId: spec.userId ?? userId,
         beforeMessageId: spec.currentMessageId,
         directContextTurn: spec.directContextTurn,
+        executionTelemetry,
       };
       // #1338: wrap each model call/round in a fresh call-local observer so the
       // output feed receives a unique stream per turn. The observer publishes
@@ -660,9 +665,16 @@ export class Spin {
         try {
           let result = (await driver.send(prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
           for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
-            const batch = drainInstructionBatch(session);
-            if (batch.length === 0) { session.steeringAccepting = false; break; }
-            result = (await driver.send(renderSteeringContinuation(batch), undefined, { userId: spec.userId ?? userId })) || "(no output)";
+            const batch = leaseInstructions(session);
+            if (!batch) { session.steeringAccepting = false; break; }
+            markDelivered(batch);
+            try {
+              result = (await driver.send(renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]), undefined, { userId: spec.userId ?? userId, executionTelemetry })) || "(no output)";
+              markConsumed(batch, session);
+            } catch (steerErr) {
+              failAfterDelivery(batch, session, "steer_failed");
+              throw steerErr;
+            }
           }
           session.steeringAccepting = false;
           if (session.instructionQueue.length > 0) expireInstructions(session, "round_limit");
@@ -673,14 +685,23 @@ export class Spin {
       };
 
       if (!spec.await) {
-        executeWithSteering().then(r => this.finishSpin(spec, profile, session, cardId, stepIndex, started, r, terminate))
-            .catch(e => this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate));
+        executeWithSteering().then(r => {
+          const telemetryUsage = executionTelemetry.snapshot();
+          executionTelemetry.close();
+          this.finishSpin(spec, profile, session, cardId, stepIndex, started, r, terminate, telemetryUsage);
+        }).catch(e => {
+          executionTelemetry.close();
+          this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate);
+        });
         return { sessionId: session.id, cardId };
       }
       const result = await executeWithSteering();
-      await this.finishSpin(spec, profile, session, cardId, stepIndex, started, result, terminate);
+      const telemetryUsage = executionTelemetry.snapshot();
+      executionTelemetry.close();
+      await this.finishSpin(spec, profile, session, cardId, stepIndex, started, result, terminate, telemetryUsage);
       return { sessionId: session.id, cardId, result };
     } catch (err) {
+      executionTelemetry.close();
       // Covers: pre-exec throws (steps 4-6) AND awaited execution failures (step 7).
       // failSpin calls markDone + drainQueued — concurrency slot always released.
       await this.failSpin(spec, profile, session, cardId, stepIndex, started, err, terminate);
@@ -693,14 +714,15 @@ export class Spin {
     spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession,
     cardId: number | undefined, stepIndex: number, started: number, result: string,
     terminate: "call" | "response" | "external",
+    telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
   ): Promise<void> {
-    // Persistent sends go through session.transport (runtime.lastUsage is only
-    // updated by runtime.complete). Prefer the transport's own usage; fall back
-    // to runtime for oneshot.
+    // #1444: prefer telemetry scope aggregate (spans all tool rounds + continuations),
+    // then transport lastUsage(), then runtime fallback.
     const status = (session.transport as { getRuntimeStatus?: () => { lastTurnUsage?: RuntimeUsageSnapshot } } | undefined)?.getRuntimeStatus?.();
-    const usage = status?.lastTurnUsage
+    const fallbackUsage = status?.lastTurnUsage
       ?? (session.transport as { lastUsage?: () => RuntimeUsageSnapshot | null } | undefined)?.lastUsage?.()
       ?? this.runtime?.lastUsage ?? null;
+    const usage = telemetryUsage ?? fallbackUsage;
     session.messageCount += 2;
     session.lastActiveAt = Date.now();
     if (usage) {

@@ -26,6 +26,8 @@ export interface PromptRequestContext {
     rawUserText: string;
     volatileBlocks: ReadonlyArray<{ kind: string; content: string }>;
   };
+  /** #1444: execution telemetry scope for provider-call correlation. */
+  executionTelemetry?: import("../execution-telemetry.js").ExecutionTelemetryScope;
 }
 
 export interface RuntimeUsageSnapshot {

@@ -94,6 +94,8 @@ export class DirectApiTransport implements IKiroTransport {
   private _activeSessionKey = "";
   private _activeUserId = "master";
   private _outputObserver?: OutputObserver;
+  /** #1444: tracks the model/provider a fallback transitioned from (for telemetry). */
+  private _fallbackFrom: string | undefined;
 
   /** Agent name for budget tracking (set by caller). */
   agentLabel = "main";
@@ -125,6 +127,8 @@ export class DirectApiTransport implements IKiroTransport {
   isPaused?: () => boolean;
   /** Returns a pending instruction from parent, if any. Consumed once. */
   getPendingInstruction?: () => string | undefined;
+  /** #1444: execution telemetry scope — set per sendPrompt from PromptRequestContext. */
+  executionTelemetry?: import("../execution-telemetry.js").ExecutionTelemetryScope;
 
   /** Context orchestrator — when set, messages are built from DB instead of in-memory session. */
   contextOrchestrator?: import("abmind").ContextOrchestrator;
@@ -206,6 +210,7 @@ export class DirectApiTransport implements IKiroTransport {
     // #1338: call-local observer for live TUI output mirroring. Invoked
     // alongside transport-wide callbacks; never changes execution/results.
     this._outputObserver = context?.outputObserver;
+    this.executionTelemetry = context?.executionTelemetry;
 
     // If context orchestrator is active, rebuild messages from DB.
     // #1329: when the pipeline hands us the just-inserted current message
@@ -334,9 +339,12 @@ export class DirectApiTransport implements IKiroTransport {
     // Try each candidate via policy
     let candidate = policy.selectModel(this._lastPromptTokens);
     while (candidate) {
+      // #1444: record fallback transition for telemetry
+      if (this.activeModel !== candidate.model) {
+        this._fallbackFrom = this.activeModel;
+      }
       this.activateCandidate({ provider: candidate.provider ?? this.config.provider ?? "unknown", model: candidate.model, endpoint: candidate.endpoint, apiKey: candidate.apiKey, maxContext: candidate.maxContext });
       this._lastActivityAt = Date.now();
-      logDebug(TAG, `Trying model: ${candidate.model} via ${candidate.provider}`);
 
       if (!isPrimary(candidate.model) && this.onFallback) {
         const ctxPct = candidate.maxContext > 0 ? Math.round((this._lastPromptTokens / candidate.maxContext) * 100) : -1;
@@ -533,7 +541,36 @@ export class DirectApiTransport implements IKiroTransport {
       const pendingInstruction = this.getPendingInstruction?.();
       if (pendingInstruction) session.addUser(pendingInstruction);
 
-      const { content, toolCalls, usage } = await this.streamCompletion(session, signal);
+      // #1444: one provider call per streamCompletion invocation
+      const fallbackFrom = this._fallbackFrom;
+      this._fallbackFrom = undefined;
+      const pcHandle = this.executionTelemetry?.beginProviderCall({
+        provider: this.activeProvider,
+        model: this.activeModel,
+        candidate: this.activeProvider ? `${this.activeProvider}/${this.activeModel}` : this.activeModel,
+        fallbackFrom,
+        startedAt: Date.now(),
+      });
+      let streamResult: { content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null };
+      try {
+        streamResult = await this.streamCompletion(session, signal);
+      } catch (streamErr) {
+        pcHandle?.end({ result: "failure", endedAt: Date.now() });
+        throw streamErr;
+      }
+      const { content, toolCalls, usage } = streamResult;
+      if (usage && usage.prompt_tokens != null) {
+        pcHandle?.end({
+          result: "success",
+          endedAt: Date.now(),
+          input: usage.prompt_tokens,
+          output: usage.completion_tokens ?? 0,
+          cacheRead: this._lastCacheRead ?? undefined,
+          cacheWrite: this._lastCacheWrite ?? undefined,
+        });
+      } else {
+        pcHandle?.end({ result: "success", endedAt: Date.now() });
+      }
 
       // #1335: Record cache telemetry after each stream completion
       if (usage) {
@@ -558,8 +595,20 @@ export class DirectApiTransport implements IKiroTransport {
           this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
         }
         logTrace(TAG, `${this.activeModel} — ${usage.prompt_tokens}→${usage.completion_tokens ?? 0} tokens, ${Date.now() - (this._lastActivityAt ?? Date.now())}ms`);
+        const correlation = pcHandle ? {
+          schemaVersion: 2 as const,
+          sessionId: this._activeSessionKey,
+          executionId: this.executionTelemetry?.executionId ?? "",
+          providerCallId: pcHandle.providerCallId,
+          ordinal: pcHandle.ordinal,
+          provider: this.activeProvider,
+          candidate: this.activeProvider ? `${this.activeProvider}/${this.activeModel}` : this.activeModel,
+          latencyMs: Date.now() - (this._promptStartedAt ?? Date.now()),
+          result: "success" as const,
+          fallbackFrom: fallbackFrom ?? undefined,
+        } : undefined;
         recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0, this.agentLabel,
-          { cacheRead: this._lastCacheRead ?? undefined, cacheWrite: this._lastCacheWrite ?? undefined });
+          { cacheRead: this._lastCacheRead ?? undefined, cacheWrite: this._lastCacheWrite ?? undefined }, correlation);
       }
 
       if (toolCalls.length > 0) {
