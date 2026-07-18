@@ -23,6 +23,8 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
   let agentApiServer: AgentApiServer | null = null;
 
+  const { updatePeerApiState, updateDoorbellState } = await import("../components/runtime-health-snapshot.js");
+
   const notifyPeer = (msg: string): void => { sendNotification(ctx, msg); };
   setPeerActivityCallback(notifyPeer);
 
@@ -133,20 +135,31 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   if (platforms.agent) {
     const result = await registry.start("agent-api");
     if (result.ok) {
-      logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port}`);    } else {
+      logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port}`);
+      updatePeerApiState("listening");
+    } else {
       logError("main", `Agent API failed to start: ${result.error}`);
+      updatePeerApiState("failed", result.error);
     }
 
     // #1434: Start doorbell service + persistent outbound WS
+    updateDoorbellState("starting");
     import("../components/peer-transport/index.js").then(async ({ getPeerTransport, PeerDoorbellService }) => {
       const transport = getPeerTransport();
       const doorbell = new PeerDoorbellService(transport);
       transport.setDoorbell(doorbell);
       await doorbell.start();
+      updateDoorbellState(doorbell.isRunning ? "listening" : "degraded", doorbell.isRunning ? undefined : "bind/start failed");
       if (Object.keys(loadPeerConfig().peers).length > 0) {
         await transport.initWsConnections();
       }
-    }).catch((err) => logError(TAG, `Peer init failed: ${err.message}`));
+    }).catch((err) => {
+      logError(TAG, `Peer init failed: ${err.message}`);
+      updateDoorbellState("degraded", err instanceof Error ? err.message : String(err));
+    });
+  } else {
+    updatePeerApiState("disabled");
+    updateDoorbellState("disabled");
   }
   return "ran";
 }

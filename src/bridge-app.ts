@@ -138,11 +138,17 @@ export async function startBridge(): Promise<number> {
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
   const startReason = process.env["ABTARS_START_REASON"] ?? "unknown";
-  initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2), startReason });
+  const startedAt = Date.now();
+  initBridgeLock({ pid: process.pid, startedAt, version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2), startReason });
 
-  // Initialize runtime health snapshot (#1439)
+  // Initialize runtime health snapshot (#1439). Must reuse the exact same
+  // startedAt value written to bridge.lock above — the snapshot reader
+  // trusts a snapshot only when its bridge.pid/startedAt match bridge.lock
+  // exactly, and two independent Date.now() calls could differ by the
+  // milliseconds between statements, permanently marking every snapshot
+  // "wrong-process" for the life of the process.
   const { initSnapshot } = await import("./components/runtime-health-snapshot.js");
-  initSnapshot(process.pid, Date.now());
+  initSnapshot(process.pid, startedAt);
 
   const bridge = new Bridge(ctx);
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;

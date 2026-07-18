@@ -102,8 +102,13 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     name: "snapshot-refresh",
     execute: async () => {
       try {
-        const { refreshSnapshot } = await import("../components/runtime-health-snapshot.js");
+        const { refreshSnapshot, updateActiveCardIds } = await import("../components/runtime-health-snapshot.js");
         refreshSnapshot();
+        // Republish the complete active-card set every tick (not just on
+        // lifecycle transitions) so an abrupt state change or missed
+        // markRunning/markDone call cannot leave a stale, indefinitely
+        // "active" entry in the snapshot doctor's Kanban probe trusts.
+        updateActiveCardIds(spin.getActiveCardIds());
       } catch { /* best effort */ }
     },
   });

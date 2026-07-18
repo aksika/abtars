@@ -20,6 +20,19 @@ export const MAX_OPERATION_LABEL_LENGTH = 200;
 export const MAX_STALL_REASON_LENGTH = 500;
 export const MAX_LEASES_PER_ATTEMPT = 100;
 
+/**
+ * #1439: Shared candidate-staleness threshold for a "running" Kanban card.
+ * This is the shortest `meaningfulProgressMs` across the lease policies
+ * below (DEFAULT_LOCAL_POLICY) — the point at which the lease-based
+ * reconciler (reconciler.ts → evaluateLease) would first consider a
+ * supervised card's progress questionable. Doctor's read-only Kanban probe
+ * uses this same constant as its candidate-age threshold instead of a
+ * separate hardcoded value, so there is exactly one definition of "old
+ * running work" shared between the actual lifecycle owner and doctor's
+ * health probe.
+ */
+export const KANBAN_STALE_CANDIDATE_MS = 300_000;
+
 export interface ExecutorProgressEventV1 {
   readonly schema_version: 1;
   readonly attempt_id: string;

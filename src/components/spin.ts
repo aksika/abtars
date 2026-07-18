@@ -1130,11 +1130,34 @@ export class Spin {
   private markRunning(type: SessionType, cardId: number): void {
     if (!this.running.has(type)) this.running.set(type, new Set());
     this.running.get(type)!.add(cardId);
+    this.publishActiveCardIds();
   }
 
   private markDone(type: SessionType, cardId: number): void {
     this.running.get(type)?.delete(cardId);
     if (type === "H") this._lastHealerDoneAt = Date.now();
+    this.publishActiveCardIds();
+  }
+
+  /**
+   * #1439: Complete set of card IDs Spin currently considers running, across
+   * every session type. This is the single authoritative source doctor's
+   * Kanban probe correlates against — publish on every lifecycle transition
+   * plus once per heartbeat (see phase-heartbeat.ts) so an abrupt process
+   * exit cannot leave a stale entry indefinitely "active".
+   */
+  getActiveCardIds(): number[] {
+    const ids: number[] = [];
+    for (const set of this.running.values()) {
+      for (const id of set) ids.push(id);
+    }
+    return ids;
+  }
+
+  private publishActiveCardIds(): void {
+    import("./runtime-health-snapshot.js").then(({ updateActiveCardIds }) => {
+      updateActiveCardIds(this.getActiveCardIds());
+    }).catch(() => { /* best effort — snapshot is a health surface, not authoritative */ });
   }
 }
 

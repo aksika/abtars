@@ -116,13 +116,6 @@ export interface BridgeStatusCtx {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const SOUL_CORE_FILES = [
-  "SOUL.md",
-  "user_profile.md",
-  "agent_notes.md",
-  "memory-tools.md",
-  "core_facts.md",
-] as const;
 const PLATFORM_NAMES = ["telegram", "discord", "irc"] as const;
 const SYSTEMCTL_TIMEOUT_MS = 3000;
 
@@ -742,14 +735,24 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
   let soulBundle: RuntimeView["soulBundle"] = null;
   try {
     const { getEnv } = await import("./env-schema.js");
-    const { abmindHome } = await import("../paths.js");
+    const { abmindHome, abtarsHome, abtarsRoot } = await import("../paths.js");
+    const { describeSoulInputs } = await import("./soul-input-manifest.js");
     const memoryProvider =
       (getEnv() as { memory?: string }).memory ?? "abmind";
     if (memoryProvider === "abmind" || memoryProvider === "auto") {
       const coreDir = join(abmindHome(), "memory", "core");
       if (existsSync(coreDir)) {
-        const available = SOUL_CORE_FILES.filter(f => existsSync(join(coreDir, f))).length;
-        soulBundle = { available, total: SOUL_CORE_FILES.length };
+        // #1439: shared manifest is the single source of truth for which
+        // abmind core inputs count toward the Soul bundle — do not
+        // duplicate the file list here.
+        const coreInputs = describeSoulInputs({
+          memoryMode: "available",
+          abtarsHome: abtarsHome(),
+          abtarsRoot: abtarsRoot(),
+          abmindHome: abmindHome(),
+        }).filter(i => i.id.startsWith("main.") && i.id !== "main.minimal-fallback");
+        const available = coreInputs.filter(i => existsSync(i.path)).length;
+        soulBundle = { available, total: coreInputs.length };
       }
     }
   } catch (err) {

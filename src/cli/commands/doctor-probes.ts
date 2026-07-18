@@ -8,6 +8,7 @@ import { readEnv } from "./doctor-render.js";
 import { getPiVersion } from "./pi-version-access.js";
 import { describeSoulInputs } from "../../components/soul-input-manifest.js";
 import { readSnapshot } from "../../components/runtime-health-snapshot.js";
+import { KANBAN_STALE_CANDIDATE_MS } from "../../components/executor-progress.js";
 import type { ProbeResult, DoctorOutputV2, SnapshotTrust, RuntimeHealthSnapshotV1 } from "./doctor-types.js";
 import { truncate } from "./doctor-types.js";
 
@@ -204,7 +205,7 @@ async function probeKanban(): Promise<ProbeResult> {
   if (!existsSync(SHARED_NM)) return { name: "kanban", status: "skipped", evidence: "filesystem", detail: "better-sqlite3 not installed", remediation: "Run abtars deps install", ms: 0 };
 
   let Db: new (path: string, opts: { readonly: boolean }) => {
-    prepare: (sql: string) => { get: () => Record<string, unknown>; all: () => Array<Record<string, unknown>> };
+    prepare: (sql: string) => { get: () => Record<string, unknown>; all: (...params: unknown[]) => Array<Record<string, unknown>> };
     close: () => void;
   };
   try {
@@ -219,7 +220,12 @@ async function probeKanban(): Promise<ProbeResult> {
     const db = new Db(dbPath, { readonly: true });
     const total = (db.prepare("SELECT COUNT(*) as cnt FROM kanban_board").get() as { cnt: number }).cnt;
     const byStatus = db.prepare("SELECT status, COUNT(*) as cnt FROM kanban_board GROUP BY status").all() as Array<{ status: string; cnt: number }>;
-    const oldRunning = db.prepare("SELECT id FROM kanban_board WHERE status='running' AND updated_at < datetime('now', '-10 minutes')").all() as Array<{ id: number }>;
+    // #1439: candidate-staleness threshold is shared with the lease-based
+    // reconciler (executor-progress.ts KANBAN_STALE_CANDIDATE_MS) rather
+    // than a doctor-only literal — age alone still never decides failure,
+    // it only decides which cards get checked against the runtime snapshot.
+    const staleCutoffIso = new Date(Date.now() - KANBAN_STALE_CANDIDATE_MS).toISOString();
+    const oldRunning = db.prepare("SELECT id FROM kanban_board WHERE status='running' AND updated_at < ?").all(staleCutoffIso) as Array<{ id: number }>;
     db.close();
 
     if (oldRunning.length === 0) {
@@ -398,11 +404,11 @@ async function probeDoorbell(snapshot: { trust: SnapshotTrust; data: RuntimeHeal
 // ── Soul Probes ──
 
 async function probeSoul(): Promise<ProbeResult> {
-  // Probe disk directly: if abmind persona dir has the core SOUL.md, memory
-  // is effectively available regardless of env flags or bridge state.
+  // Probe disk directly: if abmind's core memory dir has the core SOUL.md,
+  // memory is effectively available regardless of env flags or bridge state.
   const abmHome = abmindHome();
-  const personaDir = join(abmHome, "persona");
-  const abmindCoreExists = existsSync(join(personaDir, "SOUL.md"));
+  const coreDir = join(abmHome, "memory", "core");
+  const abmindCoreExists = existsSync(join(coreDir, "SOUL.md"));
   const memoryMode = abmindCoreExists ? "available" : "unavailable";
 
   const inputs = describeSoulInputs({

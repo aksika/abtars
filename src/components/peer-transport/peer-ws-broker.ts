@@ -96,8 +96,29 @@ export class PeerWsBroker {
     });
 
     logInfo("peer-broker", `Socket attached: ${peer} ${direction} gen=${generation} (${state.sockets.length} total)`);
+    this.publishRouteSnapshot();
 
     return () => this.detachSocket(peer, direction, generation);
+  }
+
+  /**
+   * #1439: Publish the current authenticated-route state (derived from
+   * currently OPEN socket registrations across all peers) to the runtime
+   * health snapshot so `abtars doctor`'s routes/doorbell probes can read
+   * real transport state instead of inferring it from configuration.
+   */
+  private publishRouteSnapshot(): void {
+    import("../runtime-health-snapshot.js").then(({ updateRoutes }) => {
+      const routes: Array<{ peer: string; authenticated: true; directions: Array<"accepted" | "outbound">; connectedAt: number }> = [];
+      for (const [peer, state] of this.peers) {
+        const open = state.sockets.filter(s => s.socket.readyState === WebSocket.OPEN);
+        if (open.length === 0) continue;
+        const directions = [...new Set(open.map(s => s.direction))];
+        const connectedAt = Math.min(...open.map(s => s.connectedAt));
+        routes.push({ peer, authenticated: true, directions, connectedAt });
+      }
+      updateRoutes(routes);
+    }).catch(() => { /* best effort — snapshot is a health surface, not authoritative */ });
   }
 
   hasRoute(peer: string): boolean {
@@ -180,6 +201,7 @@ export class PeerWsBroker {
     if (idx === -1) return;
     state.sockets.splice(idx, 1);
     logDebug("peer-broker", `Socket detached: ${peer} ${direction} gen=${generation} (${state.sockets.length} remaining)`);
+    this.publishRouteSnapshot();
 
     if (state.inFlight && state.inFlight.peer === peer) {
       this.clearInFlight(peer);
