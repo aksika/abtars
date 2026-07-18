@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import type { DoctorOutputV2, ProbeResult, DoctorFixOutputV2 } from "./doctor-types.js";
 
-const ICON: Record<string, string> = { ok: "+", warning: "!", failed: "x", skipped: "-" };
+const ICON: Record<string, string> = { ok: "✓", warning: "!", failed: "✗", skipped: "~" };
 
 export function readEnv(): Map<string, string> {
   const configDir = join(abtarsHome(), "config");
@@ -54,7 +54,7 @@ export function renderHuman(output: DoctorOutputV2): string {
     for (const p of probes) {
       let line = formatProbeLine(p, "  ");
       const statusPrefix = p.status === "warning" ? "!" : ICON[p.status] ?? "?";
-      line = line.replace(/^  [+!x-]/, `  ${statusPrefix}`);
+      line = line.replace(/^  [✓!✗~]/, `  ${statusPrefix}`);
       line += ` ${evidenceTag(p.evidence)}`;
       lines.push(line);
     }
@@ -72,8 +72,8 @@ export function renderHuman(output: DoctorOutputV2): string {
     lines.push("");
     lines.push("Failures:");
     for (const p of failedProbes) {
-      lines.push(`  x ${p.name}: ${p.detail}`);
-      if (p.remediation) lines.push(`    -> ${p.remediation}`);
+      lines.push(`  ✗ ${p.name}: ${p.detail}`);
+      if (p.remediation) lines.push(`    → ${p.remediation}`);
     }
   }
 
@@ -82,7 +82,7 @@ export function renderHuman(output: DoctorOutputV2): string {
     lines.push("Warnings:");
     for (const p of warningProbes) {
       lines.push(`  ! ${p.name}: ${p.detail}`);
-      if (p.remediation) lines.push(`    -> ${p.remediation}`);
+      if (p.remediation) lines.push(`    → ${p.remediation}`);
     }
   }
 
@@ -97,7 +97,7 @@ export function renderHuman(output: DoctorOutputV2): string {
     lines.push("");
     lines.push("Actions:");
     for (const p of deduplicated) {
-      lines.push(`  - ${p.remediation}`);
+      lines.push(`  • ${p.remediation}`);
     }
   }
 
@@ -132,14 +132,14 @@ export function renderFixJson(result: DoctorFixOutputV2): string {
 
 export function renderChatDiagnosis(output: DoctorOutputV2): string {
   const lines: string[] = [];
-  lines.push(`🩺 Doctor (${output.abtars.version}${output.abtars.commit ? "-" + output.abtars.commit : ""})`);
+  lines.push(`Doctor (${output.abtars.version}${output.abtars.commit ? "-" + output.abtars.commit : ""})`);
 
   for (const [layerName, probes] of Object.entries(output.layers) as [string, ProbeResult[]][]) {
     if (probes.length === 0) continue;
     lines.push("");
     lines.push(`${layerName.charAt(0).toUpperCase() + layerName.slice(1)}:`);
     for (const p of probes) {
-      const iconMap: Record<string, string> = { ok: "+", warning: "!", failed: "x", skipped: "-" };
+      const iconMap: Record<string, string> = { ok: "✓", warning: "!", failed: "✗", skipped: "~" };
       const icon = iconMap[p.status] ?? "?";
       lines.push(`  ${icon} ${p.name}${p.detail ? ` — ${p.detail}` : ""}`);
     }
@@ -152,7 +152,7 @@ export function renderChatDiagnosis(output: DoctorOutputV2): string {
 
 export function renderChatFix(result: DoctorFixOutputV2): string {
   const lines: string[] = [];
-  lines.push("🩺 Fix:");
+  lines.push("Fix:");
 
   if (result.fixes.length === 0) {
     lines.push("  (nothing to fix)");
