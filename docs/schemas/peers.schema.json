@@ -9,23 +9,24 @@
       "required": ["name"],
       "properties": {
         "name": { "type": "string" },
-        "signingKey": { "type": "string", "description": "Base64 Ed25519 private key for message signing" },
-        "udpPort": { "type": "number", "description": "UDP port for mDNS wake-up listener (default 5353)" }
+        "signingKey": { "type": "string", "description": "Base64 Ed25519 private key for message signing" }
       }
     },
     "peers": {
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["host", "port", "token"],
+        "required": ["host", "port", "verifyKey"],
         "properties": {
           "host": { "type": "string" },
           "port": { "type": "number" },
-          "token": { "type": "string" },
-          "pskSecret": { "type": "string", "description": "TLS-PSK shared secret" },
-          "mode": { "type": "string", "enum": ["plain", "signed"] },
           "verifyKey": { "type": "string", "description": "Base64 Ed25519 public key for signature verification" },
-          "udpPort": { "type": "number" }
+          "trust": { "type": "number", "description": "Trust level: 0=enrolled, 1=trusted, 2=owner" },
+          "mode": { "type": "string", "enum": ["signed"] },
+          "allowedTools": { "type": "array", "items": { "type": "string" } },
+          "allowedRead": { "type": "array", "items": { "type": "string" } },
+          "allowedWrite": { "type": "array", "items": { "type": "string" } },
+          "transport": { "type": "string", "enum": ["http", "ws-outbound"] }
         }
       }
     },

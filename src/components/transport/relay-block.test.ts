@@ -1,6 +1,6 @@
 /**
  * relay-block.test.ts — #1301: peer-originated requests must not relay through
- * this host to a third peer. The relay tools (peer_session/peer_wakeup/
+ * this host to a third peer. The relay tools (peer_session/peer_doorbell/
  * peer_ask_help) refuse when the active Orc card is peer-sourced.
  */
 

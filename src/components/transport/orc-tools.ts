@@ -23,7 +23,7 @@ export function getActiveOrcCard(): number | null {
 /**
  * #1301 — true when the Orc is currently processing a peer-originated card.
  *
- * Relay tools (peer_session/peer_wakeup/peer_ask_help) call this to refuse: a
+ * Relay tools (peer_session/peer_doorbell/peer_ask_help) call this to refuse: a
  * peer must never be able to make us call a THIRD peer under our identity
  * (relay/identity-confusion). Keys off the active card's `source` — not the
  * session — so it stays correct for the shared singleton Orc (owner-initiated

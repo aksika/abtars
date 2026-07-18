@@ -39,8 +39,8 @@ Two abTARS instances communicate via OpenAI-compatible `/v1/chat/completions` en
 
 - **Authentication** — per-peer JWT tokens + digital signatures
 - **Anti-loop** — hop counting prevents infinite ping-pong
-- **Firewall traversal** — UDP wakeup + callback mechanism for NAT/corporate firewalls
-- **Agent tools** — `peer_ask` (single question), `peer_chat` (multi-turn session), `peer_wakeup` (wake sleeping peer)
+- **Firewall traversal** — signed UDP doorbell on port 5353 for NAT/corporate firewalls
+- **Agent tools** — `peer_ask` (single question), `peer_chat` (multi-turn session), `peer_doorbell` (request WSS refresh)
 
 Configure peers in `~/.abtars/config/peers.json`.
 
