@@ -31,8 +31,11 @@ export function renderHuman(output: DoctorOutputV2): string {
   const lines: string[] = [];
 
   lines.push(`abtars doctor`);
-  const ver = output.abtars.commit ? `${output.abtars.version}-${output.abtars.commit}` : output.abtars.version;
-  if (ver !== "?-?") lines.push(`Version: ${ver}`);
+  const commit = output.abtars.commit ?? "";
+  const ver = commit && !output.abtars.version.includes(commit)
+    ? `${output.abtars.version}-${commit}`
+    : output.abtars.version;
+  if (ver !== "?-?" && ver !== "?") lines.push(`Version: ${ver}`);
   lines.push(`Doctor schema: ${output.schemaVersion}`);
   lines.push("");
 

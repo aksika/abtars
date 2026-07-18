@@ -400,29 +400,24 @@ async function probeDoorbell(snapshot: { trust: SnapshotTrust; data: RuntimeHeal
 // ── Soul Probes ──
 
 async function probeSoul(): Promise<ProbeResult> {
+  // Probe disk directly: if abmind persona dir has the core SOUL.md, memory
+  // is effectively available regardless of env flags or bridge state.
+  const abmHome = abmindHome();
+  const personaDir = join(abmHome, "persona");
+  const abmindCoreExists = existsSync(join(personaDir, "SOUL.md"));
+  const memoryMode = abmindCoreExists ? "available" : "unavailable";
+
   const inputs = describeSoulInputs({
-    memoryMode: "unavailable",
+    memoryMode,
     abtarsHome: home,
     abtarsRoot: root,
-    abmindHome: abmindHome(),
+    abmindHome: abmHome,
   });
-
-  const env = readEnv();
-  const memoryEnabled = env.get("ENABLE_MEMORY") !== "false";
-  let finalInputs = inputs;
-  if (memoryEnabled) {
-    finalInputs = describeSoulInputs({
-      memoryMode: "available",
-      abtarsHome: home,
-      abtarsRoot: root,
-      abmindHome: abmindHome(),
-    });
-  }
 
   const issues: string[] = [];
   let status: import("./doctor-types.js").ProbeStatus = "ok";
 
-  for (const input of finalInputs) {
+  for (const input of inputs) {
     const exists = existsSync(input.path);
     if (!exists) {
       if (input.required) { status = "failed"; issues.push(`${input.id}: missing`); }
