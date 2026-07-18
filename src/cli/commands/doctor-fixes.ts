@@ -1,5 +1,7 @@
 import { existsSync, chmodSync, mkdirSync, statSync, readFileSync, readdirSync, unlinkSync, lstatSync } from "node:fs";
 import { join, relative } from "node:path";
+import { homedir } from "node:os";
+import { createRequire } from "node:module";
 import { abtarsHome } from "../../paths.js";
 import type { FixResult, DoctorOutputV2 } from "./doctor-types.js";
 
@@ -25,6 +27,7 @@ export interface DoctorFixDefinition {
 }
 
 const home = abtarsHome();
+const _require = createRequire(import.meta.url);
 
 const KNOWN_DIRS = ["config", "secret", "auth", "hooks", "logs", "workspace", "overflow", "received", "kanban", "state", "prompts"] as const;
 const SENSITIVE_DIRS = ["config", "secret", "auth", "hooks"] as const;
@@ -133,6 +136,35 @@ const definitions: DoctorFixDefinition[] = [
     },
     apply: () => {
       unlinkSync(join(home, "deploy.lock"));
+    },
+  },
+  {
+    id: "fail-abandoned-kanban-cards",
+    probe: "kanban",
+    bootSafe: false,
+    applicable: (before: DoctorOutputV2) => {
+      const brainProbes = before.layers.brain ?? [];
+      return brainProbes.some(p => p.name === "kanban" && p.status === "failed");
+    },
+    revalidate: (): { ok: true } | { ok: false; reason: string } => {
+      const dbPath = join(home, "kanban", "kanban.db");
+      if (!existsSync(dbPath)) return { ok: false, reason: "no kanban.db" };
+      const sharedNm = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
+      if (!existsSync(sharedNm)) return { ok: false, reason: "better-sqlite3 not installed" };
+      return { ok: true };
+    },
+    apply: () => {
+      const dbPath = join(home, "kanban", "kanban.db");
+      if (!existsSync(dbPath)) return;
+      const cutoff = new Date(Date.now() - 86_400_000).toISOString();
+      try {
+        const Database = _require(join(homedir(), ".local", "lib", "node_modules", "better-sqlite3"));
+        const db = new Database(dbPath);
+        db.prepare(
+          "UPDATE kanban_board SET status = 'failed', error = ?, updated_at = datetime('now'), completed_at = datetime('now') WHERE status = 'running' AND updated_at < ?"
+        ).run("Abandoned — auto-failed by doctor fix", cutoff);
+        db.close();
+      } catch { /* best-effort */ }
     },
   },
 ];
