@@ -32,12 +32,8 @@ export function isModelPickerCallback(data: string): boolean {
  * - When the provider opts into pi-ai and the catalog is small (≤ PICKER_MAX), use the live
  *   pi-catalog directly (most accurate, includes models not yet in models.json).
  * - When the pi-catalog is large (> PICKER_MAX) or the provider doesn't opt in / catalog is
- *   cold, fall back to the curated `models.json` list. We DO NOT validate curated ids
- *   against the live pi-catalog: pi-ai passes through any model id we build into our
- *   `Model` object directly to the upstream provider, so a curated id missing from
- *   pi-ai's snapshot is still a valid call. model-scout's invariant ("Professor only puts
- *   working models into models.json") is the safety net. If a curated id is wrong, use
- *   `/model doctor` to find it.
+ *   cold, fall back to the curated `models.json` list. When the pi-catalog is available,
+ *   curated entries are validated against it to filter out stale IDs and prevent 404s.
  * - Always cap at PICKER_MAX as a hard backstop against the Telegram inline-keyboard size
  *   limit (~80 buttons, ~9KB markup JSON). Empty result is the caller's problem.
  */
@@ -56,11 +52,17 @@ async function buildModelEntries(providerName: string, providerConfig: { transpo
     return pi.map(m => ({ id: m.id, label: `${m.id} (${formatCost(m.cost)})` }));
   }
 
-  // Tier 2: curated models.json, alive-filtered. No catalog validation — pi-ai passes
-  // through whatever model id we hand it. (See function header.)
-  const curated = getModelsForProvider(providerName);
-  const filtered = providerConfig?.transport === "api" ? curated.filter(m => !m.entry.status || m.entry.status === "alive") : curated;
-  return filtered.slice(0, PICKER_MAX).map(m => ({ id: m.id, label: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})` }));
+  // Tier 2: curated models.json, filtered against the warmed pi-ai catalog when available
+  // to prevent stale IDs and 404s.
+  let curated = getModelsForProvider(providerName);
+  if (providerConfig?.transport === "api") {
+    curated = curated.filter(m => !m.entry.status || m.entry.status === "alive");
+  }
+  if (pi && pi.length > 0 && providerConfig?.useProviderLib) {
+    const piIds = new Set(pi.map(m => m.id));
+    curated = curated.filter(m => piIds.has(m.id));
+  }
+  return curated.slice(0, PICKER_MAX).map(m => ({ id: m.id, label: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})` }));
 }
 
 export async function handleModelPickerCallback(

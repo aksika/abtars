@@ -171,7 +171,7 @@
     "description": "Nvidia Nemotron 3 Super 120B MoE. Free Ollama cloud + OpenRouter.",
     "validatedAt": "2026-04-24"
   },
-  "inclusionai/ling-2.6-1t:free": {
+  "inclusionai/ling-2.6-1t": {
     "contextWindow": 262144,
     "maxOutput": 16384,
     "rank": 2,
