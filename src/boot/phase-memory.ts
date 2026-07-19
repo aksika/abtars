@@ -55,18 +55,13 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
     return "skipped";
   }
 
-  // #1380: try daemon first (getMemoryClient), fall back to embedded.
+  // #1380: daemon required. No fallback — getMemoryClient(true) throws if unavailable.
   try {
     const { getMemoryClient, isClient } = mod;
-    const mem = await getMemoryClient(false, ctx.memoryConfig);
+    const mem = await getMemoryClient(true, ctx.memoryConfig);
 
-    if (isClient(mem)) {
-      ctx.client = mem;
-      logInfo("main", "🧠 Memory enabled via abmind daemon");
-    } else {
-      ctx.memory = mem;
-      logDebug("main", `🧠 Memory enabled (dir=${ctx.memoryConfig.memoryDir})`);
-    }
+    ctx.client = mem as any;
+    logInfo("main", "🧠 Memory enabled via abmind daemon");
 
     const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
     const backend = isClient(mem)
