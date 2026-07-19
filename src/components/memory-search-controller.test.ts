@@ -21,14 +21,14 @@ describe("MemorySearchController", () => {
     const { runtime, controller } = makeController();
     const result = await controller.handle(new URLSearchParams({ keywords: "puppy" }));
     expect(result.status).toBe(200);
-    expect(runtime.recall).toHaveBeenCalledWith({ query: "puppy", userId: "master", limit: 10 });
+    expect(runtime.recall).toHaveBeenCalledWith({ query: "puppy", original: "puppy", userId: "master", limit: 10, timeStart: undefined, timeEnd: undefined, stages: undefined });
     expect((result.body as { results: Array<{ content: string }> }).results[0]?.content).toBe("puppy info");
   });
 
   it("passes an explicitly selected user to the runtime", async () => {
     const { runtime, controller } = makeController();
-    await controller.handle(new URLSearchParams({ keywords: "hello, world", userId: "alice" }));
-    expect(runtime.recall).toHaveBeenCalledWith({ query: "hello world", userId: "alice", limit: 10 });
+    await controller.handle(new URLSearchParams({ keywords: "hello, world", original: "hello world", stages: "Sf,Ss", userId: "alice", timeStart: "1" }));
+    expect(runtime.recall).toHaveBeenCalledWith({ query: "hello world", original: "hello world", userId: "alice", limit: 10, timeStart: 1, timeEnd: undefined, stages: ["Sf", "Ss"] });
   });
 
   it("does not pretend unsupported enumeration is available", () => {

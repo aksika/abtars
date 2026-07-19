@@ -25,6 +25,10 @@ export interface RuntimeRecallInput {
   query: string;
   userId: string;
   limit?: number;
+  original?: string;
+  timeStart?: number;
+  timeEnd?: number;
+  stages?: string[];
 }
 
 export interface RuntimeRecallHit {
@@ -32,6 +36,15 @@ export interface RuntimeRecallHit {
   score: number;
   date: string;
   memoryId?: number;
+  source?: string;
+  contentOriginal?: string;
+  memoryType?: string;
+  trust?: number;
+  integrity?: number;
+  credibility?: number;
+  classification?: number;
+  emotionScore?: number;
+  createdAt?: number;
 }
 
 export interface RuntimeRecallResult {
@@ -156,15 +169,27 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
     async recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult> {
       const result = await client.privateMemory.recall({
         translated: [input.query],
-        original: input.query,
+        original: input.original ?? input.query,
         userId: input.userId,
         limit: input.limit ?? 10,
+        timeStart: input.timeStart,
+        timeEnd: input.timeEnd,
+        stages: input.stages,
       });
       const hits: RuntimeRecallHit[] = result.results.map(r => ({
         content: r.content,
         score: r.score,
-        date: "",
+        date: r.date,
         memoryId: r.id,
+        source: r.source,
+        contentOriginal: r.contentOriginal,
+        memoryType: r.memoryType,
+        trust: r.trust,
+        integrity: r.integrity,
+        credibility: r.credibility,
+        classification: r.classification,
+        emotionScore: r.emotionScore,
+        createdAt: r.createdAt,
       }));
       const context = hits.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");
       return { hits, context };

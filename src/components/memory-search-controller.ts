@@ -44,8 +44,24 @@ export class MemorySearchController {
     const translated = keywordsRaw.split(",").map((k) => k.trim()).filter((k) => k.length > 0);
     if (translated.length === 0) return { status: 400, body: { error: "keywords required" } };
 
+    const parseNumber = (value: string | null): number | undefined => {
+      if (!value) return undefined;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    };
+    const stagesRaw = params.get("stages")?.trim();
+    const stages = stagesRaw ? stagesRaw.split(",").map(s => s.trim()).filter(Boolean) : undefined;
+
     try {
-      const result = await this.deps.memoryRuntime.recall({ query: translated.join(" "), userId, limit: 10 });
+      const result = await this.deps.memoryRuntime.recall({
+        query: translated.join(" "),
+        original: params.get("original")?.trim() || keywordsRaw,
+        userId,
+        limit: 10,
+        timeStart: parseNumber(params.get("timeStart")),
+        timeEnd: parseNumber(params.get("timeEnd")),
+        stages,
+      });
 
       const response: MemorySearchResponse = {
         results: result.hits.map(hitToWebResult),
@@ -64,7 +80,14 @@ function hitToWebResult(hit: RuntimeRecallHit): WebSearchResult {
   return {
     content: hit.content,
     date: hit.date,
-    source: "abmind.runtime",
+    source: hit.source ?? "abmind.runtime",
     score: hit.score,
+    contentOriginal: hit.contentOriginal,
+    memoryType: hit.memoryType,
+    trust: hit.trust,
+    integrity: hit.integrity,
+    credibility: hit.credibility,
+    classification: hit.classification,
+    emotionScore: hit.emotionScore,
   };
 }
