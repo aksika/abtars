@@ -251,7 +251,7 @@ export async function handleModelPickerCallback(
       const { cleanDemotedModels } = await import("../../components/transport-config.js");
       cleanDemotedModels(tc, model);
       writeTransportConfig(tc, `fallback ${fbIndex + 1} → ${model} (${providerName})`);
-      await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`);
+      try { await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "confirm fallback", err); }
     } else {
       const oldProvider = tc.agents[slot]?.provider;
       tc.agents[slot] = { ...tc.agents[slot]!, model, provider: providerName };
@@ -283,7 +283,7 @@ export async function handleModelPickerCallback(
 
       if (isMain && !providerChanged && "setModel" in deps.transport) {
         await (deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
-        await api.sendMessage(chatId, `✓ Switched to ${model}`);
+        try { await api.sendMessage(chatId, `✓ Switched to ${model}`); } catch (err) { logAndSwallow(TAG, "confirm model switch", err); }
       } else if (isMain && providerChanged && oldType === newType && "switchProvider" in deps.transport) {
         try {
           const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
@@ -326,7 +326,7 @@ export async function handleModelPickerCallback(
           await api.sendMessage(chatId, `⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}. Try /reset manually.`);
         }
       } else {
-        await api.sendMessage(chatId, `✓ ${slot} → ${model} (${providerName})`);
+        try { await api.sendMessage(chatId, `✓ ${slot} → ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "confirm slot", err); }
       }
     }
   } else if (data.startsWith("model:")) {
