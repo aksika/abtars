@@ -308,27 +308,15 @@ export class AgentApiServer {
     return true;
   }
 
-  /** Handle incoming WS message from a peer. #1433: pushes handled locally, requests go to broker. */
-  private handlePeerWsMessage(peerName: string, raw: string): void {
+  /** Handle incoming WS message from a peer. #1455: pushes handled by broker, requests go to broker. */
+  private handlePeerWsMessage(_peerName: string, raw: string): void {
     try {
       const msg = JSON.parse(raw);
 
-      if (msg.type === "push" && msg.method === "peer.inventory.v1" && msg.payload) {
-        try {
-          const { verifyAndStoreInventory } = require("./peer-transport/peer-inventory.js") as typeof import("./peer-transport/peer-inventory.js");
-          const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-          const config = loadPeerConfig();
-          const peerEntry = config.peers[peerName];
-          if (peerEntry?.verifyKey) {
-            verifyAndStoreInventory(peerName, msg.payload, peerEntry.verifyKey);
-          }
-        } catch { /* best effort */ }
-        return;
-      }
-
-      // #1358: Handle lifecycle event push (owner → origin)
-      if (msg.type === "push" && msg.method === "pi.lifecycle.v1" && msg.payload) {
-        this.handleRemotePiLifecyclePush(peerName, msg.payload, msg.id).catch(err => logAndSwallow(TAG, "pi.lifecycle.v1", err));
+      if (msg.type === "push") {
+        // All pushes (inventory, lifecycle, notify) are dispatched through the
+        // broker's unified push handler — accepted and outbound sockets use the
+        // same path. See phase-agent-api broker.registerPushHandler().
         return;
       }
 
@@ -1120,19 +1108,6 @@ export class AgentApiServer {
     const principalId = `peer:${caller}`;
     const response = await handler.handleControlRequest({ peerName: caller, principalId }, body as any);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
-  }
-
-  /** #1358 — WS push: owner pushes lifecycle event to origin (pi.lifecycle.v1). */
-  private async handleRemotePiLifecyclePush(ownerPeer: string, event: unknown, _msgId?: string): Promise<void> {
-    const { getRemotePiOriginReducer } = await import("./peer-transport/remote-pi-registry.js");
-    const reducer = getRemotePiOriginReducer();
-    if (!reducer) return; // origin reducer not configured — not an error
-    const { loadPeerConfig } = await import("./peer-config.js");
-    const localPeerName = loadPeerConfig().self.name;
-    const { handlePushLifecycleEvent } = await import("./peer-transport/remote-pi-agent-api-integration.js");
-    await handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, ownerPeer, event as any);
-    // Push frames don't get a correlated response — the durable outbox + ack
-    // protocol handles reliability.
   }
 
   /** #675 — POST /v1/callbacks: remote peer delivers task result. Body already authenticated and parsed by caller. */

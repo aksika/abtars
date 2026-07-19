@@ -179,6 +179,15 @@ describe("WsOutboxStore", () => {
 });
 
 // ── WsPeerClient state machine (#1455) ────────────────────────────────────
+// TEST DEFICIENCY: A prolonged-refusal test proving exact bounded backoff
+// attempt counts through the 5-minute cap and reset after authenticated open
+// is omitted because it requires a controlled WebSocket mock that simulates
+// repeated ECONNREFUSED + close/retry cycles across multiple backoff steps.
+// The observed 2026-07-19 incident (84 ECONNREFUSED in 7 min from overlapping
+// heartbeat chains) is the canonical failure mode — deterministic fake-timer
+// proofs of one active dial, one pending timer, and stale-callback safety
+// are covered below. A real multi-host outage replay is disproportionate
+// for this unit scope.
 
 describe("WsPeerClient state machine", () => {
   beforeEach(() => {
