@@ -12,7 +12,7 @@
  * internal logger, not an abtars singleton).
  */
 
-import { logDebug, logInfo, logWarn, logError } from "../components/logger.js";
+import { logInfo, logWarn, logError } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { nullMemory } from "../components/null-memory.js";
 import { loadAbmind } from "../utils/abmind-lazy.js";
