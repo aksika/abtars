@@ -14,7 +14,7 @@ export interface NativeGroupMutationResult {
 }
 
 export function ensureNativeConsumer(): NativeGroupMutationResult {
-  if (Number(process.version.match(/^v(\d+)/)?.[1]) !== NATIVE_TARGET_CONTRACT.nodeMajor) {
+  if ((Number(process.version.match(/^v(\d+)/)?.[1]) ?? 0) < NATIVE_TARGET_CONTRACT.nodeMajor) {
     return { ok: false, error: `Native targets require Node ${NATIVE_TARGET_CONTRACT.nodeMajor}; running ${process.version}.` };
   }
   const token = generateLockToken();
@@ -98,7 +98,7 @@ function rollback(journal: JournalEntry[], liveRoot: string): void {
 
 export function mutateNativeGroup(operation: "install" | "update"): NativeGroupMutationResult {
   const nodeMajor = Number(process.version.match(/^v(\d+)/)?.[1]);
-  if (nodeMajor !== NATIVE_TARGET_CONTRACT.nodeMajor) {
+  if ((nodeMajor ?? 0) < NATIVE_TARGET_CONTRACT.nodeMajor) {
     return { ok: false, error: `Native targets require Node ${NATIVE_TARGET_CONTRACT.nodeMajor}; running ${process.version}.` };
   }
 
