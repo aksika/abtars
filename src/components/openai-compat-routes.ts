@@ -11,7 +11,7 @@
  */
 
 import { ServerResponse } from "node:http";
-import type { IMemorySystem } from "abmind";
+import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import { buildModelsList, openaiError } from "./openai-compat-translate.js";
 
 export interface ModelsResult {
@@ -56,7 +56,7 @@ export interface EmbeddingsRequestBody {
 /** POST /v1/embeddings — delegates to memory.getEmbeddingProvider(). */
 export async function handleEmbeddings(
   body: unknown,
-  memory: IMemorySystem | null,
+  memoryRuntime: Pick<AbtarsMemoryRuntime, "embed"> | null,
 ): Promise<ModelsResult> {
   const req = body as Partial<EmbeddingsRequestBody>;
   if (!req || (typeof req.input !== "string" && !Array.isArray(req.input))) {
@@ -67,7 +67,7 @@ export async function handleEmbeddings(
     };
   }
 
-  if (!memory) {
+  if (!memoryRuntime) {
     return {
       status: 503,
       headers: { "Content-Type": "application/json" },
@@ -75,17 +75,18 @@ export async function handleEmbeddings(
     };
   }
 
-  const provider = memory.getEmbeddingProvider();
-  if (!provider) {
+  const inputs = Array.isArray(req.input) ? req.input : [req.input];
+  let embedded: Awaited<ReturnType<NonNullable<typeof memoryRuntime>["embed"]>>;
+  try {
+    embedded = await memoryRuntime.embed({ texts: inputs });
+  } catch {
     return {
       status: 503,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(openaiError("Embeddings not configured on this host", "server_error", "embeddings_disabled")),
     };
   }
-
-  const inputs = Array.isArray(req.input) ? req.input : [req.input];
-  const vectors: Array<number[] | null> = (await provider.batchEmbed(inputs)).map(v => v ? Array.from(v) : null);
+  const vectors = embedded.vectors;
 
   // Any null in vectors means the provider failed for that input — fail the whole request per OpenAI convention
   if (vectors.some(v => v === null)) {
@@ -103,7 +104,7 @@ export async function handleEmbeddings(
       embedding: Array.from(v as ArrayLike<number>),
       index: i,
     })),
-    model: req.model ?? provider.name,
+    model: req.model ?? embedded.model,
     usage: { prompt_tokens: 0, total_tokens: 0 }, // TODO(#373 v2): token counting
   };
 

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createDisabledRuntime } from "../../components/memory-runtime.js";
 import { DiscordAdapter, type DiscordAdapterConfig, type DiscordAdapterDeps } from "./discord-adapter.js";
 import type { PipelineDeps } from "../../components/message-pipeline.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
@@ -67,7 +68,7 @@ function makeDeps(transport: IKiroTransport): DiscordAdapterDeps {
     pipeline: {
       transport,
       codingMode: { has: () => false, getTransport: () => null } as any,
-      memory: null,
+      memoryRuntime: createDisabledRuntime(),
       memoryConfig: { memoryEnabled: false, memoryDir: "/tmp" },
       nlmConfig: { enabled: false },
       idleSave: { reset: vi.fn(), save: vi.fn(), getTimers: () => new Map(), clearAll: vi.fn() } as any,
@@ -79,7 +80,7 @@ function makeDeps(transport: IKiroTransport): DiscordAdapterDeps {
       updateCtxStart: vi.fn(),
     } as PipelineDeps,
     transport,
-    memory: null,
+    memoryRuntime: createDisabledRuntime(),
     conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() } as any,
   };
 }
@@ -169,16 +170,14 @@ describe("DiscordAdapter", () => {
     });
 
     it("scores emotion on authorized reaction when memory is available", async () => {
-      const mockMemory = { updateEmotionByPlatformId: vi.fn().mockReturnValue(true) };
-      deps.memory = mockMemory as any;
+      const mockMemory = { ...createDisabledRuntime(), state: "ready" as const, recordFeedback: vi.fn().mockResolvedValue({ ok: true }) };
+      deps.memoryRuntime = mockMemory as any;
       adapter = new DiscordAdapter(makeConfig(), deps);
       capturedReactionHandler = null;
       await adapter.start();
 
       await capturedReactionHandler!(fakeReaction("❤️", "ch1", "555"), fakeUser("42"));
-      expect(mockMemory.updateEmotionByPlatformId).toHaveBeenCalledWith(
-        expect.any(String), 555, expect.any(Number), expect.any(String),
-      );
+      expect(mockMemory.recordFeedback).not.toHaveBeenCalled();
     });
   });
 });

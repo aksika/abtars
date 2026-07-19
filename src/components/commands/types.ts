@@ -14,7 +14,7 @@ export interface CommandContext {
   transport: PipelineDeps["transport"];
   config: PipelineDeps["config"];
   startedAt: PipelineDeps["startedAt"];
-  memory: PipelineDeps["memory"];
+  memoryRuntime: PipelineDeps["memoryRuntime"];
   memoryConfig: PipelineDeps["memoryConfig"];
   nlmConfig: PipelineDeps["nlmConfig"];
   idleSave: PipelineDeps["idleSave"];

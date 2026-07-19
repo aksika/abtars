@@ -49,6 +49,15 @@ export interface SessionContextResult {
   wakeUp: string;
   recall: string;
   coreKnowledge: string;
+  soulBundle: SessionSoulBundle;
+}
+
+export interface SessionSoulBundle {
+  soul: string;
+  profile: string;
+  notes: string;
+  memoryTools: string;
+  coreFacts: string;
 }
 
 export interface RecentConversationInput {
@@ -66,17 +75,23 @@ export interface RuntimeStatusInput {
 export interface RuntimeStatusResult {
   totalMessages: number;
   extractedMemories: number;
+  extractedByType: Record<string, number>;
+  consolidationFiles: { daily: number; weekly: number; quarterly: number };
+  ingestedDocuments: number;
+  preservedKeywords: number;
   dbSizeBytes: number;
+  rejectedByScanner: number;
   uptimeMs?: number;
 }
 
 export interface CoreKnowledgeInput {
-  // empty
+  userId: string;
 }
 
 export type CoreKnowledgeResult = string;
 
 export interface FeedbackInput {
+  userId: string;
   memoryId: number;
   feedbackType: "cite" | "reject";
 }
@@ -94,6 +109,9 @@ export interface MaintenanceResult {
   summary: string;
 }
 
+export interface EmbeddingInput { texts: string[] }
+export interface EmbeddingResult { vectors: Array<number[] | null>; model: string }
+
 // ── Interface ──────────────────────────────────────────────────────────────
 
 export interface AbtarsMemoryRuntime {
@@ -105,8 +123,9 @@ export interface AbtarsMemoryRuntime {
   assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult>;
   getRecentConversation(input: RecentConversationInput): Promise<RecentConversationResult>;
   getStatus(input?: RuntimeStatusInput): Promise<RuntimeStatusResult>;
-  getCoreKnowledge(): Promise<CoreKnowledgeResult>;
-  recordFeedback(input: FeedbackInput): Promise<FeedbackResult>;
+  getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult>;
+  recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult>;
+  embed(input: EmbeddingInput): Promise<EmbeddingResult>;
   runMaintenance(input: MaintenanceInput): Promise<MaintenanceResult>;
   close(): Promise<void>;
 }
@@ -125,7 +144,12 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
         role: input.role,
         content: input.content,
         timestamp: input.timestamp,
-      });
+        platformMessageId: input.platformMessageId,
+        emotionScore: input.emotionScore,
+        typeHint: input.typeHint,
+        topicHint: input.topicHint,
+        emotionHint: input.emotionHint,
+      }, _operationKey);
       return { id: result.id };
     },
 
@@ -140,27 +164,18 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
         content: r.content,
         score: r.score,
         date: "",
+        memoryId: r.id,
       }));
       const context = hits.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");
       return { hits, context };
     },
 
     async assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult> {
-      let wakeUp = "";
-      let recall = "";
-      try {
-        const status = await client.system.status();
-        wakeUp = `Memory status: ${status.mode} (${status.requestCount} requests)`;
-      } catch { wakeUp = ""; }
-      if (input.prompt) {
-        try {
-          const rc = await this.recall({ query: input.prompt, userId: input.identity.principalId, limit: 5 });
-          recall = rc.context;
-        } catch { recall = ""; }
-      }
-      let coreKnowledge = "";
-      try { coreKnowledge = await client.privateMemory.getCoreKnowledge(); } catch { coreKnowledge = ""; }
-      return { wakeUp, recall, coreKnowledge };
+      const assembled = await client.privateMemory.assembleSessionContext({
+        userId: input.identity.principalId,
+        maxChars: input.maxChars,
+      });
+      return assembled;
     },
 
     async getRecentConversation(input: RecentConversationInput): Promise<RecentConversationResult> {
@@ -172,17 +187,26 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
       return {
         totalMessages: stats?.totalMessages ?? 0,
         extractedMemories: stats?.extractedMemories ?? 0,
+        extractedByType: stats?.extractedByType ?? {},
+        consolidationFiles: stats?.consolidationFiles ?? { daily: 0, weekly: 0, quarterly: 0 },
+        ingestedDocuments: stats?.ingestedDocuments ?? 0,
+        preservedKeywords: stats?.preservedKeywords ?? 0,
         dbSizeBytes: stats?.dbSizeBytes ?? 0,
+        rejectedByScanner: stats?.rejectedByScanner ?? 0,
       };
     },
 
-    async getCoreKnowledge(): Promise<CoreKnowledgeResult> {
-      return await client.privateMemory.getCoreKnowledge();
+    async getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult> {
+      return await client.privateMemory.getCoreKnowledge(input);
     },
 
-    async recordFeedback(input: FeedbackInput): Promise<FeedbackResult> {
-      await client.privateMemory.recordFeedback(input);
+    async recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult> {
+      await client.privateMemory.recordFeedback(input, operationKey);
       return { ok: true };
+    },
+
+    async embed(input: EmbeddingInput): Promise<EmbeddingResult> {
+      return await client.privateMemory.embed(input);
     },
 
     async runMaintenance(input: MaintenanceInput): Promise<MaintenanceResult> {
@@ -214,11 +238,12 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     capabilities: new Set(),
     recordMessage: async () => { unavailable("recordMessage"); return { id: null }; },
     recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
-    assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "" }; },
+    assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
-    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, dbSizeBytes: 0 }; },
+    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0 }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
+    embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
     close: async () => {},
   };
@@ -233,12 +258,17 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     capabilities: new Set(),
     recordMessage: async () => { unavailable("recordMessage"); return { id: null }; },
     recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
-    assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "" }; },
+    assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
-    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, dbSizeBytes: 0 }; },
+    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0 }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
+    embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory unavailable" }; },
     close: async () => {},
   };
+}
+
+function emptySoulBundle(): SessionSoulBundle {
+  return { soul: "", profile: "", notes: "", memoryTools: "", coreFacts: "" };
 }

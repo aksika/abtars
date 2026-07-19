@@ -1,10 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { createDbIntegrityTask } from "./heartbeat-tasks.js";
+import { createDisabledRuntime } from "./memory-runtime.js";
 
 describe("createDbIntegrityTask", () => {
-  const makeMockMemory = (integrityResult: string, rebuildResult: string[]) => ({
-    maintenance: { checkIntegrity: vi.fn(() => integrityResult) },
-    rebuildFtsIndexes: vi.fn(() => ({ rebuilt: rebuildResult })),
+  const makeMockMemory = (integrityResult: boolean, rebuildResult: string[]) => ({
+    ...createDisabledRuntime(),
+    state: "ready" as const,
+    runMaintenance: vi.fn(async ({ operation }: { operation: string }) => operation === "integrity"
+      ? { ok: integrityResult, summary: "integrity" }
+      : { ok: rebuildResult.length > 0, summary: rebuildResult.join(",") }),
   });
 
   it("skips when memory is null", async () => {
@@ -14,23 +18,23 @@ describe("createDbIntegrityTask", () => {
   });
 
   it("does nothing when integrity is ok", async () => {
-    const mem = makeMockMemory("ok", []);
+    const mem = makeMockMemory(true, []);
     const task = createDbIntegrityTask(mem as any);
     // force past interval
     (task as any).lastCheckAt = 0;
     await task.execute();
-    expect(mem.rebuildFtsIndexes).not.toHaveBeenCalled();
+    expect(mem.runMaintenance).toHaveBeenCalledTimes(1);
   });
 
   it("rebuilds on failure and resets counter on success", async () => {
-    const mem = makeMockMemory("corrupt", ["messages_fts"]);
+    const mem = makeMockMemory(false, ["messages_fts"]);
     const task = createDbIntegrityTask(mem as any);
     await task.execute();
-    expect(mem.rebuildFtsIndexes).toHaveBeenCalled();
+    expect(mem.runMaintenance).toHaveBeenCalledTimes(2);
   });
 
   it("escalates after 5 consecutive rebuild failures", async () => {
-    const mem = makeMockMemory("corrupt", []);
+    const mem = makeMockMemory(false, []);
     const task = createDbIntegrityTask(mem as any);
 
     // Bypass interval guard by advancing time
@@ -48,7 +52,7 @@ describe("createDbIntegrityTask", () => {
   });
 
   it("stops retrying after escalation", async () => {
-    const mem = makeMockMemory("corrupt", []);
+    const mem = makeMockMemory(false, []);
     const task = createDbIntegrityTask(mem as any);
 
     vi.spyOn(Date, "now").mockImplementation(() => {
@@ -58,7 +62,7 @@ describe("createDbIntegrityTask", () => {
     for (let i = 0; i < 6; i++) await task.execute();
 
     // 6th call should not invoke checkIntegrity (escalated = true)
-    expect(mem.maintenance.checkIntegrity).toHaveBeenCalledTimes(5);
+    expect(mem.runMaintenance).toHaveBeenCalledTimes(5 * 2);
     vi.restoreAllMocks();
   });
 });

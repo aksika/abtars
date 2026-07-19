@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { createDisabledRuntime } from "../../components/memory-runtime.js";
 import { TelegramAdapter, type TelegramAdapterConfig, type TelegramAdapterDeps } from "./telegram-adapter.js";
 import type { PipelineDeps } from "../../components/message-pipeline.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
@@ -69,7 +70,7 @@ function makeDeps(transport: IKiroTransport): TelegramAdapterDeps {
     pipeline: {
       transport,
       codingMode: { has: () => false, getTransport: () => null } as any,
-      memory: null,
+      memoryRuntime: createDisabledRuntime(),
       memoryConfig: { memoryEnabled: false, memoryDir: "/tmp" },
       nlmConfig: { enabled: false },
       idleSave: { reset: vi.fn(), save: vi.fn(), getTimers: () => new Map(), clearAll: vi.fn() } as any,
@@ -95,7 +96,7 @@ function makeDeps(transport: IKiroTransport): TelegramAdapterDeps {
     } as PipelineDeps,
     conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() } as any,
     transport,
-    memory: null,
+    memoryRuntime: createDisabledRuntime(),
     sessionManager: {
       getActiveSessionId: () => "1_A_01",
       spin: async (spec: any) => {

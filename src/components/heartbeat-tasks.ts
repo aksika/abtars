@@ -7,13 +7,13 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { logInfo, logError } from "./logger.js";
 import { setIdleCompactReset } from "./message-pipeline.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
-import type { MemoryManager } from "abmind";
+import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import type { HeartbeatTask } from "../types/index.js";
 
 const TAG = "heartbeat_tasks";
 export interface IdleCompactDeps {
   transport: IKiroTransport;
-  memory: MemoryManager | null;
+  memoryRuntime: AbtarsMemoryRuntime;
   memoryDir: string;
   allowedUserIds: Set<number>;
   isSleepActive: () => boolean;
@@ -34,7 +34,7 @@ export function createIdleCompactTask(_deps: IdleCompactDeps): HeartbeatTask {
  *  and its returned promise always settles. See src/capabilities/sleep/index.ts. */
 
 /** DB integrity check — runs every ~1 hour (time-based, independent of tick interval). */
-export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTask {
+export function createDbIntegrityTask(memoryRuntime: AbtarsMemoryRuntime | null): HeartbeatTask {
   let lastCheckAt = 0;
   const INTERVAL_MS = 60 * 60 * 1000;
   const MAX_FAILURES = 5;
@@ -46,13 +46,13 @@ export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTa
       if (escalated) return;
       if (Date.now() - lastCheckAt < INTERVAL_MS) return;
       lastCheckAt = Date.now();
-      if (!memory) return;
-      const result = memory.maintenance.checkIntegrity();
-      if (result !== "ok") {
-        logError("db-integrity", `Memory DB integrity check failed: ${result}`);
-        const { rebuilt } = memory.rebuildFtsIndexes();
-        if (rebuilt.length > 0) {
-          logInfo("db-integrity", `Auto-rebuilt FTS indexes: ${rebuilt.join(", ")}`);
+      if (!memoryRuntime || memoryRuntime.state !== "ready") return;
+      const result = await memoryRuntime.runMaintenance({ operation: "integrity" });
+      if (!result.ok) {
+        logError("db-integrity", `Memory DB integrity check failed: ${result.summary}`);
+        const rebuilt = await memoryRuntime.runMaintenance({ operation: "fts_rebuild" });
+        if (rebuilt.ok) {
+          logInfo("db-integrity", `Auto-rebuilt FTS indexes: ${rebuilt.summary}`);
           consecutiveFailures = 0;
         } else {
           consecutiveFailures++;

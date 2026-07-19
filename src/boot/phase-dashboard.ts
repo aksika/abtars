@@ -19,16 +19,17 @@ import { logInfo, logWarn } from "../components/logger.js";
 import { loadDashboardConfig, buildStatusSnapshot } from "../components/dashboard/dashboard-config.js";
 import type { SubsystemRefs } from "../components/dashboard/dashboard-config.js";
 import { AuthGate } from "../components/auth-gate.js";
-import { MemorySearchController } from "../components/memory-search-controller.js";
 import { DashboardServer } from "../components/dashboard/dashboard-server.js";
 import { loadAgentApiConfig } from "../components/agent-api-config.js";
 import type { IDashboardSlot, DashboardSlotOpts } from "../components/skeleton.js";
 import type { BootCtx, PhaseResult } from "./context.js";
+import { MemorySearchController } from "../components/memory-search-controller.js";
+import { loadUsers } from "../components/user-registry.js";
 
 const TAG = "dashboard";
 
 export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
-  const { platforms, memory, transport, registry, heartbeat, nlmConfig } = ctx;
+  const { platforms, transport, registry, heartbeat, nlmConfig } = ctx;
   if (!platforms.web) return "skipped";
   if (!transport || !heartbeat) { ctx.phaseHealth.set(phaseDashboard.name, { status: "skipped", error: "no transport/heartbeat" }); logWarn("boot", `${phaseDashboard.name}: skipping — deps not available`); return "skipped"; }
 
@@ -54,6 +55,20 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
     // Token auto-generated — user can find it in .env
   }
 
+  const masterUserId = loadUsers().users.find(u => u.role === "master")?.userId ?? "master";
+  let memoryStats: Awaited<ReturnType<typeof ctx.memoryRuntime.getStatus>> | null = null;
+  let memoryStatsError: string | undefined;
+  let memoryRefresh: Promise<void> | null = null;
+  const refreshMemoryStats = (): void => {
+    if (ctx.memoryRuntime.state !== "ready" || memoryRefresh) return;
+    memoryRefresh = ctx.memoryRuntime.getStatus({ userId: masterUserId })
+      .then(stats => { memoryStats = stats; memoryStatsError = undefined; })
+      .catch(err => { memoryStatsError = err instanceof Error ? err.message : String(err); })
+      .finally(() => { memoryRefresh = null; });
+  };
+  refreshMemoryStats();
+  if (memoryRefresh) await memoryRefresh;
+
   const agentApiOpts = platforms.agent
     ? (() => { try { return loadAgentApiConfig(process.env as Record<string, string | undefined>); } catch (err) { logAndSwallow(TAG, "loadAgentApiConfig", err); return null; } })()
     : null;
@@ -78,7 +93,19 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
         isReady: transport.isReady,
         contextPercent: transport.contextPercent,
       },
-      memory: memory ? { getStats: (userId?: string) => memory.getStats(userId) } : null,
+      memory: ctx.memoryRuntime.state === "ready"
+        ? {
+            getStats: () => memoryStats ? {
+              totalMessages: memoryStats.totalMessages,
+              extractedMemories: memoryStats.extractedMemories,
+              extractedByType: memoryStats.extractedByType,
+              preservedKeywords: memoryStats.preservedKeywords,
+              consolidationFiles: memoryStats.consolidationFiles,
+              ingestedDocuments: memoryStats.ingestedDocuments,
+              dbSizeBytes: memoryStats.dbSizeBytes,
+            } : null,
+          }
+        : null,
       heartbeat: heartbeat
         ? { running: heartbeat.isRunning, intervalMs: heartbeat.intervalMs, tasks: heartbeat.getTaskNames().map(n => ({ name: n })) }
         : null,
@@ -89,11 +116,15 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
       model: { name: ctx.modelName ?? "unknown", provider: ctx.modelProvider ?? "unknown", fallbackChain: ctx.fallbackChain ?? [] },
       subsystems,
     };
+    refreshMemoryStats();
+    if (memoryStatsError && refs.memory) logWarn(TAG, `memory status unavailable: ${memoryStatsError}`);
     return buildStatusSnapshot(refs);
   };
 
   const authGate = new AuthGate(dashConfig.webAuthToken);
-  const memorySearchController = memory ? new MemorySearchController({ memory }) : null;
+  const memorySearchController = ctx.memoryRuntime.state === "ready"
+    ? new MemorySearchController({ memoryRuntime: ctx.memoryRuntime, defaultUserId: masterUserId })
+    : null;
 
   const customModule = getEnv().dashboardModule;
   let dashboardServer: IDashboardSlot;

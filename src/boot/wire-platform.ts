@@ -24,7 +24,7 @@ export async function wireTelegram(ctx: BootCtx): Promise<void> {
     pipeline: ctx.pipelineDeps,
     conversationBuffer: ctx.conversationBuffer,
     transport: ctx.transport,
-    memory: ctx.memory,
+    memoryRuntime: ctx.memoryRuntime,
     sessionManager: ctx.sessionManager,
     actionGate: ctx.actionGate,
   });
@@ -59,7 +59,7 @@ export async function wireDiscord(ctx: BootCtx): Promise<void> {
   adapter.setMessageHandler({
     pipeline: ctx.pipelineDeps,
     transport: ctx.transport,
-    memory: ctx.memory,
+    memoryRuntime: ctx.memoryRuntime,
     conversationBuffer: ctx.conversationBuffer,
   });
 

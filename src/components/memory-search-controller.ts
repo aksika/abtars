@@ -1,22 +1,21 @@
 /**
  * Memory search controller — handles GET /api/memory/search requests.
  *
- * Delegates to IMemorySystem for all search operations.
- * Returns per-stage breakdown for dashboard investigation.
+ * Delegates to the bounded daemon-backed runtime for search operations.
  */
 
-import type { IMemorySystem, RecallHit } from "abmind";
+import type { AbtarsMemoryRuntime, RuntimeRecallHit } from "./memory-runtime.js";
 import { logWarn } from "./logger.js";
 import type { MemorySearchResponse, WebSearchResult } from "./dashboard/dashboard-config.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export type MemorySearchDeps = {
-  memory: IMemorySystem;
+  memoryRuntime: Pick<AbtarsMemoryRuntime, "recall">;
+  defaultUserId: string;
 };
 
 const TAG = "memory-search-ctrl";
-const VALID_STAGES = new Set(["Sf", "Ss", "Se", "S6"]);
 
 // ── Controller ──────────────────────────────────────────────────────────────
 
@@ -28,25 +27,11 @@ export class MemorySearchController {
   }
 
   listChats(): { status: number; body: object } {
-    try {
-      const userIds = this.deps.memory.getDistinctUserIds();
-      return { status: 200, body: { userIds } };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logWarn(TAG, `listChats failed: ${msg}`);
-      return { status: 500, body: { error: msg } };
-    }
+    return { status: 501, body: { error: "chat enumeration is not exposed by the bounded memory runtime" } };
   }
 
   listAll(): { status: number; body: object } {
-    try {
-      const memories = this.deps.memory.getAllExtractedMemories();
-      return { status: 200, body: { memories } };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logWarn(TAG, `listAll failed: ${msg}`);
-      return { status: 500, body: { error: msg } };
-    }
+    return { status: 501, body: { error: "memory enumeration is not exposed by the bounded memory runtime" } };
   }
 
   async handle(params: URLSearchParams): Promise<{ status: number; body: object }> {
@@ -54,29 +39,18 @@ export class MemorySearchController {
     if (!keywordsRaw) return { status: 400, body: { error: "keywords required" } };
 
     const userIdRaw = params.get("userId")?.trim() ?? "";
-    const userId = userIdRaw || undefined;
+    const userId = userIdRaw || this.deps.defaultUserId;
 
     const translated = keywordsRaw.split(",").map((k) => k.trim()).filter((k) => k.length > 0);
     if (translated.length === 0) return { status: 400, body: { error: "keywords required" } };
 
-    const original = params.get("original")?.trim() || undefined;
-    const timeStart = parseOptionalNumber(params.get("timeStart"));
-    const timeEnd = parseOptionalNumber(params.get("timeEnd"));
-    const stagesRaw = params.get("stages")?.trim();
-    const stages = stagesRaw ? stagesRaw.split(",").map((s) => s.trim()).filter((s) => VALID_STAGES.has(s)) : undefined;
-
     try {
-      const result = await this.deps.memory.recallSearch(
-        { translated, original, userId: userId ?? "unknown", limit: 10, timeStart, timeEnd, stages },
-      );
+      const result = await this.deps.memoryRuntime.recall({ query: translated.join(" "), userId, limit: 10 });
 
-      const webResults = result.results.map(hitToWebResult);
-      const stageStatuses: Record<string, { status: string; hits: number; ms: number }> = {};
-      for (const [name, stage] of Object.entries(result.stages)) {
-        const s = stage as { hits: unknown[]; ms: number };
-        stageStatuses[name] = { status: "ok", hits: s.hits.length, ms: s.ms };
-      }
-      const response: MemorySearchResponse = { results: webResults, layers: stageStatuses };
+      const response: MemorySearchResponse = {
+        results: result.hits.map(hitToWebResult),
+        layers: { runtime: { status: "ok", hits: result.hits.length, ms: 0 } },
+      };
       return { status: 200, body: response };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -86,23 +60,11 @@ export class MemorySearchController {
   }
 }
 
-function hitToWebResult(hit: RecallHit): WebSearchResult {
+function hitToWebResult(hit: RuntimeRecallHit): WebSearchResult {
   return {
     content: hit.content,
     date: hit.date,
-    source: hit.source,
+    source: "abmind.runtime",
     score: hit.score,
-    contentOriginal: hit.contentOriginal,
-    memoryType: hit.memoryType,
-    trust: hit.trust,
-    integrity: hit.integrity,
-    credibility: hit.credibility,
-    classification: hit.classification,
   };
-}
-
-function parseOptionalNumber(val: string | null): number | undefined {
-  if (!val) return undefined;
-  const n = Number(val);
-  return Number.isFinite(n) ? n : undefined;
 }

@@ -14,7 +14,7 @@ import { logInfo, logWarn, logError } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
 export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
-  const { config, platforms, transport, memory, conversationBuffer, pipelineDeps, registry, platformAdapters } = ctx;
+  const { config, platforms, transport, memoryRuntime, conversationBuffer, pipelineDeps, registry, platformAdapters } = ctx;
   if (!transport || !pipelineDeps) { ctx.phaseHealth.set(phasePlatforms.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePlatforms.name}: skipping — transport not available`); return "skipped"; }
 
   // --- Telegram service ---
@@ -24,7 +24,7 @@ export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
       const { TelegramAdapter } = await import("../platforms/telegram/telegram-adapter.js");
       const adapter = new TelegramAdapter(
         { botToken: config.telegram.botToken, allowedUserIds: config.telegram.allowedUserIds, pollTimeoutS: config.telegram.pollTimeoutS },
-        { pipeline: pipelineDeps, conversationBuffer, transport, memory, sessionManager: ctx.sessionManager, actionGate: ctx.actionGate },
+        { pipeline: pipelineDeps, conversationBuffer, transport, memoryRuntime, sessionManager: ctx.sessionManager, actionGate: ctx.actionGate },
       );
       ctx.telegramAdapter = adapter;
       platformAdapters.set("telegram", adapter);
@@ -82,7 +82,7 @@ export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
           appId: config.discord.appId!,
           allowedUserIds: config.discord.allowedUserIds!,
         },
-        { pipeline: pipelineDeps, transport, memory, conversationBuffer },
+        { pipeline: pipelineDeps, transport, memoryRuntime, conversationBuffer },
       );
       ctx.discordAdapter = adapter;
       platformAdapters.set("discord", adapter);

@@ -66,7 +66,6 @@ export class Bridge {
     await step("memory", async () => {
       await this.ctx.memoryRuntime.close().catch(() => {});
       if (this.ctx.client) await this.ctx.client.close().catch(() => {});
-      this.ctx.memory?.close();
     });
     await step("transport", () => this.ctx.transport?.destroy());
     await step("snapshot", () => { const { removeSnapshot } = require("./components/runtime-health-snapshot.js"); removeSnapshot(); });

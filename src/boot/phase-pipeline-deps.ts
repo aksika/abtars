@@ -109,7 +109,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // #894: Wire Spin (which IS the session manager now) to runtime
   const { spin } = await import("../components/spin.js");
   spin.setRuntime(ctx.runtime);
-  if (ctx.memory) spin.setMemory(ctx.memory as any);
 
   // #1319: Create Orc activity feed and wire Spin producer + Nerve bridge
   const { OrcActivityFeed } = await import("../components/orc-activity-feed.js");
@@ -146,7 +145,11 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // #998: Set system prompt AFTER memory state is known
   if (transport && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
     const { buildSoulBundle } = await import("../components/soul-bundle.js");
-    const bundle = buildSoulBundle("A", ctx.memory ?? null);
+    const masterUserId = registry.users.find(u => u.role === "master")?.userId ?? "master";
+    const sessionContext = ctx.memoryRuntime.state === "ready"
+      ? await ctx.memoryRuntime.assembleSessionContext({ identity: { principalId: masterUserId, executionId: "boot" }, maxChars: 4096 }).catch(() => null)
+      : null;
+    const bundle = buildSoulBundle("A", sessionContext?.soulBundle);
     if (bundle) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(bundle);
   }
 
@@ -165,7 +168,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // pipelineDeps.loadedCapabilities / pipelineDeps.selfHealerTask in place.
   const pipelineDeps: PipelineDeps = {
     transport,
-    memory: ctx.memory,
     memoryRuntime: ctx.memoryRuntime,
     memoryConfig,
     nlmConfig: ctx.nlmConfig,

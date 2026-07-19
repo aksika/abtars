@@ -25,7 +25,7 @@ let _lastCapabilityHash = "";
 let _lastInventoryBroadcast = 0;
 
 export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
-  const { heartbeat, transport, cronQueue, memory, memoryConfig, config, pipelineDeps, capabilities } = ctx;
+  const { heartbeat, transport, cronQueue, memoryRuntime, memoryConfig, config, pipelineDeps, capabilities } = ctx;
   if (!heartbeat || !transport || !cronQueue || !pipelineDeps) return;
 
   const cronCallback = createCronCallback(ctx);
@@ -72,14 +72,15 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   // forbids. See src/capabilities/sleep/index.ts.
 
   if (getEnv().ctxIdleCompactMin > 0) {
-    heartbeat.registerTask(createIdleCompactTask({
-      transport, memory, memoryDir: memoryConfig.memoryDir,
+  heartbeat.registerTask(createIdleCompactTask({
+      transport, memoryDir: memoryConfig.memoryDir,
+      memoryRuntime,
       allowedUserIds: config.telegram.allowedUserIds,
       isSleepActive: ctx.isSleepActive,
     }));
   }
 
-  heartbeat.registerTask(createDbIntegrityTask(memory));
+  heartbeat.registerTask(createDbIntegrityTask(memoryRuntime));
 
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;
 

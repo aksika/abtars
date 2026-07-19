@@ -13,7 +13,7 @@ const TAG = "capabilities";
 
 import type { HeartbeatTask } from "../types/index.js";
 import type { Config } from "../types/config.js";
-import type { IMemorySystem } from "abmind";
+import type { AbtarsMemoryRuntime } from "../components/memory-runtime.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { SubagentRuntime } from "../components/subagent-runtime.js";
 import type { CommandContext } from "../components/commands/types.js";
@@ -33,7 +33,7 @@ export type CapabilityServiceFactory = () => Promise<CapabilityService>;
 /** Read-only API given to each capability during registration. */
 export interface CapabilityApi {
   readonly config: Config;
-  readonly memory: IMemorySystem | null;
+  readonly memoryRuntime: AbtarsMemoryRuntime;
   readonly transport: IKiroTransport;
   readonly runtime: SubagentRuntime;
   readonly sessionManager: { getActiveSessionId(userId: string, platform: string): string };
@@ -66,7 +66,7 @@ export function createCapabilityRegistry(): CapabilityRegistry {
 export function createCapabilityApi(
   registry: CapabilityRegistry,
   config: Config,
-  memory: IMemorySystem | null,
+  memoryRuntime: AbtarsMemoryRuntime,
   transport: IKiroTransport,
   runtime: SubagentRuntime,
   sessionManager?: { getActiveSessionId(userId: string, platform: string): string },
@@ -74,7 +74,7 @@ export function createCapabilityApi(
 ): CapabilityApi {
   return {
     config,
-    memory,
+    memoryRuntime,
     transport,
     runtime,
     sessionManager: sessionManager ?? { getActiveSessionId: () => "master:telegram" },
@@ -89,7 +89,7 @@ export function createCapabilityApi(
 export async function discoverCapabilities(
   registry: CapabilityRegistry,
   config: Config,
-  memory: IMemorySystem | null,
+  memoryRuntime: AbtarsMemoryRuntime,
   transport: IKiroTransport,
   runtime: SubagentRuntime,
   capabilitiesDir: string,
@@ -118,7 +118,7 @@ export async function discoverCapabilities(
 
     try {
       const mod = await import(join(capabilitiesDir, dir, "index.js"));
-      const api = createCapabilityApi(registry, config, memory, transport, runtime);
+      const api = createCapabilityApi(registry, config, memoryRuntime, transport, runtime);
       mod.register(api);
       loaded.push(manifest.name);
     } catch (err) { logError("capabilities", `Failed to load capability "${manifest.name}": ${err instanceof Error ? err.message : String(err)}`); }

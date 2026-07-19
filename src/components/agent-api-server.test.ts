@@ -18,7 +18,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     },
     cliPath: "kiro-cli",
     workingDir: "/tmp",
-    memory: null,
+    memoryRuntime: null,
   };
 }
 

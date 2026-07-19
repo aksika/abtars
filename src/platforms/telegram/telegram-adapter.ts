@@ -15,7 +15,7 @@ import { formatReactionSignal, routeReaction } from "../../components/reactions.
 import { cleanResponse } from "../../components/clean-response.js";
 
 export const TELEGRAM_CAPABILITIES: PlatformCapabilities = { voice: true, reactions: true, typing: true, threads: true };
-import { emojiToScore, emojiToTag } from "../../utils/emoji-score.js";
+import { emojiToScore } from "../../utils/emoji-score.js";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { handleInboundMessage, resetAndPrepare, type PipelineDeps } from "../../components/message-pipeline.js";
@@ -23,7 +23,7 @@ import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } 
 import type { TelegramUpdate } from "../../types/index.js";
 import type { ConversationBuffer } from "../../components/conversation-buffer.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
-import type { IMemorySystem } from "abmind";
+import type { AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
 import { loadUsers } from "../../components/user-registry.js";
 import { isModelPickerCallback, handleModelPickerCallback } from "./telegram-model-picker.js";
 
@@ -39,7 +39,7 @@ export interface TelegramAdapterDeps {
   pipeline: PipelineDeps;
   conversationBuffer: ConversationBuffer;
   transport: IKiroTransport;
-  memory: IMemorySystem | null;
+  memoryRuntime: AbtarsMemoryRuntime;
   sessionManager: { getActiveSessionId(userId: string, platform: string): string };
   actionGate?: { handleCallback(data: string): boolean } | null;
 }
@@ -435,21 +435,19 @@ export class TelegramAdapter implements PlatformAdapter {
     const chatId = reaction.chat.id;
     const route = routeReaction(isAuthorized, reaction.chat.type);
 
-    if (isAuthorized && this.deps.memory) {
+    if (isAuthorized && this.deps.memoryRuntime.state === "ready") {
       const score = emojiToScore(emojis[0]!);
-      const tag = emojiToTag(emojis[0]!);
-      const updated = this.deps.memory.updateEmotionByPlatformId(loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master", reaction.message_id, score, tag);
-      if (updated) logDebug(TAG, `Emotion score ${score} set on platform msg ${reaction.message_id}`);
+      const resolvedUserId = loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master";
 
       // #824: Emoji reaction as recall quality feedback
       const { getRecalledIdsForMessage } = await import("../../components/message-pipeline.js");
       const recalledIds = getRecalledIdsForMessage(reaction.message_id);
       if (recalledIds && recalledIds.length > 0) {
         if (score < 0) {
-          this.deps.memory.bumpRejectedCount(recalledIds);
+          for (const memoryId of recalledIds) await this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType: "reject" }, `reaction-${reaction.message_id}-${memoryId}`);
           logDebug(TAG, `Recall rejection: ${recalledIds.length} memories penalized (emoji ${emojis[0]})`);
         } else if (score > 0) {
-          this.deps.memory.bumpCitedCount(recalledIds);
+          for (const memoryId of recalledIds) await this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType: "cite" }, `reaction-${reaction.message_id}-${memoryId}`);
           logDebug(TAG, `Recall confirmed: ${recalledIds.length} memories boosted (emoji ${emojis[0]})`);
         }
       }

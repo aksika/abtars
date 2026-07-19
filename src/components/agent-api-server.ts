@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { abtarsHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
-import type { IMemorySystem } from "abmind";
+import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import { abmind } from "../utils/abmind-lazy.js";
 import { logInfo, logWarn, logDebug, logTrace } from "./logger.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
@@ -30,7 +30,7 @@ interface AgentApiDeps {
   config: AgentApiConfig;
   cliPath: string;
   workingDir: string;
-  memory: IMemorySystem | null;
+  memoryRuntime: Pick<AbtarsMemoryRuntime, "embed"> | null;
   runtime: SubagentRuntime;
   /** #1305: Validated TLS identity — HTTPS-only, no fallback to plain HTTP. */
   tls: ValidatedTlsIdentity;
@@ -152,7 +152,7 @@ function tryReadVersion(): string | null {
 export class AgentApiServer {
   private server: ReturnType<typeof import("node:https").createServer>;
   private config: AgentApiConfig;
-  private memory: IMemorySystem | null;
+  private memoryRuntime: Pick<AbtarsMemoryRuntime, "embed"> | null;
   private trafficLog: TrafficEntry[] = [];
   private onPeerActivity?: (msg: string) => void;
   private a2aAdapter?: import("../platforms/agent-api/agent-api-adapter.js").AgentApiAdapter;
@@ -165,7 +165,7 @@ export class AgentApiServer {
   private onPiNotify?: (text: string) => Promise<import("./main-chat.js").SendResult>;
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
-    this.memory = deps.memory;
+    this.memoryRuntime = deps.memoryRuntime;
     this.onPeerActivity = deps.onPeerActivity;
     this.onPiNotify = deps.onPiNotify;
     void deps.piExecutorService; // kept for compat
@@ -1018,7 +1018,7 @@ export class AgentApiServer {
 
   /** #373 — /v1/embeddings dispatch. Body already authenticated and parsed by caller. */
   private async handleV1Embeddings(body: unknown, res: ServerResponse): Promise<void> {
-    const result = await v1HandleEmbeddings(body, this.memory);
+    const result = await v1HandleEmbeddings(body, this.memoryRuntime);
     writeResult(res, result);
   }
 

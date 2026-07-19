@@ -18,7 +18,7 @@ import type { BootCtx, PhaseResult } from "./context.js";
 const TAG = "agent_api";
 
 export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
-  const { config, memory, runtime, platforms, registry } = ctx;
+  const { config, runtime, platforms, registry } = ctx;
 
   const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
   let agentApiServer: AgentApiServer | null = null;
@@ -67,7 +67,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         config: agentConfig,
         cliPath: config.transport.agentCliPath,
         workingDir: config.transport.workingDir,
-        memory,
+        memoryRuntime: ctx.memoryRuntime,
         runtime,
         tls: tlsIdentity,
         sessionManager: ctx.sessionManager,
