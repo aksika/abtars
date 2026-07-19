@@ -38,7 +38,7 @@ export type DoorbellRingResult =
 
 export interface PeerConnectionManager {
   ensurePeerConnection(peerName: string, input: {
-    reason: "startup" | "heartbeat" | "udp-doorbell" | "outbox";
+    reason: "startup" | "udp-doorbell" | "outbox";
     jitterMs?: number;
   }): void;
 }

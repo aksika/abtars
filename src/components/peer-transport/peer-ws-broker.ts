@@ -16,6 +16,12 @@ export interface PeerSocketRegistration {
   socket: WebSocket;
 }
 
+export type PeerRouteEvent =
+  | { type: "available"; peer: string }
+  | { type: "unavailable"; peer: string };
+
+type RouteListener = (event: PeerRouteEvent) => void;
+
 const OUTBOX_TIMEOUT_MS = 30_000;
 const OUTBOX_MAX = 200;
 const OUTBOX_MAX_ENTRY_BYTES = 512 * 1024;
@@ -43,14 +49,16 @@ interface PeerState {
   waiters: Map<string, PendingWaiter>;
   inFlight: InFlight | null;
   nextGen: number;
+  hasRoute: boolean; // tracks whether at least one OPEN socket existed
 }
 
-const PUSH_ALLOWLIST = new Set(["pi.lifecycle.v1", "peer.inventory.v1", "notify", "heartbeat", "ping"]);
+const PUSH_ALLOWLIST = new Set(["pi.lifecycle.v1", "peer.inventory.v1", "notify", "ping"]);
 
 export class PeerWsBroker {
   private peers = new Map<string, PeerState>();
   private requestHandler: PeerRequestHandler | null = null;
   private pushHandler: PeerPushHandler | null = null;
+  private routeListeners: RouteListener[] = [];
 
   registerRequestHandler(handler: PeerRequestHandler): void {
     this.requestHandler = handler;
@@ -58,6 +66,26 @@ export class PeerWsBroker {
 
   registerPushHandler(handler: PeerPushHandler): void {
     this.pushHandler = handler;
+  }
+
+  /**
+   * Subscribe to route availability transitions.
+   * Emits available only for zero-to-one, unavailable only for one-to-zero.
+   * Returns an unsubscribe function.
+   */
+  subscribeRoutes(listener: RouteListener): () => void {
+    this.routeListeners.push(listener);
+    return () => {
+      const idx = this.routeListeners.indexOf(listener);
+      if (idx >= 0) this.routeListeners.splice(idx, 1);
+    };
+  }
+
+  private emitRouteEvent(event: PeerRouteEvent): void {
+    const listeners = [...this.routeListeners];
+    for (const l of listeners) {
+      try { l(event); } catch { /* isolated — subscriber failures do not propagate */ }
+    }
   }
 
   attachSocket(input: { peer: string; direction: PeerSocketDirection; socket: WebSocket }): () => void {
@@ -72,9 +100,11 @@ export class PeerWsBroker {
         maxEntryBytes: OUTBOX_MAX_ENTRY_BYTES,
         maxFileBytes: OUTBOX_MAX_FILE_BYTES,
       });
-      state = { outbox, sockets: [], waiters: new Map(), inFlight: null, nextGen: 1 };
+      state = { outbox, sockets: [], waiters: new Map(), inFlight: null, nextGen: 1, hasRoute: false };
       this.peers.set(peer, state);
     }
+
+    const hadRoute = state.hasRoute;
 
     const generation = state.nextGen++;
     const reg: PeerSocketRegistration = {
@@ -87,6 +117,10 @@ export class PeerWsBroker {
     state.sockets.push(reg);
     this.sortSockets(state);
 
+    // Re-evaluate route presence
+    const nowHasRoute = state.sockets.some(s => s.socket.readyState === WebSocket.OPEN);
+    state.hasRoute = nowHasRoute;
+
     socket.on("message", (data) => this.handleMessage(peer, data.toString(), generation));
     socket.on("close", () => {
       this.detachSocket(peer, direction, generation);
@@ -97,6 +131,11 @@ export class PeerWsBroker {
 
     logInfo("peer-broker", `Socket attached: ${peer} ${direction} gen=${generation} (${state.sockets.length} total)`);
     this.publishRouteSnapshot();
+
+    // Emit available only on false-to-true transition
+    if (!hadRoute && nowHasRoute) {
+      this.emitRouteEvent({ type: "available", peer });
+    }
 
     return () => this.detachSocket(peer, direction, generation);
   }
@@ -175,6 +214,13 @@ export class PeerWsBroker {
     return this.peers.get(peer)?.outbox;
   }
 
+  /** Reset listeners for test isolation. */
+  _resetListeners(): void {
+    this.routeListeners = [];
+    this.requestHandler = null;
+    this.pushHandler = null;
+  }
+
   // ── Private ──────────────────────────────────────────────────────────────
 
   private sortSockets(state: PeerState): void {
@@ -199,9 +245,21 @@ export class PeerWsBroker {
     if (!state) return;
     const idx = state.sockets.findIndex(s => s.direction === direction && s.generation === generation);
     if (idx === -1) return;
+
+    const hadRoute = state.hasRoute;
+
     state.sockets.splice(idx, 1);
     logDebug("peer-broker", `Socket detached: ${peer} ${direction} gen=${generation} (${state.sockets.length} remaining)`);
+
+    const nowHasRoute = state.sockets.some(s => s.socket.readyState === WebSocket.OPEN);
+    state.hasRoute = nowHasRoute;
+
     this.publishRouteSnapshot();
+
+    // Emit unavailable only on true-to-false transition
+    if (hadRoute && !nowHasRoute) {
+      this.emitRouteEvent({ type: "unavailable", peer });
+    }
 
     if (state.inFlight && state.inFlight.peer === peer) {
       this.clearInFlight(peer);
@@ -352,5 +410,6 @@ export function getPeerWsBroker(): PeerWsBroker {
 }
 
 export function resetPeerWsBroker(): void {
+  if (_broker) _broker._resetListeners();
   _broker = null;
 }

@@ -142,7 +142,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
       updatePeerApiState("failed", result.error);
     }
 
-    // #1434: Start doorbell service + persistent outbound WS
+    // #1434, #1455: Start doorbell service + persistent outbound WS + route subscriptions
     updateDoorbellState("starting");
     import("../components/peer-transport/index.js").then(async ({ getPeerTransport, PeerDoorbellService }) => {
       const transport = getPeerTransport();
@@ -153,6 +153,8 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
       if (Object.keys(loadPeerConfig().peers).length > 0) {
         await transport.initWsConnections();
       }
+      // #1455: Start route and capability subscriptions (inventory send, remote-pi drain)
+      transport.start();
     }).catch((err) => {
       logError(TAG, `Peer init failed: ${err.message}`);
       updateDoorbellState("degraded", err instanceof Error ? err.message : String(err));

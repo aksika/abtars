@@ -1,15 +1,58 @@
 /**
- * ws-peer-client.test.ts — tests for durable outbox (#1401).
- *
- * Uses WsOutboxStore directly for storage-focused tests and WsPeerClient for
- * lifecycle tests.
+ * ws-peer-client.test.ts — tests for outbound state machine (#1401, #1455).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WsOutboxStore } from "./ws-outbox-store.js";
+
+vi.mock("ws", () => {
+  const EventEmitter = require("node:events");
+  class MockWebSocket extends EventEmitter {
+    readyState = 0;
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+    constructor(url: string, opts?: any) {
+      super();
+      this.readyState = MockWebSocket.CONNECTING;
+    }
+    close() {
+      this.readyState = 3;
+      this.emit("close");
+    }
+    send() {}
+  }
+  return { default: MockWebSocket, WebSocket: MockWebSocket };
+});
+vi.mock("../peer-config.js", () => ({
+  loadPeerConfig: () => ({
+    self: { name: "testself", signingKey: "testkey" },
+    peers: { testpeer: { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" } },
+  }),
+}));
+vi.mock("./peer-auth.js", () => ({
+  signRequest: () => ({ "X-Peer-Id": "test", "X-Peer-Sig": "test", "X-Peer-Ts": "0", "X-Peer-Nonce": "n" }),
+}));
+vi.mock("./pinned-peer-tls.js", () => ({
+  createPinnedPeerWsConnection: () => () => undefined,
+}));
+vi.mock("./peer-ws-broker.js", () => {
+  const broker = {
+    attachSocket: vi.fn(),
+    hasRoute: vi.fn().mockReturnValue(false),
+    sendPush: vi.fn(),
+    sendRequest: vi.fn(),
+    subscribeRoutes: vi.fn().mockReturnValue(() => {}),
+  };
+  return {
+    getPeerWsBroker: () => broker,
+    resetPeerWsBroker: vi.fn(),
+  };
+});
 
 const originalHome = process.env["HOME"];
 let tmpDir: string;
@@ -134,3 +177,96 @@ describe("WsOutboxStore", () => {
     expect(existsSync(path)).toBe(false);
   });
 });
+
+// ── WsPeerClient state machine (#1455) ────────────────────────────────────
+
+describe("WsPeerClient state machine", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("starts in idle state", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    expect(client.currentState).toBe("idle");
+  });
+
+  it("requestConnect transitions to connecting for immediate dial", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    client.requestConnect({ reason: "startup" });
+    expect(client.currentState).toBe("connecting");
+  });
+
+  it("requestConnect coalesces repeated triggers while connecting", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    client.requestConnect({ reason: "startup" });
+    expect(client.currentState).toBe("connecting");
+    client.requestConnect({ reason: "udp-doorbell" });
+    expect(client.currentState).toBe("connecting");
+  });
+
+  it("requestConnect with delayMs transitions to waiting", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    client.requestConnect({ reason: "udp-doorbell", delayMs: 200 });
+    expect(client.currentState).toBe("waiting");
+    vi.advanceTimersByTime(200);
+    expect(client.currentState).toBe("connecting");
+  });
+
+  it("requestConnect is no-op after destroy", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    client.destroy();
+    expect(client.currentState).toBe("destroyed");
+    client.requestConnect({ reason: "startup" });
+    expect(client.currentState).toBe("destroyed");
+  });
+
+  it("destroy with pending delayed request clears timer", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    client.requestConnect({ reason: "udp-doorbell", delayMs: 500 });
+    expect(client.currentState).toBe("waiting");
+    client.destroy();
+    expect(client.currentState).toBe("destroyed");
+    vi.advanceTimersByTime(500);
+    expect(client.currentState).toBe("destroyed");
+  });
+
+  it("state transitions: idle -> waiting -> connecting -> idle -> waiting", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    expect(client.currentState).toBe("idle");
+
+    client.requestConnect({ reason: "udp-doorbell", delayMs: 100 });
+    expect(client.currentState).toBe("waiting");
+
+    vi.advanceTimersByTime(100);
+    expect(client.currentState).toBe("connecting");
+
+    client.destroy();
+    expect(client.currentState).toBe("destroyed");
+  });
+
+  it("requestConnect while waiting is no-op (coalesced)", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    client.requestConnect({ reason: "udp-doorbell", delayMs: 200 });
+    expect(client.currentState).toBe("waiting");
+    // Second delayed trigger while waiting
+    client.requestConnect({ reason: "outbox", delayMs: 100 });
+    expect(client.currentState).toBe("waiting");
+    // After the first timer fires, state should be connecting
+    vi.advanceTimersByTime(200);
+    expect(client.currentState).toBe("connecting");
+  });
+});
+

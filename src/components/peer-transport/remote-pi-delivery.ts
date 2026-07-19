@@ -1,18 +1,24 @@
 /**
- * peer-transport/remote-pi-delivery.ts — Event delivery and catch-up (#1358).
+ * peer-transport/remote-pi-delivery.ts — Event delivery and catch-up (#1358, #1455).
  *
  * Handles WSS push delivery, HTTPS/WSS pull/catch-up, and acknowledgement
- * of lifecycle events from owner to origin.
+ * of lifecycle events from owner to origin. No longer discovers or registers
+ * private WsPeerClient instances — uses the broker-backed route interface.
  */
 
 import type { RemotePiEventV1, RemotePiEventsListRequestV1, RemotePiEventsListResponseV1, RemotePiEventsAckRequestV1, RemotePiEventsAckResponseV1 } from "./remote-pi-types.js";
 import { validateEventV1, REMOTE_PI_BOUNDS } from "./remote-pi-types.js";
 import type { RemotePiEventProducer } from "./remote-pi-event-producer.js";
 import type { PiRunStore } from "../pi-executor/pi-run-store.js";
-import type { WsPeerClient } from "./ws-peer-client.js";
 import { logInfo, logDebug, logTrace, logError } from "../logger.js";
 
 const TAG = "remote-pi-delivery";
+
+export interface RemotePiRoute {
+  hasRoute(peer: string): boolean;
+  sendPush(peer: string, method: "pi.lifecycle.v1", payload: unknown): boolean;
+  requestConnection(peer: string, reason: "outbox"): void;
+}
 
 export interface DeliveryDeps {
   store: PiRunStore;
@@ -55,9 +61,10 @@ const DEFAULT_CONFIG: DeliveryConfig = {
 export class RemotePiDeliveryManager {
   private readonly deps: DeliveryDeps;
   private readonly config: DeliveryConfig;
-  private readonly wsClients = new Map<string, WsPeerClient>();
   private readonly eventListeners = new Map<string, RemotePiEventListener[]>();
-  private readonly activeCatchUp = new Map<string, Promise<number>>(); // run_id -> catch-up promise
+  private readonly activeCatchUp = new Map<string, Promise<number>>();
+  private readonly drainInFlight = new Map<string, Promise<void>>();
+  private route: RemotePiRoute | null = null;
 
   constructor(deps: DeliveryDeps, config: Partial<DeliveryConfig> = {}) {
     this.deps = deps;
@@ -65,19 +72,10 @@ export class RemotePiDeliveryManager {
   }
 
   /**
-   * Register a WS client for a peer.
+   * Inject the route interface for broker-aware WSS push and connection demand.
    */
-  registerWsClient(peerName: string, client: WsPeerClient): void {
-    this.wsClients.set(peerName, client);
-    logDebug(TAG, `Registered WS client for peer ${peerName}`);
-  }
-
-  /**
-   * Unregister a WS client for a peer.
-   */
-  unregisterWsClient(peerName: string): void {
-    this.wsClients.delete(peerName);
-    logDebug(TAG, `Unregistered WS client for peer ${peerName}`);
+  setRouteInterface(route: RemotePiRoute): void {
+    this.route = route;
   }
 
   /**
@@ -89,7 +87,6 @@ export class RemotePiDeliveryManager {
     }
     this.eventListeners.get(runId)!.push(listener);
 
-    // Return unsubscribe function
     return () => {
       const listeners = this.eventListeners.get(runId);
       if (listeners) {
@@ -100,16 +97,17 @@ export class RemotePiDeliveryManager {
   }
 
   /**
-   * Push unacknowledged events for a run via WS if connected.
+   * Push unacknowledged events for a run via route interface.
    */
   async pushEvents(runId: string, originPeer: string): Promise<number> {
-    const ws = this.wsClients.get(originPeer);
-    if (!ws || !ws.connected) {
+    if (!this.route || !this.route.hasRoute(originPeer)) {
       logTrace(TAG, `Cannot push events for run ${runId}: ${originPeer} not connected`);
+      if (this.route) {
+        this.route.requestConnection(originPeer, "outbox");
+      }
       return 0;
     }
 
-    // Get unacknowledged events
     const events = this.deps.store.getUnacknowledgedEvents(runId, this.config.maxPushBatch);
     if (events.length === 0) {
       return 0;
@@ -123,13 +121,11 @@ export class RemotePiDeliveryManager {
         const event = this.deps.eventProducer.buildEventEnvelope(row);
         this._validateEvent(event);
 
-        // Send via WS
-        await ws.send("pi.lifecycle.v1", event);
+        this.route.sendPush(originPeer, "pi.lifecycle.v1", event);
         pushed++;
         logTrace(TAG, `Pushed event ${event.event_id} for run ${runId}`);
       } catch (err) {
         logError(TAG, `Failed to push event for run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
-        // Continue with next event
       }
     }
 
@@ -137,41 +133,39 @@ export class RemotePiDeliveryManager {
   }
 
   /**
-   * Drain unacknowledged events for all runs to connected peers.
-   * Called on connection events and during heartbeat/reconciliation.
+   * Drain pending events for a specific peer (triggered by route-available).
+   * Coalesces concurrent drains for the same peer.
    */
-  async drainOutbox(): Promise<{ pushed: number; failed: number }> {
-    let pushed = 0;
-    let failed = 0;
+  async drainPeer(peer: string): Promise<void> {
+    const existing = this.drainInFlight.get(peer);
+    if (existing) return existing;
 
-    // Get all runs with unacknowledged events
+    const promise = this._drainPeer(peer);
+    this.drainInFlight.set(peer, promise);
+    try {
+      await promise;
+    } finally {
+      this.drainInFlight.delete(peer);
+    }
+  }
+
+  private async _drainPeer(peer: string): Promise<void> {
     const rows = this.deps.store.findRunsWithUnacknowledgedEvents();
+    const peerRows = rows.filter(r => r.origin_peer === peer);
+    if (peerRows.length === 0) return;
 
-    logDebug(TAG, `Draining outbox for ${rows.length} runs`);
-
-    for (const { run_id, origin_peer } of rows) {
+    logDebug(TAG, `Draining ${peerRows.length} runs for peer ${peer}`);
+    for (const { run_id } of peerRows) {
       try {
-        const count = await this.pushEvents(run_id, origin_peer);
-        pushed += count;
-        if (count === 0) {
-          failed++;
-        }
+        await this.pushEvents(run_id, peer);
       } catch (err) {
         logError(TAG, `Failed to drain events for run ${run_id}: ${err instanceof Error ? err.message : String(err)}`);
-        failed++;
       }
     }
-
-    return { pushed, failed };
   }
 
   /**
    * Handle an inbound lifecycle event (origin side).
-   * Validates, reduces, and acknowledges.
-   *
-   * On the origin side, the authenticatedPeer is the OWNER pushing to us.
-   * The event's origin_peer is us (the local origin). We verify
-   * event.origin_peer === localPeerName, NOT === authenticatedPeer.
    */
   async handleInboundEvent(
     _authenticatedPeer: string,
@@ -179,41 +173,30 @@ export class RemotePiDeliveryManager {
     onReduce?: (event: RemotePiEventV1) => Promise<void>
   ): Promise<{ accepted: boolean; reason?: string }> {
     try {
-      // Validate event (includes hash verification)
       this._validateEvent(event);
 
-      // Verify this event is addressed to us (the origin).
       if (this.deps.localPeerName && event.origin_peer !== this.deps.localPeerName) {
         return { accepted: false, reason: "Event origin_peer does not match local peer" };
       }
 
-      // Check for duplicate with different content
       const existing = this.deps.store.getEventsAfter({ runId: event.run_id, afterSequence: event.sequence - 1, limit: 1 }).find(e => e.sequence === event.sequence);
       if (existing) {
         if (existing.content_sha256 !== event.content_sha256) {
           return { accepted: false, reason: "Conflicting event hash" };
         }
-        // Idempotent duplicate - accept but don't re-process
         logTrace(TAG, `Ignoring duplicate event ${event.event_id}`);
         return { accepted: true };
       }
 
-      // Check for gaps
       const maxSeq = this.deps.store.getMaxSequence(event.run_id);
       if (event.sequence > maxSeq + 1) {
         logDebug(TAG, `Gap detected for run ${event.run_id}: have ${maxSeq}, got ${event.sequence}`);
-        // Still accept but trigger catch-up later
       }
 
-      // Store event locally (origin side would have its own storage)
-      // For now, we just reduce and acknowledge
-
-      // Call reduce callback
       if (onReduce) {
         await onReduce(event);
       }
 
-      // Fire local listeners
       const listeners = this.eventListeners.get(event.run_id) || [];
       for (const listener of listeners) {
         try {
@@ -223,12 +206,7 @@ export class RemotePiDeliveryManager {
         }
       }
 
-      // Note: acknowledgement back to the owner is a transport-level operation,
-      // not a local store operation. The origin sends an ack via WS/HTTPS
-      // to the owner's pi.events.ack.v1 endpoint after committing the projection.
-
       logTrace(TAG, `Accepted event ${event.event_id} for run ${event.run_id}`);
-
       return { accepted: true };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -241,15 +219,12 @@ export class RemotePiDeliveryManager {
    * List events for a run (owner side, for catch-up).
    */
   async listEvents(request: RemotePiEventsListRequestV1, authenticatedPeer: string): Promise<RemotePiEventsListResponseV1 | { error: string }> {
-    // Verify request version
     if (request.version !== 1) {
       return { error: `Unsupported request version: ${request.version}` };
     }
 
-    // Verify limit
     const limit = Math.min(request.limit ?? this.config.maxCatchUpBatch, REMOTE_PI_BOUNDS.MAX_EVENTS_PER_LIST);
 
-    // Verify peer owns this run
     const run = this.deps.store.get(request.run_id);
     if (!run) {
       return { error: `Run ${request.run_id} not found` };
@@ -258,12 +233,10 @@ export class RemotePiDeliveryManager {
       return { error: "Run belongs to a different peer" };
     }
 
-    // Get events
     const events = this.deps.store.getEventsAfter({ runId: request.run_id, afterSequence: request.after_sequence, limit });
 
     logDebug(TAG, `Listed ${events.length} events for run ${request.run_id} after seq ${request.after_sequence}`);
 
-    // Build response
     const eventEnvelopes = events.map(row => this.deps.eventProducer.buildEventEnvelope(row));
 
     return {
@@ -278,7 +251,6 @@ export class RemotePiDeliveryManager {
    * Acknowledge events for a run (owner side).
    */
   acknowledgeEvent(authenticatedPeer: string, runId: string, sequence: number): RemotePiEventsAckResponseV1 | { error: string } {
-    // Verify peer owns this run
     const run = this.deps.store.get(runId);
     if (!run) {
       return { error: `Run ${runId} not found` };
@@ -287,13 +259,11 @@ export class RemotePiDeliveryManager {
       return { error: "Run belongs to a different peer" };
     }
 
-    // Verify sequence exists
     const maxSeq = this.deps.store.getMaxSequence(runId);
     if (sequence > maxSeq) {
       return { error: `Sequence ${sequence} exceeds max sequence ${maxSeq}` };
     }
 
-    // Acknowledge
     const count = this.deps.store.acknowledgeEvents(runId, sequence);
     logDebug(TAG, `Acknowledged ${count} events for run ${runId} up to seq ${sequence}`);
 
@@ -308,7 +278,6 @@ export class RemotePiDeliveryManager {
    * Trigger catch-up for a run (origin side).
    */
   async catchUp(runId: string, ownerPeer: string, currentCursor: number, onEvent: (event: RemotePiEventV1) => Promise<void>): Promise<number> {
-    // Prevent concurrent catch-up for the same run
     const existing = this.activeCatchUp.get(runId);
     if (existing) {
       await existing;
@@ -340,8 +309,7 @@ export class RemotePiDeliveryManager {
 
     logInfo(TAG, `Starting catch-up for run ${runId} from cursor ${cursor}`);
 
-    const ws = this.wsClients.get(ownerPeer);
-    if (!ws || !ws.connected) {
+    if (!this.route || !this.route.hasRoute(ownerPeer)) {
       logError(TAG, `Cannot catch-up: ${ownerPeer} not connected`);
       return 0;
     }
@@ -355,7 +323,9 @@ export class RemotePiDeliveryManager {
       };
 
       try {
-        const response = await ws.call("pi.events.list.v1", request) as RemotePiEventsListResponseV1 | { error: string };
+        // Catch-up uses broker sendRequest (request/response), not sendPush
+        const broker = await import("./peer-ws-broker.js").then(m => m.getPeerWsBroker());
+        const response = await broker.sendRequest(ownerPeer, "pi.events.list.v1", request) as RemotePiEventsListResponseV1 | { error: string };
 
         if ("error" in response) {
           logError(TAG, `Catch-up failed for run ${runId}: ${response.error}`);
@@ -371,9 +341,8 @@ export class RemotePiDeliveryManager {
 
         hasMore = response.has_more;
 
-        // Acknowledge batch
         if (fetched > 0) {
-          await ws.call("pi.events.ack.v1", {
+          await broker.sendRequest(ownerPeer, "pi.events.ack.v1", {
             version: 1,
             run_id: runId,
             sequence: cursor,
@@ -388,7 +357,6 @@ export class RemotePiDeliveryManager {
     }
 
     logInfo(TAG, `Catch-up complete for run ${runId}: ${fetched} events fetched`);
-
     return fetched;
   }
 
@@ -396,10 +364,8 @@ export class RemotePiDeliveryManager {
    * Validate an event envelope.
    */
   private _validateEvent(event: RemotePiEventV1): void {
-    // Schema + hash validation (validateEventV1 includes hash verification)
     validateEventV1(event);
 
-    // Size validation
     const bytes = Buffer.byteLength(JSON.stringify(event), "utf-8");
     if (bytes > REMOTE_PI_BOUNDS.MAX_EVENT_SIZE) {
       throw new Error(`Event exceeds ${REMOTE_PI_BOUNDS.MAX_EVENT_SIZE} bytes`);

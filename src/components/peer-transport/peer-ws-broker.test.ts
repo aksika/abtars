@@ -228,4 +228,92 @@ describe("PeerWsBroker", () => {
 
   // Request handler invocation requires real Ed25519 keys for signature
   // verification — see the signed-frame tests above.
+
+  it("subscribeRoutes emits available on zero-to-one route transition", async () => {
+    const broker = await makeBroker();
+    const listener = vi.fn();
+    broker.subscribeRoutes(listener);
+
+    const { server, client } = await connectedPair();
+    expect(broker.hasRoute("kp")).toBe(false);
+
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(listener).toHaveBeenCalledWith({ type: "available", peer: "kp" });
+    server.close();
+    client.close();
+  });
+
+  it("subscribeRoutes does not emit available when route already exists", async () => {
+    const broker = await makeBroker();
+    const { server: s1, client: c1 } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: c1 });
+    await new Promise(r => setTimeout(r, 50));
+
+    const listener = vi.fn();
+    broker.subscribeRoutes(listener);
+
+    // Attach a second socket when route already exists — no available event
+    const { server: s2, client: c2 } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: c2 });
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(listener).not.toHaveBeenCalled();
+    s1.close(); c1.close();
+    s2.close(); c2.close();
+  });
+
+  it("subscribeRoutes emits unavailable on one-to-zero route transition", async () => {
+    const broker = await makeBroker();
+    const listener = vi.fn();
+    broker.subscribeRoutes(listener);
+
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+    expect(listener).toHaveBeenCalledWith({ type: "available", peer: "kp" });
+
+    // Close the socket — should emit unavailable
+    client.close();
+    await new Promise(r => setTimeout(r, 100));
+    expect(listener).toHaveBeenCalledWith({ type: "unavailable", peer: "kp" });
+    server.close();
+  });
+
+  it("subscribeRoutes listener errors are isolated", async () => {
+    const broker = await makeBroker();
+    const throwing = vi.fn().mockImplementation(() => { throw new Error("boom"); });
+    const ok = vi.fn();
+    broker.subscribeRoutes(throwing);
+    broker.subscribeRoutes(ok);
+
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    // Both listeners should have been called despite the error
+    expect(throwing).toHaveBeenCalled();
+    expect(ok).toHaveBeenCalledWith({ type: "available", peer: "kp" });
+    server.close();
+    client.close();
+  });
+
+  it("subscribeRoutes unsubscribe removes exactly that listener", async () => {
+    const broker = await makeBroker();
+    const a = vi.fn();
+    const b = vi.fn();
+    const unsub = broker.subscribeRoutes(a);
+    broker.subscribeRoutes(b);
+    unsub();
+
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(a).not.toHaveBeenCalled();
+    expect(b).toHaveBeenCalledWith({ type: "available", peer: "kp" });
+    server.close();
+    client.close();
+  });
 });

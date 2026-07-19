@@ -300,7 +300,7 @@ export class AgentApiServer {
   pushToPeer(peerName: string, method: string, payload: unknown): boolean {
     // Strict allowlist of notification-only methods
     // #1358: pi.lifecycle.v1 is a push from owner to origin (read-only lifecycle event)
-    const ALLOWED_PUSH: readonly string[] = ["notify", "heartbeat", "ping", "pi.lifecycle.v1"];
+    const ALLOWED_PUSH: readonly string[] = ["notify", "ping", "pi.lifecycle.v1"];
     if (!ALLOWED_PUSH.includes(method)) return false;
     const ws = this.peerWsConnections.get(peerName);
     if (!ws || ws.readyState !== ws.OPEN) return false;
