@@ -241,17 +241,6 @@ export async function handleModelPickerCallback(
     const validation = validateProviderReady(providerName, providerConfig, getEnv());
     if (!validation.ok) { await api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
 
-    if (providerConfig?.transport === "api") {
-      try {
-        const endpoint = providerConfig.endpoint ?? "";
-        const apiKey = getEnv().getApiKey(providerConfig.apiKeyEnv ?? "API_KEY");
-        const headers: Record<string, string> = {};
-        if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-        const res = await fetch(`${endpoint}/models`, { headers, signal: AbortSignal.timeout(5000) });
-        if (!res.ok) { await api.sendMessage(chatId, `⚠️ ${providerName} unreachable (${res.status}). Try another?`); return; }
-      } catch (err) { logAndSwallow(TAG, "provider reachability check", err); await api.sendMessage(chatId, `⚠️ ${providerName} unreachable. Try another?`); return; }
-    }
-
     const fbMatch = slot.match(/^fallback(\d+)$/);
     if (fbMatch) {
       const fbIndex = parseInt(fbMatch[1]!, 10) - 1;
