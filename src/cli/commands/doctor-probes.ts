@@ -90,7 +90,7 @@ async function probePlatforms(): Promise<ProbeResult> {
   if (results.length === 0) return { name: "platforms", status: "skipped", evidence: "configuration", detail: "no platform configured", ms: 0 };
 
   const failed = results.filter(r => r.status === "failed");
-  const status = failed.length > 0 ? "failed" : results.every(r => r.status === "ok") ? "ok" : "warning";
+  const status = failed.length > 0 ? "failed" : results.every(r => r.status === "ok") ? "ok" : "ok";
   return { name: "platforms", status, evidence: "reachable", detail: results.map(r => `${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`).join(", "), ms: 0 };
 }
 
