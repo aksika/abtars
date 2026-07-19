@@ -59,7 +59,7 @@ async function probePlatforms(): Promise<ProbeResult> {
     const tok = env.get("TELEGRAM_BOT_TOKEN") ?? env.get("TELEGRAM_TOKEN") ?? "";
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
+      const timeout = setTimeout(() => controller.abort(), 15000);
       const res = await fetch(`https://api.telegram.org/bot${tok}/getMe`, { signal: controller.signal });
       clearTimeout(timeout);
       if (res.ok) results.push({ name: "telegram", status: "ok", detail: "verified" });
@@ -72,7 +72,7 @@ async function probePlatforms(): Promise<ProbeResult> {
     const tok = env.get("DISCORD_BOT_TOKEN") ?? env.get("DISCORD_TOKEN") ?? "";
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
+      const timeout = setTimeout(() => controller.abort(), 15000);
       const res = await fetch("https://discord.com/api/v10/users/@me", {
         headers: { Authorization: `Bot ${tok}` },
         signal: controller.signal,
