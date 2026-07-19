@@ -16,6 +16,7 @@ import { logInfo, logWarn, logError } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { nullMemory } from "../components/null-memory.js";
 import { loadAbmind } from "../utils/abmind-lazy.js";
+import { createClientRuntime, createDisabledRuntime, createUnavailableRuntime } from "../components/memory-runtime.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -42,6 +43,7 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
   }
 
   if (!mod) {
+    ctx.memoryRuntime = createDisabledRuntime();
     ctx.memory = nullMemory;
     ctx.memoryConfig.memoryEnabled = false;
     ctx.memoryConfig.memoryDir = "";
@@ -50,6 +52,7 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
 
   if (!ctx.memoryConfig.memoryEnabled) {
     logInfo("main", "🧠 Memory disabled");
+    ctx.memoryRuntime = createDisabledRuntime();
     ctx.memory = nullMemory;
     ctx.memoryConfig.memoryDir = "";
     return "skipped";
@@ -60,7 +63,9 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
     const { getMemoryClient, isClient } = mod;
     const mem = await getMemoryClient(true, ctx.memoryConfig);
 
-    ctx.client = mem as any;
+    const client = mem as import("abmind").AbmindClient;
+    ctx.client = client;
+    ctx.memoryRuntime = createClientRuntime(client);
     logInfo("main", "🧠 Memory enabled via abmind daemon");
 
     const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
@@ -98,6 +103,7 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
   } catch (err) {
     logWarn("main", `⚠️ Memory init failed: ${err instanceof Error ? err.message : String(err)}. Running without persistent memory.`);
     ctx.client = null;
+    ctx.memoryRuntime = createUnavailableRuntime();
     ctx.memory = nullMemory;
     ctx.memoryConfig.memoryEnabled = false;
     ctx.memoryConfig.memoryDir = "";

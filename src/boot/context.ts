@@ -10,6 +10,7 @@ export type PhaseResult = "ran" | "skipped";
 
 import type { Config } from "../types/index.js";
 import type { MemoryConfig, MemoryManager, AbmindClient } from "abmind";
+import { createDisabledRuntime } from "../components/memory-runtime.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { HeartbeatSystem } from "../components/heartbeat-system.js";
 import type { ServiceRegistry } from "../components/service-registry.js";
@@ -66,6 +67,8 @@ export interface BootCtx {
   memory: MemoryManager | null;
   /** #1380: daemon-backed memory client when available. Null in embedded mode. */
   client: AbmindClient | null;
+  /** #1380: daemon-backed memory runtime facade. Set by phase-memory. */
+  memoryRuntime: import("../components/memory-runtime.js").AbtarsMemoryRuntime;
   transport: IKiroTransport | null;
   heartbeat: HeartbeatSystem | null;
   cronQueue: CronQueue | null;
@@ -154,6 +157,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     runtime: new SubagentRuntimeClass(),
     memory: null,
     client: null,
+    memoryRuntime: createDisabledRuntime(),
     transport: null,
     heartbeat: null,
     cronQueue: null,

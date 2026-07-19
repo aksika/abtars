@@ -166,6 +166,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const pipelineDeps: PipelineDeps = {
     transport,
     memory: ctx.memory,
+    memoryRuntime: ctx.memoryRuntime,
     memoryConfig,
     nlmConfig: ctx.nlmConfig,
     idleSave: ctx.idleSave,

@@ -64,6 +64,7 @@ export class Bridge {
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
     await     step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", async () => {
+      await this.ctx.memoryRuntime.close().catch(() => {});
       if (this.ctx.client) await this.ctx.client.close().catch(() => {});
       this.ctx.memory?.close();
     });

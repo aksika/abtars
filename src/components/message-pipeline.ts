@@ -109,6 +109,7 @@ export interface TransportDeps {
 /** Memory system deps. */
 export interface MemoryDeps {
   memory: MemoryManager | null;
+  memoryRuntime: import("./memory-runtime.js").AbtarsMemoryRuntime | null;
   memoryConfig: { memoryEnabled: boolean; memoryDir: string };
   conversationBuffer: ConversationBuffer;
   idleSave: IdleSave;
