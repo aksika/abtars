@@ -231,7 +231,7 @@ const memoryStoreTool: ToolDefinition = {
         // #706: FTS5 corruption self-heal — rebuild indexes and retry once
         if (msg.includes("fts5") || msg.includes("corruption")) {
           try {
-            memoryBackend.rebuildFtsIndexes();
+            await memoryBackend.rebuildFtsIndexes();
             logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
             const params: InstantStoreParams = {
               userId: context?.userId ?? getMasterUserId(),
