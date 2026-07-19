@@ -47,6 +47,7 @@ describe("Boot graph integrity", () => {
     // BOOT_PHASES includes phaseShutdown + legacy phasePlatforms (not in graph)
     // Config is handled explicitly in startBridge, not in the graph
     expect(BOOT_PHASES.length).toBeGreaterThanOrEqual(BOOT_NODES.length + 1);
-    expect(BOOT_NODES).toHaveLength(12);
+    // #1380: memoryIpc removed (daemon replaces legacy IPC server)
+    expect(BOOT_NODES).toHaveLength(11);
   });
 });

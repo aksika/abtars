@@ -7,7 +7,6 @@ import { createBootCtx } from "./boot/context.js";
 import { phaseConfig } from "./boot/phase-config.js";
 import { phaseMemory } from "./boot/phase-memory.js";
 import { phaseTransport } from "./boot/phase-transport.js";
-import { phaseMemoryIpc } from "./boot/phase-memory-ipc.js";
 import { phasePipelineDeps } from "./boot/phase-pipeline-deps.js";
 import { phasePlatforms } from "./boot/phase-platforms.js";
 import { phasePlatformsConnect } from "./boot/phase-platforms-connect.js";
@@ -64,7 +63,10 @@ export class Bridge {
     await step("pi-executor", () => this.ctx.piExecutorService?.executor.interruptAll());
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
     await     step("runtime", () => this.ctx.runtime.shutdown());
-    await step("memory", () => this.ctx.memory?.close());
+    await step("memory", async () => {
+      if (this.ctx.client) await this.ctx.client.close().catch(() => {});
+      this.ctx.memory?.close();
+    });
     await step("transport", () => this.ctx.transport?.destroy());
     await step("snapshot", () => { const { removeSnapshot } = require("./components/runtime-health-snapshot.js"); removeSnapshot(); });
     this.ctx.sessionManager.clearAll();
@@ -97,7 +99,6 @@ export const BOOT_PHASES = [
   phaseConfig,
   phaseMemory,
   phaseTransport,
-  phaseMemoryIpc,
   phasePipelineDeps,
   phasePlatforms,
   phasePlatformsConnect,
