@@ -129,6 +129,10 @@ export class PeerWsBroker {
       this.detachSocket(peer, direction, generation);
     });
 
+    // #1459: pump pending outbox entries on every attach — resumes pending
+    // entries retained across a zero-socket interval.
+    this.pump(peer);
+
     logInfo("peer-broker", `Socket attached: ${peer} ${direction} gen=${generation} (${state.sockets.length} total)`);
     this.publishRouteSnapshot();
 
@@ -266,7 +270,10 @@ export class PeerWsBroker {
       this.pump(peer);
     }
 
-    if (state.sockets.length === 0) {
+    // #1459: Retain peer state while pending work exists so in-flight waiters
+    // and durable outbox entries survive a zero-socket interval. Only delete
+    // when truly quiescent (no waiters, no outbox entries, no in-flight).
+    if (state.sockets.length === 0 && state.inFlight === null && state.waiters.size === 0 && state.outbox.length === 0) {
       this.peers.delete(peer);
     }
   }
