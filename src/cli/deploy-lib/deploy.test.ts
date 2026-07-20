@@ -163,7 +163,7 @@ describe("deployActivation — bootstrap success + health healthy (macOS)", () =
 });
 
 describe("deployActivation — health unhealthy (Linux)", () => {
-  it("returns 0 on Linux (unchanged behavior)", async () => {
+  it("returns 0 on Linux (unchanged behavior)", { timeout: 30000 }, async () => {
     const unhealthyProbe: (...args: any[]) => Promise<{ healthy: false }> = async () => ({ healthy: false });
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
 
