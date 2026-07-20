@@ -10,8 +10,8 @@ import { logInfo, logDebug, logWarn, logError } from "./logger.js";
 import { abtarsHome, abtarsRoot, abmindHome } from "../paths.js";
 import { loadUsers, buildUsersBlock } from "./user-registry.js";
 import { describeSoulInputs } from "./soul-input-manifest.js";
-import type { MemoryManager } from "abmind";
 import type { SessionType } from "./spin-types.js";
+import type { SessionSoulBundle } from "./memory-runtime.js";
 
 const TAG = "soul-bundle";
 
@@ -53,20 +53,11 @@ function buildCurrentTime(): string {
  * Main (A): full 9-part bundle (identity, tools, profile, notes, facts, skills, model-instructions, emotional, users, time)
  * Others: identity one-liner + core facts + skills + time
  */
-export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null): string | null {
+export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | null): string | null {
   const parts: string[] = [];
 
   if (type === "A") {
-    // Full Main bundle — requires memory state to be known (#998)
-    let bundle: { soul: string; profile: string; notes: string; memoryTools: string; coreFacts: string } | null = null;
-    try { bundle = memory?.getSessionBundle() ?? null; } catch (err) { logAndSwallow(TAG, "op", err); }
-
-    if (memory && memory.available !== false && !bundle?.soul) {
-      logWarn(TAG, "SOUL bundle empty — disabling memory until next boot");
-      memory.available = false;
-    }
-
-    const memoryMode = memory?.available !== false ? "available" : "unavailable";
+    const memoryMode = bundle ? "available" : "unavailable";
     const inputs = describeSoulInputs({
       memoryMode,
       abtarsHome: abtarsHome(),
@@ -74,7 +65,7 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
       abmindHome: abmindHome(),
     });
 
-    if (!memory || memory.available === false) {
+    if (!bundle) {
       // No memory provider — use default-minimal.md fallback bundle (#1164)
       const fallback = inputs.find(i => i.id === "main.minimal-fallback");
       const minimal = fallback ? readOr(fallback.path) : "";
@@ -94,15 +85,6 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
 
     const modelInstructions = buildModelInstructions();
     if (modelInstructions) parts.push(modelInstructions);
-
-    try {
-      const arcs = memory?.getEmotionalArcs() ?? [];
-      if (arcs.length > 0) {
-        const ARC_LABELS: Record<string, string> = { "↑": "user sentiment improving", "↓": "user sentiment worsening — be careful", "↕": "volatile — user feelings fluctuate", "→": "stable" };
-        const lines = arcs.map((a: { topic: string; arc: string }) => `- ${a.topic}: ${a.arc} (${ARC_LABELS[a.arc] ?? "unknown"})`);
-        parts.push(`[EMOTIONAL CONTEXT]\n${lines.join("\n")}`);
-      }
-    } catch (err) { logAndSwallow(TAG, "op", err); }
 
     try {
       const registry = loadUsers();

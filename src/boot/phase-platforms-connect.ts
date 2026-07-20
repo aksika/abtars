@@ -80,7 +80,7 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
       // Construct with a placeholder deps — setMessageHandler() will replace later
       const adapter = new TelegramAdapter(
         { botToken: config.telegram.botToken, allowedUserIds: config.telegram.allowedUserIds, pollTimeoutS: config.telegram.pollTimeoutS },
-        { pipeline: { handleInbound: (msg: any) => recovery.handle(msg, adapter) } as any, conversationBuffer: ctx.conversationBuffer, transport: null as any, memory: null, sessionManager: ctx.sessionManager, actionGate: ctx.actionGate },
+        { pipeline: { handleInbound: (msg: any) => recovery.handle(msg, adapter) } as any, conversationBuffer: ctx.conversationBuffer, transport: null as any, memoryRuntime: ctx.memoryRuntime, sessionManager: ctx.sessionManager, actionGate: ctx.actionGate },
       );
       ctx.telegramAdapter = adapter;
       platformAdapters.set("telegram", adapter);
@@ -116,7 +116,7 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
       const { DiscordAdapter } = await import("../platforms/discord/discord-adapter.js");
       const adapter = new DiscordAdapter(
         { botToken: config.discord.botToken!, appId: config.discord.appId!, allowedUserIds: config.discord.allowedUserIds! },
-        { pipeline: { handleInbound: (msg: any) => recovery.handle(msg, adapter) } as any, transport: null as any, memory: null, conversationBuffer: ctx.conversationBuffer },
+        { pipeline: { handleInbound: (msg: any) => recovery.handle(msg, adapter) } as any, transport: null as any, memoryRuntime: ctx.memoryRuntime, conversationBuffer: ctx.conversationBuffer },
       );
       ctx.discordAdapter = adapter;
       platformAdapters.set("discord", adapter);

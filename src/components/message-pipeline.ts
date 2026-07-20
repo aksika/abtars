@@ -28,7 +28,7 @@ async function retrySend<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   throw new Error("unreachable");
 }
 import type { IKiroTransport } from "./transport/kiro-transport.js";
-import type { MemoryManager } from "abmind";
+import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
@@ -108,7 +108,7 @@ export interface TransportDeps {
 
 /** Memory system deps. */
 export interface MemoryDeps {
-  memory: MemoryManager | null;
+  memoryRuntime: AbtarsMemoryRuntime;
   memoryConfig: { memoryEnabled: boolean; memoryDir: string };
   conversationBuffer: ConversationBuffer;
   idleSave: IdleSave;
@@ -194,7 +194,7 @@ export async function handleInboundMessage(
 
   // --- Core transport/response handling ---
   const {
-    memory, memoryConfig,
+    memoryConfig,
     idleSave, conversationBuffer,
     ttsConfig,
   } = deps;
@@ -228,7 +228,7 @@ export async function handleInboundMessage(
     // the spec, and the chokepoint at spin.ts#sendPrompt carries it
     // through to DirectApiTransport.sendPrompt as `beforeMessageId`.
     const { prompt: builtPrompt, imageContent, recalledHits, currentMessageId, currentTurn } = await buildPrompt(msg, text, {
-      memory, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
+      memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: !("agentLoop" in transport),
     }, registry);
 
@@ -452,8 +452,9 @@ export async function handleInboundMessage(
         }
       }
       // Record assistant response to memory
-      if (memory && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
-        memory.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp: Date.now(), userId, sessionId: activeSessionId });
+      if (deps.memoryRuntime?.state === "ready" && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
+        const timestamp = Date.now();
+        await deps.memoryRuntime.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp, userId, sessionId: activeSessionId }, `assistant-${userId}-${activeSessionId}-${timestamp}`);
       }
       if (isVoice && ttsConfig && adapter.sendVoice) {
         try {
@@ -527,12 +528,12 @@ export async function handleInboundMessage(
 
     // --- Record to memory (skip for guests and greeting injects) ---
     const isGuest = registry.byUserId.get(userId)?.role === "guest";
-    if (memory && !isGuest && !text.startsWith("[SESSION START]")) {
-      memory.recordMessage({
+    if (deps.memoryRuntime?.state === "ready" && !isGuest && !text.startsWith("[SESSION START]")) {
+      await deps.memoryRuntime.recordMessage({
         role: "assistant", content: cleanAnswer || response,
         timestamp: Date.now(), userId, sessionId: activeSessionId,
         platformMessageId: typeof lastSentMsgId === "number" ? lastSentMsgId : undefined,
-      });
+      }, `assistant-${userId}-${activeSessionId}-${lastSentMsgId ?? Date.now()}`);
     }
 
     // --- TTS for voice notes ---
@@ -564,13 +565,15 @@ export async function handleInboundMessage(
     effectiveSession.toolCallCount = (effectiveSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
 
     // --- #824: Citation detection — did the agent use the recalled memories? ---
-    if (recalledHits && recalledHits.length > 0 && memoryConfig.memoryEnabled && memory) {
+    if (recalledHits && recalledHits.length > 0 && memoryConfig.memoryEnabled && deps.memoryRuntime?.state === "ready") {
       try {
         const mod = abmind();
         if (mod) {
           const { detectCitations } = mod;
           const citedIds = detectCitations(userResponse, recalledHits);
-          if (citedIds.length > 0) memory.bumpCitedCount(citedIds);
+          for (const memoryId of citedIds) {
+            await deps.memoryRuntime.recordFeedback({ userId, memoryId, feedbackType: "cite" }, `cite-${userId}-${memoryId}-${lastSentMsgId ?? Date.now()}`);
+          }
           logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
           // Track recalledIds for emoji reaction feedback (1h TTL)
           if (lastSentMsgId != null) {
@@ -654,6 +657,3 @@ export async function handleInboundMessage(
 }
 
 /** Build session-start prompt with SOUL + context + greeting, send to transport, push response to adapter. */
-
-
-

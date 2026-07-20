@@ -136,9 +136,6 @@ export class DirectApiTransport implements IKiroTransport {
   /** #1335: Checkpoint engine for cache-stable context assembly. */
   checkpointEngine?: import("../checkpoint-engine.js").CheckpointEngine;
 
-  /** Memory backend — used for hydrating sessions after restart (#843). */
-  memoryBackend?: { getRecentConversation(userId: string, since: number, limit: number): Array<{ role: string; content: string; timestamp: number }> };
-
   private policy: FallbackPolicy | null;
   private emergencyOverride: { provider: string; endpoint: string; apiKey?: string; model: string; maxContext: number } | null = null;
 

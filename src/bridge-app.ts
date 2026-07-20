@@ -7,7 +7,6 @@ import { createBootCtx } from "./boot/context.js";
 import { phaseConfig } from "./boot/phase-config.js";
 import { phaseMemory } from "./boot/phase-memory.js";
 import { phaseTransport } from "./boot/phase-transport.js";
-import { phaseMemoryIpc } from "./boot/phase-memory-ipc.js";
 import { phasePipelineDeps } from "./boot/phase-pipeline-deps.js";
 import { phasePlatforms } from "./boot/phase-platforms.js";
 import { phasePlatformsConnect } from "./boot/phase-platforms-connect.js";
@@ -59,12 +58,26 @@ export class Bridge {
       ]);
 
     await step("agent-api", () => this.ctx.agentApiServer?.stop());
+    await step("peer-transport", () => {
+      try {
+        const { getPeerTransport } = require("./components/peer-transport/index.js") as typeof import("./components/peer-transport/index.js");
+        const transport = getPeerTransport();
+        if (typeof transport.stop === "function") transport.stop();
+        // Destroy all peer clients to cancel reconnect timers and close sockets
+        for (const wsClient of (transport as any).wsClients?.values() ?? []) {
+          wsClient.destroy();
+        }
+      } catch { /* best effort */ }
+    });
     await step("dashboard", () => this.ctx.dashboardServer?.stop());
     await step("services", () => this.ctx.registry.stopAll());
     await step("pi-executor", () => this.ctx.piExecutorService?.executor.interruptAll());
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
     await     step("runtime", () => this.ctx.runtime.shutdown());
-    await step("memory", () => this.ctx.memory?.close());
+    await step("memory", async () => {
+      await this.ctx.memoryRuntime.close().catch(() => {});
+      if (this.ctx.client) await this.ctx.client.close().catch(() => {});
+    });
     await step("transport", () => this.ctx.transport?.destroy());
     await step("snapshot", () => { const { removeSnapshot } = require("./components/runtime-health-snapshot.js"); removeSnapshot(); });
     this.ctx.sessionManager.clearAll();
@@ -97,7 +110,6 @@ export const BOOT_PHASES = [
   phaseConfig,
   phaseMemory,
   phaseTransport,
-  phaseMemoryIpc,
   phasePipelineDeps,
   phasePlatforms,
   phasePlatformsConnect,

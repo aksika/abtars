@@ -3,8 +3,7 @@
  *
  * Provides accessors for the lifecycle event producer, delivery manager,
  * origin reducer, and control handler. Boot constructs and sets them;
- * other code (PiExecutor hooks, agent-api routes, WSS dispatchers,
- * heartbeat) reads them.
+ * other code (PiExecutor hooks, agent-api routes, WSS dispatchers) reads them.
  */
 
 import type { RemotePiEventProducer } from "./remote-pi-event-producer.js";

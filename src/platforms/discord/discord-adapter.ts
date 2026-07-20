@@ -13,7 +13,7 @@ import { ResponseFormatter } from "../../components/response-formatter.js";
 import { formatReactionSignal } from "../../components/reactions.js";
 
 export const DISCORD_CAPABILITIES: PlatformCapabilities = { voice: false, reactions: true, typing: true, threads: true };
-import { emojiToScore, emojiToTag } from "../../utils/emoji-score.js";
+import { emojiToScore } from "../../utils/emoji-score.js";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";
@@ -21,7 +21,7 @@ import { handleInboundMessage, type PipelineDeps } from "../../components/messag
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
 import type { DiscordInboundMessage } from "../../types/index.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
-import type { IMemorySystem } from "abmind";
+import type { AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
 import type { ConversationBuffer } from "../../components/conversation-buffer.js";
 
 const TAG = "discord";
@@ -35,7 +35,7 @@ export interface DiscordAdapterConfig {
 export interface DiscordAdapterDeps {
   pipeline: PipelineDeps;
   transport: IKiroTransport;
-  memory: IMemorySystem | null;
+  memoryRuntime: AbtarsMemoryRuntime;
   conversationBuffer: ConversationBuffer;
 }
 
@@ -368,12 +368,13 @@ export class DiscordAdapter implements PlatformAdapter {
     logInfo(TAG, `Reaction ${emoji} from ${senderName} on msg ${reaction.message.id}`);
 
     // Emotion scoring on authorized reactions
-    if (isAuthorized && this.deps.memory) {
+    if (isAuthorized && this.deps.memoryRuntime.state === "ready") {
       const score = emojiToScore(emoji);
-      const tag = emojiToTag(emoji);
       const resolvedUserId = loadUsers().byPlatformId.get("discord:" + user.id)?.userId ?? "unknown";
-      const updated = this.deps.memory.updateEmotionByPlatformId(resolvedUserId, messageId, score, tag);
-      if (updated) logDebug(TAG, `Emotion score ${score} set on msg ${reaction.message.id}`);
+      const recalledIds = (await import("../../components/message-pipeline.js")).getRecalledIdsForMessage(messageId);
+      if (recalledIds && score !== 0) {
+        for (const memoryId of recalledIds) await this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType: score < 0 ? "reject" : "cite" }, `reaction-${messageId}-${memoryId}`);
+      }
     }
 
     if (!isAuthorized) {

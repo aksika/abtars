@@ -21,11 +21,9 @@ import { createModelHealthTask } from "./heartbeat-model-health.js";
 import type { BootCtx } from "./context.js";
 
 const TAG = "heartbeat";
-let _lastCapabilityHash = "";
-let _lastInventoryBroadcast = 0;
 
 export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
-  const { heartbeat, transport, cronQueue, memory, memoryConfig, config, pipelineDeps, capabilities } = ctx;
+  const { heartbeat, transport, cronQueue, memoryRuntime, memoryConfig, config, pipelineDeps, capabilities } = ctx;
   if (!heartbeat || !transport || !cronQueue || !pipelineDeps) return;
 
   const cronCallback = createCronCallback(ctx);
@@ -72,14 +70,15 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   // forbids. See src/capabilities/sleep/index.ts.
 
   if (getEnv().ctxIdleCompactMin > 0) {
-    heartbeat.registerTask(createIdleCompactTask({
-      transport, memory, memoryDir: memoryConfig.memoryDir,
+  heartbeat.registerTask(createIdleCompactTask({
+      transport, memoryDir: memoryConfig.memoryDir,
+      memoryRuntime,
       allowedUserIds: config.telegram.allowedUserIds,
       isSleepActive: ctx.isSleepActive,
     }));
   }
 
-  heartbeat.registerTask(createDbIntegrityTask(memory));
+  heartbeat.registerTask(createDbIntegrityTask(memoryRuntime));
 
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;
 
@@ -158,29 +157,6 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
       }
     }});
   }
-
-  // #1434: Inventory anti-entropy — broadcast when capability hash changes
-  import("../components/peer-transport/index.js").then(async ({ getPeerTransport }) => {
-    const transport = getPeerTransport() as import("../components/peer-transport/http-transport.js").HttpTransport;
-    heartbeat.registerTask({ name: "peer-inventory", execute: async () => {
-      if (typeof transport.broadcastInventory !== "function") return;
-      try {
-        const { getInventoryCapabilityHash } = await import("../components/peer-transport/peer-inventory.js");
-        const { loadPeerConfig } = await import("../components/peer-config.js");
-        const { getLocalCapabilities } = await import("../components/peer-transport/peer-health.js");
-        const cfg = loadPeerConfig();
-        const caps = getLocalCapabilities();
-        const hash = getInventoryCapabilityHash(cfg.self.signingKey, cfg.self.name, process.env["npm_package_version"] ?? "0.0.0", caps, ["wss", "https"]);
-        const now = Date.now();
-        const INVENTORY_ANTIENTROPY_MS = 4 * 60 * 60 * 1000;
-        if (hash !== _lastCapabilityHash || (now - _lastInventoryBroadcast) > INVENTORY_ANTIENTROPY_MS) {
-          _lastCapabilityHash = hash;
-          _lastInventoryBroadcast = now;
-          transport.broadcastInventory();
-        }
-      } catch { /* best effort */ }
-    } });
-  }).catch(err => logAndSwallow(TAG, "peer-inventory", err));
 
   if (transport.healthCheck) {
     heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });

@@ -9,7 +9,7 @@
 import type { BootNode } from "./boot-graph.js";
 import { phaseMemory } from "./phase-memory.js";
 import { phaseTransport } from "./phase-transport.js";
-import { phaseMemoryIpc } from "./phase-memory-ipc.js";
+// Memory IPC removed in #1380 — daemon replaces MemoryIpcServer + SqliteBackend fallback
 import { phasePipelineDeps } from "./phase-pipeline-deps.js";
 import { phasePlatformsConnect } from "./phase-platforms-connect.js";
 import { phaseCapabilities } from "./phase-capabilities.js";
@@ -40,7 +40,7 @@ export const BOOT_NODES: BootNode[] = [
   { name: "memory",       deps: [],                          optional: true,  run: phaseMemory },
   { name: "pipelineDeps", deps: ["transport", "platforms"],  optionalDeps: ["memory"], optional: false, run: phasePipelineDeps },
   { name: "capabilities", deps: ["pipelineDeps"],             optionalDeps: ["memory"], optional: true,  run: phaseCapabilities },
-  { name: "memoryIpc",    deps: ["memory", "transport"],     optional: true,  run: phaseMemoryIpc },
+  // memoryIpc removed in #1380 — daemon replaces legacy IPC server
   { name: "sleep",        deps: ["memory", "heartbeat"],     optional: true,  run: phaseSleep },
   { name: "power",        deps: ["heartbeat"],              optionalDeps: ["sleep"], optional: true, run: phasePower },
   { name: "dashboard",    deps: ["heartbeat"],               optionalDeps: ["transport"], optional: true, run: phaseDashboard },

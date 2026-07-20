@@ -344,8 +344,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   for (const a of agents) {
     const r = tc ? resolveAgent(a, tc) : null;
     let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`;
-    if (a === "main" && r?.fallbacks.length) {
-      line += "\n" + r.fallbacks.map((f, i) => `    ↳ fb${i + 1}: ${f.model} (${f.provider})`).join("\n");
+    if (a === "main") {
+      const fbLines = (tc?.fallbacks ?? []).map((f, i) => {
+        if ((f as any).demoted) return null;
+        return `    ↳ fb${i + 1}: ${f.model} (${f.provider})`;
+      }).filter(Boolean).join("\n");
+      if (fbLines) line += "\n" + fbLines;
     }
     lines.push(line);
   }

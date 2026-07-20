@@ -18,7 +18,7 @@ import type { BootCtx, PhaseResult } from "./context.js";
 const TAG = "agent_api";
 
 export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
-  const { config, memory, runtime, platforms, registry } = ctx;
+  const { config, runtime, platforms, registry } = ctx;
 
   const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
   let agentApiServer: AgentApiServer | null = null;
@@ -67,7 +67,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         config: agentConfig,
         cliPath: config.transport.agentCliPath,
         workingDir: config.transport.workingDir,
-        memory,
+        memoryRuntime: ctx.memoryRuntime,
         runtime,
         tls: tlsIdentity,
         sessionManager: ctx.sessionManager,
@@ -106,7 +106,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
           throw new Error(`Unknown help method: ${method}`);
         });
 
-        // Register push handler for broker (inventory, etc.)
+        // #1455: Unified push handler for accepted and outbound sockets
         broker.registerPushHandler(async (peer, method, payload) => {
           if (method === "peer.inventory.v1") {
             try {
@@ -117,6 +117,18 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
               if (peerEntry?.verifyKey) {
                 verifyAndStoreInventory(peer, payload as any, peerEntry.verifyKey);
               }
+            } catch { /* best effort */ }
+            return;
+          }
+          if (method === "pi.lifecycle.v1") {
+            try {
+              const { getRemotePiOriginReducer } = await import("../components/peer-transport/remote-pi-registry.js");
+              const reducer = getRemotePiOriginReducer();
+              if (!reducer) return;
+              const { loadPeerConfig } = await import("../components/peer-config.js");
+              const localPeerName = loadPeerConfig().self.name;
+              const { handlePushLifecycleEvent } = await import("../components/peer-transport/remote-pi-agent-api-integration.js");
+              handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, peer, payload as any).catch(() => {});
             } catch { /* best effort */ }
           }
         });
@@ -142,7 +154,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
       updatePeerApiState("failed", result.error);
     }
 
-    // #1434: Start doorbell service + persistent outbound WS
+    // #1434, #1455: Start doorbell service + persistent outbound WS + route subscriptions
     updateDoorbellState("starting");
     import("../components/peer-transport/index.js").then(async ({ getPeerTransport, PeerDoorbellService }) => {
       const transport = getPeerTransport();
@@ -150,9 +162,27 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
       transport.setDoorbell(doorbell);
       await doorbell.start();
       updateDoorbellState(doorbell.isRunning ? "listening" : "degraded", doorbell.isRunning ? undefined : "bind/start failed");
+      // #1455: Start route/capability subscriptions BEFORE initWsConnections so
+      // route-available events from initial outbound socket opens are captured.
+      transport.start();
       if (Object.keys(loadPeerConfig().peers).length > 0) {
         await transport.initWsConnections();
       }
+
+      // #1455: Inject broker-backed route interface into RemotePiDeliveryManager
+      try {
+        const { getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
+        const { getPeerWsBroker } = await import("../components/peer-transport/peer-ws-broker.js");
+        const delivery = getRemotePiDelivery();
+        const broker = getPeerWsBroker();
+        if (delivery && typeof delivery.setRouteInterface === "function") {
+          delivery.setRouteInterface({
+            hasRoute: (peer: string) => broker.hasRoute(peer),
+            sendPush: (peer: string, method: "pi.lifecycle.v1", payload: unknown) => broker.sendPush(peer, method, payload),
+            requestConnection: (peer: string) => transport.ensurePeerConnection(peer, { reason: "outbox" }),
+          });
+        }
+      } catch { /* best effort — Pi executor may not be loaded */ }
     }).catch((err) => {
       logError(TAG, `Peer init failed: ${err.message}`);
       updateDoorbellState("degraded", err instanceof Error ? err.message : String(err));

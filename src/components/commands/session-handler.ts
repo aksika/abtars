@@ -2,7 +2,6 @@
  * /session command handler (#510).
  */
 import { logInfo } from "../logger.js";
-import { logAndSwallow } from "../log-and-swallow.js";
 import { parseSessionType, typeLabel, sessionType } from "../spin-types.js";
 import type { CommandContext } from "./types.js";
 
@@ -54,13 +53,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     if (isNaN(index)) { await ctx.reply("Usage: /session kill <#>"); return true; }
     const result = ctx.sessionManager.killSession(ctx.userId, ctx.platform, index);
     if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
-    // Wipe messages from abmind
-    if (ctx.memory) {
-      try {
-        const db = (ctx.memory as any).db;
-        if (db) db.prepare("DELETE FROM messages WHERE session_id = ?").run(result.id);
-      } catch (err) { logAndSwallow(TAG, "delete session messages", err); }
-    }
+    // Message deletion is intentionally owner-side; this command no longer reaches into SQLite.
     await ctx.reply(`🗑️ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) killed.`);
     logInfo(TAG, `Killed session ${result.id}`);
     return true;

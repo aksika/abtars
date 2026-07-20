@@ -1,32 +1,20 @@
 /**
- * Context-window-start persistence — per-user timestamps tracking when the
- * current context window began. Used by recall fallback stages.
+ * Process-local context-window markers used by recall fallback stages.
  *
- * Called from phase-transport (initialize at boot), phase-sleep-cycle (reset
- * after sleep), and message-pipeline (update on session turn).
+ * They intentionally do not write inside the abmind-owned memory directory.
  */
 
-import { logAndSwallow } from "../components/log-and-swallow.js";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+const contextWindowStarts = new Map<string, number>();
 
 /** Update context-window-start timestamp for a chat. */
 export function updateCtxStart(memoryDir: string, userId: string, ts = Date.now()): void {
-  if (!memoryDir || !existsSync(memoryDir)) return; // expected: abmind absent
-  const p = join(memoryDir, "context-window-start.json");
-  let data: Record<string, number> = {};
-  try { data = JSON.parse(readFileSync(p, "utf-8")); } catch (err) { logAndSwallow("ctx_start", "read ctx-start json", err); }
-  data[userId] = ts;
-  try { writeFileSync(p, JSON.stringify(data), "utf-8"); } catch (err) { logAndSwallow("ctx_start", "write ctx-start json", err); }
+  void memoryDir;
+  contextWindowStarts.set(userId, ts);
 }
 
 /** Set all context-window-start entries to now (called after sleep). */
 export function resetAllCtxStarts(memoryDir: string): void {
-  if (!memoryDir || !existsSync(memoryDir)) return; // expected: abmind absent
-  const p = join(memoryDir, "context-window-start.json");
-  let data: Record<string, number> = {};
-  try { data = JSON.parse(readFileSync(p, "utf-8")); } catch (err) { logAndSwallow("ctx_start", "read ctx-start json", err); return; }
+  void memoryDir;
   const now = Date.now();
-  for (const key of Object.keys(data)) data[key] = now;
-  try { writeFileSync(p, JSON.stringify(data), "utf-8"); } catch (err) { logAndSwallow("ctx_start", "write ctx-start json", err); }
+  for (const key of contextWindowStarts.keys()) contextWindowStarts.set(key, now);
 }

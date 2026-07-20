@@ -8,7 +8,7 @@ import { hostname, homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, mkdirSync, copyFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { acquireLock, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
 
 import { makeLocalBuildSource } from "../update-sources/dev.js";
@@ -20,6 +20,34 @@ export interface DeployOptions {
   readonly source: SourceName;
   readonly localDir?: string;
   readonly skipFreshness?: boolean;
+}
+
+export type BootstrapResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string };
+
+export interface BootstrapFn {
+  (domain: string, plistPath: string): BootstrapResult;
+}
+
+export function runLaunchctlBootstrap(
+  domain: string,
+  plistPath: string,
+  spawnSyncFn: typeof spawnSync = spawnSync,
+): BootstrapResult {
+  try {
+    const result = spawnSyncFn("launchctl", ["bootstrap", domain, plistPath], {
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.status === 0) {
+      return { ok: true };
+    }
+    const error = result.stderr?.toString() || result.stdout?.toString() || `exit code ${result.status}`;
+    return { ok: false, error: error.trim() };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 function readJsonField(file: string, field: string): unknown {
@@ -171,7 +199,11 @@ export async function deployActivationCli(flags: ReadonlyMap<string, string | bo
  * shell as the zero-dependency last resort (no deployed binary needed). If this
  * stop/respawn sequence or the release path layout changes, update it too.
  */
-async function deployActivation(args: { staged: StagedRelease; channel: SourceName; repoRoot: string }): Promise<number> {
+export async function deployActivation(
+  args: { staged: StagedRelease; channel: SourceName; repoRoot: string },
+  bootstrapFn?: BootstrapFn,
+  healthProbeFn?: typeof healthProbe,
+): Promise<number> {
   const { staged, channel, repoRoot } = args;
   const paths = packagePaths("abtars");
   const isFirstInstall = !existsSync(paths.manifest);
@@ -348,7 +380,13 @@ async function deployActivation(args: { staged: StagedRelease; channel: SourceNa
       if (process.platform === "darwin") {
         const plistPath = join(homedir(), "Library/LaunchAgents/com.abtars.watchdog.plist");
         const uid = `gui/${process.getuid?.() ?? 501}`;
-        try { execSync(`launchctl bootstrap ${uid} "${plistPath}"`, { stdio: "ignore", timeout: 5000 }); } catch {}
+        const fn = bootstrapFn ?? runLaunchctlBootstrap;
+        const bootstrapResult = fn(uid, plistPath);
+        if (!bootstrapResult.ok) {
+          process.stderr.write(`x launchctl bootstrap failed (domain=${uid}, plist=${plistPath}): ${bootstrapResult.error}\n`);
+          writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "failed", version: staged.version, error: bootstrapResult.error.slice(-300), completedAt: new Date().toISOString() }) + "\n");
+          return 1;
+        }
       } else {
         try { execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 }); } catch {}
         try { execSync("systemctl --user unmask abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
@@ -363,13 +401,14 @@ async function deployActivation(args: { staged: StagedRelease; channel: SourceNa
 
   // ── Step 9: Health probe ──────────────────────────────────────────────
   process.stdout.write(`Waiting for bridge health...\n`);
-  const health = await healthProbe(paths.home, Date.now(), 180_000);
+  const health = await (healthProbeFn ?? healthProbe)(paths.home, Date.now(), 180_000);
   if (health.healthy) {
     process.stdout.write(`✓ Bridge healthy (PID ${health.pid}, tick at ${new Date(health.heartbeat!).toISOString()})\n`);
     writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "success", version: staged.version, completedAt: new Date().toISOString() }) + "\n");
   } else {
     process.stderr.write(`⚠ Bridge not healthy after 120s — check logs. Watchdog will keep trying.\n`);
     writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "unhealthy", version: staged.version, completedAt: new Date().toISOString() }) + "\n");
+    if (process.platform === "darwin") return 1;
   }
 
   return 0;

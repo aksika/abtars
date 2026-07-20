@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { abtarsHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
-import type { IMemorySystem } from "abmind";
+import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import { abmind } from "../utils/abmind-lazy.js";
 import { logInfo, logWarn, logDebug, logTrace } from "./logger.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
@@ -30,7 +30,7 @@ interface AgentApiDeps {
   config: AgentApiConfig;
   cliPath: string;
   workingDir: string;
-  memory: IMemorySystem | null;
+  memoryRuntime: Pick<AbtarsMemoryRuntime, "embed"> | null;
   runtime: SubagentRuntime;
   /** #1305: Validated TLS identity — HTTPS-only, no fallback to plain HTTP. */
   tls: ValidatedTlsIdentity;
@@ -152,7 +152,7 @@ function tryReadVersion(): string | null {
 export class AgentApiServer {
   private server: ReturnType<typeof import("node:https").createServer>;
   private config: AgentApiConfig;
-  private memory: IMemorySystem | null;
+  private memoryRuntime: Pick<AbtarsMemoryRuntime, "embed"> | null;
   private trafficLog: TrafficEntry[] = [];
   private onPeerActivity?: (msg: string) => void;
   private a2aAdapter?: import("../platforms/agent-api/agent-api-adapter.js").AgentApiAdapter;
@@ -165,7 +165,7 @@ export class AgentApiServer {
   private onPiNotify?: (text: string) => Promise<import("./main-chat.js").SendResult>;
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
-    this.memory = deps.memory;
+    this.memoryRuntime = deps.memoryRuntime;
     this.onPeerActivity = deps.onPeerActivity;
     this.onPiNotify = deps.onPiNotify;
     void deps.piExecutorService; // kept for compat
@@ -269,15 +269,9 @@ export class AgentApiServer {
       socket: ws,
     });
 
-    // #1434: Send inventory on accepted connection (peer-status.v1 removed)
-    try {
-      const { loadPeerConfig: lpc } = require("./peer-config.js") as typeof import("./peer-config.js");
-      const { buildSignedInventory: bsi } = require("./peer-transport/peer-inventory.js") as typeof import("./peer-transport/peer-inventory.js");
-      const { getLocalCapabilities: glc } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
-      const cfg = lpc();
-      const invPayload = bsi(cfg.self.signingKey, cfg.self.name, process.env["npm_package_version"] ?? "0.0.0", glc(), ["wss", "https"]);
-      broker.sendPush(peerName, "peer.inventory.v1", invPayload);
-    } catch { /* best effort */ }
+    // #1455: Inventory is sent by HttpTransport.onRouteAvailable via the
+    // broker route subscription, not directly here. The broker's attachSocket
+    // emits route-available, which triggers the subscriber in transport.start().
 
     ws.on("close", () => {
       if (this.peerWsConnections.get(peerName) === ws) {
@@ -300,7 +294,7 @@ export class AgentApiServer {
   pushToPeer(peerName: string, method: string, payload: unknown): boolean {
     // Strict allowlist of notification-only methods
     // #1358: pi.lifecycle.v1 is a push from owner to origin (read-only lifecycle event)
-    const ALLOWED_PUSH: readonly string[] = ["notify", "heartbeat", "ping", "pi.lifecycle.v1"];
+    const ALLOWED_PUSH: readonly string[] = ["notify", "ping", "pi.lifecycle.v1"];
     if (!ALLOWED_PUSH.includes(method)) return false;
     const ws = this.peerWsConnections.get(peerName);
     if (!ws || ws.readyState !== ws.OPEN) return false;
@@ -308,27 +302,15 @@ export class AgentApiServer {
     return true;
   }
 
-  /** Handle incoming WS message from a peer. #1433: pushes handled locally, requests go to broker. */
-  private handlePeerWsMessage(peerName: string, raw: string): void {
+  /** Handle incoming WS message from a peer. #1455: pushes handled by broker, requests go to broker. */
+  private handlePeerWsMessage(_peerName: string, raw: string): void {
     try {
       const msg = JSON.parse(raw);
 
-      if (msg.type === "push" && msg.method === "peer.inventory.v1" && msg.payload) {
-        try {
-          const { verifyAndStoreInventory } = require("./peer-transport/peer-inventory.js") as typeof import("./peer-transport/peer-inventory.js");
-          const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-          const config = loadPeerConfig();
-          const peerEntry = config.peers[peerName];
-          if (peerEntry?.verifyKey) {
-            verifyAndStoreInventory(peerName, msg.payload, peerEntry.verifyKey);
-          }
-        } catch { /* best effort */ }
-        return;
-      }
-
-      // #1358: Handle lifecycle event push (owner → origin)
-      if (msg.type === "push" && msg.method === "pi.lifecycle.v1" && msg.payload) {
-        this.handleRemotePiLifecyclePush(peerName, msg.payload, msg.id).catch(err => logAndSwallow(TAG, "pi.lifecycle.v1", err));
+      if (msg.type === "push") {
+        // All pushes (inventory, lifecycle, notify) are dispatched through the
+        // broker's unified push handler — accepted and outbound sockets use the
+        // same path. See phase-agent-api broker.registerPushHandler().
         return;
       }
 
@@ -1018,7 +1000,7 @@ export class AgentApiServer {
 
   /** #373 — /v1/embeddings dispatch. Body already authenticated and parsed by caller. */
   private async handleV1Embeddings(body: unknown, res: ServerResponse): Promise<void> {
-    const result = await v1HandleEmbeddings(body, this.memory);
+    const result = await v1HandleEmbeddings(body, this.memoryRuntime);
     writeResult(res, result);
   }
 
@@ -1120,19 +1102,6 @@ export class AgentApiServer {
     const principalId = `peer:${caller}`;
     const response = await handler.handleControlRequest({ peerName: caller, principalId }, body as any);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
-  }
-
-  /** #1358 — WS push: owner pushes lifecycle event to origin (pi.lifecycle.v1). */
-  private async handleRemotePiLifecyclePush(ownerPeer: string, event: unknown, _msgId?: string): Promise<void> {
-    const { getRemotePiOriginReducer } = await import("./peer-transport/remote-pi-registry.js");
-    const reducer = getRemotePiOriginReducer();
-    if (!reducer) return; // origin reducer not configured — not an error
-    const { loadPeerConfig } = await import("./peer-config.js");
-    const localPeerName = loadPeerConfig().self.name;
-    const { handlePushLifecycleEvent } = await import("./peer-transport/remote-pi-agent-api-integration.js");
-    await handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, ownerPeer, event as any);
-    // Push frames don't get a correlated response — the durable outbox + ack
-    // protocol handles reliability.
   }
 
   /** #675 — POST /v1/callbacks: remote peer delivers task result. Body already authenticated and parsed by caller. */

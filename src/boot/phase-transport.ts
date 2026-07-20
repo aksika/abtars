@@ -15,7 +15,6 @@ import { createAgentTransport } from "../components/agent-registry.js";
 import { logDebug, logInfo, logWarn, logError } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
-import { abmind } from "../utils/abmind-lazy.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 
@@ -376,39 +375,9 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     logDebug("main", "🛡️ Seatbelt wired to tool-registry");
   }
 
-  // #843: Wire memory to DirectApiTransport for session hydration on restart.
-  // Transport-specific — only DirectApiTransport has this field.
-  if (resolved.provider.transport === "api" && ctx.memory) {
-    (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).memoryBackend = ctx.memory!;
-
-    // Wire context engine for automatic compaction (DirectApiTransport-specific).
-    const db = ctx.memory!.getDb?.() ?? ctx.memory!.getDatabase?.();
-    if (db && resolved.contextWindow >= 128000) {
-      const mod = abmind();
-      if (mod) {
-        const { ContextEngine } = mod;
-        const { createContextOrchestrator } = await import("../components/context/index.js");
-        const { spin } = await import("../components/spin.js");
-        const { recordCompaction } = await import("../components/metrics-collector.js");
-        const contextEngine = new ContextEngine(db);
-        // Cheap compaction model: route summarization through Spin as an S-type
-        // one-shot (ephemeral, terminateAfter "call") on the dreamy agent. Spin
-        // resolves agent → model/provider/metrics; no raw LLM call, no lingering session.
-        const compactionModel = (tc ? resolveAgent("dreamy", tc) : null)?.model ?? null;
-        const orchestrator = createContextOrchestrator(
-          contextEngine,
-          (systemPrompt: string, userPrompt: string) =>
-            spin.dispatchBackground({ agent: "dreamy", prompt: `${systemPrompt}\n\n${userPrompt}` }),
-          (_chatId: string) => {
-            try { return ctx.memory?.getLastMessageTimestamp(true) ?? null; } catch (err) { logAndSwallow(TAG, "getLastMessageTimestamp", err); return null; }
-          },
-          { compactionModel, onCompactionEvent: recordCompaction },
-        );
-        (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).contextOrchestrator = orchestrator;
-        logInfo("main", `📦 Context engine wired (auto-compaction active, model: ${compactionModel ?? "main"})`);
-      }
-    }
-  }
+  // #1380: Direct API memory hydration is supplied by the daemon-backed
+  // runtime during prompt construction. No abtars-side database or context
+  // engine is opened here.
 
   if ("onFallback" in transport) {
     let lastNotifiedModel: string | null = null;

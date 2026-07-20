@@ -19,7 +19,7 @@ const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/reset", "/restart", "
 
 export const commandMiddleware: Middleware = async (ctx, next) => {
   const { msg, deps } = ctx;
-  const { transport, config, startedAt, memory, memoryConfig, nlmConfig,
+  const { transport, config, startedAt, memoryRuntime, memoryConfig, nlmConfig,
     idleSave, sessionManager,
     updateCtxStart, conversationBuffer } = deps;
   const { spin } = await import("../spin.js");
@@ -78,7 +78,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     sessionKey: effectiveId, chatId: ctx.chatId, userId: ctx.userId ?? "unknown", platform: msg.platform, reply: ctx.reply,
     editReply,
     transport, config, startedAt,
-    memory, memoryConfig, nlmConfig,
+    memoryRuntime, memoryConfig, nlmConfig,
     idleSave,
     sessionManager: deps.sessionManager,
     updateCtxStart,

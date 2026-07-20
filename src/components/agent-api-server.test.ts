@@ -18,7 +18,28 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     },
     cliPath: "kiro-cli",
     workingDir: "/tmp",
-    memory: null,
+    memoryRuntime: null,
+  };
+}
+
+// Generate a minimal self-signed TLS identity for testing
+function makeTestTls(configDir: string): ValidatedTlsIdentity {
+  const { execSync } = require("node:child_process") as typeof import("node:child_process");
+  const { generateKeyPairSync } = require("node:crypto") as typeof import("node:crypto");
+
+  const { privateKey: privKeyObj } = generateKeyPairSync("ed25519");
+  const keyPem = privKeyObj.export({ type: "pkcs8", format: "pem" }) as string;
+  writeFileSync(join(configDir, "identity.tls.key"), keyPem, { mode: 0o600 });
+  execSync(
+    `openssl req -x509 -key "${join(configDir, "identity.tls.key")}" -out "${join(configDir, "identity.crt")}" -days 3650 -nodes -subj "/CN=test"`,
+    { stdio: "pipe" },
+  );
+  return {
+    key: keyPem,
+    cert: require("node:fs").readFileSync(join(configDir, "identity.crt"), "utf-8") as string,
+    verifyKey: "test",
+    certificateNotBefore: new Date("2020-01-01"),
+    certificateNotAfter: new Date("2035-01-01"),
   };
 }
 

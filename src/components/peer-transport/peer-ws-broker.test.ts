@@ -228,4 +228,293 @@ describe("PeerWsBroker", () => {
 
   // Request handler invocation requires real Ed25519 keys for signature
   // verification — see the signed-frame tests above.
+
+  it("subscribeRoutes emits available on zero-to-one route transition", async () => {
+    const broker = await makeBroker();
+    const listener = vi.fn();
+    broker.subscribeRoutes(listener);
+
+    const { server, client } = await connectedPair();
+    expect(broker.hasRoute("kp")).toBe(false);
+
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(listener).toHaveBeenCalledWith({ type: "available", peer: "kp" });
+    server.close();
+    client.close();
+  });
+
+  it("subscribeRoutes does not emit available when route already exists", async () => {
+    const broker = await makeBroker();
+    const { server: s1, client: c1 } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: c1 });
+    await new Promise(r => setTimeout(r, 50));
+
+    const listener = vi.fn();
+    broker.subscribeRoutes(listener);
+
+    // Attach a second socket when route already exists — no available event
+    const { server: s2, client: c2 } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: c2 });
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(listener).not.toHaveBeenCalled();
+    s1.close(); c1.close();
+    s2.close(); c2.close();
+  });
+
+  it("subscribeRoutes emits unavailable on one-to-zero route transition", async () => {
+    const broker = await makeBroker();
+    const listener = vi.fn();
+    broker.subscribeRoutes(listener);
+
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+    expect(listener).toHaveBeenCalledWith({ type: "available", peer: "kp" });
+
+    // Close the socket — should emit unavailable
+    client.close();
+    await new Promise(r => setTimeout(r, 100));
+    expect(listener).toHaveBeenCalledWith({ type: "unavailable", peer: "kp" });
+    server.close();
+  });
+
+  it("subscribeRoutes listener errors are isolated", async () => {
+    const broker = await makeBroker();
+    const throwing = vi.fn().mockImplementation(() => { throw new Error("boom"); });
+    const ok = vi.fn();
+    broker.subscribeRoutes(throwing);
+    broker.subscribeRoutes(ok);
+
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    // Both listeners should have been called despite the error
+    expect(throwing).toHaveBeenCalled();
+    expect(ok).toHaveBeenCalledWith({ type: "available", peer: "kp" });
+    server.close();
+    client.close();
+  });
+
+  it("subscribeRoutes unsubscribe removes exactly that listener", async () => {
+    const broker = await makeBroker();
+    const a = vi.fn();
+    const b = vi.fn();
+    const unsub = broker.subscribeRoutes(a);
+    broker.subscribeRoutes(b);
+    unsub();
+
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(a).not.toHaveBeenCalled();
+    expect(b).toHaveBeenCalledWith({ type: "available", peer: "kp" });
+    server.close();
+    client.close();
+  });
+
+  // #1455: Accepted and outbound pushes route through the same push handler
+  it("push handler is invoked for frames on outbound socket", async () => {
+    const broker = await makeBroker();
+    const pushHandler = vi.fn();
+    broker.registerPushHandler(pushHandler);
+
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    client.emit("message", Buffer.from(JSON.stringify({
+      type: "push", method: "peer.inventory.v1", payload: { capabilities: ["bash"] },
+    })));
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(pushHandler).toHaveBeenCalledWith("kp", "peer.inventory.v1", { capabilities: ["bash"] });
+    server.close();
+    client.close();
+  });
+
+  it("push handler is invoked for frames on accepted socket", async () => {
+    const broker = await makeBroker();
+    const pushHandler = vi.fn();
+    broker.registerPushHandler(pushHandler);
+
+    const { server, client, serverConn } = await connectedPair();
+    // Attach the server-side connection as an "accepted" socket
+    broker.attachSocket({ peer: "kp", direction: "accepted", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    // Send from the remote side (serverConn simulates the remote peer)
+    // The broker listens on client for messages
+    client.emit("message", Buffer.from(JSON.stringify({
+      type: "push", method: "pi.lifecycle.v1", payload: { event: "test" },
+    })));
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(pushHandler).toHaveBeenCalledWith("kp", "pi.lifecycle.v1", { event: "test" });
+    server.close();
+    client.close();
+  });
+
+  it("push handler is called once per frame (no duplicate processing)", async () => {
+    const broker = await makeBroker();
+    const pushHandler = vi.fn();
+    broker.registerPushHandler(pushHandler);
+
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    client.emit("message", Buffer.from(JSON.stringify({
+      type: "push", method: "peer.inventory.v1", payload: { capabilities: ["bash"] },
+    })));
+    await new Promise(r => setTimeout(r, 50));
+
+    // The handler should be called exactly once
+    expect(pushHandler).toHaveBeenCalledTimes(1);
+    server.close();
+    client.close();
+  });
+
+  it("sendPush with method not in allowlist returns false", async () => {
+    const broker = await makeBroker();
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    expect(broker.sendPush("kp", "unknown.method", {})).toBe(false);
+    expect(broker.sendPush("kp", "heartbeat", {})).toBe(false); // removed from allowlist
+    server.close();
+    client.close();
+  });
+
+  // ── #1459: Reconnect state retention ─────────────────────────────────────
+
+  it("recovers in-flight request across last-socket detach and replacement attach", async () => {
+    const broker = await makeBroker();
+    const { server: s1, client: c1, serverConn: sc1 } = await connectedPair();
+    const detach1 = broker.attachSocket({ peer: "kp", direction: "outbound", socket: c1 });
+
+    // Watch for the outgoing request frame via the server-side connection
+    const frameOnSc1 = new Promise<string>(res => sc1.on("message", d => res(d.toString())));
+
+    const reqPromise = broker.sendRequest<{ result: string }>("kp", "help.request.v1", { goal: "x" });
+
+    // The first pair's serverConn receives the frame
+    const firstRaw = await frameOnSc1;
+    const firstFrame = JSON.parse(firstRaw);
+    expect(firstFrame.type).toBe("request");
+    expect(firstFrame.id).toBeDefined();
+
+    // Detach the only socket — state retained because outbox is non-empty
+    detach1();
+    expect(broker._getOutbox("kp")).toBeDefined();
+    expect(broker._getOutbox("kp")!.length).toBe(1);
+    const entryId = broker._getOutbox("kp")!.peek()!.id;
+    expect(entryId).toBe(firstFrame.id); // same entry, not a new one
+
+    // Clean up the first pair
+    c1.close();
+    sc1.close();
+    s1.close();
+
+    // Attach a replacement socket and capture frames on new serverConn
+    const { server: s2, client: c2, serverConn: sc2 } = await connectedPair();
+    const frameOnSc2 = new Promise<string>(res => sc2.on("message", d => res(d.toString())));
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: c2 });
+
+    // The pending request must be re-sent on the replacement
+    const resentRaw = await frameOnSc2;
+    const resent = JSON.parse(resentRaw);
+    expect(resent.type).toBe("request");
+    expect(resent.method).toBe("help.request.v1");
+    expect(resent.payload).toEqual({ goal: "x" });
+    expect(resent.id).toBe(firstFrame.id); // same entry ID re-sent
+
+    // Respond through the client's message handler (broker handles incoming)
+    c2.emit("message", Buffer.from(JSON.stringify({
+      type: "response", id: resent.id, payload: { result: "ok" },
+    })));
+
+    await expect(reqPromise).resolves.toEqual({ result: "ok" });
+    c2.close();
+    s2.close();
+  }, 10_000);
+
+  it("waiter timeout leaves durable entry retryable — late response acknowledges without waiter", async () => {
+    vi.useFakeTimers();
+    const broker = await makeBroker();
+    const { server: s1, client: c1 } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: c1 });
+
+    // Consume frames so send does not fail
+    c1.on("message", () => {});
+    const errPromise = broker.sendRequest("kp", "help.request.v1", { goal: "x" }).catch(e => e);
+
+    // Close socket so no response can arrive
+    c1.close();
+    s1.close();
+
+    // Advance past the caller waiter timeout
+    await vi.advanceTimersByTimeAsync(31_000);
+    const err = await errPromise;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("timeout");
+
+    // Durable outbox entry must survive
+    expect(broker._getOutbox("kp")?.length).toBe(1);
+    const entryId = broker._getOutbox("kp")!.peek()!.id;
+
+    // Reconnect with a new socket
+    const { server: s2, client: c2 } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: c2 });
+
+    // Send a late response for the pending entry
+    c2.emit("message", Buffer.from(JSON.stringify({
+      type: "response", id: entryId, payload: { result: "late" },
+    })));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // The entry must be acknowledged even without a waiter
+    expect(broker._getOutbox("kp")?.length).toBe(0);
+    c2.close();
+    s2.close();
+    vi.useRealTimers();
+  }, 10_000);
+
+  it("removes idle peer state after last socket closes (no pending work)", async () => {
+    const broker = await makeBroker();
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    expect(broker._getOutbox("kp")).toBeDefined();
+
+    client.close();
+    server.close();
+    await new Promise(r => setTimeout(r, 200));
+
+    expect(broker._getOutbox("kp")).toBeUndefined();
+  }, 10_000);
+
+  it("retains peer state with pending request across zero-socket interval", async () => {
+    vi.useFakeTimers();
+    const broker = await makeBroker();
+    const { server: s1, client: c1 } = await connectedPair();
+    const detach1 = broker.attachSocket({ peer: "kp", direction: "outbound", socket: c1 });
+
+    c1.on("message", () => {});
+    broker.sendRequest("kp", "help.request.v1", { goal: "x" }).catch(() => {});
+
+    // Detach before the pump fires on the open socket
+    detach1();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // State must be retained (outbox has the pending entry, waiter exists)
+    expect(broker._getOutbox("kp")).toBeDefined();
+    expect(broker._getOutbox("kp")!.length).toBe(1);
+
+    c1.close();
+    s1.close();
+    vi.useRealTimers();
+  }, 10_000);
 });

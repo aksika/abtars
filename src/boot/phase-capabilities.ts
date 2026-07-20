@@ -13,7 +13,7 @@ import { logInfo, logWarn, logError, logDebug } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
 export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
-  const { config, memory, transport, runtime, capabilities, pipelineDeps } = ctx;
+  const { config, transport, runtime, capabilities, pipelineDeps } = ctx;
 
   // Skills catalog: pure filesystem, no deps — always generate (#996)
   try {
@@ -61,7 +61,7 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
   for (const cap of staticCaps) {
     if (disabled.has(cap.name)) continue;
     try {
-      const api = createCapabilityApi(capabilities, config, memory, transport, runtime, ctx.sessionManager, ctx.sendSystemMessage);
+      const api = createCapabilityApi(capabilities, config, ctx.memoryRuntime, transport, runtime, ctx.sessionManager, ctx.sendSystemMessage);
       cap.module.register(api);
       loaded.push(cap.name);
     } catch (err) {

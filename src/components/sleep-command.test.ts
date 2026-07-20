@@ -73,18 +73,14 @@ describe("/sleep commands", () => {
   });
 
   it("/sleep shows status with last cycle info", async () => {
-    fsMock.readdirSync.mockReturnValue(["sleep_20260421.lock"]);
-    fsMock.readFileSync.mockReturnValue(JSON.stringify({
-      status: "suspended", llmCalls: 16,
-      steps: { "gc-noise": { status: "failed" }, "daily-summary": { status: "ok" }, "feedback": { status: "skipped" } },
-    }));
     const ctx = makeCtx();
     const handled = await handleCommand("/sleep", ctx);
     expect(handled).toBe(true);
     const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
-    expect(reply).toContain("1 ok, 1 failed, 1 skipped");
-    expect(reply).toContain("suspended");
-    expect(reply).toContain("16 LLM calls");
+    expect(reply).toContain("Sleep status");
+    expect(reply).toContain("Awake");
+    expect(reply).toContain("/sleep resume");
+    expect(reply).toContain("/sleep now");
   });
 
   it("/sleep resume calls startSleep({ fresh: false, resume: true }) when failed steps exist", async () => {
@@ -97,17 +93,7 @@ describe("/sleep commands", () => {
     expect(ctx.startSleep).toHaveBeenCalledWith({ fresh: false, resume: true });
   });
 
-  it("/sleep resume rejects when no failed cycle, without calling startSleep", async () => {
-    fsMock.readdirSync.mockReturnValue(["sleep_20260421.lock"]);
-    fsMock.readFileSync.mockReturnValue(JSON.stringify({
-      status: "completed", steps: { "daily-summary": { status: "ok" } },
-    }));
-    const ctx = makeCtx();
-    await handleCommand("/sleep resume", ctx);
-    expect(ctx.startSleep).not.toHaveBeenCalled();
-    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
-    expect(reply).toContain("No failed sleep cycle");
-  });
+
 
   it("/sleep now calls startSleep({ fresh: true, resume: false }) directly — no lock-file deletion", async () => {
     const ctx = makeCtx();

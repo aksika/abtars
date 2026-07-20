@@ -19,7 +19,7 @@ abtars config
 abtars doctor     [<args passed to doctor.sh>...]
 abtars onboard    [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
 abtars daemon     install|uninstall|start|stop|restart|status
-abtars deps       install|list|check
+abtars deps       install|list|update|remove
 ```
 
 ## Commands
@@ -114,13 +114,14 @@ Manage the systemd/launchd service.
 
 ### deps
 
-Manage optional runtime dependencies (jimp, pdf-parse, youtube-transcript).
+Manage optional npm package groups (native, twitter, pdf, youtube, image, pi) and system binaries (ollama, bwrap, lightpanda). See [Dependencies](./dependencies.md) for the full reference.
 
 | Subcommand | Description |
 |------------|-------------|
-| `deps list` | List optional deps and install status |
-| `deps install` | Install all optional deps |
-| `deps check` | Check which are missing |
+| `deps list` | List every group + system binary + install status |
+| `deps install [name\|all]` | Install a group (default: native) |
+| `deps update [name\|all]` | Refresh an installed group |
+| `deps remove <name>` | Uninstall a group |
 
 ### tui
 

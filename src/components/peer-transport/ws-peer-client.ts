@@ -1,8 +1,9 @@
 /**
- * ws-peer-client.ts — Persistent outbound WebSocket to a peer (#972, #1293).
+ * ws-peer-client.ts — Persistent outbound WebSocket to a peer (#972, #1293, #1455).
  *
- * #1433: owns only dial/reconnect/TLS lifecycle. Attaches each open socket
- * to the shared PeerWsBroker for bidirectional request/response routing.
+ * Owns exactly one connection state machine and at most one socket attempt or
+ * pending reconnect timer per peer. requestConnect() coalesces repeated
+ * triggers from startup, doorbell, and outbox demand.
  */
 import WebSocket from "ws";
 import { randomBytes } from "node:crypto";
@@ -16,79 +17,74 @@ import { getPeerWsBroker } from "./peer-ws-broker.js";
 import { abtarsHome } from "../../paths.js";
 
 const TAG = "ws-peer";
-const MAX_BACKOFF_MS = 30_000;
+
+export type OutboundPeerState = "idle" | "waiting" | "connecting" | "connected" | "destroyed";
+export type ConnectReason = "startup" | "udp-doorbell" | "outbox";
+
+const INITIAL_BACKOFF_MS = 5_000;
+const MAX_BACKOFF_MS = 300_000;
 
 export class WsPeerClient {
   private ws: WebSocket | null = null;
   private readonly peerName: string;
   private readonly entry: PeerEntry;
-  private backoff = 1000;
+  private state: OutboundPeerState = "idle";
+  private socketGeneration = 0;
+  private backoffMs = INITIAL_BACKOFF_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private destroyed = false;
 
   constructor(peerName: string, entry: PeerEntry) {
     this.peerName = peerName;
     this.entry = entry;
+    this.socketGeneration = 1;
   }
 
-  onPush(_handler: (method: string, payload: unknown) => void): void { /* pushes handled by broker */ }
+  get peer(): string { return this.peerName; }
+  get currentState(): OutboundPeerState { return this.state; }
+  get connected(): boolean {
+    const broker = getPeerWsBroker();
+    return broker.hasRoute(this.peerName);
+  }
 
-  connect(): void {
-    if (this.destroyed) return;
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+  /**
+   * Single idempotent entry point for all outbound connection triggers.
+   * destroyed, waiting, connecting, and connected states are no-ops.
+   * Delayed requests transition to waiting; immediate requests dial directly.
+   */
+  requestConnect(input: { reason: ConnectReason; delayMs?: number }): void {
+    if (this.state === "destroyed") return;
+    if (this.state === "waiting" || this.state === "connecting" || this.state === "connected") return;
+
+    if (input.delayMs && input.delayMs > 0) {
+      this.state = "waiting";
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        this.internalDial();
+      }, input.delayMs).unref();
+      logDebug(TAG, `requestConnect delayed ${this.peerName}: ${input.delayMs}ms (reason: ${input.reason})`);
       return;
     }
 
-    const config = loadPeerConfig();
-    if (!this.entry.verifyKey) {
-      logWarn(TAG, `Cannot connect to ${this.peerName}: no verifyKey (not enrolled)`);
-      return;
-    }
-
-    const url = `wss://${this.entry.host}:${this.entry.port}/v1/ws`;
-    const sigHeaders = signRequest("GET", "/v1/ws", "", config.self.signingKey, config.self.name);
-
-    this.ws = new WebSocket(url, {
-      headers: sigHeaders,
-      minVersion: "TLSv1.3",
-      createConnection: createPinnedPeerWsConnection({ peerName: this.peerName, verifyKey: this.entry.verifyKey }),
-    } as any);
-
-    this.ws.on("open", () => {
-      logInfo(TAG, `Connected to ${this.peerName}`);
-      this.backoff = 1000;
-      (this.ws as any)._socket?.setKeepAlive(true, 20_000);
-
-      // #1433: Attach this socket to the shared broker
-      const broker = getPeerWsBroker();
-      broker.attachSocket({
-        peer: this.peerName,
-        direction: "outbound",
-        socket: this.ws!,
-      });
-
-      // #1434: Send inventory on connect (peer-status.v1 removed)
-      try {
-        const { loadPeerConfig } = require("../peer-config.js") as typeof import("../peer-config.js");
-        const { buildSignedInventory } = require("./peer-inventory.js") as typeof import("./peer-inventory.js");
-        const { getLocalCapabilities } = require("./peer-health.js") as typeof import("./peer-health.js");
-        const config = loadPeerConfig();
-        const inv = buildSignedInventory(config.self.signingKey, config.self.name, process.env["npm_package_version"] ?? "0.0.0", getLocalCapabilities(), ["wss", "https"]);
-        broker.sendPush(this.peerName, "peer.inventory.v1", inv);
-      } catch { /* best effort */ }
-    });
-
-    this.ws.on("close", () => {
-      if (!this.destroyed) this.scheduleReconnect();
-    });
-
-    this.ws.on("error", (err) => {
-      logDebug(TAG, `WS error (${this.peerName}): ${err.message}`);
-      this.ws?.close();
-    });
+    this.internalDial();
+    logDebug(TAG, `requestConnect ${this.peerName} (reason: ${input.reason})`);
   }
 
-  // ── Public API ───────────────────────────────────────────────────────────
+  destroy(): void {
+    const wasDestroyed = this.state === "destroyed";
+    this.state = "destroyed";
+    this.socketGeneration++;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      try { this.ws.close(); } catch { /* ignore */ }
+      this.ws = null;
+    }
+    if (!wasDestroyed) {
+      logInfo(TAG, `Client destroyed: ${this.peerName}`);
+    }
+  }
 
   async send(method: string, payload: unknown): Promise<unknown> {
     const broker = getPeerWsBroker();
@@ -96,11 +92,6 @@ export class WsPeerClient {
       throw new Error(`No route to ${this.peerName}`);
     }
     return broker.sendRequest(this.peerName, method, payload);
-  }
-
-  get connected(): boolean {
-    const broker = getPeerWsBroker();
-    return broker.hasRoute(this.peerName);
   }
 
   sendPush(method: string, payload: unknown): void {
@@ -112,27 +103,8 @@ export class WsPeerClient {
     return (await this.send(method, payload)) as T;
   }
 
-  destroy(): void {
-    this.destroyed = true;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.ws?.close();
-  }
-
-  // ── Reconnect ────────────────────────────────────────────────────────────
-
-  private scheduleReconnect(): void {
-    const jitter = this.backoff * (0.8 + Math.random() * 0.4);
-    logDebug(TAG, `Reconnecting to ${this.peerName} in ${Math.round(jitter)}ms`);
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connect();
-    }, jitter);
-    this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF_MS);
-  }
-
   /**
    * Dialer-side enrollment handshake over /v1/enroll-ws.
-   * Called by `abtars tribe join`.
    */
   async enroll(tribeToken: string, selfSigningKey: string, selfVerifyKey: string, selfName: string): Promise<void> {
     const {
@@ -206,7 +178,6 @@ export class WsPeerClient {
 
             logInfo(TAG, `Enrolled with '${name_r}' at trust=1`);
 
-            // Detach enrollment message handler, attach to broker for steady-state
             enrollWs.removeListener("message", onEnrollMessage);
             this.ws = enrollWs;
             const broker = getPeerWsBroker();
@@ -215,8 +186,10 @@ export class WsPeerClient {
               direction: "outbound",
               socket: enrollWs,
             });
-            enrollWs.on("close", () => { if (!this.destroyed) this.scheduleReconnect(); });
-            enrollWs.on("error", (err) => { logDebug(TAG, `WS error (${this.peerName}): ${err.message}`); this.ws?.close(); });
+            this.state = "connected";
+            this.backoffMs = INITIAL_BACKOFF_MS;
+            enrollWs.on("close", () => this.handleClose(this.socketGeneration));
+            enrollWs.on("error", (err) => this.handleError(err, this.socketGeneration));
 
             enrollWs.removeListener("close", onEnrollClose);
             enrollWs.removeListener("error", onEnrollError);
@@ -254,5 +227,90 @@ export class WsPeerClient {
         if (stage < 2) { reject(new Error("Enrollment timeout")); enrollWs.close(); }
       }, 30_000);
     });
+  }
+
+  // ── Internal ────────────────────────────────────────────────────────────
+
+  private internalDial(): void {
+    if (this.state === "destroyed") return;
+
+    const config = loadPeerConfig();
+    if (!this.entry.verifyKey) {
+      logWarn(TAG, `Cannot connect to ${this.peerName}: no verifyKey (not enrolled)`);
+      return;
+    }
+
+    const generation = ++this.socketGeneration;
+    this.state = "connecting";
+
+    const url = `wss://${this.entry.host}:${this.entry.port}/v1/ws`;
+    const sigHeaders = signRequest("GET", "/v1/ws", "", config.self.signingKey, config.self.name);
+
+    const ws = new WebSocket(url, {
+      headers: sigHeaders,
+      minVersion: "TLSv1.3",
+      createConnection: createPinnedPeerWsConnection({ peerName: this.peerName, verifyKey: this.entry.verifyKey }),
+    } as any);
+
+    ws.on("open", () => {
+      if (this.state === "destroyed" || generation !== this.socketGeneration) {
+        ws.close();
+        return;
+      }
+      logInfo(TAG, `Connected to ${this.peerName}`);
+      this.ws = ws;
+      this.state = "connected";
+      this.backoffMs = INITIAL_BACKOFF_MS;
+      (ws as any)._socket?.setKeepAlive(true, 20_000);
+
+      // Attach socket to broker for bidirectional request/response routing
+      const broker = getPeerWsBroker();
+      broker.attachSocket({
+        peer: this.peerName,
+        direction: "outbound",
+        socket: ws,
+      });
+    });
+
+    ws.on("close", () => {
+      if (generation !== this.socketGeneration) return;
+      this.handleClose(generation);
+    });
+
+    ws.on("error", (err) => {
+      if (generation !== this.socketGeneration) return;
+      this.handleError(err, generation);
+    });
+  }
+
+  private handleError(err: Error, generation: number): void {
+    logDebug(TAG, `WS error (${this.peerName} gen=${generation}): ${err.message}`);
+    this.ws?.close();
+  }
+
+  private handleClose(generation: number): void {
+    if (this.state === "destroyed" || generation !== this.socketGeneration) return;
+
+    // Settle: only the current generation can schedule recovery
+    if (this.state === "connecting" || this.state === "connected") {
+      this.state = "idle";
+      this.ws = null;
+      this.scheduleReconnect(generation);
+    }
+  }
+
+  private scheduleReconnect(generation: number): void {
+    if (this.state === "destroyed" || generation !== this.socketGeneration) return;
+    if (this.reconnectTimer) return; // Only one pending timer
+
+    const delay = this.backoffMs * (0.8 + Math.random() * 0.4);
+    logDebug(TAG, `Reconnecting to ${this.peerName} in ${Math.round(delay)}ms (backoff: ${this.backoffMs}ms)`);
+    this.state = "waiting";
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.internalDial();
+    }, delay).unref();
+
+    this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS);
   }
 }
