@@ -11,7 +11,7 @@ const TEST_HOME = join(tmpdir(), `abtars-peer-config-test-${process.pid}`);
 
 vi.mock("../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
 // Logger — suppress output in tests
-vi.mock("./logger.js", () => ({ logInfo: vi.fn(), logWarn: vi.fn() }));
+vi.mock("./logger.js", () => ({ logInfo: vi.fn(), logWarn: vi.fn(), logDebug: vi.fn() }));
 
 async function freshImport() {
   // Clear module cache between tests

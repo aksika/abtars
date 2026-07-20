@@ -346,14 +346,33 @@ describe("handleInboundMessage", () => {
 
 describe("citation detection (#1270)", () => {
   let transport: IKiroTransport;
-  let buildPromptSpy: any;
+
+  /** Shared memoryRuntime mock that satisfies AbtarsMemoryRuntime. */
+  function mockMemoryRuntime(overrides: Record<string, unknown> = {}) {
+    return {
+      state: "ready",
+      capabilities: new Set<string>(),
+      recall: vi.fn().mockResolvedValue({ hits: [{ memoryId: 1, content: "test memory", score: 0.95 }] }),
+      recordMessage: vi.fn().mockResolvedValue({}),
+      recordFeedback: vi.fn().mockResolvedValue({}),
+      assembleSessionContext: vi.fn().mockResolvedValue({}),
+      getRecentConversation: vi.fn().mockResolvedValue({ results: [] }),
+      getStatus: vi.fn().mockResolvedValue({}),
+      getCoreKnowledge: vi.fn().mockResolvedValue({ core: [] }),
+      embed: vi.fn().mockResolvedValue({}),
+      runMaintenance: vi.fn().mockResolvedValue({}),
+      close: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+  }
 
   beforeEach(async () => {
     transport = mockTransport();
+    transport.contextPercent = -1;
     setUserRegistryOverride(MASTER_REGISTRY);
     detectCitationsSpy.mockClear();
     detectCitationsSpy.mockReturnValue([1]);
-    abmindReturn = { detectCitations: detectCitationsSpy };
+    abmindReturn = { detectCitations: detectCitationsSpy, renderMemory: vi.fn().mockReturnValue("test memory") };
     const spinMod = await import("./spin.js");
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
       session.transport = transport;
@@ -384,13 +403,6 @@ describe("citation detection (#1270)", () => {
         compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
       }),
     );
-    const pipelineMod = await import("./pipeline/prompt-builder.js");
-    buildPromptSpy = vi.spyOn(pipelineMod, "buildPrompt").mockResolvedValue({
-      prompt: "hello",
-      isSessionStart: false,
-      imageContent: undefined,
-      recalledHits: [{ id: 1, contentEn: "test memory" }],
-    } as any);
   });
 
   afterEach(() => {
@@ -403,7 +415,8 @@ describe("citation detection (#1270)", () => {
     const deps = mockDeps(transport, {
       memory: { bumpCitedCount: vi.fn(), recordMessage: vi.fn() } as any,
       memoryConfig: { memoryEnabled: false, memoryDir: "/tmp" },
-    });
+      memoryRuntime: mockMemoryRuntime(),
+    } as any);
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
@@ -411,17 +424,21 @@ describe("citation detection (#1270)", () => {
   });
 
   it("calls detectCitations from lazy module when memoryConfig.memoryEnabled is true", async () => {
-    const bumpCited = vi.fn();
+    const recordFeedback = vi.fn().mockResolvedValue({});
     const adapter = mockAdapter();
     const deps = mockDeps(transport, {
-      memory: { bumpCitedCount: bumpCited, recordMessage: vi.fn() } as any,
+      memory: { bumpCitedCount: vi.fn(), recordMessage: vi.fn() } as any,
       memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
-    });
+      memoryRuntime: mockMemoryRuntime({ recordFeedback }),
+    } as any);
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
     expect(detectCitationsSpy).toHaveBeenCalledWith("Hello from Kiro!", [{ id: 1, contentEn: "test memory" }]);
-    expect(bumpCited).toHaveBeenCalledWith([1]);
+    expect(recordFeedback).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryId: 1, feedbackType: "cite" }),
+      expect.any(String),
+    );
   });
 
   it("skips citation detection when abmind() returns null even if memoryEnabled is true", async () => {
@@ -430,13 +447,14 @@ describe("citation detection (#1270)", () => {
     const deps = mockDeps(transport, {
       memory: { bumpCitedCount: vi.fn(), recordMessage: vi.fn() } as any,
       memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
-    });
+      memoryRuntime: mockMemoryRuntime(),
+    } as any);
 
     await handleInboundMessage(makeMsg(), adapter, deps);
   });
 
   it("logs WARN (not DEBUG) when detectCitations throws", async () => {
-    abmindReturn = { detectCitations: () => { throw new Error("boom"); } };
+    abmindReturn = { detectCitations: () => { throw new Error("boom"); }, renderMemory: vi.fn().mockReturnValue("test memory") };
     const logMod = await import("./logger.js");
     const warnSpy = vi.spyOn(logMod, "logWarn").mockImplementation(() => {});
     const debugSpy = vi.spyOn(logMod, "logDebug").mockImplementation(() => {});
@@ -445,7 +463,8 @@ describe("citation detection (#1270)", () => {
     const deps = mockDeps(transport, {
       memory: { bumpCitedCount: vi.fn(), recordMessage: vi.fn() } as any,
       memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
-    });
+      memoryRuntime: mockMemoryRuntime(),
+    } as any);
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
