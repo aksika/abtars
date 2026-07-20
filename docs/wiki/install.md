@@ -34,33 +34,19 @@ Step 3 automatically clones source, builds, deploys, and starts the bridge (daem
 | Step | What happens |
 |------|-------------|
 | `npm install -g abtars@alpha abmind@alpha` | Installs CLI tools globally |
-| `abtars deps install all` | Installs optional npm packages (browser, PDF, YouTube, image) |
+| `abtars deps install all` | Installs optional npm package groups (native, twitter, pdf, youtube, image) |
 | `abtars install` | Creates config, clones source, builds, deploys release, starts bridge |
 | `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption (discovers user from abtars) |
 
 ### System dependencies (optional)
 
-`abtars deps` manages two distinct kinds of optional dependency:
-
-- **Npm packages** (`browser`, `pdf`, `youtube`, `image`, `native`) — auto-installed:
-  `abtars deps install <name>` (or `all`) downloads and installs them for you.
-- **System binaries** (`ollama`, `bwrap`, `lightpanda`) — installed manually. abtars
-  does **not** run system installers or `sudo` for you. `abtars deps install ollama`
-  prints the exact upstream command to run yourself; it does not install the binary.
+`abtars deps` manages optional npm package groups (`native`, `twitter`, `pdf`, `youtube`, `image`, `pi`) and system binaries (`ollama`, `bwrap`, `lightpanda`). See [Dependencies](./dependencies.md) for the full command reference, group table, and the native-deps adoption/collision behavior shared with abmind.
 
 ```bash
-abtars deps list          # shows both kinds + install hints
-abtars deps install all   # installs the npm packages
+abtars deps list          # shows every group + install status
+abtars deps install all   # installs the npm package groups
 abtars deps install ollama # prints ollama's manual install command (does not run it)
 ```
-
-| System binary | What for | Install manually |
-|-----------|----------|---------|
-| ollama | Local embeddings + local models | `curl -fsSL https://ollama.ai/install.sh \| sh` |
-| bwrap | Sandbox (Linux) | `apt install bubblewrap` |
-| lightpanda | Fast web fetch | See https://lightpanda.io |
-
-Install ollama before `abmind install` if you want local embeddings.
 
 ## Interactive install
 
