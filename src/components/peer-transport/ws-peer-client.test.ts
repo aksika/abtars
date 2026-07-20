@@ -181,15 +181,6 @@ describe("WsOutboxStore", () => {
 });
 
 // ── WsPeerClient state machine (#1455) ────────────────────────────────────
-// TEST DEFICIENCY: A prolonged-refusal test proving exact bounded backoff
-// attempt counts through the 5-minute cap and reset after authenticated open
-// is omitted because it requires a controlled WebSocket mock that simulates
-// repeated ECONNREFUSED + close/retry cycles across multiple backoff steps.
-// The observed 2026-07-19 incident (84 ECONNREFUSED in 7 min from overlapping
-// heartbeat chains) is the canonical failure mode — deterministic fake-timer
-// proofs of one active dial, one pending timer, and stale-callback safety
-// are covered below. A real multi-host outage replay is disproportionate
-// for this unit scope.
 
 describe("WsPeerClient state machine", () => {
   beforeEach(() => {
@@ -324,6 +315,60 @@ describe("WsPeerClient state machine", () => {
 
     vi.advanceTimersByTime(6000);
     expect(client.currentState).toBe("connecting");
+  });
+
+  it("prolonged refusal: one dial per backoff step, bounded at 5s-to-300s, resets after authenticated open", async () => {
+    // Pin jitter to its midpoint (0.8 + 0.5*0.4 = 1.0) so each step's exact
+    // delay is deterministic: 5s, 10s, 20s, 40s, 80s, 160s, 300s (capped), 300s...
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+
+    const expectedDelays = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000];
+
+    client.requestConnect({ reason: "startup" });
+    expect(mockWsInstances.length).toBe(1);
+
+    // Drive through every backoff step with a fresh ECONNREFUSED-style
+    // error+close on the current socket, and confirm exactly one dial is
+    // attempted per step, gated by the exact bounded delay.
+    for (let step = 0; step < expectedDelays.length; step++) {
+      const ws = mockWsInstances[mockWsInstances.length - 1];
+      ws.emit("error", new Error("ECONNREFUSED"));
+      ws.emit("close");
+      expect(client.currentState).toBe("waiting");
+
+      const delay = expectedDelays[step];
+
+      // One tick before the deadline: no new dial yet.
+      vi.advanceTimersByTime(delay - 1);
+      expect(mockWsInstances.length).toBe(step + 1);
+      expect(client.currentState).toBe("waiting");
+
+      // Crossing the deadline: exactly one new dial, never more than one.
+      vi.advanceTimersByTime(1);
+      expect(mockWsInstances.length).toBe(step + 2);
+      expect(client.currentState).toBe("connecting");
+    }
+
+    // Backoff is capped at 300s — never exceeds it even after many steps.
+    expect((client as any).backoffMs).toBe(300_000);
+
+    // A successful authenticated open resets backoff to the initial value.
+    const finalWs = mockWsInstances[mockWsInstances.length - 1];
+    finalWs.emit("open");
+    expect(client.currentState).toBe("connected");
+    expect((client as any).backoffMs).toBe(5_000);
+
+    // After reset, the next refusal starts the sequence over at 5s, not 300s.
+    finalWs.emit("error", new Error("ECONNREFUSED"));
+    finalWs.emit("close");
+    expect(client.currentState).toBe("waiting");
+    vi.advanceTimersByTime(4_999);
+    expect(mockWsInstances.length).toBe(expectedDelays.length + 1);
+    vi.advanceTimersByTime(1);
+    expect(mockWsInstances.length).toBe(expectedDelays.length + 2);
   });
 });
 
