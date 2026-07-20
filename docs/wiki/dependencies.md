@@ -75,7 +75,7 @@ If you hit this, check what else writes to `~/.local/lib/node_modules/` on your 
 | `bwrap` | Sandbox (Linux only) | `apt install bubblewrap` |
 | `lightpanda` | Fast web fetch | See https://lightpanda.io |
 
-abtars never runs a system installer or `sudo` for you. `abtars deps install ollama` (or any system binary name) just prints the upstream install command — it does not execute it. See [Do I Need sudo?](./no-sudo.md) for why.
+abtars never runs a system installer or `sudo` for you. `abtars deps install ollama` (or any system binary name) just prints the upstream install command — it does not execute it. See [Prerequisites](./prerequisites.md#do-i-need-sudo-no) for why.
 
 ## Troubleshooting
 
