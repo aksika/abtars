@@ -110,7 +110,7 @@ export function resolveClosure(nmDir: string, seedNames: string[]): ClosureResul
   const visited = new Map<string, NativeClosureEntry>();
   const queue: Array<{ name: string; kind: "root" | "transitive" }> =
     seedNames.map(n => ({ name: n, kind: "root" }));
-  const depRanges = new Map<string, string[]>();
+
 
   while (queue.length > 0) {
     const { name, kind } = queue.shift()!;
@@ -170,19 +170,6 @@ export function resolveClosure(nmDir: string, seedNames: string[]): ClosureResul
         if (existsSync(join(nmDir, depName))) {
           runtimeDeps.set(depName, range);
         }
-      }
-    }
-
-    for (const [depName, range] of runtimeDeps) {
-      const existing = depRanges.get(depName);
-      if (existing && !existing.includes(range)) {
-        return {
-          ok: false,
-          reason: `Incompatible version ranges for transitive "${depName}": "${existing[0]}" from prior dependent vs "${range}" from "${name}"`,
-        };
-      }
-      if (!existing) {
-        depRanges.set(depName, [range]);
       }
     }
 

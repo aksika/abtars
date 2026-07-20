@@ -94,7 +94,7 @@ describe("resolveClosure", () => {
     expect(trans!.version).toBe("1.1.0");
   });
 
-  it("deduplicates transitive packages from multiple roots with same range", async () => {
+  it("deduplicates transitive packages from multiple roots with distinct overlapping ranges", async () => {
     const { resolveClosure } = await import("./native-group.js");
     const nm = join(tmpDir, "node_modules");
     mkdirSync(join(nm, "root-a"), { recursive: true });
@@ -106,7 +106,7 @@ describe("resolveClosure", () => {
     }));
     writeFileSync(join(nm, "root-b", "package.json"), JSON.stringify({
       name: "root-b", version: "2.0.0",
-      dependencies: { shared: "^1.0.0" },
+      dependencies: { shared: "^1.5.0" },
     }));
     writeFileSync(join(nm, "shared", "package.json"), JSON.stringify({ name: "shared", version: "1.5.0" }));
 
@@ -155,7 +155,7 @@ describe("resolveClosure", () => {
     expect(result.reason).toContain("Missing or invalid");
   });
 
-  it("fails on incompatible transitive version ranges", async () => {
+  it("accepts distinct range strings — range diversity is not a collision", async () => {
     const { resolveClosure } = await import("./native-group.js");
     const nm = join(tmpDir, "node_modules");
     mkdirSync(join(nm, "root-a"), { recursive: true });
@@ -172,9 +172,10 @@ describe("resolveClosure", () => {
     writeFileSync(join(nm, "shared", "package.json"), JSON.stringify({ name: "shared", version: "1.5.0" }));
 
     const result = resolveClosure(nm, ["root-a", "root-b"]);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.reason).toContain("Incompatible version ranges");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.entries.some(e => e.name === "shared")).toBe(true);
+    }
   });
 
   it("skips missing optionalDependencies packages", async () => {
