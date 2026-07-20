@@ -11,6 +11,9 @@ import { describe, expect, test } from "vitest";
 import { BOOT_PHASES } from "../bridge-app.js";
 import { BOOT_NODES } from "./boot-nodes.js";
 import { detectCycle } from "./boot-graph.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { cwd } from "node:process";
 
 describe("Boot graph integrity", () => {
   test("no cycles in dependency graph", () => {
@@ -49,5 +52,58 @@ describe("Boot graph integrity", () => {
     expect(BOOT_PHASES.length).toBeGreaterThanOrEqual(BOOT_NODES.length + 1);
     // #1380: memoryIpc removed (daemon replaces legacy IPC server)
     expect(BOOT_NODES).toHaveLength(11);
+  });
+
+  // #1455: Source-boundary — no Agent Swarm imports in heartbeat modules
+  test("heartbeat modules do not import Agent Swarm peer-transport components", () => {
+    const root = cwd();
+    const forbidden = [
+      "peer-transport",
+      "ws-peer-client",
+      "peer-ws-broker",
+      "peer-inventory",
+      "peer-doorbell",
+      "remote-pi-delivery",
+      "remote-pi-registry",
+    ];
+    const heartbeatFiles = [
+      join(root, "src/boot/phase-heartbeat.ts"),
+      join(root, "src/boot/heartbeat-tier3.ts"),
+    ];
+    for (const file of heartbeatFiles) {
+      const content = readFileSync(file, "utf-8");
+      for (const pattern of forbidden) {
+        // Check import/require statements, not comments or string literals
+        const importRe = new RegExp(`from\\s+["'](?:.*?/)?${pattern}(?:/.*?)?["']`);
+        const requireRe = new RegExp(`require\\(["'](?:.*?/)?${pattern}(?:/.*?)?["']\\)`);
+        expect(content, `${file}: must not import ${pattern}`).not.toMatch(importRe);
+        expect(content, `${file}: must not require ${pattern}`).not.toMatch(requireRe);
+      }
+    }
+  });
+
+  test("no 'heartbeat' peer connection reason remains in transport code", () => {
+    const root = cwd();
+    const transportFiles = [
+      join(root, "src/components/peer-transport/http-transport.ts"),
+      join(root, "src/components/peer-transport/peer-doorbell.ts"),
+    ];
+    for (const file of transportFiles) {
+      const content = readFileSync(file, "utf-8");
+      // Check for "heartbeat" in the reason union
+      // This should NOT appear as a valid reason value in the PeerConnectionManager type
+      const reasonUnionMatch = content.match(/reason:\s*"[^"]*heartbeat[^"]*"/);
+      expect(reasonUnionMatch, `${file}: should not have heartbeat reason`).toBeNull();
+    }
+  });
+
+  test("'heartbeat' is not in PUSH_ALLOWLIST or ALLOWED_PUSH", () => {
+    const root = cwd();
+    const brokerFile = join(root, "src/components/peer-transport/peer-ws-broker.ts");
+    const apiServerFile = join(root, "src/components/agent-api-server.ts");
+    const brokerContent = readFileSync(brokerFile, "utf-8");
+    const apiContent = readFileSync(apiServerFile, "utf-8");
+    expect(brokerContent).not.toContain('"heartbeat"');
+    expect(apiContent).not.toContain('"heartbeat"');
   });
 });

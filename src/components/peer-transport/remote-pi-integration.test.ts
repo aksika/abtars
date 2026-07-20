@@ -5,7 +5,7 @@
  * resume approval enforcement, and control operations.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 
@@ -759,6 +759,73 @@ describe("Remote Pi Integration (#1358)", () => {
 
       const pending = store.findRunsWithUnacknowledgedEvents();
       expect(pending.some(r => r.run_id === run.id)).toBe(true);
+    });
+  });
+
+  // ── #1455: Remote-Pi delivery drain — route interface contract ────────────
+
+  describe("Remote-Pi delivery drain (#1455)", () => {
+    beforeEach(() => {
+      deliveryManager = new RemotePiDeliveryManager({ store, producer, localPeerName: "origin-peer" });
+    });
+
+    it("pushEvents returns 0 when route is null", async () => {
+      const result = await deliveryManager.pushEvents("run-nonexistent", "other-peer");
+      expect(result).toBe(0);
+    });
+
+    it("pushEvents returns 0 and requests connection when hasRoute returns false", async () => {
+      const mockRoute = {
+        hasRoute: () => false,
+        sendPush: vi.fn(),
+        requestConnection: vi.fn(),
+      };
+      deliveryManager.setRouteInterface(mockRoute);
+
+      const result = await deliveryManager.pushEvents("run-nonexistent", "other-peer");
+      expect(result).toBe(0);
+      expect(mockRoute.requestConnection).toHaveBeenCalledWith("other-peer", "outbox");
+    });
+
+    it("pushEvents returns 0 when there are no events for the given run", async () => {
+      const mockRoute = {
+        hasRoute: () => true,
+        sendPush: vi.fn().mockReturnValue(true),
+        requestConnection: vi.fn(),
+      };
+      deliveryManager.setRouteInterface(mockRoute);
+
+      const result = await deliveryManager.pushEvents("run-without-events", "origin-peer");
+      expect(result).toBe(0);
+    });
+
+    it("drainPeer does not error when no unacknowledged events exist", async () => {
+      const mockRoute = {
+        hasRoute: () => true,
+        sendPush: vi.fn(),
+        requestConnection: vi.fn(),
+      };
+      deliveryManager.setRouteInterface(mockRoute);
+
+      await expect(deliveryManager.drainPeer("origin-peer")).resolves.toBeUndefined();
+    });
+
+    it("drainPeer coalesces concurrent calls for the same peer", async () => {
+      const drainInFlight = (deliveryManager as any).drainInFlight as Map<string, Promise<void>>;
+      expect(drainInFlight.size).toBe(0);
+
+      // First call populates the map
+      const p1 = deliveryManager.drainPeer("origin-peer");
+      // The drainInFlight map should have an entry immediately (before await)
+      expect(drainInFlight.size).toBe(1);
+
+      // Second call reuses the same drainInFlight entry
+      const p2 = deliveryManager.drainPeer("origin-peer");
+      expect(drainInFlight.size).toBe(1);
+
+      // Wait for both to complete
+      await Promise.all([p1, p2]);
+      expect(drainInFlight.size).toBe(0);
     });
   });
 });

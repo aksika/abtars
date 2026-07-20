@@ -316,4 +316,76 @@ describe("PeerWsBroker", () => {
     server.close();
     client.close();
   });
+
+  // #1455: Accepted and outbound pushes route through the same push handler
+  it("push handler is invoked for frames on outbound socket", async () => {
+    const broker = await makeBroker();
+    const pushHandler = vi.fn();
+    broker.registerPushHandler(pushHandler);
+
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    client.emit("message", Buffer.from(JSON.stringify({
+      type: "push", method: "peer.inventory.v1", payload: { capabilities: ["bash"] },
+    })));
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(pushHandler).toHaveBeenCalledWith("kp", "peer.inventory.v1", { capabilities: ["bash"] });
+    server.close();
+    client.close();
+  });
+
+  it("push handler is invoked for frames on accepted socket", async () => {
+    const broker = await makeBroker();
+    const pushHandler = vi.fn();
+    broker.registerPushHandler(pushHandler);
+
+    const { server, client, serverConn } = await connectedPair();
+    // Attach the server-side connection as an "accepted" socket
+    broker.attachSocket({ peer: "kp", direction: "accepted", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    // Send from the remote side (serverConn simulates the remote peer)
+    // The broker listens on client for messages
+    client.emit("message", Buffer.from(JSON.stringify({
+      type: "push", method: "pi.lifecycle.v1", payload: { event: "test" },
+    })));
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(pushHandler).toHaveBeenCalledWith("kp", "pi.lifecycle.v1", { event: "test" });
+    server.close();
+    client.close();
+  });
+
+  it("push handler is called once per frame (no duplicate processing)", async () => {
+    const broker = await makeBroker();
+    const pushHandler = vi.fn();
+    broker.registerPushHandler(pushHandler);
+
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    await new Promise(r => setTimeout(r, 50));
+
+    client.emit("message", Buffer.from(JSON.stringify({
+      type: "push", method: "peer.inventory.v1", payload: { capabilities: ["bash"] },
+    })));
+    await new Promise(r => setTimeout(r, 50));
+
+    // The handler should be called exactly once
+    expect(pushHandler).toHaveBeenCalledTimes(1);
+    server.close();
+    client.close();
+  });
+
+  it("sendPush with method not in allowlist returns false", async () => {
+    const broker = await makeBroker();
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    expect(broker.sendPush("kp", "unknown.method", {})).toBe(false);
+    expect(broker.sendPush("kp", "heartbeat", {})).toBe(false); // removed from allowlist
+    server.close();
+    client.close();
+  });
 });

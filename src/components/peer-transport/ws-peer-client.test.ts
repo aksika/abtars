@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WsOutboxStore } from "./ws-outbox-store.js";
 
+const mockWsInstances: any[] = [];
 vi.mock("ws", () => {
   const EventEmitter = require("node:events");
   class MockWebSocket extends EventEmitter {
@@ -19,6 +20,7 @@ vi.mock("ws", () => {
     constructor(url: string, opts?: any) {
       super();
       this.readyState = MockWebSocket.CONNECTING;
+      mockWsInstances.push(this);
     }
     close() {
       this.readyState = 3;
@@ -197,6 +199,7 @@ describe("WsPeerClient state machine", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    mockWsInstances.length = 0;
   });
 
   it("starts in idle state", async () => {
@@ -270,11 +273,56 @@ describe("WsPeerClient state machine", () => {
     const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
     client.requestConnect({ reason: "udp-doorbell", delayMs: 200 });
     expect(client.currentState).toBe("waiting");
-    // Second delayed trigger while waiting
     client.requestConnect({ reason: "outbox", delayMs: 100 });
     expect(client.currentState).toBe("waiting");
-    // After the first timer fires, state should be connecting
     vi.advanceTimersByTime(200);
+    expect(client.currentState).toBe("connecting");
+  });
+
+  it("error+close settles connecting state once and schedules one reconnect", async () => {
+    const prevLen = mockWsInstances.length;
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    client.requestConnect({ reason: "startup" });
+    expect(client.currentState).toBe("connecting");
+
+    const ws = mockWsInstances[mockWsInstances.length - 1];
+    expect(ws).toBeTruthy();
+
+    ws.emit("error", new Error("ECONNREFUSED"));
+    ws.emit("close");
+
+    expect(client.currentState).toBe("waiting");
+  });
+
+  it("stale generation close callback does not schedule reconnect", async () => {
+    const prevLen = mockWsInstances.length;
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    client.requestConnect({ reason: "startup" });
+    const oldWs = mockWsInstances[mockWsInstances.length - 1];
+    expect(oldWs).toBeTruthy();
+    const oldGeneration = (client as any).socketGeneration;
+
+    (client as any).socketGeneration = oldGeneration + 1;
+
+    oldWs.emit("close");
+
+    expect(client.currentState).toBe("connecting");
+  });
+
+  it("reconnect timer fires once and transitions back to connecting", async () => {
+    const prevLen = mockWsInstances.length;
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+    client.requestConnect({ reason: "startup" });
+    expect(client.currentState).toBe("connecting");
+
+    const ws = mockWsInstances[mockWsInstances.length - 1];
+    ws.emit("close");
+    expect(client.currentState).toBe("waiting");
+
+    vi.advanceTimersByTime(6000);
     expect(client.currentState).toBe("connecting");
   });
 });
