@@ -162,11 +162,12 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
       transport.setDoorbell(doorbell);
       await doorbell.start();
       updateDoorbellState(doorbell.isRunning ? "listening" : "degraded", doorbell.isRunning ? undefined : "bind/start failed");
+      // #1455: Start route/capability subscriptions BEFORE initWsConnections so
+      // route-available events from initial outbound socket opens are captured.
+      transport.start();
       if (Object.keys(loadPeerConfig().peers).length > 0) {
         await transport.initWsConnections();
       }
-      // #1455: Start route and capability subscriptions (inventory send, remote-pi drain)
-      transport.start();
 
       // #1455: Inject broker-backed route interface into RemotePiDeliveryManager
       try {

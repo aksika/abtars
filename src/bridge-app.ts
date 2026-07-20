@@ -58,6 +58,17 @@ export class Bridge {
       ]);
 
     await step("agent-api", () => this.ctx.agentApiServer?.stop());
+    await step("peer-transport", () => {
+      try {
+        const { getPeerTransport } = require("./components/peer-transport/index.js") as typeof import("./components/peer-transport/index.js");
+        const transport = getPeerTransport();
+        if (typeof transport.stop === "function") transport.stop();
+        // Destroy all peer clients to cancel reconnect timers and close sockets
+        for (const wsClient of (transport as any).wsClients?.values() ?? []) {
+          wsClient.destroy();
+        }
+      } catch { /* best effort */ }
+    });
     await step("dashboard", () => this.ctx.dashboardServer?.stop());
     await step("services", () => this.ctx.registry.stopAll());
     await step("pi-executor", () => this.ctx.piExecutorService?.executor.interruptAll());

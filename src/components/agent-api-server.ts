@@ -269,15 +269,9 @@ export class AgentApiServer {
       socket: ws,
     });
 
-    // #1434: Send inventory on accepted connection (peer-status.v1 removed)
-    try {
-      const { loadPeerConfig: lpc } = require("./peer-config.js") as typeof import("./peer-config.js");
-      const { buildSignedInventory: bsi } = require("./peer-transport/peer-inventory.js") as typeof import("./peer-transport/peer-inventory.js");
-      const { getLocalCapabilities: glc } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
-      const cfg = lpc();
-      const invPayload = bsi(cfg.self.signingKey, cfg.self.name, process.env["npm_package_version"] ?? "0.0.0", glc(), ["wss", "https"]);
-      broker.sendPush(peerName, "peer.inventory.v1", invPayload);
-    } catch { /* best effort */ }
+    // #1455: Inventory is sent by HttpTransport.onRouteAvailable via the
+    // broker route subscription, not directly here. The broker's attachSocket
+    // emits route-available, which triggers the subscriber in transport.start().
 
     ws.on("close", () => {
       if (this.peerWsConnections.get(peerName) === ws) {

@@ -121,9 +121,10 @@ export class RemotePiDeliveryManager {
         const event = this.deps.eventProducer.buildEventEnvelope(row);
         this._validateEvent(event);
 
-        this.route.sendPush(originPeer, "pi.lifecycle.v1", event);
-        pushed++;
-        logTrace(TAG, `Pushed event ${event.event_id} for run ${runId}`);
+        if (this.route.sendPush(originPeer, "pi.lifecycle.v1", event)) {
+          pushed++;
+          logTrace(TAG, `Pushed event ${event.event_id} for run ${runId}`);
+        }
       } catch (err) {
         logError(TAG, `Failed to push event for run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
       }

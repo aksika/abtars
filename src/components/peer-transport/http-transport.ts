@@ -65,7 +65,6 @@ export class HttpTransport implements PeerTransport {
   }): void {
     const existing = this.wsClients.get(peerName);
     if (existing) {
-      // Coalesce — client's own state machine handles duplicate triggers
       existing.requestConnect({ reason: input.reason, delayMs: input.jitterMs });
       return;
     }
@@ -74,16 +73,19 @@ export class HttpTransport implements PeerTransport {
     const entry = config.peers[peerName];
     if (!entry || entry.transport !== "ws-outbound") return;
 
+    // Install the client synchronously before any timer so concurrent calls
+    // find the existing entry and coalesce through requestConnect.
+    const { WsPeerClient: Client } = require("./ws-peer-client.js") as typeof import("./ws-peer-client.js");
+    const client = new Client(peerName, entry);
+    this.wsClients.set(peerName, client);
+
     const jitter = input.jitterMs ?? Math.floor(Math.random() * CONNECT_JITTER_MAX_MS);
-    setTimeout(() => {
-      if (this.wsClients.has(peerName)) return;
-      const { WsPeerClient: Client } = require("./ws-peer-client.js") as typeof import("./ws-peer-client.js");
-      const client = new Client(peerName, entry);
-      this.setupWsClient(peerName, client);
-      this.wsClients.set(peerName, client);
+    if (jitter > 0) {
+      client.requestConnect({ reason: input.reason, delayMs: jitter });
+    } else {
       client.requestConnect({ reason: input.reason });
-      logInfo(TAG, `WS doorbell: connecting to ${peerName} (reason: ${input.reason})`);
-    }, jitter).unref();
+    }
+    logInfo(TAG, `WS doorbell: connecting to ${peerName} (reason: ${input.reason})`);
   }
 
   async initWsConnections(): Promise<void> {
