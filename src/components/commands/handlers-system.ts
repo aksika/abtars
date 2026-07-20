@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { spawnDetached } from "../spawn-safe.js";
 import { readEntries as cronReadEntries } from "../tasks/task-store.js";
 import { readState } from "../tasks/task-state-store.js";
 import { abtarsHome } from "../../paths.js";
@@ -536,6 +535,66 @@ export async function runDevUpdate(
   deployProc.unref();
 }
 
+export type NpmUpdateChannel = "alpha" | "stable";
+
+export async function runNpmUpdate(
+  ctx: CommandContext,
+  channel: NpmUpdateChannel,
+  spawnFn: typeof import("node:child_process").spawn,
+): Promise<void> {
+  const args = channel === "alpha"
+    ? ["update", "--source", "npm", "--tag", "alpha"]
+    : ["update", "--source", "npm"];
+
+  const child = spawnFn("abtars", args, {
+    detached: true,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  let settled = false;
+  let stderr = "";
+
+  child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+  const timeout = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    child.kill("SIGKILL");
+    const tail = stderr.slice(-300);
+    const msg = tail
+      ? `x Update timed out after 180s:\n${tail}`
+      : "x Update timed out after 180s";
+    logWarn("update", `npm ${channel} timed out`);
+    ctx.reply(msg).catch(() => {});
+  }, 180_000);
+
+  child.on("error", (err) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    const code = (err as NodeJS.ErrnoException).code;
+    const msg = `x Update failed to start${code ? ` (${code})` : ""}: ${err.message}`;
+    logWarn("update", `npm ${channel} spawn error: ${err.message}`);
+    ctx.reply(msg).catch(() => {});
+  });
+
+  child.on("close", (code, signal) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+
+    if (code === 0) return;
+
+    if (code !== null && code !== 0) {
+      ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {});
+    } else if (code === null && signal) {
+      ctx.reply(`x Update terminated (signal ${signal})`).catch(() => {});
+    }
+  });
+
+  child.unref();
+}
+
 export async function handleSoftware(_text: string, ctx: CommandContext): Promise<boolean> {
   const { existsSync } = await import("node:fs");
   const { abtarsHome } = await import("../../paths.js");
@@ -628,24 +687,11 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     if (channel === "dev") {
       const { spawn } = await import("node:child_process");
       await runDevUpdate(ctx, spawn);
-    } else if (channel === "alpha") {
-      await ctx.reply("Updating from npm (alpha)...");
-      logInfo("update", "npm alpha update requested");
-      const { spawn } = await import("node:child_process");
-      const child = spawn("abtars", ["update", "--source", "npm", "--tag", "alpha"], { stdio: ["ignore", "pipe", "pipe"] });
-      let stderr = "";
-      child.on("error", (err) => logWarn("update", `spawn abtars failed (non-fatal): ${err.message}`));
-      child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
-      child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
     } else {
-      await ctx.reply("Updating from npm (stable)...");
-      logInfo("update", "npm stable update requested");
       const { spawn } = await import("node:child_process");
-      const child = spawn("abtars", ["update", "--source", "npm"], { stdio: ["ignore", "pipe", "pipe"] });
-      let stderr = "";
-      child.on("error", (err) => logWarn("update", `spawn abtars failed (non-fatal): ${err.message}`));
-      child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
-      child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
+      await ctx.reply(`Updating from npm (${channel})...`);
+      logInfo("update", `npm ${channel} update requested`);
+      await runNpmUpdate(ctx, channel as NpmUpdateChannel, spawn);
     }
     return true;
   }
@@ -655,7 +701,8 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     if (!isMaster) { await ctx.reply("Requires master role."); return true; }
     logInfo("update", "npm alpha update (legacy /update npm)");
     await ctx.reply("Updating from npm (alpha)...");
-    spawnDetached("abtars", ["update", "--source", "npm", "--tag", "alpha"], "update");
+    const { spawn } = await import("node:child_process");
+    await runNpmUpdate(ctx, "alpha", spawn);
     return true;
   }
 
