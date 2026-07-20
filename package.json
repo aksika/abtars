@@ -1,6 +1,6 @@
 {
   "name": "abtars",
-  "version": "0.3.6-alpha.0",
+  "version": "0.3.7-alpha.0",
   "description": "Agentic framework for connecting LLMs to messaging platforms, with persistent memory, skills, scheduled tasks, self-healing supervision, and distributed multi-agent collaboration",
   "type": "module",
   "main": "bundle/abtars.js",
