@@ -199,9 +199,10 @@ export async function deployActivationCli(flags: ReadonlyMap<string, string | bo
  * shell as the zero-dependency last resort (no deployed binary needed). If this
  * stop/respawn sequence or the release path layout changes, update it too.
  */
-async function deployActivation(
+export async function deployActivation(
   args: { staged: StagedRelease; channel: SourceName; repoRoot: string },
   bootstrapFn?: BootstrapFn,
+  healthProbeFn?: typeof healthProbe,
 ): Promise<number> {
   const { staged, channel, repoRoot } = args;
   const paths = packagePaths("abtars");
@@ -400,7 +401,7 @@ async function deployActivation(
 
   // ── Step 9: Health probe ──────────────────────────────────────────────
   process.stdout.write(`Waiting for bridge health...\n`);
-  const health = await healthProbe(paths.home, Date.now(), 180_000);
+  const health = await (healthProbeFn ?? healthProbe)(paths.home, Date.now(), 180_000);
   if (health.healthy) {
     process.stdout.write(`✓ Bridge healthy (PID ${health.pid}, tick at ${new Date(health.heartbeat!).toISOString()})\n`);
     writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "success", version: staged.version, completedAt: new Date().toISOString() }) + "\n");
