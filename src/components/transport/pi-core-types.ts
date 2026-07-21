@@ -26,6 +26,18 @@ export interface AgentState {
   tools?: readonly unknown[];
 }
 
+export interface BeforeToolCallResult {
+  block?: boolean;
+  reason?: string;
+}
+
+export interface AgentToolResult {
+  label: string;
+  content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
+  details?: string;
+  isError?: boolean;
+}
+
 export interface PiAgentOptions {
   initialState?: Partial<AgentState>;
   streamFn?: StreamFn;
@@ -33,8 +45,8 @@ export interface PiAgentOptions {
   followUpMode?: "one-at-a-time" | "fifo" | "replace" | "parallel";
   toolExecution?: "sequential" | "parallel";
   convertToLlm?: (messages: readonly AgentMessage[]) => readonly AgentMessage[] | Promise<readonly AgentMessage[]>;
-  transformContext?: (context: unknown) => unknown;
-  beforeToolCall?: (toolCall: unknown) => unknown;
+  transformContext?: (messages: readonly AgentMessage[], signal?: AbortSignal) => Promise<readonly AgentMessage[]>;
+  beforeToolCall?: (toolCallId: string, toolName: string, args: Record<string, unknown>) => BeforeToolCallResult | undefined;
   afterToolCall?: (result: unknown) => unknown;
   prepareNextTurnWithContext?: (context: {
     message?: AssistantMessage;
@@ -231,7 +243,12 @@ export interface AgentTool {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
-  execute(args: Record<string, unknown>, context?: { signal?: AbortSignal }): Promise<string>;
+  execute(
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+    onUpdate?: (event: unknown) => void,
+  ): Promise<AgentToolResult>;
   executionMode?: "sequential" | "parallel";
 }
 

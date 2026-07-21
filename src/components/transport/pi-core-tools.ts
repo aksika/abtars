@@ -1,5 +1,5 @@
-import { logError, logWarn } from "../logger.js";
-import type { AgentTool } from "./pi-core-types.js";
+import { logError } from "../logger.js";
+import type { AgentTool, AgentToolResult } from "./pi-core-types.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
 import { getToolDefinitions, executeToolCall } from "./tool-registry.js";
 import type { ToolDefinition } from "./tool-registry.js";
@@ -14,8 +14,6 @@ export interface PiCoreToolContext {
   signal?: AbortSignal;
   sandboxPolicy: SandboxPolicy;
   safety: PiExecutionSafetyController;
-  onToolStart?: (name: string) => void;
-  onToolSuccess?: () => void;
   /** Wrap a JSON schema object as a Pi-compatible TypeScript schema (Type.Unsafe). */
   createUnsafeSchema?: (schema: Record<string, unknown>) => Record<string, unknown>;
 }
@@ -33,12 +31,17 @@ function adaptParameters(params: Record<string, unknown>): Record<string, unknow
   return allowed;
 }
 
-function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext): AgentTool {
-  const jsonSchema = def.parameters ?? {};
-  const adapted = adaptParameters(jsonSchema);
+function validatePiSchemaOrThrow(schema: Record<string, unknown>): void {
+  // Must be parseable as a valid JSON Schema — the registry definitions are
+  // trusted, so this is a sanity check that the schema can be represented as
+  // a Pi AgentTool parameter schema.
+  if (schema == null || typeof schema !== "object") throw new Error("Tool schema must be an object");
+}
 
-  // Wrap in Pi-compatible TSchema via createUnsafeSchema if available,
-  // otherwise pass the plain JSON schema (may fail Pi's internal TypeBox validation).
+function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext): AgentTool {
+  validatePiSchemaOrThrow(def.parameters);
+
+  const adapted = adaptParameters(def.parameters ?? {});
   const parameters = context.createUnsafeSchema
     ? context.createUnsafeSchema(adapted)
     : adapted;
@@ -50,22 +53,32 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
     executionMode: "sequential",
 
     async execute(
-      args: Record<string, unknown>,
-      execContext?: { signal?: AbortSignal },
-    ): Promise<string> {
-      const toolDecision = context.safety.beforeTool(def.name, args);
+      _toolCallId: string,
+      params: Record<string, unknown>,
+      signal?: AbortSignal,
+    ): Promise<AgentToolResult> {
+      const toolDecision = context.safety.beforeTool(def.name, params);
       if (toolDecision.decision === "skip") {
-        return JSON.stringify({ error: "Skipped — tool batch cancelled", skip: true });
+        return {
+          label: `${def.name} (skipped)`,
+          content: [{ type: "text", text: "Tool call skipped — batch cancelled" }],
+          isError: false,
+        };
       }
       if (toolDecision.decision === "error") {
         context.safety.afterTool(def.name, JSON.stringify({ error: toolDecision.reason }));
-        return JSON.stringify({ error: toolDecision.reason });
+        return {
+          label: `${def.name} (blocked)`,
+          content: [{ type: "text", text: toolDecision.reason }],
+          isError: true,
+        };
       }
 
-      context.onToolStart?.(def.name);
+      // onToolStart fires from Pi lifecycle event (tool_execution_start), not from wrapper.
+      // Do not fire it here — prevents double-count.
 
       const stringArgs: Record<string, string> = {};
-      for (const [k, v] of Object.entries(args)) {
+      for (const [k, v] of Object.entries(params)) {
         if (typeof v === "string") {
           stringArgs[k] = v;
         } else if (typeof v === "number" || typeof v === "boolean") {
@@ -82,22 +95,33 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
       try {
         const result = await executeToolCall(def.name, stringArgs, {
           userId: context.userId,
-          signal: execContext?.signal ?? context.signal,
+          signal: signal ?? context.signal,
           sandboxPolicy: context.sandboxPolicy,
         });
 
         const outcome = context.safety.afterTool(def.name, result);
         if (outcome.decision === "error") {
-          return JSON.stringify({ error: outcome.reason, detail: result });
+          return {
+            label: `${def.name} (failure)`,
+            content: [{ type: "text", text: outcome.reason }],
+            isError: true,
+          };
         }
 
-        context.onToolSuccess?.();
-        return result;
+        return {
+          label: def.name,
+          content: [{ type: "text", text: result.slice(0, 2000) }],
+          isError: false,
+        };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logError(TAG, `Tool ${def.name} execution error: ${msg}`);
         context.safety.afterTool(def.name, JSON.stringify({ error: msg }));
-        return JSON.stringify({ error: msg });
+        return {
+          label: `${def.name} (error)`,
+          content: [{ type: "text", text: "Tool execution failed" }],
+          isError: true,
+        };
       }
     },
   };
@@ -117,7 +141,8 @@ export function createPiAgentTools(context: PiCoreToolContext): AgentTool[] {
       const agentTool = definitionToAgentTool(def, context);
       tools.push(agentTool);
     } catch (err) {
-      logWarn(TAG, `Skipping tool "${def.name}" — schema validation failed: ${err instanceof Error ? err.message : String(err)}`);
+      // Design: malformed schema → fail host setup (throw), not skip silently
+      throw new Error(`Tool "${def.name}" schema validation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

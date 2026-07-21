@@ -80,20 +80,18 @@ export class PiCoreExecutionHost {
       });
     };
 
-    const transformContext = async (context: unknown): Promise<unknown> => {
-      if (!this.opts.contextProjection) return context;
-      const ctx = context as { messages?: AgentMessage[] } | null;
-      const rawMessages = ctx?.messages ?? [];
+    const transformContext = async (messages: readonly AgentMessage[], _signal?: AbortSignal): Promise<readonly AgentMessage[]> => {
+      if (!this.opts.contextProjection) return messages;
 
       const cleanMessages = this.opts.safety
-        ? this.opts.safety.scrubClassifiedLiterals(rawMessages as Array<{ role: string; content: string }>) as unknown as AgentMessage[]
-        : rawMessages;
+        ? this.opts.safety.scrubClassifiedLiterals(messages as unknown as Array<{ role: string; content: string }>) as unknown as AgentMessage[]
+        : [...messages];
 
       const result = await this.opts.contextProjection.transform(cleanMessages, this.opts.transformOptions ?? { hostGeneration: 0 });
       if (this.outputObserver && result.contextDegraded) {
         this.outputObserver.end?.("error");
       }
-      return { ...(context as object), messages: result.messages };
+      return result.messages;
     };
 
     // real AgentOptions uses initialState nesting
@@ -110,7 +108,9 @@ export class PiCoreExecutionHost {
       toolExecution: PI_AGENT_CORE_CONFIG.toolExecution,
       convertToLlm,
       transformContext,
-      beforeToolCall: (toolCall: unknown): unknown => toolCall,
+      beforeToolCall: (_toolCallId: string, _toolName: string, _args: Record<string, unknown>): import("./pi-core-types.js").BeforeToolCallResult | undefined => {
+        return undefined;
+      },
       afterToolCall: (result: unknown): unknown => result,
       prepareNextTurnWithContext: (_context: unknown): unknown => {
         if (!this.opts.safety) return _context;

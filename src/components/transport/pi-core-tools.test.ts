@@ -38,8 +38,6 @@ describe("createPiAgentTools", () => {
       userId: "user_1",
       sandboxPolicy: buildPolicy("owner"),
       safety: createPiExecutionSafetyController(policy),
-      onToolStart: vi.fn(),
-      onToolSuccess: vi.fn(),
       ...overrides,
     };
   }
@@ -81,15 +79,17 @@ describe("createPiAgentTools", () => {
     expect(recallTool).toBeDefined();
   });
 
-  it("tool execute returns a string", async () => {
+  it("tool execute returns an AgentToolResult", async () => {
     const ctx = makeContext({
       sandboxPolicy: buildPolicy("owner", { allowedTools: ["irc_send"] }),
     });
     const tools = createPiAgentTools(ctx);
     const ircTool = tools.find((t) => t.name === "irc_send");
     if (ircTool) {
-      const result = await ircTool.execute({ channel: "#test", message: "hello" });
-      expect(typeof result).toBe("string");
+      const result = await ircTool.execute("call_1", { channel: "#test", message: "hello" });
+      expect(typeof result).toBe("object");
+      expect(typeof result.label).toBe("string");
+      expect(Array.isArray(result.content)).toBe(true);
     }
   });
 
@@ -105,9 +105,9 @@ describe("createPiAgentTools", () => {
     const tools = createPiAgentTools(ctx);
     const ircTool = tools.find((t) => t.name === "irc_send");
     if (ircTool) {
-      const result = await ircTool.execute({ channel: "#test", message: "hi" });
-      const parsed = JSON.parse(result);
-      expect(parsed.skip).toBe(true);
+      const result = await ircTool.execute("call_1", { channel: "#test", message: "hi" });
+      expect(result.isError).toBe(false);
+      expect(result.label).toContain("(skipped)");
     }
   });
 });

@@ -1,11 +1,11 @@
 import { logDebug, logWarn } from "../logger.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
-import type { ToolDecision, TurnDecision, PrepareNextTurnContext, AgentLoopTurnUpdate } from "./pi-core-types.js";
+import type { ToolDecision, TurnDecision, PrepareNextTurnContext, AgentLoopTurnUpdate, AgentMessage } from "./pi-core-types.js";
 import { ToolLoopGuard } from "./tool-loop-guard.js";
 
 const TAG = "pi-core-safety";
 
-const MAX_PROMPT_ROUNDS = 40;
+const MAX_PROMPT_ROUNDS = 25;
 const MAX_CANDIDATE_ROUNDS = 10;
 
 export type BehaviorIncidentType = "exact_repeat" | "repeated_failure" | "candidate_round_limit" | "prompt_round_limit";
@@ -108,7 +108,12 @@ export function createPiExecutionSafetyController(
       }
 
       if (candidateRounds >= mc) {
+        // Candidate-round limit: exclude this candidate, don't stop execution.
+        // The #1445 FallbackPolicy will select the next eligible candidate.
         _incident = { type: "candidate_round_limit", candidateKey, roundsUsed: candidateRounds };
+        policy.excludedKeys.add(candidateKey);
+        const [model, endpoint] = candidateKey.split("@");
+        if (model && endpoint) policy.registry.recordError(model, endpoint, "weak");
         return { decision: "stop", reason: `Candidate round limit (${mc}) for ${candidateKey}` };
       }
 
@@ -119,15 +124,30 @@ export function createPiExecutionSafetyController(
     },
 
     prepareNextTurn(context: PrepareNextTurnContext): AgentLoopTurnUpdate | undefined {
-      // Check terminal conditions: if over budget or stopped/paused, signal no update
       if (_paused || _stopped || promptRounds >= mp) {
         return undefined;
       }
 
-      if (!_incident) return undefined;
+      // Default: no incident → allow next turn unchanged
+      if (!_incident) {
+        return {
+          model: { id: activeCandidate },
+          context: undefined,
+        };
+      }
 
       const inc = _incident;
       _incident = null;
+      let baseline: AgentMessage[] | undefined;
+
+      // If context projection provides a safe baseline, use it to roll back
+      // the failed tool exchange. This replaces the agent messages with the
+      // last clean state before the incident happened.
+      const ctx = context as { context?: unknown };
+      const projectionCtx = ctx.context as { messages?: AgentMessage[] } | undefined;
+      if (projectionCtx?.messages) {
+        baseline = projectionCtx.messages;
+      }
 
       if (inc.type === "exact_repeat" || inc.type === "repeated_failure") {
         const candidate = context.candidateKey;
@@ -139,12 +159,16 @@ export function createPiExecutionSafetyController(
         }
       }
 
+      // Try next eligible candidate
       const next = policy.selectModel();
       if (!next) return undefined;
 
       logDebug(TAG, `prepareNextTurn: switching to ${next.model} via ${next.provider}`);
+
+      // Return clean baseline context if available
       return {
         model: { id: next.model, provider: next.provider, endpoint: next.endpoint, maxContext: next.maxContext },
+        context: baseline ? { messages: baseline } : undefined,
       };
     },
 
