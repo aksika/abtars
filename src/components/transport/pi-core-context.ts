@@ -6,6 +6,7 @@ const TAG = "pi-core-context";
 export interface TransformOptions {
   signal?: AbortSignal;
   hostGeneration?: number;
+  candidateKeyFn?: () => string;
   orchestrator?: {
     getContext(sessionKey: string, maxContext: number, opts: { beforeMessageId?: number }): Promise<{
       messages: Array<{ role: string; content: string; tool_call_id?: string; name?: string }>;
@@ -59,11 +60,18 @@ export class PiCoreContextProjection {
 
       const suffix = agentMessages.slice(markerIndex);
       let durableMessages: AgentMessage[] = [];
+      let contextDegraded = false;
 
       if (this.seed.source.mode === "durable") {
         if (options.signal?.aborted) return { messages: this.lastSafeBaseline ?? suffix, contextDegraded: true };
 
-        durableMessages = await this.projectDurable(options);
+        if (!options.orchestrator) {
+          logWarn(TAG, "Durable mode requested but no orchestrator — returning degraded suffix");
+          durableMessages = [];
+          contextDegraded = true;
+        } else {
+          durableMessages = await this.projectDurable(options);
+        }
 
         if (options.signal?.aborted) return { messages: this.lastSafeBaseline ?? suffix, contextDegraded: true };
       }
@@ -77,7 +85,7 @@ export class PiCoreContextProjection {
       const marker = agentMessages[markerIndex] as unknown as AbtarsCurrentTurnMessage;
       logDebug(TAG, `Transform complete: ${durableMessages.length} durable + ${suffix.length} suffix (marker: ${marker.executionId})`);
 
-      return { messages: result, contextDegraded: false };
+      return { messages: result, contextDegraded };
     } catch (err) {
       logWarn(TAG, `Context projection failed for ${this.seed.executionId}: ${err instanceof Error ? err.message : String(err)}`);
       return this.fallback(agentMessages);
@@ -105,13 +113,9 @@ export class PiCoreContextProjection {
     const source = this.seed.source;
     if (source.mode !== "durable") return [];
 
-    if (!options.orchestrator) {
-      logWarn(TAG, "Durable mode requested but no orchestrator — returning degraded baseline");
-      return [];
-    }
-
     try {
-      const ctx = await options.orchestrator.getContext(
+      const orch = options.orchestrator as NonNullable<typeof options.orchestrator>;
+      const ctx = await orch.getContext(
         source.sessionKey,
         source.maxContext,
         { beforeMessageId: source.beforeMessageId },
@@ -127,8 +131,16 @@ export class PiCoreContextProjection {
 
         if (role === "tool") {
           if (toolCallId && toolName) {
-            return { role: "tool", content, tool_call_id: toolCallId, name: toolName, timestamp: Date.now() } as AgentMessage & { tool_call_id: string; name: string };
+            // Valid tool result: preserve as toolResult for Pi
+            return {
+              role: "toolResult",
+              content,
+              tool_call_id: toolCallId,
+              name: toolName,
+              timestamp: Date.now(),
+            } as unknown as AgentMessage & { tool_call_id: string; name: string };
           }
+          // Historical tool row without valid call ID: render as context text
           return { role: "user", content: `[Historical tool output]: ${content.slice(0, 500)}`, timestamp: Date.now() } as AgentMessage;
         }
 
@@ -140,13 +152,20 @@ export class PiCoreContextProjection {
     }
   }
 
-  private fallback(_agentMessages: AgentMessage[]): TransformResult {
+  private fallback(agentMessages: AgentMessage[]): TransformResult {
     if (this.lastSafeBaseline) {
       return { messages: [...this.lastSafeBaseline], contextDegraded: true };
     }
+    // Preserve the in-flight suffix: find the marker and take everything from it onward
+    const { markerIndex } = this.locateCurrentTurnMarker(agentMessages);
+    if (markerIndex >= 0) {
+      const suffix = agentMessages.slice(markerIndex);
+      return { messages: suffix, contextDegraded: true };
+    }
+    // No marker: use seed current turn content
     const marker = this.seed.currentTurn;
     const fallback: AgentMessage[] = [
-      { ...marker, content: typeof marker.content === "string" ? marker.content : "", role: "user" },
+      { role: "user", content: typeof marker.content === "string" ? marker.content : "", timestamp: marker.timestamp },
     ];
     return { messages: fallback, contextDegraded: true };
   }

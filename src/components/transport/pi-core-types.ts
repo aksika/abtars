@@ -38,8 +38,10 @@ export interface AgentToolResult {
   isError?: boolean;
 }
 
-export interface AgentLoopConfig {
-  shouldStopAfterTurn?: (context: { roundsUsed: number; maxRounds: number }) => boolean;
+export interface BeforeToolCallContext {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
 }
 
 export interface PiAgentOptions {
@@ -48,10 +50,9 @@ export interface PiAgentOptions {
   steeringMode?: "one-at-a-time" | "fifo" | "replace" | "parallel";
   followUpMode?: "one-at-a-time" | "fifo" | "replace" | "parallel";
   toolExecution?: "sequential" | "parallel";
-  loopConfig?: Partial<AgentLoopConfig>;
-  convertToLlm?: (messages: readonly AgentMessage[]) => readonly AgentMessage[] | Promise<readonly AgentMessage[]>;
+  convertToLlm?: (messages: readonly AgentMessage[]) => readonly unknown[] | Promise<readonly unknown[]>;
   transformContext?: (messages: readonly AgentMessage[], signal?: AbortSignal) => Promise<readonly AgentMessage[]>;
-  beforeToolCall?: (toolCallId: string, toolName: string, args: Record<string, unknown>) => BeforeToolCallResult | undefined;
+  beforeToolCall?: (toolCall: BeforeToolCallContext) => BeforeToolCallResult | undefined;
   afterToolCall?: (result: unknown) => unknown;
   prepareNextTurnWithContext?: (context: {
     message?: AssistantMessage;
@@ -354,6 +355,16 @@ export function convertInstructionToLlm(message: AgentMessage): AgentMessage {
 export function convertCurrentTurnToLlm(message: AgentMessage): AgentMessage {
   if (message.role !== "abtars_current_turn") return message;
   const turn = message as AbtarsCurrentTurnMessage;
+  if (turn.imageContent && turn.imageContent.length > 0) {
+    return {
+      role: "user",
+      content: JSON.stringify([
+        { type: "text", text: turn.content },
+        ...turn.imageContent.map((img) => ({ type: "image", data: img.base64, mimeType: img.mime })),
+      ]),
+      timestamp: turn.timestamp,
+    } as AgentMessage;
+  }
   return {
     role: "user",
     content: turn.content,

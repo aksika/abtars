@@ -103,35 +103,34 @@ export class PiCoreExecutionHost {
       return result.messages;
     };
 
-    const shouldStopAfterTurn = (_ctx: { roundsUsed: number; maxRounds: number }): boolean => {
-      if (!this.opts.safety) return false;
-      if (this.opts.safety.paused || this.opts.safety.stopped) return true;
-      if (this.opts.safety.promptRoundsUsed >= 25) return true;
-      return false;
-    };
-
+    // initialState.messages: seed ONLY the system prompt, NOT user messages.
+    // The current user turn is sent via prompt() below — seeding it in both
+    // places would duplicate the turn.
     const agentOptions: PiAgentOptions = {
       initialState: {
         systemPrompt,
         model: this.opts.initialState.model,
-        messages: this.opts.initialState.messages,
+        messages: [{ role: "system", content: systemPrompt }],
         tools: this.opts.initialState.tools,
       },
       streamFn: this.opts.streamFn,
       steeringMode: PI_AGENT_CORE_CONFIG.steeringMode,
       followUpMode: PI_AGENT_CORE_CONFIG.followUpMode,
       toolExecution: PI_AGENT_CORE_CONFIG.toolExecution,
-      loopConfig: { shouldStopAfterTurn },
       convertToLlm,
       transformContext,
-      beforeToolCall: (_toolCallId: string, _toolName: string, _args: Record<string, unknown>): import("./pi-core-types.js").BeforeToolCallResult | undefined => {
+      beforeToolCall: (_toolCall: import("./pi-core-types.js").BeforeToolCallContext): import("./pi-core-types.js").BeforeToolCallResult | undefined => {
         return undefined;
       },
       afterToolCall: (result: unknown): unknown => result,
       prepareNextTurnWithContext: (_ctx: unknown): unknown => {
         if (!this.opts.safety) return _ctx;
+
+        // Derive candidate key from FallbackPolicy's last decision
+        const candidateKey = this.opts.transformOptions?.candidateKeyFn?.() ?? this.executionId;
+
         const update = this.opts.safety.prepareNextTurn({
-          candidateKey: this.executionId,
+          candidateKey,
           roundsUsed: this.opts.safety.promptRoundsUsed,
           maxRounds: 25,
           incident: this.opts.safety.incident,
@@ -155,15 +154,21 @@ export class PiCoreExecutionHost {
     this.state = "running";
     this.settlementPromise = new Promise((resolve) => { this.settlementResolve = resolve; });
 
-    try {
-      await this.agent.prompt(this.opts.initialState.messages);
-    } catch (err) {
-      if (this.state !== "running") {
-        logDebug(TAG, `Prompt interrupted during startup (state=${this.state}): ${err instanceof Error ? err.message : String(err)}`);
-        return;
+    // Send the actual user messages via prompt(), not via initialState
+    const userMessages = this.opts.initialState.messages.filter(
+      (m) => m.role !== "system" || !m.content.includes(systemPrompt),
+    );
+    if (userMessages.length > 0) {
+      try {
+        await this.agent.prompt(userMessages);
+      } catch (err) {
+        if (this.state !== "running") {
+          logDebug(TAG, `Prompt interrupted during startup (state=${this.state}): ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
+        logWarn(TAG, `Initial prompt failed: ${err instanceof Error ? err.message : String(err)}`);
+        this.beginSettle("prompt_failure");
       }
-      logWarn(TAG, `Initial prompt failed: ${err instanceof Error ? err.message : String(err)}`);
-      this.beginSettle("prompt_failure");
     }
   }
 
@@ -340,18 +345,23 @@ export class PiCoreExecutionHost {
 
   private handleMessageEnd(message: AssistantMessage): void {
     if (!message.content) return;
+
+    // With one-at-a-time mode, at most one lease is outstanding.
+    // Match by insertion order (first outstanding lease = the instruction
+    // whose response this message_end corresponds to).
     const firstLease = this.outstandingLeases.values().next().value;
     if (!firstLease) return;
+
     const session = this.ensureSession();
     if (session) {
-      const fakeLease: InstructionLease = {
+      const lease: InstructionLease = {
         leaseId: firstLease.leaseId,
         sessionId: this.sessionId,
         executionId: this.executionId,
         kind: firstLease.kind,
         instructions: firstLease.instructions as InstructionLease["instructions"],
       };
-      markConsumed(fakeLease, session);
+      markConsumed(lease, session);
     }
     this.outstandingLeases.delete(firstLease.leaseId);
   }
