@@ -7,7 +7,10 @@ export interface TransformOptions {
   signal?: AbortSignal;
   hostGeneration?: number;
   orchestrator?: {
-    getRows?(sessionKey: string, maxContext: number, opts: { beforeMessageId: number }): unknown[];
+    getContext(sessionKey: string, maxContext: number, opts: { beforeMessageId?: number }): Promise<{
+      messages: Array<{ role: string; content: string; tool_call_id?: string; name?: string }>;
+      compacted?: boolean;
+    }>;
   };
 }
 
@@ -44,9 +47,13 @@ export class PiCoreContextProjection {
     const generation = ++this.instanceGeneration;
 
     try {
-      const markerIndex = this.locateCurrentTurnMarker(agentMessages);
-      if (markerIndex < 0) {
+      const { markers, markerIndex } = this.locateCurrentTurnMarker(agentMessages);
+      if (markers === 0) {
         logError(TAG, `No current-turn marker found for execution ${this.seed.executionId}`);
+        return this.fallback(agentMessages);
+      }
+      if (markers > 1) {
+        logError(TAG, `${markers} current-turn markers found for execution ${this.seed.executionId}`);
         return this.fallback(agentMessages);
       }
 
@@ -77,16 +84,21 @@ export class PiCoreContextProjection {
     }
   }
 
-  private locateCurrentTurnMarker(messages: AgentMessage[]): number {
+  private locateCurrentTurnMarker(messages: AgentMessage[]): { markers: number; markerIndex: number } {
+    let markerIndex = -1;
+    let markers = 0;
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       if (!m) continue;
       if (m.role === "abtars_current_turn") {
         const marker = m as unknown as AbtarsCurrentTurnMessage;
-        if (marker.executionId === this.seed.executionId) return i;
+        if (marker.executionId === this.seed.executionId) {
+          markers++;
+          if (markerIndex < 0) markerIndex = i;
+        }
       }
     }
-    return -1;
+    return { markers, markerIndex };
   }
 
   private async projectDurable(options: TransformOptions): Promise<AgentMessage[]> {
@@ -94,31 +106,38 @@ export class PiCoreContextProjection {
     if (source.mode !== "durable") return [];
 
     if (!options.orchestrator) {
-      logWarn(TAG, "Durable mode requested but no orchestrator available — returning empty projection");
+      logWarn(TAG, "Durable mode requested but no orchestrator — returning degraded baseline");
       return [];
     }
 
-    const rows = options.orchestrator.getRows
-      ? options.orchestrator.getRows(source.sessionKey, source.maxContext, { beforeMessageId: source.beforeMessageId })
-      : [];
+    try {
+      const ctx = await options.orchestrator.getContext(
+        source.sessionKey,
+        source.maxContext,
+        { beforeMessageId: source.beforeMessageId },
+      );
 
-    const limited = (rows as Array<Record<string, unknown>>).slice(-MAX_CONTEXT_ROWS);
+      const rows = (ctx.messages ?? []).slice(-MAX_CONTEXT_ROWS);
 
-    return limited.map((row: Record<string, unknown>) => {
-      const role = String(row.role ?? "user");
-      const content = String(row.content ?? "");
-      const toolCallId = row.tool_call_id ? String(row.tool_call_id) : undefined;
-      const toolName = row.name ? String(row.name) : undefined;
+      return rows.map((row) => {
+        const role = String(row.role ?? "user");
+        const content = String(row.content ?? "");
+        const toolCallId = row.tool_call_id ? String(row.tool_call_id) : undefined;
+        const toolName = row.name ? String(row.name) : undefined;
 
-      if (role === "tool") {
-        if (toolCallId && toolName) {
-          return { role: "tool", content, tool_call_id: toolCallId, name: toolName, timestamp: Date.now() } as AgentMessage & { tool_call_id: string; name: string };
+        if (role === "tool") {
+          if (toolCallId && toolName) {
+            return { role: "tool", content, tool_call_id: toolCallId, name: toolName, timestamp: Date.now() } as AgentMessage & { tool_call_id: string; name: string };
+          }
+          return { role: "user", content: `[Historical tool output]: ${content.slice(0, 500)}`, timestamp: Date.now() } as AgentMessage;
         }
-        return { role: "user", content: `[Historical tool output]: ${content.slice(0, 500)}`, timestamp: Date.now() } as AgentMessage;
-      }
 
-      return { role, content, timestamp: Date.now() } as AgentMessage;
-    });
+        return { role, content, timestamp: Date.now() } as AgentMessage;
+      });
+    } catch (err) {
+      logWarn(TAG, `Abmind projection failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
   }
 
   private fallback(_agentMessages: AgentMessage[]): TransformResult {
@@ -127,7 +146,7 @@ export class PiCoreContextProjection {
     }
     const marker = this.seed.currentTurn;
     const fallback: AgentMessage[] = [
-      { role: "user", content: marker.content, timestamp: marker.timestamp },
+      { ...marker, content: typeof marker.content === "string" ? marker.content : "", role: "user" },
     ];
     return { messages: fallback, contextDegraded: true };
   }

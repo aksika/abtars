@@ -80,8 +80,17 @@ export class PiCoreExecutionHost {
       });
     };
 
-    const transformContext = async (messages: readonly AgentMessage[], _signal?: AbortSignal): Promise<readonly AgentMessage[]> => {
+    const transformContext = async (messages: readonly AgentMessage[], signal?: AbortSignal): Promise<readonly AgentMessage[]> => {
       if (!this.opts.contextProjection) return messages;
+
+      if (this.opts.safety && signal) {
+        const turnDecision = this.opts.safety.beginProviderTurn(this.executionId);
+        if (turnDecision.decision === "stop") {
+          logDebug(TAG, `Provider turn stopped: ${turnDecision.reason}`);
+        } else if (turnDecision.decision === "pause") {
+          logDebug(TAG, "Provider turn paused");
+        }
+      }
 
       const cleanMessages = this.opts.safety
         ? this.opts.safety.scrubClassifiedLiterals(messages as unknown as Array<{ role: string; content: string }>) as unknown as AgentMessage[]
@@ -94,7 +103,13 @@ export class PiCoreExecutionHost {
       return result.messages;
     };
 
-    // real AgentOptions uses initialState nesting
+    const shouldStopAfterTurn = (_ctx: { roundsUsed: number; maxRounds: number }): boolean => {
+      if (!this.opts.safety) return false;
+      if (this.opts.safety.paused || this.opts.safety.stopped) return true;
+      if (this.opts.safety.promptRoundsUsed >= 25) return true;
+      return false;
+    };
+
     const agentOptions: PiAgentOptions = {
       initialState: {
         systemPrompt,
@@ -106,21 +121,22 @@ export class PiCoreExecutionHost {
       steeringMode: PI_AGENT_CORE_CONFIG.steeringMode,
       followUpMode: PI_AGENT_CORE_CONFIG.followUpMode,
       toolExecution: PI_AGENT_CORE_CONFIG.toolExecution,
+      loopConfig: { shouldStopAfterTurn },
       convertToLlm,
       transformContext,
       beforeToolCall: (_toolCallId: string, _toolName: string, _args: Record<string, unknown>): import("./pi-core-types.js").BeforeToolCallResult | undefined => {
         return undefined;
       },
       afterToolCall: (result: unknown): unknown => result,
-      prepareNextTurnWithContext: (_context: unknown): unknown => {
-        if (!this.opts.safety) return _context;
+      prepareNextTurnWithContext: (_ctx: unknown): unknown => {
+        if (!this.opts.safety) return _ctx;
         const update = this.opts.safety.prepareNextTurn({
           candidateKey: this.executionId,
           roundsUsed: this.opts.safety.promptRoundsUsed,
-          maxRounds: 40,
+          maxRounds: 25,
           incident: this.opts.safety.incident,
         });
-        return update ?? _context;
+        return update ?? _ctx;
       },
     };
 

@@ -38,12 +38,17 @@ export interface AgentToolResult {
   isError?: boolean;
 }
 
+export interface AgentLoopConfig {
+  shouldStopAfterTurn?: (context: { roundsUsed: number; maxRounds: number }) => boolean;
+}
+
 export interface PiAgentOptions {
   initialState?: Partial<AgentState>;
   streamFn?: StreamFn;
   steeringMode?: "one-at-a-time" | "fifo" | "replace" | "parallel";
   followUpMode?: "one-at-a-time" | "fifo" | "replace" | "parallel";
   toolExecution?: "sequential" | "parallel";
+  loopConfig?: Partial<AgentLoopConfig>;
   convertToLlm?: (messages: readonly AgentMessage[]) => readonly AgentMessage[] | Promise<readonly AgentMessage[]>;
   transformContext?: (messages: readonly AgentMessage[], signal?: AbortSignal) => Promise<readonly AgentMessage[]>;
   beforeToolCall?: (toolCallId: string, toolName: string, args: Record<string, unknown>) => BeforeToolCallResult | undefined;
