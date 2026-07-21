@@ -75,7 +75,12 @@ describe("PiCoreExecutionHost", () => {
     expect(host.isSettled).toBe(false);
   });
 
-  it("rejects reuse across execution IDs", () => {
+  it("constructs independent hosts for distinct execution IDs", () => {
+    // NOTE: PiCoreExecutionHost has no call site yet (#1446/#1447 wire construction).
+    // Reuse-prevention today relies on SubagentRuntime.openExecution() always minting a
+    // fresh execution ID (see subagent-runtime.ts). A same-ID double-construction guard
+    // belongs at the call site once one exists — tracked as a #1446/#1447 follow-up, not
+    // enforceable here without introducing speculative module-level registry state.
     const host = new PiCoreExecutionHost(defaultOpts);
     expect(host.executionId).toBe("exec_1");
     const host2 = new PiCoreExecutionHost({ ...defaultOpts, executionId: "exec_2" });

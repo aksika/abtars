@@ -4,7 +4,7 @@ import { convertInstructionToLlm, createInstructionMessage, PI_AGENT_CORE_CONFIG
 import type { ExecutionTelemetryScope } from "../execution-telemetry.js";
 import type { InstructionLease, QueuedSessionInstruction } from "../spin-types.js";
 import { markDelivered, markConsumed, failAfterDelivery } from "../session-instruction-queue.js";
-import type { ManagedSession } from "../spin-types.js";
+import type { InstructionQueueHolder } from "../session-instruction-queue.js";
 
 const TAG = "pi-core-host";
 
@@ -109,10 +109,8 @@ export class PiCoreExecutionHost {
     }
   }
 
-  private ensureSession(): ManagedSession | null {
-    const s = this.opts.session;
-    if (!s) return null;
-    return s as unknown as ManagedSession;
+  private ensureSession(): InstructionQueueHolder | null {
+    return this.opts.session ?? null;
   }
 
   steer(content: string, lease: InstructionLease): void {
