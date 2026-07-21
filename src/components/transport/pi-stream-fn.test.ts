@@ -55,7 +55,7 @@ describe("createPiStreamFn", () => {
   it("succeeds with valid candidate", async () => {
     const fakeStream = makeFakeStream([
       { type: "text_delta", contentIndex: 0, delta: "Hello" },
-      { type: "message_end", message: { role: "assistant", content: "Hello", stopReason: "stop", usage: { input: 10, output: 5 } } },
+      { type: "done", reason: "stop", message: { role: "assistant", content: "Hello", stopReason: "stop", usage: { input: 10, output: 5 } } },
     ]);
 
     const attemptFactory = vi.fn().mockResolvedValue(fakeStream);
@@ -81,7 +81,7 @@ describe("createPiStreamFn", () => {
       .mockRejectedValueOnce(new Error("API error 500: server failure"))
       .mockResolvedValueOnce(makeFakeStream([
         { type: "text_delta", contentIndex: 0, delta: "Hello from fallback" },
-        { type: "message_end", message: { role: "assistant", content: "Hello from fallback", stopReason: "stop", usage: { input: 10, output: 5 } } },
+        { type: "done", reason: "stop", message: { role: "assistant", content: "Hello from fallback", stopReason: "stop", usage: { input: 10, output: 5 } } },
       ]));
 
     const streamFn = createPiStreamFn({ policy: failPolicy, createPiAiAttempt: attemptFactory });
@@ -108,13 +108,13 @@ describe("createPiStreamFn", () => {
       if (callCount === 1) {
         const stream = makeFakeStream([
           { type: "text_delta", contentIndex: 0, delta: "partial " },
-          { type: "message_end", message: { role: "assistant", content: "partial", stopReason: "stop", usage: { input: 5, output: 2 } } },
+          { type: "done", reason: "stop", message: { role: "assistant", content: "partial", stopReason: "stop", usage: { input: 5, output: 2 } } },
         ]);
         return stream;
       }
       return makeFakeStream([
         { type: "text_delta", contentIndex: 0, delta: "should not reach" },
-        { type: "message_end", message: { role: "assistant", content: "should not reach", stopReason: "stop", usage: { input: 0, output: 0 } } },
+        { type: "done", reason: "stop", message: { role: "assistant", content: "should not reach", stopReason: "stop", usage: { input: 0, output: 0 } } },
       ]);
     });
 
@@ -141,9 +141,9 @@ describe("createPiStreamFn", () => {
     const events: any[] = [];
     for await (const ev of stream) events.push(ev);
 
-    expect(events.some((e) => e.type === "message_end")).toBe(true);
-    const msgEnd = events.find((e) => e.type === "message_end");
-    expect(msgEnd?.message?.stopReason).toBe("error");
+    expect(events.some((e) => e.type === "done")).toBe(true);
+    const doneEv = events.find((e) => e.type === "done") as Record<string, unknown> | undefined;
+    expect((doneEv?.message as Record<string, unknown> | undefined)?.stopReason).toBe("error");
   });
 
   it("returns aborted stream on cancellation", async () => {
@@ -161,9 +161,9 @@ describe("createPiStreamFn", () => {
     const events: any[] = [];
     for await (const ev of stream) events.push(ev);
 
-    expect(events.some((e) => e.type === "message_end")).toBe(true);
-    const msgEnd = events.find((e) => e.type === "message_end");
-    expect(msgEnd?.message?.stopReason).toBe("aborted");
+    expect(events.some((e) => e.type === "done")).toBe(true);
+    const doneEv2 = events.find((e) => e.type === "done") as Record<string, unknown> | undefined;
+    expect((doneEv2?.message as Record<string, unknown> | undefined)?.stopReason).toBe("aborted");
   });
 
   it("attempts emergency L0 when all candidates exhausted", async () => {
@@ -175,7 +175,7 @@ describe("createPiStreamFn", () => {
 
     const l0Factory = vi.fn().mockResolvedValue(makeFakeStream([
       { type: "text_delta", contentIndex: 0, delta: "Emergency response" },
-      { type: "message_end", message: { role: "assistant", content: "Emergency response", stopReason: "stop", usage: { input: 10, output: 5 } } },
+      { type: "done", reason: "stop", message: { role: "assistant", content: "Emergency response", stopReason: "stop", usage: { input: 10, output: 5 } } },
     ]));
 
     const streamFn = createPiStreamFn({ policy: failPolicy, emergencyCandidate: emergency, createL0Attempt: l0Factory });

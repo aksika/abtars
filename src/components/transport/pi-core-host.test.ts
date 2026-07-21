@@ -1,3 +1,13 @@
+// TEST DEFICIENCY: Real-package complete-cancellation contract test (multi-tool sequential batch,
+// abort during active call, verify one terminal cancellation result per unstarted call in order)
+// is release-blocking per req.md:225-226. Verified against real Pi 0.80.7 (agent-loop.ts:475-478):
+// executeToolCallsSequential's for loop does `if (signal?.aborted) break;` — tool calls after the
+// abort point never receive a tool_execution_end/toolResult. This requires a fixed public Pi release
+// (req.md:37-42). The smallest future verification path: install a Pi release with the fix, create a
+// real Agent with sequential tools, abort mid-batch, and assert skipped results for every remaining
+// call. Deferred until the upstream contract gate is resolved — the ticket cannot pass its own
+// acceptance criteria while this stands.
+
 // TEST DEFICIENCY: Real-package conformance test (loading actual @earendil-works/pi-agent-core
 // from the npm installation) is deferred — it requires a full Pi installation on the test
 // runner and would add significant environment dependency. The deferred test should:

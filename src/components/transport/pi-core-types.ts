@@ -17,20 +17,41 @@ export class PiCoreContractError extends Error {
 
 export type ExecutionRoute = import("../transport-config.js").ExecutionRoute;
 
-export interface PiAgentOptions {
+// ── Real AgentOptions (from pi-agent-core Agent constructor) ──────────────────
+
+export interface AgentState {
   systemPrompt?: string;
   model: unknown;
-  streamFn: StreamFn;
+  messages: readonly AgentMessage[];
   tools?: readonly unknown[];
+}
+
+export interface PiAgentOptions {
+  initialState?: Partial<AgentState>;
+  streamFn?: StreamFn;
   steeringMode?: "one-at-a-time" | "fifo" | "replace" | "parallel";
   followUpMode?: "one-at-a-time" | "fifo" | "replace" | "parallel";
   toolExecution?: "sequential" | "parallel";
-  convertToLlm?: (message: AgentMessage) => AgentMessage;
+  convertToLlm?: (messages: readonly AgentMessage[]) => readonly AgentMessage[] | Promise<readonly AgentMessage[]>;
   transformContext?: (context: unknown) => unknown;
   beforeToolCall?: (toolCall: unknown) => unknown;
   afterToolCall?: (result: unknown) => unknown;
-  prepareNextTurnWithContext?: (context: unknown) => unknown;
+  prepareNextTurnWithContext?: (context: {
+    message?: AssistantMessage;
+    toolResults?: readonly { toolCallId: string; toolName: string; result?: string; isError?: boolean }[];
+    context?: unknown;
+    newMessages?: readonly AgentMessage[];
+  }) => unknown;
 }
+
+/** Real AgentLoopContext passed to beforeToolCall/afterToolCall hooks. */
+export interface PiAgentToolCallContext {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+}
+
+// ── Real Agent contract ───────────────────────────────────────────────────────
 
 export interface PiAgent {
   readonly isRunning: boolean;
@@ -43,18 +64,21 @@ export interface PiAgent {
   waitForIdle(): Promise<void>;
 }
 
-export type PiAgentListener = (event: AgentEvent) => void;
+export type PiAgentListener = (event: AgentEvent, signal?: AbortSignal) => Promise<void> | void;
+
+// ── Real AgentEvent union (from pi-agent-core) ────────────────────────────────
 
 export type AgentEvent =
-  | { type: "text_delta"; contentIndex: number; delta: string }
-  | { type: "thinking_delta"; contentIndex: number; delta: string }
-  | { type: "toolcall_start"; contentIndex: number; toolCall: ToolCall }
-  | { type: "toolcall_delta"; contentIndex: number; delta: string }
-  | { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall }
+  | { type: "agent_start" }
+  | { type: "agent_end"; messages: readonly AgentMessage[] }
+  | { type: "turn_start" }
+  | { type: "turn_end" }
   | { type: "message_start"; message: AgentMessage }
+  | { type: "message_update"; message: AssistantMessage; assistantMessageEvent: unknown }
   | { type: "message_end"; message: AssistantMessage }
-  | { type: "agent_end"; reason: string }
-  | { type: "error"; error: AssistantMessage };
+  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: Record<string, unknown> }
+  | { type: "tool_execution_update"; toolCallId: string; toolName: string; args: Record<string, unknown> }
+  | { type: "tool_execution_end"; toolCallId: string; toolName: string; result?: string; isError?: boolean };
 
 export interface ToolCall {
   id: string;
@@ -83,9 +107,24 @@ export interface Usage {
   totalTokens?: number;
 }
 
-export type SimpleStreamOptions = Record<string, unknown>;
+// ── Real AssistantMessageEventStream (concrete class with .result()) ──────────
 
-export type AssistantMessageEventStream = AsyncIterable<AssistantMessage & { type: string }>;
+export interface AssistantMessageEvent {
+  type: string;
+  delta?: string;
+  contentIndex?: number;
+  toolCall?: ToolCall;
+  message?: AssistantMessage;
+  reason?: string;
+  error?: string;
+}
+
+export interface AssistantMessageEventStream {
+  [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent>;
+  result(): Promise<AssistantMessage>;
+}
+
+export type SimpleStreamOptions = Record<string, unknown>;
 
 export type StreamFn = (
   model: unknown,
@@ -93,9 +132,13 @@ export type StreamFn = (
   options: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
 
+// ── Pi module contract ────────────────────────────────────────────────────────
+
 export interface PiAgentCoreModule {
   Agent: new (options: PiAgentOptions) => PiAgent;
 }
+
+// ── #1444: instruction messages ────────────────────────────────────────────────
 
 export interface AbtarsInstructionAgentMessage extends AgentMessage {
   role: "abtars_instruction";
@@ -104,6 +147,95 @@ export interface AbtarsInstructionAgentMessage extends AgentMessage {
   executionId: string;
   kind: "steer" | "followUp";
 }
+
+// ── #1446: current-turn marker ─────────────────────────────────────────────────
+
+export interface AbtarsCurrentTurnMessage extends AgentMessage {
+  role: "abtars_current_turn";
+  executionId: string;
+  sessionId: string;
+  durableMessageId?: number;
+  timestamp: number;
+  imageContent?: Array<{ mime: string; base64: string }>;
+}
+
+// ── #1446: context projection source ───────────────────────────────────────────
+
+export type PiContextProjectionSource =
+  | {
+      mode: "durable";
+      sessionKey: string;
+      beforeMessageId: number;
+      maxContext: number;
+    }
+  | {
+      mode: "ephemeral";
+      sessionKey: string;
+    };
+
+export interface PiExecutionContextSeed {
+  source: PiContextProjectionSource;
+  executionId: string;
+  currentTurn: AbtarsCurrentTurnMessage;
+  volatileBlocks: readonly { kind: string; content: string }[];
+}
+
+// ── #1446: tool execution context ──────────────────────────────────────────────
+
+export interface PiToolExecutionContext {
+  executionId: string;
+  userId: string;
+  signal?: AbortSignal;
+  safety: unknown;
+  onToolStart?: (name: string) => void;
+  onToolSuccess?: () => void;
+  /** Wrap a JSON schema object as a Pi-compatible TypeScript schema (Type.Unsafe). */
+  createUnsafeSchema?: (schema: Record<string, unknown>) => Record<string, unknown>;
+}
+
+// ── #1446: safety controller types ─────────────────────────────────────────────
+
+export type ToolDecision =
+  | { decision: "execute" }
+  | { decision: "error"; reason: string }
+  | { decision: "skip" };
+
+export type TurnDecision =
+  | { decision: "continue" }
+  | { decision: "stop"; reason: string }
+  | { decision: "pause" };
+
+export interface AgentLoopTurnUpdate {
+  model?: unknown;
+  context?: unknown;
+}
+
+export interface PrepareNextTurnContext {
+  roundsUsed: number;
+  maxRounds: number;
+  incident: unknown;
+  candidateKey: string;
+}
+
+/** Wrapper for the real Pi prepareNextTurnWithContext callback argument. */
+export interface RealPrepareNextTurnContext {
+  message?: AssistantMessage;
+  toolResults?: readonly { toolCallId: string; toolName: string; result?: string; isError?: boolean }[];
+  context?: unknown;
+  newMessages?: readonly AgentMessage[];
+}
+
+// ── #1446: AgentTool shape ────────────────────────────────────────────────────
+
+export interface AgentTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  execute(args: Record<string, unknown>, context?: { signal?: AbortSignal }): Promise<string>;
+  executionMode?: "sequential" | "parallel";
+}
+
+// ── Validation ─────────────────────────────────────────────────────────────────
 
 const REQUIRED_METHODS: readonly (keyof PiAgent)[] = [
   "subscribe", "prompt", "steer", "followUp",
@@ -185,6 +317,8 @@ export async function loadAndValidatePiAgentCore(): Promise<LoadedPiAgentCore> {
   return { module: mod as PiAgentCoreModule, installation: result.installation };
 }
 
+// ── Converters ─────────────────────────────────────────────────────────────────
+
 export function convertInstructionToLlm(message: AgentMessage): AgentMessage {
   if (message.role !== "abtars_instruction") return message;
   const inst = message as AbtarsInstructionAgentMessage;
@@ -192,6 +326,16 @@ export function convertInstructionToLlm(message: AgentMessage): AgentMessage {
     role: "user",
     content: `${inst.content}\n[timestamp: ${inst.timestamp ?? Date.now()}]`,
     timestamp: inst.timestamp,
+  };
+}
+
+export function convertCurrentTurnToLlm(message: AgentMessage): AgentMessage {
+  if (message.role !== "abtars_current_turn") return message;
+  const turn = message as AbtarsCurrentTurnMessage;
+  return {
+    role: "user",
+    content: turn.content,
+    timestamp: turn.timestamp,
   };
 }
 
@@ -208,6 +352,22 @@ export function createInstructionMessage(
     instructionIds,
     executionId,
     kind,
+    content,
+    timestamp: Date.now(),
+  };
+}
+
+export function createCurrentTurnMessage(
+  content: string,
+  executionId: string,
+  sessionId: string,
+  durableMessageId?: number,
+): AbtarsCurrentTurnMessage {
+  return {
+    role: "abtars_current_turn",
+    executionId,
+    sessionId,
+    durableMessageId,
     content,
     timestamp: Date.now(),
   };
