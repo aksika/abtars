@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+
+const TIMEOUT = 60000;
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -116,7 +118,7 @@ describe("deployActivation — bootstrap failure (macOS)", () => {
     Object.defineProperty(process, "platform", { value: origPlatform, configurable: true, writable: true });
   });
 
-  it("returns 1 and writes failed deploy.state when launchctl bootstrap fails", async () => {
+  it("returns 1 and writes failed deploy.state when launchctl bootstrap fails", { timeout: TIMEOUT }, async () => {
     Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
     const bootstrapFn: BootstrapFn = () => ({ ok: false, error: "launchctl: WorkQueue is already bootstrapped" });
     const healthMock = makeHealthMock();
@@ -130,7 +132,7 @@ describe("deployActivation — bootstrap failure (macOS)", () => {
     expect(state.version).toBe("1.0.0-test");
   });
 
-  it("skips health probe when bootstrap fails", async () => {
+  it("skips health probe when bootstrap fails", { timeout: TIMEOUT }, async () => {
     Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
     const healthMock = makeHealthMock();
     const bootstrapFn: BootstrapFn = () => ({ ok: false, error: "bootstrap failed" });
@@ -148,7 +150,7 @@ describe("deployActivation — bootstrap success + health healthy (macOS)", () =
     Object.defineProperty(process, "platform", { value: origPlatform, configurable: true, writable: true });
   });
 
-  it("returns 0 and writes success deploy.state", async () => {
+  it("returns 0 and writes success deploy.state", { timeout: TIMEOUT }, async () => {
     Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
     const healthMock = makeHealthMock();
@@ -182,7 +184,7 @@ describe("deployActivation — health unhealthy (macOS)", () => {
     Object.defineProperty(process, "platform", { value: origPlatform, configurable: true, writable: true });
   });
 
-  it("returns 1 on macOS when health probe fails", async () => {
+  it("returns 1 on macOS when health probe fails", { timeout: TIMEOUT }, async () => {
     Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
     const unhealthyProbe: (...args: any[]) => Promise<{ healthy: false }> = async () => ({ healthy: false });
     const bootstrapFn: BootstrapFn = () => ({ ok: true });

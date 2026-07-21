@@ -234,20 +234,31 @@ export function observeNativeGroup(): NativeGroupObservation {
   const manifest = readManifest();
   const manifestOk = manifest ? manifestReady(manifest) : false;
 
+  let liveClosure: ClosureResult | null = null;
+  if (allInstalledAtTarget) {
+    liveClosure = resolveClosure(liveNmDir(), NATIVE_TARGET_NAMES);
+  }
+
   let state: NativeGroupState;
   if (absent) state = "absent";
   else if (anyInvalid) state = "invalid";
-  else if (allInstalledAtTarget && manifestOk) state = "ready";
-  else if (allInstalledAtTarget && !manifestOk) state = "drifted";
+  else if (allInstalledAtTarget && manifestOk && liveClosure?.ok &&
+           liveClosure.entries.every(e => {
+             const rec = manifest!.packages[e.name];
+             if (!rec) return false;
+             const expectedProbe = e.kind === "root" ? (NATIVE_PROBE_IDS[e.name] ?? "") : nativeClosureProbeId();
+             return rec.probe === expectedProbe;
+           })) {
+    state = "ready";
+  } else if (allInstalledAtTarget) state = "drifted";
   else if (anyInstalled) state = "drifted";
   else state = "partial";
 
   let adoption: { eligible: false; reason?: string } | { eligible: true; closure: NativeClosureEntry[] } = { eligible: false };
-  if (state === "drifted" && allInstalledAtTarget) {
-    const closureResult = resolveClosure(liveNmDir(), NATIVE_TARGET_NAMES);
-    adoption = closureResult.ok
-      ? { eligible: true, closure: closureResult.entries }
-      : { eligible: false, reason: closureResult.reason };
+  if (state === "drifted" && allInstalledAtTarget && liveClosure) {
+    adoption = liveClosure.ok
+      ? { eligible: true, closure: liveClosure.entries }
+      : { eligible: false, reason: liveClosure.reason };
   }
 
   return { packages, state, adoption };
