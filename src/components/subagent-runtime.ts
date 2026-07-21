@@ -38,6 +38,7 @@ export interface RuntimeExecution {
   close(): Promise<void>;
   readonly transport: IKiroTransport;
   readonly sessionKey: string;
+  readonly executionId: string;
   readonly ephemeral: boolean;
   /** #1364: Per-execution abort signal. Abort the controller to cancel the execution. */
   readonly abortSignal?: AbortSignal;
@@ -173,9 +174,12 @@ export class SubagentRuntime {
     let closed = false;
     const start = Date.now();
 
+    const execId = `runtime_${sessionKey}_${Date.now()}_${randomBytes(4).toString("hex")}`;
+
     const exec: RuntimeExecution = {
       transport,
       sessionKey,
+      executionId: execId,
       ephemeral: sessionStrategy === "fresh",
       lastUsage: () => transport.lastUsage?.() ?? null,
 

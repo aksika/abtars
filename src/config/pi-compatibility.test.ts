@@ -43,6 +43,11 @@ describe("devDependencies vs PI_COMPATIBILITY (#1438)", () => {
     expect(pkg.dependencies?.[PI_COMPATIBILITY.nestedPackages.tui]).toBeUndefined();
     expect(pkg.devDependencies?.[PI_COMPATIBILITY.nestedPackages.tui]).toBeDefined();
   });
+
+  it("pi-agent-core is a devDependency (#1445)", () => {
+    expect(pkg.dependencies?.[PI_COMPATIBILITY.nestedPackages.agentCore]).toBeUndefined();
+    expect(pkg.devDependencies?.[PI_COMPATIBILITY.nestedPackages.agentCore]).toBeDefined();
+  });
 });
 
 describe("lockfile resolutions match PI_COMPATIBILITY (#1438)", () => {
@@ -61,5 +66,9 @@ describe("lockfile resolutions match PI_COMPATIBILITY (#1438)", () => {
 
   it("pi-tui resolves in lockfile", () => {
     expect(pkg["node_modules/@earendil-works/pi-tui"]?.version).toBeDefined();
+  });
+
+  it("pi-agent-core resolves in lockfile (#1445)", () => {
+    expect(pkg["node_modules/@earendil-works/pi-agent-core"]?.version).toBeDefined();
   });
 });

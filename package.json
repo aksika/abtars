@@ -26,6 +26,7 @@
     "@clack/prompts": "^1.2.0",
     "@earendil-works/pi-ai": "0.80.7",
     "@earendil-works/pi-coding-agent": "0.80.7",
+    "@earendil-works/pi-agent-core": "0.80.7",
     "@earendil-works/pi-tui": "0.80.7",
     "@types/node": "^22.19.17",
     "@types/pdf-parse": "^1.1.5",

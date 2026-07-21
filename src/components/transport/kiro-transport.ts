@@ -15,6 +15,8 @@
 export interface PromptRequestContext {
   userId?: string;
   beforeMessageId?: number;
+  /** #1445: execution ID for Pi-core host correlation. */
+  executionId?: string;
   /**
    * #1338: call-local observer for live TUI output mirroring. Set by Spin per
    * model call/round; transports invoke it alongside existing transport-wide
