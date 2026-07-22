@@ -39,9 +39,10 @@ d['watchdogPid']=$$
 with open(p,'w') as f: json.dump(d,f)
 " 2>/dev/null
 
-# Don't propagate signals to bridge child
+# Don't propagate signals to bridge child; on SIGTERM/INT kill bridge and exit 2
+# (exit 2 + RestartPreventExitStatus=2 = systemd won't restart on Linux)
 trap '' HUP
-trap 'exit 0' TERM INT
+trap 'echo "$(date +%FT%T) Watchdog exit: signal=SIGTERM (pid=${PID:-none})" >> "$AB/logs/watchdog.log"; kill $PID 2>/dev/null; exit 2' TERM INT
 
 while true; do
   # Read .start-reason (one-shot message from update/stop/restart)
@@ -53,9 +54,16 @@ while true; do
 
   # Act on reason
   case "$REASON" in
-    stopped) exit 2 ;;            # intentional stop — daemon won't respawn (exit 2)
-    update:*|restart|rollback:*)  # update/restart just killed bridge — we exit so daemon respawns with new code
+    stopped)
+      echo "$(date +%FT%T) Watchdog exit: manual=stop" >> "$AB/logs/watchdog.log"
+      exit 2 ;;
+    update:*|restart|rollback:*)
+      echo "$(date +%FT%T) Watchdog exit: ${REASON}" >> "$AB/logs/watchdog.log"
       exit 0 ;;
+    "")
+      ;; # no reason — normal start
+    *)
+      echo "$(date +%FT%T) Watchdog warn: unrecognized .start-reason \"$REASON\" — discarding" >> "$AB/logs/watchdog.log" ;;
   esac
 
   # Start bridge
@@ -65,7 +73,6 @@ while true; do
   # leaving node as a grandchild that gets orphaned when the subshell dies.
   cd "$AB" && exec env ABTARS_WATCHDOG_PID=$$ NODE_PATH="$HOME/.local/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$BRIDGE_REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js 200>&- &
   PID=$!
-  disown $PID
   SPAWNED_AT=$(date +%s)
 
   # Poll: alive + heartbeat + .start-reason
@@ -86,20 +93,22 @@ while true; do
       rm -f "$AB/.start-reason"
       case "$REASON" in
         stopped)
+          echo "$(date +%FT%T) Watchdog exit: manual=stop (during poll)" >> "$AB/logs/watchdog.log"
           kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
           exit 2 ;;
         update:*|restart|rollback:*)
+          echo "$(date +%FT%T) Watchdog exit: ${REASON} (during poll)" >> "$AB/logs/watchdog.log"
           kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
           exit 0 ;;
       esac
     fi
     # Bridge alive?
     if ! kill -0 "$PID" 2>/dev/null; then
-      wait "$PID" 2>/dev/null   # reap the child; its return is ignored below (always 0 due to disown)
-      # #1328: prefer the bridge's self-reported exit code from bridge.lock. `wait` always
-      # reports 0 here because of `disown` (kept intentionally — #1050 survival +
-      # SIGTERM/INT-trap isolation, see resilience.asbuilt.md). Only trust the lock's
-      # lastExitCode if it was written AFTER this bridge instance was spawned — otherwise
+      wait "$PID" 2>/dev/null   # reap the child
+      # #1328: prefer the bridge's self-reported exit code from bridge.lock. `wait`
+      # reports the real exit code now that `disown` was removed (#1470). Only trust
+      # the lock's lastExitCode if it was written AFTER this bridge instance was
+      # spawned — otherwise
       # it's a stale value from a prior death (or the lock predates this fix).
       EXIT_CODE=$(python3 -c "
 import json

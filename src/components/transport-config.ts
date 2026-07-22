@@ -598,14 +598,6 @@ export function providersForRoute(config: TransportConfig, route: ExecutionRoute
   return Object.entries(config.providers).filter(([, p]) => providerSupportsRoute(p, route));
 }
 
-export function inferRouteFromProvider(config: TransportConfig, providerName: string): ExecutionRoute | null {
-  const provider = config.providers[providerName];
-  if (!provider) return null;
-  if (providerSupportsRoute(provider, "pi-ai")) return "pi-ai";
-  if (providerSupportsRoute(provider, "acp")) return "acp";
-  return null;
-}
-
 export function allAssignmentsMatchRoute(config: TransportConfig, route: ExecutionRoute): boolean {
   const ra = routeAssignments(config, route);
   if (!ra) return false;
