@@ -51,6 +51,7 @@ export class PiCoreTransport implements IKiroTransport {
   private _isReady = false;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
 
+  /** Override the system prompt for subsequent calls. */
   /** ContextOrchestrator for durable abmind projection. Set externally by the pipeline. */
   contextOrchestrator?: {
     getContext(sessionKey: string, maxTokens: number, opts: { beforeMessageId?: number }): Promise<{ messages: Array<{ role: string; content: string }> }>;
@@ -83,10 +84,12 @@ export class PiCoreTransport implements IKiroTransport {
     this.config.systemPrompt = prompt;
   }
 
-  async setModel(model: string): Promise<void> {
+  async setModel(model: string, endpoint?: string, maxContext?: number): Promise<void> {
     const primary = this.config.candidates[0];
     if (!primary) throw new Error("No model candidate configured");
     primary.model = model;
+    if (endpoint) primary.endpoint = endpoint;
+    if (maxContext) primary.maxContext = maxContext;
     this.policy = new FallbackPolicy(this.config.candidates, this.healthRegistry);
   }
 
