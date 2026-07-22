@@ -192,6 +192,22 @@ export function validateTransportConfig(input: unknown): TransportValidationResu
     }
   }
 
+  // Model/provider compatibility (warns only — non-fatal when catalog entry missing)
+  const models = loadModels();
+  for (const [role, assignment] of Object.entries(config.agents)) {
+    const entry = models[assignment.model];
+    if (entry && !entry.transports.includes(assignment.provider)) {
+      issues.push({ code: "model_provider_incompatible", path: `agents.${role}`, message: `Model "${assignment.model}" not available on provider "${assignment.provider}" — only supported on: ${entry.transports.join(", ")}` });
+    }
+  }
+  for (let i = 0; i < (config.fallbacks ?? []).length; i++) {
+    const fb = config.fallbacks![i]!;
+    const entry = models[fb.model];
+    if (entry && !entry.transports.includes(fb.provider)) {
+      issues.push({ code: "model_provider_incompatible", path: `fallbacks[${i}]`, message: `Model "${fb.model}" not available on provider "${fb.provider}" — only supported on: ${entry.transports.join(", ")}` });
+    }
+  }
+
   if (issues.length > 0) return { ok: false, issues };
 
   return { ok: true, config };
@@ -248,26 +264,38 @@ export function loadTransportStructured(): TransportLoadResult {
   const dir = configDir();
   const p = join(dir, getEnv().transportConfig);
 
-  // Try primary
-  let primaryResult = tryLoadFile(p);
-  if (primaryResult) {
-    const vr = validateTransportConfig(primaryResult);
-    if (vr.ok) {
-      cachedTransport = vr.config;
-      cachedSource = "primary";
-      return { ok: true, config: vr.config, source: "primary" };
+  // Try primary — distinguish file-not-found from corrupt content
+  const primaryExists = existsSync(p);
+  if (primaryExists) {
+    const primaryData = tryParseJson(p);
+    if (primaryData) {
+      const vr = validateTransportConfig(primaryData);
+      if (vr.ok) {
+        cachedTransport = vr.config;
+        cachedSource = "primary";
+        return { ok: true, config: vr.config, source: "primary" };
+      }
+      // Primary exists but is invalid — don't fall through to backup/emergency
+      cachedTransport = null;
+      cachedSource = null;
+      return { ok: false, issues: vr.issues, state: "invalid", source: "primary" };
     }
-    // Primary exists but is invalid — don't fall through to backup/emergency
+    // File exists but could not be parsed — treat as invalid, not missing
     cachedTransport = null;
     cachedSource = null;
-    return { ok: false, issues: vr.issues, state: "invalid", source: "primary" };
+    const parseIssue: TransportConfigIssue = {
+      code: "unsupported_schema",
+      path: "transport.json",
+      message: `Failed to parse ${p}`,
+    };
+    return { ok: false, issues: [parseIssue], state: "invalid", source: "primary" };
   }
 
   // Try backup
   const oldPath = p.replace(".json", ".old.json");
-  const backupResult = tryLoadFile(oldPath);
-  if (backupResult) {
-    const vr = validateTransportConfig(backupResult);
+  const backupData = tryParseJson(oldPath);
+  if (backupData) {
+    const vr = validateTransportConfig(backupData);
     if (vr.ok) {
       cachedTransport = vr.config;
       cachedSource = "backup";
@@ -278,9 +306,9 @@ export function loadTransportStructured(): TransportLoadResult {
 
   // Try default template
   const defaultPath = join(dir, "transport.default.json");
-  const defaultResult = tryLoadFile(defaultPath);
-  if (defaultResult) {
-    const vr = validateTransportConfig(defaultResult);
+  const defaultData = tryParseJson(defaultPath);
+  if (defaultData) {
+    const vr = validateTransportConfig(defaultData);
     if (vr.ok) {
       cachedTransport = vr.config;
       cachedSource = "default";
@@ -292,16 +320,10 @@ export function loadTransportStructured(): TransportLoadResult {
   return { ok: false, issues: [], state: "missing" };
 }
 
-/** Try to load and parse a JSON file, returning the raw object or null. Never writes. */
-function tryLoadFile(filePath: string): Record<string, unknown> | null {
+/** Try to parse a JSON file. Returns null if file doesn't exist or is unreadable. Never writes, never migrates. */
+function tryParseJson(filePath: string): Record<string, unknown> | null {
   try {
-    const raw = JSON.parse(readFileSync(filePath, "utf-8")) as Record<string, unknown>;
-    const migrated = migrateTransportConfig(raw);
-    if (migrated.error) {
-      logWarn(TAG, `${filePath}: migration failed — ${migrated.error}`);
-      return null;
-    }
-    return migrated.config as unknown as Record<string, unknown>;
+    return JSON.parse(readFileSync(filePath, "utf-8")) as Record<string, unknown>;
   } catch (err) {
     logDebug(TAG, `Failed to load ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
     return null;
@@ -739,27 +761,29 @@ export function writeTransportConfig(candidate: TransportConfig, reason?: string
   // Serialize candidate deterministically (use validated config, not raw input)
   const content = JSON.stringify(vr.config, null, 2);
 
-  // Write to a same-directory temporary file first
+  // Write both candidate and backup to temp files, then rename in order.
+  // If any rename fails, restore from temps so the prior pair is preserved.
   const tmp = p + ".tmp." + process.pid;
+  const oldTmp = oldPath + ".tmp." + process.pid;
   try {
     writeFileSync(tmp, content, "utf-8");
 
-    // Preserve prior primary as .old.json using bytes captured before write
     if (currentBytes !== null) {
-      writeFileSync(oldPath, currentBytes, "utf-8");
+      writeFileSync(oldTmp, currentBytes, "utf-8");
+      renameSync(oldTmp, oldPath);
     }
 
-    // Atomically rename tmp over primary
     renameSync(tmp, p);
 
-    // Update cache only after persistence succeeds
     cachedTransport = vr.config;
     cachedSource = "primary";
     logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
     return { ok: true };
   } catch (err) {
-    // Clean up tmp file on failure — best effort, never changes primary/backup
+    // Restore: if oldTmp was written but one of the renames failed, put it back
+    try { if (existsSync(oldTmp)) { renameSync(oldTmp, oldPath); } } catch { /* best effort */ }
     try { unlinkSync(tmp); } catch { /* best effort */ }
+    try { unlinkSync(oldTmp); } catch { /* best effort */ }
     logWarn(TAG, `Failed to write transport.json: ${err instanceof Error ? err.message : String(err)}`);
     return { ok: false, issues: [{ location: "write", model: "", provider: "", reason: `Write failed: ${err instanceof Error ? err.message : String(err)}` }] };
   }
@@ -800,7 +824,7 @@ export function demoteModel(model: string, reason: "auth" | "timeout"): void {
   if (found) writeTransportConfig(candidate, `auto-demote ${model} (${reason})`);
 }
 
-/** Swap transport.json ↔ transport.json.old (undo last write). */
+/** Swap transport.json ↔ transport.json.old (undo last write). Rollback-safe. */
 export function restorePrevious(): { ok: boolean; error?: string } {
   const dir = configDir();
   const activePath = join(dir, getEnv().transportConfig);
@@ -815,10 +839,12 @@ export function restorePrevious(): { ok: boolean; error?: string } {
     if (!vr.ok) {
       return { ok: false, error: `Backup config is invalid — cannot restore. Issues: ${vr.issues.map(i => i.message).join("; ")}` };
     }
-    // Atomic swap via temp file
+    // Temp-file swap: write both to temps, then rename safely
     const tmp = activePath + ".tmp." + process.pid;
+    const oldTmp = oldPath + ".tmp." + process.pid;
     writeFileSync(tmp, old, "utf-8");
-    writeFileSync(oldPath, current, "utf-8");
+    writeFileSync(oldTmp, current, "utf-8");
+    renameSync(oldTmp, oldPath);
     renameSync(tmp, activePath);
     cachedTransport = null;
     cachedSource = null;
@@ -844,10 +870,12 @@ export function resetToDefaults(): boolean {
       logWarn(TAG, `transport.default.json is invalid — keeping current config. Issues: ${vr.issues.map(i => i.message).join("; ")}`);
       return false;
     }
-    // Backup current, then atomic swap
-    try { writeFileSync(oldPath, readFileSync(activePath, "utf-8"), "utf-8"); } catch { /* best effort */ }
+    // Backup current via temp, then atomic swap (rollback-safe)
+    const oldTmp = oldPath + ".tmp." + process.pid;
     const tmp = activePath + ".tmp." + process.pid;
+    try { writeFileSync(oldTmp, readFileSync(activePath, "utf-8"), "utf-8"); } catch { /* best effort */ }
     writeFileSync(tmp, defaultRaw, "utf-8");
+    if (existsSync(oldTmp)) renameSync(oldTmp, oldPath);
     renameSync(tmp, activePath);
     cachedTransport = null;
     cachedSource = null;

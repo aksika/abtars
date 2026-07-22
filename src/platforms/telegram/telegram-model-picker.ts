@@ -240,22 +240,33 @@ export async function handleModelPickerCallback(
     const fbMatch = slot.match(/^fallback(\d+)$/);
     if (fbMatch) {
       const fbIndex = parseInt(fbMatch[1]!, 10) - 1;
-      if (!tc.fallbacks) tc.fallbacks = [];
-      tc.fallbacks[fbIndex] = { model, provider: providerName };
+      const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
+      if (!candidate.fallbacks) candidate.fallbacks = [];
+      candidate.fallbacks[fbIndex] = { model, provider: providerName };
       const { cleanDemotedModels } = await import("../../components/transport-config.js");
-      cleanDemotedModels(tc, model);
-      writeTransportConfig(tc, `fallback ${fbIndex + 1} → ${model} (${providerName})`);
-      try { await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "confirm fallback", err); }
+      cleanDemotedModels(candidate, model);
+      const wr = writeTransportConfig(candidate, `fallback ${fbIndex + 1} → ${model} (${providerName})`);
+      if (wr.ok) {
+        try { await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "confirm fallback", err); }
+      } else {
+        try { await api.sendMessage(chatId, `❌ Fallback not updated: ${wr.issues.map(i => i.reason).join("; ")}`); } catch (err) { logAndSwallow(TAG, "confirm fallback fail", err); }
+        return;
+      }
     } else {
       const oldProvider = tc.agents[slot]?.provider;
-      tc.agents[slot] = { ...tc.agents[slot]!, model, provider: providerName };
-      const { cleanDemotedModels } = await import("../../components/transport-config.js");
-      cleanDemotedModels(tc, model);
-      writeTransportConfig(tc, `${slot} → ${model} (${providerName})`);
-
       const providerChanged = oldProvider !== providerName;
       const isMain = slot === "main";
+      const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
+      candidate.agents[slot] = { ...candidate.agents[slot]!, model, provider: providerName };
+      const { cleanDemotedModels } = await import("../../components/transport-config.js");
+      cleanDemotedModels(candidate, model);
+      const wr = writeTransportConfig(candidate, `${slot} → ${model} (${providerName})`);
+      if (!wr.ok) {
+        try { await api.sendMessage(chatId, `❌ ${slot} not updated: ${wr.issues.map(i => i.reason).join("; ")}`); } catch (err) { logAndSwallow(TAG, "confirm model fail", err); }
+        return;
+      }
 
+      // Resolve transport types for cascade detection using original tc
       let oldType: string | undefined;
       let newType: string | undefined;
       let newResolved: ReturnType<typeof resolveAgent> | undefined;
@@ -264,15 +275,6 @@ export async function handleModelPickerCallback(
         newResolved = resolveAgent("_new", { ...tc, agents: { ...tc.agents, _new: { model, provider: providerName } } });
         oldType = oldResolved?.provider.transport ?? "api";
         newType = newResolved?.provider.transport ?? "api";
-        if (oldType !== newType) {
-          const resetAgents: string[] = [];
-          for (const [a, assignment] of Object.entries(tc.agents)) {
-            if (a === "main") continue;
-            const ap = tc.providers[assignment.provider];
-            if (ap && ap.transport !== newType) { tc.agents[a] = { model, provider: providerName }; resetAgents.push(a); }
-          }
-          if (resetAgents.length > 0) writeTransportConfig(tc, `cascade: ${resetAgents.join(", ")} → ${providerName}`);
-        }
       }
 
       if (isMain && !providerChanged && "setModel" in deps.transport) {
