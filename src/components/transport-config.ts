@@ -836,9 +836,10 @@ export function writeTransportConfig(candidate: TransportConfig, reason: string)
 }
 
 /** Remove demoted models from config. Called on user-initiated model switch.
- *  Models the user just chose are resurrected (demotion cleared). All other demoted entries are deleted. */
+ *  Models the user just chose are resurrected (demotion cleared). All other demoted entries are deleted.
+ *  Defaults to the active route only — never bleeds into inactive routes. Use explicitRoute list for bulk cleanup. */
 export function cleanDemotedModels(tc: TransportConfig, chosenModel?: string, explicitRoute?: ExecutionRoute): void {
-  const routesToClean = explicitRoute ? [explicitRoute] : (Object.keys(tc.routes) as ExecutionRoute[]);
+  const routesToClean = explicitRoute ? [explicitRoute] : ([tc.activeRoute] as ExecutionRoute[]);
   for (const r of routesToClean) {
     const ra = tc.routes[r];
     if (!ra) continue;

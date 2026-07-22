@@ -422,9 +422,25 @@ export async function handleRoute(args: string, ctx: CommandContext): Promise<bo
   }
 
   // Check that the target route block exists
-  if (!routeAssignments(tc, newRoute)) {
+  const targetRa = routeAssignments(tc, newRoute);
+  if (!targetRa) {
     await ctx.reply(`❌ Route "${newRoute}" is not configured. Use /model change to set up "${newRoute}" assignments first.`);
     return true;
+  }
+
+  // Validate provider readiness before switching (#367)
+  const mainAssignment = targetRa.agents["main"];
+  if (mainAssignment) {
+    const { validateProviderReady, formatValidationError } = await import("../transport-config.js");
+    const { getEnv } = await import("../env-schema.js");
+    const targetProvider = tc.providers[mainAssignment.provider];
+    if (targetProvider) {
+      const pr = validateProviderReady(mainAssignment.provider, targetProvider, getEnv());
+      if (!pr.ok) {
+        await ctx.reply(`❌ Cannot switch to ${newRoute}: ${formatValidationError(mainAssignment.provider, pr)}`);
+        return true;
+      }
+    }
   }
 
   if (allAssignmentsMatchRoute(tc, newRoute)) {

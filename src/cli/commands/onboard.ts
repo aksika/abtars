@@ -615,7 +615,6 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 
     // Seed providers and route-local agents if not already present (v3 schema)
     tc["schemaVersion"] = 3;
-    tc["activeRoute"] = "pi-ai";
     if (!tc["providers"]) {
       tc["providers"] = {
         "kiro": { "transport": "acp", "cli": "kiro-cli" },
@@ -623,10 +622,14 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
         "openrouter": { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" },
       };
     }
+    const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
+    const defaultProviderCfg = (tc["providers"] as Record<string, { transport: string }>)[provName];
+    const isAcpProvider = defaultProviderCfg?.transport === "acp";
+    tc["activeRoute"] = isAcpProvider ? "acp" : "pi-ai";
     if (!tc["routes"]) {
-      const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
+      const route = isAcpProvider ? "acp" : "pi-ai";
       tc["routes"] = {
-        "pi-ai": {
+        [route]: {
           "agents": {
             "main": { "model": answers.defaultModel, "provider": provName },
             "dreamy": { "model": answers.defaultModel, "provider": provName },
@@ -637,13 +640,21 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
         },
       };
     }
-    if (answers.hailMaryModel) {
-      const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
-      tc["hailMary"] = { route: "acp", model: answers.hailMaryModel, provider: provName };
+    // Set hailMary only when an ACP provider is available (kiro is always seeded)
+    if (answers.hailMaryModel && (tc["providers"] as Record<string, { transport: string }>)["kiro"]?.transport === "acp") {
+      tc["hailMary"] = { route: "acp", model: answers.hailMaryModel, provider: "kiro" };
     }
 
-    await writeFile(transportPath, JSON.stringify(tc, null, 2) + '\n', { mode: 0o600 });
-    process.stdout.write(`✓ transport.json → ${transportPath}\n`);
+    // Validate the full config before persisting — catch any schema violation early
+    const { validateTransportConfig } = await import("../../components/transport-config.js");
+    const vr = validateTransportConfig(tc);
+    if (!vr.ok) {
+      process.stdout.write(`❌ Invalid transport config generated: ${vr.issues.map(i => i.message).join("; ")}\n`);
+      process.stdout.write("Fix your selections and try again.\n");
+    } else {
+      await writeFile(transportPath, JSON.stringify(vr.config, null, 2) + '\n', { mode: 0o600 });
+      process.stdout.write(`✓ transport.json → ${transportPath}\n`);
+    }
   }
 
   // Write users.json (always — onboard has the real chat ID)
