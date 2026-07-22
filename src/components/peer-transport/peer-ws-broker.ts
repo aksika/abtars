@@ -7,14 +7,16 @@ import { WsOutboxStore } from "./ws-outbox-store.js";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 
-// ── Bounds (#1390) ─────────────────────────────────────────────────────────
-const MAX_ID_BYTES = 64;                   // UUID or compact ID
-const MAX_PEER_ID_BYTES = 128;             // peer name length
-const MAX_NONCE_BYTES = 64;                // hex-encoded 32-byte nonce
-const MAX_SIG_BYTES = 128;                 // base64 Ed25519 sig
-const MAX_BODY_BYTES = 524_288;            // 512 KiB body
-const MAX_TIMESTAMP_STR_BYTES = 16;        // "9999999999"
-const HELP_METHODS = new Set(["help.request.v1", "help.status.v1", "help.withdraw.v1", "help.event.v1"]);
+// ── Exported bounds (#1390) ─────────────────────────────────────────────────
+export const MAX_FRAME_BYTES = 1_048_576;  // 1 MiB raw WSS frame
+export const MAX_ID_BYTES = 64;            // UUID or compact ID
+export const MAX_METHOD_BYTES = 48;        // "help.request.v1" length
+export const MAX_PEER_ID_BYTES = 128;      // peer name length
+export const MAX_NONCE_BYTES = 64;         // hex-encoded 32-byte nonce
+export const MAX_SIG_BYTES = 128;          // base64 Ed25519 sig
+export const MAX_BODY_BYTES = 524_288;     // 512 KiB body
+export const MAX_TIMESTAMP_STR_BYTES = 16; // "9999999999"
+export const HELP_METHODS = new Set(["help.request.v1", "help.status.v1", "help.withdraw.v1", "help.event.v1"]);
 
 export type PeerSocketDirection = "accepted" | "outbound";
 
@@ -69,6 +71,7 @@ export class PeerWsBroker {
   private requestHandler: PeerRequestHandler | null = null;
   private pushHandler: PeerPushHandler | null = null;
   private routeListeners: RouteListener[] = [];
+  private nonceStore: PeerNonceStore | null = null;
 
   registerRequestHandler(handler: PeerRequestHandler): void {
     this.requestHandler = handler;
@@ -290,7 +293,7 @@ export class PeerWsBroker {
 
   private handleMessage(peer: string, raw: string, gen: number): void {
     // Reject oversized raw frame before parsing
-    if (raw.length > 1_048_576) return;
+    if (raw.length > MAX_FRAME_BYTES) return;
     try {
       const msg = JSON.parse(raw);
 
@@ -331,34 +334,27 @@ export class PeerWsBroker {
 
   /** #1390: v1 request handler with full authentication pipeline. */
   private async handleRequest(peer: string, msg: any, gen: number): Promise<void> {
-    // 1. Validate version and outer structure
+    // 1. Validate type/version/bounded fields/closed method membership
     if (msg.version !== 1) return;
     if (typeof msg.id !== "string" || msg.id.length > MAX_ID_BYTES) return;
+    if (typeof msg.method !== "string" || msg.method.length > MAX_METHOD_BYTES) return;
     if (!HELP_METHODS.has(msg.method)) return;
-    if (typeof msg.body !== "string") return;
+    if (typeof msg.body !== "string" || msg.body.length > MAX_BODY_BYTES) return;
     const body = msg.body;
-    if (body.length > MAX_BODY_BYTES) return;
     const auth = msg.auth;
     if (!auth || typeof auth !== "object") return;
-
-    // 2. Validate auth fields
     if (typeof auth.peerId !== "string" || auth.peerId.length > MAX_PEER_ID_BYTES) return;
     if (typeof auth.ts !== "string" || auth.ts.length > MAX_TIMESTAMP_STR_BYTES) return;
     if (typeof auth.nonce !== "string" || auth.nonce.length > MAX_NONCE_BYTES) return;
     if (typeof auth.sig !== "string" || auth.sig.length > MAX_SIG_BYTES) return;
 
-    // 3. Signed peerId must match socket identity
+    // 2. Signed peerId must match socket identity
     if (auth.peerId !== peer) {
       this.sendError(peer, msg.id, "auth_failed", "Peer identity mismatch", gen);
       return;
     }
 
-    if (!this.requestHandler) {
-      logWarn("peer-broker", `No request handler registered for ${peer}:${msg.method}`);
-      return;
-    }
-
-    // 4. Look up enrolled key
+    // 3. Look up enrolled key (must exist for this peer)
     const config = loadPeerConfig();
     const peerEntry = config.peers[peer];
     if (!peerEntry?.verifyKey) {
@@ -366,7 +362,7 @@ export class PeerWsBroker {
       return;
     }
 
-    // 5. Verify Ed25519 signature (WSS domain, no nonce check yet)
+    // 4. Verify Ed25519 signature (WSS domain, no nonce check yet)
     const path = `/${msg.method}`;
     const sigResult = verifyWsRequestSignature(
       { peerId: auth.peerId, requestId: msg.id, ts: auth.ts, nonce: auth.nonce, sig: auth.sig },
@@ -380,20 +376,34 @@ export class PeerWsBroker {
       return;
     }
 
-    // 6. Atomic nonce claim (after crypto, before dispatch)
-    const nonceStore = new PeerNonceStore();
-    const claimResult = nonceStore.claim(auth.peerId, auth.nonce);
+    // 5. Atomic nonce claim (after crypto, before dispatch)
+    if (!this.nonceStore) {
+      try {
+        this.nonceStore = new PeerNonceStore();
+      } catch {
+        this.sendError(peer, msg.id, "auth_failed", "Store error", gen);
+        return;
+      }
+    }
+    const claimResult = this.nonceStore.claim(auth.peerId, auth.nonce);
     if (!claimResult.ok) {
       this.sendError(peer, msg.id, "auth_failed", claimResult.reason === "replay" ? "Nonce replay" : "Store error", gen);
       return;
     }
 
-    // 7. Parse body once, after authentication
+    // 6. Parse body once, after authentication
     let payload: unknown;
     try {
       payload = JSON.parse(body);
     } catch {
       this.sendError(peer, msg.id, "invalid_frame", "Malformed body", gen);
+      return;
+    }
+
+    // 7. Check handler exists (after auth, before dispatch — never leaks
+    //    handler state before authentication succeeds)
+    if (!this.requestHandler) {
+      logWarn("peer-broker", `No request handler registered for ${peer}:${msg.method}`);
       return;
     }
 
