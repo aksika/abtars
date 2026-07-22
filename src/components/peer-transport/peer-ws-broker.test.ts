@@ -171,7 +171,12 @@ describe("PeerWsBroker", () => {
     const frame = JSON.stringify({
       type: "request", version: 1, id: "f2", method: "help.request.v1",
       body: JSON.stringify({ goal: "x" }),
-      auth: { peerId: "kp", ts: String(Math.floor(Date.now() / 1000)), nonce: "n", sig: "bogus" },
+      auth: {
+        peerId: "kp",
+        ts: String(Math.floor(Date.now() / 1000)),
+        nonce: "0".repeat(32),
+        sig: "A".repeat(88),
+      },
     });
 
     const responsePromise = new Promise<any>((resolve) => {
@@ -239,8 +244,7 @@ describe("PeerWsBroker", () => {
         auth: { peerId: "kp", ts: "0", nonce: "n", sig: "x" },
       });
       const err = await sendAndGetError(frame);
-      // version !== 1 → silent drop, no response
-      expect(err).toBeNull();
+      expect(err?.error?.code).toBe("invalid_frame");
     });
 
     it("rejects unsupported method", async () => {
@@ -248,7 +252,7 @@ describe("PeerWsBroker", () => {
       const raw = await v1Frame("unknown.method", "f5", payload);
       const frame = JSON.parse(raw);
       const err = await sendAndGetError(JSON.stringify({ ...frame, method: "unknown.method" }));
-      expect(err).toBeNull(); // HELP_METHODS check → silent drop
+      expect(err?.error?.code).toBe("unsupported_method");
     });
 
     it("rejects peer identity mismatch (auth.peerId !== socket peer)", async () => {
@@ -327,9 +331,7 @@ describe("PeerWsBroker", () => {
         auth: { peerId: "kp", ...auth },
       });
       const err = await sendAndGetError(frame);
-      // Oversized body is silently dropped (no auth_failed response since check
-      // is before requestHandler check)
-      expect(err).toBeNull();
+      expect(err?.error?.code).toBe("invalid_frame");
     });
 
     it("rejects nonce replay (duplicate nonce)", async () => {

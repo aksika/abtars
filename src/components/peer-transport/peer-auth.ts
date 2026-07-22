@@ -202,8 +202,14 @@ export function verifyWsRequestSignature(
     return { ok: false, reason: "missing_fields" };
   }
 
-  const ts = parseInt(tsStr, 10);
-  if (isNaN(ts)) return { ok: false, reason: "invalid_ts" };
+  if (!/^\d+$/.test(tsStr)) return { ok: false, reason: "invalid_ts" };
+  if (!/^[0-9a-f]{32}$/.test(nonce)) return { ok: false, reason: "invalid_nonce" };
+  if (sig.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(sig)) {
+    return { ok: false, reason: "invalid_sig" };
+  }
+
+  const ts = Number(tsStr);
+  if (!Number.isSafeInteger(ts)) return { ok: false, reason: "invalid_ts" };
 
   const nowSec = Math.floor(Date.now() / 1000);
   if (Math.abs(nowSec - ts) > TS_WINDOW_SEC) return { ok: false, reason: "stale_ts" };

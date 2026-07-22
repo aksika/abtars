@@ -18,6 +18,18 @@ export const MAX_BODY_BYTES = 524_288;     // 512 KiB body
 export const MAX_TIMESTAMP_STR_BYTES = 16; // "9999999999"
 export const HELP_METHODS = new Set(["help.request.v1", "help.status.v1", "help.withdraw.v1", "help.event.v1"]);
 
+const WIRE_TOKEN_RE = /^[A-Za-z0-9._:-]+$/;
+const NONCE_RE = /^[0-9a-f]{32}$/;
+const SIG_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function isBoundedToken(value: unknown, maxBytes: number): value is string {
+  return typeof value === "string" && value.length > 0 && utf8Bytes(value) <= maxBytes && WIRE_TOKEN_RE.test(value);
+}
+
 export type PeerSocketDirection = "accepted" | "outbound";
 
 export interface PeerSocketRegistration {
@@ -293,7 +305,7 @@ export class PeerWsBroker {
 
   private handleMessage(peer: string, raw: string, gen: number): void {
     // Reject oversized raw frame before parsing
-    if (raw.length > MAX_FRAME_BYTES) return;
+    if (utf8Bytes(raw) > MAX_FRAME_BYTES) return;
     try {
       const msg = JSON.parse(raw);
 
@@ -335,18 +347,48 @@ export class PeerWsBroker {
   /** #1390: v1 request handler with full authentication pipeline. */
   private async handleRequest(peer: string, msg: any, gen: number): Promise<void> {
     // 1. Validate type/version/bounded fields/closed method membership
-    if (msg.version !== 1) return;
-    if (typeof msg.id !== "string" || msg.id.length > MAX_ID_BYTES) return;
-    if (typeof msg.method !== "string" || msg.method.length > MAX_METHOD_BYTES) return;
-    if (!HELP_METHODS.has(msg.method)) return;
-    if (typeof msg.body !== "string" || msg.body.length > MAX_BODY_BYTES) return;
+    if (msg.version !== 1) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request version");
+      return;
+    }
+    if (!isBoundedToken(msg.id, MAX_ID_BYTES)) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request ID");
+      return;
+    }
+    if (typeof msg.method !== "string" || utf8Bytes(msg.method) > MAX_METHOD_BYTES) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request method");
+      return;
+    }
+    if (!HELP_METHODS.has(msg.method)) {
+      this.rejectRequest(peer, msg, gen, "unsupported_method", "Unsupported request method");
+      return;
+    }
+    if (typeof msg.body !== "string" || utf8Bytes(msg.body) > MAX_BODY_BYTES) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request body");
+      return;
+    }
     const body = msg.body;
     const auth = msg.auth;
-    if (!auth || typeof auth !== "object") return;
-    if (typeof auth.peerId !== "string" || auth.peerId.length > MAX_PEER_ID_BYTES) return;
-    if (typeof auth.ts !== "string" || auth.ts.length > MAX_TIMESTAMP_STR_BYTES) return;
-    if (typeof auth.nonce !== "string" || auth.nonce.length > MAX_NONCE_BYTES) return;
-    if (typeof auth.sig !== "string" || auth.sig.length > MAX_SIG_BYTES) return;
+    if (!auth || typeof auth !== "object" || Array.isArray(auth)) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request authentication");
+      return;
+    }
+    if (!isBoundedToken(auth.peerId, MAX_PEER_ID_BYTES)) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request peer");
+      return;
+    }
+    if (typeof auth.ts !== "string" || !/^\d{1,16}$/.test(auth.ts) || utf8Bytes(auth.ts) > MAX_TIMESTAMP_STR_BYTES) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request timestamp");
+      return;
+    }
+    if (typeof auth.nonce !== "string" || utf8Bytes(auth.nonce) > MAX_NONCE_BYTES || !NONCE_RE.test(auth.nonce)) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request nonce");
+      return;
+    }
+    if (typeof auth.sig !== "string" || utf8Bytes(auth.sig) > MAX_SIG_BYTES || auth.sig.length % 4 !== 0 || !SIG_RE.test(auth.sig)) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request signature");
+      return;
+    }
 
     // 2. Signed peerId must match socket identity
     if (auth.peerId !== peer) {
@@ -420,17 +462,23 @@ export class PeerWsBroker {
 
   private sendResponse(peer: string, frameId: string | undefined, payload: unknown, gen?: number): void {
     const socket = gen !== undefined ? this.socketByGeneration(peer, gen) : this.bestSocket(peer);
-    if (!socket) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({ type: "response", id: frameId, payload }));
   }
 
   private sendError(peer: string, frameId: string | undefined, code: string, message: string, gen?: number): void {
     const socket = gen !== undefined ? this.socketByGeneration(peer, gen) : this.bestSocket(peer);
-    if (!socket) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({
       type: "response", id: frameId,
       error: { code, message, retryable: false },
     }));
+  }
+
+  private rejectRequest(peer: string, msg: any, gen: number, code: string, message: string): void {
+    // Only echo a syntactically bounded ID; malformed frames otherwise have no
+    // safe correlation value for a response.
+    if (isBoundedToken(msg?.id, MAX_ID_BYTES)) this.sendError(peer, msg.id, code, message, gen);
   }
 
   private socketByGeneration(peer: string, generation: number): WebSocket | null {
