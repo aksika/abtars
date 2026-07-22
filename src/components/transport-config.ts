@@ -157,7 +157,16 @@ export function validateTransportConfig(input: unknown): TransportValidationResu
 
   // Validate every agent references an existing provider
   for (const [role, assignment] of Object.entries(config.agents)) {
-    const p = providers[assignment.provider];
+    if (!assignment || typeof assignment !== "object") {
+      issues.push({ code: "missing_field", path: `agents.${role}`, message: `Agent "${role}" has invalid assignment` });
+      continue;
+    }
+    const provider = (assignment as Record<string, unknown>).provider;
+    if (typeof provider !== "string") {
+      issues.push({ code: "missing_field", path: `agents.${role}.provider`, message: `Agent "${role}" has no provider` });
+      continue;
+    }
+    const p = providers[provider];
     if (!p) {
       issues.push({ code: "missing_provider", path: `agents.${role}.provider`, message: `Agent "${role}" references unknown provider "${assignment.provider}"` });
       continue;
@@ -170,7 +179,11 @@ export function validateTransportConfig(input: unknown): TransportValidationResu
 
   // Validate fallbacks reference existing providers and support the route
   for (let i = 0; i < (config.fallbacks ?? []).length; i++) {
-    const fb = config.fallbacks![i]!;
+    const fb = config.fallbacks![i];
+    if (!fb || typeof fb !== "object") {
+      issues.push({ code: "missing_field", path: `fallbacks[${i}]`, message: `Fallback[${i}] is invalid` });
+      continue;
+    }
     const p = providers[fb.provider];
     if (!p) {
       issues.push({ code: "missing_provider", path: `fallbacks[${i}].provider`, message: `Fallback[${i}] references unknown provider "${fb.provider}"` });
@@ -727,7 +740,7 @@ export type TransportWriteResult =
   | { ok: true }
   | { ok: false; issues: AssignmentIssue[] };
 
-export function writeTransportConfig(candidate: TransportConfig, reason?: string): TransportWriteResult {
+export function writeTransportConfig(candidate: TransportConfig, reason: string): TransportWriteResult {
   // Validate the complete candidate — use a detached deep copy so input mutation
   // doesn't leak into validation, and failed writes leave the cache unchanged.
   const candidateCopy = JSON.parse(JSON.stringify(candidate)) as TransportConfig;
@@ -762,7 +775,8 @@ export function writeTransportConfig(candidate: TransportConfig, reason?: string
   const content = JSON.stringify(vr.config, null, 2);
 
   // Write both candidate and backup to temp files, then rename in order.
-  // If any rename fails, restore from temps so the prior pair is preserved.
+  // Primary rename happens FIRST so a failure leaves oldTmp/oldPath untouched.
+  // Backup rename happens SECOND (best-effort; on failure primary is already correct).
   const tmp = p + ".tmp." + process.pid;
   const oldTmp = oldPath + ".tmp." + process.pid;
   try {
@@ -770,18 +784,25 @@ export function writeTransportConfig(candidate: TransportConfig, reason?: string
 
     if (currentBytes !== null) {
       writeFileSync(oldTmp, currentBytes, "utf-8");
-      renameSync(oldTmp, oldPath);
     }
 
+    // Commit primary FIRST
     renameSync(tmp, p);
+
+    // Commit backup SECOND (best-effort — primary is already safe)
+    if (currentBytes !== null) {
+      try { renameSync(oldTmp, oldPath); } catch { /* best effort */ }
+    }
 
     cachedTransport = vr.config;
     cachedSource = "primary";
     logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
     return { ok: true };
   } catch (err) {
-    // Restore: if oldTmp was written but one of the renames failed, put it back
-    try { if (existsSync(oldTmp)) { renameSync(oldTmp, oldPath); } } catch { /* best effort */ }
+    // Primary rename failed: restore oldTmp to oldPath to preserve prior pair
+    if (currentBytes !== null) {
+      try { if (existsSync(oldTmp)) renameSync(oldTmp, oldPath); } catch { /* best effort */ }
+    }
     try { unlinkSync(tmp); } catch { /* best effort */ }
     try { unlinkSync(oldTmp); } catch { /* best effort */ }
     logWarn(TAG, `Failed to write transport.json: ${err instanceof Error ? err.message : String(err)}`);
@@ -870,13 +891,16 @@ export function resetToDefaults(): boolean {
       logWarn(TAG, `transport.default.json is invalid — keeping current config. Issues: ${vr.issues.map(i => i.message).join("; ")}`);
       return false;
     }
-    // Backup current via temp, then atomic swap (rollback-safe)
+    // Backup current via temp, then atomic swap (primary first, backup second)
     const oldTmp = oldPath + ".tmp." + process.pid;
     const tmp = activePath + ".tmp." + process.pid;
-    try { writeFileSync(oldTmp, readFileSync(activePath, "utf-8"), "utf-8"); } catch { /* best effort */ }
+    let haveBackup = false;
+    try { writeFileSync(oldTmp, readFileSync(activePath, "utf-8"), "utf-8"); haveBackup = true; } catch { /* no prior primary to back up */ }
     writeFileSync(tmp, defaultRaw, "utf-8");
-    if (existsSync(oldTmp)) renameSync(oldTmp, oldPath);
+    // Commit primary first
     renameSync(tmp, activePath);
+    // Commit backup second (best-effort)
+    if (haveBackup) { try { renameSync(oldTmp, oldPath); } catch { /* best effort */ } }
     cachedTransport = null;
     cachedSource = null;
     logInfo(TAG, "transport.json reset to defaults (old saved as .old.json)");
