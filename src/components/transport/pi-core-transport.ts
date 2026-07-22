@@ -16,7 +16,7 @@ import type { OutputObserver } from "../session-output-feed.js";
 
 const TAG = "pi-core-transport";
 
-function extractAssistantText(content: unknown): string {
+export function extractAssistantText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content

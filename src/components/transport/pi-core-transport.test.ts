@@ -3,7 +3,9 @@
 // structure and lifecycle with mocked dependencies.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { PiCoreTransport } from "./pi-core-transport.js";
+import { PiCoreTransport, extractAssistantText } from "./pi-core-transport.js";
+import { PiCoreContextProjection } from "./pi-core-context.js";
+import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage, AgentMessage } from "./pi-core-types.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
 
@@ -144,5 +146,138 @@ describe("PiCoreTransport", () => {
       // expected — no Pi installation
     }
     expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
+  });
+});
+
+// ── extractAssistantText (pure function) ─────────────────────────────────────
+
+describe("extractAssistantText", () => {
+  it("returns string content as-is", () => {
+    expect(extractAssistantText("Hello world")).toBe("Hello world");
+  });
+
+  it("extracts only text parts from mixed text+toolCall content", () => {
+    const content = [
+      { type: "text", text: "Here's the answer. " },
+      { type: "toolCall", id: "t1", name: "bash", arguments: { cmd: "ls" } },
+      { type: "text", text: "Done." },
+    ];
+    expect(extractAssistantText(content)).toBe("Here's the answer. Done.");
+  });
+
+  it("returns empty string for toolCall-only content", () => {
+    const content = [
+      { type: "toolCall", id: "t1", name: "bash", arguments: {} },
+    ];
+    expect(extractAssistantText(content)).toBe("");
+  });
+
+  it("returns empty string for empty array", () => {
+    expect(extractAssistantText([])).toBe("");
+  });
+
+  it("returns empty string for non-array, non-string input", () => {
+    expect(extractAssistantText({ foo: "bar" })).toBe("");
+  });
+
+  it("skips non-text parts gracefully", () => {
+    const content = [
+      { type: "text", text: "A" },
+      { type: "unknown", text: "B" },
+      { type: "text", text: "C" },
+    ];
+    expect(extractAssistantText(content)).toBe("AC");
+  });
+});
+
+// ── Context projection wiring at transport level ────────────────────────────
+
+function makeProjectionSeed(overrides?: Partial<PiExecutionContextSeed>): PiExecutionContextSeed {
+  return {
+    source: { mode: "ephemeral", sessionKey: "test_session" },
+    executionId: "exec_1",
+    currentTurn: {
+      role: "abtars_current_turn",
+      executionId: "exec_1",
+      sessionId: "session_1",
+      content: "Hello!",
+      timestamp: Date.now(),
+    },
+    volatileBlocks: [],
+    ...overrides,
+  };
+}
+
+function makeMarkerMessages(): AgentMessage[] {
+  return [
+    { role: "assistant", content: "How can I help?" },
+    {
+      role: "abtars_current_turn",
+      executionId: "exec_1",
+      sessionId: "session_1",
+      content: "Hello!",
+      timestamp: Date.now(),
+    } as AbtarsCurrentTurnMessage,
+  ];
+}
+
+describe("context projection at transport level", () => {
+  it("beforeMessageId: 0 selects durable projection", async () => {
+    const seed = makeProjectionSeed({
+      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 0, maxContext: 8000 },
+    });
+    const projection = new PiCoreContextProjection(seed, "system");
+    let capturedBeforeMessageId: number | undefined;
+    const result = await projection.transform(makeMarkerMessages(), {
+      hostGeneration: 0,
+      orchestrator: {
+        async getContext(_s: string, _m: number, opts: { beforeMessageId?: number }) {
+          capturedBeforeMessageId = opts.beforeMessageId;
+          return { messages: [{ role: "user", content: "prior" }] };
+        },
+      },
+    });
+    expect(capturedBeforeMessageId).toBe(0);
+    expect(result.messages.some((m) => m.content === "prior")).toBe(true);
+  });
+
+  it("durable request without orchestrator reports degraded context", async () => {
+    const seed = makeProjectionSeed({
+      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 100, maxContext: 8000 },
+    });
+    const projection = new PiCoreContextProjection(seed, "system");
+    const result = await projection.transform(makeMarkerMessages(), { hostGeneration: 0 });
+    expect(result.contextDegraded).toBe(true);
+    expect(result.messages.length).toBe(1);
+    expect(result.messages[0]?.role).toBe("abtars_current_turn");
+  });
+
+  it("production composition passes a real orchestrator and preserves historical messages", async () => {
+    const seed = makeProjectionSeed({
+      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 42, maxContext: 8000 },
+    });
+    const projection = new PiCoreContextProjection(seed, "system");
+    const result = await projection.transform(makeMarkerMessages(), {
+      hostGeneration: 0,
+      orchestrator: {
+        async getContext() {
+          return {
+            messages: [
+              { role: "user", content: "first" },
+              { role: "assistant", content: "second" },
+              { role: "user", content: "third" },
+            ],
+          };
+        },
+      },
+    });
+    expect(result.contextDegraded).toBe(false);
+    expect(result.messages).toHaveLength(4); // 3 historical + 1 current-turn marker
+    expect(result.messages[0]?.role).toBe("user");
+    expect(result.messages[0]?.content).toBe("first");
+    expect(result.messages[1]?.role).toBe("assistant");
+    expect(result.messages[1]?.content).toEqual([{ type: "text", text: "second" }]);
+    expect(result.messages[2]?.role).toBe("user");
+    expect(result.messages[2]?.content).toBe("third");
   });
 });
