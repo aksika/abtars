@@ -96,87 +96,53 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
   })();
 
   if (agent.provider.transport === "api") {
-    const { DirectApiTransport } = await import("./transport/direct-api-transport.js");
-    const { FallbackPolicy } = await import("./transport/fallback-policy.js");
+    const { PiCoreTransport } = await import("./transport/pi-core-transport.js");
     const apiKey = getEnv().getApiKey(agent.provider.apiKeyEnv ?? "API_KEY");
 
-    // #1418: build the specialist candidate chain through the shared pure builder.
-    // Order: configured role → last successful Main candidate (or configured Main
-    // before the first success) → top-level fallback chain. Every candidate carries
-    // its complete identity tuple so provider switching preserves the right endpoint.
     const primaryEndpoint = agent.provider.endpoint ?? "http://localhost:11434/v1";
 
     const configured: ModelCandidate = {
-      model: agent.model,
-      provider: agent.providerName,
-      endpoint: primaryEndpoint,
-      apiKey,
-      maxContext: agent.contextWindow,
-      source: "primary",
+      model: agent.model, provider: agent.providerName, endpoint: primaryEndpoint,
+      apiKey, maxContext: agent.contextWindow, source: "primary",
     };
 
-    // Last successful Main (secret-free tuple) — fall back to configured Main when
-    // none has succeeded yet this process. Resolve apiKey from its provider config.
     const mainAgent = tc ? resolveAgent("main", tc) : null;
     const configuredMainSpec: CandidateSpec | null = mainAgent
-      ? {
-          model: mainAgent.model,
-          provider: mainAgent.providerName,
-          endpoint: mainAgent.provider.endpoint ?? primaryEndpoint,
-          maxContext: mainAgent.contextWindow,
-        }
+      ? { model: mainAgent.model, provider: mainAgent.providerName, endpoint: mainAgent.provider.endpoint ?? primaryEndpoint, maxContext: mainAgent.contextWindow }
       : null;
     const inheritedSpec = lastSuccessfulMain ?? configuredMainSpec;
     let inheritedCandidate: ModelCandidate | null = null;
     if (inheritedSpec) {
       const inheritedProvider = tc?.providers[inheritedSpec.provider];
       inheritedCandidate = {
-        model: inheritedSpec.model,
-        provider: inheritedSpec.provider,
-        endpoint: inheritedSpec.endpoint,
+        model: inheritedSpec.model, provider: inheritedSpec.provider, endpoint: inheritedSpec.endpoint,
         apiKey: inheritedProvider?.apiKeyEnv ? getEnv().getApiKey(inheritedProvider.apiKeyEnv) : apiKey,
-        maxContext: inheritedSpec.maxContext,
-        source: "inherited_chain",
+        maxContext: inheritedSpec.maxContext, source: "inherited_chain",
       };
     }
 
-    // Top-level fallback chain as complete candidates.
     const fallbackCandidates: ModelCandidate[] = (tc?.fallbacks ?? []).map(fb => {
       const fbProvider = tc!.providers[fb.provider];
-      const fbEndpoint = fbProvider?.endpoint ?? primaryEndpoint;
       return {
-        model: fb.model,
-        provider: fb.provider,
-        endpoint: fbEndpoint,
+        model: fb.model, provider: fb.provider, endpoint: fbProvider?.endpoint ?? primaryEndpoint,
         apiKey: fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey,
-        maxContext: mainAgent?.contextWindow ?? agent.contextWindow,
-        source: "agent_fallback",
+        maxContext: mainAgent?.contextWindow ?? agent.contextWindow, source: "agent_fallback",
       };
     });
 
-    const candidates = buildCandidates({
-      role: "specialist",
-      configured,
-      lastSuccessfulMain: inheritedCandidate,
-      fallbacks: fallbackCandidates,
-    });
+    const candidates = buildCandidates({ role: "specialist", configured, lastSuccessfulMain: inheritedCandidate, fallbacks: fallbackCandidates });
 
-    // Use shared registry if provided, otherwise create isolated one
     const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
-    const policy = new FallbackPolicy(candidates, registry ?? new ModelHealthRegistry());
 
-    const transport = new DirectApiTransport({
-      provider: agent.providerName,
-      endpoint: primaryEndpoint,
-      apiKey, model: agent.model,
-      maxContext: agent.contextWindow, maxOutput: agent.maxOutput,
-      maxTurns: tc?.maxTurns ?? 50,
-      maxToolRounds: tc?.maxToolRounds ?? 25,
-      maxFallbackToolRounds: tc?.maxFallbackToolRounds ?? 5,
-      useProviderLib: agent.provider.useProviderLib,
-    }, policy);
+    const transport = new PiCoreTransport({
+      role: "specialist",
+      systemPrompt: agent.provider.endpoint ?? "",
+      candidates,
+      healthRegistry: registry ?? new ModelHealthRegistry(),
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+    });
     await transport.initialize();
-    logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${agent.model}, ${candidates.length} candidates, shared registry: ${!!registry})`);
+    logInfo("subagent", `${role} transport: PiCore ${agent.providerName} (model=${agent.model}, ${candidates.length} candidates)`);
     return { transport, model: agent.model };
   }
 
