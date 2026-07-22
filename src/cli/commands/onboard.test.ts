@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { onboard } from './onboard.js';
+import { validateTransportConfig } from '../../components/transport-config.js';
 
 // onboard ends with a full `abtars update` (clone/build/deploy/start). Stub it
 // so the non-interactive tests exercise config/.env/secret writing hermetically
@@ -99,6 +100,27 @@ describe('onboard command (non-interactive)', () => {
     // Secrets go to secret/ dir
     const token = await readFile(join(fakeHome, 'secret', 'TELEGRAM_BOT_TOKEN'), 'utf-8');
     expect(token).toBe('123:secret');
+  });
+
+  it('writes a valid v3 route for a provider not present in the seed defaults', async () => {
+    const code = await onboard({
+      nonInteractive: true,
+      acceptRisk: true,
+      instanceName: 'test',
+      userName: 'tester',
+      passphrase: 'pw',
+      telegramToken: '123:secret',
+      telegramChatId: '4242',
+      defaultProvider: 'openai',
+      defaultModel: 'custom-openai-model',
+      force: true,
+    });
+    expect(code).toBe(0);
+    const transport = JSON.parse(await readFile(join(fakeHome, 'config', 'transport.json'), 'utf-8')) as Record<string, unknown>;
+    const result = validateTransportConfig(transport);
+    expect(result.ok).toBe(true);
+    expect(transport.activeRoute).toBe('pi-ai');
+    expect((transport.providers as Record<string, unknown>).openai).toEqual(expect.objectContaining({ transport: 'api' }));
   });
 
   it('preserves operator-added lines in .env', async () => {

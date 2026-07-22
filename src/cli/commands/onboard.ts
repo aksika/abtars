@@ -86,6 +86,16 @@ const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
   gemini: 'GEMINI_API_KEY',
 };
 
+/** Minimal provider definitions needed to make a fresh onboarding config valid. */
+const ONBOARD_PROVIDER_CONFIG: Record<ProviderChoice, Record<string, unknown>> = {
+  openrouter: { transport: "api", endpoint: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY" },
+  anthropic: { transport: "api", endpoint: "https://api.anthropic.com/v1", apiKeyEnv: "ANTHROPIC_API_KEY", apiFormat: "anthropic" },
+  openai: { transport: "api", endpoint: "https://api.openai.com/v1", apiKeyEnv: "OPENAI_API_KEY" },
+  ollama: { transport: "api", endpoint: "http://localhost:11434/v1" },
+  kiro: { transport: "acp", cli: "kiro-cli" },
+  gemini: { transport: "acp", cli: "gemini" },
+};
+
 interface WizardAnswers {
   readonly installMode: "simple" | "daemon";
   readonly userName: string;
@@ -615,15 +625,16 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 
     // Seed providers and route-local agents if not already present (v3 schema)
     tc["schemaVersion"] = 3;
-    if (!tc["providers"]) {
-      tc["providers"] = {
-        "kiro": { "transport": "acp", "cli": "kiro-cli" },
-        "ollama": { "transport": "api", "endpoint": "http://localhost:11434/v1" },
-        "openrouter": { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" },
-      };
-    }
+    const providers = (tc["providers"] && typeof tc["providers"] === "object" && !Array.isArray(tc["providers"]))
+      ? tc["providers"] as Record<string, Record<string, unknown>>
+      : {};
     const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
-    const defaultProviderCfg = (tc["providers"] as Record<string, { transport: string }>)[provName];
+    if (!providers[provName]) providers[provName] = ONBOARD_PROVIDER_CONFIG[answers.defaultProvider];
+    // Interactive onboarding may configure hailMary even when an older config
+    // had a partial provider registry; ensure its ACP provider exists too.
+    if (answers.hailMaryModel && !providers["kiro"]) providers["kiro"] = ONBOARD_PROVIDER_CONFIG.kiro;
+    tc["providers"] = providers;
+    const defaultProviderCfg = providers[provName] as { transport?: string };
     const isAcpProvider = defaultProviderCfg?.transport === "acp";
     tc["activeRoute"] = isAcpProvider ? "acp" : "pi-ai";
     if (!tc["routes"]) {
@@ -641,7 +652,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       };
     }
     // Set hailMary only when an ACP provider is available (kiro is always seeded)
-    if (answers.hailMaryModel && (tc["providers"] as Record<string, { transport: string }>)["kiro"]?.transport === "acp") {
+    if (answers.hailMaryModel && providers["kiro"]?.transport === "acp") {
       tc["hailMary"] = { route: "acp", model: answers.hailMaryModel, provider: "kiro" };
     }
 
@@ -651,6 +662,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     if (!vr.ok) {
       process.stdout.write(`❌ Invalid transport config generated: ${vr.issues.map(i => i.message).join("; ")}\n`);
       process.stdout.write("Fix your selections and try again.\n");
+      return 5;
     } else {
       await writeFile(transportPath, JSON.stringify(vr.config, null, 2) + '\n', { mode: 0o600 });
       process.stdout.write(`✓ transport.json → ${transportPath}\n`);

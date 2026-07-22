@@ -12,7 +12,7 @@
 //   Deferred: develop when mock-fs infrastructure or integration harness is in place.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { resolveAgent, getEnvFallback, clearTransportCache, validateTransportConfig, writeTransportConfig } from "./transport-config.js";
+import { resolveAgent, resolveHailMary, getEnvFallback, clearTransportCache, validateTransportConfig, validateRouteProvidersReady, writeTransportConfig } from "./transport-config.js";
 import type { TransportConfig, ModelCatalog } from "./transport-config.js";
 
 const MODELS: ModelCatalog = {
@@ -88,6 +88,21 @@ describe("getEnvFallback", () => {
     expect(fb.providerName).toBe("openrouter");
     expect(fb.provider.transport).toBe("api");
     expect(fb.model).toBe("minimax/minimax-m2.5");
+  });
+});
+
+describe("resolveHailMary", () => {
+  it("resolves an ACP hailMary without requiring an HTTP endpoint", () => {
+    const config: TransportConfig = {
+      ...TRANSPORT,
+      hailMary: { route: "acp", model: "claude-sonnet-4.6", provider: "kiro-free" },
+    };
+    expect(resolveHailMary(config)).toMatchObject({
+      route: "acp",
+      model: "claude-sonnet-4.6",
+      provider: "kiro-free",
+      cli: "kiro-cli",
+    });
   });
 });
 
@@ -396,6 +411,28 @@ describe("#367 — validateProviderReady", () => {
       expect(msg).toContain("set OPENROUTER_API_KEY");
       expect(msg.startsWith("❌")).toBe(true);
     });
+  });
+});
+
+describe("#1467 — target route provider readiness", () => {
+  it("checks fallback providers as well as the main provider", () => {
+    const config: TransportConfig = {
+      schemaVersion: 3,
+      activeRoute: "pi-ai",
+      routes: {
+        "pi-ai": {
+          agents: { main: { model: "m1", provider: "main" } },
+          fallbacks: [{ model: "m2", provider: "fallback" }],
+        },
+      },
+      providers: {
+        main: { transport: "api", apiKeyEnv: "MAIN_KEY" },
+        fallback: { transport: "api", apiKeyEnv: "FALLBACK_KEY" },
+      },
+    };
+    const result = validateRouteProvidersReady(config, "pi-ai", { getApiKey: name => name === "MAIN_KEY" ? "set" : undefined });
+    expect(result?.providerName).toBe("fallback");
+    expect(result?.result.ok).toBe(false);
   });
 });
 

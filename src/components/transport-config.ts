@@ -77,6 +77,12 @@ export type HailMaryConfig = {
   provider: string;
 };
 
+export type ResolvedHailMary = HailMaryConfig & {
+  cli?: string;
+  endpoint?: string;
+  apiKeyEnv?: string;
+};
+
 export type TransportConfig = {
   schemaVersion: 3;
   activeRoute: ExecutionRoute;
@@ -470,12 +476,17 @@ export function clearTransportCache(): void {
 }
 
 /** Resolve hailMary from transport.json. Returns null if not configured. */
-export function resolveHailMary(transport?: TransportConfig | null): { model: string; endpoint: string; apiKeyEnv?: string } | null {
+export function resolveHailMary(transport?: TransportConfig | null): ResolvedHailMary | null {
   const tc = transport ?? loadTransport();
   if (!tc?.hailMary) return null;
   const provider = tc.providers[tc.hailMary.provider];
-  if (!provider?.endpoint) return null;
-  return { model: tc.hailMary.model, endpoint: provider.endpoint, apiKeyEnv: provider.apiKeyEnv };
+  if (!provider) return null;
+  return {
+    ...tc.hailMary,
+    cli: provider.cli,
+    endpoint: provider.endpoint,
+    apiKeyEnv: provider.apiKeyEnv,
+  };
 }
 
 /** Route-specific hailMary boundary: #1468 owns the emergency execution path. */
@@ -610,6 +621,37 @@ export function allAssignmentsMatchRoute(config: TransportConfig, route: Executi
     if (!p || !providerSupportsRoute(p, route)) return false;
   }
   return true;
+}
+
+/** Return the first unavailable provider used anywhere by a route block. */
+export function validateRouteProvidersReady(
+  config: TransportConfig,
+  route: ExecutionRoute,
+  env: EnvAccessor,
+): { providerName: string; result: ProviderValidationResult } | null {
+  const assignments = routeAssignments(config, route);
+  if (!assignments) return null;
+
+  const providerNames = new Set<string>([
+    ...Object.values(assignments.agents).map(a => a.provider),
+    ...(assignments.fallbacks ?? []).map(f => f.provider),
+  ]);
+  for (const providerName of providerNames) {
+    const provider = config.providers[providerName];
+    if (!provider) {
+      return {
+        providerName,
+        result: {
+          ok: false,
+          reason: `Provider "${providerName}" is not defined in transport.json`,
+          fix: `Add provider "${providerName}" to transport.json`,
+        },
+      };
+    }
+    const result = validateProviderReady(providerName, provider, env);
+    if (!result.ok) return { providerName, result };
+  }
+  return null;
 }
 
 export function acpSameProviderConstraint(config: TransportConfig): boolean {

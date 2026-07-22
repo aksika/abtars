@@ -108,8 +108,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       ctx.hailMary = null;
     } else {
       ctx.hailMary = {
-        model: hm.model,
-        endpoint: hm.endpoint,
+        ...hm,
         apiKey: hm.apiKeyEnv ? getEnv().getApiKey(hm.apiKeyEnv) : undefined,
       };
       logInfo("main", `hailMary configured for external emergency routing: ${hm.model}`);

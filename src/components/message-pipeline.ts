@@ -42,6 +42,7 @@ import { buildPrompt } from "./pipeline/prompt-builder.js";
 import { getEnv } from "./env-schema.js";
 import { sanitizeOutbound } from "./sanitize-outbound.js";
 import { abmind } from "../utils/abmind-lazy.js";
+import type { ResolvedHailMary } from "./transport-config.js";
 
 const TAG = "pipeline";
 const PRIMING_MAX = 8;
@@ -130,7 +131,7 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   startSleep?: (opts: { fresh: boolean; resume: boolean }) => import("../capabilities/sleep/index.js").SleepStartResult;
   loadedCapabilities?: string[];
   selfHealerTask?: { enabled: boolean } | null;
-  hailMary?: { model: string; endpoint: string; apiKey?: string } | null;
+  hailMary?: (ResolvedHailMary & { apiKey?: string }) | null;
   /** Rebuild professor transport in place (used by /reset to pick up provider changes). */
   rebuildTransport?: () => Promise<void>;
   /** Boot-time phase health (#331). */

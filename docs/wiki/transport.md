@@ -7,24 +7,33 @@ Transport config lives at `~/.abtars/config/transport.json`. It defines which AI
 | Term | Definition |
 |------|-----------|
 | **Provider** | A named service entry — identifies how to reach a model | 
-| **Transport** | Communication method: `acp` (CLI via JSON-RPC), `tmux` (CLI via pane scraping), `api` (HTTP endpoint) |
+| **Route** | Normal execution route: `pi-ai` for API providers or `acp` for CLI providers |
+| **Transport** | Provider communication method: `acp` (CLI via JSON-RPC) or `api` (HTTP endpoint) |
 
 ## Example
 
 ```json
 {
-  "agents": {
-    "professor": {
-      "model": "claude-sonnet-4.6",
-      "provider": "kiro",
+  "schemaVersion": 3,
+  "activeRoute": "pi-ai",
+  "routes": {
+    "pi-ai": {
+      "agents": {
+        "main": { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" },
+        "dreamy": { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" },
+        "browsie": { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" },
+        "cody": { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" }
+      },
       "fallbacks": [
-        { "model": "kimi-k2.5:cloud", "provider": "ollama" },
-        { "model": "gemini-2.5-flash", "provider": "openrouter" }
+        { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" }
       ]
     },
-    "dreamy": { "model": "minimax-m2.5:cloud", "provider": "ollama" },
-    "browsie": { "model": "minimax-m2.5:cloud", "provider": "ollama" },
-    "coding": { "model": "qwen3.5:cloud", "provider": "ollama" }
+    "acp": {
+      "agents": {
+        "main": { "model": "claude-sonnet-4.6", "provider": "kiro" }
+      },
+      "fallbacks": []
+    }
   },
   "providers": {
     "kiro": { "transport": "acp", "cli": "kiro-cli" },
@@ -33,6 +42,11 @@ Transport config lives at `~/.abtars/config/transport.json`. It defines which AI
     "openrouter": { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" }
   },
   "maxTurns": 50,
+  "hailMary": {
+    "route": "acp",
+    "model": "claude-sonnet-4.6",
+    "provider": "kiro"
+  },
   "healthPolicy": {
     "skipThreshold": 0.7,
     "leakPerMinute": 0.03,
@@ -44,28 +58,28 @@ Transport config lives at `~/.abtars/config/transport.json`. It defines which AI
 }
 ```
 
-## Agents
+## Route-local assignments
 
 | Agent | Role |
 |-------|------|
-| `professor` | Main conversation agent |
+| `main` | Main conversation agent |
 | `dreamy` | Sleep cycle / dream processing |
 | `browsie` | Web browsing tasks |
-| `coding` | Coding mode (switched via `/coding`) |
+| `cody` | Coding mode |
 
-Each agent has a `model` and `provider`. Co-agents are independent — they can use different providers than professor.
+Each route has its own `agents` and `fallbacks` assignments. Switching with `/route pi-ai` or `/route acp` changes only `activeRoute`; the other route's selections are preserved.
 
 ## Fallback Chain
 
-Professor supports an ordered `fallbacks` array. When the primary model fails:
+Each active route supports an ordered `fallbacks` array. When the primary model fails:
 
 1. Try fallback 1, 2, 3, ... N (in order)
 2. Skip models with full health buckets (rate-limited, auth failed)
-3. If all exhausted → error (use `/model emergency` for paid hailMary)
+3. If all exhausted → error. The global ACP-only `hailMary` descriptor is reserved for the #1468 emergency path.
 
-Fallbacks must use the same transport type and CLI binary as the primary. API fallbacks can span providers freely.
+Fallbacks must use providers compatible with their route. ACP assignments use one ACP provider; `pi-ai` assignments use API providers.
 
-Add as many fallbacks as you want — just edit the array in transport.json.
+Add fallbacks to the selected route's array in `transport.json`.
 
 ## Health Policy
 

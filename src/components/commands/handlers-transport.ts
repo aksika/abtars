@@ -81,10 +81,10 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
-  // #1447: embedded Pi has no private emergency engine. #1467 will provide
-  // the explicit ACP/tmux route override in transport.json.
+  // #1447: embedded Pi has no private emergency engine. #1468 owns the
+  // dedicated emergency path; #1467 only defines the global ACP hailMary entry.
   if (arg === "emergency" || arg === "hailmary") {
-    await ctx.reply("❌ Embedded Pi emergency switching is removed. Select the ACP/tmux emergency route after the #1467 transport.json update.");
+    await ctx.reply("❌ Emergency execution is unavailable until #1468. Normal transport switching is available with /route pi-ai or /route acp.");
     return true;
   }
 
@@ -428,19 +428,13 @@ export async function handleRoute(args: string, ctx: CommandContext): Promise<bo
     return true;
   }
 
-  // Validate provider readiness before switching (#367)
-  const mainAssignment = targetRa.agents["main"];
-  if (mainAssignment) {
-    const { validateProviderReady, formatValidationError } = await import("../transport-config.js");
-    const { getEnv } = await import("../env-schema.js");
-    const targetProvider = tc.providers[mainAssignment.provider];
-    if (targetProvider) {
-      const pr = validateProviderReady(mainAssignment.provider, targetProvider, getEnv());
-      if (!pr.ok) {
-        await ctx.reply(`❌ Cannot switch to ${newRoute}: ${formatValidationError(mainAssignment.provider, pr)}`);
-        return true;
-      }
-    }
+  // Validate every provider used by the target block before switching (#367).
+  const { validateRouteProvidersReady } = await import("../transport-config.js");
+  const { getEnv } = await import("../env-schema.js");
+  const readiness = validateRouteProvidersReady(tc, newRoute, getEnv());
+  if (readiness && !readiness.result.ok) {
+    await ctx.reply(`❌ Cannot switch to ${newRoute}: ${readiness.result.reason}\n   Fix: ${readiness.result.fix}`);
+    return true;
   }
 
   if (allAssignmentsMatchRoute(tc, newRoute)) {

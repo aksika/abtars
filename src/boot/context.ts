@@ -25,6 +25,7 @@ import type { AgentApiServer } from "../components/agent-api-server.js";
 import type { PlatformAdapter } from "../types/platform.js";
 import { spin as spinInstance } from "../components/spin.js";
 import type { ModelHealthRegistry } from "../components/transport/model-health-registry.js";
+import type { ResolvedHailMary } from "../components/transport-config.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
 import { SubagentRuntime as SubagentRuntimeClass } from "../components/subagent-runtime.js";
@@ -95,7 +96,7 @@ export interface BootCtx {
   sleepUnavailable: SleepUnavailable | null;
   sleepHandle: SleepHandle | null;
   modelHealthRegistry: ModelHealthRegistry | null;
-  hailMary: { model: string; endpoint: string; apiKey?: string } | null;
+  hailMary: (ResolvedHailMary & { apiKey?: string }) | null;
   selfHealerTask: { enabled: boolean } | null;
   dashboardServer: IDashboardSlot | null;
   agentApiServer: AgentApiServer | null;
