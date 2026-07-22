@@ -208,7 +208,6 @@ export async function getStatus(ctx?: BridgeStatusCtx): Promise<StatusView> {
  */
 export function renderOperatorStatus(view: StatusView): string {
   const lines: string[] = [];
-  lines.push(`abtars status`);
   lines.push(`  home:          ${view.home}`);
   lines.push(`  version:       ${view.version ?? "(unset — run update)"}`);
   lines.push(`  commit:        ${view.commit ?? "(unknown)"}`);
@@ -491,12 +490,16 @@ function collectDaemon(
 
   const unit = unitName(scope);
   const isMac = process.platform === "darwin";
+  // The display name stays human-friendly, while launchd must be queried by
+  // the plist label. `launchctl list abtars-watchdog` always reports unknown
+  // because the actual label is `com.abtars.watchdog`.
+  const probeUnit = isMac ? "com.abtars.watchdog" : unit;
   const r = (() => {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
       if (isMac) {
-        return spawnSync("launchctl", ["list", unit], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: SYSTEMCTL_TIMEOUT_MS });
+        return spawnSync("launchctl", ["list", probeUnit], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: SYSTEMCTL_TIMEOUT_MS });
       }
       return spawnSync(
         "systemctl",

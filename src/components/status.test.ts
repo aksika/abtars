@@ -81,7 +81,6 @@ describe("renderOperatorStatus", () => {
     const view = makeOperatorView();
     const out = renderOperatorStatus(view);
     const expected = [
-      "abtars status",
       "  home:          /home/test/.abtars",
       "  version:       0.3.5-alpha.0",
       "  commit:        abc1234",
@@ -98,6 +97,7 @@ describe("renderOperatorStatus", () => {
       "  agent-api:     :7100",
     ].join("\n");
     expect(out.startsWith(expected)).toBe(true);
+    expect(out).not.toMatch(/^abtars status/m);
   });
 
   it("renders the daemon block when daemon info is present", () => {
