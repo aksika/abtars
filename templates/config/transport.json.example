@@ -4,14 +4,13 @@
   "routes": {
     "pi-ai": {
       "agents": {
-        "main":    { "model": "claude-sonnet-4.6",  "provider": "openrouter" },
-        "dreamy":  { "model": "minimax-m2.5:cloud", "provider": "openrouter" },
-        "browsie": { "model": "minimax-m2.5:cloud", "provider": "openrouter" },
-        "cody":    { "model": "qwen3.5:cloud",      "provider": "openrouter" }
+        "main":    { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" },
+        "dreamy":  { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" },
+        "browsie": { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" },
+        "cody":    { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" }
       },
       "fallbacks": [
-        { "model": "kimi-k2.5:cloud", "provider": "openrouter" },
-        { "model": "gemini-2.5-flash", "provider": "openrouter" }
+        { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" }
       ]
     },
     "acp": {
