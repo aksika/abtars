@@ -1,5 +1,5 @@
 /**
- * pi-ai adapter — the L1 "motor prosthetic" for DirectApiTransport (#1311).
+ * pi-ai adapter — the L1 "motor prosthetic" for PiCoreTransport (#1311).
  *
  * Anatomy: pi-ai attaches at Brain (model-transport motor) only. This module
  * takes an abtars candidate {endpoint, apiKey, model, apiFormat} + conversation
@@ -49,7 +49,25 @@ import type { PiModuleSpecifier } from "../pi-installation.js";
 import { parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
 import type { ErrorKind } from "./model-health-registry.js";
 import type { SSEEvent } from "./sse-parser.js";
-import type { ChatMessage, ContentPart } from "./conversation-session.js";
+
+// Shared message types (moved from deleted conversation-session.ts)
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+export type LegacyToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+export type ChatMessage = {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | ContentPart[] | null;
+  tool_calls?: LegacyToolCall[];
+  tool_call_id?: string;
+  name?: string;
+};
 
 const TAG = "pi-ai-adapter";
 
@@ -506,7 +524,7 @@ export async function* streamPiAiCompletion(
 /**
  * Public Pi stream used by the pi-agent-core boundary. This deliberately
  * returns pi-ai's native AssistantMessageEventStream; the legacy SSE adapter
- * above remains only for the existing DirectApiTransport path.
+ * above remains only for the PiCoreTransport path.
  */
 export async function createPiAiAssistantStream(
   candidate: PiAiCandidate,

@@ -21,7 +21,7 @@ import { createPiAiAssistantStream, buildPiModel, pickPiApi } from "./pi-ai-adap
 import type { PiAiCandidate, PiAiConversation } from "./pi-ai-adapter.js";
 import { streamPiAiCompletion } from "./pi-ai-adapter.js";
 import type { SSEEvent } from "./sse-parser.js";
-import type { ChatMessage } from "./conversation-session.js";
+import type { ChatMessage } from "./pi-ai-adapter.js";
 
 const TAG = "pi-stream-fn";
 

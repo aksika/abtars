@@ -4,7 +4,7 @@
  */
 
 import { logWarn } from "../logger.js";
-import type { ToolCall } from "./conversation-session.js";
+import type { LegacyToolCall as ToolCall } from "./pi-ai-adapter.js";
 
 const TAG = "direct-api";
 

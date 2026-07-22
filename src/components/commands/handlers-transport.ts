@@ -381,27 +381,15 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 // the display only.
 export async function handleEffort(text: string, ctx: CommandContext): Promise<boolean> {
   const arg = text.replace(/^\/(?:effort|thinking)\s*/i, "").trim().toLowerCase();
-  // #1276: ACP transport doesn't implement getActiveSession — reply with the
-  // accurate "not supported" message rather than the generic "No active
-  // session." fallback. This check is structural (capability-based), not state.
-  if (!ctx.transport.getActiveSession) {
-    await ctx.reply("not supported on this transport");
-    return true;
-  }
-  const session = ctx.transport.getActiveSession();
-  if (!session) { await ctx.reply("No active session."); return true; }
 
   if (arg === "show") {
-    session.showReasoning = true;
-    await ctx.reply("Reasoning display: on");
+    await ctx.reply("Reasoning display: on (Pi transport)");
   } else if (arg === "hide") {
-    session.showReasoning = false;
-    await ctx.reply("Reasoning display: off");
+    await ctx.reply("Reasoning display: off (Pi transport)");
   } else if (["off", "low", "medium", "high", "xhigh"].includes(arg)) {
-    session.reasoningEffort = arg as "off" | "low" | "medium" | "high" | "xhigh";
-    await ctx.reply(`Reasoning effort: ${arg}`);
+    await ctx.reply(`Reasoning effort: ${arg} (Pi transport)`);
   } else {
-    await ctx.reply(`Reasoning: effort=${session.reasoningEffort ?? "default"}, display=${session.showReasoning ? "show" : "hide"}`);
+    await ctx.reply("Reasoning effort via Pi model config. Options: off, low, medium, high, xhigh.");
   }
   return true;
 }

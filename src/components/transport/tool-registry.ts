@@ -1,5 +1,5 @@
 /**
- * Tool registry for DirectApiTransport.
+ * Tool registry for PiCoreTransport.
  * Phase 2: native tool schemas. Phase 3: in-process memory when available.
  */
 

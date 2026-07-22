@@ -426,12 +426,9 @@ export async function handleInboundMessage(
         ? { sessionId: activeSessionId, executionId: pSession.activeExecutionId, kind: "final_assistant" }
         : undefined;
 
-    // #869: strip <think>/<thinking> blocks unless user opted in via /effort show
-    const reasoningSession = transport.getActiveSession?.();
-    if (!reasoningSession?.showReasoning) {
-      userResponse = userResponse.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>\s*/g, "");
-      userResponse = userResponse.replace(/<\/think(?:ing)?>\s*/g, "");
-    }
+    // #869: strip <think>/<thinking> blocks (Pi transport handles thinking natively via events)
+    userResponse = userResponse.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>\s*/g, "");
+    userResponse = userResponse.replace(/<\/think(?:ing)?>\s*/g, "");
 
     // --- Secret redaction (belt-and-suspenders for #436) ---
     for (const [key, val] of Object.entries(process.env)) {
