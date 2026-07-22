@@ -226,7 +226,7 @@ export async function handleInboundMessage(
     // #1329: currentMessageId is the just-persisted raw user row ID (or
     // undefined on a no-write path). We forward it to spin as part of
     // the spec, and the chokepoint at spin.ts#sendPrompt carries it
-    // through to DirectApiTransport.sendPrompt as `beforeMessageId`.
+    // through to the transport.sendPrompt as `beforeMessageId`.
     const { prompt: builtPrompt, imageContent, recalledHits, currentMessageId, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: !("agentLoop" in transport),

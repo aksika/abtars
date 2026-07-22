@@ -119,10 +119,10 @@ export interface IKiroTransport {
   /** Restart the CLI session (tmux-only). No-op if not supported. */
   restartSession?(workingDir: string, model?: string): Promise<void>;
 
-  /** Hot-swap provider+model. API transport only. Throws if prompt in flight. */
+  /** Hot-swap provider+model (API transports only). */
   switchProvider?(opts: { provider?: string; endpoint: string; apiKey?: string; model: string; maxContext: number; policy: unknown }): void;
 
-  /** Temporarily override model API timeout for next call(s). null resets to default. */
+  /** Temporarily override model API timeout for next call(s). null resets to config default. */
   setTimeoutOverride?(ms: number | null): void;
 
   /** Temporarily override max tool rounds (circuit breaker) for next call(s). null resets to config default. */

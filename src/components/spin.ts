@@ -569,7 +569,7 @@ export class Spin {
       // 7. Execute — persistent/continuation sends via the session's own transport
       //    (key = session.id preserves the Orc sneak-in); oneshot uses runtime.complete.
       //    #1329: thread the just-persisted raw user message ID through as the
-      //    beforeMessageId cursor so DirectApiTransport can bound its DB-backed
+      //    beforeMessageId cursor so the transport can bound its DB-backed
       //    context assembly to history only.
       //    #1332: wrap with steering continuation loop for persistent sessions.
       const promptContext: import("./transport/kiro-transport.js").PromptRequestContext = {

@@ -96,7 +96,7 @@ export class SubagentRuntime {
 
   /** Set main transport reference and wire the #1418 last-successful-Main tracker. */
   setMainTransport(transport: IKiroTransport): void {
-    // #1418: Wire last-successful-Main tracker from DirectApiTransport. The tracker
+    // #1418: Wire last-successful-Main tracker from the transport. The tracker
     // stores the complete secret-free candidate tuple (provider/model/endpoint/
     // maxContext) so specialists can reuse the exact Main candidate that worked.
     const apiTransport = transport as unknown as { lastSuccessfulCandidate: CandidateSpec | null; onLastSuccessfulChanged?: (candidate: CandidateSpec) => void };

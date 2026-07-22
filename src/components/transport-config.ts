@@ -53,8 +53,6 @@ export type ProviderConfig = {
   endpoint?: string;
   apiKeyEnv?: string;
   apiFormat?: "chat" | "responses" | "anthropic";
-  /** #1311: route this provider's DirectApi through the pi-ai provider engine when installed (default off). */
-  useProviderLib?: boolean;
   thinking?:
     | { style: "default" }
     | { style: "effort"; default: "off" | "low" | "medium" | "high" | "xhigh" }
@@ -280,10 +278,9 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
 
   let contextWindow = modelEntry?.contextWindow ?? 128000;
   let maxOutput = modelEntry?.maxOutput ?? 8192;
-  if (resolvedProvider.useProviderLib) {
-    const piMeta = resolveModelMeta(effectiveModel, effectiveProvider);
-    if (piMeta) { contextWindow = piMeta.contextWindow; maxOutput = piMeta.maxOutput; }
-  }
+  // Pi catalog metadata lookup (all API providers route through Pi)
+  const piMeta = resolveModelMeta(effectiveModel, effectiveProvider);
+  if (piMeta) { contextWindow = piMeta.contextWindow; maxOutput = piMeta.maxOutput; }
 
   // Build fallback list: top-level fallbacks (filtered), plus last successful Main for specialists
   const seen = new Set<string>();
@@ -399,7 +396,6 @@ type LegacyProviderConfig = {
   endpoint?: string;
   apiKeyEnv?: string;
   apiFormat?: "chat" | "responses" | "anthropic";
-  useProviderLib?: boolean;
   thinking?: any;
   defaults?: Record<string, { model: string; fallbacks?: string[] }>;
   fallbackChain?: string[];
@@ -412,7 +408,6 @@ type LegacyTransportConfig = {
   maxTurns?: number;
   maxToolRounds?: number;
   maxFallbackToolRounds?: number;
-  hailMary?: { model: string; provider: string };
   healthPolicy?: HealthPolicyConfig;
 };
 
@@ -479,7 +474,6 @@ export function migrateTransportConfig(raw: Record<string, unknown>): { config: 
     if (p.endpoint) np.endpoint = p.endpoint;
     if (p.apiKeyEnv) np.apiKeyEnv = p.apiKeyEnv;
     if (p.apiFormat) np.apiFormat = p.apiFormat;
-    if (p.useProviderLib) np.useProviderLib = p.useProviderLib;
     if (p.thinking) np.thinking = p.thinking;
     if (p.defaults) {
       np.defaults = {};
@@ -501,7 +495,6 @@ export function migrateTransportConfig(raw: Record<string, unknown>): { config: 
       maxToolRounds: legacy.maxToolRounds,
       maxFallbackToolRounds: legacy.maxFallbackToolRounds,
       fallbacks: fallbacks.length > 0 ? fallbacks : undefined,
-      hailMary: legacy.hailMary,
       healthPolicy: legacy.healthPolicy,
     },
   };
@@ -565,13 +558,6 @@ export function validateTransportAssignments(
     }
   }
 
-  if (config.hailMary) {
-    const hmResult = validateModelProviderPair(config.hailMary.model, config.hailMary.provider, mc);
-    if (!hmResult.ok) {
-      issues.push({ location: "hailMary", model: config.hailMary.model, provider: config.hailMary.provider, reason: hmResult.reason });
-    }
-  }
-
   return issues;
 }
 
@@ -604,10 +590,10 @@ export function validateAtStartup(): void {
     }
   }
 
-  // #1311: warn when a provider opts into pi-ai but has no pi mapping (→ stays on models.json).
+  // #1311: warn when a provider has no pi catalog mapping (metadata stays on models.json).
   for (const [name, provider] of Object.entries(tc.providers)) {
-    if (provider.useProviderLib && !mapProviderName(name)) {
-      logWarn(TAG, `Provider "${name}" has useProviderLib but no pi-ai mapping — metadata stays on models.json`);
+    if (provider.transport === "api" && !mapProviderName(name)) {
+      logWarn(TAG, `Provider "${name}" has no pi-ai mapping — metadata stays on models.json`);
     }
   }
 }
@@ -616,7 +602,7 @@ export function validateAtStartup(): void {
 export function anyProviderUseProviderLib(tc?: TransportConfig | null): boolean {
   const config = tc ?? loadTransport();
   if (!config) return false;
-  return Object.values(config.providers).some(p => p.useProviderLib);
+  return Object.values(config.providers).some(p => p.transport === "api");
 }
 
 // ── Write ───────────────────────────────────────────────────────────────────

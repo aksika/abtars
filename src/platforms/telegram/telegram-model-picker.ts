@@ -39,26 +39,23 @@ export function isModelPickerCallback(data: string): boolean {
  */
 const PICKER_MAX = 50;
 
-async function buildModelEntries(providerName: string, providerConfig: { transport?: string; useProviderLib?: boolean } | undefined): Promise<Array<{ id: string; label: string }>> {
+async function buildModelEntries(providerName: string, providerConfig: { transport?: string } | undefined): Promise<Array<{ id: string; label: string }>> {
   const { getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
 
   // Tier 1: pi-catalog (small list → use directly)
   let pi: Array<{ id: string; cost: { input: number; output: number } }> | null = null;
-  if (providerConfig?.useProviderLib) {
-    const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
-    pi = modelsForProviderSync(providerName);
-  }
+  const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
+  pi = modelsForProviderSync(providerName);
   if (pi && pi.length > 0 && pi.length <= PICKER_MAX) {
     return pi.map(m => ({ id: m.id, label: `${m.id} (${formatCost(m.cost)})` }));
   }
 
   // Tier 2: curated models.json, filtered against the warmed pi-ai catalog when available
-  // to prevent stale IDs and 404s.
   let curated = getModelsForProvider(providerName);
   if (providerConfig?.transport === "api") {
     curated = curated.filter(m => !m.entry.status || m.entry.status === "alive");
   }
-  if (pi && pi.length > 0 && providerConfig?.useProviderLib) {
+  if (pi && pi.length > 0) {
     const piIds = new Set(pi.map(m => m.id));
     curated = curated.filter(m => piIds.has(m.id));
   }
@@ -235,11 +232,8 @@ export async function handleModelPickerCallback(
 
     const providerConfig = tc.providers[providerName];
     if (!providerConfig) { await api.sendMessage(chatId, `❌ Provider ${providerName} not found`); return; }
-    // #1311: pi-sourced models aren't in models.json — trust the picker cache for pi providers.
-    if (!providerConfig.useProviderLib) {
-      const validModels = getModelsForProvider(providerName);
-      if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
-    }
+    const validModels = getModelsForProvider(providerName);
+    if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
     const validation = validateProviderReady(providerName, providerConfig, getEnv());
     if (!validation.ok) { await api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
 

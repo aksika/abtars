@@ -11,7 +11,7 @@ const mockTransport = {
   isReady: true,
   contextPercent: -1,
   initialize: vi.fn(),
-  // #1290: mirrors DirectApiTransport.agentLabel default (direct-api-transport.ts:59)
+  // #1290: mirrors PiCoreTransport.agentLabel default (direct-api-transport.ts:59)
   agentLabel: "professor",
 };
 
@@ -28,7 +28,7 @@ describe("SubagentRuntime", () => {
     runtime = new SubagentRuntime();
     vi.clearAllMocks();
     mockSendPrompt.mockResolvedValue("response text");
-    // #1290: reset to the DirectApiTransport default between tests
+    // #1290: reset to the PiCoreTransport default between tests
     mockTransport.agentLabel = "professor";
   });
 
