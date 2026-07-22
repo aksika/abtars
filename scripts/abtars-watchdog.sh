@@ -29,6 +29,12 @@ else
   fi
 fi
 
+# If .stopped exists from a previous `abtars stop`, exit cleanly
+if [[ -f "$AB/.stopped" ]]; then
+  echo "$(date +%FT%T) Watchdog exit: .stopped sentinel present" >> "$AB/logs/watchdog.log"
+  exit 0
+fi
+
 # Write our PID into bridge.lock
 python3 -c "
 import json
@@ -55,9 +61,11 @@ while true; do
   # Act on reason
   case "$REASON" in
     stopped)
+      echo "stopped" > "$AB/.stopped"
       echo "$(date +%FT%T) Watchdog exit: manual=stop" >> "$AB/logs/watchdog.log"
       exit 2 ;;
-    update:*|restart|rollback:*)
+    update:*|restart|rollback:*|deploy-respawn)
+      rm -f "$AB/.stopped"
       echo "$(date +%FT%T) Watchdog exit: ${REASON}" >> "$AB/logs/watchdog.log"
       exit 0 ;;
     "")
@@ -93,10 +101,12 @@ while true; do
       rm -f "$AB/.start-reason"
       case "$REASON" in
         stopped)
+          echo "stopped" > "$AB/.stopped"
           echo "$(date +%FT%T) Watchdog exit: manual=stop (during poll)" >> "$AB/logs/watchdog.log"
           kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
           exit 2 ;;
-        update:*|restart|rollback:*)
+        update:*|restart|rollback:*|deploy-respawn)
+          rm -f "$AB/.stopped"
           echo "$(date +%FT%T) Watchdog exit: ${REASON} (during poll)" >> "$AB/logs/watchdog.log"
           kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
           exit 0 ;;
@@ -179,6 +189,7 @@ except Exception:
 " 2>/dev/null || echo 0)
   if (( CRASH_WINDOW_COUNT >= 4 )); then
     echo "$(date +%FT%T) Failsafe B: $CRASH_WINDOW_COUNT deaths within 10min (heartbeat present) — giving up" >> "$AB/logs/watchdog.log"
+    echo "stopped" > "$AB/.stopped"
     echo "stopped" > "$AB/.start-reason"
     exit 2
   fi
