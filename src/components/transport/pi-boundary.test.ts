@@ -41,15 +41,10 @@ describe("dependency boundary (#1425)", () => {
   });
 
   it("pi-ai is type-only — import type should be erased at runtime", async () => {
-    // Verify the adapter module can be imported without loading pi-ai at module level
-    // This is already true since all pi imports are `import type` which are erased.
-    // The test confirms the module structure is correct by importing it at runtime.
     const mod = await import("./pi-ai-adapter.js");
     expect(mod.pickPiApi).toBeDefined();
     expect(mod.buildPiModel).toBeDefined();
     expect(mod.buildPiContext).toBeDefined();
-    expect(mod.translatePiAiEvents).toBeDefined();
-    expect(mod.PiAiUnavailableError).toBeDefined();
 
     const catalog = await import("./pi-catalog.js");
     expect(catalog.mapProviderName).toBeDefined();
@@ -102,12 +97,7 @@ describe("retry/fallback ownership (#1425)", () => {
     expect(src).not.toContain("withRetry(");
   });
 
-  it("PiAiUnavailableError is the only pre-request failure class", async () => {
-    const mod = await import("./pi-ai-adapter.js");
-    const err = new mod.PiAiUnavailableError("test");
-    expect(err.name).toBe("PiAiUnavailableError");
-    expect(err).toBeInstanceOf(Error);
-  });
+
 });
 
 // ── 4. No provider-specific wire format copies ────────────────────────────────
@@ -130,55 +120,4 @@ describe("no upstream provider wire copies (#1425)", () => {
   });
 });
 
-// ── 5. Deterministic offline real-package stream harness ──────────────────────
 
-describe("offline real-package stream harness (#1425)", () => {
-  it("pi-ai AssistantMessageEventStream can be constructed and iterated", async () => {
-    // This test uses the real pi-ai package (devDependency) to create a stream,
-    // push deterministic events, and consume them through our translator.
-    // No network or credentials are required.
-    const { AssistantMessageEventStream } = await import(
-      "@earendil-works/pi-ai"
-    ) as { AssistantMessageEventStream: new () => Record<string, unknown> };
-    const stream = new AssistantMessageEventStream() as {
-      push: (e: import("@earendil-works/pi-ai").AssistantMessageEvent) => void;
-      end: () => void;
-      [Symbol.asyncIterator]: () => AsyncIterator<import("@earendil-works/pi-ai").AssistantMessageEvent>;
-    };
-
-    const { translatePiAiEvents } = await import("./pi-ai-adapter.js");
-
-    // Queue a text delta and done using method calls on the stream (preserves `this`)
-    const partial = {
-      role: "assistant" as const,
-      content: [] as import("@earendil-works/pi-ai").TextContent[],
-      api: "openai-completions" as import("@earendil-works/pi-ai").Api,
-      provider: "test" as const,
-      model: "",
-      usage: { input: 3, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 5,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      stopReason: "stop" as const,
-      timestamp: 0,
-    };
-
-    stream.push({ type: "text_delta", contentIndex: 0, delta: "offline pi ", partial });
-    stream.push({
-      type: "done", reason: "stop",
-      message: {
-        ...partial,
-        usage: { input: 3, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 5,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      },
-    });
-    stream.end();
-
-    const out: Array<{ type: string; content?: string }> = [];
-    for await (const ev of translatePiAiEvents(stream)) {
-      out.push(ev);
-    }
-    expect(out).toHaveLength(2);
-    expect(out[0]!.type).toBe("chunk");
-    expect((out[0] as { content: string }).content).toBe("offline pi ");
-    expect(out[1]!.type).toBe("done");
-  });
-});

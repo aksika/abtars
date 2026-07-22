@@ -15,6 +15,12 @@ const pendingArtifacts = new Map<number, InlineArtifact[]>();
 
 const MAX_FILE_BYTES = 1_000_000; // 1MB raw
 
+function stringValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
 export function drainArtifacts(cardId: number): InlineArtifact[] | undefined {
   const arts = pendingArtifacts.get(cardId);
   if (arts) pendingArtifacts.delete(cardId);
@@ -33,8 +39,8 @@ export const artifactAttachTool: ToolDefinition = {
     required: ["path", "card_id"],
   },
   async execute(args): Promise<string> {
-    const filePath = args["path"];
-    const cardId = parseInt(args["card_id"] ?? "0", 10);
+    const filePath = stringValue(args["path"]);
+    const cardId = parseInt(stringValue(args["card_id"] ?? "0"), 10);
     if (!filePath) return JSON.stringify({ error: "path is required" });
     if (!cardId) return JSON.stringify({ error: "card_id is required" });
 
@@ -68,7 +74,7 @@ export const artifactPushTool: ToolDefinition = {
   },
   async execute(args): Promise<string> {
     try {
-      const url = await upload(args["local_path"] ?? "", args["remote_path"] ?? "");
+      const url = await upload(stringValue(args["local_path"]), stringValue(args["remote_path"]));
       return JSON.stringify({ ok: true, url });
     } catch (err) {
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
@@ -89,8 +95,9 @@ export const artifactPullTool: ToolDefinition = {
   },
   async execute(args): Promise<string> {
     try {
-      await download(args["remote_path"] ?? "", args["local_path"] ?? "");
-      return JSON.stringify({ ok: true, path: args["local_path"] });
+      const localPath = stringValue(args["local_path"]);
+      await download(stringValue(args["remote_path"]), localPath);
+      return JSON.stringify({ ok: true, path: localPath });
     } catch (err) {
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
     }

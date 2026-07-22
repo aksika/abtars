@@ -85,7 +85,7 @@ describe("validateAndRepair", () => {
   it("accepts all-api mixed providers", () => {
     const tc = {
       schemaVersion: 2,
-      route: "direct-api",
+      route: "pi-ai",
       agents: {
         main: { model: "m1", provider: "ollama" },
         dreamy: { model: "m2", provider: "openrouter" },

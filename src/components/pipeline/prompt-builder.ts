@@ -34,7 +34,7 @@ export interface BuildPromptResult {
   recalledHits?: Array<{ id: number; contentEn: string }>;
   /** #1329: the SQLite message ID assigned to the just-persisted raw user row. */
   currentMessageId?: number;
-  /** #1335: structured current turn components for Direct API cache-stable assembly. */
+  /** #1335: structured current turn components for Pi cache-stable assembly. */
   currentTurn?: {
     rawText: string;
     volatileContext: Array<{
@@ -71,7 +71,7 @@ export async function buildPrompt(
       // ACP: agent reads files itself — just provide the path, no I/O
       prompt += `\nImage saved at: ${msg.mediaPath}`;
     } else {
-      // DirectApi: encode for API
+      // Pi API: encode for the embedded provider boundary
       const { readFileSync } = await import("node:fs");
       const ext = msg.mediaPath.split(".").pop()?.toLowerCase();
       const visionMimes: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" };

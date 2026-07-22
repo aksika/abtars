@@ -569,7 +569,7 @@ export class Spin {
       // 7. Execute — persistent/continuation sends via the session's own transport
       //    (key = session.id preserves the Orc sneak-in); oneshot uses runtime.complete.
       //    #1329: thread the just-persisted raw user message ID through as the
-      //    beforeMessageId cursor so DirectApiTransport can bound its DB-backed
+      //    beforeMessageId cursor so the transport can bound its DB-backed
       //    context assembly to history only.
       //    #1332: wrap with steering continuation loop for persistent sessions.
       const promptContext: import("./transport/kiro-transport.js").PromptRequestContext = {
@@ -577,6 +577,7 @@ export class Spin {
         beforeMessageId: spec.currentMessageId,
         directContextTurn: spec.directContextTurn,
         executionTelemetry,
+        orchestrator: (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator } | undefined)?.contextOrchestrator,
       };
       // #1338: wrap each model call/round in a fresh call-local observer so the
       // output feed receives a unique stream per turn. The observer publishes
@@ -615,7 +616,13 @@ export class Spin {
       const resolveDriver = async (): Promise<SpinExecutionDriver> => {
         if (sessionTransport) {
           return {
-            send: (msg, img, ctx) => observe(sessionTransport!, session.id, msg, img, ctx),
+            send: (msg, img, ctx) => observe(sessionTransport!, session.id, msg, img, {
+              ...(ctx ?? {}),
+              orchestrator: ctx?.orchestrator ?? (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator }).contextOrchestrator,
+            }),
+            steer: typeof sessionTransport.steer === "function"
+              ? (content, lease) => sessionTransport!.steer!(content, lease)
+              : undefined,
             close: async () => {},
             ephemeral: false,
           };
@@ -634,15 +641,19 @@ export class Spin {
         session.transportOwner = "runtime";
         return {
           send: async (msg, img, ctx) => {
+            const enrichedContext = {
+              ...(ctx ?? {}),
+              orchestrator: ctx?.orchestrator ?? (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator }).contextOrchestrator,
+            };
             if (!this.sessionOutputFeed || !session.activeExecutionId) {
-              return (await executor.send(msg, img, ctx)) || "(no output)";
+              return (await executor.send(msg, img, enrichedContext)) || "(no output)";
             }
             const obs = createOutputObserver(this.sessionOutputFeed, {
               sessionId: session.id, executionId: session.activeExecutionId,
             });
             const enriched = { ...(ctx ?? {}), outputObserver: obs };
             try {
-              const r = (await executor.send(msg, img, enriched)) || "(no output)";
+              const r = (await executor.send(msg, img, { ...enrichedContext, ...enriched })) || "(no output)";
               obs.end("complete");
               return r;
             } catch (err) {
@@ -652,6 +663,9 @@ export class Spin {
               obs.invalidate();
             }
           },
+          steer: typeof sessionTransport.steer === "function"
+            ? (content, lease) => sessionTransport!.steer!(content, lease)
+            : undefined,
           close: async () => {
             await executor.close();
             sessionTransport = undefined;
@@ -667,15 +681,23 @@ export class Spin {
           for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
             const batch = leaseInstructions(session, "steer");
             if (!batch) { session.steeringAccepting = false; break; }
-            // lease and markDelivered are synchronous here, so restoreBeforeDelivery
-            // (queued after lease, before handoff) is never reached in Phase 1.
-            // Phase 2's Pi adapter will introduce an async gap where it applies.
-            markDelivered(batch);
             try {
-              result = (await driver.send(renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]), undefined, { userId: spec.userId ?? userId, executionTelemetry })) || "(no output)";
-              markConsumed(batch, session);
+              const steeringPrompt = renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]);
+              if (driver.steer) {
+                result = (await driver.steer(steeringPrompt, batch)) || "(no output)";
+              } else {
+                // ACP/tmux have no in-process agent queue; preserve their
+                // continuation behavior while Pi uses its active Agent.
+                markDelivered(batch);
+                result = (await driver.send(steeringPrompt, undefined, { userId: spec.userId ?? userId, executionTelemetry })) || "(no output)";
+                markConsumed(batch, session);
+              }
             } catch (steerErr) {
-              failAfterDelivery(batch, session, "steer_failed");
+              if (batch.instructions.some((instruction) => instruction.state === "delivered")) {
+                failAfterDelivery(batch, session, "steer_failed");
+              } else {
+                failAfterDelivery(batch, session, "steer_handoff_failed");
+              }
               throw steerErr;
             }
           }

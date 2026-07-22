@@ -1,5 +1,5 @@
 /**
- * Tool registry for DirectApiTransport.
+ * Tool registry for PiCoreTransport.
  * Phase 2: native tool schemas. Phase 3: in-process memory when available.
  */
 
@@ -28,8 +28,22 @@ export type ToolDefinition = {
   readonly name: string;
   readonly description: string;
   readonly parameters: Record<string, unknown>;
-  execute(args: Record<string, string>, context?: { userId: string; signal?: AbortSignal }): Promise<string>;
+  // Implementations receive the provider's JSON object unchanged. Legacy
+  // command-backed tools normalize individual values at their own boundary.
+  execute(args: Record<string, unknown>, context?: { userId: string; signal?: AbortSignal }): Promise<string>;
 };
+
+/** Tool implementations may still consume textual CLI-style values, but the
+ * registry boundary preserves the provider's JSON types until that point. */
+function stringValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function optionalStringValue(value: unknown): string | undefined {
+  return value === undefined || value === null ? undefined : stringValue(value);
+}
 
 const BASH_TIMEOUT_MS = 300_000;
 const CLI_TIMEOUT_MS = 60_000;
@@ -185,7 +199,7 @@ const bashTool: ToolDefinition = {
     properties: { command: { type: "string", description: "The bash command to execute" } },
     required: ["command"],
   },
-  execute: (args, context) => runBash(args["command"] ?? "", BASH_TIMEOUT_MS, context?.signal),
+  execute: (args, context) => runBash(stringValue(args["command"]), BASH_TIMEOUT_MS, context?.signal),
 };
 
 let _storeCount = 0;
@@ -217,12 +231,12 @@ const memoryStoreTool: ToolDefinition = {
       try {
         const params: InstantStoreParams = {
           userId: context?.userId ?? getMasterUserId(),
-          contentEn: args["translated"] ?? "",
-          contentOriginal: args["original"] ?? args["translated"] ?? "",
-          memoryType: (args["type"] ?? "fact") as InstantStoreParams["memoryType"],
-          emotionScore: parseInt(args["emotion"] ?? "0", 10),
-          confidence: parseInt(args["confidence"] ?? "3", 10),
-          classification: parseInt(args["classification"] ?? "1", 10),
+          contentEn: stringValue(args["translated"]),
+          contentOriginal: stringValue(args["original"] ?? args["translated"]),
+          memoryType: stringValue(args["type"] ?? "fact") as InstantStoreParams["memoryType"],
+          emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
+          confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
+          classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
         };
         const result = await memoryBackend.instantStore({ ...params, createdBy: "tool:memory_store" });
         return JSON.stringify(result);
@@ -235,12 +249,12 @@ const memoryStoreTool: ToolDefinition = {
             logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
             const params: InstantStoreParams = {
               userId: context?.userId ?? getMasterUserId(),
-              contentEn: args["translated"] ?? "",
-              contentOriginal: args["original"] ?? args["translated"] ?? "",
-              memoryType: (args["type"] ?? "fact") as InstantStoreParams["memoryType"],
-              emotionScore: parseInt(args["emotion"] ?? "0", 10),
-              confidence: parseInt(args["confidence"] ?? "3", 10),
-              classification: parseInt(args["classification"] ?? "1", 10),
+              contentEn: stringValue(args["translated"]),
+              contentOriginal: stringValue(args["original"] ?? args["translated"]),
+              memoryType: stringValue(args["type"] ?? "fact") as InstantStoreParams["memoryType"],
+              emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
+              confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
+              classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
             };
             const result = await memoryBackend.instantStore({ ...params, createdBy: "tool:memory_store" });
             return JSON.stringify(result);
@@ -272,10 +286,10 @@ const memoryRecallTool: ToolDefinition = {
         const { loadUsers } = await import("../user-registry.js");
         const userEntry = loadUsers().byUserId.get(userId);
         const result = await memoryBackend.recall({
-          translated: [args["query"] ?? ""],
-          original: args["query"] ?? "",
+          translated: [stringValue(args["query"])],
+          original: stringValue(args["query"]),
           userId,
-          limit: parseInt(args["limit"] ?? "10", 10),
+          limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
           maxClassification: userEntry?.maxClass ?? 1,
         });
         import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
@@ -309,14 +323,14 @@ const memoryEditTool: ToolDefinition = {
     if (memoryBackend) {
       try {
         const result = await memoryBackend.editMemory({
-          memoryId: parseInt(args["memory_id"] ?? "0", 10),
-          contentEn: args["translated"],
-          contentOriginal: args["original"],
-          memoryType: args["type"] as "fact" | "decision" | "preference" | "event" | undefined,
-          emotionScore: args["emotion"] ? parseInt(args["emotion"], 10) : undefined,
-          confidence: args["confidence"] ? parseInt(args["confidence"], 10) : undefined,
-          classification: args["classification"] ? parseInt(args["classification"], 10) : undefined,
-          caller: (args["caller"] ?? "kp") as "kp" | "dreamy",
+          memoryId: parseInt(stringValue(args["memory_id"] ?? "0"), 10),
+          contentEn: optionalStringValue(args["translated"]),
+          contentOriginal: optionalStringValue(args["original"]),
+          memoryType: optionalStringValue(args["type"]) as "fact" | "decision" | "preference" | "event" | undefined,
+          emotionScore: args["emotion"] ? parseInt(stringValue(args["emotion"]), 10) : undefined,
+          confidence: args["confidence"] ? parseInt(stringValue(args["confidence"]), 10) : undefined,
+          classification: args["classification"] ? parseInt(stringValue(args["classification"]), 10) : undefined,
+          caller: stringValue(args["caller"] ?? "kp") as "kp" | "dreamy",
         });
         return JSON.stringify(result);
       } catch (err) {
@@ -340,8 +354,8 @@ const webBrowseTool: ToolDefinition = {
     required: ["task", "chat_id"],
   },
   execute: (args) => {
-    let cmd = `abtars-browse --task ${JSON.stringify(args["task"] ?? "")} --chat-id ${args["chat_id"] ?? "0"}`;
-    if (args["engine"]) cmd += ` --engine ${args["engine"]}`;
+    let cmd = `abtars-browse --task ${JSON.stringify(stringValue(args["task"]))} --chat-id ${stringValue(args["chat_id"] ?? "0")}`;
+    if (args["engine"]) cmd += ` --engine ${stringValue(args["engine"])}`;
     return runBash(cmd, CLI_TIMEOUT_MS);
   },
 };
@@ -359,10 +373,10 @@ const todoTool: ToolDefinition = {
     required: ["action"],
   },
   execute: (args) => {
-    const action = args["action"] ?? "list";
-    if (action === "add") return runBash(`abtars-todo add ${JSON.stringify(args["text"] ?? "")}`, CLI_TIMEOUT_MS);
-    if (action === "done") return runBash(`abtars-todo done ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    if (action === "remove") return runBash(`abtars-todo remove ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
+    const action = stringValue(args["action"] ?? "list");
+    if (action === "add") return runBash(`abtars-todo add ${JSON.stringify(stringValue(args["text"]))}`, CLI_TIMEOUT_MS);
+    if (action === "done") return runBash(`abtars-todo done ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
+    if (action === "remove") return runBash(`abtars-todo remove ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
     return runBash("abtars-todo list", CLI_TIMEOUT_MS);
   },
 };
@@ -399,11 +413,11 @@ const sendDocumentTool: ToolDefinition = {
     required: ["path"],
   },
   execute: async (args) => {
-    const path = args["path"];
+    const path = stringValue(args["path"]);
     if (!path) return JSON.stringify({ error: "path is required" });
     if (!_sendDocument) return JSON.stringify({ error: "Telegram not configured (sendDocument unavailable)" });
     try {
-      const messageId = await _sendDocument(path, args["caption"]);
+      const messageId = await _sendDocument(path, optionalStringValue(args["caption"]));
       return JSON.stringify({ ok: true, message_id: messageId });
     } catch (err) {
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
@@ -427,20 +441,21 @@ const taskTool: ToolDefinition = {
     required: ["action"],
   },
   execute: (args) => {
-    const action = args["action"] ?? "list";
+    const action = stringValue(args["action"] ?? "list");
     if (action === "list") return runBash("abtars-task list", CLI_TIMEOUT_MS);
-    if (action === "remove") return runBash(`abtars-task remove ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    if (action === "pause") return runBash(`abtars-task pause ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    if (action === "resume") return runBash(`abtars-task resume ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
+    if (action === "remove") return runBash(`abtars-task remove ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
+    if (action === "pause") return runBash(`abtars-task pause ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
+    if (action === "resume") return runBash(`abtars-task resume ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
     if (action === "run") {
       if (!_enqueueCron) return Promise.resolve(JSON.stringify({ error: "enqueueCron not available" }));
-      const err = _enqueueCron(args["id"] ?? "", true);
-      return Promise.resolve(JSON.stringify(err ? { error: err } : { ok: true, message: `Task ${args["id"]} enqueued for immediate execution` }));
+      const id = stringValue(args["id"]);
+      const err = _enqueueCron(id, true);
+      return Promise.resolve(JSON.stringify(err ? { error: err } : { ok: true, message: `Task ${id} enqueued for immediate execution` }));
     }
-    let cmd = `abtars-task add --message ${JSON.stringify(args["message"] ?? "")}`;
-    if (args["schedule"]) cmd += ` --schedule ${JSON.stringify(args["schedule"])}`;
-    if (args["type"]) cmd += ` --type ${args["type"]}`;
-    if (args["chat_id"]) cmd += ` --chat-id ${args["chat_id"]}`;
+    let cmd = `abtars-task add --message ${JSON.stringify(stringValue(args["message"]))}`;
+    if (args["schedule"]) cmd += ` --schedule ${JSON.stringify(stringValue(args["schedule"]))}`;
+    if (args["type"]) cmd += ` --type ${stringValue(args["type"])}`;
+    if (args["chat_id"]) cmd += ` --chat-id ${stringValue(args["chat_id"])}`;
     return runBash(cmd, CLI_TIMEOUT_MS);
   },
 };
@@ -467,15 +482,15 @@ const peerSessionTool: ToolDefinition = {
     const { loadPeerConfig } = await import("../peer-config.js");
     const { getOrCreateSession, addTurn, isEnded, destroySession } = await import("../peer-sessions.js");
 
-    const peerName = args.peer_name?.trim();
-    const message = args.message?.trim();
+    const peerName = stringValue(args.peer_name).trim();
+    const message = stringValue(args.message).trim();
     if (!peerName || !message) return JSON.stringify({ error: "peer_name and message required" });
 
     const config = loadPeerConfig();
     if (peerName === config.self.name) return JSON.stringify({ error: "Cannot chat with yourself" });
     if (!config.peers[peerName]) return JSON.stringify({ error: `Unknown peer: ${peerName}` });
 
-    const session = getOrCreateSession(args.session_id?.trim() || undefined, peerName);
+    const session = getOrCreateSession(stringValue(args.session_id).trim() || undefined, peerName);
 
     // Check turn cap before sending
     if (session.messages.length >= 20) {
@@ -521,7 +536,7 @@ const peerDoorbellTool: ToolDefinition = {
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
     const { loadPeerConfig } = await import("../peer-config.js");
-    const peerName = args.peer_name?.trim();
+    const peerName = stringValue(args.peer_name).trim();
     if (!peerName) return JSON.stringify({ error: "peer_name required" });
     const config = loadPeerConfig();
     const peer = config.peers[peerName];
@@ -545,8 +560,8 @@ const ircSendTool: ToolDefinition = {
   },
   execute: async (args) => {
     if (!_ircSend) return JSON.stringify({ error: "IRC adapter not connected" });
-    const channel = args["channel"] ?? "";
-    const message = args["message"] ?? "";
+    const channel = stringValue(args["channel"]);
+    const message = stringValue(args["message"]);
     if (!channel || !message) return JSON.stringify({ error: "channel and message are required" });
     _ircSend(channel, message);
     return JSON.stringify({ ok: true, channel, sent: message.length + " chars" });
@@ -563,7 +578,7 @@ const secretGetTool: ToolDefinition = {
     required: ["name"],
   },
   execute: async (args) => {
-    const name = args.name?.trim();
+    const name = stringValue(args.name).trim();
     if (!name) return JSON.stringify({ error: "name is required" });
     try {
       const { readSecret } = await import("../../components/secrets.js");
@@ -611,16 +626,16 @@ export function getToolSchemas(policy?: SandboxPolicy): Array<{ type: "function"
 import { bumpRead } from "../skill-stats.js";
 
 /** Check if a bash command result indicates a skill file was read. */
-function checkSkillRead(toolName: string, args: Record<string, string>): void {
+function checkSkillRead(toolName: string, args: Record<string, unknown>): void {
   if (toolName !== "execute_bash") return;
-  const cmd = args["command"] ?? "";
+  const cmd = stringValue(args["command"]);
   if (cmd.includes("/.abtars/skills/") && cmd.includes("/SKILL.md")) {
     const match = cmd.match(/\/.abtars\/skills\/[^/]+\/([^/]+)\/SKILL\.md/);
     if (match) bumpRead(match[1]!);
   }
 }
 
-export async function executeToolCall(name: string, args: Record<string, string>, context?: { userId: string; signal?: AbortSignal; sandboxPolicy?: SandboxPolicy }): Promise<string> {
+export async function executeToolCall(name: string, args: Record<string, unknown>, context?: { userId: string; signal?: AbortSignal; sandboxPolicy?: SandboxPolicy }): Promise<string> {
   // Sandbox enforcement
   if (context?.sandboxPolicy) {
     const toolCheck = checkTool(name, context.sandboxPolicy);
@@ -629,7 +644,7 @@ export async function executeToolCall(name: string, args: Record<string, string>
       auditDeny(name, undefined, "session", toolCheck.reason!);
       return JSON.stringify({ error: `Tool '${name}' not available in this session`, available_tools: available, reason: "peer_sandbox" });
     }
-    const filePath = args["path"] ?? args["file_path"];
+    const filePath = stringValue(args["path"] ?? args["file_path"]);
     if (filePath) {
       const mode = name.includes("read") || name === "memory_recall" ? "read" as const : "write" as const;
       const pathCheck = checkPath(filePath, mode, context.sandboxPolicy);
@@ -645,7 +660,7 @@ export async function executeToolCall(name: string, args: Record<string, string>
   const ts = Date.now();
 
   // #621: redact abmind_store args based on classification
-  const storeClass = (name === "abmind_store" || name === "memory_store") ? parseInt(args.classification ?? args.class ?? "1", 10) : 0;
+  const storeClass = (name === "abmind_store" || name === "memory_store") ? parseInt(stringValue(args.classification ?? args.class ?? "1"), 10) : 0;
   const auditArgs = storeClass >= 2
     ? `{"class":${storeClass},"[REDACTED]":true}`
     : redactSecrets(JSON.stringify(args));

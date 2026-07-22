@@ -4,9 +4,9 @@
  */
 
 import { logWarn } from "../logger.js";
-import type { ToolCall } from "./conversation-session.js";
+import type { LegacyToolCall as ToolCall } from "./pi-ai-adapter.js";
 
-const TAG = "direct-api";
+const TAG = "pi-ai";
 
 /**
  * Normalize tool calls from models that fragment a single call across multiple entries.

@@ -14,6 +14,12 @@ import { getEnv } from "../env-schema.js";
 const TAG = "delegation";
 const MAX_BACKGROUND = parseInt(process.env["MAX_BACKGROUND_SESSIONS"] ?? "3", 10);
 
+function stringValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
 let _runtime: SubagentRuntime | null = null;
 
 export function setDelegationDeps(runtime: SubagentRuntime): void {
@@ -60,8 +66,8 @@ export const spawnSessionTool: ToolDefinition = {
   async execute(args) {
     if (!_runtime) return JSON.stringify({ error: "Delegation not initialized" });
 
-    const typeInfo = TYPE_MAP[args.type ?? "task"];
-    if (!typeInfo) return JSON.stringify({ error: `Unknown type: ${args.type}. Use: code, browse, task` });
+    const typeInfo = TYPE_MAP[stringValue(args.type) || "task"];
+    if (!typeInfo) return JSON.stringify({ error: `Unknown type: ${stringValue(args.type)}. Use: code, browse, task` });
 
     // Check cap
     const running = [...activeBackgrounds.values()].filter(e => e.status === "running");
@@ -74,8 +80,9 @@ export const spawnSessionTool: ToolDefinition = {
     const session = spin.createSubSession(masterUid, "telegram", typeInfo.sessionType);
     if (typeof session === "string") return JSON.stringify({ error: session });
 
-    const goal = args.goal ?? "No goal specified";
-    const prompt = args.context ? `${args.context}\n\nTask: ${goal}` : goal;
+    const goal = stringValue(args.goal) || "No goal specified";
+    const context = stringValue(args.context);
+    const prompt = context ? `${context}\n\nTask: ${goal}` : goal;
 
     // Spawn via SubagentRuntime (fire-and-forget)
     const { taskId } = await _runtime.spawn(typeInfo.agent, prompt, {
@@ -143,8 +150,9 @@ export const checkSessionTool: ToolDefinition = {
     required: ["task_id"],
   },
   async execute(args) {
-    const entry = activeBackgrounds.get(args.task_id ?? "");
-    if (!entry) return JSON.stringify({ error: `No background session found with task_id: ${args.task_id}` });
+    const taskId = stringValue(args.task_id);
+    const entry = activeBackgrounds.get(taskId);
+    if (!entry) return JSON.stringify({ error: `No background session found with task_id: ${taskId}` });
 
     const elapsed = Math.round((Date.now() - entry.startedAt) / 1000);
     return JSON.stringify({
@@ -171,8 +179,9 @@ export const terminateSessionTool: ToolDefinition = {
   async execute(args) {
     if (!_runtime) return JSON.stringify({ error: "Delegation not initialized" });
 
-    const entry = activeBackgrounds.get(args.task_id ?? "");
-    if (!entry) return JSON.stringify({ error: `No background session found with task_id: ${args.task_id}` });
+    const taskId = stringValue(args.task_id);
+    const entry = activeBackgrounds.get(taskId);
+    if (!entry) return JSON.stringify({ error: `No background session found with task_id: ${taskId}` });
     if (entry.status !== "running") return JSON.stringify({ error: `Session already ${entry.status}` });
 
     const interrupted = _runtime.interruptSpawn(entry.taskId);
@@ -212,11 +221,13 @@ export const sendToSessionTool: ToolDefinition = {
     required: ["task_id", "message"],
   },
   async execute(args) {
-    const entry = activeBackgrounds.get(args.task_id ?? "");
-    if (!entry) return JSON.stringify({ error: `No background session found with task_id: ${args.task_id}` });
+    const taskId = stringValue(args.task_id);
+    const entry = activeBackgrounds.get(taskId);
+    if (!entry) return JSON.stringify({ error: `No background session found with task_id: ${taskId}` });
     if (entry.status !== "running") return JSON.stringify({ error: `Session is ${entry.status}, cannot send instruction` });
-    entry.pendingInstruction = args.message;
-    logInfo(TAG, `Instruction queued for ${entry.taskId}: "${(args.message ?? "").slice(0, 60)}"`);
+    const message = stringValue(args.message);
+    entry.pendingInstruction = message;
+    logInfo(TAG, `Instruction queued for ${entry.taskId}: "${message.slice(0, 60)}"`);
     return JSON.stringify({ delivered: true, task_id: entry.taskId });
   },
 };

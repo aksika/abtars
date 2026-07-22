@@ -3,6 +3,8 @@
  * Both ACP and tmux transports implement this contract.
  */
 
+import type { PiContextOrchestrator } from "./pi-core-context.js";
+
 /**
  * Per-call request metadata threaded from the pipeline through to the
  * transport. #1329: `beforeMessageId` is the exclusive upper bound for
@@ -15,6 +17,8 @@
 export interface PromptRequestContext {
   userId?: string;
   beforeMessageId?: number;
+  /** #1445: execution ID for Pi-core host correlation. */
+  executionId?: string;
   /**
    * #1338: call-local observer for live TUI output mirroring. Set by Spin per
    * model call/round; transports invoke it alongside existing transport-wide
@@ -28,6 +32,8 @@ export interface PromptRequestContext {
   };
   /** #1444: execution telemetry scope for provider-call correlation. */
   executionTelemetry?: import("../execution-telemetry.js").ExecutionTelemetryScope;
+  /** Durable context authority for Pi-core's exclusive before-message projection. */
+  orchestrator?: PiContextOrchestrator;
 }
 
 export interface RuntimeUsageSnapshot {
@@ -56,7 +62,7 @@ export interface IKiroTransport {
    * Send a prompt to Kiro and return the complete response text.
    * For ACP: sends session/prompt and collects streaming chunks.
    * For tmux: sends via send-keys and polls capture-pane for output.
-   * For DirectApi: rebuilds context from DB (bounded by
+   * For Pi-core: rebuilds context from abmind (bounded by
    * `context.beforeMessageId` when set) and appends the current
    * augmented turn on top exactly once (#1329).
    */
@@ -72,6 +78,12 @@ export interface IKiroTransport {
 
   /** Send Ctrl+C interrupt to the running Kiro CLI process. */
   sendInterrupt(reason?: string): Promise<void>;
+
+  /** Queue an instruction on the active Pi execution, when supported. */
+  steer?(content: string, lease: import("../spin-types.js").InstructionLease): Promise<string>;
+
+  /** Queue a follow-up on the active Pi execution, when supported. */
+  followUp?(content: string, lease: import("../spin-types.js").InstructionLease): Promise<string>;
 
   /** Clean up resources (kill processes, etc.) */
   destroy(): void;
@@ -106,8 +118,7 @@ export interface IKiroTransport {
   /** Transport-specific slash commands (e.g. /usage for kiro, /stats for gemini). */
   readonly transportCommands: string[];
 
-  /** Get the active ConversationSession (DirectApi only). */
-  getActiveSession?(): import("./conversation-session.js").ConversationSession | null;
+  /** Get runtime status snapshot. Implementations return route/provider/model info. */
 
   /** Execute a transport-specific command. Returns output text. */
   executeCommand?(cmd: string): Promise<string>;
@@ -118,10 +129,10 @@ export interface IKiroTransport {
   /** Restart the CLI session (tmux-only). No-op if not supported. */
   restartSession?(workingDir: string, model?: string): Promise<void>;
 
-  /** Hot-swap provider+model. API transport only. Throws if prompt in flight. */
+  /** Hot-swap provider+model (API transports only). */
   switchProvider?(opts: { provider?: string; endpoint: string; apiKey?: string; model: string; maxContext: number; policy: unknown }): void;
 
-  /** Temporarily override model API timeout for next call(s). null resets to default. */
+  /** Temporarily override model API timeout for next call(s). null resets to config default. */
   setTimeoutOverride?(ms: number | null): void;
 
   /** Temporarily override max tool rounds (circuit breaker) for next call(s). null resets to config default. */

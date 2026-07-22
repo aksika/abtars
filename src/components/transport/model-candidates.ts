@@ -13,6 +13,7 @@
  * candidate, while a true duplicate triple collapses.
  */
 import { logWarn } from "../logger.js";
+import type { ApiFormat, PiAiCandidate } from "./pi-ai-adapter.js";
 
 const TAG = "model-candidates";
 
@@ -20,8 +21,7 @@ export type CandidateSource =
   | "primary"
   | "agent_fallback"
   | "provider_chain"
-  | "inherited_chain"
-  | "emergency";
+  | "inherited_chain";
 
 /** Secret-free identity + context needed to rebuild a candidate. */
 export interface CandidateSpec {
@@ -29,6 +29,8 @@ export interface CandidateSpec {
   provider: string;
   endpoint: string;
   maxContext: number;
+  apiFormat?: ApiFormat;
+  thinking?: PiAiCandidate["thinking"];
 }
 
 /** Full canonical candidate — provider identity is required (#1418). */

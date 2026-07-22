@@ -218,7 +218,7 @@ export interface SpinSessionSpec {
   callbackPeer?: string;
   sourcePeer?: string;
   // #1329: just-persisted raw user message ID (from BuildPromptResult.currentMessageId).
-  // Carried through to DirectApiTransport.sendPrompt as the exclusive
+  // Carried through to the transport.sendPrompt as the exclusive
   // `beforeMessageId` cursor so the augmented current turn is appended
   // exactly once. Undefined on no-write paths (memory disabled, etc.).
   currentMessageId?: number;
@@ -269,6 +269,7 @@ export interface SpinResult {
 /** #1361: Per-execution continuation-capable driver for Spin's execution loop. */
 export interface SpinExecutionDriver {
   send(prompt: string, image?: { mime: string; base64: string }, context?: import("./transport/kiro-transport.js").PromptRequestContext): Promise<string>;
+  steer?(content: string, lease: import("./spin-types.js").InstructionLease): Promise<string>;
   close(): Promise<void>;
   readonly ephemeral: boolean;
 }

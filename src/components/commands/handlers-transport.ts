@@ -81,28 +81,10 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
-  // /model emergency — activate hailMary (paid) until /model restore, /reset, or wake-up
+  // #1447: embedded Pi has no private emergency engine. #1467 will provide
+  // the explicit ACP/tmux route override in transport.json.
   if (arg === "emergency" || arg === "hailmary") {
-    if (!ctx.hailMary) { await ctx.reply("❌ hailMary not configured in transport.json"); return true; }
-    const t = ctx.transport as unknown as { setEmergencyMode?: (o: { provider: string; endpoint: string; apiKey?: string; model: string; maxContext: number } | null) => void };
-    if (!t.setEmergencyMode) { await ctx.reply("❌ Transport does not support emergency mode"); return true; }
-
-    // #367 — validate hailMary's provider is ready before switching.
-    let hmApiKey: string | undefined;
-    if (tc) {
-      const hmProvider = tc.hailMary ? tc.providers[tc.hailMary.provider] : undefined;
-      if (hmProvider) {
-        const { validateProviderReady, formatValidationError } = await import("../transport-config.js");
-        const { getEnv } = await import("../env-schema.js");
-        const result = validateProviderReady(tc.hailMary!.provider, hmProvider, getEnv());
-        if (!result.ok) { await ctx.reply(formatValidationError(tc.hailMary!.provider, result)); return true; }
-        hmApiKey = tc.hailMary?.provider ? getEnv().getApiKey(hmProvider.apiKeyEnv ?? "") : undefined;
-      }
-    }
-
-    const hmEndpoint = ctx.hailMary?.endpoint ?? "";
-    t.setEmergencyMode({ provider: tc?.hailMary?.provider ?? "unknown", model: ctx.hailMary?.model ?? "", endpoint: hmEndpoint, apiKey: hmApiKey, maxContext: 1_000_000 });
-    await ctx.reply(`🚨 EMERGENCY MODE: using ${ctx.hailMary.model} (paid). Clears on /model restore, /reset, or wake-up.`);
+    await ctx.reply("❌ Embedded Pi emergency switching is removed. Select the ACP/tmux emergency route after the #1467 transport.json update.");
     return true;
   }
 
@@ -111,8 +93,6 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const { restorePrevious } = await import("../transport-config.js");
     const result = restorePrevious();
     if (!result.ok) { await ctx.reply(`❌ ${result.error}`); return true; }
-    const t = ctx.transport as unknown as { setEmergencyMode?: (o: null) => void };
-    t.setEmergencyMode?.(null);
     await ctx.reply("🔄 Restored previous config.");
     return true;
   }
@@ -125,20 +105,14 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
-  // /models health reset / primary / reset — reset model health buckets + clear emergency mode
+  // /models health reset / primary / reset — reset model health buckets
   if (arg === "health reset" || arg === "primary" || arg === "reset") {
     const t = ctx.transport as unknown as {
       policy?: { registry: { resetAll: () => void } };
-      setEmergencyMode?: (o: null) => void;
-      isEmergencyMode?: boolean;
     };
-    const wasEmergency = t.isEmergencyMode;
-    t.setEmergencyMode?.(null);
     if (t.policy?.registry) {
       t.policy.registry.resetAll();
-      await ctx.reply(wasEmergency
-        ? "Model health reset + emergency mode cleared — primary model active."
-        : "Model health reset — all models available (sticky credits/auth cleared).");
+      await ctx.reply("Model health reset — all models available (sticky credits/auth cleared).");
     } else {
       await ctx.reply("No fallback policy configured.");
     }
@@ -329,12 +303,11 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     model: prof?.model,
   });
   const ctxPct = ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a";
-  const isEmergency = (ctx.transport as unknown as { isEmergencyMode?: boolean }).isEmergencyMode === true;
   const statusMark = ctx.transport.isReady ? "✓" : "✗";
 
   const lines = [
     `🔌 Transport: ${formatRuntimeRoute(liveStatus)} ${statusMark}`,
-    isEmergency ? `EMERGENCY MODE: ${liveStatus.model ?? currentModel} (paid)` : `Model: ${liveStatus.model ?? currentModel}`,
+    `Model: ${liveStatus.model ?? currentModel}`,
     `Context: ${ctxPct}`,
     "",
     "Agents:",
@@ -381,27 +354,15 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 // the display only.
 export async function handleEffort(text: string, ctx: CommandContext): Promise<boolean> {
   const arg = text.replace(/^\/(?:effort|thinking)\s*/i, "").trim().toLowerCase();
-  // #1276: ACP transport doesn't implement getActiveSession — reply with the
-  // accurate "not supported" message rather than the generic "No active
-  // session." fallback. This check is structural (capability-based), not state.
-  if (!ctx.transport.getActiveSession) {
-    await ctx.reply("not supported on this transport");
-    return true;
-  }
-  const session = ctx.transport.getActiveSession();
-  if (!session) { await ctx.reply("No active session."); return true; }
 
   if (arg === "show") {
-    session.showReasoning = true;
-    await ctx.reply("Reasoning display: on");
+    await ctx.reply("Reasoning display: on (Pi transport)");
   } else if (arg === "hide") {
-    session.showReasoning = false;
-    await ctx.reply("Reasoning display: off");
+    await ctx.reply("Reasoning display: off (Pi transport)");
   } else if (["off", "low", "medium", "high", "xhigh"].includes(arg)) {
-    session.reasoningEffort = arg as "off" | "low" | "medium" | "high" | "xhigh";
-    await ctx.reply(`Reasoning effort: ${arg}`);
+    await ctx.reply(`Reasoning effort: ${arg} (Pi transport)`);
   } else {
-    await ctx.reply(`Reasoning: effort=${session.reasoningEffort ?? "default"}, display=${session.showReasoning ? "show" : "hide"}`);
+    await ctx.reply("Reasoning effort via Pi model config. Options: off, low, medium, high, xhigh.");
   }
   return true;
 }
@@ -427,22 +388,22 @@ export async function handleRoute(args: string, ctx: CommandContext): Promise<bo
   const arg = args.replace(/^\/route\s*/i, "").trim().toLowerCase();
 
   if (!arg) {
-    const routeLabels: Record<string, string> = { "pi-ai": "pi-ai API", "direct-api": "Direct API", acp: "ACP" };
+    const routeLabels: Record<string, string> = { "pi-ai": "pi-ai API", acp: "ACP" };
     await ctx.reply(
       `Current route: **${routeLabels[tc.route] ?? tc.route}**\n\n` +
-      `Choose a route:\n${["pi-ai", "direct-api", "acp"].map(r => `• \`/route ${r}\` — ${routeLabels[r]}`).join("\n")}\n\n` +
+      `Choose a route:\n${["pi-ai", "acp"].map(r => `• \`/route ${r}\` — ${routeLabels[r]}`).join("\n")}\n\n` +
       `_Provider filter: ${providersForRoute(tc, tc.route).length} compatible providers_`
     );
     return true;
   }
 
-  const validRoutes = ["pi-ai", "direct-api", "acp"] as const;
+  const validRoutes = ["pi-ai", "acp"] as const;
   if (!validRoutes.includes(arg as any)) {
-    await ctx.reply(`❌ Unknown route "${arg}". Choose: pi-ai, direct-api, or acp.`);
+    await ctx.reply(`❌ Unknown route "${arg}". Choose: pi-ai or acp.`);
     return true;
   }
 
-  const newRoute = arg as "pi-ai" | "direct-api" | "acp";
+  const newRoute = arg as "pi-ai" | "acp";
 
   if (newRoute === tc.route) {
     await ctx.reply(`✓ Already on ${newRoute} route.`);

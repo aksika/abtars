@@ -112,7 +112,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         endpoint: hm.endpoint,
         apiKey: hm.apiKeyEnv ? getEnv().getApiKey(hm.apiKeyEnv) : undefined,
       };
-      logInfo("main", `🚨 hailMary configured: ${hm.model} (manual /model emergency only)`);
+      logInfo("main", `hailMary configured for external emergency routing: ${hm.model}`);
     }
   } else {
     ctx.hailMary = null;
@@ -217,14 +217,10 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       defaults?.maxWaitSec ?? config.transport.tmuxMaxWaitSec,
     );
   } else if (resolved.provider.transport === "api") {
-    const { DirectApiTransport } = await import("../components/transport/direct-api-transport.js");
+    const { PiCoreTransport } = await import("../components/transport/pi-core-transport.js");
     const { ModelHealthRegistry } = await import("../components/transport/model-health-registry.js");
-    const { FallbackPolicy } = await import("../components/transport/fallback-policy.js");
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
 
-    // #1418: build the Main candidate chain through the shared pure builder so
-    // every candidate carries its complete identity tuple (provider/endpoint/
-    // apiKey/maxContext). Last-successful-Main is not relevant at boot.
     const fallbackCandidates: ModelCandidate[] = (resolved.fallbacks ?? []).map(fb => {
       const fbResolved = tc ? resolveAgent("_fallback", { ...tc, agents: { ...tc.agents, _fallback: { model: fb.model, provider: fb.provider } } }) : null;
       return {
@@ -233,6 +229,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint ?? "http://localhost:11434/v1",
         apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
         maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
+        apiFormat: fbResolved?.provider.apiFormat,
+        thinking: fbResolved?.provider.thinking,
         source: "agent_fallback",
       };
     });
@@ -244,6 +242,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
         apiKey,
         maxContext: resolved.contextWindow,
+        apiFormat: resolved.provider.apiFormat,
+        thinking: resolved.provider.thinking,
         source: "primary",
       },
       fallbacks: fallbackCandidates,
@@ -252,7 +252,6 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     if (!ctx.modelHealthRegistry) {
       ctx.modelHealthRegistry = new ModelHealthRegistry(tc?.healthPolicy);
     }
-    // Wire auto-demotion
     if (!ctx.modelHealthRegistry.onDemote) {
       ctx.modelHealthRegistry.onDemote = (model, _endpoint, reason) => {
         import("../components/transport-config.js").then(({ demoteModel }) => demoteModel(model, reason));
@@ -260,26 +259,19 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
           sendNotification(ctx, `⚠️ ${model} demoted (${reason}). Next healthy model promoted.`)).catch(err => logAndSwallow(TAG, "sendNotification model-demote", err));
       };
     }
-    const policy = new FallbackPolicy(candidates, ctx.modelHealthRegistry);
 
-    transport = new DirectApiTransport({
-      route: tc?.route,
-      provider: resolved.providerName,
-      endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
-      apiKey,
-      model: resolved.model,
-      maxContext: resolved.contextWindow,
-      maxOutput: resolved.maxOutput,
-      maxTurns: tc?.maxTurns ?? 50,
-      maxToolRounds: tc?.maxToolRounds ?? 25,
-      maxFallbackToolRounds: tc?.maxFallbackToolRounds ?? 5,
-      apiFormat: resolved.provider.apiFormat,
-      useProviderLib: resolved.provider.useProviderLib,
-      thinking: resolved.provider.thinking,
-    }, policy);
-    // #1318: debug line showing the L1/L0 route decision at transport-construction time.
-    logDebug("boot", `DirectApiTransport: provider=${resolved.providerName} model=${resolved.model} useProviderLib=${resolved.provider.useProviderLib ?? false}`);
-    logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
+    transport = new PiCoreTransport({
+      role: "main",
+      // The SOUL bundle is installed by phase-pipeline-deps once memory state
+      // is known. The endpoint is transport configuration, never a prompt.
+      systemPrompt: "",
+      candidates,
+      healthRegistry: ctx.modelHealthRegistry,
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      maxPromptRounds: tc?.maxToolRounds,
+      maxCandidateRounds: tc?.maxFallbackToolRounds,
+    });
+    logInfo("main", `🔌 PiCore transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {
     // Kill stale ACP processes from previous run (#921, #1012)
     const { readAndClearAcpPids } = await import("../components/transport/bridge-lock-transport.js");

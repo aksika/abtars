@@ -38,6 +38,7 @@ export interface RuntimeExecution {
   close(): Promise<void>;
   readonly transport: IKiroTransport;
   readonly sessionKey: string;
+  readonly executionId: string;
   readonly ephemeral: boolean;
   /** #1364: Per-execution abort signal. Abort the controller to cancel the execution. */
   readonly abortSignal?: AbortSignal;
@@ -95,7 +96,7 @@ export class SubagentRuntime {
 
   /** Set main transport reference and wire the #1418 last-successful-Main tracker. */
   setMainTransport(transport: IKiroTransport): void {
-    // #1418: Wire last-successful-Main tracker from DirectApiTransport. The tracker
+    // #1418: Wire last-successful-Main tracker from the transport. The tracker
     // stores the complete secret-free candidate tuple (provider/model/endpoint/
     // maxContext) so specialists can reuse the exact Main candidate that worked.
     const apiTransport = transport as unknown as { lastSuccessfulCandidate: CandidateSpec | null; onLastSuccessfulChanged?: (candidate: CandidateSpec) => void };
@@ -173,14 +174,20 @@ export class SubagentRuntime {
     let closed = false;
     const start = Date.now();
 
+    const execId = `runtime_${sessionKey}_${Date.now()}_${randomBytes(4).toString("hex")}`;
+
     const exec: RuntimeExecution = {
       transport,
       sessionKey,
+      executionId: execId,
       ephemeral: sessionStrategy === "fresh",
       lastUsage: () => transport.lastUsage?.() ?? null,
 
       send: async (prompt, image, context) => {
-        const response = await transport.sendPrompt(sessionKey, prompt, image, context);
+        const response = await transport.sendPrompt(sessionKey, prompt, image, {
+          ...context,
+          executionId: context?.executionId ?? execId,
+        });
         logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
         return response ?? "";
       },
@@ -309,9 +316,8 @@ export class SubagentRuntime {
     const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
-    // DirectApi only — ACP transport uses its own this.agentName. The "professor"
-    // default in direct-api-transport.ts stays correct for the main boot transport
-    // (phase-transport.ts), which bypasses createAgent.
+    // External ACP keeps its own agent label; embedded Pi uses this label when
+    // the transport exposes the optional capability.
     if ("agentLabel" in transport) {
       (transport as { agentLabel: string }).agentLabel = agent;
     }
