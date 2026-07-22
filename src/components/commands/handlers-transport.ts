@@ -198,11 +198,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       if (!result.ok) { await ctx.reply(formatValidationError(prof.providerName, result)); return true; }
     }
 
-    // Write + switch
-    tc.agents["main"]!.model = newModel;
+    // Build independent candidate — never mutate the cached object
+    const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
+    candidate.agents["main"]!.model = newModel;
     const { cleanDemotedModels, writeTransportConfig } = await import("../transport-config.js");
-    cleanDemotedModels(tc, newModel);
-    const result = writeTransportConfig(tc, `main model → ${newModel}`);
+    cleanDemotedModels(candidate, newModel);
+    const result = writeTransportConfig(candidate, `main model → ${newModel}`);
     if (!result.ok) {
       await ctx.reply(`❌ Cannot switch: ${result.issues.map(i => i.reason).join("; ")}`);
       return true;
@@ -275,19 +276,20 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     if (!validation.ok) { await ctx.reply(formatValidationError(providerName, validation)); return true; }
     const defaults = loadProviderDefaults(providerName);
     if (defaults?.main) {
-      tc.agents["main"] = { model: defaults.main.model, provider: providerName };
+      const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
+      candidate.agents["main"] = { model: defaults.main.model, provider: providerName };
       for (const role of ["dreamy", "browsie", "cody"] as const) {
-        tc.agents[role] = { model: defaults[role]?.model ?? defaults.main.model, provider: providerName };
+        candidate.agents[role] = { model: defaults[role]?.model ?? defaults.main.model, provider: providerName };
+      }
+      const { writeTransportConfig } = await import("../transport-config.js");
+      const result = writeTransportConfig(candidate, `global provider → ${providerName}`);
+      if (!result.ok) {
+        await ctx.reply(`❌ Cannot switch to ${providerName}: ${result.issues.map(i => i.reason).join("; ")}`);
+        return true;
       }
     } else {
       // #1415: no provider defaults — don't retain old provider's model IDs
       await ctx.reply(`❌ ${providerName} has no model defaults. Use /model list ${providerName} and /model quick <model> to pick a compatible model.`);
-      return true;
-    }
-    const { writeTransportConfig } = await import("../transport-config.js");
-    const result = writeTransportConfig(tc, `global provider → ${providerName}`);
-    if (!result.ok) {
-      await ctx.reply(`❌ Cannot switch to ${providerName}: ${result.issues.map(i => i.reason).join("; ")}`);
       return true;
     }
     await ctx.reply(`✓ All agents → ${providerName}. Use /reset to apply.`);
@@ -411,8 +413,9 @@ export async function handleRoute(args: string, ctx: CommandContext): Promise<bo
   }
 
   if (allAssignmentsMatchRoute(tc, newRoute)) {
-    tc.route = newRoute;
-    const result = writeTransportConfig(tc, `route → ${newRoute}`);
+    const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
+    candidate.route = newRoute;
+    const result = writeTransportConfig(candidate, `route → ${newRoute}`);
     if (!result.ok) {
       await ctx.reply(`❌ Cannot switch to ${newRoute}: ${result.issues.map(i => i.reason).join("; ")}`);
       return true;

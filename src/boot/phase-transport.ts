@@ -89,7 +89,9 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     logDebug("main", `transport.json unavailable — using ${loadResult.source} as in-memory source (primary unchanged)`);
   }
   if (!loadResult.ok && loadResult.state === "invalid") {
-    logWarn("main", `transport.json is invalid (${loadResult.issues.length} issue(s)) — running transportless`);
+    logWarn("main", `transport.json is invalid (${loadResult.issues.length} issue(s)) — running transportless (primary unchanged, .env fallback not activated)`);
+    ctx.transport = null;
+    return "skipped";
   }
 
   const prof = tc ? resolveAgent("main", tc) : null;
