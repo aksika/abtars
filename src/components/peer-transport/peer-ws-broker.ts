@@ -1,10 +1,20 @@
 import WebSocket from "ws";
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import { signRequest, verifyRequest } from "./peer-auth.js";
+import { signWsRequest, verifyWsRequestSignature } from "./peer-auth.js";
+import { PeerNonceStore } from "./peer-nonce-store.js";
 import { loadPeerConfig } from "../peer-config.js";
 import { WsOutboxStore } from "./ws-outbox-store.js";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
+
+// ── Bounds (#1390) ─────────────────────────────────────────────────────────
+const MAX_ID_BYTES = 64;                   // UUID or compact ID
+const MAX_PEER_ID_BYTES = 128;             // peer name length
+const MAX_NONCE_BYTES = 64;                // hex-encoded 32-byte nonce
+const MAX_SIG_BYTES = 128;                 // base64 Ed25519 sig
+const MAX_BODY_BYTES = 524_288;            // 512 KiB body
+const MAX_TIMESTAMP_STR_BYTES = 16;        // "9999999999"
+const HELP_METHODS = new Set(["help.request.v1", "help.status.v1", "help.withdraw.v1", "help.event.v1"]);
 
 export type PeerSocketDirection = "accepted" | "outbound";
 
@@ -278,7 +288,9 @@ export class PeerWsBroker {
     }
   }
 
-  private handleMessage(peer: string, raw: string, _gen: number): void {
+  private handleMessage(peer: string, raw: string, gen: number): void {
+    // Reject oversized raw frame before parsing
+    if (raw.length > 1_048_576) return;
     try {
       const msg = JSON.parse(raw);
 
@@ -313,56 +325,97 @@ export class PeerWsBroker {
 
       if (msg.type !== "request") return;
 
-      this.handleRequest(peer, msg);
+      this.handleRequest(peer, msg, gen);
     } catch { /* malformed frame */ }
   }
 
-  private async handleRequest(peer: string, msg: { id?: string; method: string; payload: unknown }): Promise<void> {
-    if (!msg.method) return;
+  /** #1390: v1 request handler with full authentication pipeline. */
+  private async handleRequest(peer: string, msg: any, gen: number): Promise<void> {
+    // 1. Validate version and outer structure
+    if (msg.version !== 1) return;
+    if (typeof msg.id !== "string" || msg.id.length > MAX_ID_BYTES) return;
+    if (!HELP_METHODS.has(msg.method)) return;
+    if (typeof msg.body !== "string") return;
+    const body = msg.body;
+    if (body.length > MAX_BODY_BYTES) return;
+    const auth = msg.auth;
+    if (!auth || typeof auth !== "object") return;
+
+    // 2. Validate auth fields
+    if (typeof auth.peerId !== "string" || auth.peerId.length > MAX_PEER_ID_BYTES) return;
+    if (typeof auth.ts !== "string" || auth.ts.length > MAX_TIMESTAMP_STR_BYTES) return;
+    if (typeof auth.nonce !== "string" || auth.nonce.length > MAX_NONCE_BYTES) return;
+    if (typeof auth.sig !== "string" || auth.sig.length > MAX_SIG_BYTES) return;
+
+    // 3. Signed peerId must match socket identity
+    if (auth.peerId !== peer) {
+      this.sendError(peer, msg.id, "auth_failed", "Peer identity mismatch", gen);
+      return;
+    }
+
     if (!this.requestHandler) {
       logWarn("peer-broker", `No request handler registered for ${peer}:${msg.method}`);
       return;
     }
 
+    // 4. Look up enrolled key
     const config = loadPeerConfig();
     const peerEntry = config.peers[peer];
     if (!peerEntry?.verifyKey) {
-      this.sendError(peer, msg.id, "unknown_peer", "Peer not enrolled");
+      this.sendError(peer, msg.id, "auth_failed", "Peer not enrolled", gen);
       return;
     }
 
-    const authFields = ["X-Peer-Id", "X-Peer-Ts", "X-Peer-Nonce", "X-Peer-Sig"];
-    const headers: Record<string, string> = {};
-    for (const f of authFields) {
-      if (typeof (msg as any)[f] === "string") headers[f] = (msg as any)[f];
-    }
-
+    // 5. Verify Ed25519 signature (WSS domain, no nonce check yet)
     const path = `/${msg.method}`;
-    const body = typeof msg.payload === "string" ? msg.payload : JSON.stringify(msg.payload ?? {});
-    const authResult = verifyRequest(headers, "POST", path, body, peerEntry.verifyKey);
-    if (!authResult.ok) {
-      this.sendError(peer, msg.id, "auth_failed", `Request auth failed: ${authResult.reason}`);
+    const sigResult = verifyWsRequestSignature(
+      { peerId: auth.peerId, requestId: msg.id, ts: auth.ts, nonce: auth.nonce, sig: auth.sig },
+      msg.method,
+      path,
+      body,
+      peerEntry.verifyKey,
+    );
+    if (!sigResult.ok) {
+      this.sendError(peer, msg.id, "auth_failed", `Request auth failed: ${sigResult.reason}`, gen);
       return;
     }
 
+    // 6. Atomic nonce claim (after crypto, before dispatch)
+    const nonceStore = new PeerNonceStore();
+    const claimResult = nonceStore.claim(auth.peerId, auth.nonce);
+    if (!claimResult.ok) {
+      this.sendError(peer, msg.id, "auth_failed", claimResult.reason === "replay" ? "Nonce replay" : "Store error", gen);
+      return;
+    }
+
+    // 7. Parse body once, after authentication
+    let payload: unknown;
     try {
-      const result = await this.requestHandler(peer, msg.method, msg.payload, msg.id ?? "");
-      this.sendResponse(peer, msg.id, result);
+      payload = JSON.parse(body);
+    } catch {
+      this.sendError(peer, msg.id, "invalid_frame", "Malformed body", gen);
+      return;
+    }
+
+    // 8. Dispatch to handler
+    try {
+      const result = await this.requestHandler(peer, msg.method, payload, msg.id);
+      this.sendResponse(peer, msg.id, result, gen);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logDebug("peer-broker", `Handler error for ${peer}:${msg.method}: ${message}`);
-      this.sendError(peer, msg.id, "handler_error", message);
+      this.sendError(peer, msg.id, "handler_error", message, gen);
     }
   }
 
-  private sendResponse(peer: string, frameId: string | undefined, payload: unknown): void {
-    const socket = this.bestSocket(peer);
+  private sendResponse(peer: string, frameId: string | undefined, payload: unknown, gen?: number): void {
+    const socket = gen !== undefined ? this.socketByGeneration(peer, gen) : this.bestSocket(peer);
     if (!socket) return;
     socket.send(JSON.stringify({ type: "response", id: frameId, payload }));
   }
 
-  private sendError(peer: string, frameId: string | undefined, code: string, message: string): void {
-    const socket = this.bestSocket(peer);
+  private sendError(peer: string, frameId: string | undefined, code: string, message: string, gen?: number): void {
+    const socket = gen !== undefined ? this.socketByGeneration(peer, gen) : this.bestSocket(peer);
     if (!socket) return;
     socket.send(JSON.stringify({
       type: "response", id: frameId,
@@ -370,6 +423,14 @@ export class PeerWsBroker {
     }));
   }
 
+  private socketByGeneration(peer: string, generation: number): WebSocket | null {
+    const state = this.peers.get(peer);
+    if (!state) return null;
+    const reg = state.sockets.find(s => s.generation === generation);
+    return reg?.socket ?? null;
+  }
+
+  /** #1390: pump sends a v1 envelope signed with the WSS domain. */
   private pump(peer: string): void {
     const state = this.peers.get(peer);
     if (!state) return;
@@ -385,9 +446,23 @@ export class PeerWsBroker {
     state.outbox.recordAttempt(entry.id);
 
     const config = loadPeerConfig();
-    const payloadStr = JSON.stringify(entry.payload);
-    const sigHeaders = signRequest("POST", `/${entry.method}`, payloadStr, config.self.signingKey, config.self.name);
-    const frame = JSON.stringify({ type: "request", id: entry.id, method: entry.method, payload: entry.payload, ...sigHeaders });
+    const body = JSON.stringify(entry.payload);
+    const auth = signWsRequest(
+      config.self.name,
+      entry.id,
+      entry.method,
+      `/${entry.method}`,
+      body,
+      config.self.signingKey,
+    );
+    const frame = JSON.stringify({
+      type: "request",
+      version: 1,
+      id: entry.id,
+      method: entry.method,
+      body,
+      auth: { peerId: config.self.name, ...auth },
+    });
 
     const timer = setTimeout(() => {
       const currentState = this.peers.get(peer);

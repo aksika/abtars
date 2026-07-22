@@ -121,7 +121,22 @@ describe("PeerWsBroker", () => {
     client.close();
   });
 
-  it("dispatches a signed request frame to the registered handler and returns the response", async () => {
+  /** #1390: Build a valid v1 request frame for the test peer "kp". */
+  async function v1Frame(method: string, id: string, payload: unknown, sigKey?: string): Promise<string> {
+    const { signWsRequest } = await import("./peer-auth.js");
+    const body = JSON.stringify(payload);
+    const auth = signWsRequest("kp", id, method, `/${method}`, body, sigKey ?? selfSigningKey);
+    return JSON.stringify({
+      type: "request",
+      version: 1,
+      id,
+      method,
+      body,
+      auth: { peerId: "kp", ...auth },
+    });
+  }
+
+  it("dispatches a signed v1 request frame to the registered handler and returns the response", async () => {
     const broker = await makeBroker();
     const requestHandler = vi.fn().mockResolvedValue({ decision: "accepted" });
     broker.registerRequestHandler(requestHandler);
@@ -129,18 +144,12 @@ describe("PeerWsBroker", () => {
     const { server, client, serverConn } = await connectedPair();
     broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
 
-    const { signRequest } = await import("./peer-auth.js");
     const payload = { goal: "help" };
-    const body = JSON.stringify(payload);
-    // "kp" signs with our own test keypair — loadPeerConfig() maps kp's verifyKey to it.
-    const sigHeaders = signRequest("POST", "/help.request.v1", body, selfSigningKey, "kp");
-    const frame = JSON.stringify({ type: "request", id: "f1", method: "help.request.v1", payload, ...sigHeaders });
+    const frame = await v1Frame("help.request.v1", "f1", payload);
 
     const responsePromise = new Promise<any>((resolve) => {
       serverConn.on("message", (data) => resolve(JSON.parse(data.toString())));
     });
-    // The "remote peer" (serverConn) sends the frame into the broker-attached
-    // client socket — this is the direction handleMessage actually listens on.
     serverConn.send(frame);
 
     const response = await responsePromise;
@@ -151,7 +160,7 @@ describe("PeerWsBroker", () => {
     client.close();
   });
 
-  it("rejects a request frame with an invalid signature before invoking the handler", async () => {
+  it("rejects a v1 request frame with an invalid signature before invoking the handler", async () => {
     const broker = await makeBroker();
     const requestHandler = vi.fn();
     broker.registerRequestHandler(requestHandler);
@@ -160,8 +169,9 @@ describe("PeerWsBroker", () => {
     broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
 
     const frame = JSON.stringify({
-      type: "request", id: "f2", method: "help.request.v1", payload: { goal: "x" },
-      "X-Peer-Id": "kp", "X-Peer-Ts": String(Math.floor(Date.now() / 1000)), "X-Peer-Nonce": "n", "X-Peer-Sig": "bogus",
+      type: "request", version: 1, id: "f2", method: "help.request.v1",
+      body: JSON.stringify({ goal: "x" }),
+      auth: { peerId: "kp", ts: String(Math.floor(Date.now() / 1000)), nonce: "n", sig: "bogus" },
     });
 
     const responsePromise = new Promise<any>((resolve) => {
@@ -174,6 +184,204 @@ describe("PeerWsBroker", () => {
     expect(response.error.code).toBe("auth_failed");
     server.close();
     client.close();
+  });
+
+  /** #1390: Zero-dispatch test matrix — every tamper case must be rejected. */
+  describe("v1 request frame authentication (#1390)", () => {
+    /** Helper: send a frame and return the error response (or null if none). */
+    async function sendAndGetError(frame: string): Promise<any> {
+      const broker = await makeBroker();
+      const requestHandler = vi.fn();
+      broker.registerRequestHandler(requestHandler);
+      const { server, client, serverConn } = await connectedPair();
+      broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+
+      const responsePromise = new Promise<any>((resolve) => {
+        serverConn.on("message", (data) => resolve(JSON.parse(data.toString())));
+      });
+      serverConn.send(frame);
+
+      // Allow a brief window for processing
+      const result = await Promise.race([
+        responsePromise,
+        new Promise<any>(r => setTimeout(() => r(null), 200)),
+      ]);
+      server.close();
+      client.close();
+      expect(requestHandler).not.toHaveBeenCalled();
+      return result;
+    }
+
+    it("rejects missing version field", async () => {
+      const frame = JSON.stringify({
+        type: "request", id: "f3", method: "help.request.v1",
+        body: "{}",
+        auth: { peerId: "kp", ts: "0", nonce: "n", sig: "x" },
+      });
+      // No version → handleRequest returns early without error (silent drop)
+      // Verify by absence of handler call
+      const broker = await makeBroker();
+      const requestHandler = vi.fn();
+      broker.registerRequestHandler(requestHandler);
+      const { server, client, serverConn } = await connectedPair();
+      broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+      serverConn.send(frame);
+      await new Promise(r => setTimeout(r, 100));
+      expect(requestHandler).not.toHaveBeenCalled();
+      server.close();
+      client.close();
+    });
+
+    it("rejects wrong version (not 1)", async () => {
+      const frame = JSON.stringify({
+        type: "request", version: 2, id: "f4", method: "help.request.v1",
+        body: "{}",
+        auth: { peerId: "kp", ts: "0", nonce: "n", sig: "x" },
+      });
+      const err = await sendAndGetError(frame);
+      // version !== 1 → silent drop, no response
+      expect(err).toBeNull();
+    });
+
+    it("rejects unsupported method", async () => {
+      const payload = { goal: "x" };
+      const raw = await v1Frame("unknown.method", "f5", payload);
+      const frame = JSON.parse(raw);
+      const err = await sendAndGetError(JSON.stringify({ ...frame, method: "unknown.method" }));
+      expect(err).toBeNull(); // HELP_METHODS check → silent drop
+    });
+
+    it("rejects peer identity mismatch (auth.peerId !== socket peer)", async () => {
+      const { signWsRequest } = await import("./peer-auth.js");
+      const body = JSON.stringify({ goal: "x" });
+      const auth = signWsRequest("WRONG", "f6", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f6", method: "help.request.v1",
+        body,
+        auth: { peerId: "WRONG", ...auth },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("auth_failed");
+      expect(err?.error?.message).toContain("identity mismatch");
+    });
+
+    it("rejects wrong verify key (different keypair)", async () => {
+      const { generateKeyPairSync, createPublicKey } = await import("node:crypto");
+      const wrong = generateKeyPairSync("ed25519");
+      const wrongSigningKey = wrong.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64");
+      const frame = await v1Frame("help.request.v1", "f7", { goal: "x" }, wrongSigningKey);
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("auth_failed");
+    });
+
+    it("rejects stale timestamp (>30s old)", async () => {
+      const payload = { goal: "x" };
+      const body = JSON.stringify(payload);
+      const { signWsRequest } = await import("./peer-auth.js");
+      const auth = signWsRequest("kp", "f8", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+      const staleTs = String(Math.floor(Date.now() / 1000) - 60);
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f8", method: "help.request.v1",
+        body,
+        auth: { peerId: "kp", ...auth, ts: staleTs },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("auth_failed");
+    });
+
+    it("rejects body tampering (signed body differs from envelope body)", async () => {
+      const { signWsRequest } = await import("./peer-auth.js");
+      const originalBody = JSON.stringify({ goal: "x" });
+      const auth = signWsRequest("kp", "f9", "help.request.v1", "/help.request.v1", originalBody, selfSigningKey);
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f9", method: "help.request.v1",
+        body: JSON.stringify({ goal: "tampered" }),
+        auth: { peerId: "kp", ...auth },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("auth_failed");
+    });
+
+    it("rejects method tampering (signed path differs from envelope method)", async () => {
+      const { signWsRequest } = await import("./peer-auth.js");
+      const body = JSON.stringify({ goal: "x" });
+      const auth = signWsRequest("kp", "f10", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f10", method: "help.status.v1",
+        body,
+        auth: { peerId: "kp", ...auth },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("auth_failed");
+    });
+
+    it("rejects oversized body", async () => {
+      const bigPayload = { data: "x".repeat(600_000) };
+      const { signWsRequest } = await import("./peer-auth.js");
+      const body = JSON.stringify(bigPayload);
+      // Over MAX_BODY_BYTES (524288) — method is valid but body is too large
+      const auth = signWsRequest("kp", "f11", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f11", method: "help.request.v1",
+        body,
+        auth: { peerId: "kp", ...auth },
+      });
+      const err = await sendAndGetError(frame);
+      // Oversized body is silently dropped (no auth_failed response since check
+      // is before requestHandler check)
+      expect(err).toBeNull();
+    });
+
+    it("rejects nonce replay (duplicate nonce)", async () => {
+      const broker = await makeBroker();
+      const requestHandler = vi.fn();
+      broker.registerRequestHandler(requestHandler);
+      const { server, client, serverConn } = await connectedPair();
+      broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+
+      const frame = await v1Frame("help.request.v1", "f12", { goal: "x" });
+
+      // Send twice — second should fail with nonce replay
+      const responsePromise = new Promise<any>((resolve) => {
+        let count = 0;
+        serverConn.on("message", (data) => {
+          count++;
+          if (count === 2) resolve(JSON.parse(data.toString()));
+        });
+      });
+      serverConn.send(frame);
+      await new Promise(r => setTimeout(r, 50));
+      serverConn.send(frame);
+
+      const response = await responsePromise;
+      expect(response.error.code).toBe("auth_failed");
+      expect(requestHandler).toHaveBeenCalledTimes(1); // only first passed auth
+      server.close();
+      client.close();
+    });
+
+    it("regression: push with a help.*.v1 method never enters the request handler", async () => {
+      const broker = await makeBroker();
+      const requestHandler = vi.fn();
+      const pushHandler = vi.fn();
+      broker.registerRequestHandler(requestHandler);
+      broker.registerPushHandler(pushHandler);
+
+      const { server, client, serverConn } = await connectedPair();
+      broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+
+      serverConn.send(JSON.stringify({
+        type: "push", method: "help.request.v1", payload: { goal: "x" },
+      }));
+      await new Promise(r => setTimeout(r, 100));
+
+      // Push handler should receive it (push frames are not validated for help methods)
+      expect(pushHandler).toHaveBeenCalledWith("kp", "help.request.v1", { goal: "x" });
+      // Request handler must NOT be invoked
+      expect(requestHandler).not.toHaveBeenCalled();
+      server.close();
+      client.close();
+    });
   });
 
   it("detach is scoped to (peer, direction, generation) — a stale close does not remove a replacement socket", async () => {
@@ -424,12 +632,13 @@ describe("PeerWsBroker", () => {
     const frameOnSc2 = new Promise<string>(res => sc2.on("message", d => res(d.toString())));
     broker.attachSocket({ peer: "kp", direction: "outbound", socket: c2 });
 
-    // The pending request must be re-sent on the replacement
+    // The pending request must be re-sent on the replacement (v1 envelope)
     const resentRaw = await frameOnSc2;
     const resent = JSON.parse(resentRaw);
     expect(resent.type).toBe("request");
+    expect(resent.version).toBe(1);
     expect(resent.method).toBe("help.request.v1");
-    expect(resent.payload).toEqual({ goal: "x" });
+    expect(JSON.parse(resent.body)).toEqual({ goal: "x" });
     expect(resent.id).toBe(firstFrame.id); // same entry ID re-sent
 
     // Respond through the client's message handler (broker handles incoming)

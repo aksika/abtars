@@ -183,10 +183,13 @@ export interface VerifyWsRequestFields {
 }
 
 /**
- * Verify a WSS request frame's Ed25519 signature. Uses the durable
- * PeerNonceStore for restart-proof replay protection.
+ * Verify ONLY the Ed25519 signature of a WSS request frame (no nonce check).
+ * The broker calls this first, then atomically claims the nonce via
+ * PeerNonceStore.claim().
+ *
+ * Returns missing_fields / invalid_ts / stale_ts / bad_sig on failure.
  */
-export function verifyWsRequest(
+export function verifyWsRequestSignature(
   fields: VerifyWsRequestFields,
   method: string,
   canonicalPath: string,
@@ -205,15 +208,38 @@ export function verifyWsRequest(
   const nowSec = Math.floor(Date.now() / 1000);
   if (Math.abs(nowSec - ts) > TS_WINDOW_SEC) return { ok: false, reason: "stale_ts" };
 
-  const store = getNonceStore();
-  if (store.isSeen(nonce)) return { ok: false, reason: "nonce_replay" };
-
   const bodyHash = createHash("sha256").update(body, "utf-8").digest("hex");
   const canonical = `abtars-ws-req-v1\n${peerId}\n${requestId}\n${method}\n${canonicalPath}\n${tsStr}\n${nonce}\n${bodyHash}`;
 
   if (!edVerify(verifyKey, canonical, sig)) return { ok: false, reason: "bad_sig" };
 
-  store.record(nonce);
+  return { ok: true };
+}
+
+/**
+ * Verify a WSS request frame's Ed25519 signature AND atomically claim its
+ * nonce. This is a convenience wrapper used by tests; the broker itself
+ * calls verifyWsRequestSignature() + claim() separately to enforce the
+ * order (verify first, then claim).
+ *
+ * Uses the durable PeerNonceStore for restart-proof replay protection.
+ */
+export function verifyWsRequest(
+  fields: VerifyWsRequestFields,
+  method: string,
+  canonicalPath: string,
+  body: string,
+  verifyKey: string,
+): VerifyRequestResult {
+  const sigResult = verifyWsRequestSignature(fields, method, canonicalPath, body, verifyKey);
+  if (!sigResult.ok) return sigResult;
+
+  const store = getNonceStore();
+  const claimResult = store.claim(fields.peerId, fields.nonce);
+  if (!claimResult.ok) {
+    return { ok: false, reason: claimResult.reason === "replay" ? "nonce_replay" : "store_error" };
+  }
+
   return { ok: true };
 }
 
