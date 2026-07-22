@@ -316,9 +316,8 @@ export class SubagentRuntime {
     const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
-    // DirectApi only — ACP transport uses its own this.agentName. The "professor"
-    // default in direct-api-transport.ts stays correct for the main boot transport
-    // (phase-transport.ts), which bypasses createAgent.
+    // External ACP keeps its own agent label; embedded Pi uses this label when
+    // the transport exposes the optional capability.
     if ("agentLabel" in transport) {
       (transport as { agentLabel: string }).agentLabel = agent;
     }

@@ -223,7 +223,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/models — Model, transport & agent status (legacy)",
     "/models change — Switch model/provider (any agent)",
     "/models quick <model> — Instant switch on same provider",
-    "/emergency — 🚨 Activate paid hailMary model",
+    "/emergency — Select external ACP/tmux emergency route (transport.json update pending)",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/task run <id> — Manually fire a task",

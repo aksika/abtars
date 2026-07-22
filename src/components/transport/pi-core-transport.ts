@@ -16,6 +16,20 @@ import type { OutputObserver } from "../session-output-feed.js";
 
 const TAG = "pi-core-transport";
 
+function extractAssistantText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part): part is { type: "text"; text: string } => (
+      typeof part === "object"
+      && part !== null
+      && (part as { type?: unknown }).type === "text"
+      && typeof (part as { text?: unknown }).text === "string"
+    ))
+    .map((part) => part.text)
+    .join("");
+}
+
 export interface PiCoreTransportOptions {
   role: "main" | "specialist" | "background" | "task";
   systemPrompt: string;
@@ -36,6 +50,11 @@ export class PiCoreTransport implements IKiroTransport {
   private activeHost: PiCoreExecutionHost | null = null;
   private _isReady = false;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
+
+  /** ContextOrchestrator for durable abmind projection. Set externally by the pipeline. */
+  contextOrchestrator?: {
+    getContext(sessionKey: string, maxTokens: number, opts: { beforeMessageId?: number }): Promise<{ messages: Array<{ role: string; content: string }> }>;
+  };
   private _toolCallsSucceeded = 0;
   private _lastResponse = "";
   private _intermediateText = "";
@@ -59,6 +78,17 @@ export class PiCoreTransport implements IKiroTransport {
   get toolCallsSucceeded(): number { return this._toolCallsSucceeded; }
   get intermediateDeliveredText(): string { return this._intermediateText; }
   get transportCommands(): string[] { return []; }
+
+  setSystemPrompt(prompt: string): void {
+    this.config.systemPrompt = prompt;
+  }
+
+  async setModel(model: string): Promise<void> {
+    const primary = this.config.candidates[0];
+    if (!primary) throw new Error("No model candidate configured");
+    primary.model = model;
+    this.policy = new FallbackPolicy(this.config.candidates, this.healthRegistry);
+  }
 
   async initialize(): Promise<void> {
     this._isReady = true;
@@ -93,7 +123,7 @@ export class PiCoreTransport implements IKiroTransport {
     }
 
     // Context seed: durable vs ephemeral
-    const source = context?.beforeMessageId
+    const source = context?.beforeMessageId !== undefined
       ? { mode: "durable" as const, sessionKey, beforeMessageId: context.beforeMessageId, maxContext: this.config.candidates[0]?.maxContext ?? 128000 }
       : { mode: "ephemeral" as const, sessionKey };
 
@@ -113,7 +143,7 @@ export class PiCoreTransport implements IKiroTransport {
       provider: first?.provider ?? "unknown",
       baseUrl: first?.endpoint ?? "",
       reasoning: false,
-      input: ["text"] as Array<"text" | "image">,
+      input: (image ? ["text", "image"] : ["text"]) as Array<"text" | "image">,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: first?.maxContext ?? 128000,
       maxTokens: 4096,
@@ -170,7 +200,7 @@ export class PiCoreTransport implements IKiroTransport {
       transformOptions: {
         signal: undefined,
         hostGeneration: 0,
-        orchestrator: (context as Record<string, unknown>).orchestrator as {
+        orchestrator: this.contextOrchestrator as {
           getContext(s: string, m: number, o: { beforeMessageId?: number }): Promise<{ messages: Array<{ role: string; content: string }> }>;
         } | undefined,
       },
@@ -180,9 +210,12 @@ export class PiCoreTransport implements IKiroTransport {
           this.onToolCallStart?.(event.toolName);
         }
         if (event.type === "message_end") {
-          const msg = event.message as unknown as { content?: string };
-          responseText = msg.content ?? "";
-          this._lastResponse = msg.content ?? "";
+          const msg = event.message as unknown as { role?: string; content?: unknown };
+          if (msg.role === "assistant") {
+            const text = extractAssistantText(msg.content);
+            responseText = text;
+            this._lastResponse = text;
+          }
         }
         if (event.type === "message_update") {
           const streamEv = event.assistantMessageEvent as { type?: string; delta?: string } | null;
@@ -200,26 +233,21 @@ export class PiCoreTransport implements IKiroTransport {
 
     this.activeHost = host;
 
-    const { loadAndValidatePiAgentCore } = await import("./pi-core-types.js");
-    const loaded = await loadAndValidatePiAgentCore();
-
     try {
+      const { loadAndValidatePiAgentCore } = await import("./pi-core-types.js");
+      const loaded = await loadAndValidatePiAgentCore();
       await host.start(loaded);
-    } catch (err) {
-      this.activeHost = null;
-      throw err;
+      await host.waitForSettlement();
+
+      if (context?.executionTelemetry) {
+        const snap = context.executionTelemetry.snapshot();
+        if (snap) this._lastUsage = snap;
+      }
+
+      return responseText;
+    } finally {
+      if (this.activeHost === host) this.activeHost = null;
     }
-
-    await host.waitForSettlement();
-
-    if (context?.executionTelemetry) {
-      const snap = context.executionTelemetry.snapshot();
-      if (snap) this._lastUsage = snap;
-    }
-
-    this.activeHost = null;
-
-    return responseText || "OK";
   }
 
   async resetSession(_sessionKey: string): Promise<void> {

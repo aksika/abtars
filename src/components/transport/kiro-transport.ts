@@ -3,6 +3,8 @@
  * Both ACP and tmux transports implement this contract.
  */
 
+import type { PiContextOrchestrator } from "./pi-core-context.js";
+
 /**
  * Per-call request metadata threaded from the pipeline through to the
  * transport. #1329: `beforeMessageId` is the exclusive upper bound for
@@ -30,6 +32,8 @@ export interface PromptRequestContext {
   };
   /** #1444: execution telemetry scope for provider-call correlation. */
   executionTelemetry?: import("../execution-telemetry.js").ExecutionTelemetryScope;
+  /** Durable context authority for Pi-core's exclusive before-message projection. */
+  orchestrator?: PiContextOrchestrator;
 }
 
 export interface RuntimeUsageSnapshot {
@@ -58,7 +62,7 @@ export interface IKiroTransport {
    * Send a prompt to Kiro and return the complete response text.
    * For ACP: sends session/prompt and collects streaming chunks.
    * For tmux: sends via send-keys and polls capture-pane for output.
-   * For DirectApi: rebuilds context from DB (bounded by
+   * For Pi-core: rebuilds context from abmind (bounded by
    * `context.beforeMessageId` when set) and appends the current
    * augmented turn on top exactly once (#1329).
    */

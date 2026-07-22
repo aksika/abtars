@@ -24,7 +24,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "stop", description: "Stop current response" },
   { name: "wait", description: "Inject message mid-run (non-interrupting)" },
   { name: "update", description: "Update: git | alpha | stable" },
-  { name: "emergency", description: "Activate paid hailMary model" },
+  { name: "emergency", description: "Select external ACP/tmux emergency route" },
   { name: "heartbeat", description: "Heartbeat diagnostics" },
   { name: "memory", description: "Memory stats" },
   { name: "skills", description: "List active skills" },

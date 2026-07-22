@@ -36,19 +36,16 @@ import type {
   UserMessage,
   ToolResultMessage,
   AssistantMessage,
-  AssistantMessageEvent,
+
   ProviderStreams,
   SimpleStreamOptions,
   Provider,
   CreateProviderOptions,
 } from "@earendil-works/pi-ai";
 
-import { logDebug, logWarn, logTrace, isLogLevel } from "../logger.js";
+import { logWarn } from "../logger.js";
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import type { PiModuleSpecifier } from "../pi-installation.js";
-import { parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
-import type { ErrorKind } from "./model-health-registry.js";
-import type { SSEEvent } from "./sse-parser.js";
 
 // Shared message types (moved from deleted conversation-session.ts)
 export type ContentPart =
@@ -124,21 +121,7 @@ export interface PiAiModule {
 
 // ─── error tagging ──────────────────────────────────────────────────────────
 
-/**
- * Tagged load failure. The gate catches this (by name) and falls through to L0.
- * Request errors are NOT this — they throw a plain Error with "API error <status>".
- *
- * #1318: `piFunction` is the throwing step (loadPi | loadApi) — the consumer
- * surfaces it in the WARN so debug logs identify the load step at a glance.
- */
-export class PiAiUnavailableError extends Error {
-  piFunction?: string;
-  constructor(message: string, options?: { cause?: unknown; piFunction?: string }) {
-    super(message, options);
-    this.name = "PiAiUnavailableError";
-    this.piFunction = options?.piFunction;
-  }
-}
+// Legacy L0 adapter classes removed in #1447.
 
 // ─── pure translators ───────────────────────────────────────────────────────
 
@@ -171,10 +154,6 @@ function deriveProviderId(endpoint: string): string {
   } catch {
     return "abtars-direct";
   }
-}
-
-function conversationHasImage(messages: ChatMessage[]): boolean {
-  return messages.some(m => Array.isArray(m.content) && m.content.some(p => (p as ContentPart)?.type === "image_url"));
 }
 
 /**
@@ -312,220 +291,23 @@ export function buildPiContext(conv: PiAiConversation, api?: Api, providerId?: s
  * - error → throws an Error whose message carries "API error <status>", mapped
  *   via pi's classifier so L2 buckets it correctly.
  */
-export async function* translatePiAiEvents(
-  events: AsyncIterable<AssistantMessageEvent>,
-  isRetryable: (m: AssistantMessage) => boolean = () => true,
-): AsyncGenerator<SSEEvent> {
-  // contentIndex → accumulated delta-only tool call (fallback when no toolcall_end)
-  const partialArgs = new Map<number, { id?: string; name?: string; args: string }>();
-  const traceRaw = isLogLevel("trace");
 
-  for await (const ev of events) {
-    if (traceRaw) {
-      logTrace(TAG, `pi raw ev: ${ev.type}${"contentIndex" in ev ? ` idx=${ev.contentIndex}` : ""}${ev.type === "text_delta" || ev.type === "thinking_delta" ? ` Δ=${ev.delta.length}ch` : ""}${ev.type === "toolcall_end" ? ` tool=${ev.toolCall.name} id=${ev.toolCall.id}` : ""}${ev.type === "done" ? ` reason=${ev.reason}` : ""}${ev.type === "error" ? ` reason=${ev.reason}` : ""}`);
-    }
-    switch (ev.type) {
-      case "text_delta":
-        yield { type: "chunk", content: ev.delta };
-        break;
-      case "thinking_delta":
-        yield { type: "thinking", content: ev.delta };
-        break;
-      case "toolcall_start":
-      case "toolcall_delta": {
-        const e = partialArgs.get(ev.contentIndex) ?? { args: "" };
-        const blk = ev.partial.content[ev.contentIndex];
-        if (blk && blk.type === "toolCall") { e.id = blk.id; e.name = blk.name; }
-        if (ev.type === "toolcall_delta") e.args += ev.delta;
-        partialArgs.set(ev.contentIndex, e);
-        break;
-      }
-      case "toolcall_end":
-        partialArgs.delete(ev.contentIndex);
-        yield { type: "tool_call_delta", index: ev.contentIndex, id: ev.toolCall.id, name: ev.toolCall.name, arguments: JSON.stringify(ev.toolCall.arguments) };
-        break;
-      case "done": {
-        if (partialArgs.size > 0 && traceRaw) {
-          logTrace(TAG, `flushing ${partialArgs.size} delta-only toolCall(s) at done`);
-        }
-        for (const [idx, e] of partialArgs) {
-          if (e.name) yield { type: "tool_call_delta", index: idx, id: e.id, name: e.name, arguments: e.args };
-        }
-        const u = ev.message.usage;
-        logDebug(TAG, `stream complete: input=${u.input} output=${u.output} cacheRead=${u.cacheRead} cacheWrite=${u.cacheWrite}`);
-        yield { type: "done", usage: { prompt_tokens: u.input + u.cacheRead + u.cacheWrite, completion_tokens: u.output }, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite };
-        return;
-      }
-      case "error":
-        throw toL2Error(ev.error, isRetryable);
-      default:
-        if (traceRaw) {
-          logTrace(TAG, `unhandled pi event type: ${(ev as { type: string }).type}`);
-        }
-    }
-  }
-}
-
-export interface PiAiErrorMapping { status: number; kind: ErrorKind; retryAfterMs?: number; text: string }
-
-/**
- * D1/D2 — "pi classifies, abtars decides." Map a pi error AssistantMessage +
- * pi's retryable verdict to abtars {status, retryAfter, kind}. The status is
- * chosen so abtars's classifyError(status) reproduces the intended kind, and
- * the detail text is preserved so parseRetryAfter/parseUsageLimitCooldown can
- * extract cooldowns from the formatted provider message.
- */
-export function mapPiAiError(message: AssistantMessage, isRetryable: boolean): PiAiErrorMapping {
-  const detail = message.errorMessage ?? "pi-ai stream error";
-  const statusMatch = /\b(\d{3})\b/.exec(detail);
-  const parsedStatus = statusMatch ? parseInt(statusMatch[1] as string, 10) : 0;
-  const retryAfterMs = parseRetryAfter(detail) ?? parseUsageLimitCooldown(detail);
-
-  let status: number;
-  let kind: ErrorKind;
-  if (/maximum context length|context_length_exceeded/i.test(detail)) {
-    kind = "context_exceeded";
-    status = parsedStatus || 400;
-  } else if (isRetryable) {
-    kind = "transient";
-    status = parsedStatus || 500;
-  } else if (/\b(quota|credit|usage[ _-]?limit|insufficient|balance|payment|plan[ _-]?limit|GoUsageLimit)\b/i.test(detail)) {
-    kind = "rate_limit";
-    status = parsedStatus || 429;
-  } else if (/\b(unauth|forbidden|api[ _-]?key|invalid.{0,8}key|permission)\b/i.test(detail) || parsedStatus === 401 || parsedStatus === 403) {
-    kind = "auth";
-    status = parsedStatus || 401;
-  } else {
-    kind = "rate_limit";
-    status = parsedStatus || 429;
-  }
-
-  logTrace(TAG, `error map: detail="${detail.slice(0, 120)}" → status=${status} kind=${kind} retryAfterMs=${retryAfterMs ?? "none"} isRetryable=${isRetryable}`);
-  return { status, kind, retryAfterMs, text: `API error ${status}: ${detail}` };
-}
-
-function toL2Error(message: AssistantMessage, isRetryable: (m: AssistantMessage) => boolean): Error {
-  const mapping = mapPiAiError(message, isRetryable(message));
-  const err = new Error(mapping.text);
-  (err as Error & { piKind?: ErrorKind; piRetryAfterMs?: number }).piKind = mapping.kind;
-  (err as Error & { piKind?: ErrorKind; piRetryAfterMs?: number }).piRetryAfterMs = mapping.retryAfterMs;
-  return err;
-}
-
-// ─── orchestration ──────────────────────────────────────────────────────────
-
-/** Injectable dependencies (tests pass fakes; production omits → ESM import). */
-export interface PiAiStreamDeps {
-  loadPi?: () => PiAiModule | Promise<PiAiModule>;
-  /** Load the api module streams for a given pi Api. */
-  loadApi?: (api: Api) => ProviderStreams | Promise<ProviderStreams>;
+async function defaultLoadPi(): Promise<PiAiModule> {
+  const result = resolvePiInstallation();
+  if (result.state !== "compatible") throw new Error(`Pi not available: ${result.state}`);
+  const aiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-ai" };
+  const piModule = await loadPiModule<Record<string, unknown>>(result.installation, aiSpec);
+  return piModule as unknown as PiAiModule;
 }
 
 async function defaultLoadApi(api: Api): Promise<ProviderStreams> {
   const result = resolvePiInstallation();
-  if (result.state !== "compatible") throw new PiAiUnavailableError(`Pi not available: ${result.state}`);
+  if (result.state !== "compatible") throw new Error(`Pi not available: ${result.state}`);
   const aiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-ai", subpath: `api/${api}` };
   const mod = await loadPiModule<Record<string, unknown>>(result.installation, aiSpec);
-  if (typeof mod.stream !== "function" || typeof mod.streamSimple !== "function") {
-    throw new PiAiUnavailableError(`pi-ai/api/${api}: missing stream/streamSimple exports`);
-  }
-  return { stream: mod.stream as ProviderStreams["stream"], streamSimple: mod.streamSimple as ProviderStreams["streamSimple"] };
+  return mod as unknown as ProviderStreams;
 }
 
-async function defaultLoadPi(): Promise<PiAiModule> {
-  const result = resolvePiInstallation();
-  if (result.state !== "compatible") throw new PiAiUnavailableError(`Pi not available: ${result.state}`);
-  const aiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-ai" };
-  const piModule = await loadPiModule<Record<string, unknown>>(result.installation, aiSpec);
-  if (typeof piModule.createProvider !== "function" || typeof piModule.isRetryableAssistantError !== "function") {
-    throw new PiAiUnavailableError(`pi-ai: missing createProvider/isRetryableAssistantError exports`);
-  }
-  return {
-    createProvider: piModule.createProvider as PiAiModule["createProvider"],
-    isRetryableAssistantError: piModule.isRetryableAssistantError as PiAiModule["isRetryableAssistantError"],
-  };
-}
-
-/**
- * Execute one streamed completion through pi-ai for the given candidate, yielding
- * abtars SSEEvents. Load failure → throws PiAiUnavailableError (gate → L0).
- * Request failure → throws Error("API error <status>: …") (gate → L2 rotation).
- */
-export async function* streamPiAiCompletion(
-  candidate: PiAiCandidate,
-  conv: PiAiConversation,
-  signal: AbortSignal,
-  deps: PiAiStreamDeps = {},
-): AsyncGenerator<SSEEvent> {
-  const api = pickPiApi(candidate.apiFormat);
-  const providerId = deriveProviderId(candidate.endpoint);
-
-  let pi: PiAiModule;
-  let apiMod: ProviderStreams;
-  try {
-    pi = await (deps.loadPi ?? defaultLoadPi)();
-  } catch (err) {
-    if (isLogLevel("trace")) logTrace(TAG, `pi-ai load failed for api=${api} (loadPi): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
-    throw new PiAiUnavailableError(
-      `pi-ai (${api}) could not be loaded: ${err instanceof Error ? err.message : String(err)}`,
-      { cause: err, piFunction: "loadPi" },
-    );
-  }
-  try {
-    apiMod = await (deps.loadApi ? deps.loadApi(api) : defaultLoadApi(api));
-  } catch (err) {
-    if (isLogLevel("trace")) logTrace(TAG, `pi-ai load failed for api=${api} (loadApi): ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
-    throw new PiAiUnavailableError(
-      `pi-ai (${api}) could not be loaded: ${err instanceof Error ? err.message : String(err)}`,
-      { cause: err, piFunction: "loadApi" },
-    );
-  }
-  const hasImage = conversationHasImage(conv.messages);
-  logTrace(TAG, `resolve: apiFormat=${candidate.apiFormat ?? "chat"} → piApi=${api} providerId=${providerId} hasImage=${hasImage}`);
-  const model = buildPiModel(candidate, api, hasImage, providerId);
-  const { reasoning, level: reasoningLevel } = resolveReasoning(candidate);
-  logTrace(TAG, `piModel: id=${model.id} baseUrl=${model.baseUrl} reasoning=${reasoning} maxTokens=${model.maxTokens} reasoningLevel=${reasoningLevel ?? "none"}`);
-  const context = buildPiContext(conv, api, providerId);
-  logTrace(TAG, `piContext: systemPromptLen=${context.systemPrompt?.length ?? 0} messages=${context.messages.length} tools=${context.tools?.length ?? 0}`);
-
-  const provider = pi.createProvider({
-    id: providerId,
-    name: providerId,
-    baseUrl: candidate.endpoint,
-    auth: {
-      apiKey: {
-        name: `${providerId} API key`,
-        resolve: async () => candidate.apiKey
-          ? { auth: { apiKey: candidate.apiKey }, source: "abtars candidate" }
-          : undefined,
-      },
-    },
-    models: [model],
-    api: { stream: apiMod.stream, streamSimple: apiMod.streamSimple },
-  });
-
-  const options: SimpleStreamOptions & Record<string, unknown> = {
-    apiKey: candidate.apiKey,
-    signal,
-    maxTokens: candidate.maxOutput,
-    maxRetries: 0,
-    cacheRetention: "short",
-  };
-  if (candidate.sessionId) options.sessionId = candidate.sessionId;
-  if (reasoningLevel) options.reasoning = reasoningLevel;
-
-  logDebug(TAG, `resolved: piModelId=${model.id} endpoint=${candidate.endpoint} reasoning=${JSON.stringify(reasoning)}`);
-  logTrace(TAG, `streamSimple options: maxTokens=${options.maxTokens} maxRetries=${options.maxRetries} cacheRetention=${options.cacheRetention} sessionId=${options.sessionId ?? "none"} reasoning=${options.reasoning ?? "none"} apiKey=${candidate.apiKey ? "***set***" : "none"}`);
-
-  const eventStream = provider.streamSimple(model, context, options);
-  yield* translatePiAiEvents(eventStream, pi.isRetryableAssistantError.bind(pi));
-}
-
-/**
- * Public Pi stream used by the pi-agent-core boundary. This deliberately
- * returns pi-ai's native AssistantMessageEventStream; the legacy SSE adapter
- * above remains only for the PiCoreTransport path.
- */
 export async function createPiAiAssistantStream(
   candidate: PiAiCandidate,
   model: Model<Api>,

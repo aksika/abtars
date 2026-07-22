@@ -20,8 +20,7 @@ export type CandidateSource =
   | "primary"
   | "agent_fallback"
   | "provider_chain"
-  | "inherited_chain"
-  | "emergency";
+  | "inherited_chain";
 
 /** Secret-free identity + context needed to rebuild a candidate. */
 export interface CandidateSpec {

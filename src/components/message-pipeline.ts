@@ -93,9 +93,6 @@ export async function resetAndPrepare(opts: {
     pSession.busy = false;
     pSession.queue = [];
   }
-  // #254: clear emergency mode on reset — next session starts fresh
-  const t = opts.transport as unknown as { setEmergencyMode?: (o: null) => void };
-  t.setEmergencyMode?.(null);
 }
 
 /** Transport + agent runtime deps. */
@@ -229,7 +226,7 @@ export async function handleInboundMessage(
     // through to the transport.sendPrompt as `beforeMessageId`.
     const { prompt: builtPrompt, imageContent, recalledHits, currentMessageId, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
-      isAcp: !("agentLoop" in transport),
+      isAcp: transport.getRuntimeStatus?.().route === "acp",
     }, registry);
 
     if (builtPrompt === "__INJECTION_BLOCKED__") {
@@ -278,15 +275,6 @@ export async function handleInboundMessage(
     // Wire cooperative pause check (#539) — agent loop checks this between tool calls
     if ("isPaused" in sessionTransport) {
       (sessionTransport as any).isPaused = () => effectiveSession.status === "paused";
-    }
-
-    // Wire /wait steer injection (#1248) — agent loop drains bounded FIFO between tool rounds
-    if ("getPendingInstruction" in transport) {
-      (transport as any).getPendingInstruction = () => {
-        if (pSession.pendingWait.length === 0) return undefined;
-        const items = pSession.pendingWait.splice(0);
-        return items.map(i => i.text).join("\n");
-      };
     }
 
     // #1271: pipeline main turn goes through spin(spec) (model-call chokepoint).

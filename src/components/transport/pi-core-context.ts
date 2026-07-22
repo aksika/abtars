@@ -3,17 +3,19 @@ import type { AssistantMessage, ModelApi, PiExecutionContextSeed, AgentMessage, 
 
 const TAG = "pi-core-context";
 
+export interface PiContextOrchestrator {
+  getContext(sessionKey: string, maxContext: number, opts: { beforeMessageId?: number }): Promise<{
+    messages: Array<{ role: string; content: string; tool_call_id?: string; name?: string; is_error?: boolean }>;
+    compacted?: boolean;
+  }>;
+}
+
 export interface TransformOptions {
   signal?: AbortSignal;
   hostGeneration?: number;
   candidateKeyFn?: () => string;
   candidateModelFn?: (candidateKey: string) => ModelApi | undefined;
-  orchestrator?: {
-    getContext(sessionKey: string, maxContext: number, opts: { beforeMessageId?: number }): Promise<{
-      messages: Array<{ role: string; content: string; tool_call_id?: string; name?: string; is_error?: boolean }>;
-      compacted?: boolean;
-    }>;
-  };
+  orchestrator?: PiContextOrchestrator;
 }
 
 export interface TransformResult {

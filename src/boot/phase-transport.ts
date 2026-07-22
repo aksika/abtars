@@ -112,7 +112,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         endpoint: hm.endpoint,
         apiKey: hm.apiKeyEnv ? getEnv().getApiKey(hm.apiKeyEnv) : undefined,
       };
-      logInfo("main", `🚨 hailMary configured: ${hm.model} (manual /model emergency only)`);
+      logInfo("main", `hailMary configured for external emergency routing: ${hm.model}`);
     }
   } else {
     ctx.hailMary = null;
@@ -258,7 +258,9 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
     transport = new PiCoreTransport({
       role: "main",
-      systemPrompt: resolved.provider.endpoint ?? "",
+      // The SOUL bundle is installed by phase-pipeline-deps once memory state
+      // is known. The endpoint is transport configuration, never a prompt.
+      systemPrompt: "",
       candidates,
       healthRegistry: ctx.modelHealthRegistry,
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },

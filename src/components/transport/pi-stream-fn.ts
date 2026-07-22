@@ -177,7 +177,11 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           startedAt: Date.now(),
         });
         const attemptFactory = options.createPiAiAttempt ?? defaultCreatePiAiAttempt;
-        const piModel = buildPiModel({ ...candidate, maxOutput: model.maxTokens }, pickPiApi(candidate.endpoint.includes("anthropic") ? "anthropic" : undefined), false, candidate.provider);
+        const hasImage = context.messages.some((message) =>
+          Array.isArray(message.content)
+            && message.content.some((part) => part.type === "image"),
+        );
+        const piModel = buildPiModel({ ...candidate, maxOutput: model.maxTokens }, pickPiApi(candidate.endpoint.includes("anthropic") ? "anthropic" : undefined), hasImage, candidate.provider);
         let attemptCommitted = false;
         let telemetryEnded = false;
         const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage): void => {
