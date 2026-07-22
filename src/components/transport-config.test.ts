@@ -12,7 +12,7 @@
 //   Deferred: develop when mock-fs infrastructure or integration harness is in place.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { resolveAgent, getEnvFallback, clearTransportCache, validateTransportConfig } from "./transport-config.js";
+import { resolveAgent, getEnvFallback, clearTransportCache, validateTransportConfig, writeTransportConfig } from "./transport-config.js";
 import type { TransportConfig, ModelCatalog } from "./transport-config.js";
 
 const MODELS: ModelCatalog = {
@@ -21,17 +21,21 @@ const MODELS: ModelCatalog = {
 };
 
 const TRANSPORT: TransportConfig = {
-  schemaVersion: 2,
-  route: "acp",
-  agents: {
-    main: { model: "claude-sonnet-4.6", provider: "kiro-free" },
-    dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
+  schemaVersion: 3,
+  activeRoute: "acp",
+  routes: {
+    acp: {
+      agents: {
+        main: { model: "claude-sonnet-4.6", provider: "kiro-free" },
+        dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
+      },
+      fallbacks: [{ model: "minimax-m2.5:cloud", provider: "ollama" }],
+    },
   },
   providers: {
     "kiro-free": { transport: "acp", cli: "kiro-cli" },
     ollama: { transport: "api", endpoint: "http://localhost:11434/v1" },
   },
-  fallbacks: [{ model: "minimax-m2.5:cloud", provider: "ollama" }],
   maxTurns: 50,
 };
 
@@ -67,7 +71,7 @@ describe("resolveAgent", () => {
   });
 
   it("returns null for missing provider", () => {
-    const tc = { ...TRANSPORT, agents: { main: { model: "x", provider: "nonexistent" } }, providers: {} };
+    const tc: TransportConfig = { ...TRANSPORT, routes: { acp: { agents: { main: { model: "x", provider: "nonexistent" } }, fallbacks: [] } }, providers: {} };
     expect(resolveAgent("main", tc, MODELS)).toBeNull();
   });
 
@@ -95,46 +99,38 @@ describe("validateTransportConfig — pure validator (#1466)", () => {
     gemini: { transport: "acp" as const, cli: "gemini-cli" },
   };
 
+  const mkPi = (overrides?: Record<string, unknown>) => ({
+    schemaVersion: 3,
+    activeRoute: "pi-ai",
+    routes: { "pi-ai": { agents: { main: { model: "m1", provider: "ollama" }, dreamy: { model: "m2", provider: "openrouter" } }, fallbacks: [] as Array<{ model: string; provider: string }> } },
+    providers,
+    ...overrides,
+  });
+
+  const mkAcp = (overrides?: Record<string, unknown>) => ({
+    schemaVersion: 3,
+    activeRoute: "acp",
+    routes: { acp: { agents: { main: { model: "m1", provider: "kiro" }, dreamy: { model: "m2", provider: "kiro" } }, fallbacks: [] as Array<{ model: string; provider: string }> } },
+    providers,
+    ...overrides,
+  });
+
   it("accepts valid pi-ai config", () => {
-    const result = validateTransportConfig({
-      schemaVersion: 2,
-      route: "pi-ai",
-      agents: {
-        main: { model: "m1", provider: "ollama" },
-        dreamy: { model: "m2", provider: "openrouter" },
-      },
-      providers,
-    });
+    const result = validateTransportConfig(mkPi());
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.config.route).toBe("pi-ai");
-      expect(result.config.agents["main"]!.provider).toBe("ollama");
+      expect(result.config.activeRoute).toBe("pi-ai");
+      expect(result.config.routes["pi-ai"]!.agents["main"]!.provider).toBe("ollama");
     }
   });
 
   it("accepts valid acp config with matching providers", () => {
-    const result = validateTransportConfig({
-      schemaVersion: 2,
-      route: "acp",
-      agents: {
-        main: { model: "m1", provider: "kiro" },
-        dreamy: { model: "m2", provider: "kiro" },
-      },
-      providers,
-    });
+    const result = validateTransportConfig(mkAcp());
     expect(result.ok).toBe(true);
   });
 
   it("reports cross-transport violation (subagent api, main acp)", () => {
-    const result = validateTransportConfig({
-      schemaVersion: 2,
-      route: "acp",
-      agents: {
-        main: { model: "m1", provider: "kiro" },
-        dreamy: { model: "m2", provider: "ollama" },
-      },
-      providers,
-    });
+    const result = validateTransportConfig(mkAcp({ routes: { acp: { agents: { main: { model: "m1", provider: "kiro" }, dreamy: { model: "m2", provider: "ollama" } }, fallbacks: [] } } }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.issues.some(i => i.path.includes("dreamy"))).toBe(true);
@@ -143,15 +139,7 @@ describe("validateTransportConfig — pure validator (#1466)", () => {
   });
 
   it("reports acp provider mismatch (multiple providers for acp route)", () => {
-    const result = validateTransportConfig({
-      schemaVersion: 2,
-      route: "acp",
-      agents: {
-        main: { model: "m1", provider: "kiro" },
-        dreamy: { model: "m2", provider: "gemini" },
-      },
-      providers,
-    });
+    const result = validateTransportConfig(mkAcp({ routes: { acp: { agents: { main: { model: "m1", provider: "kiro" }, dreamy: { model: "m2", provider: "gemini" } }, fallbacks: [] } } }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.issues.some(i => i.code === "acp_provider_mismatch")).toBe(true);
@@ -159,55 +147,38 @@ describe("validateTransportConfig — pure validator (#1466)", () => {
   });
 
   it("reports fallbacks with incompatible route", () => {
-    const result = validateTransportConfig({
-      schemaVersion: 2,
-      route: "acp",
-      agents: {
-        main: { model: "m1", provider: "kiro" },
-      },
-      providers,
-      fallbacks: [
-        { model: "m2", provider: "ollama" },
-        { model: "m3", provider: "kiro" },
-      ],
-    });
+    const result = validateTransportConfig(mkAcp({ routes: { acp: { agents: { main: { model: "m1", provider: "kiro" } }, fallbacks: [{ model: "m2", provider: "ollama" }, { model: "m3", provider: "kiro" }] } } }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.issues.some(i => i.path === "fallbacks[0]")).toBe(true);
-      expect(result.issues.some(i => i.path === "fallbacks[0]" && i.code === "provider_route_incompatible")).toBe(true);
+      expect(result.issues.some(i => i.path === "routes.acp.fallbacks[0]")).toBe(true);
+      expect(result.issues.some(i => i.path === "routes.acp.fallbacks[0]" && i.code === "provider_route_incompatible")).toBe(true);
     }
   });
 
   it("does not mutate input", () => {
-    const input = {
-      schemaVersion: 2,
-      route: "pi-ai",
-      agents: { main: { model: "m1", provider: "ollama" } },
-      providers,
-    };
+    const input = mkPi();
     const before = JSON.stringify(input);
     validateTransportConfig(input);
-    // Input serialization must be unchanged after validation
     expect(JSON.stringify(input)).toBe(before);
   });
 
-  it("rejects missing route", () => {
+  it("rejects missing activeRoute", () => {
     const result = validateTransportConfig({
-      schemaVersion: 2,
-      agents: { main: { model: "m1", provider: "ollama" } },
+      schemaVersion: 3,
+      routes: { "pi-ai": { agents: { main: { model: "m1", provider: "ollama" } }, fallbacks: [] } },
       providers,
     } as any);
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.issues.some(i => i.code === "missing_field" && i.path === "route")).toBe(true);
+      expect(result.issues.some(i => i.code === "missing_field" && i.path === "activeRoute")).toBe(true);
     }
   });
 
   it("rejects unsupported schema version", () => {
     const result = validateTransportConfig({
       schemaVersion: 1,
-      route: "pi-ai",
-      agents: { main: { model: "m1", provider: "ollama" } },
+      activeRoute: "pi-ai",
+      routes: { "pi-ai": { agents: { main: { model: "m1", provider: "ollama" } }, fallbacks: [] } },
       providers,
     });
     expect(result.ok).toBe(false);
@@ -218,9 +189,9 @@ describe("validateTransportConfig — pure validator (#1466)", () => {
 
   it("rejects invalid route value", () => {
     const result = validateTransportConfig({
-      schemaVersion: 2,
-      route: "invalid-route",
-      agents: { main: { model: "m1", provider: "ollama" } },
+      schemaVersion: 3,
+      activeRoute: "invalid-route",
+      routes: { "pi-ai": { agents: { main: { model: "m1", provider: "ollama" } }, fallbacks: [] } },
       providers,
     } as any);
     expect(result.ok).toBe(false);
@@ -231,9 +202,9 @@ describe("validateTransportConfig — pure validator (#1466)", () => {
 
   it("reports missing provider reference", () => {
     const result = validateTransportConfig({
-      schemaVersion: 2,
-      route: "pi-ai",
-      agents: { main: { model: "m1", provider: "nonexistent" } },
+      schemaVersion: 3,
+      activeRoute: "pi-ai",
+      routes: { "pi-ai": { agents: { main: { model: "m1", provider: "nonexistent" } }, fallbacks: [] } },
       providers,
     });
     expect(result.ok).toBe(false);
@@ -242,45 +213,63 @@ describe("validateTransportConfig — pure validator (#1466)", () => {
     }
   });
 
+  it("reports malformed config shapes without throwing", () => {
+    const malformed = {
+      schemaVersion: 3,
+      activeRoute: "pi-ai",
+      routes: { "pi-ai": { agents: { main: null }, fallbacks: [null] } },
+      providers: {},
+    };
+    expect(() => validateTransportConfig(malformed)).not.toThrow();
+    const result = validateTransportConfig(malformed);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some(i => i.path === "routes.pi-ai.agents.main")).toBe(true);
+      expect(result.issues.some(i => i.path === "routes.pi-ai.fallbacks[0]")).toBe(true);
+    }
+    expect(validateTransportConfig(null).ok).toBe(false);
+  });
+
+  it("requires a non-empty mutation reason", () => {
+    const result = writeTransportConfig(TRANSPORT, "   ");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ location: "reason" }),
+      ]));
+    }
+  });
+
   it("does not report model_provider_incompatible for unknown models (custom models OK)", () => {
     const result = validateTransportConfig({
-      schemaVersion: 2,
-      route: "pi-ai",
-      agents: { main: { model: "__nonexistent_custom_model__", provider: "ollama" } },
+      schemaVersion: 3,
+      activeRoute: "pi-ai",
+      routes: { "pi-ai": { agents: { main: { model: "__nonexistent_custom_model__", provider: "ollama" } }, fallbacks: [] } },
       providers,
     });
-    // Unknown models pass validation (not in catalog at all)
     expect(result.ok).toBe(true);
   });
 
   it("reports model_provider_incompatible when catalog model is on wrong provider", () => {
-    // Uses real loadModels() catalog — model must be present with a known transport.
-    // claude-opus-4.6 is on "kiro", so pairing it with "ollama" should fail.
     const result = validateTransportConfig({
-      schemaVersion: 2,
-      route: "pi-ai",
-      agents: { main: { model: "claude-opus-4.6", provider: "ollama" } },
+      schemaVersion: 3,
+      activeRoute: "pi-ai",
+      routes: { "pi-ai": { agents: { main: { model: "claude-opus-4.6", provider: "ollama" } }, fallbacks: [] } },
       providers: { ...providers, ollama: { transport: "api", endpoint: "http://localhost:11434/v1" } },
     });
-    if (result.ok) {
-      // If models.json lacks claude-opus-4.6 or allows ollama, this is a no-op.
-      // The important test is: when the catalog entry exists and rejects the pair,
-      // model_provider_incompatible is emitted.
-      return;
-    }
+    if (result.ok) return;
     expect(result.issues.some(i => i.code === "model_provider_incompatible")).toBe(true);
   });
 
   it("reports model_provider_incompatible for fallbacks on wrong provider", () => {
     const result = validateTransportConfig({
-      schemaVersion: 2,
-      route: "pi-ai",
-      agents: { main: { model: "m1", provider: "ollama" } },
+      schemaVersion: 3,
+      activeRoute: "pi-ai",
+      routes: { "pi-ai": { agents: { main: { model: "m1", provider: "ollama" } }, fallbacks: [{ model: "claude-opus-4.6", provider: "ollama" }] } },
       providers,
-      fallbacks: [{ model: "claude-opus-4.6", provider: "ollama" }],
     });
-    if (result.ok) return; // environment-dependent
-    expect(result.issues.some(i => i.code === "model_provider_incompatible" && i.path.startsWith("fallbacks"))).toBe(true);
+    if (result.ok) return;
+    expect(result.issues.some(i => i.code === "model_provider_incompatible" && i.path.startsWith("routes.pi-ai.fallbacks"))).toBe(true);
   });
 });
 
@@ -434,13 +423,14 @@ describe("resolveAgent with demotion", () => {
   it("filters demoted fallbacks from returned list", () => {
     const tc: TransportConfig = {
       ...TRANSPORT,
-      agents: {
-        ...TRANSPORT.agents,
-        main: { model: "claude-sonnet-4.6", provider: "kiro-free" },
+      routes: {
+        acp: {
+          agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } },
+          fallbacks: [
+            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
+          ],
+        },
       },
-      fallbacks: [
-        { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
-      ],
     };
     const r = resolveAgent("main", tc, MODELS)!;
     expect(r.model).toBe("claude-sonnet-4.6");
@@ -450,13 +440,17 @@ describe("resolveAgent with demotion", () => {
   it("uses primary anyway when all models demoted", () => {
     const tc: TransportConfig = {
       ...TRANSPORT,
-      agents: {
-        ...TRANSPORT.agents,
-        main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22" } as any,
+      routes: {
+        acp: {
+          agents: {
+            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22" } as any,
+            dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
+          },
+          fallbacks: [
+            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
+          ],
+        },
       },
-      fallbacks: [
-        { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
-      ],
     };
     const r = resolveAgent("main", tc, MODELS)!;
     expect(r.model).toBe("claude-sonnet-4.6"); // falls back to primary
@@ -464,49 +458,50 @@ describe("resolveAgent with demotion", () => {
 });
 
 describe("cleanDemotedModels", () => {
+  const ra = { agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } }, fallbacks: [{ model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any] };
+
   it("keeps demoted fallbacks but does not remove them", () => {
-    const tc: TransportConfig = {
-      ...TRANSPORT,
-      agents: {
-        main: { model: "claude-sonnet-4.6", provider: "kiro-free" },
-        dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
-      },
-      fallbacks: [
-        { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
-      ],
-    };
+    const tc: TransportConfig = { ...TRANSPORT, routes: { acp: { ...ra } } };
     cleanDemotedModels(tc);
-    // Fallback stays — only demoted flag cleared if model matches chosenModel
-    expect(tc.fallbacks).toHaveLength(1);
-    expect(tc.fallbacks![0]!.model).toBe("minimax-m2.5:cloud");
+    const tcRa = tc.routes["acp"]!;
+    expect(tcRa.fallbacks).toHaveLength(1);
+    expect(tcRa.fallbacks![0]!.model).toBe("minimax-m2.5:cloud");
   });
 
   it("resurrects chosen model (clears demotion)", () => {
     const tc: TransportConfig = {
       ...TRANSPORT,
-      agents: {
-        main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth" } as any,
-        dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
+      routes: {
+        acp: {
+          agents: {
+            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth" } as any,
+            dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
+          },
+          fallbacks: [],
+        },
       },
     };
     cleanDemotedModels(tc, "claude-sonnet-4.6");
-    expect((tc.agents["main"] as any).demoted).toBeUndefined();
-    expect((tc.agents["main"] as any).demotedReason).toBeUndefined();
+    const tcRa = tc.routes["acp"]!;
+    expect((tcRa.agents["main"] as any).demoted).toBeUndefined();
+    expect((tcRa.agents["main"] as any).demotedReason).toBeUndefined();
   });
 
   it("keeps all fallbacks — demoted and non-demoted", () => {
     const tc: TransportConfig = {
       ...TRANSPORT,
-      agents: {
-        main: { model: "claude-sonnet-4.6", provider: "kiro-free" },
-        dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
+      routes: {
+        acp: {
+          agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } },
+          fallbacks: [
+            { model: "minimax-m2.5:cloud", provider: "ollama" },
+            { model: "dead-model", provider: "ollama", demoted: "2026-05-22" } as any,
+          ],
+        },
       },
-      fallbacks: [
-        { model: "minimax-m2.5:cloud", provider: "ollama" },
-        { model: "dead-model", provider: "ollama", demoted: "2026-05-22" } as any,
-      ],
     };
     cleanDemotedModels(tc);
-    expect(tc.fallbacks).toHaveLength(2);
+    const tcRa = tc.routes["acp"]!;
+    expect(tcRa.fallbacks).toHaveLength(2);
   });
 });

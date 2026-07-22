@@ -130,7 +130,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       };
     }
 
-    const fallbackCandidates: ModelCandidate[] = (tc?.fallbacks ?? []).map(fb => {
+    const ra = tc ? (await import("./transport-config.js")).routeAssignments(tc) : null;
+    const fallbackCandidates: ModelCandidate[] = (ra?.fallbacks ?? []).map(fb => {
       const fbProvider = tc!.providers[fb.provider];
       return {
         model: fb.model, provider: fb.provider, endpoint: fbProvider?.endpoint ?? primaryEndpoint,
@@ -158,10 +159,11 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     return { transport, model: agent.model };
   }
 
-  // ACP path — try configured model, then top-level fallbacks on failure
+  // ACP path — try configured model, then route-local fallbacks on failure
   const { loadAndValidateConfig } = await import("./config.js");
   const config = await loadAndValidateConfig();
-  const fallbackModels = (tc?.fallbacks ?? []).map(f => f.model).filter(m => m !== agent.model);
+  const ra = tc ? (await import("./transport-config.js")).routeAssignments(tc) : null;
+  const fallbackModels = (ra?.fallbacks ?? []).map(f => f.model).filter(m => m !== agent.model);
   const modelsToTry = [agent.model, ...fallbackModels];
 
   for (let i = 0; i < modelsToTry.length; i++) {

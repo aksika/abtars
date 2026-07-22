@@ -79,7 +79,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   let transport: IKiroTransport;
 
-  const { resolveAgent, getEnvFallback, resolveHailMary, validateProviderReady, validateModelProviderPair } = await import("../components/transport-config.js");
+  const { resolveAgent, getEnvFallback, resolveHailMary, validateProviderReady, validateModelProviderPair, routeAssignments } = await import("../components/transport-config.js");
   const { loadTransportStructured, clearTransportCache } = await import("../components/transport-config.js");
   clearTransportCache();  // always re-read (picks up /models change writes)
   const loadResult = loadTransportStructured();
@@ -118,6 +118,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     ctx.hailMary = null;
   }
 
+  const tcActiveRoute = tc?.activeRoute;
+  const tcRa = tc ? routeAssignments(tc) : null;
   let resolved: typeof prof = null;
 
   if (!tc) {
@@ -170,7 +172,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
           logDebug("main", `Fallback incompatible: ${fb.model} — ${fbCompat.reason}`);
           continue;
         }
-        const fbResolved = resolveAgent("_fb", { ...tc!, agents: { ...tc!.agents, _fb: { model: fb.model, provider: fb.provider } } });
+        const tcWithFb = tc && tcRa ? { ...tc, routes: { ...tc.routes, [tcActiveRoute!]: { agents: { ...tcRa.agents, _fb: { model: fb.model, provider: fb.provider } }, fallbacks: tcRa.fallbacks } } } : tc;
+        const fbResolved = resolveAgent("_fb", tcWithFb);
         if (!fbResolved) continue;
         const fbVal = validateProviderReady(fbResolved.providerName, fbResolved.provider, getEnv());
         if (fbVal.ok) {
@@ -222,7 +225,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
 
     const fallbackCandidates: ModelCandidate[] = (resolved.fallbacks ?? []).map(fb => {
-      const fbResolved = tc ? resolveAgent("_fallback", { ...tc, agents: { ...tc.agents, _fallback: { model: fb.model, provider: fb.provider } } }) : null;
+      const tcWithFb = tc && tcRa ? { ...tc, routes: { ...tc.routes, [tcActiveRoute!]: { agents: { ...tcRa.agents, _fallback: { model: fb.model, provider: fb.provider } }, fallbacks: tcRa.fallbacks } } } : tc;
+      const fbResolved = tc ? resolveAgent("_fallback", tcWithFb) : null;
       return {
         model: fb.model,
         provider: fbResolved?.providerName ?? fb.provider,

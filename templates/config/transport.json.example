@@ -1,101 +1,55 @@
 {
-  "agents": {
-    "professor": {
-      "model": "claude-sonnet-4.6",
-      "provider": "kiro",
+  "schemaVersion": 3,
+  "activeRoute": "pi-ai",
+  "routes": {
+    "pi-ai": {
+      "agents": {
+        "main":    { "model": "claude-sonnet-4.6",  "provider": "openrouter" },
+        "dreamy":  { "model": "minimax-m2.5:cloud", "provider": "openrouter" },
+        "browsie": { "model": "minimax-m2.5:cloud", "provider": "openrouter" },
+        "cody":    { "model": "qwen3.5:cloud",      "provider": "openrouter" }
+      },
       "fallbacks": [
-        {
-          "model": "kimi-k2.5:cloud",
-          "provider": "ollama"
-        },
-        {
-          "model": "gemini-2.5-flash",
-          "provider": "openrouter"
-        }
+        { "model": "kimi-k2.5:cloud", "provider": "openrouter" },
+        { "model": "gemini-2.5-flash", "provider": "openrouter" }
       ]
     },
-    "dreamy": {
-      "model": "minimax-m2.5:cloud",
-      "provider": "ollama"
-    },
-    "browsie": {
-      "model": "minimax-m2.5:cloud",
-      "provider": "ollama"
-    },
-    "coding": {
-      "model": "qwen3.5:cloud",
-      "provider": "ollama"
+    "acp": {
+      "agents": {
+        "main":    { "model": "claude-sonnet-4.6",  "provider": "kiro" },
+        "dreamy":  { "model": "claude-sonnet-4.6",  "provider": "kiro" },
+        "browsie": { "model": "claude-sonnet-4.6",  "provider": "kiro" },
+        "cody":    { "model": "claude-sonnet-4.6",  "provider": "kiro" }
+      },
+      "fallbacks": []
     }
   },
   "providers": {
-    "kiro": {
-      "transport": "acp",
-      "cli": "kiro-cli"
-    },
-    "gemini": {
-      "transport": "acp",
-      "cli": "gemini"
-    },
-    "ollama": {
-      "transport": "api",
-      "endpoint": "http://localhost:11434/v1"
-    },
-    "openrouter": {
-      "transport": "api",
-      "endpoint": "https://openrouter.ai/api/v1",
-      "apiKeyEnv": "OPENROUTER_API_KEY"
-    },
-    "openai": {
-      "_comment": "API provider with reasoning control. thinking.style: effort (OpenAI o-series) or extended (Claude). Omit for models without reasoning.",
-      "transport": "api",
-      "endpoint": "https://api.openai.com/v1",
-      "apiKeyEnv": "OPENAI_API_KEY",
-      "thinking": {
-        "style": "effort",
-        "default": "medium"
-      }
-    },
-    "anthropic": {
-      "_comment": "Anthropic native API (not via proxy). apiFormat: anthropic uses Messages API format (x-api-key auth, /v1/messages endpoint).",
-      "transport": "api",
-      "endpoint": "https://api.anthropic.com/v1",
-      "apiKeyEnv": "ANTHROPIC_API_KEY",
-      "apiFormat": "anthropic",
-      "thinking": {
-        "style": "extended",
-        "default": 8000
-      }
-    },
-    "openai-codex": {
-      "_comment": "OpenAI Codex via Responses API. apiFormat: responses uses /v1/responses endpoint instead of /chat/completions.",
-      "transport": "api",
-      "endpoint": "https://api.openai.com/v1",
-      "apiKeyEnv": "OPENAI_API_KEY",
-      "apiFormat": "responses"
-    }
+    "kiro":        { "transport": "acp", "cli": "kiro-cli" },
+    "gemini":      { "transport": "acp", "cli": "gemini" },
+    "ollama":      { "transport": "api", "endpoint": "http://localhost:11434/v1" },
+    "openrouter":  { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" },
+    "openai":      { "transport": "api", "endpoint": "https://api.openai.com/v1", "apiKeyEnv": "OPENAI_API_KEY", "thinking": { "style": "effort", "default": "medium" } },
+    "anthropic":   { "transport": "api", "endpoint": "https://api.anthropic.com/v1", "apiKeyEnv": "ANTHROPIC_API_KEY", "apiFormat": "anthropic", "thinking": { "style": "extended", "default": 8000 } },
+    "openai-codex":{ "transport": "api", "endpoint": "https://api.openai.com/v1", "apiKeyEnv": "OPENAI_API_KEY", "apiFormat": "responses" }
   },
   "transportDefaults": {
-    "tmux": {
-      "session": "kiro-bridge",
-      "captureDelaySec": 3,
-      "maxWaitSec": 300
-    },
-    "acp": {
-      "permissionTimeoutMs": 60000
-    }
+    "acp":  { "permissionTimeoutMs": 60000 }
   },
   "maxTurns": 50,
+  "maxToolRounds": 50,
+  "maxFallbackToolRounds": 5,
+  "hailMary": {
+    "route": "acp",
+    "model": "claude-sonnet-4.6",
+    "provider": "kiro"
+  },
   "healthPolicy": {
     "skipThreshold": 0.7,
     "leakPerMinute": 0.03,
     "rateLimitFill": 0.5,
     "weakFill": 0.05,
-    "transientProgressive": [
-      0.1,
-      0.2,
-      0.4,
-      0.8
-    ],
+    "transientProgressive": [0.1, 0.2, 0.4, 0.8],
     "transientCooldownAfter": 3,
     "transientMaxCooldownSec": 300
   }

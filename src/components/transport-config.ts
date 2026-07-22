@@ -66,18 +66,28 @@ export type TransportDefaults = {
 
 import type { HealthPolicyConfig } from "./transport/model-health-registry.js";
 
-export type TransportConfig = {
-  schemaVersion?: number;
-  route: ExecutionRoute;
+export type RouteAssignments = {
   agents: Record<string, AgentAssignment>;
+  fallbacks?: Array<{ model: string; provider: string }>;
+};
+
+export type HailMaryConfig = {
+  route: "acp";
+  model: string;
+  provider: string;
+};
+
+export type TransportConfig = {
+  schemaVersion: 3;
+  activeRoute: ExecutionRoute;
+  routes: Partial<Record<ExecutionRoute, RouteAssignments>>;
   providers: Record<string, ProviderConfig>;
   transportDefaults?: TransportDefaults;
   maxTurns?: number;
   maxToolRounds?: number;
   /** #1386: Lower tool-round limit for fallback candidates. Default 5. */
   maxFallbackToolRounds?: number;
-  fallbacks?: Array<{ model: string; provider: string }>;
-  hailMary?: { model: string; provider: string };
+  hailMary?: HailMaryConfig;
   healthPolicy?: HealthPolicyConfig;
 };
 
@@ -117,107 +127,203 @@ export type TransportLoadResult =
   | { ok: true; config: TransportConfig; source: TransportConfigSource }
   | { ok: false; issues: readonly TransportConfigIssue[]; state: "missing" | "invalid"; source?: TransportConfigSource };
 
+// ── Route-local accessors (#1467) ─────────────────────────────────────────────
+
+export function routeAssignments(
+  config: TransportConfig,
+  route: ExecutionRoute = config.activeRoute,
+): RouteAssignments | null {
+  return config.routes[route] ?? null;
+}
+
+export function requireRouteAssignments(
+  config: TransportConfig,
+  route: ExecutionRoute = config.activeRoute,
+): RouteAssignments {
+  const ra = routeAssignments(config, route);
+  if (!ra) throw new Error(`Route "${route}" has no assignments block in transport config`);
+  return ra;
+}
+
 /**
  * Pure validator — never mutates input, never writes to disk.
  * Returns structured issues for every invariant violation.
  */
 export function validateTransportConfig(input: unknown): TransportValidationResult {
   const issues: TransportConfigIssue[] = [];
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return {
+      ok: false,
+      issues: [{ code: "missing_field", path: "", message: "Transport config must be an object" }],
+    };
+  }
   const tc = input as Record<string, unknown>;
 
-  // schemaVersion required, must be 2
+  // schemaVersion required, must be 3
   if (tc.schemaVersion == null) {
     issues.push({ code: "missing_field", path: "schemaVersion", message: "schemaVersion is required" });
-  } else if (tc.schemaVersion !== 2) {
-    issues.push({ code: "unsupported_schema", path: "schemaVersion", message: `Unsupported schema version ${tc.schemaVersion} — only version 2 is supported` });
+  } else if (tc.schemaVersion !== 3) {
+    issues.push({ code: "unsupported_schema", path: "schemaVersion", message: `Unsupported schema version ${tc.schemaVersion} — only version 3 is supported` });
   }
 
-  // route required, must be a valid ExecutionRoute
-  if (tc.route == null) {
-    issues.push({ code: "missing_field", path: "route", message: "route is required" });
-  } else if (tc.route !== "pi-ai" && tc.route !== "acp") {
-    issues.push({ code: "invalid_route", path: "route", message: `Invalid route "${String(tc.route)}" — must be "pi-ai" or "acp"` });
+  // activeRoute required, must be a valid ExecutionRoute
+  if (tc.activeRoute == null) {
+    issues.push({ code: "missing_field", path: "activeRoute", message: "activeRoute is required" });
+  } else if (tc.activeRoute !== "pi-ai" && tc.activeRoute !== "acp") {
+    issues.push({ code: "invalid_route", path: "activeRoute", message: `Invalid activeRoute "${String(tc.activeRoute)}" — must be "pi-ai" or "acp"` });
   }
 
-  // agents required
-  if (tc.agents == null || typeof tc.agents !== "object") {
-    issues.push({ code: "missing_field", path: "agents", message: "agents is required" });
+  // routes required
+  if (tc.routes == null || typeof tc.routes !== "object" || Array.isArray(tc.routes)) {
+    issues.push({ code: "missing_field", path: "routes", message: "routes is required" });
   }
 
   // providers required
-  if (tc.providers == null || typeof tc.providers !== "object") {
+  if (tc.providers == null || typeof tc.providers !== "object" || Array.isArray(tc.providers)) {
     issues.push({ code: "missing_field", path: "providers", message: "providers is required" });
   }
 
   if (issues.length > 0) return { ok: false, issues };
 
   const config = input as TransportConfig;
-  const route = config.route;
   const providers = config.providers;
+  const activeRoute = config.activeRoute;
 
-  // Validate every agent references an existing provider
-  for (const [role, assignment] of Object.entries(config.agents)) {
-    if (!assignment || typeof assignment !== "object") {
-      issues.push({ code: "missing_field", path: `agents.${role}`, message: `Agent "${role}" has invalid assignment` });
-      continue;
-    }
-    const provider = (assignment as Record<string, unknown>).provider;
-    if (typeof provider !== "string") {
-      issues.push({ code: "missing_field", path: `agents.${role}.provider`, message: `Agent "${role}" has no provider` });
-      continue;
-    }
-    const p = providers[provider];
-    if (!p) {
-      issues.push({ code: "missing_provider", path: `agents.${role}.provider`, message: `Agent "${role}" references unknown provider "${assignment.provider}"` });
-      continue;
-    }
-    // Validate provider supports the route
-    if (!providerSupportsRoute(p, route)) {
-      issues.push({ code: "provider_route_incompatible", path: `agents.${role}`, message: `Agent "${role}" provider "${assignment.provider}" does not support route "${route}"` });
+  // Reject unknown route keys in routes object
+  for (const routeKey of Object.keys(config.routes)) {
+    if (routeKey !== "pi-ai" && routeKey !== "acp") {
+      issues.push({ code: "invalid_route", path: `routes.${routeKey}`, message: `Unknown route "${routeKey}" — only "pi-ai" and "acp" are supported` });
     }
   }
 
-  // Validate fallbacks reference existing providers and support the route
-  for (let i = 0; i < (config.fallbacks ?? []).length; i++) {
-    const fb = config.fallbacks![i];
-    if (!fb || typeof fb !== "object") {
-      issues.push({ code: "missing_field", path: `fallbacks[${i}]`, message: `Fallback[${i}] is invalid` });
-      continue;
-    }
-    const p = providers[fb.provider];
-    if (!p) {
-      issues.push({ code: "missing_provider", path: `fallbacks[${i}].provider`, message: `Fallback[${i}] references unknown provider "${fb.provider}"` });
-    } else if (!providerSupportsRoute(p, route)) {
-      issues.push({ code: "provider_route_incompatible", path: `fallbacks[${i}]`, message: `Fallback[${i}] provider "${fb.provider}" does not support route "${route}"` });
-    }
+  // Require the active route block to exist
+  if (!config.routes[activeRoute]) {
+    issues.push({ code: "missing_field", path: `routes.${activeRoute}`, message: `Active route "${activeRoute}" has no assignments block` });
   }
 
-  // ACP same-provider rule
-  if (route === "acp") {
-    const entries = Object.values(config.agents);
+  if (issues.length > 0) return { ok: false, issues };
+
+  // Validate each present route block independently
+  const validateRouteBlock = (routeKey: string, ra: RouteAssignments) => {
+    const prefix = `routes.${routeKey}`;
+
+    if (ra.agents == null || typeof ra.agents !== "object" || Array.isArray(ra.agents)) {
+      issues.push({ code: "missing_field", path: `${prefix}.agents`, message: `Route "${routeKey}" has no agents block` });
+      return;
+    }
+
+    for (const [role, assignment] of Object.entries(ra.agents)) {
+      if (!assignment || typeof assignment !== "object") {
+        issues.push({ code: "missing_field", path: `${prefix}.agents.${role}`, message: `Agent "${role}" in route "${routeKey}" has invalid assignment` });
+        continue;
+      }
+      const assignmentRecord = assignment as Record<string, unknown>;
+      const model = assignmentRecord.model;
+      const providerName = assignmentRecord.provider;
+      if (typeof model !== "string" || !model.trim()) {
+        issues.push({ code: "missing_field", path: `${prefix}.agents.${role}.model`, message: `Agent "${role}" in route "${routeKey}" has no model` });
+      }
+      if (typeof providerName !== "string") {
+        issues.push({ code: "missing_field", path: `${prefix}.agents.${role}.provider`, message: `Agent "${role}" in route "${routeKey}" has no provider` });
+        continue;
+      }
+      const p = providers[providerName];
+      if (!p) {
+        issues.push({ code: "missing_provider", path: `${prefix}.agents.${role}`, message: `Agent "${role}" in route "${routeKey}" references unknown provider "${providerName}"` });
+        continue;
+      }
+      if (!providerSupportsRoute(p, routeKey as ExecutionRoute)) {
+        issues.push({ code: "provider_route_incompatible", path: `${prefix}.agents.${role}`, message: `Agent "${role}" in route "${routeKey}" provider "${providerName}" does not support route "${routeKey}"` });
+      }
+    }
+
+    if (ra.fallbacks != null && !Array.isArray(ra.fallbacks)) {
+      issues.push({ code: "missing_field", path: `${prefix}.fallbacks`, message: `fallbacks in route "${routeKey}" must be an array` });
+      return;
+    }
+
+    for (let i = 0; i < (ra.fallbacks ?? []).length; i++) {
+      const fb = ra.fallbacks![i];
+      if (!fb || typeof fb !== "object") {
+        issues.push({ code: "missing_field", path: `${prefix}.fallbacks[${i}]`, message: `Fallback[${i}] in route "${routeKey}" is invalid` });
+        continue;
+      }
+      if (typeof fb.model !== "string" || !fb.model.trim()) {
+        issues.push({ code: "missing_field", path: `${prefix}.fallbacks[${i}].model`, message: `Fallback[${i}] in route "${routeKey}" has no model` });
+      }
+      if (typeof fb.provider !== "string") {
+        issues.push({ code: "missing_field", path: `${prefix}.fallbacks[${i}].provider`, message: `Fallback[${i}] in route "${routeKey}" has no provider` });
+        continue;
+      }
+      const p = providers[fb.provider];
+      if (!p) {
+        issues.push({ code: "missing_provider", path: `${prefix}.fallbacks[${i}]`, message: `Fallback[${i}] in route "${routeKey}" references unknown provider "${fb.provider}"` });
+      } else if (!providerSupportsRoute(p, routeKey as ExecutionRoute)) {
+        issues.push({ code: "provider_route_incompatible", path: `${prefix}.fallbacks[${i}]`, message: `Fallback[${i}] in route "${routeKey}" provider "${fb.provider}" does not support route "${routeKey}"` });
+      }
+    }
+  };
+
+  for (const [routeKey, ra] of Object.entries(config.routes)) {
+    if (ra) validateRouteBlock(routeKey, ra);
+  }
+
+  if (issues.length > 0) return { ok: false, issues };
+
+  // ACP same-provider rule — scoped to routes.acp only
+  const acpRa = config.routes["acp"];
+  if (acpRa) {
+    const entries = Object.values(acpRa.agents);
     if (entries.length > 0) {
       const first = entries[0]!.provider;
       for (let i = 1; i < entries.length; i++) {
         if (entries[i]!.provider !== first) {
-          issues.push({ code: "acp_provider_mismatch", path: `agents.${Object.keys(config.agents)[i]}`, message: `ACP requires all agents use the same provider ("${first}")` });
+          issues.push({ code: "acp_provider_mismatch", path: `routes.acp.agents.${Object.keys(acpRa.agents)[i]}`, message: `ACP requires all agents use the same provider ("${first}")` });
         }
       }
     }
   }
 
-  // Model/provider compatibility (warns only — non-fatal when catalog entry missing)
-  const models = loadModels();
-  for (const [role, assignment] of Object.entries(config.agents)) {
-    const entry = models[assignment.model];
-    if (entry && !entry.transports.includes(assignment.provider)) {
-      issues.push({ code: "model_provider_incompatible", path: `agents.${role}`, message: `Model "${assignment.model}" not available on provider "${assignment.provider}" — only supported on: ${entry.transports.join(", ")}` });
+  // Validate hailMary when present
+  if (tc.hailMary != null) {
+    const hm = tc.hailMary as Record<string, unknown>;
+    if (hm.route !== "acp") {
+      issues.push({ code: "invalid_route", path: "hailMary.route", message: `hailMary route must be "acp", got "${String(hm.route)}"` });
+    }
+    if (typeof hm.provider !== "string") {
+      issues.push({ code: "missing_field", path: "hailMary.provider", message: "hailMary provider is required" });
+    } else {
+      const p = providers[hm.provider as string];
+      if (!p) {
+        issues.push({ code: "missing_provider", path: "hailMary.provider", message: `hailMary references unknown provider "${hm.provider}"` });
+      } else if (!providerSupportsRoute(p, "acp")) {
+        issues.push({ code: "provider_route_incompatible", path: "hailMary.route", message: `hailMary provider "${hm.provider}" does not support ACP route` });
+      }
+    }
+    if (typeof hm.model !== "string" || !(hm.model as string).trim()) {
+      issues.push({ code: "missing_field", path: "hailMary.model", message: "hailMary model is required" });
     }
   }
-  for (let i = 0; i < (config.fallbacks ?? []).length; i++) {
-    const fb = config.fallbacks![i]!;
-    const entry = models[fb.model];
-    if (entry && !entry.transports.includes(fb.provider)) {
-      issues.push({ code: "model_provider_incompatible", path: `fallbacks[${i}]`, message: `Model "${fb.model}" not available on provider "${fb.provider}" — only supported on: ${entry.transports.join(", ")}` });
+
+  if (issues.length > 0) return { ok: false, issues };
+
+  // Model/provider compatibility (warns only — non-fatal when catalog entry missing)
+  const models = loadModels();
+  for (const [routeKey, ra] of Object.entries(config.routes)) {
+    if (!ra) continue;
+    const prefix = `routes.${routeKey}`;
+    for (const [role, assignment] of Object.entries(ra.agents)) {
+      const entry = models[assignment.model];
+      if (entry && !entry.transports.includes(assignment.provider)) {
+        issues.push({ code: "model_provider_incompatible", path: `${prefix}.agents.${role}`, message: `Model "${assignment.model}" not available on provider "${assignment.provider}" in route "${routeKey}" — only supported on: ${entry.transports.join(", ")}` });
+      }
+    }
+    for (let i = 0; i < (ra.fallbacks ?? []).length; i++) {
+      const fb = ra.fallbacks![i]!;
+      const entry = models[fb.model];
+      if (entry && !entry.transports.includes(fb.provider)) {
+        issues.push({ code: "model_provider_incompatible", path: `${prefix}.fallbacks[${i}]`, message: `Model "${fb.model}" not available on provider "${fb.provider}" in route "${routeKey}" — only supported on: ${entry.transports.join(", ")}` });
+      }
     }
   }
 
@@ -351,7 +457,7 @@ function tryParseJson(filePath: string): Record<string, unknown> | null {
 export function loadTransport(): TransportConfig | null {
   const result = loadTransportStructured();
   if (result.ok) {
-    logInfo(TAG, `Loaded transport config v${result.config.schemaVersion ?? 2} (route: ${result.config.route}, source: ${result.source})`);
+    logInfo(TAG, `Loaded transport config v${result.config.schemaVersion} (activeRoute: ${result.config.activeRoute}, source: ${result.source})`);
     return result.config;
   }
   return null;
@@ -372,18 +478,26 @@ export function resolveHailMary(transport?: TransportConfig | null): { model: st
   return { model: tc.hailMary.model, endpoint: provider.endpoint, apiKeyEnv: provider.apiKeyEnv };
 }
 
+/** Route-specific hailMary boundary: #1468 owns the emergency execution path. */
+
 // ── Invariant validation ────────────────────────────────────────────────────
 // #1466: replaced by pure validateTransportConfig() — no mutation, no repair.
 
 // ── Resolution ──────────────────────────────────────────────────────────────
 
-export function resolveAgent(role: string, transport?: TransportConfig | null, models?: ModelCatalog, lastSuccessfulMain?: { model: string; provider: string } | null): ResolvedAgent | null {
+export function resolveAgent(role: string, transport?: TransportConfig | null, models?: ModelCatalog, lastSuccessfulMain?: { model: string; provider: string } | null, explicitRoute?: ExecutionRoute): ResolvedAgent | null {
   const tc = transport ?? loadTransport();
   if (!tc) return null;
 
+  const ra = routeAssignments(tc, explicitRoute);
+  if (!ra) {
+    logWarn(TAG, `No route assignments for role "${role}"`);
+    return null;
+  }
+
   // task inherits main
   const effectiveRole = role === "task" ? "main" : role;
-  const assignment = tc.agents[effectiveRole];
+  const assignment = ra.agents[effectiveRole];
   if (!assignment) {
     logWarn(TAG, `No agent assignment for role "${role}"`);
     return null;
@@ -411,13 +525,14 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
   const piMeta = resolveModelMeta(effectiveModel, effectiveProvider);
   if (piMeta) { contextWindow = piMeta.contextWindow; maxOutput = piMeta.maxOutput; }
 
-  // Build fallback list: top-level fallbacks (filtered), plus last successful Main for specialists
+  // Build fallback list: route-local fallbacks (filtered), plus last successful Main for specialists
   const seen = new Set<string>();
   const fallbackList: Array<{ model: string; provider: string }> = [];
 
-  // For specialists, prepend last successful Main (or configured Main) before top-level fallbacks
+  // For specialists, prepend last successful Main (or configured Main) before route-local fallbacks
   if (role !== "main" && role !== "task") {
-    const lastMain = lastSuccessfulMain ?? { model: tc.agents["main"]?.model ?? "", provider: tc.agents["main"]?.provider ?? "" };
+    const mainAssignment = ra.agents["main"];
+    const lastMain = lastSuccessfulMain ?? { model: mainAssignment?.model ?? "", provider: mainAssignment?.provider ?? "" };
     if (lastMain.model && lastMain.provider) {
       const key = `${lastMain.model}@${lastMain.provider}`;
       seen.add(key);
@@ -425,8 +540,8 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
     }
   }
 
-  // Append top-level fallbacks, filtering demoted and self-duplicates
-  for (const fb of tc.fallbacks ?? []) {
+  // Append route-local fallbacks, filtering demoted and self-duplicates
+  for (const fb of ra.fallbacks ?? []) {
     const fbAny = fb as any;
     if (fbAny.demoted || fb.model === effectiveModel) continue;
     const key = `${fb.model}@${fb.provider}`;
@@ -492,11 +607,13 @@ export function inferRouteFromProvider(config: TransportConfig, providerName: st
 }
 
 export function allAssignmentsMatchRoute(config: TransportConfig, route: ExecutionRoute): boolean {
-  for (const assignment of Object.values(config.agents)) {
+  const ra = routeAssignments(config, route);
+  if (!ra) return false;
+  for (const assignment of Object.values(ra.agents)) {
     const p = config.providers[assignment.provider];
     if (!p || !providerSupportsRoute(p, route)) return false;
   }
-  for (const fb of config.fallbacks ?? []) {
+  for (const fb of ra.fallbacks ?? []) {
     const p = config.providers[fb.provider];
     if (!p || !providerSupportsRoute(p, route)) return false;
   }
@@ -505,129 +622,14 @@ export function allAssignmentsMatchRoute(config: TransportConfig, route: Executi
 
 export function acpSameProviderConstraint(config: TransportConfig): boolean {
   // ACP requires all agents to use the same provider (single child process)
-  if (config.route !== "acp") return true;
-  const first = Object.values(config.agents)[0];
+  const acpRa = config.routes["acp"];
+  if (!acpRa) return true;
+  const first = Object.values(acpRa.agents)[0];
   if (!first) return true;
-  return Object.values(config.agents).every(a => a.provider === first.provider);
+  return Object.values(acpRa.agents).every(a => a.provider === first.provider);
 }
 
-// ── Schema migration (#1418) ─────────────────────────────────────────────────
-
-type LegacyAgentAssignment = {
-  model: string;
-  provider: string;
-  fallbacks?: Array<{ model: string; provider: string }>;
-};
-
-type LegacyProviderConfig = {
-  transport: "acp" | "tmux" | "api";
-  cli?: string;
-  endpoint?: string;
-  apiKeyEnv?: string;
-  apiFormat?: "chat" | "responses" | "anthropic";
-  thinking?: any;
-  defaults?: Record<string, { model: string; fallbacks?: string[] }>;
-  fallbackChain?: string[];
-};
-
-type LegacyTransportConfig = {
-  agents: Record<string, LegacyAgentAssignment>;
-  providers: Record<string, LegacyProviderConfig>;
-  transportDefaults?: TransportDefaults;
-  maxTurns?: number;
-  maxToolRounds?: number;
-  maxFallbackToolRounds?: number;
-  healthPolicy?: HealthPolicyConfig;
-};
-
-export function migrateTransportConfig(raw: Record<string, unknown>): { config: TransportConfig | null; error?: string } {
-  // v2: no migration needed
-  if (raw.schemaVersion === 2) return { config: raw as unknown as TransportConfig };
-
-  const legacy = raw as unknown as LegacyTransportConfig;
-  if (!legacy.agents || !legacy.providers) return { config: null, error: "transport.json: missing agents or providers" };
-
-  const professor = legacy.agents["professor"];
-  if (!professor) return { config: null, error: "transport.json: agents.professor is required for migration" };
-
-  // Reject tmux — not a selectable route
-  const anyTmux = Object.entries(legacy.providers).some(([, p]) => p.transport === "tmux");
-  if (anyTmux) return { config: null, error: "transport.json: tmux transport cannot be migrated to a selectable route — manual action required" };
-
-  // Infer route from professor's provider
-  const route = inferRouteFromProvider(legacy as unknown as TransportConfig, professor.provider);
-  if (!route) return { config: null, error: `transport.json: cannot infer route from professor's provider "${professor.provider}"` };
-
-  // Check all assignments resolve to the same route
-  for (const [role, a] of Object.entries(legacy.agents)) {
-    const p = legacy.providers[a.provider];
-    if (!p) return { config: null, error: `transport.json: agent "${role}" references unknown provider "${a.provider}"` };
-    const routeForProvider = inferRouteFromProvider(legacy as unknown as TransportConfig, a.provider);
-    if (!routeForProvider || routeForProvider !== route) {
-      return { config: null, error: `transport.json: agent "${role}" provider "${a.provider}" incompatible with inferred route "${route}"` };
-    }
-  }
-
-  // Build top-level fallbacks: professor fallbacks + provider fallbackChain + other agent fallbacks, deduplicated
-  const seen = new Set<string>();
-  const fallbacks: Array<{ model: string; provider: string }> = [];
-
-  const addFallback = (model: string, provider: string) => {
-    const key = `${model}@${provider}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    fallbacks.push({ model, provider });
-  };
-
-  // Professor fallbacks first (preserve order)
-  for (const fb of professor.fallbacks ?? []) addFallback(fb.model, fb.provider);
-  // Provider fallbackChain
-  const profProvider = legacy.providers[professor.provider];
-  for (const fbModel of profProvider?.fallbackChain ?? []) addFallback(fbModel, professor.provider);
-  // Other agent fallbacks
-  for (const a of Object.values(legacy.agents)) {
-    for (const fb of a.fallbacks ?? []) addFallback(fb.model, fb.provider);
-  }
-
-  // Build new config
-  const agents: Record<string, AgentAssignment> = {};
-  for (const [role, a] of Object.entries(legacy.agents)) {
-    const newRole = role === "professor" ? "main" : role === "coding" ? "cody" : role;
-    agents[newRole] = { model: a.model, provider: a.provider };
-  }
-
-  const newProviders: Record<string, ProviderConfig> = {};
-  for (const [name, p] of Object.entries(legacy.providers)) {
-    const np: ProviderConfig = { transport: p.transport };
-    if (p.cli) np.cli = p.cli;
-    if (p.endpoint) np.endpoint = p.endpoint;
-    if (p.apiKeyEnv) np.apiKeyEnv = p.apiKeyEnv;
-    if (p.apiFormat) np.apiFormat = p.apiFormat;
-    if (p.thinking) np.thinking = p.thinking;
-    if (p.defaults) {
-      np.defaults = {};
-      for (const [k, v] of Object.entries(p.defaults)) {
-        np.defaults[k] = { model: v.model };
-      }
-    }
-    newProviders[name] = np;
-  }
-
-  return {
-    config: {
-      schemaVersion: 2,
-      route,
-      agents,
-      providers: newProviders,
-      transportDefaults: legacy.transportDefaults,
-      maxTurns: legacy.maxTurns,
-      maxToolRounds: legacy.maxToolRounds,
-      maxFallbackToolRounds: legacy.maxFallbackToolRounds,
-      fallbacks: fallbacks.length > 0 ? fallbacks : undefined,
-      healthPolicy: legacy.healthPolicy,
-    },
-  };
-}
+// ── Schema migration (#1418) — deleted in #1467 (v3 hard cut, no migration) ──
 
 // ── Model/provider compatibility (#1415) ─────────────────────────────────────
 
@@ -668,22 +670,27 @@ export function validateModelProviderPair(
 export function validateTransportAssignments(
   config: TransportConfig,
   models?: ModelCatalog,
+  explicitRoute?: ExecutionRoute,
 ): AssignmentIssue[] {
   const issues: AssignmentIssue[] = [];
   const mc = models ?? loadModels();
 
-  for (const [role, assignment] of Object.entries(config.agents)) {
-    const result = validateModelProviderPair(assignment.model, assignment.provider, mc);
-    if (!result.ok) {
-      issues.push({ location: `${role}.model`, model: assignment.model, provider: assignment.provider, reason: result.reason });
+  // Validate active route block (or the explicit route if given) + hailMary
+  const route = explicitRoute ?? config.activeRoute;
+  const ra = routeAssignments(config, route);
+  if (ra) {
+    for (const [role, assignment] of Object.entries(ra.agents)) {
+      const result = validateModelProviderPair(assignment.model, assignment.provider, mc);
+      if (!result.ok) {
+        issues.push({ location: `${route}.agents.${role}.model`, model: assignment.model, provider: assignment.provider, reason: result.reason });
+      }
     }
-  }
-
-  for (let i = 0; i < (config.fallbacks ?? []).length; i++) {
-    const fb = config.fallbacks![i]!;
-    const fbResult = validateModelProviderPair(fb.model, fb.provider, mc);
-    if (!fbResult.ok) {
-      issues.push({ location: `fallbacks[${i}]`, model: fb.model, provider: fb.provider, reason: fbResult.reason });
+    for (let i = 0; i < (ra.fallbacks ?? []).length; i++) {
+      const fb = ra.fallbacks![i]!;
+      const fbResult = validateModelProviderPair(fb.model, fb.provider, mc);
+      if (!fbResult.ok) {
+        issues.push({ location: `${route}.fallbacks[${i}]`, model: fb.model, provider: fb.provider, reason: fbResult.reason });
+      }
     }
   }
 
@@ -703,19 +710,22 @@ export function validateAtStartup(): void {
     logWarn(TAG, `${iss.location}: ${iss.reason}`);
   }
 
-  for (const [role, assignment] of Object.entries(tc.agents)) {
-    if (!tc.providers[assignment.provider]) {
-      logWarn(TAG, `Agent "${role}": provider "${assignment.provider}" not defined in providers`);
+  for (const [routeKey, ra] of Object.entries(tc.routes)) {
+    if (!ra) continue;
+    for (const [role, assignment] of Object.entries(ra.agents)) {
+      if (!tc.providers[assignment.provider]) {
+        logWarn(TAG, `Route "${routeKey}" Agent "${role}": provider "${assignment.provider}" not defined in providers`);
+      }
+      const modelEntry = mc[assignment.model];
+      if (!modelEntry) {
+        logWarn(TAG, `Route "${routeKey}" Agent "${role}": model "${assignment.model}" not in models.json`);
+      }
     }
-    const modelEntry = mc[assignment.model];
-    if (!modelEntry) {
-      logWarn(TAG, `Agent "${role}": model "${assignment.model}" not in models.json`);
-    }
-  }
-  for (let i = 0; i < (tc.fallbacks ?? []).length; i++) {
-    const fb = tc.fallbacks![i]!;
-    if (!tc.providers[fb.provider]) {
-      logWarn(TAG, `Fallback[${i}]: provider "${fb.provider}" not defined in providers`);
+    for (let i = 0; i < (ra.fallbacks ?? []).length; i++) {
+      const fb = ra.fallbacks![i]!;
+      if (!tc.providers[fb.provider]) {
+        logWarn(TAG, `Route "${routeKey}" Fallback[${i}]: provider "${fb.provider}" not defined in providers`);
+      }
     }
   }
 
@@ -741,6 +751,9 @@ export type TransportWriteResult =
   | { ok: false; issues: AssignmentIssue[] };
 
 export function writeTransportConfig(candidate: TransportConfig, reason: string): TransportWriteResult {
+  if (typeof reason !== "string" || !reason.trim()) {
+    return { ok: false, issues: [{ location: "reason", model: "", provider: "", reason: "A non-empty mutation reason is required" }] };
+  }
   // Validate the complete candidate — use a detached deep copy so input mutation
   // doesn't leak into validation, and failed writes leave the cache unchanged.
   const candidateCopy = JSON.parse(JSON.stringify(candidate)) as TransportConfig;
@@ -756,11 +769,14 @@ export function writeTransportConfig(candidate: TransportConfig, reason: string)
     for (const iss of compatIssues) logWarn(TAG, `Refusing to write — ${iss.reason}`);
     return { ok: false, issues: compatIssues };
   }
-  // Guard: reject empty model strings before persisting
-  for (const [role, agent] of Object.entries(vr.config.agents)) {
-    if (!agent.model?.trim()) {
-      logWarn(TAG, `Refusing to write transport.json — agent "${role}" has empty model`);
-      return { ok: false, issues: [{ location: role, model: agent.model ?? "", provider: agent.provider, reason: `empty model string` }] };
+  // Guard: reject empty model strings in the active route block
+  const activeRa = routeAssignments(vr.config);
+  if (activeRa) {
+    for (const [role, agent] of Object.entries(activeRa.agents)) {
+      if (!agent.model?.trim()) {
+        logWarn(TAG, `Refusing to write transport.json — agent "${role}" has empty model`);
+        return { ok: false, issues: [{ location: role, model: agent.model ?? "", provider: agent.provider, reason: `empty model string` }] };
+      }
     }
   }
 
@@ -774,37 +790,54 @@ export function writeTransportConfig(candidate: TransportConfig, reason: string)
   // Serialize candidate deterministically (use validated config, not raw input)
   const content = JSON.stringify(vr.config, null, 2);
 
-  // Write both candidate and backup to temp files, then rename in order.
-  // Primary rename happens FIRST so a failure leaves oldTmp/oldPath untouched.
-  // Backup rename happens SECOND (best-effort; on failure primary is already correct).
   const tmp = p + ".tmp." + process.pid;
   const oldTmp = oldPath + ".tmp." + process.pid;
+  const rollbackPrimaryTmp = p + ".rollback." + process.pid;
+  const rollbackOldTmp = oldPath + ".rollback." + process.pid;
+  let primaryCommitted = false;
+  let backupAttempted = false;
+  const oldBackupExists = existsSync(oldPath);
   try {
+    if (oldBackupExists) {
+      writeFileSync(rollbackOldTmp, readFileSync(oldPath, "utf-8"), "utf-8");
+    }
     writeFileSync(tmp, content, "utf-8");
 
     if (currentBytes !== null) {
       writeFileSync(oldTmp, currentBytes, "utf-8");
+      writeFileSync(rollbackPrimaryTmp, currentBytes, "utf-8");
     }
 
-    // Commit primary FIRST
     renameSync(tmp, p);
+    primaryCommitted = true;
 
-    // Commit backup SECOND (best-effort — primary is already safe)
     if (currentBytes !== null) {
-      try { renameSync(oldTmp, oldPath); } catch { /* best effort */ }
+      backupAttempted = true;
+      renameSync(oldTmp, oldPath);
     }
 
     cachedTransport = vr.config;
     cachedSource = "primary";
-    logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
+    try { unlinkSync(rollbackPrimaryTmp); } catch { /* best effort */ }
+    try { unlinkSync(rollbackOldTmp); } catch { /* best effort */ }
+    logInfo(TAG, `transport.json updated — ${reason}`);
     return { ok: true };
   } catch (err) {
-    // Primary rename failed: restore oldTmp to oldPath to preserve prior pair
-    if (currentBytes !== null) {
-      try { if (existsSync(oldTmp)) renameSync(oldTmp, oldPath); } catch { /* best effort */ }
+    // If backup commit was attempted, restore the previous backup (or its
+    // absence). If primary commit succeeded, restore the previous primary too.
+    if (backupAttempted) {
+      try {
+        if (oldBackupExists) renameSync(rollbackOldTmp, oldPath);
+        else if (existsSync(oldPath)) unlinkSync(oldPath);
+      } catch { /* best effort */ }
+    }
+    if (primaryCommitted && currentBytes !== null) {
+      try { renameSync(rollbackPrimaryTmp, p); } catch { /* best effort */ }
     }
     try { unlinkSync(tmp); } catch { /* best effort */ }
     try { unlinkSync(oldTmp); } catch { /* best effort */ }
+    try { unlinkSync(rollbackPrimaryTmp); } catch { /* best effort */ }
+    try { unlinkSync(rollbackOldTmp); } catch { /* best effort */ }
     logWarn(TAG, `Failed to write transport.json: ${err instanceof Error ? err.message : String(err)}`);
     return { ok: false, issues: [{ location: "write", model: "", provider: "", reason: `Write failed: ${err instanceof Error ? err.message : String(err)}` }] };
   }
@@ -812,14 +845,19 @@ export function writeTransportConfig(candidate: TransportConfig, reason: string)
 
 /** Remove demoted models from config. Called on user-initiated model switch.
  *  Models the user just chose are resurrected (demotion cleared). All other demoted entries are deleted. */
-export function cleanDemotedModels(tc: TransportConfig, chosenModel?: string): void {
-  for (const agent of Object.values(tc.agents)) {
-    if ((agent as any).demoted) {
-      if (agent.model === chosenModel) { delete (agent as any).demoted; delete (agent as any).demotedReason; delete (agent as any).demotedModel; }
+export function cleanDemotedModels(tc: TransportConfig, chosenModel?: string, explicitRoute?: ExecutionRoute): void {
+  const routesToClean = explicitRoute ? [explicitRoute] : (Object.keys(tc.routes) as ExecutionRoute[]);
+  for (const r of routesToClean) {
+    const ra = tc.routes[r];
+    if (!ra) continue;
+    for (const agent of Object.values(ra.agents)) {
+      if ((agent as any).demoted) {
+        if (agent.model === chosenModel) { delete (agent as any).demoted; delete (agent as any).demotedReason; delete (agent as any).demotedModel; }
+      }
     }
-  }
-  for (const fb of tc.fallbacks ?? []) {
-    if ((fb as any).demoted && fb.model === chosenModel) { delete (fb as any).demoted; delete (fb as any).demotedReason; delete (fb as any).demotedModel; }
+    for (const fb of ra.fallbacks ?? []) {
+      if ((fb as any).demoted && fb.model === chosenModel) { delete (fb as any).demoted; delete (fb as any).demotedReason; delete (fb as any).demotedModel; }
+    }
   }
 }
 
@@ -830,17 +868,22 @@ export function demoteModel(model: string, reason: "auth" | "timeout"): void {
   // Work on a detached candidate — never mutate the cached object
   const candidate = JSON.parse(JSON.stringify(tc)) as TransportConfig;
   // Guard: don't demote if it's the last non-demoted model for any role
-  for (const agent of Object.values(candidate.agents)) {
-    const all = [agent, ...(candidate.fallbacks ?? [])];
-    const healthy = all.filter((m: any) => !m.demoted);
-    if (healthy.length <= 1 && healthy.some((m: any) => m.model === model)) return;
+  const activeRa = routeAssignments(candidate);
+  if (activeRa) {
+    for (const agent of Object.values(activeRa.agents)) {
+      const all = [agent, ...(activeRa.fallbacks ?? [])];
+      const healthy = all.filter((m: any) => !m.demoted);
+      if (healthy.length <= 1 && healthy.some((m: any) => m.model === model)) return;
+    }
   }
   let found = false;
-  for (const agent of Object.values(candidate.agents)) {
-    if (agent.model === model) { (agent as any).demoted = new Date().toISOString(); (agent as any).demotedReason = reason; (agent as any).demotedModel = model; found = true; }
-  }
-  for (const fb of candidate.fallbacks ?? []) {
-    if (fb.model === model) { (fb as any).demoted = new Date().toISOString(); (fb as any).demotedReason = reason; (fb as any).demotedModel = model; found = true; }
+  if (activeRa) {
+    for (const agent of Object.values(activeRa.agents)) {
+      if (agent.model === model) { (agent as any).demoted = new Date().toISOString(); (agent as any).demotedReason = reason; (agent as any).demotedModel = model; found = true; }
+    }
+    for (const fb of activeRa.fallbacks ?? []) {
+      if (fb.model === model) { (fb as any).demoted = new Date().toISOString(); (fb as any).demotedReason = reason; (fb as any).demotedModel = model; found = true; }
+    }
   }
   if (found) writeTransportConfig(candidate, `auto-demote ${model} (${reason})`);
 }
@@ -850,6 +893,12 @@ export function restorePrevious(): { ok: boolean; error?: string } {
   const dir = configDir();
   const activePath = join(dir, getEnv().transportConfig);
   const oldPath = activePath.replace(".json", ".old.json");
+  const tmp = activePath + ".tmp." + process.pid;
+  const oldTmp = oldPath + ".tmp." + process.pid;
+  const rollbackActiveTmp = activePath + ".rollback." + process.pid;
+  const rollbackOldTmp = oldPath + ".rollback." + process.pid;
+  let activeCommitted = false;
+  let oldAttempted = false;
   if (!existsSync(oldPath)) return { ok: false, error: "Nothing to restore — no previous config saved." };
   try {
     const current = readFileSync(activePath, "utf-8");
@@ -860,18 +909,30 @@ export function restorePrevious(): { ok: boolean; error?: string } {
     if (!vr.ok) {
       return { ok: false, error: `Backup config is invalid — cannot restore. Issues: ${vr.issues.map(i => i.message).join("; ")}` };
     }
-    // Temp-file swap: write both to temps, then rename safely
-    const tmp = activePath + ".tmp." + process.pid;
-    const oldTmp = oldPath + ".tmp." + process.pid;
+    // Snapshot both files before swapping so a failed second rename can roll
+    // the first rename back as well.
     writeFileSync(tmp, old, "utf-8");
     writeFileSync(oldTmp, current, "utf-8");
-    renameSync(oldTmp, oldPath);
+    writeFileSync(rollbackActiveTmp, current, "utf-8");
+    writeFileSync(rollbackOldTmp, old, "utf-8");
     renameSync(tmp, activePath);
+    activeCommitted = true;
+    oldAttempted = true;
+    renameSync(oldTmp, oldPath);
+    try { unlinkSync(rollbackActiveTmp); } catch { /* best effort */ }
+    try { unlinkSync(rollbackOldTmp); } catch { /* best effort */ }
     cachedTransport = null;
     cachedSource = null;
     logInfo(TAG, "transport.json swapped with .old (restore)");
     return { ok: true };
   } catch (err) {
+    // Restore whichever side may have been committed before the failure.
+    try { if (oldAttempted) renameSync(rollbackOldTmp, oldPath); } catch { /* best effort */ }
+    try { if (activeCommitted) renameSync(rollbackActiveTmp, activePath); } catch { /* best effort */ }
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+    try { unlinkSync(oldTmp); } catch { /* best effort */ }
+    try { unlinkSync(rollbackActiveTmp); } catch { /* best effort */ }
+    try { unlinkSync(rollbackOldTmp); } catch { /* best effort */ }
     return { ok: false, error: `Restore failed: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
@@ -882,6 +943,14 @@ export function resetToDefaults(): boolean {
   const defaultPath = join(dir, "transport.default.json");
   const activePath = join(dir, getEnv().transportConfig);
   const oldPath = activePath.replace(".json", ".old.json");
+  const tmp = activePath + ".tmp." + process.pid;
+  const oldTmp = oldPath + ".tmp." + process.pid;
+  const rollbackActiveTmp = activePath + ".rollback." + process.pid;
+  const rollbackOldTmp = oldPath + ".rollback." + process.pid;
+  let currentBytes: string | null = null;
+  let oldBackupExists = false;
+  let primaryCommitted = false;
+  let backupAttempted = false;
   try {
     // Validate defaults before swapping
     const defaultRaw = readFileSync(defaultPath, "utf-8");
@@ -891,21 +960,42 @@ export function resetToDefaults(): boolean {
       logWarn(TAG, `transport.default.json is invalid — keeping current config. Issues: ${vr.issues.map(i => i.message).join("; ")}`);
       return false;
     }
-    // Backup current via temp, then atomic swap (primary first, backup second)
-    const oldTmp = oldPath + ".tmp." + process.pid;
-    const tmp = activePath + ".tmp." + process.pid;
-    let haveBackup = false;
-    try { writeFileSync(oldTmp, readFileSync(activePath, "utf-8"), "utf-8"); haveBackup = true; } catch { /* no prior primary to back up */ }
+    // Snapshot both files before swapping. A backup read failure is a failed
+    // reset, not permission to overwrite the only usable configuration.
+    oldBackupExists = existsSync(oldPath);
+    if (oldBackupExists) writeFileSync(rollbackOldTmp, readFileSync(oldPath, "utf-8"), "utf-8");
+    if (existsSync(activePath)) {
+      currentBytes = readFileSync(activePath, "utf-8");
+      writeFileSync(oldTmp, currentBytes, "utf-8");
+      writeFileSync(rollbackActiveTmp, currentBytes, "utf-8");
+    }
     writeFileSync(tmp, defaultRaw, "utf-8");
-    // Commit primary first
     renameSync(tmp, activePath);
-    // Commit backup second (best-effort)
-    if (haveBackup) { try { renameSync(oldTmp, oldPath); } catch { /* best effort */ } }
+    primaryCommitted = true;
+    if (currentBytes !== null) {
+      backupAttempted = true;
+      renameSync(oldTmp, oldPath);
+    }
+    try { unlinkSync(rollbackActiveTmp); } catch { /* best effort */ }
+    try { unlinkSync(rollbackOldTmp); } catch { /* best effort */ }
     cachedTransport = null;
     cachedSource = null;
     logInfo(TAG, "transport.json reset to defaults (old saved as .old.json)");
     return true;
   } catch (err) {
+    if (backupAttempted) {
+      try {
+        if (oldBackupExists) renameSync(rollbackOldTmp, oldPath);
+        else if (existsSync(oldPath)) unlinkSync(oldPath);
+      } catch { /* best effort */ }
+    }
+    if (primaryCommitted && currentBytes !== null) {
+      try { renameSync(rollbackActiveTmp, activePath); } catch { /* best effort */ }
+    }
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+    try { unlinkSync(oldTmp); } catch { /* best effort */ }
+    try { unlinkSync(rollbackActiveTmp); } catch { /* best effort */ }
+    try { unlinkSync(rollbackOldTmp); } catch { /* best effort */ }
     logWarn(TAG, `No transport.default.json — keeping current config: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }

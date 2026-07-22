@@ -1,16 +1,29 @@
 {
-  "schemaVersion": 2,
-  "route": "acp",
-  "agents": {
-    "main":    { "model": "claude-sonnet-4.6",  "provider": "kiro" },
-    "dreamy":  { "model": "minimax-m2.5:cloud", "provider": "ollama" },
-    "browsie": { "model": "minimax-m2.5:cloud", "provider": "ollama" },
-    "cody":    { "model": "qwen3.5:cloud",      "provider": "ollama" }
+  "schemaVersion": 3,
+  "activeRoute": "pi-ai",
+  "routes": {
+    "pi-ai": {
+      "agents": {
+        "main":    { "model": "claude-sonnet-4.6",  "provider": "openrouter" },
+        "dreamy":  { "model": "minimax-m2.5:cloud", "provider": "openrouter" },
+        "browsie": { "model": "minimax-m2.5:cloud", "provider": "openrouter" },
+        "cody":    { "model": "qwen3.5:cloud",      "provider": "openrouter" }
+      },
+      "fallbacks": [
+        { "model": "kimi-k2.5:cloud", "provider": "openrouter" },
+        { "model": "gemini-2.5-flash", "provider": "openrouter" }
+      ]
+    },
+    "acp": {
+      "agents": {
+        "main":    { "model": "claude-sonnet-4.6",  "provider": "kiro" },
+        "dreamy":  { "model": "claude-sonnet-4.6",  "provider": "kiro" },
+        "browsie": { "model": "claude-sonnet-4.6",  "provider": "kiro" },
+        "cody":    { "model": "claude-sonnet-4.6",  "provider": "kiro" }
+      },
+      "fallbacks": []
+    }
   },
-  "fallbacks": [
-    { "model": "kimi-k2.5:cloud", "provider": "ollama" },
-    { "model": "gemini-2.5-flash", "provider": "openrouter" }
-  ],
   "providers": {
     "kiro":        { "transport": "acp", "cli": "kiro-cli" },
     "gemini":      { "transport": "acp", "cli": "gemini" },
@@ -19,7 +32,6 @@
     "nvidia":      { "transport": "api", "endpoint": "https://integrate.api.nvidia.com/v1", "apiKeyEnv": "NVIDIA_API_KEY" }
   },
   "transportDefaults": {
-    "tmux": { "session": "kiro-bridge", "captureDelaySec": 3, "maxWaitSec": 300 },
     "acp":  { "permissionTimeoutMs": 60000 }
   },
   "maxTurns": 50,

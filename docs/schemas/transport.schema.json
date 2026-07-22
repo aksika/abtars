@@ -1,19 +1,18 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "abtars transport.json",
+  "title": "abtars transport.json — v3",
   "type": "object",
-  "required": ["agents", "providers"],
+  "required": ["schemaVersion", "activeRoute", "routes", "providers"],
   "properties": {
-    "agents": {
+    "schemaVersion": { "const": 3 },
+    "activeRoute": { "type": "string", "enum": ["pi-ai", "acp"] },
+    "routes": {
       "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "required": ["provider"],
-        "properties": {
-          "provider": { "type": "string" },
-          "model": { "type": "string" }
-        }
-      }
+      "properties": {
+        "pi-ai": { "$ref": "#/definitions/RouteAssignments" },
+        "acp": { "$ref": "#/definitions/RouteAssignments" }
+      },
+      "additionalProperties": false
     },
     "providers": {
       "type": "object",
@@ -24,12 +23,56 @@
           "transport": { "type": "string", "enum": ["api", "acp"] },
           "endpoint": { "type": "string" },
           "apiKeyEnv": { "type": "string" },
-          "contextWindow": { "type": "number" },
-          "maxOutput": { "type": "number" },
-          "fallbackChain": { "type": "array", "items": { "type": "string" } }
+          "cli": { "type": "string" },
+          "apiFormat": { "type": "string", "enum": ["chat", "responses", "anthropic"] },
+          "thinking": { "type": "object" },
+          "defaults": { "type": "object" }
         }
       }
     },
-    "maxTurns": { "type": "number" }
+    "maxTurns": { "type": "number" },
+    "maxToolRounds": { "type": "number" },
+    "maxFallbackToolRounds": { "type": "number" },
+    "hailMary": {
+      "type": "object",
+      "required": ["route", "model", "provider"],
+      "properties": {
+        "route": { "const": "acp" },
+        "model": { "type": "string" },
+        "provider": { "type": "string" }
+      }
+    },
+    "healthPolicy": { "type": "object" },
+    "transportDefaults": { "type": "object" }
+  },
+  "definitions": {
+    "RouteAssignments": {
+      "type": "object",
+      "required": ["agents"],
+      "properties": {
+        "agents": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["model", "provider"],
+            "properties": {
+              "model": { "type": "string" },
+              "provider": { "type": "string" }
+            }
+          }
+        },
+        "fallbacks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["model", "provider"],
+            "properties": {
+              "model": { "type": "string" },
+              "provider": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
   }
 }

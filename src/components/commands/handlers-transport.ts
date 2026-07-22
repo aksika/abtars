@@ -72,7 +72,7 @@ export async function handleEmergencyAlias(_text: string, ctx: CommandContext): 
 }
 
 export async function handleModels(text: string, ctx: CommandContext): Promise<boolean> {
-  const { loadTransport, resolveAgent, getModelsForProvider } = await import("../transport-config.js");
+  const { loadTransport, resolveAgent, getModelsForProvider, routeAssignments } = await import("../transport-config.js");
   const tc = loadTransport();
   const prof = tc ? resolveAgent("main", tc) : null;
   const currentModel = ("currentModel" in ctx.transport
@@ -125,13 +125,16 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const endpoint = prof.provider.endpoint ?? "http://localhost:11434/v1";
     const apiKey = prof.provider.apiKeyEnv ? (await import("../env-schema.js")).getEnv().getApiKey(prof.provider.apiKeyEnv) : undefined;
 
-    // Collect all models under this provider
+    // Collect all models under this provider from the active route block + hailMary
     const models = new Set<string>();
-    for (const [, agent] of Object.entries(tc!.agents)) {
-      if (agent.provider === prof.providerName) models.add(agent.model);
-    }
-    for (const fb of tc!.fallbacks ?? []) {
-      if (fb.provider === prof.providerName) models.add(fb.model);
+    const ra = tc ? (await import("../transport-config.js")).routeAssignments(tc) : null;
+    if (ra) {
+      for (const [, agent] of Object.entries(ra.agents)) {
+        if (agent.provider === prof.providerName) models.add(agent.model);
+      }
+      for (const fb of ra.fallbacks ?? []) {
+        if (fb.provider === prof.providerName) models.add(fb.model);
+      }
     }
     if (tc!.hailMary?.provider === prof.providerName) models.add(tc!.hailMary.model);
 
@@ -200,7 +203,8 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
     // Build independent candidate — never mutate the cached object
     const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
-    candidate.agents["main"]!.model = newModel;
+    const activeRa = candidate.routes[candidate.activeRoute];
+    if (activeRa) activeRa.agents["main"]!.model = newModel;
     const { cleanDemotedModels, writeTransportConfig } = await import("../transport-config.js");
     cleanDemotedModels(candidate, newModel);
     const result = writeTransportConfig(candidate, `main model → ${newModel}`);
@@ -277,9 +281,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const defaults = loadProviderDefaults(providerName);
     if (defaults?.main) {
       const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
-      candidate.agents["main"] = { model: defaults.main.model, provider: providerName };
-      for (const role of ["dreamy", "browsie", "cody"] as const) {
-        candidate.agents[role] = { model: defaults[role]?.model ?? defaults.main.model, provider: providerName };
+      const activeRa = candidate.routes[candidate.activeRoute];
+      if (activeRa) {
+        activeRa.agents["main"] = { model: defaults.main.model, provider: providerName };
+        for (const role of ["dreamy", "browsie", "cody"] as const) {
+          activeRa.agents[role] = { model: defaults[role]?.model ?? defaults.main.model, provider: providerName };
+        }
       }
       const { writeTransportConfig } = await import("../transport-config.js");
       const result = writeTransportConfig(candidate, `global provider → ${providerName}`);
@@ -300,7 +307,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   // #1416: live snapshot from getRuntimeStatus() — shared formatter.
   const { resolveRuntimeStatus, formatRuntimeRoute } = await import("../transport/runtime-status.js");
   const liveStatus = resolveRuntimeStatus(ctx.transport as any, {
-    route: tc?.route,
+    route: tc?.activeRoute,
     provider: prof?.providerName,
     model: prof?.model,
   });
@@ -320,7 +327,8 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const r = tc ? resolveAgent(a, tc) : null;
     let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`;
     if (a === "main") {
-      const fbLines = (tc?.fallbacks ?? []).map((f, i) => {
+      const ra = tc ? routeAssignments(tc) : null;
+      const fbLines = (ra?.fallbacks ?? []).map((f, i) => {
         if ((f as any).demoted) return null;
         return `    ↳ fb${i + 1}: ${f.model} (${f.provider})`;
       }).filter(Boolean).join("\n");
@@ -328,8 +336,9 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     }
     lines.push(line);
   }
-  if (tc?.fallbacks?.length) {
-    lines.push(`\nFallback chain: ${tc.fallbacks.map(f => f.model).join(" → ")}`);
+  const ra = tc ? routeAssignments(tc) : null;
+  if (ra?.fallbacks?.length) {
+    lines.push(`\nFallback chain: ${ra.fallbacks.map(f => f.model).join(" → ")}`);
   }
   // #1386: Show effective candidate order from the transport's policy
   const transport = ctx.transport as unknown as { policy?: { candidates: Array<{ model: string; endpoint: string; source: string }> } };
@@ -383,7 +392,7 @@ export async function handleContinue(_text: string, ctx: CommandContext): Promis
 // ── /route handler (#1418) ───────────────────────────────────────────────────
 
 export async function handleRoute(args: string, ctx: CommandContext): Promise<boolean> {
-  const { loadTransport, writeTransportConfig, providersForRoute, allAssignmentsMatchRoute, providerSupportsRoute } = await import("../transport-config.js");
+  const { loadTransport, writeTransportConfig, providersForRoute, allAssignmentsMatchRoute, providerSupportsRoute, routeAssignments } = await import("../transport-config.js");
   const tc = loadTransport();
   if (!tc) { await ctx.reply("❌ transport.json not loaded"); return true; }
 
@@ -392,9 +401,9 @@ export async function handleRoute(args: string, ctx: CommandContext): Promise<bo
   if (!arg) {
     const routeLabels: Record<string, string> = { "pi-ai": "pi-ai API", acp: "ACP" };
     await ctx.reply(
-      `Current route: **${routeLabels[tc.route] ?? tc.route}**\n\n` +
+      `Current route: **${routeLabels[tc.activeRoute] ?? tc.activeRoute}**\n\n` +
       `Choose a route:\n${["pi-ai", "acp"].map(r => `• \`/route ${r}\` — ${routeLabels[r]}`).join("\n")}\n\n` +
-      `_Provider filter: ${providersForRoute(tc, tc.route).length} compatible providers_`
+      `_Provider filter: ${providersForRoute(tc, tc.activeRoute).length} compatible providers_`
     );
     return true;
   }
@@ -407,14 +416,20 @@ export async function handleRoute(args: string, ctx: CommandContext): Promise<bo
 
   const newRoute = arg as "pi-ai" | "acp";
 
-  if (newRoute === tc.route) {
+  if (newRoute === tc.activeRoute) {
     await ctx.reply(`✓ Already on ${newRoute} route.`);
+    return true;
+  }
+
+  // Check that the target route block exists
+  if (!routeAssignments(tc, newRoute)) {
+    await ctx.reply(`❌ Route "${newRoute}" is not configured. Use /model change to set up "${newRoute}" assignments first.`);
     return true;
   }
 
   if (allAssignmentsMatchRoute(tc, newRoute)) {
     const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
-    candidate.route = newRoute;
+    candidate.activeRoute = newRoute;
     const result = writeTransportConfig(candidate, `route → ${newRoute}`);
     if (!result.ok) {
       await ctx.reply(`❌ Cannot switch to ${newRoute}: ${result.issues.map(i => i.reason).join("; ")}`);
@@ -422,15 +437,18 @@ export async function handleRoute(args: string, ctx: CommandContext): Promise<bo
     }
     await ctx.reply(`✓ Route switched to ${newRoute}. Use /reset to apply.`);
   } else {
+    const ra = routeAssignments(tc, newRoute);
     const incompatible: string[] = [];
-    for (const [role, a] of Object.entries(tc.agents)) {
-      const p = tc.providers[a.provider];
-      if (!p || !providerSupportsRoute(p, newRoute)) incompatible.push(role);
-    }
-    for (let i = 0; i < (tc.fallbacks ?? []).length; i++) {
-      const fb = tc.fallbacks![i]!;
-      const p = tc.providers[fb.provider];
-      if (!p || !providerSupportsRoute(p, newRoute)) incompatible.push(`fallback[${i}]`);
+    if (ra) {
+      for (const [role, a] of Object.entries(ra.agents)) {
+        const p = tc.providers[a.provider];
+        if (!p || !providerSupportsRoute(p, newRoute)) incompatible.push(role);
+      }
+      for (let i = 0; i < (ra.fallbacks ?? []).length; i++) {
+        const fb = ra.fallbacks![i]!;
+        const p = tc.providers[fb.provider];
+        if (!p || !providerSupportsRoute(p, newRoute)) incompatible.push(`fallback[${i}]`);
+      }
     }
     await ctx.reply(
       `❌ Cannot switch to ${newRoute}: incompatible assignments found.\n` +

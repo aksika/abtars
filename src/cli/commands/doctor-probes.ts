@@ -188,7 +188,16 @@ async function probeTransport(): Promise<ProbeResult> {
   const tPath = join(home, "config", "transport.json");
   const t = readJson(tPath) as Record<string, unknown> | null;
   if (!t) return { name: "transport", status: "failed", evidence: "filesystem", detail: "transport.json missing", ms: 0 };
-  const agents = Object.keys((t.agents as Record<string, unknown>) ?? {});
+  // v3: agents live in the active route block
+  const activeRoute = t.activeRoute as string | undefined;
+  const routes = t.routes as Record<string, unknown> | undefined;
+  let agents: string[] = [];
+  if (activeRoute && routes) {
+    const routeBlock = routes[activeRoute] as Record<string, unknown> | undefined;
+    if (routeBlock) {
+      agents = Object.keys((routeBlock.agents as Record<string, unknown>) ?? {});
+    }
+  }
   if (agents.length === 0) return { name: "transport", status: "failed", evidence: "configuration", detail: "no agents configured", ms: 0 };
   return { name: "transport", status: "ok", evidence: "configuration", detail: `${agents.length} agent(s): ${agents.join(", ")}`, ms: 0 };
 }

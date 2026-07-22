@@ -613,7 +613,9 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       tc = JSON.parse(await readFile(transportPath, 'utf-8'));
     } catch (err) { logAndSwallow("onboard", "op", err); }
 
-    // Seed providers and agents if not already present
+    // Seed providers and route-local agents if not already present (v3 schema)
+    tc["schemaVersion"] = 3;
+    tc["activeRoute"] = "pi-ai";
     if (!tc["providers"]) {
       tc["providers"] = {
         "kiro": { "transport": "acp", "cli": "kiro-cli" },
@@ -621,18 +623,23 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
         "openrouter": { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" },
       };
     }
-    if (!tc["agents"]) {
+    if (!tc["routes"]) {
       const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
-      tc["agents"] = {
-        "professor": { "model": answers.defaultModel, "provider": provName },
-        "dreamy": { "model": answers.defaultModel, "provider": provName },
-        "browsie": { "model": answers.defaultModel, "provider": provName },
-        "coding": { "model": answers.defaultModel, "provider": provName },
+      tc["routes"] = {
+        "pi-ai": {
+          "agents": {
+            "main": { "model": answers.defaultModel, "provider": provName },
+            "dreamy": { "model": answers.defaultModel, "provider": provName },
+            "browsie": { "model": answers.defaultModel, "provider": provName },
+            "cody": { "model": answers.defaultModel, "provider": provName },
+          },
+          "fallbacks": [],
+        },
       };
     }
     if (answers.hailMaryModel) {
       const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
-      tc["hailMary"] = { model: answers.hailMaryModel, provider: provName };
+      tc["hailMary"] = { route: "acp", model: answers.hailMaryModel, provider: provName };
     }
 
     await writeFile(transportPath, JSON.stringify(tc, null, 2) + '\n', { mode: 0o600 });
