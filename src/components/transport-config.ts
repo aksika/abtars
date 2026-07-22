@@ -1,16 +1,15 @@
-import { logAndSwallow } from "./log-and-swallow.js";
-import { getEnv } from "./env-schema.js";
-import { validateShape, TRANSPORT_SCHEMA } from "./config-validator.js";
 /**
  * transport-config.ts — Load and validate transport.json + models.json.
- * Falls back to .env defaults if JSON is broken.
+ * #1466: Read-only loading, pure validation, explicit atomic persistence.
+ * Never writes or repairs during loading.
  */
 
-import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 import { readEnvWithDefault } from "./env.js";
-import { logInfo, logWarn, logError } from "./logger.js";
+import { getEnv } from "./env-schema.js";
+import { logDebug, logInfo, logWarn } from "./logger.js";
 import { resolveModelMeta, mapProviderName } from "./transport/pi-catalog.js";
 
 const TAG = "transport-config";
@@ -91,9 +90,117 @@ export type ResolvedAgent = {
   fallbacks: Array<{ model: string; provider: string }>;
 };
 
+// ── #1466: Pure validation types ─────────────────────────────────────────────
+
+export type TransportConfigIssueCode =
+  | "unsupported_schema"
+  | "missing_field"
+  | "invalid_route"
+  | "missing_provider"
+  | "model_provider_incompatible"
+  | "provider_route_incompatible"
+  | "acp_provider_mismatch";
+
+export interface TransportConfigIssue {
+  code: TransportConfigIssueCode;
+  path: string;
+  message: string;
+}
+
+export type TransportValidationResult =
+  | { ok: true; config: TransportConfig }
+  | { ok: false; issues: readonly TransportConfigIssue[] };
+
+export type TransportConfigSource = "primary" | "backup" | "default";
+
+export type TransportLoadResult =
+  | { ok: true; config: TransportConfig; source: TransportConfigSource }
+  | { ok: false; issues: readonly TransportConfigIssue[]; state: "missing" | "invalid"; source?: TransportConfigSource };
+
+/**
+ * Pure validator — never mutates input, never writes to disk.
+ * Returns structured issues for every invariant violation.
+ */
+export function validateTransportConfig(input: unknown): TransportValidationResult {
+  const issues: TransportConfigIssue[] = [];
+  const tc = input as Record<string, unknown>;
+
+  // schemaVersion required, must be 2
+  if (tc.schemaVersion == null) {
+    issues.push({ code: "missing_field", path: "schemaVersion", message: "schemaVersion is required" });
+  } else if (tc.schemaVersion !== 2) {
+    issues.push({ code: "unsupported_schema", path: "schemaVersion", message: `Unsupported schema version ${tc.schemaVersion} — only version 2 is supported` });
+  }
+
+  // route required, must be a valid ExecutionRoute
+  if (tc.route == null) {
+    issues.push({ code: "missing_field", path: "route", message: "route is required" });
+  } else if (tc.route !== "pi-ai" && tc.route !== "acp") {
+    issues.push({ code: "invalid_route", path: "route", message: `Invalid route "${String(tc.route)}" — must be "pi-ai" or "acp"` });
+  }
+
+  // agents required
+  if (tc.agents == null || typeof tc.agents !== "object") {
+    issues.push({ code: "missing_field", path: "agents", message: "agents is required" });
+  }
+
+  // providers required
+  if (tc.providers == null || typeof tc.providers !== "object") {
+    issues.push({ code: "missing_field", path: "providers", message: "providers is required" });
+  }
+
+  if (issues.length > 0) return { ok: false, issues };
+
+  const config = input as TransportConfig;
+  const route = config.route;
+  const providers = config.providers;
+
+  // Validate every agent references an existing provider
+  for (const [role, assignment] of Object.entries(config.agents)) {
+    const p = providers[assignment.provider];
+    if (!p) {
+      issues.push({ code: "missing_provider", path: `agents.${role}.provider`, message: `Agent "${role}" references unknown provider "${assignment.provider}"` });
+      continue;
+    }
+    // Validate provider supports the route
+    if (!providerSupportsRoute(p, route)) {
+      issues.push({ code: "provider_route_incompatible", path: `agents.${role}`, message: `Agent "${role}" provider "${assignment.provider}" does not support route "${route}"` });
+    }
+  }
+
+  // Validate fallbacks reference existing providers and support the route
+  for (let i = 0; i < (config.fallbacks ?? []).length; i++) {
+    const fb = config.fallbacks![i]!;
+    const p = providers[fb.provider];
+    if (!p) {
+      issues.push({ code: "missing_provider", path: `fallbacks[${i}].provider`, message: `Fallback[${i}] references unknown provider "${fb.provider}"` });
+    } else if (!providerSupportsRoute(p, route)) {
+      issues.push({ code: "provider_route_incompatible", path: `fallbacks[${i}]`, message: `Fallback[${i}] provider "${fb.provider}" does not support route "${route}"` });
+    }
+  }
+
+  // ACP same-provider rule
+  if (route === "acp") {
+    const entries = Object.values(config.agents);
+    if (entries.length > 0) {
+      const first = entries[0]!.provider;
+      for (let i = 1; i < entries.length; i++) {
+        if (entries[i]!.provider !== first) {
+          issues.push({ code: "acp_provider_mismatch", path: `agents.${Object.keys(config.agents)[i]}`, message: `ACP requires all agents use the same provider ("${first}")` });
+        }
+      }
+    }
+  }
+
+  if (issues.length > 0) return { ok: false, issues };
+
+  return { ok: true, config };
+}
+
 // ── Loaders ─────────────────────────────────────────────────────────────────
 
 let cachedTransport: TransportConfig | null = null;
+let cachedSource: TransportConfigSource | null = null;
 
 export function configDir(): string {
   return join(abtarsHome(), "config");
@@ -123,50 +230,102 @@ export function computeCostDisplay(cost: ModelCost): { inputPer1M: string; outpu
   return { inputPer1M: fmt(cost.input), outputPer1M: fmt(cost.output) };
 }
 
-export function loadTransport(): TransportConfig | null {
-  if (cachedTransport) return cachedTransport;
+/**
+ * Load transport config with structured result.
+ * Never writes to disk, never mutates input, never auto-repairs.
+ */
+export function loadTransportStructured(): TransportLoadResult {
+  if (cachedTransport && cachedSource) {
+    const vr = validateTransportConfig(cachedTransport);
+    if (!vr.ok) {
+      cachedTransport = null;
+      cachedSource = null;
+      return { ok: false, issues: vr.issues, state: "invalid" };
+    }
+    return { ok: true, config: vr.config, source: cachedSource };
+  }
+
   const dir = configDir();
   const p = join(dir, getEnv().transportConfig);
-  try {
-    const raw = JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>;
-    // #1418: one-way migration v1 → v2
-    const migrated = migrateTransportConfig(raw);
-    if (migrated.error) {
-      logError(TAG, `Config migration failed: ${migrated.error}`);
-      return null;
+
+  // Try primary
+  let primaryResult = tryLoadFile(p);
+  if (primaryResult) {
+    const vr = validateTransportConfig(primaryResult);
+    if (vr.ok) {
+      cachedTransport = vr.config;
+      cachedSource = "primary";
+      return { ok: true, config: vr.config, source: "primary" };
     }
-    const config = migrated.config!;
-    // Validate before persisting migration
-    validateShape(config, TRANSPORT_SCHEMA, "transport.json");
-    const repairs = validateAndRepair(config);
-    cachedTransport = config;
-    if (raw.schemaVersion !== 2) {
-      const oldPath = p.replace(".json", ".old.json");
-      try { writeFileSync(oldPath, JSON.stringify(raw, null, 2), "utf-8"); } catch { /* best effort */ }
-      writeFileSync(p, JSON.stringify(config, null, 2), "utf-8");
-      logInfo(TAG, "Migrated transport config v1 → v2");
-    }
-    logInfo(TAG, `Loaded transport config v${config.schemaVersion ?? 2} (route: ${config.route}, ${Object.keys(config.agents).length} agents, ${Object.keys(config.providers).length} providers)`);
-    if (repairs.length > 0) {
-      for (const r of repairs) logWarn(TAG, `Auto-repaired: ${r.agent} was on ${r.oldProvider} — ${r.reason}`);
-      writeTransportConfig(config, `invariant auto-repair (${repairs.length} agents)`);
-      pendingRepairs = repairs;
-    }
-    return config;
-  } catch (err) {
-    logAndSwallow(TAG, "loadTransport parse", err);
-    // Fallback to transport.default.json
-    try {
-      const defaultRaw = JSON.parse(readFileSync(join(dir, "transport.default.json"), "utf-8")) as Record<string, unknown>;
-      const defaultMigrated = migrateTransportConfig(defaultRaw);
-      cachedTransport = defaultMigrated.config ?? (defaultRaw as unknown as TransportConfig);
-      logWarn(TAG, `transport.json missing/corrupt — loaded transport.default.json`);
-      return cachedTransport;
-    } catch (err) {
-      logError(TAG, `No transport config available: ${err instanceof Error ? err.message : String(err)}`);
-      return null;
+    // Primary exists but is invalid — don't fall through to backup/emergency
+    cachedTransport = null;
+    cachedSource = null;
+    return { ok: false, issues: vr.issues, state: "invalid", source: "primary" };
+  }
+
+  // Try backup
+  const oldPath = p.replace(".json", ".old.json");
+  const backupResult = tryLoadFile(oldPath);
+  if (backupResult) {
+    const vr = validateTransportConfig(backupResult);
+    if (vr.ok) {
+      cachedTransport = vr.config;
+      cachedSource = "backup";
+      logWarn(TAG, `transport.json missing — using transport.old.json as in-memory source`);
+      return { ok: true, config: vr.config, source: "backup" };
     }
   }
+
+  // Try default template
+  const defaultPath = join(dir, "transport.default.json");
+  const defaultResult = tryLoadFile(defaultPath);
+  if (defaultResult) {
+    const vr = validateTransportConfig(defaultResult);
+    if (vr.ok) {
+      cachedTransport = vr.config;
+      cachedSource = "default";
+      logWarn(TAG, `transport.json missing — using transport.default.json as in-memory source`);
+      return { ok: true, config: vr.config, source: "default" };
+    }
+  }
+
+  return { ok: false, issues: [], state: "missing" };
+}
+
+/** Try to load and parse a JSON file, returning the raw object or null. Never writes. */
+function tryLoadFile(filePath: string): Record<string, unknown> | null {
+  try {
+    const raw = JSON.parse(readFileSync(filePath, "utf-8")) as Record<string, unknown>;
+    const migrated = migrateTransportConfig(raw);
+    if (migrated.error) {
+      logWarn(TAG, `${filePath}: migration failed — ${migrated.error}`);
+      return null;
+    }
+    return migrated.config as unknown as Record<string, unknown>;
+  } catch (err) {
+    logDebug(TAG, `Failed to load ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/**
+ * Backward-compatible loadTransport for existing callers.
+ * Returns null when no valid config is available.
+ * Never writes, never mutates, never auto-repairs.
+ */
+export function loadTransport(): TransportConfig | null {
+  const result = loadTransportStructured();
+  if (result.ok) {
+    logInfo(TAG, `Loaded transport config v${result.config.schemaVersion ?? 2} (route: ${result.config.route}, source: ${result.source})`);
+    return result.config;
+  }
+  return null;
+}
+
+/** Clear in-memory cache only (no disk writes). */
+export function clearTransportCache(): void {
+  cachedTransport = null;
+  cachedSource = null;
 }
 
 /** Resolve hailMary from transport.json. Returns null if not configured. */
@@ -178,73 +337,8 @@ export function resolveHailMary(transport?: TransportConfig | null): { model: st
   return { model: tc.hailMary.model, endpoint: provider.endpoint, apiKeyEnv: provider.apiKeyEnv };
 }
 
-/** Force re-read on next call (for tests). */
-export function clearTransportCache(): void {
-  cachedTransport = null;
-}
-
 // ── Invariant validation ────────────────────────────────────────────────────
-
-export type RepairEntry = { agent: string; oldProvider: string; reason: string };
-
-/** Stashed repairs from last loadTransport() — consumed by model-health task. */
-let pendingRepairs: RepairEntry[] = [];
-export function consumeRepairs(): RepairEntry[] {
-  const r = pendingRepairs;
-  pendingRepairs = [];
-  return r;
-}
-
-/**
- * Validate transport invariant: all agents must share professor's transport type.
- * For acp/tmux, provider name must also match (single child process).
- * Violations are auto-repaired (subagent reset to professor's assignment).
- */
-export function validateAndRepair(tc: TransportConfig): RepairEntry[] {
-  const mainAssignment = tc.agents["main"];
-  if (!mainAssignment) return [];
-  const mainProvider = tc.providers[mainAssignment.provider];
-  if (!mainProvider) return [];
-
-  const mainType = mainProvider.transport;
-  const repairs: RepairEntry[] = [];
-
-  for (const [agent, assignment] of Object.entries(tc.agents)) {
-    if (agent === "main") continue;
-    const provider = tc.providers[assignment.provider];
-    if (!provider) continue;
-
-    const agentType = provider.transport;
-    let violation = false;
-
-    if (agentType !== mainType) {
-      violation = true;
-    } else if (mainType !== "api" && assignment.provider !== mainAssignment.provider) {
-      violation = true;
-    }
-
-    if (violation) {
-      repairs.push({ agent, oldProvider: assignment.provider, reason: `${provider.transport} incompatible with main (${mainType}/${mainAssignment.provider})` });
-      tc.agents[agent] = { model: mainAssignment.model, provider: mainAssignment.provider };
-    }
-  }
-
-  // Validate top-level fallbacks — must match route
-  if (tc.fallbacks) {
-    const route = tc.route;
-    for (let i = tc.fallbacks.length - 1; i >= 0; i--) {
-      const fb = tc.fallbacks[i]!;
-      const fbProvider = tc.providers[fb.provider];
-      if (!fbProvider) continue;
-      if (!providerSupportsRoute(fbProvider, route)) {
-        repairs.push({ agent: `fallback[${i}]`, oldProvider: fb.provider, reason: `fallback incompatible with route ${route}` });
-        tc.fallbacks.splice(i, 1);
-      }
-    }
-  }
-
-  return repairs;
-}
+// #1466: replaced by pure validateTransportConfig() — no mutation, no repair.
 
 // ── Resolution ──────────────────────────────────────────────────────────────
 
@@ -611,34 +705,64 @@ export type TransportWriteResult =
   | { ok: true }
   | { ok: false; issues: AssignmentIssue[] };
 
-export function writeTransportConfig(tc: TransportConfig, reason?: string): TransportWriteResult {
-  // #1415: reject known-incompatible model/provider pairs before persisting
-  const issues = validateTransportAssignments(tc);
-  if (issues.length > 0) {
+export function writeTransportConfig(candidate: TransportConfig, reason?: string): TransportWriteResult {
+  // Validate the complete candidate — use a detached deep copy so input mutation
+  // doesn't leak into validation, and failed writes leave the cache unchanged.
+  const candidateCopy = JSON.parse(JSON.stringify(candidate)) as TransportConfig;
+  const vr = validateTransportConfig(candidateCopy);
+  if (!vr.ok) {
+    const issues: AssignmentIssue[] = vr.issues.map(i => ({ location: i.path, model: "", provider: "", reason: i.message }));
     for (const iss of issues) logWarn(TAG, `Refusing to write — ${iss.reason}`);
     return { ok: false, issues };
   }
+  // #1415: reject known-incompatible model/provider pairs before persisting
+  const compatIssues = validateTransportAssignments(vr.config);
+  if (compatIssues.length > 0) {
+    for (const iss of compatIssues) logWarn(TAG, `Refusing to write — ${iss.reason}`);
+    return { ok: false, issues: compatIssues };
+  }
   // Guard: reject empty model strings before persisting
-  for (const [role, agent] of Object.entries(tc.agents)) {
+  for (const [role, agent] of Object.entries(vr.config.agents)) {
     if (!agent.model?.trim()) {
       logWarn(TAG, `Refusing to write transport.json — agent "${role}" has empty model`);
       return { ok: false, issues: [{ location: role, model: agent.model ?? "", provider: agent.provider, reason: `empty model string` }] };
     }
   }
+
   const p = join(configDir(), getEnv().transportConfig);
-  // Ensure output has schemaVersion and route without mutating the input
-  const output = { ...tc, schemaVersion: 2, route: tc.route || ("pi-ai" as ExecutionRoute) };
-  // Save current as .old before overwriting (enables /model restore)
-  // Only overwrite .old if it's >15min old — preserves last-known-good during rapid changes
   const oldPath = p.replace(".json", ".old.json");
+
+  // Read current primary bytes for backup (before any mutation)
+  let currentBytes: string | null = null;
+  try { currentBytes = readFileSync(p, "utf-8"); } catch { /* no existing primary */ }
+
+  // Serialize candidate deterministically (use validated config, not raw input)
+  const content = JSON.stringify(vr.config, null, 2);
+
+  // Write to a same-directory temporary file first
+  const tmp = p + ".tmp." + process.pid;
   try {
-    const oldAge = Date.now() - statSync(oldPath).mtimeMs;
-    if (oldAge > 15 * 60_000) writeFileSync(oldPath, readFileSync(p, "utf-8"), "utf-8");
-  } catch { try { writeFileSync(oldPath, readFileSync(p, "utf-8"), "utf-8"); } catch (err) { logAndSwallow(TAG, "backup transport.old.json", err); } }
-  writeFileSync(p, JSON.stringify(output, null, 2), "utf-8");
-  cachedTransport = output;
-  logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
-  return { ok: true };
+    writeFileSync(tmp, content, "utf-8");
+
+    // Preserve prior primary as .old.json using bytes captured before write
+    if (currentBytes !== null) {
+      writeFileSync(oldPath, currentBytes, "utf-8");
+    }
+
+    // Atomically rename tmp over primary
+    renameSync(tmp, p);
+
+    // Update cache only after persistence succeeds
+    cachedTransport = vr.config;
+    cachedSource = "primary";
+    logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
+    return { ok: true };
+  } catch (err) {
+    // Clean up tmp file on failure — best effort, never changes primary/backup
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+    logWarn(TAG, `Failed to write transport.json: ${err instanceof Error ? err.message : String(err)}`);
+    return { ok: false, issues: [{ location: "write", model: "", provider: "", reason: `Write failed: ${err instanceof Error ? err.message : String(err)}` }] };
+  }
 }
 
 /** Remove demoted models from config. Called on user-initiated model switch.
@@ -658,23 +782,25 @@ export function cleanDemotedModels(tc: TransportConfig, chosenModel?: string): v
 export function demoteModel(model: string, reason: "auth" | "timeout"): void {
   const tc = loadTransport();
   if (!tc) return;
+  // Work on a detached candidate — never mutate the cached object
+  const candidate = JSON.parse(JSON.stringify(tc)) as TransportConfig;
   // Guard: don't demote if it's the last non-demoted model for any role
-  for (const agent of Object.values(tc.agents)) {
-    const all = [agent, ...(tc.fallbacks ?? [])];
+  for (const agent of Object.values(candidate.agents)) {
+    const all = [agent, ...(candidate.fallbacks ?? [])];
     const healthy = all.filter((m: any) => !m.demoted);
     if (healthy.length <= 1 && healthy.some((m: any) => m.model === model)) return;
   }
   let found = false;
-  for (const agent of Object.values(tc.agents)) {
+  for (const agent of Object.values(candidate.agents)) {
     if (agent.model === model) { (agent as any).demoted = new Date().toISOString(); (agent as any).demotedReason = reason; (agent as any).demotedModel = model; found = true; }
   }
-  for (const fb of tc.fallbacks ?? []) {
+  for (const fb of candidate.fallbacks ?? []) {
     if (fb.model === model) { (fb as any).demoted = new Date().toISOString(); (fb as any).demotedReason = reason; (fb as any).demotedModel = model; found = true; }
   }
-  if (found) writeTransportConfig(tc, `auto-demote ${model} (${reason})`);
+  if (found) writeTransportConfig(candidate, `auto-demote ${model} (${reason})`);
 }
 
-/** Swap transport.json ↔ transport.json.old (undo last switch). */
+/** Swap transport.json ↔ transport.json.old (undo last write). */
 export function restorePrevious(): { ok: boolean; error?: string } {
   const dir = configDir();
   const activePath = join(dir, getEnv().transportConfig);
@@ -683,9 +809,19 @@ export function restorePrevious(): { ok: boolean; error?: string } {
   try {
     const current = readFileSync(activePath, "utf-8");
     const old = readFileSync(oldPath, "utf-8");
-    writeFileSync(activePath, old, "utf-8");
+    // Validate the backup before swapping
+    const oldParsed = JSON.parse(old) as Record<string, unknown>;
+    const vr = validateTransportConfig(oldParsed);
+    if (!vr.ok) {
+      return { ok: false, error: `Backup config is invalid — cannot restore. Issues: ${vr.issues.map(i => i.message).join("; ")}` };
+    }
+    // Atomic swap via temp file
+    const tmp = activePath + ".tmp." + process.pid;
+    writeFileSync(tmp, old, "utf-8");
     writeFileSync(oldPath, current, "utf-8");
+    renameSync(tmp, activePath);
     cachedTransport = null;
+    cachedSource = null;
     logInfo(TAG, "transport.json swapped with .old (restore)");
     return { ok: true };
   } catch (err) {
@@ -693,17 +829,28 @@ export function restorePrevious(): { ok: boolean; error?: string } {
   }
 }
 
-/** Copy transport.default.json → transport.json, clear cache. Returns true if successful. */
+/** Copy transport.default.json → transport.json atomically, backup current first. */
 export function resetToDefaults(): boolean {
   const dir = configDir();
   const defaultPath = join(dir, "transport.default.json");
   const activePath = join(dir, getEnv().transportConfig);
+  const oldPath = activePath.replace(".json", ".old.json");
   try {
-    // Backup current before overwriting
-    try { writeFileSync(activePath.replace(".json", ".old.json"), readFileSync(activePath, "utf-8"), "utf-8"); } catch (err) { logAndSwallow("transport_config", "op", err); }
-    const defaults = readFileSync(defaultPath, "utf-8");
-    writeFileSync(activePath, defaults, "utf-8");
+    // Validate defaults before swapping
+    const defaultRaw = readFileSync(defaultPath, "utf-8");
+    const defaultParsed = JSON.parse(defaultRaw) as Record<string, unknown>;
+    const vr = validateTransportConfig(defaultParsed);
+    if (!vr.ok) {
+      logWarn(TAG, `transport.default.json is invalid — keeping current config. Issues: ${vr.issues.map(i => i.message).join("; ")}`);
+      return false;
+    }
+    // Backup current, then atomic swap
+    try { writeFileSync(oldPath, readFileSync(activePath, "utf-8"), "utf-8"); } catch { /* best effort */ }
+    const tmp = activePath + ".tmp." + process.pid;
+    writeFileSync(tmp, defaultRaw, "utf-8");
+    renameSync(tmp, activePath);
     cachedTransport = null;
+    cachedSource = null;
     logInfo(TAG, "transport.json reset to defaults (old saved as .old.json)");
     return true;
   } catch (err) {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { resolveAgent, getEnvFallback, clearTransportCache, validateAndRepair } from "./transport-config.js";
+import { resolveAgent, getEnvFallback, clearTransportCache, validateTransportConfig } from "./transport-config.js";
 import type { TransportConfig, ModelCatalog } from "./transport-config.js";
 
 const MODELS: ModelCatalog = {
@@ -74,7 +74,7 @@ describe("getEnvFallback", () => {
   });
 });
 
-describe("validateAndRepair", () => {
+describe("validateTransportConfig — pure validator (#1466)", () => {
   const providers = {
     ollama: { transport: "api" as const, endpoint: "http://localhost:11434/v1" },
     openrouter: { transport: "api" as const, endpoint: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY" },
@@ -82,8 +82,8 @@ describe("validateAndRepair", () => {
     gemini: { transport: "acp" as const, cli: "gemini-cli" },
   };
 
-  it("accepts all-api mixed providers", () => {
-    const tc = {
+  it("accepts valid pi-ai config", () => {
+    const result = validateTransportConfig({
       schemaVersion: 2,
       route: "pi-ai",
       agents: {
@@ -91,12 +91,16 @@ describe("validateAndRepair", () => {
         dreamy: { model: "m2", provider: "openrouter" },
       },
       providers,
-    };
-    expect(validateAndRepair(tc)).toEqual([]);
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.config.route).toBe("pi-ai");
+      expect(result.config.agents["main"]!.provider).toBe("ollama");
+    }
   });
 
-  it("accepts acp agents matching main's provider", () => {
-    const tc = {
+  it("accepts valid acp config with matching providers", () => {
+    const result = validateTransportConfig({
       schemaVersion: 2,
       route: "acp",
       agents: {
@@ -104,12 +108,12 @@ describe("validateAndRepair", () => {
         dreamy: { model: "m2", provider: "kiro" },
       },
       providers,
-    };
-    expect(validateAndRepair(tc)).toEqual([]);
+    });
+    expect(result.ok).toBe(true);
   });
 
-  it("repairs cross-transport violation (subagent api, main acp)", () => {
-    const tc = {
+  it("reports cross-transport violation (subagent api, main acp)", () => {
+    const result = validateTransportConfig({
       schemaVersion: 2,
       route: "acp",
       agents: {
@@ -117,16 +121,16 @@ describe("validateAndRepair", () => {
         dreamy: { model: "m2", provider: "ollama" },
       },
       providers,
-    };
-    const repairs = validateAndRepair(tc);
-    expect(repairs).toHaveLength(1);
-    expect(repairs[0]!.agent).toBe("dreamy");
-    expect(tc.agents["dreamy"]!.provider).toBe("kiro");
-    expect(tc.agents["dreamy"]!.model).toBe("m1");
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some(i => i.path.includes("dreamy"))).toBe(true);
+      expect(result.issues.some(i => i.code === "provider_route_incompatible")).toBe(true);
+    }
   });
 
-  it("repairs acp provider mismatch (single child process)", () => {
-    const tc = {
+  it("reports acp provider mismatch (multiple providers for acp route)", () => {
+    const result = validateTransportConfig({
       schemaVersion: 2,
       route: "acp",
       agents: {
@@ -134,15 +138,15 @@ describe("validateAndRepair", () => {
         dreamy: { model: "m2", provider: "gemini" },
       },
       providers,
-    };
-    const repairs = validateAndRepair(tc);
-    expect(repairs).toHaveLength(1);
-    expect(repairs[0]!.agent).toBe("dreamy");
-    expect(tc.agents["dreamy"]!.provider).toBe("kiro");
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some(i => i.code === "acp_provider_mismatch")).toBe(true);
+    }
   });
 
-  it("removes fallbacks with incompatible transport", () => {
-    const tc = {
+  it("reports fallbacks with incompatible route", () => {
+    const result = validateTransportConfig({
       schemaVersion: 2,
       route: "acp",
       agents: {
@@ -153,12 +157,76 @@ describe("validateAndRepair", () => {
         { model: "m2", provider: "ollama" },
         { model: "m3", provider: "kiro" },
       ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some(i => i.path === "fallbacks[0]")).toBe(true);
+      expect(result.issues.some(i => i.path === "fallbacks[0]" && i.code === "provider_route_incompatible")).toBe(true);
+    }
+  });
+
+  it("does not mutate input", () => {
+    const input = {
+      schemaVersion: 2,
+      route: "pi-ai",
+      agents: { main: { model: "m1", provider: "ollama" } },
+      providers,
     };
-    const repairs = validateAndRepair(tc);
-    expect(repairs).toHaveLength(1);
-    expect(repairs[0]!.agent).toBe("fallback[0]");
-    expect(tc.fallbacks).toHaveLength(1);
-    expect(tc.fallbacks![0]!.model).toBe("m3");
+    const before = JSON.stringify(input);
+    validateTransportConfig(input);
+    // Input serialization must be unchanged after validation
+    expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it("rejects missing route", () => {
+    const result = validateTransportConfig({
+      schemaVersion: 2,
+      agents: { main: { model: "m1", provider: "ollama" } },
+      providers,
+    } as any);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some(i => i.code === "missing_field" && i.path === "route")).toBe(true);
+    }
+  });
+
+  it("rejects unsupported schema version", () => {
+    const result = validateTransportConfig({
+      schemaVersion: 1,
+      route: "pi-ai",
+      agents: { main: { model: "m1", provider: "ollama" } },
+      providers,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some(i => i.code === "unsupported_schema")).toBe(true);
+    }
+  });
+
+  it("rejects invalid route value", () => {
+    const result = validateTransportConfig({
+      schemaVersion: 2,
+      route: "invalid-route",
+      agents: { main: { model: "m1", provider: "ollama" } },
+      providers,
+    } as any);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some(i => i.code === "invalid_route")).toBe(true);
+    }
+  });
+
+  it("reports missing provider reference", () => {
+    const result = validateTransportConfig({
+      schemaVersion: 2,
+      route: "pi-ai",
+      agents: { main: { model: "m1", provider: "nonexistent" } },
+      providers,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some(i => i.code === "missing_provider")).toBe(true);
+    }
   });
 });
 

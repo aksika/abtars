@@ -79,23 +79,19 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   let transport: IKiroTransport;
 
-  const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary, clearTransportCache, validateProviderReady, validateModelProviderPair } = await import("../components/transport-config.js");
-  const { existsSync, renameSync } = await import("node:fs");
-  const { join: pathJoin } = await import("node:path");
+  const { resolveAgent, getEnvFallback, resolveHailMary, validateProviderReady, validateModelProviderPair } = await import("../components/transport-config.js");
+  const { loadTransportStructured, clearTransportCache } = await import("../components/transport-config.js");
   clearTransportCache();  // always re-read (picks up /models change writes)
-  let tc = loadTransport();
+  const loadResult = loadTransportStructured();
+  let tc: import("../components/transport-config.js").TransportConfig | null = loadResult.ok ? loadResult.config : null;
 
-  // Recovery: if transport.json missing/corrupt, try transport.old.json
-  if (!tc) {
-    const configDir = pathJoin(getEnv().abtarsHome, "config");
-    const primary = pathJoin(configDir, "transport.json");
-    const old = pathJoin(configDir, "transport.old.json");
-    if (existsSync(old)) {
-      logDebug("main", "transport.json missing/corrupt — recovering from transport.old.json");
-      renameSync(old, primary);
-      clearTransportCache();
-      tc = loadTransport();
-    }
+  if (loadResult.ok && loadResult.source !== "primary") {
+    logDebug("main", `transport.json unavailable — using ${loadResult.source} as in-memory source (primary unchanged)`);
+  }
+  if (!loadResult.ok && loadResult.state === "invalid") {
+    logWarn("main", `transport.json is invalid (${loadResult.issues.length} issue(s)) — running transportless (primary unchanged, .env fallback not activated)`);
+    ctx.transport = null;
+    return "skipped";
   }
 
   const prof = tc ? resolveAgent("main", tc) : null;
