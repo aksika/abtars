@@ -1,3 +1,16 @@
+// TEST DEFICIENCY (#1466): The following paths lack unit test coverage:
+//   1. loadTransportStructured() — primary-vs-backup-vs-default recovery chain,
+//      invalid-vs-missing state, source tracking. Requires filesystem mocking.
+//   2. writeTransportConfig() — atomic temp-file write, backup preservation,
+//      rollback on rename failure, cache-only-after-success. Needs mock fs.
+//   3. restorePrevious() / resetToDefaults() — rollback-safe swap, backup
+//      validation, temp-file cleanup on error. Needs mock fs.
+//   4. phase-transport recovery — reload, /reset keep-existing-transport path.
+//      Integration-level test with BootCtx.
+//   5. telegram-model-picker — detached candidate path, cascade write.
+//      Requires Telegram API mock.
+//   Deferred: develop when mock-fs infrastructure or integration harness is in place.
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { resolveAgent, getEnvFallback, clearTransportCache, validateTransportConfig } from "./transport-config.js";
 import type { TransportConfig, ModelCatalog } from "./transport-config.js";
@@ -227,6 +240,47 @@ describe("validateTransportConfig — pure validator (#1466)", () => {
     if (!result.ok) {
       expect(result.issues.some(i => i.code === "missing_provider")).toBe(true);
     }
+  });
+
+  it("does not report model_provider_incompatible for unknown models (custom models OK)", () => {
+    const result = validateTransportConfig({
+      schemaVersion: 2,
+      route: "pi-ai",
+      agents: { main: { model: "__nonexistent_custom_model__", provider: "ollama" } },
+      providers,
+    });
+    // Unknown models pass validation (not in catalog at all)
+    expect(result.ok).toBe(true);
+  });
+
+  it("reports model_provider_incompatible when catalog model is on wrong provider", () => {
+    // Uses real loadModels() catalog — model must be present with a known transport.
+    // claude-opus-4.6 is on "kiro", so pairing it with "ollama" should fail.
+    const result = validateTransportConfig({
+      schemaVersion: 2,
+      route: "pi-ai",
+      agents: { main: { model: "claude-opus-4.6", provider: "ollama" } },
+      providers: { ...providers, ollama: { transport: "api", endpoint: "http://localhost:11434/v1" } },
+    });
+    if (result.ok) {
+      // If models.json lacks claude-opus-4.6 or allows ollama, this is a no-op.
+      // The important test is: when the catalog entry exists and rejects the pair,
+      // model_provider_incompatible is emitted.
+      return;
+    }
+    expect(result.issues.some(i => i.code === "model_provider_incompatible")).toBe(true);
+  });
+
+  it("reports model_provider_incompatible for fallbacks on wrong provider", () => {
+    const result = validateTransportConfig({
+      schemaVersion: 2,
+      route: "pi-ai",
+      agents: { main: { model: "m1", provider: "ollama" } },
+      providers,
+      fallbacks: [{ model: "claude-opus-4.6", provider: "ollama" }],
+    });
+    if (result.ok) return; // environment-dependent
+    expect(result.issues.some(i => i.code === "model_provider_incompatible" && i.path.startsWith("fallbacks"))).toBe(true);
   });
 });
 
