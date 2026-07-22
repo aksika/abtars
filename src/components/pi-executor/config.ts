@@ -63,7 +63,7 @@ export function loadPiConfig(): PiExecutorConfig | null {
   }
   try {
     const raw = JSON.parse(readFileSync(p, "utf-8")) as Partial<PiExecutorConfig>;
-    if (!raw.enabled) { logDebug(TAG, "Pi executor disabled in config"); return null; }
+    if (raw.enabled === false) { logDebug(TAG, "Pi executor disabled in config"); return null; }
     if (!raw.command) { logWarn(TAG, `${p}: enabled but missing "command" — Pi executor will not start`); return null; }
     if (!raw.workspaceAliases || Object.keys(raw.workspaceAliases).length === 0) {
       logWarn(TAG, `${p}: enabled but no workspace aliases configured — add at least one alias to enable delegation`);
