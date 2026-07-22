@@ -88,8 +88,8 @@ describe("createPiAgentTools", () => {
     if (ircTool) {
       const result = await ircTool.execute("call_1", { channel: "#test", message: "hello" });
       expect(typeof result).toBe("object");
-      expect(typeof result.label).toBe("string");
       expect(Array.isArray(result.content)).toBe(true);
+      expect(result.details).toBeDefined();
     }
   });
 
@@ -106,8 +106,8 @@ describe("createPiAgentTools", () => {
     const ircTool = tools.find((t) => t.name === "irc_send");
     if (ircTool) {
       const result = await ircTool.execute("call_1", { channel: "#test", message: "hi" });
-      expect(result.isError).toBe(false);
-      expect(result.label).toContain("(skipped)");
+      expect(result.details).toEqual({ skipped: true });
+      expect(result.content[0]?.text).toContain("skipped");
     }
   });
 });

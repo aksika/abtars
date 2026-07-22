@@ -112,9 +112,38 @@ describe("PiCoreContextProjection", () => {
     });
     const projection = new PiCoreContextProjection(seed, "system");
     const result = await projection.transform(makeAgentMessages(true), { hostGeneration: 0 });
-    // No orchestrator → no durable rows, just suffix (marker onward)
-    // contextDegraded is false because the orchestrator simply wasn't passed (no failure)
+    // No orchestrator → no durable rows, just suffix (marker onward), degraded.
     expect(result.messages.length).toBe(1);
     expect(result.messages[0]?.role).toBe("abtars_current_turn");
+    expect(result.contextDegraded).toBe(true);
+  });
+
+  it("projection failure keeps the latest in-flight suffix", async () => {
+    const seed = makeSeed({
+      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 100, maxContext: 8000 },
+    });
+    const projection = new PiCoreContextProjection(seed, "system");
+    const first = await projection.transform(makeAgentMessages(true), {
+      orchestrator: {
+        async getContext() {
+          return { messages: [{ role: "user", content: "durable history" }] };
+        },
+      },
+    });
+    expect(first.contextDegraded).toBe(false);
+
+    const latest = [
+      ...makeAgentMessages(true),
+      { role: "assistant", content: [{ type: "text" as const, text: "in-flight" }] },
+    ] as import("./pi-core-types.js").AgentMessage[];
+    const failed = await projection.transform(latest, {
+      orchestrator: {
+        async getContext() {
+          throw new Error("abmind unavailable");
+        },
+      },
+    });
+    expect(failed.contextDegraded).toBe(true);
+    expect(failed.messages.at(-1)?.role).toBe("assistant");
   });
 });

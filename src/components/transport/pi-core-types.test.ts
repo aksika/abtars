@@ -25,7 +25,16 @@ describe("validatePiAgentCoreModule", () => {
 
   it("accepts a valid module", () => {
     const mod = { Agent: makeValidAgent() };
-    expect(() => validatePiAgentCoreModule(mod, "0.80.7")).not.toThrow();
+    expect(() => validatePiAgentCoreModule(mod, "0.80.8")).not.toThrow();
+  });
+
+  it("blocks the known-incompatible 0.80.7 sequential cancellation contract", () => {
+    expect(() => validatePiAgentCoreModule({ Agent: makeValidAgent() }, "0.80.7")).toThrow(/sequential cancellation/);
+    try {
+      validatePiAgentCoreModule({ Agent: makeValidAgent() }, "0.80.7");
+    } catch (err) {
+      expect((err as PiCoreContractError).missingCapability).toBe("sequential-batch-cancellation");
+    }
   });
 
   it("rejects null", () => {
@@ -48,8 +57,8 @@ describe("validatePiAgentCoreModule", () => {
         get isRunning() { return false; }
       },
     };
-    expect(() => validatePiAgentCoreModule(mod, "0.80.7")).toThrow(PiCoreContractError);
-    expect(() => validatePiAgentCoreModule(mod, "0.80.7")).toThrow(/prompt/);
+    expect(() => validatePiAgentCoreModule(mod, "0.80.8")).toThrow(PiCoreContractError);
+    expect(() => validatePiAgentCoreModule(mod, "0.80.8")).toThrow(/prompt/);
   });
 
   it("rejects Agent missing waitForIdle", () => {
@@ -64,16 +73,16 @@ describe("validatePiAgentCoreModule", () => {
         get isRunning() { return false; }
       },
     };
-    expect(() => validatePiAgentCoreModule(mod, "0.80.7")).toThrow(PiCoreContractError);
-    expect(() => validatePiAgentCoreModule(mod, "0.80.7")).toThrow(/waitForIdle/);
+    expect(() => validatePiAgentCoreModule(mod, "0.80.8")).toThrow(PiCoreContractError);
+    expect(() => validatePiAgentCoreModule(mod, "0.80.8")).toThrow(/waitForIdle/);
   });
 
   it("sets missingCapability on error", () => {
     try {
-      validatePiAgentCoreModule({}, "0.80.7");
+      validatePiAgentCoreModule({}, "0.80.8");
     } catch (err) {
       expect(err).toBeInstanceOf(PiCoreContractError);
-      expect((err as PiCoreContractError).installationVersion).toBe("0.80.7");
+      expect((err as PiCoreContractError).installationVersion).toBe("0.80.8");
       expect((err as PiCoreContractError).missingCapability).toBe("Agent");
     }
   });

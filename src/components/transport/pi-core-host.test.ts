@@ -8,17 +8,9 @@
 // call. Deferred until the upstream contract gate is resolved — the ticket cannot pass its own
 // acceptance criteria while this stands.
 
-// TEST DEFICIENCY: Real-package conformance test (loading actual @earendil-works/pi-agent-core
-// from the npm installation) is deferred — it requires a full Pi installation on the test
-// runner and would add significant environment dependency. The deferred test should:
-//   1. Call loadAndValidatePiAgentCore() with a real Pi installation
-//   2. Construct a PiCoreExecutionHost with the real Agent
-//   3. Verify subscribe/prompt/steer/followUp/abort/waitForIdle without a provider call
-//   4. Verify one-at-a-time queue mode, sequential tool execution, abort-before-start,
-//      abort-while-running, idle settlement ordering
-// Smallest future verification path: run on a machine with `pi` installed, add a single
-// integration test file that imports the real package and calls the factory methods.
-// See steering test-cost gate (#1445 req.md:181-186).
+// Real-package construction/idle settlement is covered below. The complete
+// multi-tool cancellation assertion remains blocked by the known Pi 0.80.7
+// upstream defect and must run when a repaired public release is adopted.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PiCoreExecutionHost } from "./pi-core-host.js";
@@ -107,6 +99,36 @@ describe("PiCoreExecutionHost", () => {
     await startPromise;
 
     expect(agent.subscribe).toHaveBeenCalled();
+  });
+
+  it("constructs and settles with the installed public Pi Agent", async () => {
+    const real = await import("@earendil-works/pi-agent-core");
+    const model = {
+      id: "contract-model",
+      name: "contract-model",
+      api: "openai-completions" as const,
+      provider: "contract-provider",
+      baseUrl: "https://contract.invalid",
+      reasoning: false,
+      input: ["text"] as ("text")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 128,
+    };
+    const host = new PiCoreExecutionHost({
+      executionId: "real_exec",
+      sessionId: "real_session",
+      initialState: { systemPrompt: "system", model, messages: [], tools: [] },
+      streamFn: vi.fn() as unknown as StreamFn,
+    });
+    await host.start({
+      module: { Agent: real.Agent },
+      installation: { executable: "", packageRoot: "", version: "0.80.7", source: "path", moduleRoots: { ai: "", tui: "", agentCore: "" } },
+    });
+    expect(host.state).toBe("running");
+    host.cancel();
+    await host.waitForSettlement();
+    expect(host.isSettled).toBe(true);
   });
 
   it("cancel before start settles immediately", async () => {

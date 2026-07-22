@@ -1,9 +1,6 @@
-// TEST DEFICIENCY: Real-package StreamFn conformance test (using actual pi-ai from the
-// npm installation) is deferred — requires a full Pi installation. The deferred test should:
-//   1. Create a real StreamFn via createPiStreamFn with actual fallback policy
-//   2. Feed it a model and context
-//   3. Verify the returned stream yields valid AssistantMessageEventStream events
-// Smallest future verification path: add to the real-package test from pi-core-host.test.ts.
+// The outer StreamFn protocol is tested below with Pi-shaped events. A live
+// provider call remains environment-dependent and is covered by the provider
+// package's own contract tests.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createPiStreamFn } from "./pi-stream-fn.js";
@@ -50,6 +47,30 @@ describe("createPiStreamFn", () => {
   it("returns a StreamFn", () => {
     const streamFn = createPiStreamFn({ policy });
     expect(typeof streamFn).toBe("function");
+  });
+
+  it("keeps the outer stream on Pi's terminal error protocol", async () => {
+    const model = {
+      id: "test-model",
+      name: "test-model",
+      api: "openai-completions" as const,
+      provider: "test-provider",
+      baseUrl: "https://api.test/v1",
+      reasoning: false,
+      input: ["text"] as ("text")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 128,
+    };
+    const streamFn = createPiStreamFn({
+      policy,
+      createPiAiAttempt: vi.fn().mockRejectedValue(new Error("provider unavailable")),
+    });
+    const events: any[] = [];
+    for await (const event of streamFn(model, { messages: [] })) events.push(event);
+    expect(events.at(-1)?.type).toBe("error");
+    expect(events.at(-1)?.error?.stopReason).toBe("error");
+    expect(events.at(-1)?.error?.errorMessage).toBeTruthy();
   });
 
   it("succeeds with valid candidate", async () => {
@@ -141,9 +162,9 @@ describe("createPiStreamFn", () => {
     const events: any[] = [];
     for await (const ev of stream) events.push(ev);
 
-    expect(events.some((e) => e.type === "done")).toBe(true);
-    const doneEv = events.find((e) => e.type === "done") as Record<string, unknown> | undefined;
-    expect((doneEv?.message as Record<string, unknown> | undefined)?.stopReason).toBe("error");
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    const errorEv = events.find((e) => e.type === "error") as Record<string, unknown> | undefined;
+    expect((errorEv?.error as Record<string, unknown> | undefined)?.stopReason).toBe("error");
   });
 
   it("returns aborted stream on cancellation", async () => {
@@ -161,9 +182,9 @@ describe("createPiStreamFn", () => {
     const events: any[] = [];
     for await (const ev of stream) events.push(ev);
 
-    expect(events.some((e) => e.type === "done")).toBe(true);
-    const doneEv2 = events.find((e) => e.type === "done") as Record<string, unknown> | undefined;
-    expect((doneEv2?.message as Record<string, unknown> | undefined)?.stopReason).toBe("aborted");
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    const errorEv2 = events.find((e) => e.type === "error") as Record<string, unknown> | undefined;
+    expect((errorEv2?.error as Record<string, unknown> | undefined)?.stopReason).toBe("aborted");
   });
 
   it("attempts emergency L0 when all candidates exhausted", async () => {

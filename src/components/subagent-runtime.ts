@@ -184,7 +184,10 @@ export class SubagentRuntime {
       lastUsage: () => transport.lastUsage?.() ?? null,
 
       send: async (prompt, image, context) => {
-        const response = await transport.sendPrompt(sessionKey, prompt, image, context);
+        const response = await transport.sendPrompt(sessionKey, prompt, image, {
+          ...context,
+          executionId: context?.executionId ?? execId,
+        });
         logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
         return response ?? "";
       },

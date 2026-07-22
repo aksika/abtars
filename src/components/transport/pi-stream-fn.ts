@@ -1,24 +1,34 @@
-import { logWarn, logDebug } from "../logger.js";
+import type {
+  Api,
+  AssistantMessage,
+  AssistantMessageEvent,
+  AssistantMessageEventStream,
+  Context,
+  Model,
+  SimpleStreamOptions,
+  TextContent,
+  ThinkingContent,
+  ToolCall,
+  Usage,
+} from "@earendil-works/pi-ai";
+import { logDebug } from "../logger.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
-import type { ModelCandidate, CandidateSpec } from "./model-candidates.js";
+import type { ModelCandidate } from "./model-candidates.js";
 import { candidateKey } from "./model-candidates.js";
 import type { ExecutionTelemetryScope, ProviderCallTerminal } from "../execution-telemetry.js";
-import type {
-  StreamFn, AssistantMessageEventStream, SimpleStreamOptions,
-  Usage, AgentMessage, AssistantMessageEvent, AssistantMessage,
-} from "./pi-core-types.js";
+import type { StreamFn } from "./pi-core-types.js";
+import { createPiAiAssistantStream, buildPiModel, pickPiApi } from "./pi-ai-adapter.js";
 import type { PiAiCandidate, PiAiConversation } from "./pi-ai-adapter.js";
-import { streamPiAiCompletion, buildPiModel, pickPiApi, buildPiContext } from "./pi-ai-adapter.js";
+import { streamPiAiCompletion } from "./pi-ai-adapter.js";
 import type { SSEEvent } from "./sse-parser.js";
 import type { ChatMessage } from "./conversation-session.js";
-import type { ApiFormat } from "./pi-ai-adapter.js";
 
 const TAG = "pi-stream-fn";
 
 export type ProviderAttemptFactory = (
-  candidate: CandidateSpec,
-  model: unknown,
-  context: unknown,
+  candidate: ModelCandidate,
+  model: Model<Api>,
+  context: Context,
   options: SimpleStreamOptions,
   signal: AbortSignal,
 ) => Promise<AssistantMessageEventStream>;
@@ -29,441 +39,338 @@ export interface AbtarsPiStreamFnOptions {
   telemetry?: ExecutionTelemetryScope;
   createPiAiAttempt?: ProviderAttemptFactory;
   createL0Attempt?: ProviderAttemptFactory;
-  onCandidateCommitted?: (candidate: CandidateSpec) => void;
+  onCandidateCommitted?: (candidate: ModelCandidate) => void;
 }
 
-interface PiStreamState {
-  signal: AbortSignal;
-  committedCandidate: CandidateSpec | null;
-  committed: boolean;
+function zeroUsage(): Usage {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
 }
 
-function deriveProviderIdFromEndpoint(endpoint: string): string {
-  try {
-    const host = new URL(endpoint).hostname;
-    const id = host.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    return id || "abtars-direct";
-  } catch {
-    return "abtars-direct";
+function assistantMessage(
+  model: Model<Api>,
+  content: AssistantMessage["content"],
+  stopReason: AssistantMessage["stopReason"],
+  errorMessage?: string,
+  usage: Usage = zeroUsage(),
+): AssistantMessage {
+  return {
+    role: "assistant",
+    content,
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage,
+    stopReason,
+    ...(errorMessage ? { errorMessage } : {}),
+    timestamp: Date.now(),
+  };
+}
+
+function terminalError(model: Model<Api>, reason: "error" | "aborted", text: string): AssistantMessageEvent {
+  return {
+    type: "error",
+    reason,
+    error: assistantMessage(model, [], reason, text),
+  };
+}
+
+function isTerminal(event: AssistantMessageEvent): boolean {
+  return event.type === "done" || event.type === "error";
+}
+
+function isSemanticEvent(event: AssistantMessageEvent): boolean {
+  if (event.type === "text_delta" || event.type === "thinking_delta") return event.delta.trim().length > 0;
+  return event.type === "toolcall_start" || event.type === "toolcall_delta" || event.type === "toolcall_end";
+}
+
+function terminalResult(event: AssistantMessageEvent): AssistantMessage | undefined {
+  if (event.type === "done") return event.message;
+  if (event.type === "error") return event.error;
+  return undefined;
+}
+
+function endTelemetry(handle: ReturnType<ExecutionTelemetryScope["beginProviderCall"]> | undefined, terminal: ProviderCallTerminal): void {
+  handle?.end(terminal);
+}
+
+function contextToLegacyConversation(context: Context): { conversation: PiAiConversation } {
+  const messages: ChatMessage[] = context.systemPrompt
+    ? [{ role: "system", content: context.systemPrompt }]
+    : [];
+  for (const message of context.messages) {
+    if (message.role === "user") {
+      messages.push({ role: "user", content: typeof message.content === "string" ? message.content : message.content.map((part) => part.type === "text" ? { type: "text", text: part.text } : { type: "image_url", image_url: { url: `data:${part.mimeType};base64,${part.data}` } }) });
+    } else if (message.role === "assistant") {
+      const text = message.content.filter((part): part is TextContent => part.type === "text").map((part) => part.text).join("");
+      const toolCalls = message.content.filter((part): part is ToolCall => part.type === "toolCall").map((part) => ({ id: part.id, type: "function" as const, function: { name: part.name, arguments: JSON.stringify(part.arguments) } }));
+      messages.push({ role: "assistant", content: text, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}) });
+    } else if (message.role === "toolResult") {
+      messages.push({ role: "tool", content: message.content.filter((part): part is TextContent => part.type === "text").map((part) => part.text).join(""), tool_call_id: message.toolCallId, name: message.toolName });
+    }
   }
+  return {
+    conversation: {
+      messages,
+      tools: (context.tools ?? []).map((tool) => ({
+        type: "function" as const,
+        function: { name: tool.name, description: tool.description, parameters: tool.parameters as Record<string, unknown> },
+      })),
+    },
+  };
 }
 
-function buildPiModelFromCandidate(candidate: ModelCandidate, overrides?: Partial<PiAiCandidate>): unknown {
-  const ext = candidate as unknown as Record<string, unknown>;
-  const apiFormat = ext.apiFormat as ApiFormat | undefined
-    ?? (candidate.endpoint.includes("anthropic") ? "anthropic" as const : undefined);
-  const api = pickPiApi(apiFormat);
-  const providerId = deriveProviderIdFromEndpoint(candidate.endpoint);
+async function defaultCreatePiAiAttempt(
+  candidate: ModelCandidate,
+  model: Model<Api>,
+  context: Context,
+  options: SimpleStreamOptions,
+  signal: AbortSignal,
+): Promise<AssistantMessageEventStream> {
+  const piCandidate: PiAiCandidate = {
+    ...candidate,
+    apiFormat: candidate.endpoint.includes("anthropic") ? "anthropic" : undefined,
+    maxOutput: model.maxTokens,
+    contextWindow: model.contextWindow,
+  };
+  return createPiAiAssistantStream(piCandidate, model, context, options, signal);
+}
+
+async function defaultCreateL0Attempt(
+  candidate: ModelCandidate,
+  model: Model<Api>,
+  context: Context,
+  _options: SimpleStreamOptions,
+  signal: AbortSignal,
+): Promise<AssistantMessageEventStream> {
+  const legacy = contextToLegacyConversation(context);
   const piCandidate: PiAiCandidate = {
     model: candidate.model,
     endpoint: candidate.endpoint,
     apiKey: candidate.apiKey,
-    apiFormat,
-    maxOutput: ext.maxOutput as number ?? 4096,
-    contextWindow: candidate.maxContext,
-    thinking: ext.thinking as PiAiCandidate["thinking"] ?? overrides?.thinking,
-    reasoningEffort: ext.reasoningEffort as PiAiCandidate["reasoningEffort"] ?? overrides?.reasoningEffort,
-    sessionId: ext.sessionId as string | undefined ?? overrides?.sessionId,
+    apiFormat: candidate.endpoint.includes("anthropic") ? "anthropic" : undefined,
+    maxOutput: model.maxTokens,
+    contextWindow: model.contextWindow,
   };
-  const hasImage = ext.hasImage as boolean ?? false;
-  return buildPiModel(piCandidate, api, hasImage, providerId);
+  return createL0AssistantStream(streamPiAiCompletion(piCandidate, legacy.conversation, signal), model, signal);
 }
 
-function buildContextFromMessages(
-  systemPrompt: string,
-  messages: AgentMessage[],
-): unknown {
-  const conv: PiAiConversation = {
-    messages: messages.map((m) => ({
-      role: m.role === "abtars_instruction" ? "user" : m.role,
-      content: m.content,
-    } as ChatMessage)),
-    tools: [],
-  };
-  const api = "openai-completions" as const;
-  const providerId = "abtars";
-  const ctx = buildPiContext(conv, api, providerId);
-  ctx.systemPrompt = systemPrompt || ctx.systemPrompt;
-  return ctx;
-}
+function createL0AssistantStream(events: AsyncGenerator<SSEEvent>, model: Model<Api>, signal: AbortSignal): AssistantMessageEventStream {
+  const output: AssistantMessage = assistantMessage(model, [], "stop");
+  let textBlock: TextContent | undefined;
+  let thinkingBlock: ThinkingContent | undefined;
+  let terminal: AssistantMessage | undefined;
 
-async function defaultCreatePiAiAttempt(
-  candidate: CandidateSpec,
-  _model: unknown,
-  context: unknown,
-  options: SimpleStreamOptions,
-  signal: AbortSignal,
-): Promise<AssistantMessageEventStream> {
-  const ctx = context as { messages?: Array<Record<string, unknown>> } | null;
-  const apiFormat: ApiFormat | undefined =
-    candidate.endpoint.includes("anthropic") ? "anthropic" : undefined;
-  const piCandidate: PiAiCandidate = {
-    model: candidate.model,
-    endpoint: candidate.endpoint,
-    apiFormat,
-    maxOutput: (options as Record<string, unknown>).maxTokens as number ?? 4096,
-    contextWindow: candidate.maxContext,
-  };
-  const conv: PiAiConversation = {
-    messages: (ctx?.messages ?? []).map((m) => ({
-      role: (m?.role as string) ?? "user",
-      content: typeof m?.content === "string" ? m.content : "",
-    } as ChatMessage)),
-    tools: [],
-  };
-
-  const sseStream = streamPiAiCompletion(piCandidate, conv, signal);
-  return createAssistantEventStream(sseStream);
-}
-
-// ── Real AssistantMessageEventStream: class with .result() + done/error terminal ──
-
-function createAssistantEventStream(sseStream: AsyncGenerator<SSEEvent>): AssistantMessageEventStream {
-  const asyncIter = translateSseToPiAssistantStream(sseStream);
-  let resolvedResult: AssistantMessage | null = null;
-
-  return {
-    [Symbol.asyncIterator]() {
-      return asyncIter[Symbol.asyncIterator]();
-    },
-    async result(): Promise<AssistantMessage> {
-      if (resolvedResult) return resolvedResult;
-      for await (const ev of asyncIter) {
-        if (ev.type === "done" && ev.message) {
-          resolvedResult = ev.message;
-          return ev.message;
+  async function* run(): AsyncGenerator<AssistantMessageEvent> {
+    yield { type: "start", partial: output };
+    try {
+      for await (const event of events) {
+        if (signal.aborted) {
+          terminal = assistantMessage(model, output.content, "aborted", "Execution cancelled", output.usage);
+          yield { type: "error", reason: "aborted", error: terminal };
+          return;
         }
-        if (ev.type === "error") {
-          resolvedResult = {
-            role: "assistant",
-            content: ev.error ?? "Provider error",
-            stopReason: "error",
-            usage: { input: 0, output: 0 },
-          };
-          return resolvedResult;
+        if (event.type === "chunk") {
+          if (!textBlock) {
+            textBlock = { type: "text", text: "" };
+            output.content.push(textBlock);
+            yield { type: "text_start", contentIndex: output.content.length - 1, partial: output };
+          }
+          textBlock.text += event.content;
+          yield { type: "text_delta", contentIndex: output.content.indexOf(textBlock), delta: event.content, partial: output };
+        } else if (event.type === "thinking") {
+          if (!thinkingBlock) {
+            thinkingBlock = { type: "thinking", thinking: "" };
+            output.content.push(thinkingBlock);
+            yield { type: "thinking_start", contentIndex: output.content.length - 1, partial: output };
+          }
+          thinkingBlock.thinking += event.content;
+          yield { type: "thinking_delta", contentIndex: output.content.indexOf(thinkingBlock), delta: event.content, partial: output };
+        } else if (event.type === "tool_call_delta") {
+          const call: ToolCall = { type: "toolCall", id: event.id ?? `tool_${Date.now()}`, name: event.name ?? "", arguments: parseJson(event.arguments ?? "{}") };
+          output.content.push(call);
+          const index = output.content.length - 1;
+          yield { type: "toolcall_start", contentIndex: index, partial: output };
+          yield { type: "toolcall_delta", contentIndex: index, delta: JSON.stringify(call.arguments), partial: output };
+          yield { type: "toolcall_end", contentIndex: index, toolCall: call, partial: output };
+        } else if (event.type === "done") {
+          const usage = event.usage;
+          if (usage) {
+            output.usage = {
+              ...output.usage,
+              input: usage.prompt_tokens,
+              output: usage.completion_tokens,
+              totalTokens: usage.prompt_tokens + usage.completion_tokens,
+            };
+          }
+          output.stopReason = output.content.some((part) => part.type === "toolCall") ? "toolUse" : "stop";
+          terminal = output;
+          if (textBlock) yield { type: "text_end", contentIndex: output.content.indexOf(textBlock), content: textBlock.text, partial: output };
+          if (thinkingBlock) yield { type: "thinking_end", contentIndex: output.content.indexOf(thinkingBlock), content: thinkingBlock.thinking, partial: output };
+          yield { type: "done", reason: output.stopReason === "toolUse" ? "toolUse" : "stop", message: output };
+          return;
         }
       }
-      resolvedResult = { role: "assistant", content: "", stopReason: "stop", usage: { input: 0, output: 0 } };
-      return resolvedResult;
-    },
-  };
-}
-
-async function* translateSseToPiAssistantStream(
-  sseStream: AsyncGenerator<SSEEvent>,
-): AsyncGenerator<AssistantMessageEvent> {
-  let textAccumulator = "";
-  const toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
-  let usage: Usage | undefined;
-
-  for await (const ev of sseStream) {
-    switch (ev.type) {
-      case "chunk":
-        textAccumulator += ev.content;
-        yield { type: "text_delta", contentIndex: 0, delta: ev.content };
-        break;
-      case "thinking":
-        yield { type: "thinking_delta", contentIndex: 0, delta: ev.content };
-        break;
-      case "tool_call_delta": {
-        const id = ev.id ?? "";
-        const name = ev.name ?? "";
-        const args = parseArgsObject(ev.arguments ?? "{}");
-        toolCalls.push({ id, name, arguments: args });
-        // Real Pi expects toolcall events at the stream level
-        yield { type: "toolcall_start", contentIndex: toolCalls.length - 1, toolCall: { id, name, arguments: args } };
-        yield { type: "toolcall_end", contentIndex: toolCalls.length - 1, toolCall: { id, name, arguments: args } };
-        break;
-      }
-      case "done":
-        usage = {
-          input: (ev as unknown as Record<string, unknown>).usage
-            ? ((ev as unknown as Record<string, unknown>).usage as Record<string, unknown>).prompt_tokens as number ?? 0
-            : 0,
-          output: (ev as unknown as Record<string, unknown>).usage
-            ? ((ev as unknown as Record<string, unknown>).usage as Record<string, unknown>).completion_tokens as number ?? 0
-            : 0,
-          cacheRead: ev.cacheRead,
-          cacheWrite: ev.cacheWrite,
-        };
-        yield {
-          type: "done",
-          reason: toolCalls.length > 0 ? "toolUse" as const : "stop" as const,
-          message: {
-            role: "assistant",
-            content: textAccumulator,
-            stopReason: toolCalls.length > 0 ? "toolUse" as const : "stop" as const,
-            usage: usage ?? { input: 0, output: 0 },
-          } as AssistantMessage,
-        };
-        return;
+      terminal = assistantMessage(model, output.content, "stop", undefined, output.usage);
+      yield { type: "done", reason: "stop", message: terminal };
+    } catch (err) {
+      terminal = assistantMessage(model, output.content, signal.aborted ? "aborted" : "error", "Provider stream failed", output.usage);
+      yield { type: "error", reason: signal.aborted ? "aborted" : "error", error: terminal };
     }
   }
 
-  // stream ended without done event
-  yield {
-    type: "done",
-    reason: "stop",
-    message: {
-      role: "assistant",
-      content: textAccumulator,
-      stopReason: "stop" as const,
-      usage: usage ?? { input: 0, output: 0 },
-    } as AssistantMessage,
-  };
+  return wrapEventStream(run(), () => terminal ?? assistantMessage(model, output.content, signal.aborted ? "aborted" : "error", "Provider stream ended without a terminal event", output.usage));
 }
 
-function parseArgsObject(argsStr: string): Record<string, unknown> {
-  try { return JSON.parse(argsStr) as Record<string, unknown>; } catch { return {}; }
+function parseJson(value: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
 }
 
-const ZERO_USAGE: Usage = { input: 0, output: 0 };
-
-function classifyError(msg: string): { kind: "auth" | "rate_limit" | "context_exceeded" | "transient" } {
-  if (msg.includes("401") || msg.includes("403") || msg.includes("auth") || msg.includes("unauth") || msg.includes("unauthorized")) {
-    return { kind: "auth" };
+function wrapEventStream(source: AsyncGenerator<AssistantMessageEvent>, fallback: () => AssistantMessage): AssistantMessageEventStream {
+  let result: AssistantMessage | undefined;
+  let resolveResult: ((message: AssistantMessage) => void) | undefined;
+  const resultPromise = new Promise<AssistantMessage>((resolve) => { resolveResult = resolve; });
+  async function* iterator(): AsyncGenerator<AssistantMessageEvent> {
+    try {
+      for await (const event of source) {
+        const message = terminalResult(event);
+        if (message) {
+          result = message;
+          resolveResult?.(message);
+        }
+        yield event;
+      }
+    } finally {
+      if (!result) {
+        result = fallback();
+        resolveResult?.(result);
+      }
+    }
   }
-  if (msg.includes("429") || msg.includes("quota") || msg.includes("rate_limit") || msg.includes("credit") || msg.includes("rate limit")) {
-    return { kind: "rate_limit" };
-  }
-  if (msg.includes("context_length") || msg.includes("context_length_exceeded") || msg.includes("maximum context") || msg.includes("context length")) {
-    return { kind: "context_exceeded" };
-  }
-  return { kind: "transient" };
+  return {
+    [Symbol.asyncIterator]: () => iterator(),
+    result: async () => result ?? resultPromise,
+  } as unknown as AssistantMessageEventStream;
 }
 
-export function createPiStreamFn(
-  options: AbtarsPiStreamFnOptions,
-): StreamFn {
-  const streamFn: StreamFn = (
-    _model: unknown,
-    context: unknown,
-    fnOptions: SimpleStreamOptions,
-  ): AssistantMessageEventStream => {
-    const signal: AbortSignal = (fnOptions as Record<string, unknown>).signal as AbortSignal ?? new AbortController().signal;
-    const state: PiStreamState = {
-      signal,
-      committedCandidate: null,
-      committed: false,
-    };
+export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
+  return (model: Model<Api>, context: Context, fnOptions: SimpleStreamOptions = {}): AssistantMessageEventStream => {
+    const signal = fnOptions.signal ?? new AbortController().signal;
+    const outer = async function* (): AsyncGenerator<AssistantMessageEvent> {
+      const candidates = [...options.policy.candidates];
+      if (options.emergencyCandidate) candidates.push(options.emergencyCandidate);
 
-    const ctx = context as { systemPrompt?: string; messages?: AgentMessage[] } | null;
-    const systemPrompt = ctx?.systemPrompt ?? "";
-    const messages: AgentMessage[] = ctx?.messages ?? [];
-
-    async function* run(): AsyncGenerator<AssistantMessageEvent> {
-      let attemptIndex = 0;
-
-      while (true) {
-        if (state.signal.aborted) {
-          yield { type: "done", reason: "aborted", message: { role: "assistant", content: "Execution cancelled", stopReason: "aborted", usage: ZERO_USAGE } as AssistantMessage };
+      for (const candidate of candidates) {
+        if (!options.emergencyCandidate || candidate !== options.emergencyCandidate) {
+          const selected = options.policy.selectModel();
+          if (!selected || selected !== candidate) continue;
+        }
+        if (signal.aborted) {
+          yield terminalError(model, "aborted", "Execution cancelled");
           return;
         }
 
-        const candidate = options.policy.selectModel();
-        if (!candidate) {
-          const emergency = options.emergencyCandidate;
-          if (emergency) {
-            logWarn(TAG, "All regular candidates exhausted — trying emergency L0");
-            if (options.policy.excludedKeys.size > 0) {
-              options.policy.excludedKeys.clear();
-            }
-            const emergencyAttempt = emergency;
-            options.policy.lastDecision = { chosen: emergencyAttempt, skipped: [] };
-
-            const telemetryHandle = options.telemetry
-              ? options.telemetry.beginProviderCall({
-                  provider: emergencyAttempt.provider,
-                  model: emergencyAttempt.model,
-                  candidate: candidateKey(emergencyAttempt.model, emergencyAttempt.endpoint),
-                  startedAt: Date.now(),
-                })
-              : undefined;
-
-            try {
-              const attemptFn = options.createL0Attempt ?? defaultCreatePiAiAttempt;
-              const piModel = buildPiModelFromCandidate(emergencyAttempt);
-              const piContext = buildContextFromMessages(systemPrompt, messages);
-              const stream = await attemptFn(emergencyAttempt, piModel, piContext, fnOptions, signal);
-
-              for await (const ev of stream) {
-                if (!state.committed && isSemanticEvent(ev)) {
-                  state.committedCandidate = emergencyAttempt;
-                  state.committed = true;
-                  options.onCandidateCommitted?.(emergencyAttempt);
-                  logDebug(TAG, `Emergency candidate committed: ${emergencyAttempt.model}`);
-                }
-                yield ev;
-                if (ev.type === "done" || ev.type === "error") {
-                  if (telemetryHandle) {
-                    const usage = ev.message?.usage;
-                    if (usage) {
-                      telemetryHandle.end({
-                        result: "success",
-                        endedAt: Date.now(),
-                        input: usage.input,
-                        output: usage.output,
-                        cacheRead: usage.cacheRead,
-                        cacheWrite: usage.cacheWrite,
-                      } as ProviderCallTerminal);
-                    } else {
-                      telemetryHandle.end({ result: "success", endedAt: Date.now() });
-                    }
-                  }
-                  return;
-                }
-              }
-
-              if (telemetryHandle) telemetryHandle.end({ result: "success", endedAt: Date.now() });
-              return;
-            } catch (err) {
-              if (telemetryHandle) telemetryHandle.end({ result: "failure", endedAt: Date.now() });
-              const msg = err instanceof Error ? err.message : String(err);
-              yield { type: "done", reason: "error", message: { role: "assistant", content: msg, stopReason: "error", usage: ZERO_USAGE } as AssistantMessage };
-              return;
-            }
-          }
-
-          logWarn(TAG, "All candidates exhausted — returning error stream");
-          yield { type: "done", reason: "error", message: { role: "assistant", content: "All model candidates failed", stopReason: "error", usage: ZERO_USAGE } as AssistantMessage };
-          return;
-        }
-
-        attemptIndex++;
-
-        logDebug(TAG, `Attempt ${attemptIndex}: ${candidate.model} via ${candidate.provider} (source: ${candidate.source})`);
-
-        const telemetryHandle = options.telemetry
-          ? options.telemetry.beginProviderCall({
-              provider: candidate.provider,
-              model: candidate.model,
-              candidate: candidateKey(candidate.model, candidate.endpoint),
-              fallbackFrom: attemptIndex > 1 ? options.policy.lastDecision?.chosen?.model : undefined,
-              startedAt: Date.now(),
-            })
-          : undefined;
-
-        let committed = false;
-        const buffer: AssistantMessageEvent[] = [];
-        try {
-          const attemptFn = options.createPiAiAttempt ?? defaultCreatePiAiAttempt;
-          const piModel = buildPiModelFromCandidate(candidate);
-          const piContext = buildContextFromMessages(systemPrompt, messages);
-          const stream = await attemptFn(candidate, piModel, piContext, fnOptions, signal);
-
-          for await (const ev of stream) {
-            if (state.signal.aborted && !committed) {
-              if (telemetryHandle) telemetryHandle.end({ result: "aborted", endedAt: Date.now() });
-              options.policy.recordError(candidate, "transient");
-              yield { type: "done", reason: "aborted", message: { role: "assistant", content: "Execution cancelled", stopReason: "aborted", usage: ZERO_USAGE } as AssistantMessage };
-              return;
-            }
-
-            if (!committed) {
-              if (isSemanticEvent(ev)) {
-                committed = true;
-                state.committedCandidate = candidate;
-                state.committed = true;
-                options.policy.recordSuccess(candidate);
-                options.onCandidateCommitted?.(candidate);
-                logDebug(TAG, `Candidate committed: ${candidate.model}`);
-
-                for (const buffered of buffer) {
-                  yield buffered;
-                }
-                buffer.length = 0;
-              } else {
-                buffer.push(ev);
-                continue;
-              }
-            }
-
-            yield ev;
-          }
-
-          if (!committed) {
-            if (telemetryHandle) telemetryHandle.end({ result: "failure", endedAt: Date.now() });
+        const handle = options.telemetry?.beginProviderCall({
+          provider: candidate.provider,
+          model: candidate.model,
+          candidate: candidateKey(candidate.model, candidate.endpoint),
+          startedAt: Date.now(),
+        });
+        const attemptFactory = candidate.source === "emergency"
+          ? (options.createL0Attempt ?? defaultCreateL0Attempt)
+          : (options.createPiAiAttempt ?? defaultCreatePiAiAttempt);
+        const piModel = buildPiModel({ ...candidate, maxOutput: model.maxTokens }, pickPiApi(candidate.endpoint.includes("anthropic") ? "anthropic" : undefined), false, candidate.provider);
+        let attemptCommitted = false;
+        let telemetryEnded = false;
+        const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage): void => {
+          if (telemetryEnded) return;
+          telemetryEnded = true;
+          endTelemetry(handle, {
+            result,
+            endedAt: Date.now(),
+            input: message?.usage.input,
+            output: message?.usage.output,
+            cacheRead: message?.usage.cacheRead,
+            cacheWrite: message?.usage.cacheWrite,
+          });
+          if (result === "success") {
+            options.policy.recordSuccess(candidate);
+          } else {
             options.policy.recordError(candidate, "transient");
+            options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
+          }
+        };
+        try {
+          const inner = await attemptFactory(candidate, piModel, context, fnOptions, signal);
+          const buffered: AssistantMessageEvent[] = [];
+          let terminal: AssistantMessage | undefined;
+          for await (const event of inner) {
+            terminal = terminalResult(event) ?? terminal;
+            if (!attemptCommitted && isSemanticEvent(event)) {
+              attemptCommitted = true;
+              options.onCandidateCommitted?.(candidate);
+              for (const bufferedEvent of buffered) yield bufferedEvent;
+              buffered.length = 0;
+            }
+            if (!attemptCommitted && isTerminal(event)) {
+              const result = terminalResult(event);
+              const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
+              if (failed) {
+                finishAttempt(event.type === "error" && event.reason === "aborted" ? "aborted" : "failure", terminal);
+                break;
+              }
+              finishAttempt("success", terminal);
+              for (const bufferedEvent of buffered) yield bufferedEvent;
+              yield event;
+              return;
+            }
+            if (attemptCommitted) yield event;
+            else buffered.push(event);
+            if (attemptCommitted && isTerminal(event)) {
+              const result = terminalResult(event);
+              const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
+              finishAttempt(failed
+                ? (event.type === "error" && event.reason === "aborted" ? "aborted" : "failure")
+                : "success", terminal);
+              return;
+            }
+          }
+          if (attemptCommitted) {
+            finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
+            yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream ended without a terminal event");
+            return;
+          }
+          if (!telemetryEnded) {
+            finishAttempt("failure", terminal);
             continue;
           }
-
-          if (telemetryHandle) telemetryHandle.end({ result: "success", endedAt: Date.now() });
-          return;
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          logDebug(TAG, `Attempt ${attemptIndex} failed: ${msg}`);
-
-          if (telemetryHandle) telemetryHandle.end({ result: "failure", endedAt: Date.now() });
-
-          const { kind } = classifyError(msg);
-          options.policy.recordError(candidate, kind);
-
-          if (committed) {
-            logWarn(TAG, `Post-commit failure for ${candidate.model} — no fallback allowed`);
-            yield { type: "done", reason: "error", message: { role: "assistant", content: msg, stopReason: "error", usage: ZERO_USAGE } as AssistantMessage };
+          finishAttempt(signal.aborted ? "aborted" : "failure");
+          if (attemptCommitted) {
+            yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream failed after output began");
+            return;
+          }
+          logDebug(TAG, `Provider attempt failed before commit (${err instanceof Error ? err.name : "unknown"})`);
+          if (signal.aborted) {
+            yield terminalError(model, "aborted", "Execution cancelled");
             return;
           }
         }
       }
-    }
 
-    const stream = run();
-    let terminalMessage: AssistantMessage | null = null;
-    let terminalResolve: ((msg: AssistantMessage) => void) | null = null;
-    const terminalPromise = new Promise<AssistantMessage>((resolve) => {
-      terminalResolve = resolve;
-    });
-
-    // Intercept the async iterator to capture terminal events on the fly
-    const originalIterator = stream[Symbol.asyncIterator]();
-    const proxiedIterator: AsyncIterator<AssistantMessageEvent> = {
-      async next() {
-        const result = await originalIterator.next();
-        if (!result.done) {
-          const ev = result.value;
-          if (ev.type === "done" && ev.message) {
-            terminalMessage = ev.message;
-            terminalResolve?.(ev.message);
-          } else if (ev.type === "error") {
-            const msg: AssistantMessage = { role: "assistant", content: ev.error ?? "Provider error", stopReason: "error", usage: ZERO_USAGE };
-            terminalMessage = msg;
-            terminalResolve?.(msg);
-          }
-        } else if (!terminalMessage) {
-          const msg: AssistantMessage = { role: "assistant", content: "", stopReason: "stop", usage: ZERO_USAGE };
-          terminalMessage = msg;
-          terminalResolve?.(msg);
-        }
-        return result;
-      },
-      return(value?: unknown) {
-        return originalIterator.return!(value);
-      },
-      throw(error?: unknown) {
-        return originalIterator.throw!(error);
-      },
+      yield terminalError(model, signal.aborted ? "aborted" : "error", signal.aborted ? "Execution cancelled" : "All model candidates failed");
     };
-
-    return {
-      [Symbol.asyncIterator]() {
-        return proxiedIterator;
-      },
-      async result(): Promise<AssistantMessage> {
-        if (terminalMessage) return terminalMessage;
-        return terminalPromise;
-      },
-    };
+    return wrapEventStream(outer(), () => assistantMessage(model, [], signal.aborted ? "aborted" : "error", signal.aborted ? "Execution cancelled" : "All model candidates failed"));
   };
-
-  return streamFn;
-}
-
-function isSemanticEvent(ev: unknown): boolean {
-  const event = ev as Record<string, unknown> | null;
-  if (!event || typeof event !== "object") return false;
-  if (event.type === "text_delta" && typeof event.delta === "string" && (event.delta as string).trim().length > 0) return true;
-  if (event.type === "thinking_delta") return true;
-  if (event.type === "toolcall_start" || event.type === "toolcall_end") return true;
-  if (event.type === "done" || event.type === "error") return true;
-  return false;
 }

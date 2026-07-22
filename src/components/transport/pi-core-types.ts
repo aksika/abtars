@@ -1,6 +1,27 @@
 import { logInfo } from "../logger.js";
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import type { PiModuleSpecifier, PiInstallation } from "../pi-installation.js";
+import type {
+  Agent as PublicPiAgent,
+  AgentEvent as PublicPiAgentEvent,
+  AgentMessage as PublicPiAgentMessage,
+  AgentOptions as PublicPiAgentOptions,
+  AgentLoopTurnUpdate as PublicAgentLoopTurnUpdate,
+  BeforeToolCallContext as PublicBeforeToolCallContext,
+  BeforeToolCallResult as PublicBeforeToolCallResult,
+  PrepareNextTurnContext as PublicPrepareNextTurnContext,
+} from "@earendil-works/pi-agent-core";
+import type {
+  AssistantMessage as PublicAssistantMessage,
+  AssistantMessageEvent as PublicAssistantMessageEvent,
+  AssistantMessageEventStream as PublicAssistantMessageEventStream,
+  Api,
+  ImageContent,
+  Message,
+  Model,
+  TextContent,
+  UserMessage,
+} from "@earendil-works/pi-ai";
 
 const TAG = "pi-core-types";
 
@@ -17,149 +38,41 @@ export class PiCoreContractError extends Error {
 
 export type ExecutionRoute = import("../transport-config.js").ExecutionRoute;
 
-// ── Real AgentOptions (from pi-agent-core Agent constructor) ──────────────────
-
-export interface AgentState {
-  systemPrompt?: string;
-  model: unknown;
-  messages: readonly AgentMessage[];
-  tools?: readonly unknown[];
-}
-
-export interface BeforeToolCallResult {
-  block?: boolean;
-  reason?: string;
-}
-
-export interface AgentToolResult {
-  label: string;
-  content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
-  details?: string;
-  isError?: boolean;
-}
-
-export interface BeforeToolCallContext {
-  toolCallId: string;
-  toolName: string;
-  args: Record<string, unknown>;
-}
-
-export interface PiAgentOptions {
-  initialState?: Partial<AgentState>;
-  streamFn?: StreamFn;
-  steeringMode?: "one-at-a-time" | "fifo" | "replace" | "parallel";
-  followUpMode?: "one-at-a-time" | "fifo" | "replace" | "parallel";
-  toolExecution?: "sequential" | "parallel";
-  convertToLlm?: (messages: readonly AgentMessage[]) => readonly unknown[] | Promise<readonly unknown[]>;
-  transformContext?: (messages: readonly AgentMessage[], signal?: AbortSignal) => Promise<readonly AgentMessage[]>;
-  beforeToolCall?: (toolCall: BeforeToolCallContext) => BeforeToolCallResult | undefined;
-  afterToolCall?: (result: unknown) => unknown;
-  prepareNextTurnWithContext?: (context: {
-    message?: AssistantMessage;
-    toolResults?: readonly { toolCallId: string; toolName: string; result?: string; isError?: boolean }[];
-    context?: unknown;
-    newMessages?: readonly AgentMessage[];
-  }) => unknown;
-}
-
-/** Real AgentLoopContext passed to beforeToolCall/afterToolCall hooks. */
-export interface PiAgentToolCallContext {
-  toolCallId: string;
-  toolName: string;
-  args: Record<string, unknown>;
-}
-
-// ── Real Agent contract ───────────────────────────────────────────────────────
-
-export interface PiAgent {
-  readonly isRunning: boolean;
-  subscribe(listener: PiAgentListener): () => void;
-  prompt(message: AgentMessage | readonly AgentMessage[]): Promise<void>;
-  steer(message: AgentMessage): void;
-  followUp(message: AgentMessage): void;
-  clearAllQueues(): void;
-  abort(): void;
-  waitForIdle(): Promise<void>;
-}
-
-export type PiAgentListener = (event: AgentEvent, signal?: AbortSignal) => Promise<void> | void;
-
-// ── Real AgentEvent union (from pi-agent-core) ────────────────────────────────
-
-export type AgentEvent =
-  | { type: "agent_start" }
-  | { type: "agent_end"; messages: readonly AgentMessage[] }
-  | { type: "turn_start" }
-  | { type: "turn_end" }
-  | { type: "message_start"; message: AgentMessage }
-  | { type: "message_update"; message: AssistantMessage; assistantMessageEvent: unknown }
-  | { type: "message_end"; message: AssistantMessage }
-  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: Record<string, unknown> }
-  | { type: "tool_execution_update"; toolCallId: string; toolName: string; args: Record<string, unknown> }
-  | { type: "tool_execution_end"; toolCallId: string; toolName: string; result?: string; isError?: boolean };
-
-export interface ToolCall {
-  id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-export interface AgentMessage {
-  role: string;
-  content: string;
-  timestamp?: number;
-}
-
-export interface AssistantMessage extends AgentMessage {
-  role: "assistant";
-  usage?: Usage;
-  stopReason?: string;
-  errorMessage?: string;
-}
-
-export interface Usage {
-  input: number;
-  output: number;
-  cacheRead?: number;
-  cacheWrite?: number;
-  totalTokens?: number;
-}
-
-// ── Real AssistantMessageEventStream (concrete class with .result()) ──────────
-
-export interface AssistantMessageEvent {
-  type: string;
-  delta?: string;
-  contentIndex?: number;
-  toolCall?: ToolCall;
-  message?: AssistantMessage;
-  reason?: string;
-  error?: string;
-}
-
-export interface AssistantMessageEventStream {
-  [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent>;
-  result(): Promise<AssistantMessage>;
-}
-
-export type SimpleStreamOptions = Record<string, unknown>;
-
-export type StreamFn = (
-  model: unknown,
-  context: unknown,
-  options: SimpleStreamOptions,
-) => AssistantMessageEventStream;
+// These aliases deliberately come from the public Pi packages. The runtime
+// loader remains installation-scoped, but the adapter must compile against the
+// exact Agent/Message/StreamFn contracts it will receive.
+export type AgentState = import("@earendil-works/pi-agent-core").AgentState;
+export type AgentContext = import("@earendil-works/pi-agent-core").AgentContext;
+export type BeforeToolCallResult = PublicBeforeToolCallResult;
+export type BeforeToolCallContext = PublicBeforeToolCallContext;
+export type AgentToolResult<T = unknown> = import("@earendil-works/pi-agent-core").AgentToolResult<T>;
+export type PiAgentOptions = PublicPiAgentOptions;
+export type PiAgent = PublicPiAgent;
+export type PiAgentListener = (event: AgentEvent, signal: AbortSignal) => Promise<void> | void;
+export type AgentEvent = PublicPiAgentEvent;
+export type AgentMessage = PublicPiAgentMessage;
+export type AssistantMessage = PublicAssistantMessage;
+export type AssistantMessageEvent = PublicAssistantMessageEvent;
+export type AssistantMessageEventStream = PublicAssistantMessageEventStream;
+export type SimpleStreamOptions = import("@earendil-works/pi-ai").SimpleStreamOptions;
+export type StreamFn = import("@earendil-works/pi-agent-core").StreamFn;
+export type AgentLoopTurnUpdate = PublicAgentLoopTurnUpdate;
+export type PrepareNextTurnContext = PublicPrepareNextTurnContext;
+export type Usage = PublicAssistantMessage["usage"];
+export type ModelApi = Model<Api>;
 
 // ── Pi module contract ────────────────────────────────────────────────────────
 
 export interface PiAgentCoreModule {
-  Agent: new (options: PiAgentOptions) => PiAgent;
+  Agent: new (options?: PiAgentOptions) => PiAgent;
 }
 
 // ── #1444: instruction messages ────────────────────────────────────────────────
 
-export interface AbtarsInstructionAgentMessage extends AgentMessage {
+export interface AbtarsInstructionAgentMessage {
   role: "abtars_instruction";
+  content: string;
+  timestamp?: number;
   leaseId: string;
   instructionIds: readonly string[];
   executionId: string;
@@ -168,14 +81,24 @@ export interface AbtarsInstructionAgentMessage extends AgentMessage {
 
 // ── #1446: current-turn marker ─────────────────────────────────────────────────
 
-export interface AbtarsCurrentTurnMessage extends AgentMessage {
+export interface AbtarsCurrentTurnMessage {
   role: "abtars_current_turn";
+  content: string | Array<TextContent | ImageContent>;
   executionId: string;
   sessionId: string;
   durableMessageId?: number;
   timestamp: number;
   imageContent?: Array<{ mime: string; base64: string }>;
 }
+
+declare module "@earendil-works/pi-agent-core" {
+  interface CustomAgentMessages {
+    abtars_instruction: AbtarsInstructionAgentMessage;
+    abtars_current_turn: AbtarsCurrentTurnMessage;
+  }
+}
+
+export type AbtarsAgentMessage = AgentMessage | AbtarsInstructionAgentMessage | AbtarsCurrentTurnMessage;
 
 // ── #1446: context projection source ───────────────────────────────────────────
 
@@ -223,40 +146,17 @@ export type TurnDecision =
   | { decision: "stop"; reason: string }
   | { decision: "pause" };
 
-export interface AgentLoopTurnUpdate {
-  model?: unknown;
-  context?: unknown;
-}
-
-export interface PrepareNextTurnContext {
+export interface SafetyPrepareNextTurnContext {
   roundsUsed: number;
   maxRounds: number;
   incident: unknown;
   candidateKey: string;
+  context?: AgentContext;
+  modelForCandidate?: (candidateKey: string) => ModelApi | undefined;
 }
 
 /** Wrapper for the real Pi prepareNextTurnWithContext callback argument. */
-export interface RealPrepareNextTurnContext {
-  message?: AssistantMessage;
-  toolResults?: readonly { toolCallId: string; toolName: string; result?: string; isError?: boolean }[];
-  context?: unknown;
-  newMessages?: readonly AgentMessage[];
-}
-
-// ── #1446: AgentTool shape ────────────────────────────────────────────────────
-
-export interface AgentTool {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-  execute(
-    toolCallId: string,
-    params: Record<string, unknown>,
-    signal?: AbortSignal,
-    onUpdate?: (event: unknown) => void,
-  ): Promise<AgentToolResult>;
-  executionMode?: "sequential" | "parallel";
-}
+export type AgentTool = import("@earendil-works/pi-agent-core").AgentTool;
 
 // ── Validation ─────────────────────────────────────────────────────────────────
 
@@ -271,6 +171,15 @@ export function validatePiAgentCoreModule(
   mod: unknown,
   version?: string,
 ): asserts mod is PiAgentCoreModule {
+  // The installed 0.80.7 executor stops its sequential loop after the active
+  // call observes abort and never emits terminal results for later calls. Do
+  // not report readiness until a public Pi release repairs that contract.
+  if (version === "0.80.7") {
+    throw new PiCoreContractError(
+      "pi-agent-core 0.80.7 is not ready for #1446: sequential cancellation omits terminal results for unstarted calls",
+      { installationVersion: version, missingCapability: "sequential-batch-cancellation" },
+    );
+  }
   if (!mod || typeof mod !== "object") {
     throw new PiCoreContractError("Loaded pi-agent-core module is not an object", { installationVersion: version });
   }
@@ -342,34 +251,46 @@ export async function loadAndValidatePiAgentCore(): Promise<LoadedPiAgentCore> {
 
 // ── Converters ─────────────────────────────────────────────────────────────────
 
-export function convertInstructionToLlm(message: AgentMessage): AgentMessage {
-  if (message.role !== "abtars_instruction") return message;
+export function convertInstructionToLlm(message: AbtarsAgentMessage): Message {
+  if (message.role !== "abtars_instruction") return message as Message;
   const inst = message as AbtarsInstructionAgentMessage;
   return {
     role: "user",
-    content: `${inst.content}\n[timestamp: ${inst.timestamp ?? Date.now()}]`,
-    timestamp: inst.timestamp,
-  };
+    content: inst.content,
+    timestamp: inst.timestamp ?? Date.now(),
+  } satisfies UserMessage;
 }
 
-export function convertCurrentTurnToLlm(message: AgentMessage): AgentMessage {
-  if (message.role !== "abtars_current_turn") return message;
+export function convertCurrentTurnToLlm(message: AbtarsAgentMessage): Message {
+  if (message.role !== "abtars_current_turn") return message as Message;
   const turn = message as AbtarsCurrentTurnMessage;
   if (turn.imageContent && turn.imageContent.length > 0) {
+    const text = typeof turn.content === "string" ? turn.content : "";
     return {
       role: "user",
-      content: JSON.stringify([
-        { type: "text", text: turn.content },
-        ...turn.imageContent.map((img) => ({ type: "image", data: img.base64, mimeType: img.mime })),
-      ]),
+      content: [
+        { type: "text" as const, text },
+        ...turn.imageContent.map((img) => ({ type: "image" as const, data: img.base64, mimeType: img.mime })),
+      ],
       timestamp: turn.timestamp,
-    } as AgentMessage;
+    } satisfies UserMessage;
   }
   return {
     role: "user",
-    content: turn.content,
+    content: typeof turn.content === "string" ? turn.content : turn.content,
     timestamp: turn.timestamp,
-  };
+  } satisfies UserMessage;
+}
+
+export function convertMessagesToLlm(messages: readonly AbtarsAgentMessage[]): Message[] {
+  return messages.flatMap((message) => {
+    if (message.role === "abtars_instruction") return [convertInstructionToLlm(message)];
+    if (message.role === "abtars_current_turn") return [convertCurrentTurnToLlm(message)];
+    if (message.role === "user" || message.role === "assistant" || message.role === "toolResult") {
+      return [message as Message];
+    }
+    return [];
+  });
 }
 
 export function createInstructionMessage(
@@ -391,10 +312,11 @@ export function createInstructionMessage(
 }
 
 export function createCurrentTurnMessage(
-  content: string,
+  content: string | Array<TextContent | ImageContent>,
   executionId: string,
   sessionId: string,
   durableMessageId?: number,
+  imageContent?: Array<{ mime: string; base64: string }>,
 ): AbtarsCurrentTurnMessage {
   return {
     role: "abtars_current_turn",
@@ -403,6 +325,7 @@ export function createCurrentTurnMessage(
     durableMessageId,
     content,
     timestamp: Date.now(),
+    imageContent,
   };
 }
 

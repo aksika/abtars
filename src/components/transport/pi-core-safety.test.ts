@@ -141,4 +141,20 @@ describe("createPiExecutionSafetyController", () => {
     ]);
     expect(scrubbed[0]?.content).toBe("ab is short");
   });
+
+  it("scrubs classified literals inside native Pi content blocks", () => {
+    const ctrl = createPiExecutionSafetyController(policy);
+    ctrl.recordClassifiedStoreLiteral("secret123");
+    const scrubbed = ctrl.scrubClassifiedLiterals([
+      {
+        role: "toolResult",
+        toolCallId: "call_1",
+        toolName: "memory_store",
+        content: [{ type: "text", text: "stored secret123" }],
+        isError: false,
+        timestamp: Date.now(),
+      },
+    ]);
+    expect((scrubbed[0] as { content: Array<{ text: string }> }).content[0]?.text).toBe("stored [REDACTED]");
+  });
 });

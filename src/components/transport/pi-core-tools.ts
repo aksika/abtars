@@ -14,28 +14,47 @@ export interface PiCoreToolContext {
   signal?: AbortSignal;
   sandboxPolicy: SandboxPolicy;
   safety: PiExecutionSafetyController;
+  onToolSuccess?: () => void;
   /** Wrap a JSON schema object as a Pi-compatible TypeScript schema (Type.Unsafe). */
   createUnsafeSchema?: (schema: Record<string, unknown>) => Record<string, unknown>;
 }
 
 function adaptParameters(params: Record<string, unknown>): Record<string, unknown> {
-  const allowed: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(params)) {
-    if (key === "type" || key === "properties" || key === "required" || key === "description" || key === "additionalProperties" || key === "items") {
-      allowed[key] = value;
-    } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-      const nested = adaptParameters(value as Record<string, unknown>);
-      if (Object.keys(nested).length > 0) allowed[key] = nested;
-    }
-  }
-  return allowed;
+  // Pi accepts a public TypeBox schema, but the registry already owns the
+  // complete JSON Schema. Preserve every keyword instead of maintaining a
+  // lossy whitelist that silently drops enum/oneOf/format constraints.
+  return structuredClone(params) as Record<string, unknown>;
 }
 
 function validatePiSchemaOrThrow(schema: Record<string, unknown>): void {
-  // Must be parseable as a valid JSON Schema — the registry definitions are
-  // trusted, so this is a sanity check that the schema can be represented as
-  // a Pi AgentTool parameter schema.
-  if (schema == null || typeof schema !== "object") throw new Error("Tool schema must be an object");
+  if (schema == null || typeof schema !== "object" || Array.isArray(schema)) throw new Error("schema_not_object");
+  if (schema.type !== undefined && typeof schema.type !== "string") throw new Error("schema_type_invalid");
+  if (schema.properties !== undefined && (typeof schema.properties !== "object" || schema.properties === null || Array.isArray(schema.properties))) {
+    throw new Error("schema_properties_invalid");
+  }
+  if (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.some((key) => typeof key !== "string"))) {
+    throw new Error("schema_required_invalid");
+  }
+  if (schema.items !== undefined && (typeof schema.items !== "object" || schema.items === null || Array.isArray(schema.items))) {
+    throw new Error("schema_items_invalid");
+  }
+  const properties = schema.properties as Record<string, unknown> | undefined;
+  if (properties) {
+    for (const child of Object.values(properties)) {
+      if (!child || typeof child !== "object" || Array.isArray(child)) throw new Error("schema_property_invalid");
+      validatePiSchemaOrThrow(child as Record<string, unknown>);
+    }
+  }
+  for (const keyword of ["oneOf", "anyOf", "allOf"] as const) {
+    const branches = schema[keyword];
+    if (branches !== undefined) {
+      if (!Array.isArray(branches)) throw new Error(`schema_${keyword}_invalid`);
+      for (const branch of branches) {
+        if (!branch || typeof branch !== "object" || Array.isArray(branch)) throw new Error(`schema_${keyword}_branch_invalid`);
+        validatePiSchemaOrThrow(branch as Record<string, unknown>);
+      }
+    }
+  }
 }
 
 function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext): AgentTool {
@@ -49,29 +68,27 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
   return {
     name: def.name,
     description: def.description,
-    parameters,
+    label: def.name,
+    parameters: parameters as import("typebox").TSchema,
     executionMode: "sequential",
 
     async execute(
       _toolCallId: string,
-      params: Record<string, unknown>,
+      rawParams: unknown,
       signal?: AbortSignal,
-    ): Promise<AgentToolResult> {
+    ): Promise<AgentToolResult<unknown>> {
+      const params = rawParams && typeof rawParams === "object" && !Array.isArray(rawParams)
+        ? rawParams as Record<string, unknown>
+        : {};
       const toolDecision = context.safety.beforeTool(def.name, params);
       if (toolDecision.decision === "skip") {
         return {
-          label: `${def.name} (skipped)`,
           content: [{ type: "text", text: "Tool call skipped — batch cancelled" }],
-          isError: false,
+          details: { skipped: true },
         };
       }
       if (toolDecision.decision === "error") {
-        context.safety.afterTool(def.name, JSON.stringify({ error: toolDecision.reason }));
-        return {
-          label: `${def.name} (blocked)`,
-          content: [{ type: "text", text: toolDecision.reason }],
-          isError: true,
-        };
+        throw new Error(toolDecision.reason);
       }
 
       // onToolStart fires from Pi lifecycle event (tool_execution_start), not from wrapper.
@@ -92,6 +109,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
         }
       }
 
+      let outcomeRecorded = false;
       try {
         const result = await executeToolCall(def.name, stringArgs, {
           userId: context.userId,
@@ -99,29 +117,38 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
           sandboxPolicy: context.sandboxPolicy,
         });
 
-        const outcome = context.safety.afterTool(def.name, result);
-        if (outcome.decision === "error") {
-          return {
-            label: `${def.name} (failure)`,
-            content: [{ type: "text", text: outcome.reason }],
-            isError: true,
-          };
+        if (def.name === "memory_store") {
+          try {
+            const parsed = JSON.parse(result) as { stored?: boolean };
+            const classification = Number(params["classification"] ?? params["class"] ?? 1);
+            if (parsed.stored === true && classification >= 2 && typeof params["translated"] === "string") {
+              context.safety.recordClassifiedStoreLiteral(params["translated"]);
+            }
+          } catch {
+            // Store results are still returned normally; only valid success
+            // envelopes can create a scrub literal.
+          }
         }
 
+        const outcome = context.safety.afterTool(def.name, result);
+        outcomeRecorded = true;
+        if (outcome.decision === "error") {
+          throw new Error(outcome.reason);
+        }
+
+        context.onToolSuccess?.();
+
         return {
-          label: def.name,
           content: [{ type: "text", text: result.slice(0, 2000) }],
-          isError: false,
+          details: { tool: def.name },
         };
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logError(TAG, `Tool ${def.name} execution error: ${msg}`);
-        context.safety.afterTool(def.name, JSON.stringify({ error: msg }));
-        return {
-          label: `${def.name} (error)`,
-          content: [{ type: "text", text: "Tool execution failed" }],
-          isError: true,
-        };
+        const errorClass = err instanceof Error ? err.name : "unknown";
+        logError(TAG, `Tool ${def.name} execution failed (${errorClass})`);
+        if (!outcomeRecorded) {
+          context.safety.afterTool(def.name, JSON.stringify({ error: errorClass }));
+        }
+        throw new Error("Tool execution failed");
       }
     },
   };

@@ -502,3 +502,42 @@ export async function* streamPiAiCompletion(
   const eventStream = provider.streamSimple(model, context, options);
   yield* translatePiAiEvents(eventStream, pi.isRetryableAssistantError.bind(pi));
 }
+
+/**
+ * Public Pi stream used by the pi-agent-core boundary. This deliberately
+ * returns pi-ai's native AssistantMessageEventStream; the legacy SSE adapter
+ * above remains only for the existing DirectApiTransport path.
+ */
+export async function createPiAiAssistantStream(
+  candidate: PiAiCandidate,
+  model: Model<Api>,
+  context: Context,
+  options: SimpleStreamOptions,
+  signal: AbortSignal,
+): Promise<import("@earendil-works/pi-ai").AssistantMessageEventStream> {
+  const api = pickPiApi(candidate.apiFormat);
+  const pi = await (defaultLoadPi)();
+  const apiMod = await defaultLoadApi(api);
+  const providerId = deriveProviderId(candidate.endpoint);
+  const provider = pi.createProvider({
+    id: providerId,
+    name: providerId,
+    baseUrl: candidate.endpoint,
+    auth: {
+      apiKey: {
+        name: `${providerId} API key`,
+        resolve: async () => candidate.apiKey
+          ? { auth: { apiKey: candidate.apiKey }, source: "abtars candidate" }
+          : undefined,
+      },
+    },
+    models: [model],
+    api: { stream: apiMod.stream, streamSimple: apiMod.streamSimple },
+  });
+  return provider.streamSimple(model, context, {
+    ...options,
+    apiKey: candidate.apiKey,
+    signal,
+    maxRetries: 0,
+  });
+}

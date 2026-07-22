@@ -1,13 +1,13 @@
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import type { PiAgent, PiAgentOptions, AgentEvent, AssistantMessage, StreamFn, AgentMessage, LoadedPiAgentCore } from "./pi-core-types.js";
-import { convertInstructionToLlm, convertCurrentTurnToLlm, createInstructionMessage, PI_AGENT_CORE_CONFIG } from "./pi-core-types.js";
-import type { ExecutionTelemetryScope } from "../execution-telemetry.js";
+import type { PiAgent, PiAgentOptions, AgentEvent, StreamFn, AgentMessage, LoadedPiAgentCore, ModelApi, BeforeToolCallContext, AgentLoopTurnUpdate } from "./pi-core-types.js";
+import { convertMessagesToLlm, createInstructionMessage, PI_AGENT_CORE_CONFIG } from "./pi-core-types.js";
 import type { InstructionLease, QueuedSessionInstruction } from "../spin-types.js";
 import { markDelivered, markConsumed, failAfterDelivery } from "../session-instruction-queue.js";
-import type { ManagedSession } from "../spin-types.js";
+import type { InstructionQueueHolder } from "../session-instruction-queue.js";
 import type { PiCoreContextProjection, TransformOptions } from "./pi-core-context.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
 import type { OutputObserver } from "../session-output-feed.js";
+import type { ExecutionTelemetryScope } from "../execution-telemetry.js";
 
 const TAG = "pi-core-host";
 
@@ -18,9 +18,9 @@ export interface PiCoreExecutionHostOptions {
   sessionId: string;
   initialState: {
     systemPrompt: string;
-    model: unknown;
-    messages: readonly AgentMessage[];
-    tools?: readonly unknown[];
+    model: ModelApi;
+    messages: AgentMessage[];
+    tools?: import("@earendil-works/pi-agent-core").AgentTool[];
   };
   streamFn: StreamFn;
   session?: { instructionQueue: QueuedSessionInstruction[]; id: string };
@@ -50,14 +50,12 @@ export class PiCoreExecutionHost {
   private idlePromise: Promise<void> | null = null;
   private outstandingLeases: Map<string, OutstandingLease> = new Map();
   private opts: PiCoreExecutionHostOptions;
-  private telemetry?: ExecutionTelemetryScope;
   private outputObserver?: OutputObserver;
 
   constructor(opts: PiCoreExecutionHostOptions) {
     this.executionId = opts.executionId;
     this.sessionId = opts.sessionId;
     this.opts = opts;
-    this.telemetry = opts.executionTelemetry;
     this.outputObserver = opts.outputObserver;
     logDebug(TAG, `Host created for execution ${this.executionId} (session ${this.sessionId})`);
   }
@@ -72,19 +70,16 @@ export class PiCoreExecutionHost {
       : this.opts.initialState.systemPrompt;
 
     // batch convertToLlm matching real Pi contract: (messages: AgentMessage[]) => Message[]
-    const convertToLlm = (messages: readonly AgentMessage[]): readonly AgentMessage[] => {
-      return messages.map((m) => {
-        if (m.role === "abtars_instruction") return convertInstructionToLlm(m);
-        if (m.role === "abtars_current_turn") return convertCurrentTurnToLlm(m);
-        return m;
-      });
+    const convertToLlm = (messages: AgentMessage[]): import("@earendil-works/pi-ai").Message[] => {
+      return convertMessagesToLlm(messages);
     };
 
-    const transformContext = async (messages: readonly AgentMessage[], signal?: AbortSignal): Promise<readonly AgentMessage[]> => {
-      if (!this.opts.contextProjection) return messages;
+    const transformContext = async (messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> => {
+      if (!this.opts.contextProjection) return [...messages];
 
       if (this.opts.safety && signal) {
-        const turnDecision = this.opts.safety.beginProviderTurn(this.executionId);
+        const candidateKey = this.opts.transformOptions?.candidateKeyFn?.() ?? this.executionId;
+        const turnDecision = this.opts.safety.beginProviderTurn(candidateKey);
         if (turnDecision.decision === "stop") {
           logDebug(TAG, `Provider turn stopped: ${turnDecision.reason}`);
         } else if (turnDecision.decision === "pause") {
@@ -93,25 +88,24 @@ export class PiCoreExecutionHost {
       }
 
       const cleanMessages = this.opts.safety
-        ? this.opts.safety.scrubClassifiedLiterals(messages as unknown as Array<{ role: string; content: string }>) as unknown as AgentMessage[]
+        ? this.opts.safety.scrubClassifiedLiterals(messages)
         : [...messages];
 
       const result = await this.opts.contextProjection.transform(cleanMessages, this.opts.transformOptions ?? { hostGeneration: 0 });
       if (this.outputObserver && result.contextDegraded) {
-        this.outputObserver.end?.("error");
+        this.notifyOutput(() => this.outputObserver?.end?.("error"));
       }
       return result.messages;
     };
 
-    // initialState.messages: seed ONLY the system prompt, NOT user messages.
-    // The current user turn is sent via prompt() below — seeding it in both
-    // places would duplicate the turn.
+    // Pi owns the system prompt separately. The current user turn and any
+    // execution-local suffix enter through prompt() exactly once.
     const agentOptions: PiAgentOptions = {
       initialState: {
         systemPrompt,
         model: this.opts.initialState.model,
-        messages: [{ role: "system", content: systemPrompt }],
-        tools: this.opts.initialState.tools,
+        messages: [],
+        tools: [...(this.opts.initialState.tools ?? [])],
       },
       streamFn: this.opts.streamFn,
       steeringMode: PI_AGENT_CORE_CONFIG.steeringMode,
@@ -119,23 +113,25 @@ export class PiCoreExecutionHost {
       toolExecution: PI_AGENT_CORE_CONFIG.toolExecution,
       convertToLlm,
       transformContext,
-      beforeToolCall: (_toolCall: import("./pi-core-types.js").BeforeToolCallContext): import("./pi-core-types.js").BeforeToolCallResult | undefined => {
+      beforeToolCall: async (_context: BeforeToolCallContext, signal?: AbortSignal) => {
+        if (signal?.aborted || this.opts.safety?.paused || this.opts.safety?.stopped) {
+          return { block: true, reason: signal?.aborted ? "Execution cancelled" : "Execution paused or stopped" };
+        }
         return undefined;
       },
-      afterToolCall: (result: unknown): unknown => result,
-      prepareNextTurnWithContext: (_ctx: unknown): unknown => {
-        if (!this.opts.safety) return _ctx;
-
-        // Derive candidate key from FallbackPolicy's last decision
+      afterToolCall: async () => undefined,
+      prepareNextTurnWithContext: async (ctx, signal): Promise<AgentLoopTurnUpdate | undefined> => {
+        if (!this.opts.safety) return undefined;
+        if (signal?.aborted) return undefined;
         const candidateKey = this.opts.transformOptions?.candidateKeyFn?.() ?? this.executionId;
-
-        const update = this.opts.safety.prepareNextTurn({
+        return this.opts.safety.prepareNextTurn({
           candidateKey,
           roundsUsed: this.opts.safety.promptRoundsUsed,
-          maxRounds: 25,
+          maxRounds: this.opts.safety.maxPromptRounds,
           incident: this.opts.safety.incident,
+          context: ctx.context,
+          modelForCandidate: this.opts.transformOptions?.candidateModelFn,
         });
-        return update ?? _ctx;
       },
     };
 
@@ -154,10 +150,8 @@ export class PiCoreExecutionHost {
     this.state = "running";
     this.settlementPromise = new Promise((resolve) => { this.settlementResolve = resolve; });
 
-    // Send the actual user messages via prompt(), not via initialState
-    const userMessages = this.opts.initialState.messages.filter(
-      (m) => m.role !== "system" || !m.content.includes(systemPrompt),
-    );
+    // Send the actual user/current-turn messages via prompt(), not via state.
+    const userMessages = [...this.opts.initialState.messages];
     if (userMessages.length > 0) {
       try {
         await this.agent.prompt(userMessages);
@@ -174,10 +168,10 @@ export class PiCoreExecutionHost {
 
   // Cross-instance executionId deduplication is a #1446/#1447 production concern.
 
-  private ensureSession(): ManagedSession | null {
+  private ensureSession(): InstructionQueueHolder | null {
     const s = this.opts.session;
     if (!s) return null;
-    return s as unknown as ManagedSession;
+    return s;
   }
 
   steer(content: string, lease: InstructionLease): void {
@@ -204,10 +198,12 @@ export class PiCoreExecutionHost {
     const session = this.ensureSession();
     if (session) markDelivered(lease);
     try {
-      this.agent?.steer(msg);
+      if (!this.agent) throw new Error("Cannot steer before Agent construction");
+      this.agent.steer(msg);
     } catch (err) {
       logWarn(TAG, `steer() threw before queue insertion: ${err instanceof Error ? err.message : String(err)}`);
       this.outstandingLeases.delete(lease.leaseId);
+      if (session) failAfterDelivery(lease, session, "steer_handoff_failed");
       throw err;
     }
   }
@@ -236,10 +232,12 @@ export class PiCoreExecutionHost {
     const session = this.ensureSession();
     if (session) markDelivered(lease);
     try {
-      this.agent?.followUp(msg);
+      if (!this.agent) throw new Error("Cannot followUp before Agent construction");
+      this.agent.followUp(msg);
     } catch (err) {
       logWarn(TAG, `followUp() threw before queue insertion: ${err instanceof Error ? err.message : String(err)}`);
       this.outstandingLeases.delete(lease.leaseId);
+      if (session) failAfterDelivery(lease, session, "followup_handoff_failed");
       throw err;
     }
   }
@@ -285,8 +283,6 @@ export class PiCoreExecutionHost {
     }
     this.outstandingLeases.clear();
 
-    this.telemetry?.close();
-
     this.idlePromise = this.waitForIdleCleanup();
 
     this.settlementResolve?.();
@@ -294,11 +290,11 @@ export class PiCoreExecutionHost {
 
     if (this.outputObserver) {
       if (reason === "cancelled") {
-        this.outputObserver.end?.("cancelled");
+        this.notifyOutput(() => this.outputObserver?.end?.("cancelled"));
       } else if (reason && reason !== "agent_end") {
-        this.outputObserver.end?.("error");
+        this.notifyOutput(() => this.outputObserver?.end?.("error"));
       } else {
-        this.outputObserver.end?.("complete");
+        this.notifyOutput(() => this.outputObserver?.end?.("complete"));
       }
     }
 
@@ -315,7 +311,7 @@ export class PiCoreExecutionHost {
   }
 
   private async handleEvent(event: AgentEvent, _signal?: AbortSignal): Promise<void> {
-    if (this.settled && event.type !== "agent_end") return;
+    if (this.settled) return;
 
     if (event.type === "message_end") {
       this.handleMessageEnd(event.message);
@@ -327,13 +323,13 @@ export class PiCoreExecutionHost {
     if (event.type === "message_update") {
       const streamEv = event.assistantMessageEvent as { type?: string; delta?: string } | null;
       if (streamEv?.type === "text_delta" && streamEv.delta) {
-        this.outputObserver?.onDelta?.({ kind: "text", text: streamEv.delta });
+        this.notifyOutput(() => this.outputObserver?.onDelta?.({ kind: "text", text: streamEv.delta as string }));
       }
       if (streamEv?.type === "thinking_delta" && streamEv.delta) {
-        this.outputObserver?.onDelta?.({ kind: "thinking", text: streamEv.delta });
+        this.notifyOutput(() => this.outputObserver?.onDelta?.({ kind: "thinking", text: streamEv.delta as string }));
       }
     } else if (event.type === "tool_execution_start") {
-      this.outputObserver?.onToolStart?.({ name: event.toolName });
+      this.notifyOutput(() => this.outputObserver?.onToolStart?.({ name: event.toolName }));
     }
 
     try {
@@ -343,33 +339,39 @@ export class PiCoreExecutionHost {
     }
   }
 
-  private handleMessageEnd(message: AssistantMessage): void {
-    if (!message.content) return;
-
-    // With one-at-a-time mode, at most one lease is outstanding.
-    // Match by insertion order (first outstanding lease = the instruction
-    // whose response this message_end corresponds to).
-    const firstLease = this.outstandingLeases.values().next().value;
-    if (!firstLease) return;
+  private handleMessageEnd(message: AgentMessage): void {
+    if (message.role !== "abtars_instruction") return;
+    const instruction = message;
+    const outstanding = this.outstandingLeases.get(instruction.leaseId);
+    if (!outstanding || instruction.executionId !== this.executionId || instruction.kind !== outstanding.kind) return;
+    const expectedIds = outstanding.instructions.map((item) => item.id);
+    if (expectedIds.length !== instruction.instructionIds.length || expectedIds.some((id) => !instruction.instructionIds.includes(id))) return;
 
     const session = this.ensureSession();
     if (session) {
       const lease: InstructionLease = {
-        leaseId: firstLease.leaseId,
+        leaseId: outstanding.leaseId,
         sessionId: this.sessionId,
         executionId: this.executionId,
-        kind: firstLease.kind,
-        instructions: firstLease.instructions as InstructionLease["instructions"],
+        kind: outstanding.kind,
+        instructions: outstanding.instructions as InstructionLease["instructions"],
       };
       markConsumed(lease, session);
     }
-    this.outstandingLeases.delete(firstLease.leaseId);
+    this.outstandingLeases.delete(outstanding.leaseId);
   }
 
-  private handleAgentEnd(event: { messages?: readonly AgentMessage[] } | { reason?: string }): void {
-    const reason = "reason" in event ? (event as { reason: string }).reason : "agent_end";
-    logInfo(TAG, `Agent ended: ${reason}`);
-    this.beginSettle(`agent_end: ${reason}`);
+  private handleAgentEnd(_event: Extract<AgentEvent, { type: "agent_end" }>): void {
+    logInfo(TAG, `Agent ended for execution ${this.executionId}`);
+    this.beginSettle("agent_end");
+  }
+
+  private notifyOutput(action: () => void): void {
+    try {
+      action();
+    } catch (err) {
+      logWarn(TAG, `Output observer failed (isolated): ${err instanceof Error ? err.name : "unknown"}`);
+    }
   }
 
   async waitForSettlement(): Promise<void> {
@@ -384,7 +386,7 @@ export class PiCoreExecutionHost {
   }
 
   get isRunning(): boolean {
-    return this.state === "running" && (this.agent?.isRunning ?? false);
+    return this.state === "running" && (this.agent?.state.isStreaming ?? false);
   }
 
   get isSettled(): boolean {

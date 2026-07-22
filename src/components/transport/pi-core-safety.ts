@@ -1,12 +1,27 @@
 import { logDebug, logWarn } from "../logger.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
-import type { ToolDecision, TurnDecision, PrepareNextTurnContext, AgentLoopTurnUpdate, AgentMessage } from "./pi-core-types.js";
+import type { AgentContext, AgentLoopTurnUpdate, AgentMessage, AbtarsAgentMessage, SafetyPrepareNextTurnContext, ModelApi, ToolDecision, TurnDecision } from "./pi-core-types.js";
 import { ToolLoopGuard } from "./tool-loop-guard.js";
 
 const TAG = "pi-core-safety";
 
 const MAX_PROMPT_ROUNDS = 25;
 const MAX_CANDIDATE_ROUNDS = 10;
+
+function redactValue(value: unknown, literals: readonly string[]): unknown {
+  if (typeof value === "string") {
+    let result = value;
+    for (const literal of literals) result = result.split(literal).join("[REDACTED]");
+    return result;
+  }
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, literals));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactValue(item, literals)]),
+    );
+  }
+  return value;
+}
 
 export type BehaviorIncidentType = "exact_repeat" | "repeated_failure" | "candidate_round_limit" | "prompt_round_limit";
 
@@ -19,15 +34,16 @@ export interface BehaviorIncident {
 
 export interface PiExecutionSafetyController {
   readonly promptRoundsUsed: number;
+  readonly maxPromptRounds: number;
   readonly activeCandidateKey: string;
   beforeTool(name: string, args: Record<string, unknown>): ToolDecision;
   afterTool(name: string, result: string): ToolDecision;
   beginProviderTurn(candidateKey: string): TurnDecision;
-  prepareNextTurn(context: PrepareNextTurnContext): AgentLoopTurnUpdate | undefined;
+  prepareNextTurn(context: SafetyPrepareNextTurnContext): AgentLoopTurnUpdate | undefined;
   requestPause(): void;
   requestStop(reason: string): void;
   recordClassifiedStoreLiteral(literal: string): void;
-  scrubClassifiedLiterals(messages: Array<{ role: string; content: string }>): Array<{ role: string; content: string }>;
+  scrubClassifiedLiterals(messages: AbtarsAgentMessage[]): AbtarsAgentMessage[];
   get incident(): BehaviorIncident | null;
   get paused(): boolean;
   get stopped(): boolean;
@@ -38,6 +54,7 @@ export function createPiExecutionSafetyController(
   options?: {
     maxPromptRounds?: number;
     maxCandidateRounds?: number;
+    modelForCandidate?: (candidateKey: string) => ModelApi | undefined;
   },
 ): PiExecutionSafetyController {
   let promptRounds = 0;
@@ -57,6 +74,7 @@ export function createPiExecutionSafetyController(
 
   return {
     get promptRoundsUsed() { return promptRounds; },
+    get maxPromptRounds() { return mp; },
     get activeCandidateKey() { return activeCandidate; },
     get incident() { return _incident; },
     get paused() { return _paused; },
@@ -123,18 +141,13 @@ export function createPiExecutionSafetyController(
       return { decision: "continue" };
     },
 
-    prepareNextTurn(context: PrepareNextTurnContext): AgentLoopTurnUpdate | undefined {
+    prepareNextTurn(context: SafetyPrepareNextTurnContext): AgentLoopTurnUpdate | undefined {
       if (_paused || _stopped || promptRounds >= mp) {
         return undefined;
       }
 
       // Default: no incident → allow next turn unchanged
-      if (!_incident) {
-        return {
-          model: { id: activeCandidate },
-          context: undefined,
-        };
-      }
+      if (!_incident) return undefined;
 
       const inc = _incident;
       _incident = null;
@@ -143,11 +156,8 @@ export function createPiExecutionSafetyController(
       // If context projection provides a safe baseline, use it to roll back
       // the failed tool exchange. This replaces the agent messages with the
       // last clean state before the incident happened.
-      const ctx = context as { context?: unknown };
-      const projectionCtx = ctx.context as { messages?: AgentMessage[] } | undefined;
-      if (projectionCtx?.messages) {
-        baseline = projectionCtx.messages;
-      }
+      const projectionCtx = context.context as AgentContext | undefined;
+      if (projectionCtx?.messages) baseline = projectionCtx.messages;
 
       if (inc.type === "exact_repeat" || inc.type === "repeated_failure") {
         const candidate = context.candidateKey;
@@ -166,9 +176,16 @@ export function createPiExecutionSafetyController(
       logDebug(TAG, `prepareNextTurn: switching to ${next.model} via ${next.provider}`);
 
       // Return clean baseline context if available
+      const model = context.modelForCandidate?.(`${next.model}@${next.endpoint}`);
+      if (!model) {
+        logWarn(TAG, `Candidate ${next.model} selected without a public Pi model; ending turn`);
+        return undefined;
+      }
       return {
-        model: { id: next.model, provider: next.provider, endpoint: next.endpoint, maxContext: next.maxContext },
-        context: baseline ? { messages: baseline } : undefined,
+        model,
+        context: projectionCtx && baseline
+          ? { ...projectionCtx, messages: baseline }
+          : undefined,
       };
     },
 
@@ -188,15 +205,13 @@ export function createPiExecutionSafetyController(
     },
 
     scrubClassifiedLiterals(
-      messages: Array<{ role: string; content: string }>,
-    ): Array<{ role: string; content: string }> {
+      messages: AbtarsAgentMessage[],
+    ): AbtarsAgentMessage[] {
       if (classifiedLiterals.size === 0) return messages;
+      const literals = [...classifiedLiterals];
       const result = messages.map((m) => {
-        let { content } = m;
-        for (const literal of classifiedLiterals) {
-          content = content.split(literal).join("[REDACTED]");
-        }
-        return { ...m, content };
+        if (!("content" in m)) return m;
+        return { ...m, content: redactValue(m.content, literals) } as AbtarsAgentMessage;
       });
       classifiedLiterals.clear();
       return result;
