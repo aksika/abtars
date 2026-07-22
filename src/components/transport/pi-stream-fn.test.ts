@@ -187,27 +187,4 @@ describe("createPiStreamFn", () => {
     expect((errorEv2?.error as Record<string, unknown> | undefined)?.stopReason).toBe("aborted");
   });
 
-  it("attempts emergency L0 when all candidates exhausted", async () => {
-    const emergency = makeCandidate({ model: "emergency-model", source: "emergency" });
-    const failPolicy = new FallbackPolicy([makeCandidate({ model: "fail-model" })], registry);
-
-    failPolicy.recordError(makeCandidate({ model: "fail-model" }), "auth");
-    failPolicy.excludedKeys.add("fail-model@https://api.test/v1");
-
-    const l0Factory = vi.fn().mockResolvedValue(makeFakeStream([
-      { type: "text_delta", contentIndex: 0, delta: "Emergency response" },
-      { type: "done", reason: "stop", message: { role: "assistant", content: "Emergency response", stopReason: "stop", usage: { input: 10, output: 5 } } },
-    ]));
-
-    const streamFn = createPiStreamFn({ policy: failPolicy, emergencyCandidate: emergency, createL0Attempt: l0Factory });
-    const ctx = { systemPrompt: "", messages: [{ role: "user", content: "help" }] };
-    const opts: SimpleStreamOptions = {};
-
-    const stream = streamFn({ id: "test" }, ctx, opts);
-    const events: any[] = [];
-    for await (const ev of stream) events.push(ev);
-
-    expect(l0Factory).toHaveBeenCalledTimes(1);
-    expect(events.some((e) => e.delta === "Emergency response")).toBe(true);
-  });
 });

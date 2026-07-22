@@ -136,7 +136,7 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
 
     const transport = new PiCoreTransport({
       role: "specialist",
-      systemPrompt: agent.provider.endpoint ?? "",
+      systemPrompt: `You are an abtars ${agentName} agent.`,
       candidates,
       healthRegistry: registry ?? new ModelHealthRegistry(),
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },

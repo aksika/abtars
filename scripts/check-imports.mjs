@@ -53,6 +53,8 @@ const PATTERNS = [
   { re: /ConversationSession/, label: "ConversationSession (deleted)" },
   // Legacy "direct-api" route — must not appear in production source
   { re: /"direct-api"/, label: '"direct-api" route (deleted)' },
+  // Emergency L0 — must not appear in production source
+  { re: /createL0Attempt|emergencyCandidate|defaultCreateL0Attempt/, label: "emergency L0 (deleted)" },
   // Runtime imports from abmind internals
   { re: /import\(["']abmind\//, label: "dynamic import from abmind/" },
 ];

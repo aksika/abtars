@@ -3,7 +3,7 @@
  * set (off|low|medium|high|xhigh).
  *
  * With PiCoreTransport, reasoning effort is configured through the Pi model
- * (StreamFn options), not via a ConversationSession. The command acknowledges
+ * (StreamFn options), not via a conversation session. The command acknowledges
  * the setting; the host translates it into the StreamFn reasoning options.
  */
 import { describe, it, expect, vi } from "vitest";
