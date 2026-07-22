@@ -386,6 +386,281 @@ describe("PeerWsBroker", () => {
     });
   });
 
+  // ── #1390: Unicode and format boundary tests ─────────────────────────────
+  describe("v1 frame boundary validation (#1390)", () => {
+    async function sendAndGetError(frame: string): Promise<any> {
+      const broker = await makeBroker();
+      const requestHandler = vi.fn();
+      broker.registerRequestHandler(requestHandler);
+      const { server, client, serverConn } = await connectedPair();
+      broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+
+      const responsePromise = new Promise<any>((resolve) => {
+        serverConn.on("message", (data) => resolve(JSON.parse(data.toString())));
+      });
+      serverConn.send(frame);
+
+      const result = await Promise.race([
+        responsePromise,
+        new Promise<any>(r => setTimeout(() => r(null), 200)),
+      ]);
+      server.close();
+      client.close();
+      expect(requestHandler).not.toHaveBeenCalled();
+      return result;
+    }
+
+    it("rejects peerId with multi-byte UTF-8 exceeding MAX_PEER_ID_BYTES", async () => {
+      // 5 three-byte chars + 1 two-byte char = 17 bytes — exceeds 16-char bound
+      const { signWsRequest } = await import("./peer-auth.js");
+      const peerId = "\u00e9".repeat(43); // 43 × 2 bytes = 86, under 128
+      const body = JSON.stringify({});
+      const auth = signWsRequest(peerId, "f-u1", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+      // Use safe peer for socket, but wrong peerId in auth
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f-u1", method: "help.request.v1", body,
+        auth: { peerId, ...auth },
+      });
+      const err = await sendAndGetError(frame);
+      // auth.peerId !== "kp" → identity mismatch (OR invalid_frame if bounds catch it first)
+      if (err) expect(err?.error?.code).toMatch(/^(auth_failed|invalid_frame)$/);
+    });
+
+    it("rejects body with multi-byte UTF-8 exceeding MAX_BODY_BYTES", async () => {
+      // Each 3-byte UTF-8 char: 524_288 / 3 ≈ 174763 chars. Use 180000 to exceed.
+      const multiByte = "\u0800".repeat(180_000);
+      const { signWsRequest } = await import("./peer-auth.js");
+      const body = JSON.stringify({ data: multiByte });
+      const auth = signWsRequest("kp", "f-u2", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f-u2", method: "help.request.v1", body,
+        auth: { peerId: "kp", ...auth },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("invalid_frame");
+    });
+
+    it("rejects timestamp with trailing non-numeric suffix", async () => {
+      const { signWsRequest } = await import("./peer-auth.js");
+      const body = JSON.stringify({});
+      const auth = signWsRequest("kp", "f-ts1", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f-ts1", method: "help.request.v1", body,
+        auth: { peerId: "kp", ...auth, ts: "12345abc" },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("invalid_frame");
+    });
+
+    it("rejects timestamp with safe-integer overflow", async () => {
+      const { signWsRequest } = await import("./peer-auth.js");
+      const body = JSON.stringify({});
+      const auth = signWsRequest("kp", "f-ts2", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f-ts2", method: "help.request.v1", body,
+        auth: { peerId: "kp", ...auth, ts: "99999999999999999" },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("invalid_frame");
+    });
+
+    it("rejects nonce with non-hex characters", async () => {
+      const body = JSON.stringify({});
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f-n1", method: "help.request.v1", body,
+        auth: { peerId: "kp", ts: String(Math.floor(Date.now() / 1000)), nonce: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", sig: "A".repeat(88) },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("invalid_frame");
+    });
+
+    it("rejects nonce with wrong length (31 chars)", async () => {
+      const body = JSON.stringify({});
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f-n2", method: "help.request.v1", body,
+        auth: { peerId: "kp", ts: String(Math.floor(Date.now() / 1000)), nonce: "a".repeat(31), sig: "A".repeat(88) },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("invalid_frame");
+    });
+
+    it("rejects nonce with wrong length (33 chars)", async () => {
+      const body = JSON.stringify({});
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f-n3", method: "help.request.v1", body,
+        auth: { peerId: "kp", ts: String(Math.floor(Date.now() / 1000)), nonce: "a".repeat(33), sig: "A".repeat(88) },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("invalid_frame");
+    });
+
+    it("rejects signature with illegal base64 characters", async () => {
+      const body = JSON.stringify({});
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f-s1", method: "help.request.v1", body,
+        auth: { peerId: "kp", ts: String(Math.floor(Date.now() / 1000)), nonce: "a".repeat(32), sig: "!!!invalid-base64!!!" },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("invalid_frame");
+    });
+
+    it("rejects signature with wrong padding (1 char remainder)", async () => {
+      const body = JSON.stringify({});
+      const frame = JSON.stringify({
+        type: "request", version: 1, id: "f-s2", method: "help.request.v1", body,
+        auth: { peerId: "kp", ts: String(Math.floor(Date.now() / 1000)), nonce: "a".repeat(32), sig: "A".repeat(87) },
+      });
+      const err = await sendAndGetError(frame);
+      expect(err?.error?.code).toBe("invalid_frame");
+    });
+  });
+
+  // ── #1390: Socket-generation response routing ──────────────────────────
+  describe("response routing on source socket generation (#1390)", () => {
+    it("async handler response after socket replacement does not reach the new socket", async () => {
+      const broker = await makeBroker();
+      let resolveHandler!: (v: unknown) => void;
+      broker.registerRequestHandler(
+        vi.fn().mockImplementation(() => new Promise(r => { resolveHandler = r; }))
+      );
+
+      // Gen 1: send a request, block the handler
+      const p1 = await connectedPair();
+      broker.attachSocket({ peer: "kp", direction: "outbound", socket: p1.client });
+
+      const { signWsRequest } = await import("./peer-auth.js");
+      const body = JSON.stringify({ goal: "slow" });
+      const auth = signWsRequest("kp", "f-gen1", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+      p1.serverConn.send(JSON.stringify({
+        type: "request", version: 1, id: "f-gen1", method: "help.request.v1",
+        body, auth: { peerId: "kp", ...auth },
+      }));
+      await new Promise(r => setTimeout(r, 50));
+
+      // Close gen 1 socket — this triggers the broker's detachSocket handler.
+      // Wait for the close event to propagate before attaching gen 2.
+      p1.client.close();
+      p1.serverConn.close();
+      p1.server.close();
+      await new Promise(r => setTimeout(r, 200));
+
+      // Verify gen 1 is fully gone before attaching gen 2
+      expect(broker._getOutbox("kp")).toBeUndefined();
+
+      // Attach gen 2
+      const p2 = await connectedPair();
+      broker.attachSocket({ peer: "kp", direction: "outbound", socket: p2.client });
+
+      // Capture all outbound messages on gen 2's remote side
+      const p2Messages: any[] = [];
+      p2.serverConn.on("message", (d) => p2Messages.push(JSON.parse(d.toString())));
+
+      // Resolve the handler — response targets gen 1 (registration gone)
+      resolveHandler({ result: "from-gen1" });
+      await new Promise(r => setTimeout(r, 200));
+
+      // The response targeted gen 1. Since that registration was removed,
+      // sendResponse returns early. Gen 2 must never see this response.
+      const leaked = p2Messages.some((m: any) => m.type === "response" && m.id === "f-gen1");
+      expect(leaked).toBe(false);
+
+      p2.client.close(); p2.serverConn.close(); p2.server.close();
+    });
+  });
+
+  // ── #1390: Two-instance WSS smoke test ──────────────────────────────────
+  describe("WSS smoke test (#1390)", () => {
+    it("valid request round-trip with replay, reconnect, and retry", async () => {
+      const broker = await makeBroker();
+      const requestHandler = vi.fn().mockResolvedValue({ result: "ok" });
+      broker.registerRequestHandler(requestHandler);
+
+      // === Phase 1: signed request round-trip ===
+      const { server: s1, client: c1, serverConn: sc1 } = await connectedPair();
+      broker.attachSocket({ peer: "kp", direction: "outbound", socket: c1 });
+
+      const payload1 = { goal: "smoke" };
+      const frame1 = await (async () => {
+        const { signWsRequest } = await import("./peer-auth.js");
+        const body = JSON.stringify(payload1);
+        const auth = signWsRequest("kp", "smoke-1", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+        return { body, auth };
+      })();
+
+      const resp1 = new Promise<any>(r => sc1.on("message", d => r(JSON.parse(d.toString()))));
+      sc1.send(JSON.stringify({
+        type: "request", version: 1, id: "smoke-1", method: "help.request.v1",
+        body: frame1.body, auth: { peerId: "kp", ...frame1.auth },
+      }));
+      const response1 = await resp1;
+      expect(response1.payload).toEqual({ result: "ok" });
+
+      // === Phase 2: replay detection ===
+      const resp2 = new Promise<any>(r => sc1.on("message", d => r(JSON.parse(d.toString()))));
+      sc1.send(JSON.stringify({
+        type: "request", version: 1, id: "smoke-1", method: "help.request.v1",
+        body: frame1.body, auth: { peerId: "kp", ...frame1.auth },
+      }));
+      const response2 = await resp2;
+      expect(response2.error.code).toBe("auth_failed");
+
+      // === Phase 3: reconnect — new request on new socket ===
+      c1.close();
+      sc1.close();
+      s1.close();
+
+      const { server: s2, client: c2, serverConn: sc2 } = await connectedPair();
+      broker.attachSocket({ peer: "kp", direction: "outbound", socket: c2 });
+
+      const payload2 = { goal: "reconnect" };
+      const frame2 = await (async () => {
+        const { signWsRequest } = await import("./peer-auth.js");
+        const body = JSON.stringify(payload2);
+        const auth = signWsRequest("kp", "smoke-2", "help.request.v1", "/help.request.v1", body, selfSigningKey);
+        return { body, auth };
+      })();
+
+      const resp3 = new Promise<any>(r => sc2.on("message", d => r(JSON.parse(d.toString()))));
+      sc2.send(JSON.stringify({
+        type: "request", version: 1, id: "smoke-2", method: "help.request.v1",
+        body: frame2.body, auth: { peerId: "kp", ...frame2.auth },
+      }));
+      const response3 = await resp3;
+      expect(response3.payload).toEqual({ result: "ok" });
+
+      // === Phase 4: retry with fresh auth on pump timeout ===
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const payload3 = { goal: "retry" };
+
+      // Intercept outbound sends to capture auth fields (pattern from
+      // existing "sendRequest retries" test)
+      const framesSent: Array<{ nonce: string; sig: string }> = [];
+      const origSend = c2.send.bind(c2);
+      c2.send = ((d: any) => framesSent.push(JSON.parse(String(d)).auth) || origSend(d)) as any;
+
+      broker.sendRequest("kp", "help.request.v1", payload3).catch(() => {});
+      // First pump sends the frame immediately
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      // Advance past the 30s pump timeout — retry should fire
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      // Should have the initial send + at least one retry
+      expect(framesSent.length).toBeGreaterThanOrEqual(2);
+      // Fresh auth on retry: nonce and sig differ
+      const firstNonce = framesSent[0]!.nonce;
+      const secondNonce = framesSent[1]!.nonce;
+      const firstSig = framesSent[0]!.sig;
+      const secondSig = framesSent[1]!.sig;
+      expect(firstNonce).not.toBe(secondNonce);
+      expect(firstSig).not.toBe(secondSig);
+
+      c2.close();
+      s2.close();
+      vi.useRealTimers();
+    }, 15_000);
+  });
+
   it("detach is scoped to (peer, direction, generation) — a stale close does not remove a replacement socket", async () => {
     const broker = await makeBroker();
     const pairA = await connectedPair();

@@ -72,7 +72,6 @@ interface PeerState {
   sockets: PeerSocketRegistration[];
   waiters: Map<string, PendingWaiter>;
   inFlight: InFlight | null;
-  nextGen: number;
   hasRoute: boolean; // tracks whether at least one OPEN socket existed
 }
 
@@ -84,6 +83,7 @@ export class PeerWsBroker {
   private pushHandler: PeerPushHandler | null = null;
   private routeListeners: RouteListener[] = [];
   private nonceStore: PeerNonceStore | null = null;
+  private nextGen = 1; // global monotonic — survives peer state cleanup
 
   registerRequestHandler(handler: PeerRequestHandler): void {
     this.requestHandler = handler;
@@ -125,13 +125,13 @@ export class PeerWsBroker {
         maxEntryBytes: OUTBOX_MAX_ENTRY_BYTES,
         maxFileBytes: OUTBOX_MAX_FILE_BYTES,
       });
-      state = { outbox, sockets: [], waiters: new Map(), inFlight: null, nextGen: 1, hasRoute: false };
+      state = { outbox, sockets: [], waiters: new Map(), inFlight: null, hasRoute: false };
       this.peers.set(peer, state);
     }
 
     const hadRoute = state.hasRoute;
 
-    const generation = state.nextGen++;
+    const generation = this.nextGen++;
     const reg: PeerSocketRegistration = {
       peer,
       direction,
