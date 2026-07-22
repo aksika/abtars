@@ -269,6 +269,7 @@ export interface SpinResult {
 /** #1361: Per-execution continuation-capable driver for Spin's execution loop. */
 export interface SpinExecutionDriver {
   send(prompt: string, image?: { mime: string; base64: string }, context?: import("./transport/kiro-transport.js").PromptRequestContext): Promise<string>;
+  steer?(content: string, lease: import("./spin-types.js").InstructionLease): Promise<string>;
   close(): Promise<void>;
   readonly ephemeral: boolean;
 }

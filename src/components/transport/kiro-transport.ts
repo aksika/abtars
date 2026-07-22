@@ -79,6 +79,12 @@ export interface IKiroTransport {
   /** Send Ctrl+C interrupt to the running Kiro CLI process. */
   sendInterrupt(reason?: string): Promise<void>;
 
+  /** Queue an instruction on the active Pi execution, when supported. */
+  steer?(content: string, lease: import("../spin-types.js").InstructionLease): Promise<string>;
+
+  /** Queue a follow-up on the active Pi execution, when supported. */
+  followUp?(content: string, lease: import("../spin-types.js").InstructionLease): Promise<string>;
+
   /** Clean up resources (kill processes, etc.) */
   destroy(): void;
 

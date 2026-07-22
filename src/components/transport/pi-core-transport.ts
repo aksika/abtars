@@ -1,6 +1,6 @@
 import { logDebug } from "../logger.js";
 import type { IKiroTransport, PromptRequestContext, RuntimeUsageSnapshot, RuntimeStatusSnapshot } from "./kiro-transport.js";
-import type { ModelCandidate } from "./model-candidates.js";
+import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
 import type { ModelHealthRegistry } from "./model-health-registry.js";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { PiCoreExecutionHost } from "./pi-core-host.js";
@@ -13,6 +13,9 @@ import type { SandboxPolicy } from "../tool-sandbox.js";
 import type { AgentMessage } from "./pi-core-types.js";
 import { createCurrentTurnMessage } from "./pi-core-types.js";
 import type { OutputObserver } from "../session-output-feed.js";
+import type { PiContextOrchestrator } from "./pi-core-context.js";
+import { buildPiModel, pickPiApi } from "./pi-ai-adapter.js";
+import { candidateKey } from "./model-candidates.js";
 
 const TAG = "pi-core-transport";
 
@@ -37,6 +40,9 @@ export interface PiCoreTransportOptions {
   healthRegistry: ModelHealthRegistry;
   sandboxPolicy: SandboxPolicy;
   session?: { instructionQueue: Array<import("../spin-types.js").QueuedSessionInstruction>; id: string };
+  contextOrchestrator?: PiContextOrchestrator;
+  maxPromptRounds?: number;
+  maxCandidateRounds?: number;
 }
 
 let executionSeq = 0;
@@ -47,18 +53,26 @@ export class PiCoreTransport implements IKiroTransport {
   private healthRegistry: ModelHealthRegistry;
   private sandboxPolicy: SandboxPolicy;
   private session?: PiCoreTransportOptions["session"];
+  private maxPromptRounds?: number;
+  private maxCandidateRounds?: number;
+  private maxToolRoundsOverride: number | null = null;
+  private timeoutOverrideMs: number | null = null;
   private activeHost: PiCoreExecutionHost | null = null;
   private _isReady = false;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
 
   /** Override the system prompt for subsequent calls. */
-  /** ContextOrchestrator for durable abmind projection. Set externally by the pipeline. */
-  contextOrchestrator?: {
-    getContext(sessionKey: string, maxTokens: number, opts: { beforeMessageId?: number }): Promise<{ messages: Array<{ role: string; content: string }> }>;
-  };
+  /** ContextOrchestrator for durable abmind projection. Set by boot composition. */
+  get contextOrchestrator(): PiContextOrchestrator | undefined { return this._contextOrchestrator; }
+  set contextOrchestrator(value: PiContextOrchestrator | undefined) { this._contextOrchestrator = value; }
+  private _contextOrchestrator?: PiContextOrchestrator;
   private _toolCallsSucceeded = 0;
   private _lastResponse = "";
   private _intermediateText = "";
+
+  /** Last candidate that produced semantic output; reused by specialists. */
+  lastSuccessfulCandidate: CandidateSpec | null = null;
+  onLastSuccessfulChanged?: (candidate: CandidateSpec) => void;
 
   onReady?: () => void;
   onIntermediateResponse?: (text: string) => void;
@@ -70,6 +84,9 @@ export class PiCoreTransport implements IKiroTransport {
     this.healthRegistry = opts.healthRegistry;
     this.sandboxPolicy = opts.sandboxPolicy;
     this.session = opts.session;
+    this._contextOrchestrator = opts.contextOrchestrator;
+    this.maxPromptRounds = opts.maxPromptRounds;
+    this.maxCandidateRounds = opts.maxCandidateRounds;
     this.policy = new FallbackPolicy(opts.candidates, opts.healthRegistry);
   }
 
@@ -93,6 +110,24 @@ export class PiCoreTransport implements IKiroTransport {
     this.policy = new FallbackPolicy(this.config.candidates, this.healthRegistry);
   }
 
+  setTimeoutOverride(ms: number | null): void { this.timeoutOverrideMs = ms; }
+
+  setMaxToolRoundsOverride(rounds: number | null): void { this.maxToolRoundsOverride = rounds; }
+
+  async steer(content: string, lease: import("../spin-types.js").InstructionLease): Promise<string> {
+    if (!this.activeHost) throw new Error("No active Pi execution to steer");
+    this.activeHost.steer(content, lease);
+    await this.activeHost.waitForSettlement();
+    return this._lastResponse;
+  }
+
+  async followUp(content: string, lease: import("../spin-types.js").InstructionLease): Promise<string> {
+    if (!this.activeHost) throw new Error("No active Pi execution for follow-up");
+    this.activeHost.followUp(content, lease);
+    await this.activeHost.waitForSettlement();
+    return this._lastResponse;
+  }
+
   async initialize(): Promise<void> {
     this._isReady = true;
     this.onReady?.();
@@ -112,7 +147,24 @@ export class PiCoreTransport implements IKiroTransport {
     // Use provided executionId or allocate a new one
     const executionId = context?.executionId ?? `${sessionKey}_${Date.now()}_${++executionSeq}`;
 
-    const safety = createPiExecutionSafetyController(this.policy);
+    const modelForCandidate = (key: string) => {
+      const candidate = this.config.candidates.find((item) => candidateKey(item.model, item.endpoint) === key);
+      if (!candidate) return undefined;
+      return buildPiModel({
+        model: candidate.model,
+        endpoint: candidate.endpoint,
+        apiKey: candidate.apiKey,
+        apiFormat: candidate.apiFormat,
+        thinking: candidate.thinking,
+        maxOutput: 4096,
+        contextWindow: candidate.maxContext,
+      }, pickPiApi(candidate.apiFormat), Boolean(image), candidate.provider);
+    };
+    const safety = createPiExecutionSafetyController(this.policy, {
+      maxPromptRounds: this.maxToolRoundsOverride ?? this.maxPromptRounds,
+      maxCandidateRounds: this.maxCandidateRounds,
+      modelForCandidate,
+    });
 
     // Build current-turn marker with image content
     const currentTurn = createCurrentTurnMessage(
@@ -139,24 +191,33 @@ export class PiCoreTransport implements IKiroTransport {
 
     // Build the Pi model
     const first = this.config.candidates[0];
-    const piModel = {
-      id: first?.model ?? "unknown",
-      name: first?.model ?? "unknown",
-      api: "openai-completions" as const,
-      provider: first?.provider ?? "unknown",
-      baseUrl: first?.endpoint ?? "",
-      reasoning: false,
-      input: (image ? ["text", "image"] : ["text"]) as Array<"text" | "image">,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: first?.maxContext ?? 128000,
-      maxTokens: 4096,
-    };
+    const piModel = first
+      ? buildPiModel({
+        model: first.model,
+        endpoint: first.endpoint,
+        apiKey: first.apiKey,
+        apiFormat: first.apiFormat,
+        thinking: first.thinking,
+        maxOutput: 4096,
+        contextWindow: first.maxContext,
+      }, pickPiApi(first.apiFormat), Boolean(image), first.provider)
+      : buildPiModel({ model: "unknown", endpoint: "", maxOutput: 4096, contextWindow: 128000 }, pickPiApi(), Boolean(image), "unknown");
 
     // Build StreamFn — no emergency L0, no legacy conversion
     const streamFn = createPiStreamFn({
       policy: this.policy,
       telemetry: context?.executionTelemetry,
       onCandidateCommitted: (candidate) => {
+        const successful: CandidateSpec = {
+          model: candidate.model,
+          provider: candidate.provider,
+          endpoint: candidate.endpoint,
+          maxContext: candidate.maxContext,
+          apiFormat: candidate.apiFormat,
+          thinking: candidate.thinking,
+        };
+        this.lastSuccessfulCandidate = successful;
+        this.onLastSuccessfulChanged?.(successful);
         logDebug(TAG, `Candidate committed: ${candidate.model}`);
       },
     });
@@ -203,9 +264,12 @@ export class PiCoreTransport implements IKiroTransport {
       transformOptions: {
         signal: undefined,
         hostGeneration: 0,
-        orchestrator: this.contextOrchestrator as {
-          getContext(s: string, m: number, o: { beforeMessageId?: number }): Promise<{ messages: Array<{ role: string; content: string }> }>;
-        } | undefined,
+        orchestrator: context?.orchestrator ?? this._contextOrchestrator,
+        candidateKeyFn: () => {
+          const candidate = this.policy.selectModel();
+          return candidate ? candidateKey(candidate.model, candidate.endpoint) : executionId;
+        },
+        candidateModelFn: modelForCandidate,
       },
       outputObserver,
       onEvent: (event) => {
@@ -235,6 +299,10 @@ export class PiCoreTransport implements IKiroTransport {
     });
 
     this.activeHost = host;
+    const timeout = this.timeoutOverrideMs;
+    const timeoutHandle = timeout && timeout > 0
+      ? setTimeout(() => host.cancel(), timeout)
+      : undefined;
 
     try {
       const { loadAndValidatePiAgentCore } = await import("./pi-core-types.js");
@@ -249,6 +317,7 @@ export class PiCoreTransport implements IKiroTransport {
 
       return responseText;
     } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
       if (this.activeHost === host) this.activeHost = null;
     }
   }

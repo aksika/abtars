@@ -93,6 +93,26 @@ describe("createPiStreamFn", () => {
     expect(events.some((e) => e.type === "text_delta")).toBe(true);
   });
 
+  it("preserves candidate API format and thinking metadata", async () => {
+    const candidate = makeCandidate({
+      apiFormat: "responses",
+      thinking: { style: "effort", default: "high" },
+    });
+    const metadataPolicy = new FallbackPolicy([candidate], registry);
+    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
+      { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
+    ]));
+
+    const stream = createPiStreamFn({ policy: metadataPolicy, createPiAiAttempt: attemptFactory })(
+      { id: "test" }, { messages: [] }, {},
+    );
+    for await (const _event of stream) { /* consume */ }
+
+    const model = attemptFactory.mock.calls[0]?.[1] as { api: string; reasoning: boolean };
+    expect(model.api).toBe("openai-responses");
+    expect(model.reasoning).toBe(true);
+  });
+
   it("falls back on setup failure before commit", async () => {
     const failCandidate = makeCandidate({ model: "fail", endpoint: "https://fail/v1" });
     const goodCandidate = makeCandidate({ model: "good", endpoint: "https://good/v1" });

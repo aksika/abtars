@@ -94,24 +94,9 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
       // onToolStart fires from Pi lifecycle event (tool_execution_start), not from wrapper.
       // Do not fire it here — prevents double-count.
 
-      const stringArgs: Record<string, string> = {};
-      for (const [k, v] of Object.entries(params)) {
-        if (typeof v === "string") {
-          stringArgs[k] = v;
-        } else if (typeof v === "number" || typeof v === "boolean") {
-          stringArgs[k] = String(v);
-        } else if (v === null) {
-          stringArgs[k] = "null";
-        } else if (v === undefined) {
-          stringArgs[k] = "";
-        } else {
-          stringArgs[k] = JSON.stringify(v);
-        }
-      }
-
       let outcomeRecorded = false;
       try {
-        const result = await executeToolCall(def.name, stringArgs, {
+        const result = await executeToolCall(def.name, params, {
           userId: context.userId,
           signal: signal ?? context.signal,
           sandboxPolicy: context.sandboxPolicy,

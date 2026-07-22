@@ -82,8 +82,17 @@ export class PiCoreExecutionHost {
         const turnDecision = this.opts.safety.beginProviderTurn(candidateKey);
         if (turnDecision.decision === "stop") {
           logDebug(TAG, `Provider turn stopped: ${turnDecision.reason}`);
+          // Candidate limits are handled by pi-stream-fn after the policy
+          // excludes that candidate. A prompt-wide stop must prevent the
+          // provider request from being issued at all.
+          if (turnDecision.reason?.startsWith("Prompt round limit") || this.opts.safety.stopped) {
+            this.opts.safety.requestStop(turnDecision.reason ?? "Provider turn stopped");
+            throw new Error(turnDecision.reason ?? "Provider turn stopped");
+          }
         } else if (turnDecision.decision === "pause") {
           logDebug(TAG, "Provider turn paused");
+          this.opts.safety.requestPause();
+          throw new Error("Provider turn paused");
         }
       }
 
@@ -91,7 +100,11 @@ export class PiCoreExecutionHost {
         ? this.opts.safety.scrubClassifiedLiterals(messages)
         : [...messages];
 
-      const result = await this.opts.contextProjection.transform(cleanMessages, this.opts.transformOptions ?? { hostGeneration: 0 });
+      const transformOptions: TransformOptions = {
+        ...(this.opts.transformOptions ?? { hostGeneration: 0 }),
+        signal: this.opts.transformOptions?.signal ?? signal,
+      };
+      const result = await this.opts.contextProjection.transform(cleanMessages, transformOptions);
       if (this.outputObserver && result.contextDegraded) {
         this.notifyOutput(() => this.outputObserver?.end?.("error"));
       }

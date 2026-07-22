@@ -104,7 +104,8 @@ async function defaultCreatePiAiAttempt(
     model: candidate.model,
     endpoint: candidate.endpoint,
     apiKey: candidate.apiKey,
-    apiFormat: candidate.endpoint.includes("anthropic") ? "anthropic" : undefined,
+    apiFormat: candidate.apiFormat,
+    thinking: candidate.thinking,
     maxOutput: model.maxTokens,
     contextWindow: model.contextWindow,
   };
@@ -181,7 +182,7 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           Array.isArray(message.content)
             && message.content.some((part) => part.type === "image"),
         );
-        const piModel = buildPiModel({ ...candidate, maxOutput: model.maxTokens }, pickPiApi(candidate.endpoint.includes("anthropic") ? "anthropic" : undefined), hasImage, candidate.provider);
+        const piModel = buildPiModel({ ...candidate, maxOutput: model.maxTokens }, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);
         let attemptCommitted = false;
         let telemetryEnded = false;
         const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage): void => {

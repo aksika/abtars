@@ -229,6 +229,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint ?? "http://localhost:11434/v1",
         apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
         maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
+        apiFormat: fbResolved?.provider.apiFormat,
+        thinking: fbResolved?.provider.thinking,
         source: "agent_fallback",
       };
     });
@@ -240,6 +242,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
         apiKey,
         maxContext: resolved.contextWindow,
+        apiFormat: resolved.provider.apiFormat,
+        thinking: resolved.provider.thinking,
         source: "primary",
       },
       fallbacks: fallbackCandidates,
@@ -264,6 +268,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       candidates,
       healthRegistry: ctx.modelHealthRegistry,
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      maxPromptRounds: tc?.maxToolRounds,
+      maxCandidateRounds: tc?.maxFallbackToolRounds,
     });
     logInfo("main", `🔌 PiCore transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {

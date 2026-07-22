@@ -103,12 +103,20 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
 
     const configured: ModelCandidate = {
       model: agent.model, provider: agent.providerName, endpoint: primaryEndpoint,
-      apiKey, maxContext: agent.contextWindow, source: "primary",
+      apiKey, maxContext: agent.contextWindow, apiFormat: agent.provider.apiFormat,
+      thinking: agent.provider.thinking, source: "primary",
     };
 
     const mainAgent = tc ? resolveAgent("main", tc) : null;
     const configuredMainSpec: CandidateSpec | null = mainAgent
-      ? { model: mainAgent.model, provider: mainAgent.providerName, endpoint: mainAgent.provider.endpoint ?? primaryEndpoint, maxContext: mainAgent.contextWindow }
+      ? {
+        model: mainAgent.model,
+        provider: mainAgent.providerName,
+        endpoint: mainAgent.provider.endpoint ?? primaryEndpoint,
+        maxContext: mainAgent.contextWindow,
+        apiFormat: mainAgent.provider.apiFormat,
+        thinking: mainAgent.provider.thinking,
+      }
       : null;
     const inheritedSpec = lastSuccessfulMain ?? configuredMainSpec;
     let inheritedCandidate: ModelCandidate | null = null;
@@ -117,7 +125,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       inheritedCandidate = {
         model: inheritedSpec.model, provider: inheritedSpec.provider, endpoint: inheritedSpec.endpoint,
         apiKey: inheritedProvider?.apiKeyEnv ? getEnv().getApiKey(inheritedProvider.apiKeyEnv) : apiKey,
-        maxContext: inheritedSpec.maxContext, source: "inherited_chain",
+        maxContext: inheritedSpec.maxContext, apiFormat: inheritedSpec.apiFormat,
+        thinking: inheritedSpec.thinking, source: "inherited_chain",
       };
     }
 
@@ -126,7 +135,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       return {
         model: fb.model, provider: fb.provider, endpoint: fbProvider?.endpoint ?? primaryEndpoint,
         apiKey: fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey,
-        maxContext: mainAgent?.contextWindow ?? agent.contextWindow, source: "agent_fallback",
+        maxContext: mainAgent?.contextWindow ?? agent.contextWindow, apiFormat: fbProvider?.apiFormat,
+        thinking: fbProvider?.thinking, source: "agent_fallback",
       };
     });
 
@@ -140,6 +150,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       candidates,
       healthRegistry: registry ?? new ModelHealthRegistry(),
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      maxPromptRounds: tc?.maxToolRounds,
+      maxCandidateRounds: tc?.maxFallbackToolRounds,
     });
     await transport.initialize();
     logInfo("subagent", `${role} transport: PiCore ${agent.providerName} (model=${agent.model}, ${candidates.length} candidates)`);
