@@ -29,7 +29,6 @@ export function resolveRuntimeStatus(
 
 export function formatRuntimeRoute(status: RuntimeStatusSnapshot): string {
   if (status.route === "pi-ai") return `pi-ai API / ${status.provider ?? "unknown"}`;
-  if (status.route === "direct-api") return `Direct API / ${status.provider ?? "unknown"}`;
   if (status.route === "acp") return "ACP";
   return "Unknown route";
 }

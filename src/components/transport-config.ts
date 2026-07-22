@@ -40,7 +40,7 @@ export type ModelEntry = {
 
 export type ModelCatalog = Record<string, ModelEntry>;
 
-export type ExecutionRoute = "pi-ai" | "direct-api" | "acp";
+export type ExecutionRoute = "pi-ai" | "acp";
 
 export type AgentAssignment = {
   model: string;
@@ -348,8 +348,7 @@ export function getEnvFallback(): EnvFallback {
 // ── Route classification (#1418) ─────────────────────────────────────────────
 
 export function providerSupportsRoute(provider: ProviderConfig, route: ExecutionRoute): boolean {
-  if (route === "pi-ai") return provider.transport === "api" && provider.useProviderLib === true;
-  if (route === "direct-api") return provider.transport === "api" && provider.useProviderLib !== true;
+  if (route === "pi-ai") return provider.transport === "api";
   if (route === "acp") return provider.transport === "acp";
   return false;
 }
@@ -362,7 +361,6 @@ export function inferRouteFromProvider(config: TransportConfig, providerName: st
   const provider = config.providers[providerName];
   if (!provider) return null;
   if (providerSupportsRoute(provider, "pi-ai")) return "pi-ai";
-  if (providerSupportsRoute(provider, "direct-api")) return "direct-api";
   if (providerSupportsRoute(provider, "acp")) return "acp";
   return null;
 }
@@ -643,7 +641,7 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): Tran
   }
   const p = join(configDir(), getEnv().transportConfig);
   // Ensure output has schemaVersion and route without mutating the input
-  const output = { ...tc, schemaVersion: 2, route: tc.route || ("direct-api" as ExecutionRoute) };
+  const output = { ...tc, schemaVersion: 2, route: tc.route || ("pi-ai" as ExecutionRoute) };
   // Save current as .old before overwriting (enables /model restore)
   // Only overwrite .old if it's >15min old — preserves last-known-good during rapid changes
   const oldPath = p.replace(".json", ".old.json");

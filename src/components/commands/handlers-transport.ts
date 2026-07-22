@@ -427,22 +427,22 @@ export async function handleRoute(args: string, ctx: CommandContext): Promise<bo
   const arg = args.replace(/^\/route\s*/i, "").trim().toLowerCase();
 
   if (!arg) {
-    const routeLabels: Record<string, string> = { "pi-ai": "pi-ai API", "direct-api": "Direct API", acp: "ACP" };
+    const routeLabels: Record<string, string> = { "pi-ai": "pi-ai API", acp: "ACP" };
     await ctx.reply(
       `Current route: **${routeLabels[tc.route] ?? tc.route}**\n\n` +
-      `Choose a route:\n${["pi-ai", "direct-api", "acp"].map(r => `• \`/route ${r}\` — ${routeLabels[r]}`).join("\n")}\n\n` +
+      `Choose a route:\n${["pi-ai", "acp"].map(r => `• \`/route ${r}\` — ${routeLabels[r]}`).join("\n")}\n\n` +
       `_Provider filter: ${providersForRoute(tc, tc.route).length} compatible providers_`
     );
     return true;
   }
 
-  const validRoutes = ["pi-ai", "direct-api", "acp"] as const;
+  const validRoutes = ["pi-ai", "acp"] as const;
   if (!validRoutes.includes(arg as any)) {
-    await ctx.reply(`❌ Unknown route "${arg}". Choose: pi-ai, direct-api, or acp.`);
+    await ctx.reply(`❌ Unknown route "${arg}". Choose: pi-ai or acp.`);
     return true;
   }
 
-  const newRoute = arg as "pi-ai" | "direct-api" | "acp";
+  const newRoute = arg as "pi-ai" | "acp";
 
   if (newRoute === tc.route) {
     await ctx.reply(`✓ Already on ${newRoute} route.`);
