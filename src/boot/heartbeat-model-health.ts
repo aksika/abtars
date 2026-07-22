@@ -14,15 +14,11 @@ export function createModelHealthTask(ctx: BootCtx): { task: HeartbeatTask; runN
   const execute = async (): Promise<void> => {
     if (done) return;
     done = true;
-    const { loadTransport, resolveAgent, consumeRepairs } = await import("../components/transport-config.js");
+    const { loadTransport, resolveAgent } = await import("../components/transport-config.js");
     const tc = loadTransport();
     if (!tc) return;
 
-    const repairs = consumeRepairs();
     const warnings: string[] = [];
-    if (repairs.length > 0) {
-      for (const r of repairs) warnings.push(`🔧 ${r.agent} auto-repaired: was ${r.oldProvider} — ${r.reason}`);
-    }
 
     const prof = resolveAgent("main", tc);
     if (!prof) return;
