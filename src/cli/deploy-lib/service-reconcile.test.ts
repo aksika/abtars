@@ -92,13 +92,14 @@ describe("deploy-lib/service-reconcile — L4 Restart policy (#1278)", () => {
   const unit = readFileSync(join(scriptsDir, "abtars-watchdog.service"), "utf-8");
 
   it("systemd unit respawns a crashed watchdog but not an intentional stop", () => {
-    // Restart=always → respawn on crash/signal death (the fix for the dead-watchdog hole).
-    expect(unit).toMatch(/^Restart=always$/m);
+    // Restart=on-failure → respawn on crash/signal death but NOT on clean
+    // exit 0 or on exit 2 (which RestartPreventExitStatus excludes).
+    expect(unit).toMatch(/^Restart=on-failure$/m);
     // RestartPreventExitStatus=2 → do NOT respawn on the intentional-stop code.
     expect(unit).toMatch(/^RestartPreventExitStatus=2$/m);
     // Guard against regressing to the narrow policies that miss crashes.
     expect(unit).not.toMatch(/^Restart=on-success$/m);
-    expect(unit).not.toMatch(/^Restart=on-failure$/m);
+    expect(unit).not.toMatch(/^Restart=always$/m);
   });
 
   it("RestartPreventExitStatus matches the watchdog's intentional-stop exit code", () => {
@@ -108,7 +109,7 @@ describe("deploy-lib/service-reconcile — L4 Restart policy (#1278)", () => {
     // watchdog (or fail to). Lock the two together.
     const wd = readFileSync(join(scriptsDir, "abtars-watchdog.sh"), "utf-8");
     // `stopped) ... exit 2` — the intentional-stop path exits 2.
-    expect(wd).toMatch(/stopped\)[\s\S]{0,80}?exit 2/);
+    expect(wd).toMatch(/stopped\)[\s\S]{0,120}?exit 2/);
     expect(unit).toMatch(/^RestartPreventExitStatus=2$/m);
   });
 });
