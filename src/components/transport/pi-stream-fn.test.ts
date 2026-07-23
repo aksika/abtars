@@ -304,12 +304,14 @@ describe("createPiStreamFn", () => {
   });
 
   it("does not add x-client-request-id for anthropic-messages candidates", async () => {
+    const anthropicCandidate = makeCandidate({ apiFormat: "anthropic" });
+    const anthropicPolicy = new FallbackPolicy([anthropicCandidate], registry);
     const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
       { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
     ]));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      policy: anthropicPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "gen-id",
     });
     const opts: SimpleStreamOptions = {};
@@ -317,7 +319,7 @@ describe("createPiStreamFn", () => {
       id: "claude", api: "anthropic-messages" as const,
     }, { messages: [] }, opts)) { /* consume */ }
 
-    const passedOptions = attemptFactory.mock.calls[0]?.[2] as SimpleStreamOptions;
+    const passedOptions = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
     expect(passedOptions?.headers?.["x-client-request-id"]).toBeUndefined();
   });
 
