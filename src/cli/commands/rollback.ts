@@ -5,6 +5,7 @@ import { hostname } from 'node:os';
 import { acquireLock, packagePaths, readManifest, writeManifest, emptyManifest } from '../deploy-lib-import.js';
 import { activateRelease } from '../deploy-lib/activate.js';
 import { publishCommand, resetRestartCount } from '../../supervisor/state.js';
+import { validateBridgePid } from '../../supervisor/identity.js';
 
 function resolveReleaseIdentity(releaseDir: string, target: string): { version: string; commit: string | null } {
   let version = target;
@@ -70,15 +71,25 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
       writeFileSync(statePath, JSON.stringify(state) + '\n');
     } catch {}
 
-    publishCommand(paths.home, "rollback", `rollback:${target}`);
+    const command = publishCommand(paths.home, "rollback", `rollback:${target}`);
+    if (command.result === "busy") {
+      process.stderr.write("Rollback activated, but another supervisor command is pending; bridge restart was not requested.\n");
+      return 1;
+    }
     resetRestartCount(paths.home, "rollback");
 
     try {
       const lock = JSON.parse(readFileSync(join(paths.home, 'bridge.lock'), 'utf-8'));
       const bridgePid = typeof lock.pid === "number" ? lock.pid : 0;
+      const bridgeIdentity = typeof lock.startIdentity === "string" ? lock.startIdentity : null;
       const wdPid = typeof lock.watchdogPid === "number" ? lock.watchdogPid : null;
-      if (bridgePid > 0) process.kill(bridgePid, 'SIGTERM');
-      if (wdPid && wdPid > 0) process.kill(wdPid, 'SIGUSR1');
+      const wdIdentity = typeof lock.watchdogStartIdentity === "string" ? lock.watchdogStartIdentity : null;
+      if (bridgePid > 0 && bridgeIdentity && validateBridgePid(bridgePid, bridgeIdentity, ['abtars.js', 'bundle']).safeToSignal) {
+        process.kill(bridgePid, 'SIGTERM');
+      }
+      if (wdPid && wdPid > 0 && wdIdentity && validateBridgePid(wdPid, wdIdentity, ['abtars-watchdog.sh']).safeToSignal) {
+        process.kill(wdPid, 'SIGUSR1');
+      }
     } catch {}
 
     process.stdout.write(`+ Bridge killed — WD will respawn from ${target}\n`);

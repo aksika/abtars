@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, mkdirSync, unlinkSync, existsSync, rmdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, mkdirSync, unlinkSync, existsSync, statSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -74,6 +74,10 @@ function readJsonSafe<T>(path: string): T | null {
   }
 }
 
+function readTextSafe(path: string): string | null {
+  try { return readFileSync(path, "utf-8"); } catch { return null; }
+}
+
 function writeAtomic(target: string, data: string): void {
   const tmp = target + ".tmp." + randomUUID().slice(0, 8);
   writeFileSync(tmp, data, "utf-8");
@@ -85,14 +89,38 @@ function writeAtomic(target: string, data: string): void {
 
 export function readSupervisorState(home: string): StateReadResult {
   const path = join(home, STATE_FILE);
-  const raw = readJsonSafe<Record<string, unknown>>(path);
-  if (raw === null) {
-    return { ok: false, reason: "missing" };
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+  } catch (err) {
+    return { ok: false, reason: (err as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "corrupt" };
   }
   if (typeof raw !== "object" || raw === null) {
     return { ok: false, reason: "corrupt" };
   }
-  if (raw.schemaVersion !== 1) {
+  const pending = raw.pendingCommand;
+  const nextCommandSeq = raw.nextCommandSeq;
+  const acknowledgedCommandSeq = raw.acknowledgedCommandSeq;
+  const restartCount = raw.restartCount;
+  const backoffAttempt = raw.backoffAttempt;
+  const pendingValid = pending === null || (
+    typeof pending === "object" && pending !== null &&
+    Number.isInteger((pending as Record<string, unknown>).seq) &&
+    typeof (pending as Record<string, unknown>).type === "string" &&
+    typeof (pending as Record<string, unknown>).reason === "string" &&
+    typeof (pending as Record<string, unknown>).createdAt === "string"
+  );
+  if (
+    raw.schemaVersion !== 1 ||
+    (raw.desiredState !== "running" && raw.desiredState !== "stopped") ||
+    typeof nextCommandSeq !== "number" || !Number.isInteger(nextCommandSeq) || nextCommandSeq < 1 ||
+    !pendingValid ||
+    typeof acknowledgedCommandSeq !== "number" || !Number.isInteger(acknowledgedCommandSeq) || acknowledgedCommandSeq < 0 ||
+    typeof restartCount !== "number" || !Number.isInteger(restartCount) || restartCount < 0 ||
+    typeof backoffAttempt !== "number" || !Number.isInteger(backoffAttempt) || backoffAttempt < 0 || backoffAttempt > 5 ||
+    !Array.isArray(raw.recentDeaths) || raw.recentDeaths.some((t) => typeof t !== "number" || !Number.isFinite(t)) ||
+    !(raw.lastDeathAt === null || typeof raw.lastDeathAt === "string")
+  ) {
     return { ok: false, reason: "invalid-schema" };
   }
   return { ok: true, state: raw as unknown as SupervisorState };
@@ -132,11 +160,25 @@ export function acquireStateLock(home: string, operation: string, timeoutMs: num
           const tombstone = lockPath + ".stale." + randomUUID().slice(0, 8);
           try {
             renameSync(lockPath, tombstone);
+            rmSync(tombstone, { recursive: true, force: true });
             continue;
           } catch {
             // Another contender renamed it — retry
           }
         }
+      } else {
+        // A process can die after mkdir and before publishing owner.json. Do
+        // not leave that empty lease blocking every future state operation.
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > 1000) {
+            const tombstone = lockPath + ".stale." + randomUUID().slice(0, 8);
+            try {
+              renameSync(lockPath, tombstone);
+              rmSync(tombstone, { recursive: true, force: true });
+              continue;
+            } catch { /* another contender won */ }
+          }
+        } catch { /* lock disappeared */ }
       }
       sleep(50);
     }
@@ -148,16 +190,15 @@ export function acquireStateLock(home: string, operation: string, timeoutMs: num
 function releaseStateLock(lockPath: string, token: string): void {
   const owner = readJsonSafe<LockOwner>(join(lockPath, "owner.json"));
   if (owner && owner.token === token) {
+    const releasedPath = lockPath + ".released." + randomUUID().slice(0, 8);
     try {
-      unlinkSync(join(lockPath, "owner.json"));
+      // Remove the whole lease atomically; never expose an empty canonical
+      // lock directory if this process dies during cleanup.
+      renameSync(lockPath, releasedPath);
     } catch {
-      // owner file already gone
+      return;
     }
-    try {
-      rmdirSync(lockPath);
-    } catch {
-      // directory locked by another thread or already removed
-    }
+    rmSync(releasedPath, { recursive: true, force: true });
   }
 }
 
@@ -178,6 +219,9 @@ function withStateLock<T>(home: string, operation: string, fn: (state: Superviso
   const lock = acquireStateLock(home, operation);
   try {
     const read = readSupervisorState(home);
+    if (!read.ok && read.reason !== "missing") {
+      throw new Error(`Cannot mutate ${operation}: supervisor.state is ${read.reason}`);
+    }
     const state = read.ok ? read.state : defaultState();
     const result = fn(state);
     writeAtomic(join(home, STATE_FILE), JSON.stringify(state, null, 2) + "\n");
@@ -190,7 +234,10 @@ function withStateLock<T>(home: string, operation: string, fn: (state: Superviso
 export function setDesiredState(home: string, desired: DesiredState): SupervisorState {
   return withStateLock(home, `setDesiredState:${desired}`, (state) => {
     state.desiredState = desired;
-    if (desired === "stopped" && state.pendingCommand && state.pendingCommand.type !== "stop") {
+    if (desired === "stopped") {
+      state.pendingCommand = null;
+    } else if (state.pendingCommand?.type === "stop") {
+      // Starting cancels a stop that was published but not yet applied.
       state.pendingCommand = null;
     }
     return state;
@@ -199,14 +246,16 @@ export function setDesiredState(home: string, desired: DesiredState): Supervisor
 
 export function publishCommand(home: string, type: string, reason: string): { result: CommandResult; state: SupervisorState } {
   return withStateLock(home, `publishCommand:${type}`, (state) => {
+    // Stop is represented by durable desiredState, not a command that can get
+    // stranded ahead of a future start.
+    if (type === "stop") {
+      state.desiredState = "stopped";
+      state.pendingCommand = null;
+      return { result: "created" as CommandResult, state };
+    }
     if (state.pendingCommand) {
       if (state.pendingCommand.type === type && state.pendingCommand.reason === reason) {
         return { result: "coalesced" as CommandResult, state };
-      }
-      if (type === "stop" && state.pendingCommand.type !== "stop") {
-        state.desiredState = "stopped";
-        state.pendingCommand = null;
-        return { result: "created" as CommandResult, state };
       }
       return { result: "busy" as CommandResult, state };
     }
@@ -306,7 +355,8 @@ export function migrateSupervisorState(home: string): MigrationResult {
       desiredState = "stopped";
     } else {
       const startReasonPath = join(home, ".start-reason");
-      const sr = readJsonSafe<string>(startReasonPath);
+      const rawReason = readTextSafe(startReasonPath)?.trim();
+      const sr = rawReason?.startsWith('"') ? readJsonSafe<string>(startReasonPath) : rawReason;
       if (sr === "stopped") {
         desiredState = "stopped";
       }

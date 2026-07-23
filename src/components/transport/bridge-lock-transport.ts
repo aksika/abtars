@@ -118,9 +118,15 @@ export function initBridgeLock(opts: { pid: number; startedAt: number; version: 
     }
     // Merge: preserve watchdogPid from watchdog or env var
     const wdPid = Number(process.env.ABTARS_WATCHDOG_PID) || existing.watchdogPid || null;
-    const instanceId = typeof existing.instanceId === "string" ? existing.instanceId : randomUUID();
+    const wdStartIdentity = typeof existing.watchdogStartIdentity === "string"
+      ? existing.watchdogStartIdentity
+      : (typeof wdPid === "number" && wdPid > 0 ? processStartIdentity(wdPid) : null);
+    // A bridge instance ID belongs to this process, not to the lock file. Never
+    // carry the previous bridge's ID across a respawn.
+    const instanceId = randomUUID();
     atomicWriteSync(p, JSON.stringify({
-      pid: opts.pid, watchdogPid: wdPid, startedAt: opts.startedAt, version: opts.version,
+      pid: opts.pid, watchdogPid: wdPid, watchdogStartIdentity: wdStartIdentity,
+      startedAt: opts.startedAt, version: opts.version,
       instanceId, startIdentity: processStartIdentity(opts.pid),
       sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(),
       startReason: opts.startReason ?? "unknown", bootType,

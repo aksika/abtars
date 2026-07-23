@@ -54,10 +54,7 @@ migrate_supervisor_state() {
 read_desired_state() { svc desired-state 2>/dev/null || echo "unavailable"; }
 
 handle_stopped() {
-  if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
-    kill "$PID" 2>/dev/null
-    wait "$PID" 2>/dev/null
-  fi
+  svc signal-bridge SIGTERM 2>/dev/null || true
   logw "Watchdog exit: desiredState=stopped"
   exit 2
 }
@@ -81,9 +78,7 @@ apply_command() {
     stop)
       # Stop dominates (R3.3): desiredState is already = stopped. Terminate the
       # validated bridge, THEN ack, THEN exit 2.
-      if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
-        kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
-      fi
+      svc signal-bridge SIGTERM 2>/dev/null || true
       svc ack-command "$seq" 2>/dev/null
       logw "Watchdog exit: command=stop"
       exit 2
@@ -92,9 +87,7 @@ apply_command() {
       # Planned bridge termination (R7.2 resets the rollback counter). Kill the
       # validated bridge, reset the counter, ack, then break to respawn from the
       # (possibly repointed) release. The watchdog stays in its loop.
-      if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
-        kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
-      fi
+      svc signal-bridge SIGTERM 2>/dev/null || true
       svc reset-restart-count "command:$type" 2>/dev/null
       svc ack-command "$seq" 2>/dev/null
       logw "Planned bridge restart: command=$type"
@@ -193,8 +186,10 @@ while true; do
       continue
     fi
 
-    # Bridge alive?
-    if ! kill -0 "$PID" 2>/dev/null; then
+    # Bridge alive and still the validated process? Never trust a cached PID:
+    # PID reuse must be classified before any signal is sent.
+    read -r _vstatus _vpid _vstarted <<< "$(svc validate-bridge 2>/dev/null)"
+    if [[ "$_vstatus" != "valid" || "$_vpid" != "$PID" ]]; then
       wait "$PID" 2>/dev/null   # reap the child
       # #1328: read the bridge's SELF-REPORTED exit code (lastExitCode), gated on
       # lastExitAt > SPAWNED_AT so a stale prior-death code is never reused.
@@ -221,8 +216,16 @@ except Exception:
     NOW=$(($(date +%s) * 1000))
     if [[ -n "$HB" ]] && (( (NOW - HB) / 1000 > STALE )); then
       DEATH_REASON="stale-heartbeat:$(( (NOW - HB) / 1000 ))s"
-      kill -9 "$PID" 2>/dev/null
+      svc signal-bridge SIGKILL 2>/dev/null || true
       break
+    fi
+
+    # Account for continuous health while it is actually observed. Without
+    # this call restartCount/backoff never decay after a successful recovery.
+    _health_now=$(date +%s)
+    if (( _health_now - ${LAST_HEALTH_ACCOUNT:-0} >= 60 )); then
+      svc record-healthy 2>/dev/null || true
+      LAST_HEALTH_ACCOUNT=$_health_now
     fi
 
     sleep "$POLL_INTERVAL"
@@ -245,10 +248,13 @@ except Exception:
   if [[ "$BACKOFF_MS" -gt 0 ]]; then
     BACKOFF_S=$(( BACKOFF_MS / 1000 ))
     # Bounded poll during backoff — check state every 5s (R3.5).
-    for ((i=0; i<BACKOFF_S; i+=POLL_INTERVAL)); do
+    _remaining=$BACKOFF_S
+    while (( _remaining > 0 )); do
       poll_state
       [[ "$PLANNED_RESTART" -eq 1 ]] && break
-      sleep "$POLL_INTERVAL"
+      _slice=$(( _remaining < POLL_INTERVAL ? _remaining : POLL_INTERVAL ))
+      sleep "$_slice"
+      _remaining=$(( _remaining - _slice ))
     done
   fi
 

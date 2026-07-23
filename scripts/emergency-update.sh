@@ -83,16 +83,37 @@ node -e '
 
 # Stop only the bridge. The watchdog itself is replaced by launchd/systemd and
 # will start/adopt one bridge from the newly activated release.
-BRIDGE_PID="$(node -e '
-  try { const l = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (l.pid) process.stdout.write(String(l.pid)); } catch {}
-' "$HOME_DIR/bridge.lock")"
+signal_bridge() {
+  node -e '
+  const fs = require("node:fs");
+  try {
+    const l = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const pid = typeof l.pid === "number" ? l.pid : 0;
+    const expected = typeof l.startIdentity === "string" ? l.startIdentity : "";
+    let identity = `${pid}:0`;
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      identity = `${pid}:${stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]}`;
+      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      if (!cmdline.includes("abtars.js") && !cmdline.includes("bundle")) process.exit(0);
+    } catch {
+      if (process.platform !== "darwin") process.exit(0);
+    }
+    if (pid > 0 && expected === identity) {
+      process.kill(pid, process.argv[2]);
+      process.stdout.write(String(pid));
+    }
+  } catch {}
+' "$HOME_DIR/bridge.lock" "$1"
+}
+
+BRIDGE_PID="$(signal_bridge SIGTERM)"
 if [[ "$BRIDGE_PID" =~ ^[1-9][0-9]*$ ]]; then
-  kill "$BRIDGE_PID" 2>/dev/null || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     kill -0 "$BRIDGE_PID" 2>/dev/null || break
     sleep 0.5
   done
-  kill -9 "$BRIDGE_PID" 2>/dev/null || true
+  signal_bridge SIGKILL >/dev/null || true
 fi
 
 if [[ "$(uname)" == "Darwin" ]]; then

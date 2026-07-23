@@ -12,6 +12,7 @@ import { execSync, spawnSync } from "node:child_process";
 import { acquireLock, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
 import { activateRelease } from "./activate.js";
 import { publishCommand, setDesiredState, resetRestartCount, migrateSupervisorState } from "../../supervisor/state.js";
+import { readBridgeLock, validateBridgePid } from "../../supervisor/identity.js";
 
 import { makeLocalBuildSource } from "../update-sources/dev.js";
 import { makeNpmSource } from "../update-sources/npm.js";
@@ -50,10 +51,6 @@ export function runLaunchctlBootstrap(
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
-}
-
-function readJsonField(file: string, field: string): unknown {
-  try { return JSON.parse(readFileSync(file, "utf-8"))[field]; } catch { return undefined; }
 }
 
 /**
@@ -197,9 +194,9 @@ export async function deployActivationCli(flags: ReadonlyMap<string, string | bo
  * The stop/respawn sequence (Step 7/8) is FROZEN (abtars.md watchdog) — moved
  * verbatim from the previous monolithic deploy().
  *
- * BASH MIRROR: scripts/emergency-update.sh reimplements this activation in pure
- * shell as the zero-dependency last resort (no deployed binary needed). If this
- * stop/respawn sequence or the release path layout changes, update it too.
+ * Emergency fallback: scripts/emergency-update.sh is intentionally a small,
+ * independent recovery path. It does not mirror this state machine or invoke
+ * deployed code.
  */
 export async function deployActivation(
   args: { staged: StagedRelease; channel: SourceName; repoRoot: string },
@@ -308,8 +305,10 @@ export async function deployActivation(
       // No systemctl stop, no watchdog kill, and NO supervisor state update
       // command — that would make the live watchdog exit for a systemd restart
       // that tears down (and SIGTERMs) our own cgroup.
-      const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
-      if (bridgePid && bridgePid > 0) {
+      const bridgeLock = readBridgeLock(join(paths.home, "bridge.lock"));
+      const bridgePid = bridgeLock && typeof bridgeLock.pid === "number" ? bridgeLock.pid : undefined;
+      const bridgeIdentity = bridgeLock && typeof bridgeLock.startIdentity === "string" ? bridgeLock.startIdentity : null;
+      if (bridgePid && bridgePid > 0 && bridgeIdentity && validateBridgePid(bridgePid, bridgeIdentity, ["abtars.js", "bundle"]).safeToSignal) {
         try { process.kill(bridgePid, "SIGTERM"); } catch {}
         process.stdout.write(`  x Killing bridge (PID ${bridgePid}) — L3 watchdog will respawn from new release...\n`);
         for (let i = 0; i < 10; i++) {
@@ -320,6 +319,13 @@ export async function deployActivation(
     } else {
       // Out-of-cgroup (macOS, or manual `abtars update --dev` from a login
       // shell): full stop sequence — safe here, and refreshes the watchdog.
+      // Reserve the durable command before unloading anything. A busy command
+      // must leave the existing supervisor untouched.
+      const updateCommand = publishCommand(paths.home, "update", `update:${staged.version}`);
+      if (updateCommand.result === "busy") {
+        process.stderr.write("x deploy blocked: another supervisor command is pending\n");
+        return 1;
+      }
       // 7.1 Stop daemon service (tells WD to exit via service manager)
       if (process.platform === "darwin") {
         const uid = `gui/${process.getuid?.() ?? 501}`;
@@ -328,22 +334,32 @@ export async function deployActivation(
         try { execSync("systemctl --user stop abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
       }
 
-      // 7.2 Publish update command via supervisor state + wake watchdog
-      publishCommand(paths.home, "update", `update:${staged.version}`);
+      // 7.2 Wake the old watchdog; the durable command remains in state for the
+      // replacement watchdog if this process also refreshes the service.
       try {
-        const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
-        if (wdPid && wdPid > 0) process.kill(wdPid, "SIGUSR1");
+        const lock = readBridgeLock(join(paths.home, "bridge.lock"));
+        const wdPid = lock && typeof lock.watchdogPid === "number" ? lock.watchdogPid : null;
+        const wdIdentity = lock && typeof lock.watchdogStartIdentity === "string" ? lock.watchdogStartIdentity : null;
+        if (wdPid && wdPid > 0 && wdIdentity && validateBridgePid(wdPid, wdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
+          process.kill(wdPid, "SIGUSR1");
+        }
       } catch {}
 
       // 7.3 Kill WD PID explicitly (belt)
-      const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
+      const wdLock = readBridgeLock(join(paths.home, "bridge.lock"));
+      const wdPid = wdLock && typeof wdLock.watchdogPid === "number" ? wdLock.watchdogPid : undefined;
+      const wdIdentity = wdLock && typeof wdLock.watchdogStartIdentity === "string" ? wdLock.watchdogStartIdentity : null;
       if (wdPid && wdPid > 0) {
-        try { process.kill(wdPid, "SIGTERM"); } catch {}
+        if (wdIdentity && validateBridgePid(wdPid, wdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
+          try { process.kill(wdPid, "SIGTERM"); } catch {}
+        }
       }
 
       // 7.4 Kill bridge PID
-      const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
-      if (bridgePid && bridgePid > 0) {
+      const bridgeLock = readBridgeLock(join(paths.home, "bridge.lock"));
+      const bridgePid = bridgeLock && typeof bridgeLock.pid === "number" ? bridgeLock.pid : undefined;
+      const bridgeIdentity = bridgeLock && typeof bridgeLock.startIdentity === "string" ? bridgeLock.startIdentity : null;
+      if (bridgePid && bridgePid > 0 && bridgeIdentity && validateBridgePid(bridgePid, bridgeIdentity, ["abtars.js", "bundle"]).safeToSignal) {
         try { process.kill(bridgePid, "SIGTERM"); } catch {}
         process.stdout.write(`  x Killing bridge (PID ${bridgePid})...\n`);
         for (let i = 0; i < 10; i++) {
@@ -359,7 +375,15 @@ export async function deployActivation(
           try { process.kill(wdPid, 0); wdAlive = true; } catch { wdAlive = false; break; }
           await new Promise(r => setTimeout(r, 500));
         }
-        if (wdAlive) { try { process.kill(wdPid, "SIGKILL"); } catch {} }
+        if (wdAlive) {
+          const currentWd = readBridgeLock(join(paths.home, "bridge.lock"));
+          const currentWdPid = currentWd && typeof currentWd.watchdogPid === "number" ? currentWd.watchdogPid : null;
+          const currentWdIdentity = currentWd && typeof currentWd.watchdogStartIdentity === "string" ? currentWd.watchdogStartIdentity : null;
+          if (currentWdPid === wdPid && currentWdIdentity &&
+              validateBridgePid(wdPid, currentWdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
+            try { process.kill(wdPid, "SIGKILL"); } catch {}
+          }
+        }
       }
     }
   }
@@ -374,13 +398,8 @@ export async function deployActivation(
       // new app/ symlink after the process-gone kill above.
       process.stdout.write(`  Bridge killed — L3 watchdog respawning from new release\n`);
     } else {
-      // 8.1 Publish deploy-respawn command — new WD will acknowledge and restart
-      publishCommand(paths.home, "update", "deploy-respawn");
-      try {
-        const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
-        if (wdPid && wdPid > 0) process.kill(wdPid, "SIGUSR1");
-      } catch {}
-      // 8.2 Restart daemon service
+      // 8.1 Restart daemon service. The pending update command survives the
+      // watchdog handoff; publishing a second unlike command would be rejected.
       if (process.platform === "darwin") {
         const plistPath = join(homedir(), "Library/LaunchAgents/com.abtars.watchdog.plist");
         const uid = `gui/${process.getuid?.() ?? 501}`;
@@ -392,7 +411,6 @@ export async function deployActivation(
           return 1;
         }
       } else {
-        try { execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 }); } catch {}
         try { execSync("systemctl --user unmask abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
         try { execSync("systemctl --user enable abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
         try { execSync("systemctl --user start abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}

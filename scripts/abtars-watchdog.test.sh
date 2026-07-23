@@ -191,16 +191,16 @@ rm -f "$FAKE_STATE"
 
 # Test 10: Failsafe A (no-heartbeat-ever) logic must still be present, unmodified in intent —
 # regression guard per the frozen-watchdog rule ("a regression test asserts L2 still exits on
-# stale elapsed"). This checks the STALE heartbeat check + kill -9 path still exist.
+# stale elapsed"). This checks the STALE heartbeat check + validated SIGKILL path still exists.
 if ! grep -q 'stale-heartbeat:' "$WD_SH"; then
   echo "FAIL: stale-heartbeat detection removed — regresses L2/L3 staleness contract"
   exit 1
 fi
-if ! grep -q 'kill -9 "\$PID"' "$WD_SH"; then
-  echo "FAIL: stale-heartbeat kill -9 removed — regresses L2/L3 staleness contract"
+if ! grep -q 'signal-bridge SIGKILL' "$WD_SH"; then
+  echo "FAIL: stale-heartbeat validated SIGKILL removed — regresses L2/L3 staleness contract"
   exit 1
 fi
-echo "OK: stale-heartbeat detection + kill -9 path intact (frozen-watchdog regression guard)"
+echo "OK: stale-heartbeat detection + validated SIGKILL path intact (frozen-watchdog regression guard)"
 
 echo "ALL TESTS PASSED"
 exit 0

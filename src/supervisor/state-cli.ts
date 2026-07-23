@@ -14,7 +14,7 @@ import {
   migrateSupervisorState,
   getBackoffDelayMs,
 } from "./state.js";
-import { validateBridgeLock } from "./identity.js";
+import { validateBridgeLock, signalValidatedBridge, processStartIdentity } from "./identity.js";
 import { atomicWriteSync } from "../components/atomic-write.js";
 
 const home = process.env.ABTARS_HOME ?? resolve(homedir(), ".abtars");
@@ -180,9 +180,25 @@ function main(): void {
       process.exit(Exit.Ok);
     }
 
+    case "signal-bridge": {
+      const signal = process.argv[3] as NodeJS.Signals | undefined;
+      if (signal !== "SIGTERM" && signal !== "SIGKILL" && signal !== "SIGINT") {
+        process.stderr.write("Usage: supervisor-state signal-bridge <SIGTERM|SIGKILL|SIGINT>\n");
+        process.exit(Exit.Usage);
+      }
+      try {
+        const result = signalValidatedBridge(join(home, "bridge.lock"), signal);
+        process.stdout.write(result.status + "\n");
+        process.exit(Exit.Ok);
+      } catch (err) {
+        process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+        process.exit(Exit.Error);
+      }
+    }
+
     default:
       process.stderr.write(`Unknown command: ${cmd}\n`);
-      process.stderr.write("Available: read, desired-state, is-stopped, set-desired-state, publish-command, claim-command, ack-command, record-death, record-healthy, reset-restart-count, get-backoff, migrate, validate-bridge, set-watchdog-pid\n");
+      process.stderr.write("Available: read, desired-state, is-stopped, set-desired-state, publish-command, claim-command, ack-command, record-death, record-healthy, reset-restart-count, get-backoff, migrate, validate-bridge, set-watchdog-pid, signal-bridge\n");
       process.exit(Exit.Usage);
   }
 }
@@ -192,6 +208,7 @@ function setBridgeWatchdogPid(home: string, pid: number): void {
   let lock: Record<string, unknown> = {};
   try { lock = JSON.parse(readFileSync(p, "utf-8")); } catch { /* missing — seed */ }
   lock["watchdogPid"] = pid;
+  lock["watchdogStartIdentity"] = processStartIdentity(pid);
   atomicWriteSync(p, JSON.stringify(lock));
 }
 

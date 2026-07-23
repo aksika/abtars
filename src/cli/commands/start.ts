@@ -5,10 +5,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { setDesiredState, migrateSupervisorState } from "../../supervisor/state.js";
-
-function pidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
+import { readBridgeLock, validateBridgeLock } from "../../supervisor/identity.js";
 
 function readJsonField(file: string, field: string): unknown {
   try { return JSON.parse(readFileSync(file, "utf-8"))[field]; } catch { return undefined; }
@@ -40,8 +37,9 @@ export async function start(): Promise<number> {
 
   if (existsSync(lockFile)) {
     try {
-      const lock = JSON.parse(readFileSync(lockFile, "utf-8"));
-      if (lock.pid && pidAlive(lock.pid)) {
+      const lock = readBridgeLock(lockFile);
+      const result = validateBridgeLock(lock, ["abtars.js", "bundle"]);
+      if (result.safeToAdopt && lock && typeof lock.pid === "number") {
         process.stdout.write(`Bridge already running (pid ${lock.pid}).\n`);
         return 0;
       }

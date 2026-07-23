@@ -17,12 +17,13 @@ function readJsonField(file: string, field: string): unknown {
 
 type KillResult = "killed" | "forced" | "gone" | "stale" | "not-running";
 
-async function killGracefully(pid: number, needles: readonly string[]): Promise<KillResult> {
-  const result = validateBridgePid(pid, null, needles);
+async function killGracefully(pid: number, expectedIdentity: string | null, needles: readonly string[]): Promise<KillResult> {
+  const result = validateBridgePid(pid, expectedIdentity, needles);
   if (!result.safeToSignal) {
     if (result.status === "dead") return "not-running";
     return "stale";
   }
+  if (expectedIdentity === null) return "stale";
 
   try { process.kill(pid, "SIGTERM"); } catch { return "not-running"; }
 
@@ -31,7 +32,9 @@ async function killGracefully(pid: number, needles: readonly string[]): Promise<
     if (!isPidAlive(pid)) return "killed";
   }
 
-  try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+  if (validateBridgePid(pid, expectedIdentity, needles).safeToSignal) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+  }
   await new Promise(r => setTimeout(r, 500));
   return isPidAlive(pid) ? "not-running" : "forced";
 }
@@ -45,7 +48,8 @@ function sigusrWatchdog(home: string): void {
   try {
     const lock = JSON.parse(readFileSync(join(home, "bridge.lock"), "utf-8"));
     const wdPid = typeof lock.watchdogPid === "number" ? lock.watchdogPid : null;
-    if (wdPid && wdPid > 0) {
+    const wdIdentity = typeof lock.watchdogStartIdentity === "string" ? lock.watchdogStartIdentity : null;
+    if (wdPid && wdPid > 0 && wdIdentity && validateBridgePid(wdPid, wdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
       process.kill(wdPid, "SIGUSR1");
     }
   } catch { /* lock missing — ok */ }
@@ -78,19 +82,21 @@ export async function stop(_opts: {}): Promise<number> {
   }
 
   const wdPid = readJsonField(bridgeLock, "watchdogPid") as number | undefined;
+  const wdIdentity = readJsonField(bridgeLock, "watchdogStartIdentity") as string | undefined;
   let wdResult: KillResult = "not-running";
   let wdPidActual: number | undefined;
   if (wdPid && wdPid > 0) {
     wdPidActual = wdPid;
-    wdResult = await killGracefully(wdPid, ["abtars-watchdog.sh"]);
+    wdResult = await killGracefully(wdPid, wdIdentity ?? null, ["abtars-watchdog.sh"]);
   }
 
   const brPid = readJsonField(bridgeLock, "pid") as number | undefined;
+  const brIdentity = readJsonField(bridgeLock, "startIdentity") as string | undefined;
   let brResult: KillResult = "not-running";
   let brPidActual: number | undefined;
   if (brPid && brPid > 0) {
     brPidActual = brPid;
-    brResult = await killGracefully(brPid, ["abtars.js", "bundle"]);
+    brResult = await killGracefully(brPid, brIdentity ?? null, ["abtars.js", "bundle"]);
     if (brResult === "killed" || brResult === "forced") {
       removeLock(bridgeLock);
     } else if (brResult === "stale") {

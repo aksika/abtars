@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, mkdirSync, unlinkSync, rmdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, mkdirSync, statSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { processStartIdentity, isPidAlive } from "../../supervisor/identity.js";
@@ -53,8 +53,9 @@ function releaseLockDirectory(lockDir: string, token: string): void {
   const ownerPath = lockDir + "/" + LOCK_OWNER_FILE;
   const owner = readJsonSafe<LockContent>(ownerPath);
   if (owner && owner.token === token) {
-    try { unlinkSync(ownerPath); } catch { /* ok */ }
-    try { rmdirSync(lockDir); } catch { /* ok */ }
+    const releasedPath = lockDir + ".released." + randomUUID().slice(0, 8);
+    try { renameSync(lockDir, releasedPath); } catch { return; }
+    rmSync(releasedPath, { recursive: true, force: true });
   }
 }
 
@@ -109,6 +110,13 @@ export async function acquireLock(path: string, cmd: string): Promise<() => Prom
             // Another contender renamed it
           }
         }
+      } else {
+        try {
+          if (Date.now() - statSync(lockDir).mtimeMs > 1000) {
+            const tombstone = lockDir + ".stale." + randomUUID().slice(0, 8);
+            try { renameSync(lockDir, tombstone); rmSync(tombstone, { recursive: true, force: true }); continue; } catch { /* contender won */ }
+          }
+        } catch { /* lock disappeared */ }
       }
       if (attempt < 50) {
         await new Promise((r) => setTimeout(r, 50));

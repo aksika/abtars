@@ -80,5 +80,26 @@ export function validateBridgeLock(
     return { status: "corrupt", safeToSignal: false, safeToAdopt: false };
   }
   const startIdentity = typeof lock.startIdentity === "string" ? lock.startIdentity : null;
+  if (startIdentity === null || (process.platform !== "darwin" && startIdentity.endsWith(":0"))) {
+    return { status: "corrupt", safeToSignal: false, safeToAdopt: false };
+  }
   return validateBridgePid(pid, startIdentity, needles);
+}
+
+export function readBridgeLock(lockPath: string): Record<string, unknown> | null {
+  try { return JSON.parse(readFileSync(lockPath, "utf-8")) as Record<string, unknown>; }
+  catch { return null; }
+}
+
+/** Validate immediately before signalling; callers must not signal cached PIDs. */
+export function signalValidatedBridge(
+  lockPath: string,
+  signal: NodeJS.Signals,
+  needles: readonly string[] = ["abtars.js", "bundle"],
+): ValidationResult {
+  const lock = readBridgeLock(lockPath);
+  const result = validateBridgeLock(lock, needles);
+  if (!result.safeToSignal || !lock || typeof lock.pid !== "number") return result;
+  process.kill(lock.pid, signal);
+  return result;
 }

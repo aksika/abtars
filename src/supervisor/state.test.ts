@@ -58,7 +58,7 @@ describe("readSupervisorState", () => {
     writeFileSync(stateFilePath(home), "not-json", "utf-8");
     const r = readSupervisorState(home);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toBe("missing");
+    if (!r.ok) expect(r.reason).toBe("corrupt");
   });
 
   it("returns invalid-schema for unknown schema version", () => {
@@ -127,12 +127,19 @@ describe("publishCommand", () => {
   it("stop command sets desiredState to stopped", () => {
     const { state } = publishCommand(home, "stop", "user-stop");
     expect(state.desiredState).toBe("stopped");
+    expect(state.pendingCommand).toBeNull();
   });
 
-  it("rejects stop-dominance check when stop is already pending", () => {
+  it("start clears an unprocessed stop so stop then start is recoverable", () => {
     publishCommand(home, "stop", "user-stop");
-    const { result } = publishCommand(home, "restart", "user-restart");
-    expect(result).toBe("busy");
+    const state = setDesiredState(home, "running");
+    expect(state.desiredState).toBe("running");
+    expect(state.pendingCommand).toBeNull();
+  });
+
+  it("does not strand a pending stop command", () => {
+    publishCommand(home, "stop", "user-stop");
+    expect(readState().pendingCommand).toBeNull();
   });
 });
 
@@ -317,7 +324,7 @@ describe("migrateSupervisorState", () => {
   });
 
   it("migrates desiredState=stopped from .start-reason=stopped", () => {
-    writeFileSync(join(home, ".start-reason"), JSON.stringify("stopped"), "utf-8");
+    writeFileSync(join(home, ".start-reason"), "stopped\n", "utf-8");
     const result = migrateSupervisorState(home);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.migrated).toBe(true);
