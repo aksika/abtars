@@ -4,6 +4,8 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { processStartIdentity, isPidAlive } from "./identity.js";
 
+const COMMAND_STALE_MS = 5 * 60_000;
+
 export type DesiredState = "running" | "stopped";
 
 export interface SupervisorState {
@@ -257,7 +259,12 @@ export function publishCommand(home: string, type: string, reason: string): { re
       if (state.pendingCommand.type === type && state.pendingCommand.reason === reason) {
         return { result: "coalesced" as CommandResult, state };
       }
-      return { result: "busy" as CommandResult, state };
+      const age = Date.now() - new Date(state.pendingCommand.createdAt).getTime();
+      if (age > COMMAND_STALE_MS) {
+        state.pendingCommand = null;
+      } else {
+        return { result: "busy" as CommandResult, state };
+      }
     }
     const seq = state.nextCommandSeq;
     state.nextCommandSeq = seq + 1;
