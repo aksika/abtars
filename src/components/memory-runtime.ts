@@ -138,15 +138,11 @@ function normalizeRecordMessageResult(value: unknown): RecordMessageResult {
     const id = (value as Record<string, unknown>).id;
     if (id === null) return { id: null };
     if (typeof id === "number" && Number.isSafeInteger(id) && id > 0) return { id };
-    if (id !== undefined) {
-      logWarn("memory-runtime", `recordMessage: unexpected id type (${typeof id}), falling back to null`);
-    }
-    return { id: null };
   }
   if (value === null) {
     return { id: null };
   }
-  logWarn("memory-runtime", `recordMessage: unexpected response type (${typeof value}), falling back to null`);
+  logWarn("memory-runtime", "recordMessage: malformed non-null response, falling back to null");
   return { id: null };
 }
 
