@@ -145,9 +145,9 @@ Always works — `app.prev/` is a full copy of the previous working version. No 
 If the deployed CLI is in a state where it cannot run the update flow at all
 — typically `abtars: no release staged. Run 'abtars install' first.` from the
 wrapper, with a dead bridge the watchdog cannot respawn — use
-`scripts/emergency-update.sh`. It is a manual mirror of the `deploy.ts`
-activation flow that uses plain `npm` + `esbuild` and direct
-launchctl/systemd calls. No working deployed binary is required.
+`scripts/emergency-update.sh`. It is a small standalone fallback that uses only
+plain `npm`/`node`, filesystem operations, and direct launchctl/systemd calls.
+It does not invoke any abtars CLI or supervisor-state helper.
 
 ```bash
 bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
@@ -155,12 +155,9 @@ bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
 
 Source HEAD determines the deployed version. Pull or check out the commit you
 want first if needed. The script updates `manifest.json`, `history.json`, and
-the `app@` / `current@` symlinks, then restarts the watchdog. A 60-attempt
-health probe confirms the new bridge is alive.
-
-This script must stay in sync with `src/cli/deploy-lib/deploy.ts`. If the
-activation flow changes (path layout, stop/respawn sequence), update both. See
-the script's header comment for the full mirror contract.
+the canonical `app -> current -> release` symlinks, then restarts the watchdog
+and verifies that the OS service is active. It intentionally does not mirror the
+normal deploy state machine; keep it limited to this recovery path.
 
 ## Doctor on every boot
 

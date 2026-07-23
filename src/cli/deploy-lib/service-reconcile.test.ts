@@ -67,7 +67,7 @@ describe("deploy-lib/service-reconcile — mirror invariant (Test B)", () => {
 
   it("emergency-update.sh writes the plist BEFORE it bootstraps (macOS)", () => {
     const writeIdx = lines.findIndex(
-      (l) => l.includes("com.abtars.watchdog.plist") && l.includes('> "$PLIST"'),
+      (l) => l.includes('> "$tmp_plist"'),
     );
     const bootstrapIdx = lines.findIndex((l) => l.includes("launchctl bootstrap"));
     expect(writeIdx, "no line renders the plist to $PLIST").toBeGreaterThanOrEqual(0);
@@ -78,10 +78,9 @@ describe("deploy-lib/service-reconcile — mirror invariant (Test B)", () => {
   it("emergency-update.sh installs the systemd unit BEFORE it starts (Linux)", () => {
     const writeIdx = lines.findIndex(
       (l) =>
-        l.includes("abtars-watchdog.service") &&
-        l.includes("systemd/user"),
+        l.includes('cp "$SRC_DIR/scripts/abtars-watchdog.service" "$UNIT"'),
     );
-    const startIdx = lines.findIndex((l) => l.includes("systemctl --user start abtars-watchdog"));
+    const startIdx = lines.findIndex((l) => l.includes("systemctl --user restart") || l.includes("systemctl --user start"));
     expect(writeIdx, "no line installs the systemd unit").toBeGreaterThanOrEqual(0);
     expect(startIdx, "no systemctl start found").toBeGreaterThanOrEqual(0);
     expect(writeIdx).toBeLessThan(startIdx);
@@ -129,28 +128,28 @@ describe("deploy-lib/service-reconcile — emergency-update watchdog-liveness ve
   const lines = script.split("\n");
 
   it("verifies the watchdog is alive after respawn, before exiting", () => {
-    // Must check actual liveness (watchdogPid + is-active/launchctl print), not just
-    // that a restart command returned. This is the fix for the silent-swallowed-restart
-    // outage — the old code masked the restart with `|| true` and never verified.
-    expect(script).toContain("watchdogPid");
+    // Must check actual service liveness, not bridge.lock or a deployed helper.
+    // This fallback must remain independent of every abtars CLI.
     expect(script).toMatch(/is-active|launchctl print/);
+    expect(script).not.toContain("SUPERVISOR_CLI");
+    expect(script).not.toMatch(/\bsvc\s*\(/);
   });
 
   it("loud-fails (exit 1) when the watchdog does not come up", () => {
     // A dead watchdog after a deploy must be a hard error with a recovery hint,
     // not a swallowed no-op.
-    const verifyIdx = lines.findIndex((l) => l.includes("verifying watchdog is alive"));
+    const verifyIdx = lines.findIndex((l) => l.includes("is-active --quiet"));
     const loudFailIdx = lines.findIndex(
-      (l) => l.includes("NO supervisor") || (l.includes("watchdog did NOT come up")),
+      (l) => l.includes("watchdog is not active"),
     );
     expect(verifyIdx, "no watchdog-liveness verify step").toBeGreaterThanOrEqual(0);
     expect(loudFailIdx, "no loud-fail on dead watchdog").toBeGreaterThanOrEqual(0);
     // The loud-fail branch must contain an explicit non-zero exit.
-    const failBlock = script.slice(script.indexOf("did NOT come up"));
+    const failBlock = script.slice(script.indexOf("watchdog is not active"));
     expect(failBlock).toMatch(/exit 1/);
   });
 
   it("uses atomic systemctl restart, not the old silent stop+start on the critical path", () => {
-    expect(script).toContain("systemctl --user restart abtars-watchdog");
+    expect(script).toMatch(/systemctl --user restart [^\n]+SERVICE/);
   });
 });
