@@ -102,14 +102,9 @@ export async function healthProbe(
   while (Date.now() < deadline) {
     try {
       const content = JSON.parse(readLock(lockPath));
-      if (content.pid !== oldPid) {
-        if (content.lastHeartbeat && content.lastHeartbeat > afterTimestamp) {
-          return { healthy: true, pid: content.pid, heartbeat: content.lastHeartbeat };
-        }
-        // Bridge has a new PID but no fresh heartbeat yet (first tick is
-        // intentionally delayed by up to 4 minutes). Accept the running
-        // process — the heartbeat will arrive on its first tick.
-        try { process.kill(content.pid, 0); return { healthy: true, pid: content.pid, heartbeat: content.lastHeartbeat }; } catch {}
+      // Verify bridge restarted (new PID) AND is healthy (fresh heartbeat)
+      if (content.pid !== oldPid && content.lastHeartbeat && content.lastHeartbeat > afterTimestamp) {
+        return { healthy: true, pid: content.pid, heartbeat: content.lastHeartbeat };
       }
     } catch {}
     await new Promise(r => setTimeout(r, 3000));
