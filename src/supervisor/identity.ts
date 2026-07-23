@@ -1,0 +1,71 @@
+import { readFileSync } from "node:fs";
+
+export type ValidationResult =
+  | { readonly status: "valid"; readonly safeToSignal: true; readonly safeToAdopt: true }
+  | { readonly status: "dead"; readonly safeToSignal: false; readonly safeToAdopt: false }
+  | { readonly status: "reused"; readonly safeToSignal: false; readonly safeToAdopt: false }
+  | { readonly status: "wrong-command"; readonly safeToSignal: false; readonly safeToAdopt: false }
+  | { readonly status: "mismatch"; readonly safeToSignal: false; readonly safeToAdopt: false }
+  | { readonly status: "corrupt"; readonly safeToSignal: false; readonly safeToAdopt: false };
+
+export function processStartIdentity(pid: number): string {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const startTime = stat.split(" ")[21];
+    return `${pid}:${startTime ?? "0"}`;
+  } catch {
+    return `${pid}:0`;
+  }
+}
+
+export function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+export function validateBridgePid(
+  pid: number,
+  expectedIdentity: string | null,
+  needles: readonly string[],
+): ValidationResult {
+  const alive = isPidAlive(pid);
+  if (!alive) {
+    return { status: "dead", safeToSignal: false, safeToAdopt: false };
+  }
+  if (expectedIdentity !== null) {
+    const actual = processStartIdentity(pid);
+    if (actual !== expectedIdentity) {
+      return { status: "reused", safeToSignal: false, safeToAdopt: false };
+    }
+  }
+  try {
+    const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
+    const match = needles.some((n) => cmdline.includes(n));
+    if (!match) {
+      return { status: "wrong-command", safeToSignal: false, safeToAdopt: false };
+    }
+  } catch {
+    // /proc unavailable (macOS, container, etc.) — trust the lock
+    return { status: "valid", safeToSignal: true, safeToAdopt: true };
+  }
+  return { status: "valid", safeToSignal: true, safeToAdopt: true };
+}
+
+export function validateBridgeLock(
+  lock: Record<string, unknown> | null,
+  needles: readonly string[],
+): ValidationResult {
+  if (lock === null || typeof lock !== "object") {
+    return { status: "corrupt", safeToSignal: false, safeToAdopt: false };
+  }
+  const pid = typeof lock.pid === "number" ? lock.pid : null;
+  if (pid === null || pid <= 0) {
+    return { status: "dead", safeToSignal: false, safeToAdopt: false };
+  }
+  const startIdentity = typeof lock.startIdentity === "string" ? lock.startIdentity : null;
+  return validateBridgePid(pid, startIdentity, needles);
+}
