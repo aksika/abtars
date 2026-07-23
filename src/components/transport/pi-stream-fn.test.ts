@@ -45,7 +45,7 @@ describe("createPiStreamFn", () => {
   });
 
   it("returns a StreamFn", () => {
-    const streamFn = createPiStreamFn({ policy });
+    const streamFn = createPiStreamFn({ policy, executionId: "test" });
     expect(typeof streamFn).toBe("function");
   });
 
@@ -64,6 +64,7 @@ describe("createPiStreamFn", () => {
     };
     const streamFn = createPiStreamFn({
       policy,
+      executionId: "test",
       createPiAiAttempt: vi.fn().mockRejectedValue(new Error("provider unavailable")),
     });
     const events: any[] = [];
@@ -80,7 +81,7 @@ describe("createPiStreamFn", () => {
     ]);
 
     const attemptFactory = vi.fn().mockResolvedValue(fakeStream);
-    const streamFn = createPiStreamFn({ policy, createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
     const ctx = { systemPrompt: "You are a bot.", messages: [{ role: "user", content: "hi" }] };
     const opts: SimpleStreamOptions = {};
 
@@ -103,7 +104,7 @@ describe("createPiStreamFn", () => {
       { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
     ]));
 
-    const stream = createPiStreamFn({ policy: metadataPolicy, createPiAiAttempt: attemptFactory })(
+    const stream = createPiStreamFn({ policy: metadataPolicy, executionId: "test", createPiAiAttempt: attemptFactory })(
       { id: "test" }, { messages: [] }, {},
     );
     for await (const _event of stream) { /* consume */ }
@@ -125,7 +126,7 @@ describe("createPiStreamFn", () => {
         { type: "done", reason: "stop", message: { role: "assistant", content: "Hello from fallback", stopReason: "stop", usage: { input: 10, output: 5 } } },
       ]));
 
-    const streamFn = createPiStreamFn({ policy: failPolicy, createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ policy: failPolicy, executionId: "test", createPiAiAttempt: attemptFactory });
     const ctx = { systemPrompt: "", messages: [{ role: "user", content: "hi" }] };
     const opts: SimpleStreamOptions = {};
 
@@ -159,7 +160,7 @@ describe("createPiStreamFn", () => {
       ]);
     });
 
-    const streamFn = createPiStreamFn({ policy: failPolicy, createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ policy: failPolicy, executionId: "test", createPiAiAttempt: attemptFactory });
     const ctx = { systemPrompt: "", messages: [{ role: "user", content: "hi" }] };
     const opts: SimpleStreamOptions = {};
 
@@ -174,7 +175,7 @@ describe("createPiStreamFn", () => {
 
   it("returns error stream on total exhaustion", async () => {
     const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500"));
-    const streamFn = createPiStreamFn({ policy, createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
     const ctx = { systemPrompt: "", messages: [] };
     const opts: SimpleStreamOptions = {};
 
@@ -194,7 +195,7 @@ describe("createPiStreamFn", () => {
       return makeFakeStream([]);
     });
 
-    const streamFn = createPiStreamFn({ policy, createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
     const ctx = { systemPrompt: "", messages: [] };
     const opts: SimpleStreamOptions = { signal: controller.signal };
 
