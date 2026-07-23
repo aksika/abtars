@@ -38,15 +38,36 @@ export function runLaunchctlBootstrap(
   plistPath: string,
   spawnSyncFn: typeof spawnSync = spawnSync,
 ): BootstrapResult {
+  const run = () => spawnSyncFn("launchctl", ["bootstrap", domain, plistPath], {
+    timeout: 5000,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
   try {
-    const result = spawnSyncFn("launchctl", ["bootstrap", domain, plistPath], {
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    let result = run();
     if (result.status === 0) {
       return { ok: true };
     }
-    const error = result.stderr?.toString() || result.stdout?.toString() || `exit code ${result.status}`;
+    let error = result.stderr?.toString() || result.stdout?.toString() || `exit code ${result.status}`;
+
+    // launchd can return EIO while the previous bootout is still removing the
+    // job from the GUI domain. Re-issue bootout by plist path, then retry once;
+    // this is safe when the job is already absent and avoids a false deploy
+    // failure on macOS (#1284).
+    if (/input\/output error|error 5/i.test(error)) {
+      try {
+        spawnSyncFn("launchctl", ["bootout", domain, plistPath], {
+          timeout: 5000,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch {}
+      result = run();
+      if (result.status === 0) {
+        return { ok: true };
+      }
+      error = result.stderr?.toString() || result.stdout?.toString() || `exit code ${result.status}`;
+    }
+
     return { ok: false, error: error.trim() };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
