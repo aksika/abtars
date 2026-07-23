@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync
 import { join } from "node:path";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
+import { processStartIdentity, isPidAlive } from "./identity.js";
 
 export type DesiredState = "running" | "stopped";
 
@@ -80,25 +81,6 @@ function writeAtomic(target: string, data: string): void {
   fsyncSync(fd);
   closeSync(fd);
   renameSync(tmp, target);
-}
-
-function processStartIdentity(pid: number): string {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-    const startTime = stat.split(" ")[21];
-    return `${pid}:${startTime ?? "0"}`;
-  } catch {
-    return `${pid}:0`;
-  }
-}
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
 }
 
 export function readSupervisorState(home: string): StateReadResult {

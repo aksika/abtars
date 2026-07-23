@@ -332,8 +332,12 @@ export async function deployActivation(
         try { execSync("systemctl --user stop abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
       }
 
-      // 7.2 Publish update command via supervisor state
+      // 7.2 Publish update command via supervisor state + wake watchdog
       publishCommand(paths.home, "update", `update:${staged.version}`);
+      try {
+        const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
+        if (wdPid && wdPid > 0) process.kill(wdPid, "SIGUSR1");
+      } catch {}
 
       // 7.3 Kill WD PID explicitly (belt)
       const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
@@ -376,6 +380,10 @@ export async function deployActivation(
     } else {
       // 8.1 Publish deploy-respawn command — new WD will acknowledge and restart
       publishCommand(paths.home, "update", "deploy-respawn");
+      try {
+        const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
+        if (wdPid && wdPid > 0) process.kill(wdPid, "SIGUSR1");
+      } catch {}
       // 8.2 Restart daemon service
       if (process.platform === "darwin") {
         const plistPath = join(homedir(), "Library/LaunchAgents/com.abtars.watchdog.plist");

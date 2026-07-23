@@ -5,13 +5,10 @@ import { abtarsHome } from "../../paths.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { acquireLock } from "../deploy-lib/lock.js";
 import { publishCommand, resetRestartCount } from "../../supervisor/state.js";
+import { isPidAlive } from "../../supervisor/identity.js";
 
 function readJsonField(file: string, field: string): unknown {
   try { return JSON.parse(readFileSync(file, "utf-8"))[field]; } catch { return undefined; }
-}
-
-function pidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 async function killBridge(pid: number): Promise<void> {
@@ -19,7 +16,7 @@ async function killBridge(pid: number): Promise<void> {
   process.stdout.write(`Killing bridge (PID ${pid})...\n`);
   for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 500));
-    if (!pidAlive(pid)) return;
+    if (!isPidAlive(pid)) return;
   }
   try { process.kill(pid, "SIGKILL"); } catch (err) { logAndSwallow("restart", "op", err); }
   await new Promise(r => setTimeout(r, 1000));
@@ -42,7 +39,7 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
 
   try {
     const bridgePid = readJsonField(lockFile, "pid") as number | undefined;
-    const bridgeAlive = bridgePid != null && bridgePid > 0 && pidAlive(bridgePid);
+    const bridgeAlive = bridgePid != null && bridgePid > 0 && isPidAlive(bridgePid);
 
     if (cold) {
       if (bridgeAlive) await killBridge(bridgePid!);
@@ -53,6 +50,11 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
 
     if (bridgeAlive) {
       publishCommand(home, "restart", "restart");
+      try {
+        const lock = JSON.parse(readFileSync(join(home, "bridge.lock"), "utf-8"));
+        const wdPid = typeof lock.watchdogPid === "number" ? lock.watchdogPid : null;
+        if (wdPid && wdPid > 0) process.kill(wdPid, "SIGUSR1");
+      } catch { /* lock missing */ }
       const { writeRestartRequested } = await import("../../components/transport/bridge-lock-transport.js");
       writeRestartRequested("restart");
       process.stdout.write(`Restart requested (PID ${bridgePid}) — bridge will restart within 30s\n`);

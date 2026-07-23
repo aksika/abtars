@@ -77,8 +77,11 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
     resetRestartCount(paths.home, "rollback");
 
     try {
-      const bridgePid = JSON.parse(readFileSync(join(paths.home, 'bridge.lock'), 'utf-8')).pid;
+      const lock = JSON.parse(readFileSync(join(paths.home, 'bridge.lock'), 'utf-8'));
+      const bridgePid = typeof lock.pid === "number" ? lock.pid : 0;
+      const wdPid = typeof lock.watchdogPid === "number" ? lock.watchdogPid : null;
       if (bridgePid > 0) process.kill(bridgePid, 'SIGTERM');
+      if (wdPid && wdPid > 0) process.kill(wdPid, 'SIGUSR1');
     } catch {}
 
     process.stdout.write(`+ Bridge killed — WD will respawn from ${target}\n`);

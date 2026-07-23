@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { setDesiredState, publishCommand } from "../../supervisor/state.js";
+import { isPidAlive, validateBridgePid } from "../../supervisor/identity.js";
 
 function readJsonField(file: string, field: string): unknown {
   try {
@@ -14,38 +15,40 @@ function readJsonField(file: string, field: string): unknown {
   } catch { return undefined; }
 }
 
-function pidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-function pidLooksLike(pid: number, needles: string[]): boolean {
-  try {
-    const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
-    return needles.some(n => cmdline.includes(n));
-  } catch { return true; }
-}
-
 type KillResult = "killed" | "forced" | "gone" | "stale" | "not-running";
 
-async function killGracefully(pid: number, needles: string[]): Promise<KillResult> {
-  if (!pidAlive(pid)) return "not-running";
-  if (!pidLooksLike(pid, needles)) return "stale";
+async function killGracefully(pid: number, needles: readonly string[]): Promise<KillResult> {
+  const result = validateBridgePid(pid, null, needles);
+  if (!result.safeToSignal) {
+    if (result.status === "dead") return "not-running";
+    return "stale";
+  }
 
   try { process.kill(pid, "SIGTERM"); } catch { return "not-running"; }
 
   for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 500));
-    if (!pidAlive(pid)) return "killed";
+    if (!isPidAlive(pid)) return "killed";
   }
 
   try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
   await new Promise(r => setTimeout(r, 500));
-  return pidAlive(pid) ? "not-running" : "forced";
+  return isPidAlive(pid) ? "not-running" : "forced";
 }
 
 function removeLock(path: string): void {
   try { if (existsSync(path)) unlinkSync(path); }
   catch (err) { logAndSwallow("stop", "op", err); }
+}
+
+function sigusrWatchdog(home: string): void {
+  try {
+    const lock = JSON.parse(readFileSync(join(home, "bridge.lock"), "utf-8"));
+    const wdPid = typeof lock.watchdogPid === "number" ? lock.watchdogPid : null;
+    if (wdPid && wdPid > 0) {
+      process.kill(wdPid, "SIGUSR1");
+    }
+  } catch { /* lock missing — ok */ }
 }
 
 export async function stop(_opts: {}): Promise<number> {
@@ -54,8 +57,9 @@ export async function stop(_opts: {}): Promise<number> {
   const manifestPath = join(home, "manifest.json");
   const bridgeLock = join(home, "bridge.lock");
 
-  setDesiredState(home, "stopped");
   publishCommand(home, "stop", "stopped");
+  setDesiredState(home, "stopped");
+  sigusrWatchdog(home);
 
   const installMode = readJsonField(manifestPath, "installMode") as string | undefined;
 

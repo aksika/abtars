@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, unlinkSync, symlinkSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, unlinkSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { resolveAbtarsHome, resolveReleasesDir } from "../cli/deploy-lib/paths.js";
 import { readSupervisorState, resetRestartCount } from "../supervisor/state.js";
@@ -31,6 +31,7 @@ export function checkCircuitBreaker(): void {
   if (history.length < 2) {
     console.error("[circuit-breaker] No previous release to roll back to — continuing anyway");
     resetRestartCount(home, "rollback-unavailable");
+    try { writeFileSync(join(home, "rollback-history-missing"), new Date().toISOString() + "\n"); } catch {}
     return;
   }
 
@@ -39,6 +40,7 @@ export function checkCircuitBreaker(): void {
   if (!existsSync(targetDir)) {
     console.error(`[circuit-breaker] history[1] dir ${target} not found — continuing anyway`);
     resetRestartCount(home, "rollback-target-missing");
+    try { writeFileSync(join(home, "rollback-target-missing"), new Date().toISOString() + " " + target + "\n"); } catch {}
     return;
   }
 

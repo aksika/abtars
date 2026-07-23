@@ -9,6 +9,7 @@ import { atomicWriteSync } from "../atomic-write.js";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { localISO } from "../../utils/local-time.js";
+import { randomUUID } from "node:crypto";
 
 export type SleepStatus = "awake" | "sleeping";
 
@@ -116,9 +117,11 @@ export function initBridgeLock(opts: { pid: number; startedAt: number; version: 
     }
     // Merge: preserve watchdogPid from watchdog or env var
     const wdPid = Number(process.env.ABTARS_WATCHDOG_PID) || existing.watchdogPid || null;
+    const instanceId = typeof existing.instanceId === "string" ? existing.instanceId : randomUUID();
     atomicWriteSync(p, JSON.stringify({
       pid: opts.pid, watchdogPid: wdPid, startedAt: opts.startedAt, version: opts.version,
-      sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(), startReason: opts.startReason ?? "unknown", bootType,
+      instanceId, sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(),
+      startReason: opts.startReason ?? "unknown", bootType,
     }));
   } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
   return prev;
