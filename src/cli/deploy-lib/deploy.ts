@@ -296,6 +296,10 @@ export async function deployActivation(
   // reintroduces the cgroup-suicide bug.
   const inCgroup = inWatchdogServiceCgroup();
 
+  // Capture old PID before any kill (health probe needs the pre-kill PID as
+  // reference to detect that a new bridge has started).
+  const oldBridgePid: number = (() => { try { const lock = readBridgeLock(join(paths.home, "bridge.lock")); return typeof lock?.pid === "number" ? lock.pid : 0; } catch { return 0; } })();
+
   if (!isFirstInstall) {
     migrateSupervisorState(paths.home);
     setDesiredState(paths.home, "running");
@@ -423,7 +427,7 @@ export async function deployActivation(
 
   // ── Step 9: Health probe ──────────────────────────────────────────────
   process.stdout.write(`Waiting for bridge health...\n`);
-  const health = await (healthProbeFn ?? healthProbe)(paths.home, Date.now(), 180_000);
+  const health = await (healthProbeFn ?? healthProbe)(paths.home, Date.now(), 180_000, { oldPid: oldBridgePid });
   if (health.healthy) {
     process.stdout.write(`✓ Bridge healthy (PID ${health.pid}, tick at ${new Date(health.heartbeat!).toISOString()})\n`);
     writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "success", version: staged.version, completedAt: new Date().toISOString() }) + "\n");
