@@ -70,13 +70,9 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   heartbeat.registerTask({
     name: "snapshot-refresh",
     execute: async () => {
-      try {
-        const { refreshHeartbeatSnapshot } = await import("../components/runtime-health-snapshot.js");
-        refreshHeartbeatSnapshot(spin.getActiveCardIds());
-        return { state: "ran" as const };
-      } catch {
-        return { state: "ran" as const };
-      }
+      const { refreshHeartbeatSnapshot } = await import("../components/runtime-health-snapshot.js");
+      refreshHeartbeatSnapshot(spin.getActiveCardIds());
+      return { state: "ran" as const };
     },
   });
 

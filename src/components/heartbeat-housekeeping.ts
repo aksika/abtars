@@ -71,8 +71,7 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
 
       const detail = children.join(", ") + (errors.length > 0 ? `; failures: ${errors.join("; ")}` : "");
       if (errors.length > 0) {
-        const agg = errors.join("; ");
-        throw new Error(`Housekeeping failures: ${agg}`);
+        throw new Error(`Housekeeping failures (${children.join(", ")}): ${errors.join("; ")}`);
       }
 
       return { state: "ran", detail };
@@ -80,17 +79,13 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
   };
 
   async function recordCronDepth(): Promise<void> {
-    try {
-      const { recordCronDepth } = await import("./metrics-collector.js");
-      recordCronDepth(deps.cronQueueDepth());
-    } catch (err) { logAndSwallow(TAG, "recordCronDepth", err); }
+    const { recordCronDepth } = await import("./metrics-collector.js");
+    recordCronDepth(deps.cronQueueDepth());
   }
 
   async function flushMetrics(): Promise<void> {
-    try {
-      const { flushToFile } = await import("./metrics-collector.js");
-      flushToFile();
-    } catch (err) { logAndSwallow(TAG, "flushMetrics", err); }
+    const { flushToFile } = await import("./metrics-collector.js");
+    flushToFile();
   }
 
   async function runDbIntegrity(): Promise<void> {
@@ -113,6 +108,7 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
           const { bufferSystemEvent } = await import("./system-event-buffer.js");
           bufferSystemEvent(msg);
         }
+        throw new Error(`Integrity failed: ${result.summary}; FTS rebuild failed: ${rebuilt.summary}`);
       }
     } else {
       dbIntegrityFailures = 0;
@@ -120,10 +116,8 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
   }
 
   async function flushSkillStats(): Promise<void> {
-    try {
-      const { flush } = await import("./skill-stats.js");
-      flush();
-    } catch (err) { logAndSwallow(TAG, "flushSkillStats", err); }
+    const { flush } = await import("./skill-stats.js");
+    flush();
   }
 
   async function runUpdateCheck(): Promise<void> {
@@ -147,17 +141,13 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
   }
 
   async function pruneMetrics(): Promise<void> {
-    try {
-      const { pruneMetricsFile } = await import("./metrics-collector.js");
-      pruneMetricsFile();
-    } catch (err) { logAndSwallow(TAG, "pruneMetrics", err); }
+    const { pruneMetricsFile } = await import("./metrics-collector.js");
+    pruneMetricsFile();
   }
 
   async function cleanupKanban(): Promise<void> {
-    try {
-      const { kanbanCleanup } = await import("./tasks/kanban-board.js");
-      const purged = kanbanCleanup(7);
-      if (purged > 0) logInfo(TAG, `Kanban: purged ${purged} delivered cards > 7d`);
-    } catch (err) { logAndSwallow(TAG, "cleanupKanban", err); }
+    const { kanbanCleanup } = await import("./tasks/kanban-board.js");
+    const purged = kanbanCleanup(7);
+    if (purged > 0) logInfo(TAG, `Kanban: purged ${purged} delivered cards > 7d`);
   }
 }

@@ -144,9 +144,12 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     heartbeat.registerTask(task);
   }
 
-  import("../components/metrics-collector.js").then(({ initMetrics }) => {
+  try {
+    const { initMetrics } = await import("../components/metrics-collector.js");
     initMetrics(abtarsHome());
-  }).catch(() => {});
+  } catch (err) {
+    logAndSwallow(TAG, "initMetrics", err, "warn");
+  }
 
   const hbIntervalMs = heartbeat.intervalMs;
   heartbeat.registerTask(createHousekeepingTask({

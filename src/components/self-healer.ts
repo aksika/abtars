@@ -103,7 +103,7 @@ export function createSelfHealerTask(
           : { state: "idle" };
       } catch (err) {
         logAndSwallow(TAG, "op", err);
-        return { state: "idle" };
+        throw err;
       }
     },
   };

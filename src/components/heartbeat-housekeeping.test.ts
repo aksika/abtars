@@ -71,10 +71,8 @@ describe("createHousekeepingTask", () => {
   it("isolates child failures and continues to next due child", async () => {
     deps.cronQueueDepth = () => { throw new Error("queue error"); };
     const task = createHousekeepingTask(deps);
-    const result = await task.execute();
-    expect(result).toBeDefined();
-    // metrics-sample will fail (cronQueueDepth throws), but others should still run
-    expect(result.detail).toContain("metrics-flush");
+    // metrics-sample fails, but later children still run before the aggregate failure.
+    await expect(task.execute()).rejects.toThrow(/metrics-sample: queue error/);
   });
 
   it("produces correct elapsed-time schedules for 60s and 300s intervals", async () => {
@@ -103,7 +101,11 @@ describe("createHousekeepingTask", () => {
     const task = createHousekeepingTask(deps);
     for (let i = 0; i < 6; i++) {
       clock += 3600_001;
-      await task.execute();
+      if (i < 5) {
+        await expect(task.execute()).rejects.toThrow(/Integrity failed/);
+      } else {
+        await expect(task.execute()).resolves.toMatchObject({ state: "ran" });
+      }
     }
     expect(runMaintenance).toHaveBeenCalled();
   });

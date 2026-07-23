@@ -145,22 +145,18 @@ export function getMetricsSummary(): MetricsSummary {
 
 export function flushToFile(): void {
   if (!metricsPath) return;
-  try {
-    const summary = getMetricsSummary();
-    const line = JSON.stringify({ ts: Date.now(), ...summary }) + "\n";
-    appendFileSync(metricsPath, line);
-  } catch { /* non-fatal */ }
+  const summary = getMetricsSummary();
+  const line = JSON.stringify({ ts: Date.now(), ...summary }) + "\n";
+  appendFileSync(metricsPath, line);
 }
 
 /** Housekeeping: remove lines older than 7 days. */
 export function pruneMetricsFile(): void {
   if (!metricsPath || !existsSync(metricsPath)) return;
-  try {
-    const cutoff = Date.now() - SEVEN_DAYS_MS;
-    const lines = readFileSync(metricsPath, "utf-8").split("\n").filter(Boolean);
-    const kept = lines.filter(line => {
-      try { return JSON.parse(line).ts >= cutoff; } catch { return false; }
-    });
-    writeFileSync(metricsPath, kept.join("\n") + (kept.length > 0 ? "\n" : ""));
-  } catch { /* non-fatal */ }
+  const cutoff = Date.now() - SEVEN_DAYS_MS;
+  const lines = readFileSync(metricsPath, "utf-8").split("\n").filter(Boolean);
+  const kept = lines.filter(line => {
+    try { return JSON.parse(line).ts >= cutoff; } catch { return false; }
+  });
+  writeFileSync(metricsPath, kept.join("\n") + (kept.length > 0 ? "\n" : ""));
 }
