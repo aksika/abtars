@@ -207,4 +207,288 @@ describe("createPiStreamFn", () => {
     expect((errorEv2?.error as Record<string, unknown> | undefined)?.stopReason).toBe("aborted");
   });
 
+  // ── Request-identity tests (#1472) ──────────────────────────────────────────
+
+  it("replaces stale caller-provided x-client-request-id with a generated ID", async () => {
+    const usedIds: string[] = [];
+    const requestIdFactory = vi.fn()
+      .mockReturnValueOnce("gen-req-1")
+      .mockReturnValueOnce("gen-req-2");
+    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
+      { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
+    ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: requestIdFactory,
+    });
+    const opts: SimpleStreamOptions = { headers: { "x-client-request-id": "stale-session-value" } };
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, opts)) { /* consume */ }
+
+    const passedOptions = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
+    expect(passedOptions?.headers?.["x-client-request-id"]).toBe("gen-req-1");
+    // The stale value must NOT appear in the output (Abtars' value wins)
+    expect(passedOptions?.headers?.["x-client-request-id"]).not.toBe("stale-session-value");
+  });
+
+  it("generates distinct IDs for two stream invocations", async () => {
+    const ids: string[] = [];
+    const requestIdFactory = vi.fn(() => {
+      const id = `req-${ids.length}`;
+      ids.push(id);
+      return id;
+    });
+    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
+      { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
+    ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: requestIdFactory,
+    });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
+  it("generates a fresh ID for conflict recovery retry", async () => {
+    const ids: string[] = [];
+    const requestIdFactory = vi.fn(() => {
+      const id = `req-${ids.length}`;
+      ids.push(id);
+      return id;
+    });
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("idempotency_conflict"))
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 2, output: 2 } } },
+      ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: requestIdFactory,
+    });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    // Two IDs: one for the conflict attempt, one for the retry
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+    // Both attempts got the x-client-request-id header with their respective IDs
+    const opts1 = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
+    const opts2 = attemptFactory.mock.calls[1]?.[3] as SimpleStreamOptions;
+    expect(opts1?.headers?.["x-client-request-id"]).toBe(ids[0]);
+    expect(opts2?.headers?.["x-client-request-id"]).toBe(ids[1]);
+  });
+
+  it("preserves sessionId and unrelated option headers while adding request ID", async () => {
+    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
+      { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
+    ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: () => "gen-id",
+    });
+    const opts: SimpleStreamOptions = {
+      sessionId: "cache-affinity-session",
+      headers: { "x-custom": "custom-value" },
+    };
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, opts)) { /* consume */ }
+
+    const passedOptions = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
+    expect(passedOptions?.sessionId).toBe("cache-affinity-session");
+    expect(passedOptions?.headers?.["x-custom"]).toBe("custom-value");
+    expect(passedOptions?.headers?.["x-client-request-id"]).toBe("gen-id");
+  });
+
+  it("does not add x-client-request-id for anthropic-messages candidates", async () => {
+    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
+      { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
+    ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: () => "gen-id",
+    });
+    const opts: SimpleStreamOptions = {};
+    for await (const _ev of streamFn({
+      id: "claude", api: "anthropic-messages" as const,
+    }, { messages: [] }, opts)) { /* consume */ }
+
+    const passedOptions = attemptFactory.mock.calls[0]?.[2] as SimpleStreamOptions;
+    expect(passedOptions?.headers?.["x-client-request-id"]).toBeUndefined();
+  });
+
+  // ── Conflict-recovery tests (#1472) ─────────────────────────────────────────
+
+  it("retries once on thrown idempotency_conflict before commit", async () => {
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("idempotency_conflict: duplicate request"))
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "text_delta", contentIndex: 0, delta: "recovered" },
+        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 5, output: 3 } } },
+      ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: () => "fresh-id",
+    });
+    const events: any[] = [];
+    for await (const ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) events.push(ev);
+
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(events.some((e) => e.type === "text_delta")).toBe(true);
+    expect(events.some((e) => e.delta?.includes("recovered"))).toBe(true);
+  });
+
+  it("retries once on terminal idempotency_conflict error message", async () => {
+    const attemptFactory = vi.fn()
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "idempotency_conflict: request key reused", usage: { input: 0, output: 0 } } },
+      ]))
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "text_delta", contentIndex: 0, delta: "ok" },
+        { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 3, output: 1 } } },
+      ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: () => "fresh-id",
+    });
+    const events: any[] = [];
+    for await (const ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) events.push(ev);
+
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(events.some((e) => e.type === "text_delta")).toBe(true);
+  });
+
+  it("does not retry a second conflict on the same candidate", async () => {
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("idempotency_conflict"))
+      .mockRejectedValueOnce(new Error("idempotency_conflict again"));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: () => "fresh-id",
+    });
+    const events: any[] = [];
+    for await (const ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) events.push(ev);
+
+    // Called twice: original attempt + retry attempt (both fail)
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    // Falls through to terminal error
+    expect(events.some((e) => e.type === "error")).toBe(true);
+  });
+
+  it("does not retry conflict after semantic commit", async () => {
+    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
+      { type: "text_delta", contentIndex: 0, delta: "committed " },
+      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "idempotency_conflict after output", usage: { input: 0, output: 0 } } },
+    ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: () => "fresh-id",
+    });
+    const events: any[] = [];
+    for await (const ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) events.push(ev);
+
+    // Only one attempt — no retry after commit
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
+    // The committed text_delta was yielded before the error
+    expect(events.some((e) => e.delta?.includes("committed"))).toBe(true);
+  });
+
+  it("falls back to next candidate when recovery attempt fails", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const fallbackPolicy = new FallbackPolicy([first, second], registry);
+
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("idempotency_conflict"))
+      .mockRejectedValueOnce(new Error("API error 503"))
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "text_delta", contentIndex: 0, delta: "fallback worked" },
+        { type: "done", reason: "stop", message: { role: "assistant", content: "fallback worked", stopReason: "stop", usage: { input: 3, output: 1 } } },
+      ]));
+
+    const streamFn = createPiStreamFn({
+      policy: fallbackPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: () => "fresh-id",
+    });
+    const events: any[] = [];
+    for await (const ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) events.push(ev);
+
+    // Two calls for first candidate (conflict + recovery failure) + one for second (success)
+    expect(attemptFactory).toHaveBeenCalledTimes(3);
+    expect(events.some((e) => e.delta?.includes("fallback worked"))).toBe(true);
+  });
+
+  // ── Telemetry and policy settlement tests (#1472 §4) ────────────────────────
+
+  it("records telemetry for both conflict and recovery attempts", async () => {
+    const telemetryCalls: Array<{ result: string }> = [];
+    const mockTelemetry = {
+      executionId: "exec_1",
+      beginProviderCall: vi.fn().mockReturnValue({
+        providerCallId: "pc1",
+        ordinal: 1,
+        end: vi.fn().mockImplementation((t: { result: string }) => { telemetryCalls.push({ result: t.result }); }),
+      }),
+      snapshot: vi.fn(),
+      close: vi.fn(),
+    };
+
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("idempotency_conflict"))
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 2, output: 1 } } },
+      ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: () => "fresh-id",
+      telemetry: mockTelemetry,
+    });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    // Two telemetry calls: one failure (conflict), one success (recovery)
+    expect(mockTelemetry.beginProviderCall).toHaveBeenCalledTimes(2);
+    expect(telemetryCalls).toHaveLength(2);
+    expect(telemetryCalls[0]?.result).toBe("failure");
+    expect(telemetryCalls[1]?.result).toBe("success");
+  });
+
+  it("does not penalize policy on recoverable conflict", async () => {
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("idempotency_conflict"))
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 2, output: 1 } } },
+      ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: () => "fresh-id",
+    });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    // The candidate should NOT be excluded (recordError was not called for the conflict)
+    expect(policy.excludedKeys.size).toBe(0);
+  });
+
+  it("penalizes policy when recovery attempt fails", async () => {
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("idempotency_conflict"))
+      .mockRejectedValueOnce(new Error("API error 503"));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: () => "fresh-id",
+    });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    // The candidate IS excluded after the recovery attempt fails (one recordError)
+    expect(policy.excludedKeys.size).toBe(1);
+  });
 });

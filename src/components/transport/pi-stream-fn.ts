@@ -15,6 +15,7 @@ import { candidateKey } from "./model-candidates.js";
 import type { ExecutionTelemetryScope, ProviderCallTerminal } from "../execution-telemetry.js";
 import type { StreamFn } from "./pi-core-types.js";
 import { buildPiModel, pickPiApi, createPiAiAssistantStream } from "./pi-ai-adapter.js";
+import { randomUUID } from "node:crypto";
 
 const TAG = "pi-stream-fn";
 
@@ -28,9 +29,11 @@ export type ProviderAttemptFactory = (
 
 export interface AbtarsPiStreamFnOptions {
   policy: FallbackPolicy;
+  executionId: string;
   telemetry?: ExecutionTelemetryScope;
   createPiAiAttempt?: ProviderAttemptFactory;
   onCandidateCommitted?: (candidate: ModelCandidate) => void;
+  providerRequestIdFactory?: () => string;
 }
 
 function zeroUsage(): Usage {
@@ -91,7 +94,28 @@ function endTelemetry(handle: ReturnType<ExecutionTelemetryScope["beginProviderC
   handle?.end(terminal);
 }
 
-// Emergency L0 path was removed in #1447. All API providers use pi-ai natively.
+function isIdempotencyConflict(err: unknown): boolean {
+  const msg = typeof err === "string" ? err
+    : err instanceof Error ? err.message
+    : typeof err === "object" && err !== null && "errorMessage" in err
+      ? (err as { errorMessage: string }).errorMessage ?? ""
+      : "";
+  return msg.toLowerCase().includes("idempotency_conflict");
+}
+
+function isOpenAiCompatible(api: Api): boolean {
+  return api === "openai-completions" || api === "openai-responses";
+}
+
+function buildAttemptOptions(fnOptions: SimpleStreamOptions, providerRequestId: string): SimpleStreamOptions {
+  return {
+    ...fnOptions,
+    headers: {
+      ...fnOptions.headers,
+      "x-client-request-id": providerRequestId,
+    },
+  };
+}
 
 async function defaultCreatePiAiAttempt(
   candidate: ModelCandidate,
@@ -171,93 +195,124 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           return;
         }
 
-        const handle = options.telemetry?.beginProviderCall({
-          provider: candidate.provider,
-          model: candidate.model,
-          candidate: candidateKey(candidate.model, candidate.endpoint),
-          startedAt: Date.now(),
-        });
         const attemptFactory = options.createPiAiAttempt ?? defaultCreatePiAiAttempt;
         const hasImage = context.messages.some((message) =>
           Array.isArray(message.content)
             && message.content.some((part) => part.type === "image"),
         );
         const piModel = buildPiModel({ ...candidate, maxOutput: model.maxTokens }, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);
+
         let attemptCommitted = false;
-        let telemetryEnded = false;
-        const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage): void => {
-          if (telemetryEnded) return;
-          telemetryEnded = true;
-          endTelemetry(handle, {
-            result,
-            endedAt: Date.now(),
-            input: message?.usage.input,
-            output: message?.usage.output,
-            cacheRead: message?.usage.cacheRead,
-            cacheWrite: message?.usage.cacheWrite,
+        let retried = false;
+
+        while (true) {
+          const providerRequestId = (options.providerRequestIdFactory ?? randomUUID)();
+          const attemptOptions = isOpenAiCompatible(piModel.api)
+            ? buildAttemptOptions(fnOptions, providerRequestId)
+            : fnOptions;
+
+          logDebug(TAG, `provider attempt execution=${options.executionId} request=${providerRequestId} candidate=${candidateKey(candidate.model, candidate.endpoint)}`);
+
+          const handle = options.telemetry?.beginProviderCall({
+            provider: candidate.provider,
+            model: candidate.model,
+            candidate: candidateKey(candidate.model, candidate.endpoint),
+            startedAt: Date.now(),
           });
-          if (result === "success") {
-            options.policy.recordSuccess(candidate);
-          } else {
-            options.policy.recordError(candidate, "transient");
-            options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
-          }
-        };
-        try {
-          const inner = await attemptFactory(candidate, piModel, context, fnOptions, signal);
-          const buffered: AssistantMessageEvent[] = [];
-          let terminal: AssistantMessage | undefined;
-          for await (const event of inner) {
-            terminal = terminalResult(event) ?? terminal;
-            if (!attemptCommitted && isSemanticEvent(event)) {
-              attemptCommitted = true;
-              options.onCandidateCommitted?.(candidate);
-              for (const bufferedEvent of buffered) yield bufferedEvent;
-              buffered.length = 0;
+
+          let telemetryEnded = false;
+          const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage): void => {
+            if (telemetryEnded) return;
+            telemetryEnded = true;
+            endTelemetry(handle, {
+              result,
+              endedAt: Date.now(),
+              input: message?.usage.input,
+              output: message?.usage.output,
+              cacheRead: message?.usage.cacheRead,
+              cacheWrite: message?.usage.cacheWrite,
+            });
+            if (result === "success") {
+              options.policy.recordSuccess(candidate);
+            } else {
+              options.policy.recordError(candidate, "transient");
+              options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
             }
-            if (!attemptCommitted && isTerminal(event)) {
-              const result = terminalResult(event);
-              const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
-              if (failed) {
-                finishAttempt(event.type === "error" && event.reason === "aborted" ? "aborted" : "failure", terminal);
-                break;
+          };
+
+          let shouldRetry = false;
+          try {
+            const inner = await attemptFactory(candidate, piModel, context, attemptOptions, signal);
+            const buffered: AssistantMessageEvent[] = [];
+            let terminal: AssistantMessage | undefined;
+            for await (const event of inner) {
+              terminal = terminalResult(event) ?? terminal;
+              if (!attemptCommitted && isSemanticEvent(event)) {
+                attemptCommitted = true;
+                options.onCandidateCommitted?.(candidate);
+                for (const bufferedEvent of buffered) yield bufferedEvent;
+                buffered.length = 0;
               }
-              finishAttempt("success", terminal);
-              for (const bufferedEvent of buffered) yield bufferedEvent;
-              yield event;
+              if (!attemptCommitted && isTerminal(event)) {
+                const result = terminalResult(event);
+                const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
+                if (failed && !retried && isIdempotencyConflict(result?.errorMessage ?? "")) {
+                  endTelemetry(handle, { result: "failure", endedAt: Date.now() });
+                  telemetryEnded = true;
+                  retried = true;
+                  shouldRetry = true;
+                  break;
+                }
+                if (failed) {
+                  finishAttempt(event.type === "error" && event.reason === "aborted" ? "aborted" : "failure", terminal);
+                  break;
+                }
+                finishAttempt("success", terminal);
+                for (const bufferedEvent of buffered) yield bufferedEvent;
+                yield event;
+                return;
+              }
+              if (attemptCommitted) yield event;
+              else buffered.push(event);
+              if (attemptCommitted && isTerminal(event)) {
+                const result = terminalResult(event);
+                const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
+                finishAttempt(failed
+                  ? (event.type === "error" && event.reason === "aborted" ? "aborted" : "failure")
+                  : "success", terminal);
+                return;
+              }
+            }
+            if (shouldRetry) continue;
+            if (attemptCommitted) {
+              finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
+              yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream ended without a terminal event");
               return;
             }
-            if (attemptCommitted) yield event;
-            else buffered.push(event);
-            if (attemptCommitted && isTerminal(event)) {
-              const result = terminalResult(event);
-              const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
-              finishAttempt(failed
-                ? (event.type === "error" && event.reason === "aborted" ? "aborted" : "failure")
-                : "success", terminal);
+            if (!telemetryEnded) {
+              finishAttempt("failure", terminal);
+              break;
+            }
+          } catch (err) {
+            if (!retried && isIdempotencyConflict(err)) {
+              endTelemetry(handle, { result: "failure", endedAt: Date.now() });
+              telemetryEnded = true;
+              retried = true;
+              continue;
+            }
+            finishAttempt(signal.aborted ? "aborted" : "failure");
+            if (attemptCommitted) {
+              yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream failed after output began");
               return;
             }
+            logDebug(TAG, `Provider attempt failed before commit (${err instanceof Error ? err.name : "unknown"})`);
+            if (signal.aborted) {
+              yield terminalError(model, "aborted", "Execution cancelled");
+              return;
+            }
+            break;
           }
-          if (attemptCommitted) {
-            finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
-            yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream ended without a terminal event");
-            return;
-          }
-          if (!telemetryEnded) {
-            finishAttempt("failure", terminal);
-            continue;
-          }
-        } catch (err) {
-          finishAttempt(signal.aborted ? "aborted" : "failure");
-          if (attemptCommitted) {
-            yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream failed after output began");
-            return;
-          }
-          logDebug(TAG, `Provider attempt failed before commit (${err instanceof Error ? err.name : "unknown"})`);
-          if (signal.aborted) {
-            yield terminalError(model, "aborted", "Execution cancelled");
-            return;
-          }
+          break;
         }
       }
 

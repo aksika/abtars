@@ -206,6 +206,7 @@ export class PiCoreTransport implements IKiroTransport {
     // Build StreamFn — no emergency L0, no legacy conversion
     const streamFn = createPiStreamFn({
       policy: this.policy,
+      executionId,
       telemetry: context?.executionTelemetry,
       onCandidateCommitted: (candidate) => {
         const successful: CandidateSpec = {

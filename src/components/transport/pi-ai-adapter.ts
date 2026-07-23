@@ -102,8 +102,6 @@ export interface PiAiCandidate {
     | { style: "extended"; default: number };
   /** Session-level reasoning override (from /effort or /thinking command). */
   reasoningEffort?: "off" | "low" | "medium" | "high" | "xhigh" | null;
-  /** Session key — used as pi's sessionId for prompt-cache affinity. */
-  sessionId?: string;
 }
 
 export interface PiAiConversation {
