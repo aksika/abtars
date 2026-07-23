@@ -111,6 +111,17 @@ describe("deploy-lib/service-reconcile — L4 Restart policy (#1278)", () => {
     expect(wd).toMatch(/exit 2/);
     expect(unit).toMatch(/^RestartPreventExitStatus=2$/m);
   });
+
+  it("systemd unit has bounded restart rate limiting (R5.1-R5.2)", () => {
+    expect(unit).toMatch(/^StartLimitBurst=3$/m);
+    expect(unit).toMatch(/^StartLimitIntervalSec=60$/m);
+  });
+
+  it("systemd unit uses KillMode=process to avoid killing bridge children", () => {
+    expect(unit).toMatch(/^KillMode=process$/m);
+    expect(unit).not.toMatch(/^KillMode=none$/m);
+    expect(unit).not.toMatch(/^KillMode=control-group$/m);
+  });
 });
 
 describe("deploy-lib/service-reconcile — emergency-update watchdog-liveness verify (#1278)", () => {
