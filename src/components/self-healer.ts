@@ -111,14 +111,22 @@ export function createSelfHealerTask(
   function readIncremental(logFile: string): string | null {
     try {
       const st = statSync(logFile);
-      if (!logCursor || logCursor.path !== logFile || st.ino !== logCursor.inode || st.size < logCursor.offset) {
+      if (!logCursor) {
         logCursor = {
           path: logFile,
           inode: st.ino,
-          offset: Math.max(0, st.size - 1),
+          offset: Math.max(0, st.size),
           partial: "",
         };
         return null;
+      }
+      if (logCursor.path !== logFile || st.ino !== logCursor.inode || st.size < logCursor.offset) {
+        logCursor = {
+          path: logFile,
+          inode: st.ino,
+          offset: 0,
+          partial: "",
+        };
       }
 
       if (st.size <= logCursor.offset) return null;

@@ -78,4 +78,16 @@ describe("RuntimeHealthSnapshot", () => {
     expect(result.trust).toBe("missing");
     expect(result.data).toBeNull();
   });
+
+  it("refreshHeartbeatSnapshot updates updatedAt and activeCardIds in one write", async () => {
+    mockStartedAt = 1000;
+    const { initSnapshot, refreshHeartbeatSnapshot, readSnapshot } = await import("./runtime-health-snapshot.js");
+    initSnapshot(process.pid, 1000);
+
+    refreshHeartbeatSnapshot([10, 20, 30]);
+
+    const result = readSnapshot();
+    expect(result.data?.bridge.updatedAt).toBeGreaterThan(0);
+    expect(result.data?.activeCardIds).toEqual([10, 20, 30]);
+  });
 });
