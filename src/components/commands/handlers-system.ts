@@ -115,8 +115,9 @@ export async function handleHeartbeat(_text: string, ctx: CommandContext): Promi
   const statuses = hb.getTaskStatuses();
   if (statuses.size > 0) {
     lines.push("Tasks (last tick):");
-    for (const [name, status] of statuses) {
-      lines.push(`  ${status} ${name}`);
+    for (const [name, st] of statuses) {
+      const detail = st.detail ? ` — ${st.detail}` : "";
+      lines.push(`  ${st.marker} ${name}${detail}`);
     }
   }
 

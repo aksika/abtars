@@ -12,11 +12,11 @@ import type { StatusSnapshot } from "../types/status.js";
 
 /** Task scheduler slot — heartbeat tick loop or message queue. */
 export interface ITaskSlot {
-  registerTask(task: { name: string; heavy?: boolean; execute: () => Promise<boolean | void> }): void;
+  registerTask(task: { name: string; heavy?: boolean; execute: () => Promise<{ state: "ran" | "idle"; detail?: string }> }): void;
   start(): void;
   stop(): void;
   getTaskNames(): string[];
-  getTaskStatuses(): ReadonlyMap<string, string>;
+  getTaskStatuses(): ReadonlyMap<string, { marker: "✓" | "✗" | "—" | "?"; state: "ran" | "idle" | "failed" | "skipped" | "never"; detail?: string }>;
   readonly intervalMs: number;
 }
 

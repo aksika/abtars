@@ -69,7 +69,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "CTX_COMPACT_PCT", type: "int", default: "80", description: "Context % to auto-compact" },
   { env: "CTX_AGGRESSIVE_PCT", type: "int", default: "90", description: "Context % for aggressive compaction" },
   { env: "CTX_IDLE_COMPACT_PCT", type: "int", default: "65", description: "Context % for idle compaction" },
-  { env: "CTX_IDLE_COMPACT_MIN", type: "int", default: "10", description: "Minutes idle before floating compaction" },
+
 
   // ── Typing / streaming ──
   { env: "TYPING_TTL_SEC", type: "int", default: "300", description: "Typing indicator TTL (seconds)" },
@@ -179,7 +179,7 @@ export interface EnvConfig {
   ctxCompactPct: number;
   ctxAggressivePct: number;
   ctxIdleCompactPct: number;
-  ctxIdleCompactMin: number;
+
 
   // Typing / streaming
   typingTtlMs: number;
@@ -330,7 +330,6 @@ export function initEnv(): Readonly<EnvConfig> {
     ctxCompactPct: parseIntSafe(readOr("CTX_COMPACT_PCT", "80"), "CTX_COMPACT_PCT"),
     ctxAggressivePct: parseIntSafe(readOr("CTX_AGGRESSIVE_PCT", "90"), "CTX_AGGRESSIVE_PCT"),
     ctxIdleCompactPct: parseIntSafe(readOr("CTX_IDLE_COMPACT_PCT", "65"), "CTX_IDLE_COMPACT_PCT"),
-    ctxIdleCompactMin: parseIntSafe(readOr("CTX_IDLE_COMPACT_MIN", "10"), "CTX_IDLE_COMPACT_MIN"),
 
     typingTtlMs: parseIntSafe(readOr("TYPING_TTL_SEC", "300"), "TYPING_TTL_SEC") * 1000,
     typingSilentThresholdMs: parseIntSafe(readOr("TYPING_SILENT_THRESHOLD_SEC", "90"), "TYPING_SILENT_THRESHOLD_SEC") * 1000,

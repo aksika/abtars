@@ -1,197 +1,26 @@
-/**
- * Heartbeat tasks extracted from bridge-app.ts — complex periodic operations
- * that benefit from being independently readable and testable.
- */
-
-import { logAndSwallow } from "./log-and-swallow.js";
-import { logInfo, logError } from "./logger.js";
-import { setIdleCompactReset } from "./message-pipeline.js";
-import type { IKiroTransport } from "./transport/kiro-transport.js";
-import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import type { HeartbeatTask } from "../types/index.js";
 
-const TAG = "heartbeat_tasks";
-export interface IdleCompactDeps {
-  transport: IKiroTransport;
-  memoryRuntime: AbtarsMemoryRuntime;
-  memoryDir: string;
-  allowedUserIds: Set<number>;
-  isSleepActive: () => boolean;
-}
-
-/** Idle compaction removed — context engine handles compaction automatically via buildContext(). */
-export function createIdleCompactTask(_deps: IdleCompactDeps): HeartbeatTask {
-  setIdleCompactReset(() => {});
-  return {
-    name: "idle-compact",
-    heavy: false,
-    execute: async () => false,
-  };
-}
-
-/** #1353: the periodic in-cycle stuck-run guard (createSleepStaleCheckTask) was
- *  removed — abmind's runSleepCycle owns its own wall-clock timeout internally
- *  and its returned promise always settles. See src/capabilities/sleep/index.ts. */
-
-/** DB integrity check — runs every ~1 hour (time-based, independent of tick interval). */
-export function createDbIntegrityTask(memoryRuntime: AbtarsMemoryRuntime | null): HeartbeatTask {
-  let lastCheckAt = 0;
-  const INTERVAL_MS = 60 * 60 * 1000;
-  const MAX_FAILURES = 5;
-  let consecutiveFailures = 0;
-  let escalated = false;
-  return {
-    name: "db-integrity",
-    execute: async () => {
-      if (escalated) return;
-      if (Date.now() - lastCheckAt < INTERVAL_MS) return;
-      lastCheckAt = Date.now();
-      if (!memoryRuntime || memoryRuntime.state !== "ready") return;
-      const result = await memoryRuntime.runMaintenance({ operation: "integrity" });
-      if (!result.ok) {
-        logError("db-integrity", `Memory DB integrity check failed: ${result.summary}`);
-        const rebuilt = await memoryRuntime.runMaintenance({ operation: "fts_rebuild" });
-        if (rebuilt.ok) {
-          logInfo("db-integrity", `Auto-rebuilt FTS indexes: ${rebuilt.summary}`);
-          consecutiveFailures = 0;
-        } else {
-          consecutiveFailures++;
-          if (consecutiveFailures >= MAX_FAILURES) {
-            escalated = true;
-            const msg = `⚠️ FTS corruption persists after ${MAX_FAILURES} rebuild attempts. Needs manual fix.`;
-            logError("db-integrity", msg);
-            const { bufferSystemEvent } = await import("./system-event-buffer.js");
-            bufferSystemEvent(msg);
-          }
-        }
-      } else {
-        consecutiveFailures = 0;
-      }
-    },
-  };
-}
-
-/** #440: Check for updates on npm, notify if newer version available. */
-export function createUpdateCheckTask(notify: (msg: string) => void): HeartbeatTask {
-  return {
-    name: "update-check",
-    async execute() {
-      if (process.env["UPDATES_CHECK_ENABLED"] === "false") return;
-      const { checkForUpdate } = await import("./update-check.js");
-      const { readFileSync } = await import("node:fs");
-      const { join } = await import("node:path");
-      const { abtarsHome } = await import("../paths.js");
-      let version = "0.0.0";
-      let source = "npm";
-      try {
-        const m = JSON.parse(readFileSync(join(abtarsHome(), "manifest.json"), "utf-8"));
-        version = m.version ?? "0.0.0";
-        source = m.source ?? "npm";
-      } catch (err) { logAndSwallow(TAG, "read manifest.json", err); }
-      if (source === "local") return; // git deploys are always ahead of npm
-      const result = checkForUpdate("abtars", version);
-      if (result?.shouldNotify) {
-        notify(`⚡ Update available: ${result.current} → ${result.latest}. Run: abtars update`);
-      }
-    },
-  };
-}
-
-/** #613: Flush skill usage stats to disk every 3 hours. */
-export function createSkillStatsFlushTask(): HeartbeatTask {
-  let lastFlushAt = 0;
-  const INTERVAL_MS = 3 * 60 * 60 * 1000;
-  return {
-    name: "skill-stats-flush",
-    execute: async () => {
-      if (Date.now() - lastFlushAt < INTERVAL_MS) return;
-      lastFlushAt = Date.now();
-      const { flush } = await import("./skill-stats.js");
-      flush();
-    },
-  };
-}
-
-/** #1114: Reload skills catalog every 10 minutes if skill files changed. */
-export function createSkillReloadTask(): HeartbeatTask {
-  let lastCheckAt = 0;
-  let lastMtime = 0;
-  const INTERVAL_MS = 10 * 60 * 1000;
-  return {
-    name: "skill-reload",
-    execute: async () => {
-      if (Date.now() - lastCheckAt < INTERVAL_MS) return;
-      lastCheckAt = Date.now();
-      const { statSync } = await import("node:fs");
-      const { join } = await import("node:path");
-      const { abtarsHome } = await import("../paths.js");
-      const skillsDir = join(abtarsHome(), "skills");
-      try {
-        const mtime = statSync(skillsDir).mtimeMs;
-        if (mtime === lastMtime) return;
-        lastMtime = mtime;
-        const { reloadCatalog } = await import("../capabilities/hotskills/index.js");
-        const count = reloadCatalog();
-        logInfo("skill-reload", `Catalog regenerated: ${count} skills`);
-      } catch { /* skills dir missing — skip */ }
-    },
-  };
-}
-
-
-/** #936: Expire idle user sessions managed by Spin. */
 export function createUserSessionExpiryTask(): HeartbeatTask {
   return {
     name: "user-session-expiry",
     execute: async () => {
       const { spin } = await import("./spin.js");
       const sessions = spin.listAllSessions();
-      if (!sessions.length) return;
+      if (!sessions.length) return { state: "idle" as const };
       const now = Date.now();
+      let expired = 0;
       for (const session of sessions) {
         if (session.idleTimeoutMs === Infinity) continue;
         if (session.status !== "ready") continue;
         if (!session.transport) continue;
         if (now - session.lastActiveAt > session.idleTimeoutMs) {
           spin.destroySession(session.userId, session.id);
+          expired++;
         }
       }
-    },
-  };
-}
-
-/** #857: Kanban cleanup — purge delivered cards older than 7 days. */
-export function createKanbanCleanupTask(): HeartbeatTask {
-  let counter = 0;
-  return {
-    name: "kanban-cleanup",
-    execute: async () => {
-      counter++;
-      if (counter % 72 !== 0) return; // ~hourly
-      try {
-        const { kanbanCleanup } = await import("./tasks/kanban-board.js");
-        const purged = kanbanCleanup(7);
-        if (purged > 0) logInfo(TAG, `Kanban: purged ${purged} delivered cards > 7d`);
-      } catch (err) { logAndSwallow(TAG, "kanban-cleanup", err); }
-    },
-  };
-}
-
-/** #832: Metrics flush (every 5min) + prune (daily). */
-export function createMetricsTask(cronQueueDepth: () => number): HeartbeatTask {
-  let flushCounter = 0;
-  let pruneCounter = 0;
-  return {
-    name: "metrics",
-    execute: async () => {
-      try {
-        const { recordCronDepth, flushToFile, pruneMetricsFile } = await import("./metrics-collector.js");
-        recordCronDepth(cronQueueDepth());
-        flushCounter++;
-        if (flushCounter % 6 === 0) flushToFile(); // ~5min (6 ticks × 50s)
-        pruneCounter++;
-        if (pruneCounter % 1728 === 0) pruneMetricsFile(); // ~daily (1728 ticks × 50s)
-      } catch (err) { logAndSwallow(TAG, "metrics", err); }
+      return expired > 0
+        ? { state: "ran" as const, detail: `expired ${expired} session(s)` }
+        : { state: "idle" as const };
     },
   };
 }

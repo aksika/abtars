@@ -1,29 +1,20 @@
-/**
- * heartbeat-tier3.ts — Register Tier 3 heartbeat tasks.
- *
- * Called from phasePipelineDeps after transport+platforms+cronQueue are ready.
- * These tasks need transport, memory, cronQueue, or platform adapters.
- */
-
 import { getEnv } from "../components/env-schema.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
-import {
-  createIdleCompactTask, createDbIntegrityTask,
-  createKanbanCleanupTask, createUserSessionExpiryTask, createMetricsTask,
-} from "../components/heartbeat-tasks.js";
+import { createUserSessionExpiryTask } from "../components/heartbeat-tasks.js";
+import { createHousekeepingTask } from "../components/heartbeat-housekeeping.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
 import { loadUsers } from "../components/user-registry.js";
-import { logInfo, logWarn } from "../components/logger.js";
+import { logInfo } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
 import { createCronCallback } from "./phase-pipeline-deps.js";
-import { createModelHealthTask } from "./heartbeat-model-health.js";
+import { runModelHealthCheck } from "./heartbeat-model-health.js";
 import type { BootCtx } from "./context.js";
 
 const TAG = "heartbeat";
 
 export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
-  const { heartbeat, transport, cronQueue, memoryRuntime, memoryConfig, config, pipelineDeps, capabilities } = ctx;
+  const { heartbeat, transport, cronQueue, memoryRuntime, config, pipelineDeps, capabilities } = ctx;
   if (!heartbeat || !transport || !cronQueue || !pipelineDeps) return;
 
   const cronCallback = createCronCallback(ctx);
@@ -32,57 +23,43 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     name: "tasks",
     execute: async () => {
       const dueTasks = checkCron();
-      for (const entry of dueTasks) cronQueue.enqueue(entry, cronCallback);
-    },
-  });
-
-  heartbeat.registerTask({
-    name: "reminder-injector",
-    execute: async () => {
-      const reminders = readPendingReminders();
-      if (reminders.length === 0) return;
-      clearPendingReminders();
-      for (const r of reminders) {
-        logInfo("main", `Injecting reminder for chat ${r.chatId}: "${r.message}"`);
-        if (ctx.telegramAdapter) {
-          ctx.telegramAdapter.injectMessage({
-            platform: "telegram",
-            channelId: String(r.chatId),
-            userId: loadUsers().byPlatformId.get("telegram:" + r.chatId)?.userId ?? "master",
-            senderId: String(r.chatId),
-            senderName: "task",
-            text: `[Scheduled reminder] ${r.message}`,
-            timestamp: Date.now(),
-            threadId: r.threadId ? String(r.threadId) : undefined,
-            isGroup: false,
-            isVoice: false,
-          });
-        }
+      let ran = false;
+      for (const entry of dueTasks) {
+        cronQueue.enqueue(entry, cronCallback);
+        ran = true;
       }
+
+      const reminders = readPendingReminders();
+      if (reminders.length > 0) {
+        clearPendingReminders();
+        for (const r of reminders) {
+          logInfo("main", `Injecting reminder for chat ${r.chatId}: "${r.message}"`);
+          if (ctx.telegramAdapter) {
+            ctx.telegramAdapter.injectMessage({
+              platform: "telegram",
+              channelId: String(r.chatId),
+              userId: loadUsers().byPlatformId.get("telegram:" + r.chatId)?.userId ?? "master",
+              senderId: String(r.chatId),
+              senderName: "task",
+              text: `[Scheduled reminder] ${r.message}`,
+              timestamp: Date.now(),
+              threadId: r.threadId ? String(r.threadId) : undefined,
+              isGroup: false,
+              isVoice: false,
+            });
+          }
+        }
+        ran = true;
+      }
+
+      return ran
+        ? { state: "ran" as const, detail: `${dueTasks.length} cron, ${reminders.length} reminder(s)` }
+        : { state: "idle" as const };
     },
   });
-
-  // #1353: the in-cycle stuck-run guard was removed. abmind's runSleepCycle
-  // now owns its own wall-clock timeout internally (combined into the
-  // request signal) and its returned promise always settles — the host's
-  // `running` flag can no longer desync from an actually-stuck cycle without
-  // the host reading abmind's private lock-file format, which the contract
-  // forbids. See src/capabilities/sleep/index.ts.
-
-  if (getEnv().ctxIdleCompactMin > 0) {
-  heartbeat.registerTask(createIdleCompactTask({
-      transport, memoryDir: memoryConfig.memoryDir,
-      memoryRuntime,
-      allowedUserIds: config.telegram.allowedUserIds,
-      isSleepActive: ctx.isSleepActive,
-    }));
-  }
-
-  heartbeat.registerTask(createDbIntegrityTask(memoryRuntime));
 
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;
 
-  // Nerve-driven instant delivery — sole delivery trigger (#1298: polling backstop removed)
   import("../components/nerve.js").then(({ nerve }) => {
     nerve.on("card:done", async (cardId: number) => {
       try {
@@ -118,51 +95,39 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     });
   }).catch(err => logAndSwallow(TAG, "nerve import", err));
 
-  heartbeat.registerTask(createKanbanCleanupTask());
-
-  import("../components/metrics-collector.js").then(({ initMetrics }) => {
-    initMetrics(abtarsHome());
-  }).catch(() => {});
-  heartbeat.registerTask(createMetricsTask(() => cronQueue.pending));
-
   heartbeat.registerTask(createUserSessionExpiryTask());
 
-  // Reconciler — boot scan + periodic resync (#1414)
   import("../components/reconciler.js").then(({ startReconciler, scanActiveProjects }) => {
     startReconciler();
     heartbeat.registerTask({
       name: "reconciler-resync",
-      execute: async () => { scanActiveProjects(); },
+      execute: async () => {
+        scanActiveProjects();
+        return { state: "ran" as const };
+      },
     });
   }).catch(err => logAndSwallow(TAG, "reconciler", err));
 
-  // Spin tick
   import("../components/spin.js").then(({ spin }) => {
-    heartbeat.registerTask({ name: "spin-tick", execute: () => spin.tick() });
+    heartbeat.registerTask({
+      name: "spin-tick",
+      execute: async () => {
+        await spin.tick();
+        return { state: "ran" as const };
+      },
+    });
   }).catch(err => logAndSwallow(TAG, "spin-tick", err));
 
-  // Busy-unstick
-  {
-    const { spin: spinRef } = require("../components/spin.js") as typeof import("../components/spin.js");
-    heartbeat.registerTask({ name: "busy-unstick", execute: async () => {
-      const now = Date.now();
-      for (const s of spinRef.listAllSessions()) {
-        if (s.busy && s.lastActiveAt && now - s.lastActiveAt > 60_000) {
-          if (transport && "sendInterrupt" in transport) {
-            (transport as { sendInterrupt: (r?: string) => Promise<void> }).sendInterrupt("timeout").catch(() => {});
-          }
-          s.busy = false;
-          logWarn(TAG, `Force-cleared stuck busy on ${s.id} (>60s) — interrupted`);
-        }
-      }
-    }});
-  }
-
   if (transport.healthCheck) {
-    heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });
+    heartbeat.registerTask({
+      name: "transport-health",
+      execute: async () => {
+        await transport.healthCheck!();
+        return { state: "ran" as const };
+      },
+    });
   }
 
-  // Self-healer
   let selfHealerTask: ReturnType<typeof createSelfHealerTask> | null = null;
   if (getEnv().selfhealEnabled) {
     selfHealerTask = createSelfHealerTask(() => ctx.telegramAdapter, config.telegram.allowedUserIds);
@@ -171,7 +136,6 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   ctx.selfHealerTask = selfHealerTask;
   pipelineDeps.selfHealerTask = selfHealerTask;
 
-  // Capability tasks + commands
   const { registerCommand } = await import("../components/commands/index.js");
   for (const [name, handler] of capabilities.commands) {
     registerCommand(name, handler);
@@ -180,8 +144,23 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     heartbeat.registerTask(task);
   }
 
-  // Model health
-  const { task: modelHealthTask, runNow: runModelHealth } = createModelHealthTask(ctx);
-  heartbeat.registerTask(modelHealthTask);
-  queueMicrotask(() => { runModelHealth().catch(err => logAndSwallow(TAG, "runModelHealth boot", err)); });
+  import("../components/metrics-collector.js").then(({ initMetrics }) => {
+    initMetrics(abtarsHome());
+  }).catch(() => {});
+
+  const hbIntervalMs = heartbeat.intervalMs;
+  heartbeat.registerTask(createHousekeepingTask({
+    heartbeatIntervalMs: hbIntervalMs,
+    memoryRuntime,
+    cronQueueDepth: () => cronQueue.pending,
+    notifyUpdate: (msg) => {
+      import("../components/notification.js").then(({ sendNotification }) =>
+        sendNotification(ctx, msg),
+      ).catch(err => logAndSwallow(TAG, "sendNotification update-check", err));
+    },
+  }));
+
+  queueMicrotask(() => {
+    runModelHealthCheck(ctx).catch(err => logAndSwallow(TAG, "runModelHealth boot", err));
+  });
 }

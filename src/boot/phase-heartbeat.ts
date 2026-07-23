@@ -1,41 +1,22 @@
-import { logAndSwallow } from "../components/log-and-swallow.js";
-/**
- * phase-heartbeat — Tier 1 heartbeat: create, register core tasks, start.
- *
- * Runs with deps:[] — starts before transport/pipeline. Watchdog kick from tick 1.
- * Tier 3 tasks (cron, kanban, self-healer etc.) registered later by heartbeat-tier3.ts
- * called from phasePipelineDeps.
- *
- * Populates ctx: heartbeat, sendSystemMessage.
- */
-
 import { HeartbeatSystem, setHeartbeatInstance } from "../components/heartbeat-system.js";
 import { classifyResume } from "../components/platform-detect.js";
 import {
   writeRestartReason, readAndClearRestartRequested, updateBridgeLockField,
 } from "../components/transport/bridge-lock-transport.js";
-import { createUpdateCheckTask, createSkillStatsFlushTask, createSkillReloadTask } from "../components/heartbeat-tasks.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { readEnvWithDefault } from "../components/env.js";
 import { startInProcWatchdog } from "./heartbeat-watchdog.js";
 
-const TAG = "heartbeat";
-
 export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
-  // Tier 3 deps registered later in phasePipelineDeps via registerTier3Tasks()
-
-  // #613: initialize skill usage stats from disk
   const { init: initSkillStats } = await import("../components/skill-stats.js");
   initSkillStats();
 
-  // bridge.lock already written at process start (bridge-app.ts) — just update startedAt from ctx
   updateBridgeLockField("startedAt", ctx.startedAt);
 
   const hbIntervalMs = Math.max(60, parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "60", "heartbeat tick interval"), 10)) * 1000;
 
-  // In-proc watchdog (#263: extracted to heartbeat-watchdog.ts)
   const WD_THRESHOLD_MS = hbIntervalMs * 3;
   const watchdog = startInProcWatchdog({ thresholdMs: WD_THRESHOLD_MS });
 
@@ -52,8 +33,6 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
         logDebug("main", `⏸️ Darkwake resume (${gapMin}min) — skipping tick`);
         return;
       }
-      // #548: any non-dark resume → restart for clean state
-      // In-flight prompts are dead, sessions stuck busy, connections dropped.
       writeRestartReason(`resume after ${gapMin}min suspend`);
       logInfo("main", `⏸️ Resume (${gapMin}min, ${resumeKind}) — restarting for clean state`);
       process.exit(0);
@@ -62,12 +41,6 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   ctx.heartbeat = heartbeat;
   setHeartbeatInstance(heartbeat);
 
-  // --- Tier 1 tasks (no transport/pipeline deps) ---
-  heartbeat.registerTask(createSkillStatsFlushTask());
-  heartbeat.registerTask(createSkillReloadTask());
-  heartbeat.registerTask(createUpdateCheckTask((msg) => {
-    import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(err => logAndSwallow(TAG, "sendNotification update-check", err));
-  }));
   heartbeat.registerTask({
     name: "restart-check",
     execute: async () => {
@@ -76,12 +49,10 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
         logInfo("restart-check", `Restart requested: ${req}`);
         process.exit(0);
       }
+      return { state: "idle" as const };
     },
   });
 
-  // sendSystemMessage — #1106: use injectGreeting (routes through pipeline,
-  // model response is delivered to master user via standard adapter path).
-  // Replaces spin.inject() which generated a response but never delivered it.
   const { spin } = await import("../components/spin.js");
   const masterUser = loadUsers().users.find(u => u.role === "master");
   const masterUserId = masterUser?.userId ?? "master";
@@ -93,26 +64,21 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     }
   };
 
-  // Start heartbeat immediately — watchdog kick from tick 1 (Tier 1)
   heartbeat.start();
   logInfo("main", `💓 Heartbeat started (${Math.round(hbIntervalMs / 1000)}s interval)`);
 
-  // #1439: Refresh runtime health snapshot on each heartbeat tick
   heartbeat.registerTask({
     name: "snapshot-refresh",
     execute: async () => {
       try {
-        const { refreshSnapshot, updateActiveCardIds } = await import("../components/runtime-health-snapshot.js");
-        refreshSnapshot();
-        // Republish the complete active-card set every tick (not just on
-        // lifecycle transitions) so an abrupt state change or missed
-        // markRunning/markDone call cannot leave a stale, indefinitely
-        // "active" entry in the snapshot doctor's Kanban probe trusts.
-        updateActiveCardIds(spin.getActiveCardIds());
-      } catch { /* best effort */ }
+        const { refreshHeartbeatSnapshot } = await import("../components/runtime-health-snapshot.js");
+        refreshHeartbeatSnapshot(spin.getActiveCardIds());
+        return { state: "ran" as const };
+      } catch {
+        return { state: "ran" as const };
+      }
     },
   });
 
   return "ran";
 }
-

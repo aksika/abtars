@@ -73,8 +73,6 @@ function extractKeywords(text: string): string[] {
     .slice(0, 3);
 }
 /** Reset by bridge-app on inbound message to re-enable floating compaction. */
-export let resetIdleCompactFlag: (() => void) | null = null;
-export function setIdleCompactReset(fn: () => void): void { resetIdleCompactFlag = fn; }
 
 /** Shared session reset: reset transport, clear buffer, mark pendingStart. */
 export async function resetAndPrepare(opts: {
@@ -214,7 +212,7 @@ export async function handleInboundMessage(
   let streamMsgId: number | string | undefined; // tool indicator message (editable)
   try {
     busyEntry.busy = true;
-    resetIdleCompactFlag?.(); // re-enable floating compaction on next idle
+
     const ctxPct = transport.contextPercent;
     logInfo(TAG, `← [${msg.platform}] ${isVoice ? "🎤 " : ""}"${text.slice(0, 60)}"${ctxPct >= 0 ? ` (ctx: ${ctxPct}%)` : ""}`);
     // --- Sleep: main transport is available during sleep (sleep uses its own) ---
