@@ -1,15 +1,10 @@
 import { printBanner } from './banner.js';
-/**
- * abtars restart [--cold] — unified restart command.
- * Warm (default): writeRestartRequested → main.ts internal loop restarts.
- * Cold (--cold): kill process, then start fresh.
- */
-
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { acquireLock } from "../deploy-lib/lock.js";
+import { publishCommand, resetRestartCount } from "../../supervisor/state.js";
 
 function readJsonField(file: string, field: string): unknown {
   try { return JSON.parse(readFileSync(file, "utf-8"))[field]; } catch { return undefined; }
@@ -36,7 +31,6 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
   const lockFile = join(home, "bridge.lock");
   const cold = opts.cold ?? false;
 
-  // Acquire operation lock to prevent concurrent restart/deploy
   let releaseLock: (() => Promise<void>) | null = null;
   try {
     releaseLock = await acquireLock(join(home, ".update.lock"), `restart${cold ? " --cold" : ""}`);
@@ -52,21 +46,13 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
 
     if (cold) {
       if (bridgeAlive) await killBridge(bridgePid!);
-
-      // Clear circuit breaker — intentional restart = clean slate
-      try {
-        const s = JSON.parse(readFileSync(join(home, "deploy.state"), "utf-8"));
-        s.restartCount = 0;
-        (await import("node:fs")).writeFileSync(join(home, "deploy.state"), JSON.stringify(s) + "\n");
-      } catch {}
-
-      // Start via the start command (handles both modes)
+      resetRestartCount(home, "cold-restart");
       const { start } = await import("./start.js");
       return start();
     }
 
-    // Warm restart
     if (bridgeAlive) {
+      publishCommand(home, "restart", "restart");
       const { writeRestartRequested } = await import("../../components/transport/bridge-lock-transport.js");
       writeRestartRequested("restart");
       process.stdout.write(`Restart requested (PID ${bridgePid}) — bridge will restart within 30s\n`);

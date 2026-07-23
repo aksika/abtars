@@ -10,6 +10,7 @@ import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, mkdirSync, cop
 import { mkdir } from "node:fs/promises";
 import { execSync, spawnSync } from "node:child_process";
 import { acquireLock, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
+import { publishCommand, setDesiredState, resetRestartCount, migrateSupervisorState } from "../../supervisor/state.js";
 
 import { makeLocalBuildSource } from "../update-sources/dev.js";
 import { makeNpmSource } from "../update-sources/npm.js";
@@ -303,12 +304,14 @@ export async function deployActivation(
   const inCgroup = inWatchdogServiceCgroup();
 
   if (!isFirstInstall) {
+    migrateSupervisorState(paths.home);
+    setDesiredState(paths.home, "running");
+    resetRestartCount(paths.home, "deploy");
     if (inCgroup) {
       // In-cgroup (Linux `/update dev`): kill ONLY the bridge; L3 respawns it.
-      // No systemctl stop, no watchdog kill, and NO `update:` .start-reason —
-      // that would make the live watchdog exit 0 for a systemd restart that
-      // tears down (and SIGTERMs) our own cgroup.
-      try { rmSync(join(paths.home, ".stopped")); } catch {}
+      // No systemctl stop, no watchdog kill, and NO supervisor state update
+      // command — that would make the live watchdog exit for a systemd restart
+      // that tears down (and SIGTERMs) our own cgroup.
       const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
       if (bridgePid && bridgePid > 0) {
         try { process.kill(bridgePid, "SIGTERM"); } catch {}
@@ -329,8 +332,8 @@ export async function deployActivation(
         try { execSync("systemctl --user stop abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
       }
 
-      // 7.2 Write .start-reason = "update:X" (safety net if WD survives service stop)
-      writeFileSync(join(paths.home, ".start-reason"), `update:${staged.version}`);
+      // 7.2 Publish update command via supervisor state
+      publishCommand(paths.home, "update", `update:${staged.version}`);
 
       // 7.3 Kill WD PID explicitly (belt)
       const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
@@ -358,9 +361,6 @@ export async function deployActivation(
         }
         if (wdAlive) { try { process.kill(wdPid, "SIGKILL"); } catch {} }
       }
-
-      // 7.6 Clear .stopped sentinel
-      try { rmSync(join(paths.home, ".stopped")); } catch {}
     }
   }
 
@@ -374,8 +374,8 @@ export async function deployActivation(
       // new app/ symlink after the process-gone kill above.
       process.stdout.write(`  Bridge killed — L3 watchdog respawning from new release\n`);
     } else {
-      // 8.1 Write neutral .start-reason — new WD won't match any exit case
-      writeFileSync(join(paths.home, ".start-reason"), "deploy-respawn");
+      // 8.1 Publish deploy-respawn command — new WD will acknowledge and restart
+      publishCommand(paths.home, "update", "deploy-respawn");
       // 8.2 Restart daemon service
       if (process.platform === "darwin") {
         const plistPath = join(homedir(), "Library/LaunchAgents/com.abtars.watchdog.plist");

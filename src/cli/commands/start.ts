@@ -1,10 +1,10 @@
 import { printBanner } from './banner.js';
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
-
+import { setDesiredState, migrateSupervisorState } from "../../supervisor/state.js";
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -18,15 +18,12 @@ export async function start(): Promise<number> {
   await printBanner("start");
   const home = abtarsHome();
   const lockFile = join(home, "bridge.lock");
-  const startReasonFile = join(home, ".start-reason");
 
-  // Clear stop sentinel so WD/bridge can start
-  try { unlinkSync(startReasonFile); } catch {}
-  try { unlinkSync(join(home, ".stopped")); } catch {}
+  migrateSupervisorState(home);
+  setDesiredState(home, "running");
 
   const installMode = readJsonField(join(home, "manifest.json"), "installMode") as string | undefined;
 
-  // Daemon mode — let launchd/systemd handle it
   if (installMode === "daemon") {
     if (process.platform === "darwin") {
       const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
@@ -37,11 +34,10 @@ export async function start(): Promise<number> {
       try { execFileSync("systemctl", ["--user", "enable", "abtars-watchdog"], { timeout: 5000 }); } catch {}
       try { execFileSync("systemctl", ["--user", "start", "abtars-watchdog"], { timeout: 5000 }); } catch {}
     }
-    process.stdout.write(`✓ Service loaded. Watchdog starting...\n`);
+    process.stdout.write(`+ Service loaded. Watchdog starting...\n`);
     return 0;
   }
 
-  // Simple mode — spawn bridge directly
   if (existsSync(lockFile)) {
     try {
       const lock = JSON.parse(readFileSync(lockFile, "utf-8"));
@@ -72,6 +68,6 @@ export async function start(): Promise<number> {
   });
   br.unref();
   closeSync(logFd);
-  process.stdout.write(`✓ Bridge started (pid ${br.pid}).\n`);
+  process.stdout.write(`+ Bridge started (pid ${br.pid}).\n`);
   return 0;
 }

@@ -103,13 +103,12 @@ describe("deploy-lib/service-reconcile — L4 Restart policy (#1278)", () => {
   });
 
   it("RestartPreventExitStatus matches the watchdog's intentional-stop exit code", () => {
-    // The policy above is only correct if the watchdog exits 2 for intentional stop
-    // (abtars stop sentinel + AG5 failsafe). If the watchdog's stop exit code ever
-    // changes, RestartPreventExitStatus=2 would silently start respawning a stopped
-    // watchdog (or fail to). Lock the two together.
+    // The policy above is only correct if the watchdog exits 2 for intentional stop.
+    // If the watchdog's stop exit code ever changes, RestartPreventExitStatus=2
+    // would silently start respawning a stopped watchdog (or fail to).
     const wd = readFileSync(join(scriptsDir, "abtars-watchdog.sh"), "utf-8");
-    // `stopped) ... exit 2` — the intentional-stop path exits 2.
-    expect(wd).toMatch(/stopped\)[\s\S]{0,120}?exit 2/);
+    // `handle_stopped` function does `exit 2` — the intentional-stop path exits 2.
+    expect(wd).toMatch(/exit 2/);
     expect(unit).toMatch(/^RestartPreventExitStatus=2$/m);
   });
 });

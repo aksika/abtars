@@ -72,6 +72,7 @@ const result = await esbuild.build({
     "abtars-restart": "src/cli/commands/restart.ts",
     "abtars-rss": "src/cli/abtars-rss.ts",
     "abtars-todo": "src/cli/abtars-todo.ts",
+    "abtars-supervisor-state": "src/supervisor/state-cli.ts",
   },
   bundle: true,
   platform: "node",
@@ -111,6 +112,6 @@ const totalBytes = Object.values(result.metafile.outputs).reduce((sum, o) => sum
 console.log(`\n✓ Bundle: ${outputs.length} files, ${(totalBytes / 1024 / 1024).toFixed(1)}MB total`);
 
 // Ensure CLI entry points are executable
-for (const f of ["bundle/abtars-cli.js", "bundle/abtars-sleep.js"]) {
+for (const f of ["bundle/abtars-cli.js", "bundle/abtars-sleep.js", "bundle/abtars-supervisor-state.js"]) {
   try { chmodSync(f, 0o755); } catch { /* ignore if missing */ }
 }

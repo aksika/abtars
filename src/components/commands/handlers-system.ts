@@ -83,10 +83,11 @@ export async function handleStop(_text: string, ctx: CommandContext): Promise<bo
 }
 
 export async function handleRestart(_text: string, ctx: CommandContext): Promise<boolean> {
-  const { writeFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
-  writeFileSync(join(home, ".start-reason"), "user-restart");
+  const { setDesiredState, resetRestartCount } = await import("../../supervisor/state.js");
+  setDesiredState(home, "running");
+  resetRestartCount(home, "user-restart");
 
   const arg = _text.replace(/^\/restart\s*/i, "").trim().toLowerCase();
   if (arg === "cold") {

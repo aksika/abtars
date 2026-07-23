@@ -1,41 +1,41 @@
 #!/usr/bin/env bash
 # Watchdog: start bridge, poll alive + heartbeat, respawn on death.
-# Reads .start-reason for instructions. Exits on "stopped" (code 2) or update/restart (code 0).
+# Uses supervisor.state for durable command and desired-state arbitration.
+# Exit codes: 0 no-op, 1 fault, 2 durable stop, 3 running handoff
 AB="${ABTARS_HOME:-$HOME/.abtars}"
 LOCK="$AB/bridge.lock"
 STALE=300
 POLL=60
-STATE="$AB/deploy.state"
+WD_LOG="$AB/logs/watchdog.log"
+
+# Resolve supervisor-state CLI entry
+SUPERVISOR_CLI=""
+for candidate in "$AB/app/bundle/abtars-supervisor-state.js" "$AB/../src/abtars/bundle/abtars-supervisor-state.js"; do
+  if [[ -f "$candidate" ]]; then
+    SUPERVISOR_CLI="$candidate"
+    break
+  fi
+done
+if [[ -z "$SUPERVISOR_CLI" ]]; then
+  echo "$(date +%FT%T) FATAL: abtars-supervisor-state.js not found" >> "$WD_LOG"
+  exit 1
+fi
+
+svc() { node "$SUPERVISOR_CLI" "$@"; }
 
 # Singleton: flock (Linux) / lockf (macOS)
 exec 200>>"$AB/.bridge.flock"
 if command -v flock &>/dev/null; then
   if ! flock -w 5 200; then
-    WD_PID=$(python3 -c "import json; print(json.load(open('$LOCK')).get('watchdogPid',''))" 2>/dev/null)
-    if [[ -n "$WD_PID" ]] && ! kill -0 "$WD_PID" 2>/dev/null; then
-      rm -f "$AB/.bridge.flock"
-      exec "$0" "$@"
-    fi
     exit 0
   fi
 else
   if ! lockf -s -t 5 200; then
-    WD_PID=$(python3 -c "import json; print(json.load(open('$LOCK')).get('watchdogPid',''))" 2>/dev/null)
-    if [[ -n "$WD_PID" ]] && ! kill -0 "$WD_PID" 2>/dev/null; then
-      rm -f "$AB/.bridge.flock"
-      exec "$0" "$@"
-    fi
     exit 0
   fi
 fi
 
-# If .stopped exists from a previous `abtars stop`, exit cleanly
-if [[ -f "$AB/.stopped" ]]; then
-  echo "$(date +%FT%T) Watchdog exit: .stopped sentinel present" >> "$AB/logs/watchdog.log"
-  exit 0
-fi
-
-# Write our PID into bridge.lock
+# Write watchdog PID into bridge.lock
 python3 -c "
 import json
 p='$LOCK'
@@ -45,81 +45,123 @@ d['watchdogPid']=$$
 with open(p,'w') as f: json.dump(d,f)
 " 2>/dev/null
 
-# Don't propagate signals to bridge child; on SIGTERM/INT kill bridge and exit 2
-# (exit 2 + RestartPreventExitStatus=2 = systemd won't restart on Linux)
+# Signal traps: set in-memory flags only; never kill bridge or mutate state
+TERMINATE_FLAG=0
+WAKE_FLAG=0
 trap '' HUP
-trap 'echo "$(date +%FT%T) Watchdog exit: signal=SIGTERM (pid=${PID:-none})" >> "$AB/logs/watchdog.log"; kill $PID 2>/dev/null; exit 2' TERM INT
+trap 'TERMINATE_FLAG=1' TERM INT
+trap 'WAKE_FLAG=1' USR1
 
-while true; do
-  # Read .start-reason (one-shot message from update/stop/restart)
-  REASON=""
-  if [[ -f "$AB/.start-reason" ]]; then
-    REASON=$(cat "$AB/.start-reason")
-    rm -f "$AB/.start-reason"
+migrate_supervisor_state() {
+  local result
+  result=$(svc migrate 2>/dev/null)
+  if [[ "$result" == "migrated" ]]; then
+    echo "$(date +%FT%T) Supervisor state migrated from legacy" >> "$WD_LOG"
   fi
+}
 
-  # Act on reason
-  case "$REASON" in
-    stopped)
-      echo "stopped" > "$AB/.stopped"
-      echo "$(date +%FT%T) Watchdog exit: manual=stop" >> "$AB/logs/watchdog.log"
-      exit 2 ;;
-    update:*|restart|rollback:*|deploy-respawn)
-      rm -f "$AB/.stopped"
-      echo "$(date +%FT%T) Watchdog exit: ${REASON}" >> "$AB/logs/watchdog.log"
-      exit 0 ;;
-    "")
-      ;; # no reason — normal start
-    *)
-      echo "$(date +%FT%T) Watchdog warn: unrecognized .start-reason \"$REASON\" — discarding" >> "$AB/logs/watchdog.log" ;;
-  esac
+read_desired_state() {
+  svc desired-state 2>/dev/null || echo "unavailable"
+}
 
+claim_and_ack_command() {
+  local cmd_json cmd_seq cmd_type
+  cmd_json=$(svc claim-command 2>/dev/null)
+  if [[ "$cmd_json" == "null" || -z "$cmd_json" ]]; then
+    return 1
+  fi
+  cmd_seq=$(echo "$cmd_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('seq',''))" 2>/dev/null)
+  cmd_type=$(echo "$cmd_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('type',''))" 2>/dev/null)
+  if [[ -z "$cmd_seq" || -z "$cmd_type" ]]; then
+    return 1
+  fi
+  echo "$cmd_type"
+  svc ack-command "$cmd_seq" "applied" 2>/dev/null
+  return 0
+}
+
+handle_stopped() {
+  # desiredState = stopped: kill bridge, exit 2
+  if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+    kill "$PID" 2>/dev/null
+    wait "$PID" 2>/dev/null
+  fi
+  echo "$(date +%FT%T) Watchdog exit: desiredState=stopped" >> "$WD_LOG"
+  exit 2
+}
+
+handle_running_handoff() {
+  # TERM/INT while desiredState=running: preserve bridge, exit 3
+  echo "$(date +%FT%T) Watchdog exit: handoff with running bridge (PID=${PID:-none})" >> "$WD_LOG"
+  exit 3
+}
+
+# ── Startup ──────────────────────────────────────────────────────────────
+migrate_supervisor_state
+DESIRED=$(read_desired_state)
+if [[ "$DESIRED" == "stopped" ]]; then
+  handle_stopped
+fi
+
+# ── Main loop ────────────────────────────────────────────────────────────
+while true; do
   # Start bridge
-  BRIDGE_REASON="${REASON:-watchdog-respawn}"
-  # #1261: exec replaces the subshell with the env->nohup->node chain so $! is the real node PID.
-  # Without exec, bash forks a subshell for `cd && env=value cmd &` and $! returns the subshell,
-  # leaving node as a grandchild that gets orphaned when the subshell dies.
-  cd "$AB" && exec env ABTARS_WATCHDOG_PID=$$ NODE_PATH="$HOME/.local/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$BRIDGE_REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js 200>&- &
+  cd "$AB" && exec env ABTARS_WATCHDOG_PID=$$ NODE_PATH="$HOME/.local/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="watchdog-respawn" nohup node --max-old-space-size=1024 app/bundle/abtars.js 200>&- &
   PID=$!
   SPAWNED_AT=$(date +%s)
 
-  # Poll: alive + heartbeat + .start-reason
   DEATH_REASON=""
   LAST_POLL_AT=$(date +%s)
   while sleep "$POLL"; do
-    # Suspend detection: if poll gap >> POLL, host was asleep — skip stale check
+    # Resolve signal flags
+    if [[ "$TERMINATE_FLAG" -eq 1 ]]; then
+      TERMINATE_FLAG=0
+      DESIRED=$(read_desired_state)
+      if [[ "$DESIRED" == "stopped" ]]; then
+        handle_stopped
+      fi
+      # TERM while running: preserve bridge, exit 3 for restart
+      handle_running_handoff
+    fi
+    if [[ "$WAKE_FLAG" -eq 1 ]]; then
+      WAKE_FLAG=0
+      # Woken by USR1 — check for pending command
+      local cmd_type
+      cmd_type=$(claim_and_ack_command)
+      if [[ -n "$cmd_type" ]]; then
+        echo "$(date +%FT%T) Processing command: $cmd_type" >> "$WD_LOG"
+      fi
+    fi
+
+    # Suspend detection
     _now_s=$(date +%s)
     _poll_gap=$(( _now_s - LAST_POLL_AT ))
     LAST_POLL_AT=$_now_s
     if (( _poll_gap > POLL * 3 )); then
-      echo "$(date +%FT%T) Suspend detected (poll gap ${_poll_gap}s >> ${POLL}s) — granting one-cycle grace" >> "$AB/logs/watchdog.log"
+      echo "$(date +%FT%T) Suspend detected (poll gap ${_poll_gap}s >> ${POLL}s) — granting one-cycle grace" >> "$WD_LOG"
       continue
     fi
-    # Check for new instructions
-    if [[ -f "$AB/.start-reason" ]]; then
-      REASON=$(cat "$AB/.start-reason")
-      rm -f "$AB/.start-reason"
-      case "$REASON" in
-        stopped)
-          echo "stopped" > "$AB/.stopped"
-          echo "$(date +%FT%T) Watchdog exit: manual=stop (during poll)" >> "$AB/logs/watchdog.log"
-          kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
-          exit 2 ;;
-        update:*|restart|rollback:*|deploy-respawn)
-          rm -f "$AB/.stopped"
-          echo "$(date +%FT%T) Watchdog exit: ${REASON} (during poll)" >> "$AB/logs/watchdog.log"
-          kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
-          exit 0 ;;
-      esac
+
+    # Poll desired state every cycle (also handles lost USR1 signals)
+    DESIRED=$(read_desired_state)
+    if [[ "$DESIRED" == "stopped" ]]; then
+      handle_stopped
     fi
+
+    # Check for pending command (durable state poll, recovers lost signals)
+    local cmd_type
+    cmd_type=$(claim_and_ack_command)
+    if [[ "$cmd_type" == "stop" ]]; then
+      handle_stopped
+    elif [[ "$cmd_type" == "update" || "$cmd_type" == "restart" || "$cmd_type" == "rollback" ]]; then
+      echo "$(date +%FT%T) Watchdog exit: command=$cmd_type" >> "$WD_LOG"
+      kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
+      exit 3
+    fi
+
     # Bridge alive?
     if ! kill -0 "$PID" 2>/dev/null; then
-      wait "$PID" 2>/dev/null   # reap the child
-      # #1328: prefer the bridge's self-reported exit code from bridge.lock. `wait`
-      # reports the real exit code now that `disown` was removed (#1470). Only trust
-      # the lock's lastExitCode if it was written AFTER this bridge instance was
-      # spawned — otherwise
-      # it's a stale value from a prior death (or the lock predates this fix).
+      wait "$PID" 2>/dev/null
       EXIT_CODE=$(python3 -c "
 import json
 try:
@@ -145,53 +187,21 @@ except Exception:
     fi
   done
 
-  # Log death + update deploy.state restartCount + crash-window death log
-  echo "$(date +%FT%T) Bridge died: $DEATH_REASON (PID=$PID)" >> "$AB/logs/watchdog.log"
-  python3 -c "
-import json, time
-p='$STATE'
-try: d=json.load(open(p))
-except: d={}
-d['restartCount'] = d.get('restartCount', 0) + 1
-d['lastDeath'] = '$(date +%FT%T)'
-# #1328: rolling window of recent death timestamps (epoch seconds), for the
-# crash-with-heartbeat failsafe below. Keep only the last 10 — plenty for a
-# 4-in-N-minutes check without unbounded growth.
-window = d.get('deathWindow', [])
-window.append(int(time.time()))
-d['deathWindow'] = window[-10:]
-with open(p,'w') as f: json.dump(d,f)
-" 2>/dev/null
+  # Log death + record via supervisor state
+  echo "$(date +%FT%T) Bridge died: $DEATH_REASON (PID=$PID)" >> "$WD_LOG"
+  svc record-death "$DEATH_REASON" 2>/dev/null
+  svc record-healthy 2>/dev/null
 
-  # Failsafe A: 4+ deaths in 7min with no heartbeat ever → give up
-  HB_CHECK=$(grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*')
-  RESTART_COUNT=$(python3 -c "import json; print(json.load(open('$STATE')).get('restartCount',0))" 2>/dev/null || echo 0)
-  if (( RESTART_COUNT >= 4 )) && [[ -z "$HB_CHECK" || "$HB_CHECK" == "0" ]]; then
-    echo "stopped" > "$AB/.start-reason"
-    exit 2
+  # Read backoff delay from supervisor state
+  BACKOFF_MS=$(svc get-backoff 2>/dev/null || echo 0)
+  if [[ "$BACKOFF_MS" -gt 0 ]]; then
+    sleep $(( BACKOFF_MS / 1000 ))
   fi
 
-  # Failsafe B (#1328): 4+ deaths within a 10min window, REGARDLESS of heartbeat state.
-  # Catches the #1327 pattern — bridge heartbeats fine for ~2min each cycle then dies on
-  # the same bug every time. Failsafe A never fires in this case because heartbeat IS
-  # present; the boot-side circuit breaker (boot/circuit-breaker.ts) eventually catches it
-  # via restartCount, but only after a full rollback cycle. This trips sooner, same terminal
-  # action (stopped, exit 2) as Failsafe A.
-  CRASH_WINDOW_COUNT=$(python3 -c "
-import json, time
-try:
-    d = json.load(open('$STATE'))
-    window = d.get('deathWindow', [])
-    now = time.time()
-    print(sum(1 for t in window if now - t <= 600))
-except Exception:
-    print(0)
-" 2>/dev/null || echo 0)
-  if (( CRASH_WINDOW_COUNT >= 4 )); then
-    echo "$(date +%FT%T) Failsafe B: $CRASH_WINDOW_COUNT deaths within 10min (heartbeat present) — giving up" >> "$AB/logs/watchdog.log"
-    echo "stopped" > "$AB/.stopped"
-    echo "stopped" > "$AB/.start-reason"
-    exit 2
+  # Check desired state before respawn
+  DESIRED=$(read_desired_state)
+  if [[ "$DESIRED" == "stopped" ]]; then
+    handle_stopped
   fi
 
   sleep 2

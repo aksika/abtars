@@ -28,6 +28,16 @@ ABTARS_HOME="${ABTARS_HOME:-$HOME/.abtars}"
 PLIST="$HOME/Library/LaunchAgents/com.abtars.watchdog.plist"
 BRIDGE_LOCK="$ABTARS_HOME/bridge.lock"
 UID_LABEL="gui/$(id -u)"
+SUPERVISOR_CLI="$ABTARS_HOME/app/bundle/abtars-supervisor-state.js"
+
+# Use supervisor state CLI if available, fall back to legacy sentinel files
+svc() {
+  if [ -x "$SUPERVISOR_CLI" ] || [ -f "$SUPERVISOR_CLI" ]; then
+    node "$SUPERVISOR_CLI" "$@"
+    return $?
+  fi
+  return 1
+}
 IS_MAC="$(uname | grep -q Darwin && echo 1 || echo 0)"
 
 die() { echo "x $*" >&2; exit 1; }
@@ -108,7 +118,7 @@ if [ "$IS_MAC" = "1" ]; then
   # macOS: bootout now, bootstrap in step 9. No cgroup teardown, so the detached
   # deploy survives — the full stop/kill sequence is safe here.
   launchctl bootout "$UID_LABEL/com.abtars.watchdog" 2>/dev/null || true
-  echo "update:$VERSION" > "$ABTARS_HOME/.start-reason"
+  svc publish-command update "update:$VERSION" 2>/dev/null || echo "update:$VERSION" > "$ABTARS_HOME/.start-reason"
   [ -n "$OLD_PID" ] && kill "$OLD_PID" 2>/dev/null || true
   [ -n "$WD_PID" ]  && kill "$WD_PID"  2>/dev/null || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do               # wait up to ~5s for bridge to exit
@@ -126,7 +136,7 @@ fi
 # bridge) and starts a fresh watchdog with the new service def + new
 # abtars-watchdog.sh. This script runs OUTSIDE the service cgroup (manual login
 # shell), so the restart does not kill it — this is the foolproof WD-refresh path.
-rm -f "$ABTARS_HOME/.stopped"
+svc set-desired-state running 2>/dev/null || rm -f "$ABTARS_HOME/.stopped"
 
 # ── 8b. Reconcile watchdog service definition from repo template (#1284) ────
 # MIRROR of deploy.ts deployActivation (the plist/systemd reconcile block).
@@ -149,7 +159,7 @@ fi
 
 # ── 9. Respawn ─────────────────────────────────────────────────────────────
 step "respawning daemon..."
-echo "deploy-respawn" > "$ABTARS_HOME/.start-reason"
+svc publish-command update "deploy-respawn" 2>/dev/null || echo "deploy-respawn" > "$ABTARS_HOME/.start-reason"
 if [ "$IS_MAC" = "1" ]; then
   # bootout->bootstrap can race (launchd tear-down); retry once after a beat
   launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || { sleep 2; launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || true; }

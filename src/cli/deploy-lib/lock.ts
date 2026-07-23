@@ -1,24 +1,13 @@
-/**
- * Update lock: prevents concurrent `install` / `update` / `rollback` runs
- * in the same runtime from colliding.
- *
- * Mechanism: write a JSON pidfile at packagePaths().lock. If file exists and
- * the PID is alive and the mtime is recent (<1h), refuse to proceed. Otherwise
- * take the lock.
- *
- * Stale timeout matches plan: 1 hour (our updates take minutes). Compared to
- * claude-code's 7-day timeout which accommodates laptop sleep during a long
- * install — not applicable for our short-lived updates.
- */
+import { readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, mkdirSync, unlinkSync, rmdirSync } from "node:fs";
+import { hostname } from "node:os";
+import { randomUUID } from "node:crypto";
 
-import { readFile, unlink, writeFile } from 'node:fs/promises';
-import { unlinkSync } from 'node:fs';
-import { hostname } from 'node:os';
-
-const STALE_MS = 5 * 60 * 1000; // 5 minutes — deploys take <2min
+const STALE_MS = 5 * 60 * 1000;
 
 export interface LockContent {
+  readonly token: string;
   readonly pid: number;
+  readonly startIdentity: string;
   readonly host: string;
   readonly startedAt: string;
   readonly cmd: string;
@@ -29,12 +18,39 @@ export class LockHeldError extends Error {
     public readonly content: LockContent,
     public readonly isStale: boolean,
   ) {
-    const staleMsg = isStale ? ' (appears stale — process may have crashed)' : '';
+    const staleMsg = isStale ? " (appears stale — process may have crashed)" : "";
     super(
       `Lock held by pid ${content.pid} since ${content.startedAt} ` +
         `(cmd: ${content.cmd})${staleMsg}`,
     );
-    this.name = 'LockHeldError';
+    this.name = "LockHeldError";
+  }
+}
+
+function readJsonSafe<T>(path: string): T | null {
+  try {
+    return JSON.parse(readFileSync(path, "utf-8")) as T;
+  } catch {
+    return null;
+  }
+}
+
+function writeAtomic(target: string, data: string): void {
+  const tmp = target + ".tmp." + randomUUID().slice(0, 8);
+  writeFileSync(tmp, data, "utf-8");
+  const fd = openSync(tmp, "r");
+  fsyncSync(fd);
+  closeSync(fd);
+  renameSync(tmp, target);
+}
+
+function processStartIdentity(pid: number): string {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const startTime = stat.split(" ")[21];
+    return `${pid}:${startTime ?? "0"}`;
+  } catch {
+    return `${pid}:0`;
   }
 }
 
@@ -43,65 +59,99 @@ function isPidAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
+    return (err as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
-async function readLock(path: string): Promise<LockContent | null> {
-  try {
-    return JSON.parse(await readFile(path, 'utf-8')) as LockContent;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw err;
+const LOCK_OWNER_FILE = "owner.json";
+
+function releaseLockDirectory(lockDir: string, token: string): void {
+  const ownerPath = lockDir + "/" + LOCK_OWNER_FILE;
+  const owner = readJsonSafe<LockContent>(ownerPath);
+  if (owner && owner.token === token) {
+    try { unlinkSync(ownerPath); } catch { /* ok */ }
+    try { rmdirSync(lockDir); } catch { /* ok */ }
   }
 }
 
-/**
- * Acquire the lock or throw LockHeldError. Returns a release function.
- * Caller must call release() on both success and failure; the returned
- * function is idempotent.
- */
 export async function acquireLock(path: string, cmd: string): Promise<() => Promise<void>> {
-  const existing = await readLock(path);
+  const lockDir = path + ".lockdir";
+
+  const existing = readJsonSafe<LockContent>(lockDir + "/" + LOCK_OWNER_FILE);
   if (existing) {
     const alive = isPidAlive(existing.pid);
+    const startOk = processStartIdentity(existing.pid) === existing.startIdentity;
     const started = Date.parse(existing.startedAt);
     const age = Date.now() - (Number.isFinite(started) ? started : 0);
-    const stale = !alive || age > STALE_MS;
+    const stale = !alive || !startOk || age > STALE_MS;
     if (!stale) {
       throw new LockHeldError(existing, false);
     }
-    // Stale: fall through and take it, but tell the caller so doctor can surface.
+    if (stale) {
+      const tombstone = lockDir + ".stale." + randomUUID().slice(0, 8);
+      try {
+        renameSync(lockDir, tombstone);
+      } catch {
+        // Another contender took it
+      }
+    }
   }
 
   const content: LockContent = {
+    token: randomUUID(),
     pid: process.pid,
+    startIdentity: processStartIdentity(process.pid),
     host: hostname(),
     startedAt: new Date().toISOString(),
     cmd,
   };
-  await writeFile(path, JSON.stringify(content, null, 2) + '\n', 'utf-8');
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      mkdirSync(lockDir);
+      writeAtomic(lockDir + "/" + LOCK_OWNER_FILE, JSON.stringify(content, null, 2) + "\n");
+      break;
+    } catch {
+      // Someone else created the directory — retry stale takeover
+      const recheck = readJsonSafe<LockContent>(lockDir + "/" + LOCK_OWNER_FILE);
+      if (recheck) {
+        const alive = isPidAlive(recheck.pid);
+        const startOk = processStartIdentity(recheck.pid) === recheck.startIdentity;
+        const stale = !alive || !startOk;
+        if (stale) {
+          const tombstone = lockDir + ".stale." + randomUUID().slice(0, 8);
+          try {
+            renameSync(lockDir, tombstone);
+            continue;
+          } catch {
+            // Another contender renamed it
+          }
+        }
+      }
+      if (attempt < 50) {
+        await new Promise((r) => setTimeout(r, 50));
+      } else {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+  }
+
+  const verify = readJsonSafe<LockContent>(lockDir + "/" + LOCK_OWNER_FILE);
+  if (!verify || verify.token !== content.token) {
+    throw new LockHeldError(verify ?? content, false);
+  }
 
   let released = false;
   const release = async (): Promise<void> => {
     if (released) return;
     released = true;
-    try {
-      await unlink(path);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    }
+    releaseLockDirectory(lockDir, content.token);
   };
 
-  // Best-effort cleanup on unexpected exit.
   const exitHandler = (): void => {
-    try {
-      unlinkSync(path);
-    } catch {
-      /* ignore — stale detection handles orphans next run */
-    }
+    releaseLockDirectory(lockDir, content.token);
   };
-  process.once('exit', exitHandler);
+  process.once("exit", exitHandler);
 
   return release;
 }
@@ -110,11 +160,13 @@ export async function inspectLock(path: string): Promise<
   | { held: false }
   | { held: true; content: LockContent; stale: boolean }
 > {
-  const content = await readLock(path);
+  const lockDir = path + ".lockdir";
+  const content = readJsonSafe<LockContent>(lockDir + "/" + LOCK_OWNER_FILE);
   if (!content) return { held: false };
   const alive = isPidAlive(content.pid);
+  const startOk = processStartIdentity(content.pid) === content.startIdentity;
   const started = Date.parse(content.startedAt);
   const age = Date.now() - (Number.isFinite(started) ? started : 0);
-  const stale = !alive || age > STALE_MS;
+  const stale = !alive || !startOk || age > STALE_MS;
   return { held: true, content, stale };
 }

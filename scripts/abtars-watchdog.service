@@ -7,8 +7,11 @@ StartLimitIntervalSec=60
 [Service]
 Type=simple
 ExecStart=%h/.abtars-releases/src/abtars/scripts/abtars-watchdog.sh
-Restart=on-abnormal
+Restart=on-failure
+RestartPreventExitStatus=2
 RestartSec=5
+KillMode=process
+KillSignal=SIGTERM
 Environment=PATH=%h/.abtars/bin:%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 Environment=NODE_PATH=%h/.local/lib/node_modules
 

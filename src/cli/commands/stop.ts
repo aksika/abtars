@@ -1,19 +1,11 @@
 import { printBanner } from './banner.js';
-/**
- * abtars stop — kill watchdog (if running) then bridge.
- *
- * Ordering: watchdog dies first so it doesn't respawn the bridge.
- * Each process gets SIGTERM → 5s grace → SIGKILL.
- * Daemon mode: unloads launchd/systemd service before killing.
- */
-
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
-
+import { setDesiredState, publishCommand } from "../../supervisor/state.js";
 
 function readJsonField(file: string, field: string): unknown {
   try {
@@ -26,12 +18,11 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-/** Linux-only guard: verify cmdline contains expected substring. Mac has no /proc — returns true. */
 function pidLooksLike(pid: number, needles: string[]): boolean {
   try {
     const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
     return needles.some(n => cmdline.includes(n));
-  } catch { return true; /* /proc unavailable — trust the lock */ }
+  } catch { return true; }
 }
 
 type KillResult = "killed" | "forced" | "gone" | "stale" | "not-running";
@@ -42,13 +33,11 @@ async function killGracefully(pid: number, needles: string[]): Promise<KillResul
 
   try { process.kill(pid, "SIGTERM"); } catch { return "not-running"; }
 
-  // 10 × 500ms poll = 5s grace per process
   for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 500));
     if (!pidAlive(pid)) return "killed";
   }
 
-  // Force kill
   try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
   await new Promise(r => setTimeout(r, 500));
   return pidAlive(pid) ? "not-running" : "forced";
@@ -64,16 +53,12 @@ export async function stop(_opts: {}): Promise<number> {
   const home = abtarsHome();
   const manifestPath = join(home, "manifest.json");
   const bridgeLock = join(home, "bridge.lock");
-  const startReasonFile = join(home, ".start-reason");
-  const stoppedFile = join(home, ".stopped");
+
+  setDesiredState(home, "stopped");
+  publishCommand(home, "stop", "stopped");
 
   const installMode = readJsonField(manifestPath, "installMode") as string | undefined;
 
-  // 0) Write sentinel — prevents watchdog from respawning even if kill races with launchd
-  try { require("node:fs").writeFileSync(startReasonFile, "stopped"); } catch {}
-  try { require("node:fs").writeFileSync(stoppedFile, "stopped"); } catch {}
-
-  // 1) Unload supervisor service (prevent respawn)
   let serviceWasStopped = false;
   if (installMode === "daemon") {
     if (process.platform === "darwin") {
@@ -81,7 +66,6 @@ export async function stop(_opts: {}): Promise<number> {
       const uid = `gui/${process.getuid!()}`;
       try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); serviceWasStopped = true; } catch {}
       await new Promise(r => setTimeout(r, 1000));
-      // Retry in case launchd respawned before bootout took effect
       try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); } catch {}
     } else {
       try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); serviceWasStopped = true; } catch {}
@@ -97,7 +81,6 @@ export async function stop(_opts: {}): Promise<number> {
     wdResult = await killGracefully(wdPid, ["abtars-watchdog.sh"]);
   }
 
-  // 2) Bridge second
   const brPid = readJsonField(bridgeLock, "pid") as number | undefined;
   let brResult: KillResult = "not-running";
   let brPidActual: number | undefined;
@@ -107,32 +90,30 @@ export async function stop(_opts: {}): Promise<number> {
     if (brResult === "killed" || brResult === "forced") {
       removeLock(bridgeLock);
     } else if (brResult === "stale") {
-      process.stdout.write(`⚠️ bridge.lock PID ${brPid} is not abtars — stale lock, removing\n`);
+      process.stdout.write(`warning bridge.lock PID ${brPid} is not abtars — stale lock, removing\n`);
       removeLock(bridgeLock);
     }
   }
 
-  // 3) Summary + exit code
   const wdMsg = formatResult("Watchdog", wdResult, wdPidActual);
   const brMsg = formatResult("Bridge", brResult, brPidActual);
 
   if (wdResult === "not-running" && brResult === "not-running") {
     if (serviceWasStopped) {
       removeLock(bridgeLock);
-      process.stdout.write(`🛑 Stopped via service manager.\n`);
+      process.stdout.write(`* Stopped via service manager.\n`);
     } else {
       process.stdout.write(`Nothing to stop — neither watchdog nor bridge running.\n`);
     }
     return 0;
   }
 
-  process.stdout.write(`🛑 ${wdMsg}\n   ${brMsg}\n`);
+  process.stdout.write(`* ${wdMsg}\n   ${brMsg}\n`);
 
   if (installMode === "daemon") {
     process.stdout.write(`   Service unloaded. Use 'abtars start' to restart.\n`);
   }
 
-  // Return 0 if nothing's still alive; 1 if we left something running
   const allDown =
     (wdResult === "not-running" || wdResult === "killed" || wdResult === "forced" || wdResult === "stale") &&
     (brResult === "not-running" || brResult === "killed" || brResult === "forced" || brResult === "stale");
