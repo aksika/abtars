@@ -471,4 +471,104 @@ describe("citation detection (#1270)", () => {
     expect(warnSpy).toHaveBeenCalledWith("pipeline", expect.stringContaining("Citation detection failed"));
     expect(debugSpy).not.toHaveBeenCalledWith("pipeline", expect.stringContaining("Citation detection failed"));
   });
+
+  describe("recordMessage canonical content (#1473)", () => {
+    function mockMemoryRuntime(overrides: Record<string, unknown> = {}) {
+      return {
+        state: "ready",
+        capabilities: new Set<string>(),
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordMessage: vi.fn().mockResolvedValue({}),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({}),
+        getRecentConversation: vi.fn().mockResolvedValue({ results: [] }),
+        getStatus: vi.fn().mockResolvedValue({}),
+        getCoreKnowledge: vi.fn().mockResolvedValue({ core: [] }),
+        embed: vi.fn().mockResolvedValue({}),
+        runMaintenance: vi.fn().mockResolvedValue({}),
+        close: vi.fn().mockResolvedValue(undefined),
+        ...overrides,
+      };
+    }
+
+    beforeEach(async () => {
+      transport = mockTransport();
+      transport.contextPercent = -1;
+      setUserRegistryOverride(MASTER_REGISTRY);
+      abmindReturn = null;
+      const spinMod = await import("./spin.js");
+      vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+        session.transport = transport;
+      });
+      vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
+        id, userId: "master", platform: "telegram", chatId: 100,
+        delivery: "streaming", active: true, status: "ready",
+        idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+        log: [], shortIndex: 1,
+        busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      }));
+      vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
+        id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+        delivery: "streaming", active: true, status: "ready",
+        idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+        log: [], shortIndex: 1,
+        busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      }));
+      vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+        async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
+          id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+          delivery: "streaming", active: true, status: "ready",
+          idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+          log: [], shortIndex: 1,
+          busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+          compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        }),
+      );
+    });
+
+    afterEach(() => {
+      setUserRegistryOverride(null);
+      vi.restoreAllMocks();
+    });
+
+    it("records cleaned text for [NO_REPLY] + text response", async () => {
+      transport.sendPrompt = vi.fn().mockResolvedValue("[NO_REPLY]\n\n[REACT:🤷]\n\nSleep finished — 5 things done.") as any;
+      const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 10 }), adapter, deps);
+
+      // recordMessage should be called with cleaned text (no [NO_REPLY] marker)
+      expect(recordMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ role: "assistant", content: "Sleep finished — 5 things done." }),
+        expect.any(String),
+      );
+    });
+
+    it("does not record assistant response for exact [NO_REPLY] (no text)", async () => {
+      transport.sendPrompt = vi.fn().mockResolvedValue("[NO_REPLY]") as any;
+      const recordMessage = vi.fn().mockResolvedValue({ id: null });
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 11 }), adapter, deps);
+
+      // Should not send anything
+      expect(adapter.sendMessage).not.toHaveBeenCalled();
+      // User message IS recorded (by buildPrompt), but assistant response should NOT be
+      const assistantCalls = (recordMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: unknown[]) => (c[0] as { role?: string })?.role === "assistant",
+      );
+      expect(assistantCalls).toHaveLength(0);
+    });
+  });
 });

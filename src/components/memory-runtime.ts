@@ -1,5 +1,7 @@
 import type { AbmindClient } from "abmind";
 
+import { logWarn } from "./logger.js";
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type RuntimeState = "ready" | "disabled" | "unavailable";
@@ -125,6 +127,29 @@ export interface MaintenanceResult {
 export interface EmbeddingInput { texts: string[] }
 export interface EmbeddingResult { vectors: Array<number[] | null>; model: string }
 
+/** Normalize an unknown recordMessage response to RecordMessageResult.
+ *  Accepts canonical objects, legacy raw numbers, and null without throwing.
+ *  Malformed values become { id: null } with a bounded warning. */
+function normalizeRecordMessageResult(value: unknown): RecordMessageResult {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+    return { id: value };
+  }
+  if (value && typeof value === "object" && "id" in value) {
+    const id = (value as Record<string, unknown>).id;
+    if (id === null) return { id: null };
+    if (typeof id === "number" && Number.isSafeInteger(id) && id > 0) return { id };
+    if (id !== undefined) {
+      logWarn("memory-runtime", `recordMessage: unexpected id type (${typeof id}), falling back to null`);
+    }
+    return { id: null };
+  }
+  if (value === null) {
+    return { id: null };
+  }
+  logWarn("memory-runtime", `recordMessage: unexpected response type (${typeof value}), falling back to null`);
+  return { id: null };
+}
+
 // ── Interface ──────────────────────────────────────────────────────────────
 
 export interface AbtarsMemoryRuntime {
@@ -163,7 +188,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
         topicHint: input.topicHint,
         emotionHint: input.emotionHint,
       }, _operationKey);
-      return { id: result.id };
+      return normalizeRecordMessageResult(result);
     },
 
     async recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult> {

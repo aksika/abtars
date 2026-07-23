@@ -438,7 +438,7 @@ export async function handleInboundMessage(
       // Record assistant response to memory
       if (deps.memoryRuntime?.state === "ready" && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
         const timestamp = Date.now();
-        await deps.memoryRuntime.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp, userId, sessionId: activeSessionId }, `assistant-${userId}-${activeSessionId}-${timestamp}`);
+        await deps.memoryRuntime.recordMessage({ role: "assistant", content: userResponse, timestamp, userId, sessionId: activeSessionId }, `assistant-${userId}-${activeSessionId}-${timestamp}`);
       }
       if (isVoice && ttsConfig && adapter.sendVoice) {
         try {
@@ -514,7 +514,7 @@ export async function handleInboundMessage(
     const isGuest = registry.byUserId.get(userId)?.role === "guest";
     if (deps.memoryRuntime?.state === "ready" && !isGuest && !text.startsWith("[SESSION START]")) {
       await deps.memoryRuntime.recordMessage({
-        role: "assistant", content: cleanAnswer || response,
+        role: "assistant", content: userResponse,
         timestamp: Date.now(), userId, sessionId: activeSessionId,
         platformMessageId: typeof lastSentMsgId === "number" ? lastSentMsgId : undefined,
       }, `assistant-${userId}-${activeSessionId}-${lastSentMsgId ?? Date.now()}`);
