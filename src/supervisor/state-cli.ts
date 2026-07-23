@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
 import { homedir } from "node:os";
+import { readFileSync } from "node:fs";
 import {
   readSupervisorState,
   setDesiredState,
@@ -13,6 +14,8 @@ import {
   migrateSupervisorState,
   getBackoffDelayMs,
 } from "./state.js";
+import { validateBridgeLock } from "./identity.js";
+import { atomicWriteSync } from "../components/atomic-write.js";
 
 const home = process.env.ABTARS_HOME ?? resolve(homedir(), ".abtars");
 
@@ -60,11 +63,13 @@ function main(): void {
     }
 
     case "claim-command": {
+      // Shell-friendly: "<seq> <type>" or "0 none" when no command is pending.
+      // The watchdog acks only AFTER applying the action (see abtars-watchdog.sh).
       const cmd = claimPendingCommand(home);
       if (cmd) {
-        process.stdout.write(JSON.stringify(cmd) + "\n");
+        process.stdout.write(`${cmd.seq} ${cmd.type}\n`);
       } else {
-        process.stdout.write("null\n");
+        process.stdout.write("0 none\n");
       }
       process.exit(Exit.Ok);
     }
@@ -142,11 +147,52 @@ function main(): void {
       process.exit(Exit.Ok);
     }
 
+    case "validate-bridge": {
+      // Validate the bridge recorded in bridge.lock via the shared identity
+      // validator (R6). Shell-friendly output: "<status> <pid> <startedAtMs>".
+      const lockPath = join(home, "bridge.lock");
+      let lock: Record<string, unknown> | null = null;
+      try { lock = JSON.parse(readFileSync(lockPath, "utf-8")); } catch { /* missing */ }
+      const result = validateBridgeLock(lock, ["abtars.js", "bundle"]);
+      const lo = lock as { pid?: unknown; startedAt?: unknown } | null;
+      const pid = lo && typeof lo.pid === "number" ? lo.pid : 0;
+      const startedAt = lo && typeof lo.startedAt === "number" ? lo.startedAt : 0;
+      process.stdout.write(`${result.status} ${pid} ${startedAt}\n`);
+      process.exit(Exit.Ok);
+    }
+
+    case "set-watchdog-pid": {
+      // Atomic read-merge-write of the watchdog-owned watchdogPid field in
+      // bridge.lock (R1.3). Replaces the watchdog's former inline python3
+      // mutation (R2.2 — shell must not mutate JSON directly).
+      const pidStr = process.argv[3];
+      if (pidStr === undefined) {
+        process.stderr.write("Usage: supervisor-state set-watchdog-pid <pid>\n");
+        process.exit(Exit.Usage);
+      }
+      const pid = parseInt(pidStr, 10);
+      if (isNaN(pid)) {
+        process.stderr.write("Usage: supervisor-state set-watchdog-pid <pid>\n");
+        process.exit(Exit.Usage);
+      }
+      setBridgeWatchdogPid(home, pid);
+      process.stdout.write("ok\n");
+      process.exit(Exit.Ok);
+    }
+
     default:
       process.stderr.write(`Unknown command: ${cmd}\n`);
-      process.stderr.write("Available: read, desired-state, is-stopped, set-desired-state, publish-command, claim-command, ack-command, record-death, record-healthy, reset-restart-count, get-backoff, migrate\n");
+      process.stderr.write("Available: read, desired-state, is-stopped, set-desired-state, publish-command, claim-command, ack-command, record-death, record-healthy, reset-restart-count, get-backoff, migrate, validate-bridge, set-watchdog-pid\n");
       process.exit(Exit.Usage);
   }
+}
+
+function setBridgeWatchdogPid(home: string, pid: number): void {
+  const p = join(home, "bridge.lock");
+  let lock: Record<string, unknown> = {};
+  try { lock = JSON.parse(readFileSync(p, "utf-8")); } catch { /* missing — seed */ }
+  lock["watchdogPid"] = pid;
+  atomicWriteSync(p, JSON.stringify(lock));
 }
 
 main();

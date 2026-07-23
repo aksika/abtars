@@ -1,8 +1,9 @@
 import { printBanner } from './banner.js';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, symlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { acquireLock, packagePaths, readManifest, writeManifest, emptyManifest } from '../deploy-lib-import.js';
+import { activateRelease } from '../deploy-lib/activate.js';
 import { publishCommand, resetRestartCount } from '../../supervisor/state.js';
 
 function resolveReleaseIdentity(releaseDir: string, target: string): { version: string; commit: string | null } {
@@ -20,7 +21,6 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
   const paths = packagePaths('abtars');
   const releasesDir = paths.releasesDir;
   const historyFile = join(releasesDir, 'history.json');
-  const currentLink = join(releasesDir, 'current');
   const slot = opts?.to ?? 1;
 
   if (slot < 1 || slot > 3) {
@@ -45,11 +45,8 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
 
   const release = await acquireLock(paths.lock, 'rollback');
   try {
-    try { unlinkSync(currentLink); } catch {}
-    symlinkSync(targetDir, currentLink);
-
-    try { unlinkSync(paths.app); } catch {}
-    try { symlinkSync(targetDir, paths.app); } catch {}
+    // Atomically activate: current → target (atomic rename), app → current (#1262 R7.5)
+    activateRelease(releasesDir, paths.home, targetDir);
 
     const priorManifest = await readManifest(paths.manifest);
     const { version: targetVersion, commit: targetCommit } = resolveReleaseIdentity(targetDir, target);

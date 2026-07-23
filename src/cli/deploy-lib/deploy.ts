@@ -10,6 +10,7 @@ import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, mkdirSync, cop
 import { mkdir } from "node:fs/promises";
 import { execSync, spawnSync } from "node:child_process";
 import { acquireLock, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
+import { activateRelease } from "./activate.js";
 import { publishCommand, setDesiredState, resetRestartCount, migrateSupervisorState } from "../../supervisor/state.js";
 
 import { makeLocalBuildSource } from "../update-sources/dev.js";
@@ -223,7 +224,6 @@ export async function deployActivation(
   }
 
   // ── Step 3: Deploy to releases dir + repoint symlink ────────────────
-  const { symlinkSync, unlinkSync: unlink } = await import("node:fs");
   mkdirSync(paths.releasesDir, { recursive: true });
   const releaseDir = join(paths.releasesDir, staged.commit || staged.version);
   if (existsSync(releaseDir)) rmSync(releaseDir, { recursive: true, force: true });
@@ -246,13 +246,9 @@ export async function deployActivation(
   }
   writeFileSync(paths.releasesHistory, JSON.stringify(history) + "\n");
 
-  // Repoint current symlink
-  try { unlink(paths.releasesCurrentLink); } catch {}
-  symlinkSync(releaseDir, paths.releasesCurrentLink);
-
-  // Keep legacy app/ as symlink for backward compat (WD, bridge.lock paths)
-  try { rmSync(paths.app, { recursive: true, force: true }); } catch {}
-  symlinkSync(releaseDir, paths.app);
+  // Atomically activate: current → release (temp symlink → atomic rename),
+  // and normalize app → current. Shared with rollback/circuit-breaker (#1262 R7.5).
+  activateRelease(paths.releasesDir, paths.home, releaseDir);
 
   process.stdout.write(`✓ deployed to releases/${staged.commit || staged.version}\n`);
 

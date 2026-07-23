@@ -107,7 +107,7 @@ describe("rollback (#1291 — manifest update)", () => {
     expect(state["version"]).toBe("0.3.4-alpha.8-bbbbbbb");
   });
 
-  it("repoints both current and app symlinks to the target release", async () => {
+  it("repoints current to the target release and app to the canonical current", async () => {
     await seedHistory([
       { ref: "aaaaaaa", version: "0.3.4-alpha.8-aaaaaaa" },
       { ref: "bbbbbbb", version: "0.3.4-alpha.8-bbbbbbb" },
@@ -116,8 +116,10 @@ describe("rollback (#1291 — manifest update)", () => {
     await rollback({ to: 1 });
 
     const { readlinkSync } = await import("node:fs");
+    // current -> target release dir (atomic rename)
     expect(readlinkSync(join(releases, "current"))).toBe(join(releases, "bbbbbbb"));
-    expect(readlinkSync(join(home, "app"))).toBe(join(releases, "bbbbbbb"));
+    // app -> current (canonical link), never directly at a release (#1262 R7.5)
+    expect(readlinkSync(join(home, "app"))).toBe(join(releases, "current"));
   });
 
   it("publishes rollback command via supervisor state", async () => {

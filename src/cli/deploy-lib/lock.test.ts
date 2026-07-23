@@ -74,15 +74,18 @@ describe('deploy-lib/lock', () => {
     await release();
   });
 
-  it('acquireLock steals stale lock from old timestamp', async () => {
+  it('does NOT steal a live lock based on age alone (R2.5)', async () => {
+    // A live owner with a matching start-identity must never be expired solely
+    // because wall-clock age exceeded a threshold. Age is intentionally absent
+    // from the staleness decision.
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    const owner = fakeOwner({ startedAt: twoHoursAgo });
+    const owner = fakeOwner({ startedAt: twoHoursAgo }); // pid=process.pid (alive)
     mkdirSync(lockDir(lockPath), { recursive: true });
     writeFileSync(ownerFile(lockPath), JSON.stringify(owner));
-    const release = await acquireLock(lockPath, 'test');
+    await expect(acquireLock(lockPath, 'test')).rejects.toBeInstanceOf(LockHeldError);
+    // Lock is still held by the original (live) owner.
     const after = JSON.parse(await readFile(ownerFile(lockPath), 'utf-8'));
-    expect(after.startedAt).not.toBe(twoHoursAgo);
-    await release();
+    expect(after.startedAt).toBe(twoHoursAgo);
   });
 
   it('release is idempotent', async () => {

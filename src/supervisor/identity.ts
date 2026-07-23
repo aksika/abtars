@@ -11,7 +11,13 @@ export type ValidationResult =
 export function processStartIdentity(pid: number): string {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-    const startTime = stat.split(" ")[21];
+    // comm (field 2) is wrapped in parens and may contain spaces, so parse from
+    // the LAST ')'. Fields after it are space-separated starting at field 3
+    // (state); starttime is field 22 → index 22-3 = 19.
+    const rp = stat.lastIndexOf(")");
+    if (rp < 0) return `${pid}:0`;
+    const fields = stat.slice(rp + 2).split(" ");
+    const startTime = fields[19];
     return `${pid}:${startTime ?? "0"}`;
   } catch {
     return `${pid}:0`;
@@ -65,6 +71,13 @@ export function validateBridgeLock(
   const pid = typeof lock.pid === "number" ? lock.pid : null;
   if (pid === null || pid <= 0) {
     return { status: "dead", safeToSignal: false, safeToAdopt: false };
+  }
+  // R6.2.4: the bridge instance identifier must be present — confirms the
+  // bridge completed identity initialization. A lock missing it did not come
+  // from a fully-initialized #1262 bridge and is not safe to adopt/signal.
+  const instanceId = typeof lock.instanceId === "string" ? lock.instanceId : "";
+  if (!instanceId) {
+    return { status: "corrupt", safeToSignal: false, safeToAdopt: false };
   }
   const startIdentity = typeof lock.startIdentity === "string" ? lock.startIdentity : null;
   return validateBridgePid(pid, startIdentity, needles);

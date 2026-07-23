@@ -3,7 +3,9 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { processStartIdentity, isPidAlive } from "../../supervisor/identity.js";
 
-const STALE_MS = 5 * 60 * 1000;
+// R2.5: a live lock is NEVER expired solely because wall-clock age exceeded a
+// threshold. Staleness is decided only by owner process death or start-identity
+// mismatch (PID reuse). Age is intentionally absent from the decision.
 
 export interface LockContent {
   readonly token: string;
@@ -61,21 +63,19 @@ export async function acquireLock(path: string, cmd: string): Promise<() => Prom
 
   const existing = readJsonSafe<LockContent>(lockDir + "/" + LOCK_OWNER_FILE);
   if (existing) {
+    // R2.5: only process death or PID reuse (start-identity mismatch) make a
+    // lock stale — never wall-clock age.
     const alive = isPidAlive(existing.pid);
     const startOk = processStartIdentity(existing.pid) === existing.startIdentity;
-    const started = Date.parse(existing.startedAt);
-    const age = Date.now() - (Number.isFinite(started) ? started : 0);
-    const stale = !alive || !startOk || age > STALE_MS;
+    const stale = !alive || !startOk;
     if (!stale) {
       throw new LockHeldError(existing, false);
     }
-    if (stale) {
-      const tombstone = lockDir + ".stale." + randomUUID().slice(0, 8);
-      try {
-        renameSync(lockDir, tombstone);
-      } catch {
-        // Another contender took it
-      }
+    const tombstone = lockDir + ".stale." + randomUUID().slice(0, 8);
+    try {
+      renameSync(lockDir, tombstone);
+    } catch {
+      // Another contender took it
     }
   }
 
@@ -147,8 +147,7 @@ export async function inspectLock(path: string): Promise<
   if (!content) return { held: false };
   const alive = isPidAlive(content.pid);
   const startOk = processStartIdentity(content.pid) === content.startIdentity;
-  const started = Date.parse(content.startedAt);
-  const age = Date.now() - (Number.isFinite(started) ? started : 0);
-  const stale = !alive || !startOk || age > STALE_MS;
+  // R2.5: age is not a staleness criterion.
+  const stale = !alive || !startOk;
   return { held: true, content, stale };
 }

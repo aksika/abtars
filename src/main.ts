@@ -9,23 +9,26 @@ import { resetAbmindCache } from "./utils/abmind-lazy.js";
 initEnv();
 
 import { checkCircuitBreaker } from "./boot/circuit-breaker.js";
-checkCircuitBreaker();
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateBridgeLock } from "./supervisor/identity.js";
 
+// Duplicate-bridge gate runs BEFORE the circuit breaker: a duplicate bridge
+// must exit without touching rollback counters or release links (R6).
 try {
   const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
   const lockPath = join(home, "bridge.lock");
   let lock: Record<string, unknown> | null = null;
   try { lock = JSON.parse(readFileSync(lockPath, "utf-8")); } catch { /* missing */ }
-  const result = validateBridgeLock(lock, ["abtars", "main.js", "bundle"]);
+  const result = validateBridgeLock(lock, ["abtars.js", "bundle"]);
   if (result.status === "valid" && lock && typeof lock.pid === "number" && lock.pid !== process.pid) {
     console.error(`[FATAL] Another bridge running (PID ${lock.pid}) — exiting`);
     process.exit(1);
   }
 } catch { /* proceed */ }
+
+checkCircuitBreaker();
 
 process.on("uncaughtException", (err) => {
   const e = err as NodeJS.ErrnoException;

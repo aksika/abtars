@@ -118,7 +118,7 @@ if [ "$IS_MAC" = "1" ]; then
   # macOS: bootout now, bootstrap in step 9. No cgroup teardown, so the detached
   # deploy survives — the full stop/kill sequence is safe here.
   launchctl bootout "$UID_LABEL/com.abtars.watchdog" 2>/dev/null || true
-  svc publish-command update "update:$VERSION" 2>/dev/null || echo "update:$VERSION" > "$ABTARS_HOME/.start-reason"
+  svc publish-command update "update:$VERSION" 2>/dev/null || true
   [ -n "$OLD_PID" ] && kill "$OLD_PID" 2>/dev/null || true
   [ -n "$WD_PID" ]  && kill "$WD_PID"  2>/dev/null || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do               # wait up to ~5s for bridge to exit
@@ -159,7 +159,7 @@ fi
 
 # ── 9. Respawn ─────────────────────────────────────────────────────────────
 step "respawning daemon..."
-svc publish-command update "deploy-respawn" 2>/dev/null || echo "deploy-respawn" > "$ABTARS_HOME/.start-reason"
+svc publish-command update "deploy-respawn" 2>/dev/null || true
 if [ "$IS_MAC" = "1" ]; then
   # bootout->bootstrap can race (launchd tear-down); retry once after a beat
   launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || { sleep 2; launchctl bootstrap "$UID_LABEL" "$PLIST" 2>/dev/null || true; }

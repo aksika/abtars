@@ -1,7 +1,8 @@
-import { readFileSync, existsSync, writeFileSync, unlinkSync, symlinkSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveAbtarsHome, resolveReleasesDir } from "../cli/deploy-lib/paths.js";
 import { readSupervisorState, resetRestartCount } from "../supervisor/state.js";
+import { activateRelease } from "../cli/deploy-lib/activate.js";
 
 const MAX_DEATHS = 4;
 
@@ -9,7 +10,6 @@ export function checkCircuitBreaker(): void {
   const home = resolveAbtarsHome();
   const releasesDir = resolveReleasesDir();
   const historyFile = join(releasesDir, "history.json");
-  const currentLink = join(releasesDir, "current");
   const reason = process.env["ABTARS_START_REASON"] ?? "watchdog-respawn";
 
   if (reason.startsWith("update:") || reason === "user-restart" || reason.startsWith("rollback:") || reason.startsWith("auto-rollback:")) {
@@ -44,12 +44,9 @@ export function checkCircuitBreaker(): void {
     return;
   }
 
-  try { unlinkSync(currentLink); } catch {}
-  symlinkSync(targetDir, currentLink);
-
-  const appLink = join(home, "app");
-  try { unlinkSync(appLink); } catch {}
-  try { symlinkSync(targetDir, appLink); } catch {}
+  // Atomically repoint canonical `current` (temp symlink → rename) and
+  // normalize `app` → `current`. Shared with deploy/rollback (#1262 R7.5).
+  activateRelease(releasesDir, home, targetDir);
 
   resetRestartCount(home, "auto-rollback");
   console.error(`[circuit-breaker] ${restartCount} unplanned deaths — rolled back to ${target}`);

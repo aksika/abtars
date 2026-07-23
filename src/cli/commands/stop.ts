@@ -90,7 +90,7 @@ export async function stop(_opts: {}): Promise<number> {
   let brPidActual: number | undefined;
   if (brPid && brPid > 0) {
     brPidActual = brPid;
-    brResult = await killGracefully(brPid, ["abtars", "main.js", "bundle"]);
+    brResult = await killGracefully(brPid, ["abtars.js", "bundle"]);
     if (brResult === "killed" || brResult === "forced") {
       removeLock(bridgeLock);
     } else if (brResult === "stale") {
