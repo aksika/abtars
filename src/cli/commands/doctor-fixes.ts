@@ -1,8 +1,7 @@
 import { existsSync, chmodSync, mkdirSync, statSync, readFileSync, readdirSync, unlinkSync, lstatSync } from "node:fs";
 import { join, relative } from "node:path";
-import { homedir } from "node:os";
-import { createRequire } from "node:module";
 import { abtarsHome } from "../../paths.js";
+import { resolveNativeDep } from "../../utils/lazy-require.js";
 import type { FixResult, DoctorOutputV2 } from "./doctor-types.js";
 
 const STALE_MS = 5 * 60 * 1000;
@@ -27,7 +26,7 @@ export interface DoctorFixDefinition {
 }
 
 const home = abtarsHome();
-const _require = createRequire(import.meta.url);
+
 
 const KNOWN_DIRS = ["config", "secret", "auth", "hooks", "logs", "workspace", "overflow", "received", "kanban", "state", "prompts"] as const;
 const SENSITIVE_DIRS = ["config", "secret", "auth", "hooks"] as const;
@@ -149,16 +148,19 @@ const definitions: DoctorFixDefinition[] = [
     revalidate: (): { ok: true } | { ok: false; reason: string } => {
       const dbPath = join(home, "kanban", "kanban.db");
       if (!existsSync(dbPath)) return { ok: false, reason: "no kanban.db" };
-      const sharedNm = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
-      if (!existsSync(sharedNm)) return { ok: false, reason: "better-sqlite3 not installed" };
-      return { ok: true };
+      try {
+        resolveNativeDep("better-sqlite3");
+        return { ok: true };
+      } catch {
+        return { ok: false, reason: "better-sqlite3 not installed" };
+      }
     },
     apply: () => {
       const dbPath = join(home, "kanban", "kanban.db");
       if (!existsSync(dbPath)) return;
       const cutoff = new Date(Date.now() - 86_400_000).toISOString();
       try {
-        const Database = _require(join(homedir(), ".local", "lib", "node_modules", "better-sqlite3"));
+        const Database = resolveNativeDep("better-sqlite3");
         const db = new Database(dbPath);
         db.prepare(
           "UPDATE kanban_board SET status = 'failed', error = ?, updated_at = datetime('now'), completed_at = datetime('now') WHERE status = 'running' AND updated_at < ?"

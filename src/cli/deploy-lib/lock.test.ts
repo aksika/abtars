@@ -17,7 +17,9 @@ function ownerFile(path: string): string {
 function currentStartIdentity(): string {
   try {
     const stat = readFileSync(`/proc/${process.pid}/stat`, "utf-8");
-    const startTime = stat.split(" ")[21];
+    const rp = stat.lastIndexOf(")");
+    const fields = rp >= 0 ? stat.slice(rp + 2).split(" ") : stat.split(" ");
+    const startTime = fields[19];
     return `${process.pid}:${startTime ?? "0"}`;
   } catch {
     return `${process.pid}:0`;
@@ -74,18 +76,34 @@ describe('deploy-lib/lock', () => {
     await release();
   });
 
-  it('does NOT steal a live lock based on age alone (R2.5)', async () => {
-    // A live owner with a matching start-identity must never be expired solely
-    // because wall-clock age exceeded a threshold. Age is intentionally absent
-    // from the staleness decision.
+  it('does NOT steal a live lock based on age alone (R2.5) when no staleMs', async () => {
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    const owner = fakeOwner({ startedAt: twoHoursAgo }); // pid=process.pid (alive)
+    const owner = fakeOwner({ startedAt: twoHoursAgo });
     mkdirSync(lockDir(lockPath), { recursive: true });
     writeFileSync(ownerFile(lockPath), JSON.stringify(owner));
     await expect(acquireLock(lockPath, 'test')).rejects.toBeInstanceOf(LockHeldError);
-    // Lock is still held by the original (live) owner.
     const after = JSON.parse(await readFile(ownerFile(lockPath), 'utf-8'));
     expect(after.startedAt).toBe(twoHoursAgo);
+  });
+
+  it('steals a live lock based on age when staleMs is set', async () => {
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const owner = fakeOwner({ startedAt: twoHoursAgo });
+    mkdirSync(lockDir(lockPath), { recursive: true });
+    writeFileSync(ownerFile(lockPath), JSON.stringify(owner));
+    const release = await acquireLock(lockPath, 'test', { staleMs: 60 * 60 * 1000 });
+    const after = JSON.parse(await readFile(ownerFile(lockPath), 'utf-8'));
+    expect(after.pid).toBe(process.pid);
+    expect(after.startedAt).not.toBe(twoHoursAgo);
+    await release();
+  });
+
+  it('ensureParentDir creates missing parent', async () => {
+    const deepPath = join(tmp, 'nested', 'dir', '.update.lock');
+    const release = await acquireLock(deepPath, 'test', { ensureParentDir: true });
+    const content = JSON.parse(await readFile(ownerFile(deepPath), 'utf-8'));
+    expect(content.pid).toBe(process.pid);
+    await release();
   });
 
   it('release is idempotent', async () => {
@@ -122,6 +140,16 @@ describe('deploy-lib/lock', () => {
     mkdirSync(lockDir(lockPath), { recursive: true });
     writeFileSync(ownerFile(lockPath), JSON.stringify(owner));
     const r = await inspectLock(lockPath);
+    expect(r.held).toBe(true);
+    if (r.held) expect(r.stale).toBe(true);
+  });
+
+  it('inspectLock respects staleMs option', async () => {
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const owner = fakeOwner({ startedAt: twoHoursAgo });
+    mkdirSync(lockDir(lockPath), { recursive: true });
+    writeFileSync(ownerFile(lockPath), JSON.stringify(owner));
+    const r = await inspectLock(lockPath, { staleMs: 60 * 60 * 1000 });
     expect(r.held).toBe(true);
     if (r.held) expect(r.stale).toBe(true);
   });

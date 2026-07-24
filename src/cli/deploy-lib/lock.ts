@@ -1,11 +1,12 @@
 import { readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, mkdirSync, statSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
-import { processStartIdentity, isPidAlive } from "../../supervisor/identity.js";
+import { dirname } from "node:path";
 
-// R2.5: a live lock is NEVER expired solely because wall-clock age exceeded a
-// threshold. Staleness is decided only by owner process death or start-identity
-// mismatch (PID reuse). Age is intentionally absent from the decision.
+export interface AcquireLockOptions {
+  readonly staleMs?: number;
+  readonly ensureParentDir?: boolean;
+}
 
 export interface LockContent {
   readonly token: string;
@@ -27,6 +28,28 @@ export class LockHeldError extends Error {
         `(cmd: ${content.cmd})${staleMsg}`,
     );
     this.name = "LockHeldError";
+  }
+}
+
+function processStartIdentity(pid: number): string {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const rp = stat.lastIndexOf(")");
+    if (rp < 0) return `${pid}:0`;
+    const fields = stat.slice(rp + 2).split(" ");
+    const startTime = fields[19];
+    return `${pid}:${startTime ?? "0"}`;
+  } catch {
+    return `${pid}:0`;
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
@@ -59,17 +82,30 @@ function releaseLockDirectory(lockDir: string, token: string): void {
   }
 }
 
-export async function acquireLock(path: string, cmd: string): Promise<() => Promise<void>> {
+function isLockStale(_lockDir: string, content: LockContent, staleMs?: number): boolean {
+  const alive = isPidAlive(content.pid);
+  const startOk = processStartIdentity(content.pid) === content.startIdentity;
+  if (!alive || !startOk) return true;
+  if (staleMs !== undefined) {
+    const started = Date.parse(content.startedAt);
+    const age = Date.now() - (Number.isFinite(started) ? started : 0);
+    if (age > staleMs) return true;
+  }
+  return false;
+}
+
+export async function acquireLock(path: string, cmd: string, options?: AcquireLockOptions): Promise<() => Promise<void>> {
   const lockDir = path + ".lockdir";
+  const staleMs = options?.staleMs;
+  const ensureParentDir = options?.ensureParentDir;
+
+  if (ensureParentDir) {
+    mkdirSync(dirname(path), { recursive: true });
+  }
 
   const existing = readJsonSafe<LockContent>(lockDir + "/" + LOCK_OWNER_FILE);
   if (existing) {
-    // R2.5: only process death or PID reuse (start-identity mismatch) make a
-    // lock stale — never wall-clock age.
-    const alive = isPidAlive(existing.pid);
-    const startOk = processStartIdentity(existing.pid) === existing.startIdentity;
-    const stale = !alive || !startOk;
-    if (!stale) {
+    if (!isLockStale(lockDir, existing, staleMs)) {
       throw new LockHeldError(existing, false);
     }
     const tombstone = lockDir + ".stale." + randomUUID().slice(0, 8);
@@ -95,13 +131,9 @@ export async function acquireLock(path: string, cmd: string): Promise<() => Prom
       writeAtomic(lockDir + "/" + LOCK_OWNER_FILE, JSON.stringify(content, null, 2) + "\n");
       break;
     } catch {
-      // Someone else created the directory — retry stale takeover
       const recheck = readJsonSafe<LockContent>(lockDir + "/" + LOCK_OWNER_FILE);
       if (recheck) {
-        const alive = isPidAlive(recheck.pid);
-        const startOk = processStartIdentity(recheck.pid) === recheck.startIdentity;
-        const stale = !alive || !startOk;
-        if (stale) {
+        if (isLockStale(lockDir, recheck, staleMs)) {
           const tombstone = lockDir + ".stale." + randomUUID().slice(0, 8);
           try {
             renameSync(lockDir, tombstone);
@@ -146,16 +178,15 @@ export async function acquireLock(path: string, cmd: string): Promise<() => Prom
   return release;
 }
 
-export async function inspectLock(path: string): Promise<
+export async function inspectLock(path: string, options?: { staleMs?: number }): Promise<
   | { held: false }
   | { held: true; content: LockContent; stale: boolean }
 > {
   const lockDir = path + ".lockdir";
   const content = readJsonSafe<LockContent>(lockDir + "/" + LOCK_OWNER_FILE);
   if (!content) return { held: false };
-  const alive = isPidAlive(content.pid);
-  const startOk = processStartIdentity(content.pid) === content.startIdentity;
-  // R2.5: age is not a staleness criterion.
-  const stale = !alive || !startOk;
+  const stale = !isPidAlive(content.pid) ||
+    processStartIdentity(content.pid) !== content.startIdentity ||
+    (options?.staleMs !== undefined && (Date.now() - (Number.isFinite(Date.parse(content.startedAt)) ? Date.parse(content.startedAt) : 0)) > options.staleMs);
   return { held: true, content, stale };
 }

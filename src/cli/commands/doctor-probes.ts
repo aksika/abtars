@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+
+
 import { abtarsHome, abtarsRoot, abmindHome, getDeployedVersion } from "../../paths.js";
 import { resolveAbmindPackageDir } from "../../utils/abmind-lazy.js";
 import { pathToFileURL } from "node:url";
@@ -14,8 +15,6 @@ import { truncate } from "./doctor-types.js";
 
 const home = abtarsHome();
 const root = abtarsRoot();
-
-const SHARED_NM = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
 
 
 async function timedProbe(name: string, evidence: import("./doctor-types.js").EvidenceLevel, fn: () => Promise<ProbeResult>): Promise<ProbeResult> {
@@ -211,16 +210,13 @@ async function probeSpin(): Promise<ProbeResult> {
 async function probeKanban(): Promise<ProbeResult> {
   const dbPath = join(home, "kanban", "kanban.db");
   if (!existsSync(dbPath)) return { name: "kanban", status: "skipped", evidence: "filesystem", detail: "no kanban.db", ms: 0 };
-  if (!existsSync(SHARED_NM)) return { name: "kanban", status: "skipped", evidence: "filesystem", detail: "better-sqlite3 not installed", remediation: "Run abtars deps install", ms: 0 };
-
   let Db: new (path: string, opts: { readonly: boolean }) => {
     prepare: (sql: string) => { get: () => Record<string, unknown>; all: (...params: unknown[]) => Array<Record<string, unknown>> };
     close: () => void;
   };
   try {
-    const { createRequire } = await import("node:module");
-    const _require = createRequire(import.meta.url);
-    Db = _require(SHARED_NM);
+    const { resolveNativeDep: rnd } = await import("../../utils/lazy-require.js");
+    Db = rnd("better-sqlite3");
   } catch {
     return { name: "kanban", status: "skipped", evidence: "filesystem", detail: "better-sqlite3 not loadable", ms: 0 };
   }
