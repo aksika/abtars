@@ -1,21 +1,58 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { resolveNestedPackageRoot, resolveExecutableFromPath, resolvePiFromPath, resolvePiModuleUrl } from "./pi-installation.js";
+import {
+  clearPiCache,
+  resolveNestedPackageRoot,
+  resolveExecutableFromPath,
+  resolvePiFromPath,
+  resolvePiInstallation,
+  resolvePiModuleUrl,
+} from "./pi-installation.js";
 import type { PiInstallation, PiModuleSpecifier } from "./pi-installation.js";
+
+const loadPiConfigMock = vi.hoisted(() => vi.fn(() => null));
+
+vi.mock("./pi-executor/config.js", () => ({ loadPiConfig: loadPiConfigMock }));
 
 const roots: string[] = [];
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  clearPiCache();
+  loadPiConfigMock.mockReset();
+  loadPiConfigMock.mockReturnValue(null);
 });
 
 function fixture(): string {
   const root = mkdtempSync(join(tmpdir(), "pi-installation-"));
   roots.push(root);
   return root;
+}
+
+function piInstallationFixture(version: string): { bin: string; packageRoot: string } {
+  const packageRoot = fixture();
+  const bin = join(packageRoot, "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+    name: "@earendil-works/pi-coding-agent",
+    version,
+  }));
+  writeFileSync(join(bin, "pi"), "#!/bin/sh\nexit 42\n", "utf-8");
+  chmodSync(join(bin, "pi"), 0o755);
+
+  for (const [scope, name] of [
+    ["@earendil-works", "pi-ai"],
+    ["@earendil-works", "pi-tui"],
+    ["@earendil-works", "pi-agent-core"],
+  ]) {
+    const nestedRoot = join(packageRoot, "node_modules", scope, name);
+    mkdirSync(nestedRoot, { recursive: true });
+    writeFileSync(join(nestedRoot, "package.json"), JSON.stringify({ name: `${scope}/${name}` }));
+  }
+  return { bin, packageRoot };
 }
 
 describe("resolveNestedPackageRoot", () => {
@@ -42,6 +79,40 @@ describe("resolveNestedPackageRoot", () => {
     symlinkSync(externalRoot, join(scopeRoot, "pi-ai"));
 
     expect(resolveNestedPackageRoot(piRoot, "@earendil-works/pi-ai")).toBeNull();
+  });
+});
+
+describe("resolvePiInstallation", () => {
+  it("uses package metadata without launching the Pi executable", () => {
+    const { bin, packageRoot } = piInstallationFixture("0.82.0");
+    const originalPath = process.env.PATH;
+    process.env.PATH = bin;
+    try {
+      const result = resolvePiInstallation({ useCache: false });
+      expect(result).toMatchObject({
+        state: "compatible",
+        installation: {
+          packageRoot,
+          version: "0.82.0",
+        },
+      });
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("rejects malformed package versions without executing Pi", () => {
+    const { bin } = piInstallationFixture("not-a-version");
+    const originalPath = process.env.PATH;
+    process.env.PATH = bin;
+    try {
+      expect(resolvePiInstallation({ useCache: false })).toMatchObject({
+        state: "invalid",
+        reason: expect.stringContaining("Missing or invalid version"),
+      });
+    } finally {
+      process.env.PATH = originalPath;
+    }
   });
 });
 
