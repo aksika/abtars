@@ -26,10 +26,13 @@ if [ ! -f "$CLI" ]; then
   exit 1
 fi
 
-# 3. Run with isolated environment
+# 3. Run with isolated environment — HOME, PATH, and Pi config
 export HOME="$TMP_HOME"
 export AB_SHARED_DEPS_ROOT="$TMP_DEPS_ROOT"
 unset NODE_PATH
+# Isolate PATH to prevent developer's Pi/global npm from being discovered
+NODE_BIN="$(dirname "$(command -v node)")"
+export PATH="$NODE_BIN:/usr/bin:/bin"
 
 echo "--- deps list ---"
 if ! node "$CLI" deps list > "$TMP_DIR/list.out" 2>&1; then
