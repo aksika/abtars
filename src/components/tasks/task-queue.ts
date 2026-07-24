@@ -32,6 +32,12 @@ function validateAgentOutput(raw: unknown, delivery: string | undefined): Valida
   try {
     const parsed = JSON.parse(content);
     if (parsed && typeof parsed === "object" && "exit_code" in parsed) {
+      if (typeof parsed.exit_code !== "number" || !Number.isInteger(parsed.exit_code)) {
+        return { ok: false, reason: "task produced an invalid structured exit code" };
+      }
+      if (parsed.exit_code !== 0) {
+        return { ok: false, reason: `task command failed (exit code ${parsed.exit_code})` };
+      }
       const stdout = typeof parsed.stdout === "string" ? parsed.stdout : "";
       const stderr = typeof parsed.stderr === "string" ? parsed.stderr : "";
       if (!stdout && !stderr) {

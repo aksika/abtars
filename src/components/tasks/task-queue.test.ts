@@ -239,6 +239,18 @@ describe("CronQueue agent output validation", () => {
     expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("struct-empty", expect.objectContaining({ retrying: true }));
   });
 
+  it("fails on structured output with a non-zero exit code even when stdout is present", async () => {
+    const { spin } = await import("../spin.js");
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({
+      cardId: 5,
+      result: JSON.stringify({ exit_code: 1, stdout: "command failed", stderr: "" }),
+    });
+    const entry = makeEntry({ id: "struct-failed", kind: "agent", prompt: "test", delivery: "silent", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("struct-failed");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("struct-failed", expect.objectContaining({ retrying: true }));
+  });
+
   it("fails on synthetic sentinel (no output)", async () => {
     const { spin } = await import("../spin.js");
     vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: "(no output)" });
