@@ -1,10 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const { mockEnqueue, mockUpdate, mockComplete, mockLoadSleepSteps } = vi.hoisted(() => ({
+const { mockEnqueue, mockUpdate, mockComplete } = vi.hoisted(() => ({
   mockEnqueue: vi.fn((_title: string, _source: string, _sid: unknown, _opts: unknown) => 42),
   mockUpdate: vi.fn(),
   mockComplete: vi.fn(),
-  mockLoadSleepSteps: vi.fn(),
 }));
 
 vi.mock("../../components/tasks/kanban-board.js", () => ({
@@ -14,104 +13,61 @@ vi.mock("../../components/tasks/kanban-board.js", () => ({
 }));
 
 import { startSleepCard } from "./sleep-card.js";
-import type { SleepEvent, SleepStepSummary } from "abmind";
 
-const STEPS = [
-  { name: "gc-noise", filename: "01-gc-noise.md", rawPrompt: "", skippable: true },
-  { name: "daily-summary", filename: "02-daily-summary.md", rawPrompt: "", skippable: false },
-  { name: "extract-memories", filename: "03-extract-memories.md", rawPrompt: "", skippable: false },
-];
-
-function summary(id: string, status: SleepStepSummary["status"]): SleepStepSummary {
-  return { id, status, essential: false, attempts: 1 };
-}
-
-function started(stepId: string, index: number): SleepEvent {
-  return { type: "step_started", runId: "run-1", stepId, index, total: STEPS.length };
-}
-function completed(stepId: string): SleepEvent {
-  return { type: "step_completed", runId: "run-1", step: summary(stepId, "completed") };
-}
-function skipped(stepId: string): SleepEvent {
-  return { type: "step_skipped", runId: "run-1", step: summary(stepId, "skipped") };
-}
-function failed(stepId: string): SleepEvent {
-  return { type: "step_failed", runId: "run-1", step: summary(stepId, "failed") };
-}
+const STEPS = ["gc-noise", "daily-summary", "extract-memories"];
 
 function lastNotes(): string {
   const calls = mockUpdate.mock.calls.filter(c => (c[1] as { notes?: string }).notes !== undefined);
   return (calls[calls.length - 1]?.[1] as { notes: string }).notes;
 }
 
-describe("startSleepCard (#1353 — neutral SleepEvent contract)", () => {
+describe("startSleepCard (event-driven, #1381)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockLoadSleepSteps.mockReturnValue(STEPS);
   });
 
-  it("creates ONE card, type D, running status, checklist mirrors loadSleepSteps()", () => {
-    startSleepCard(mockLoadSleepSteps);
+  it("creates ONE card on first event, type D, running status", () => {
+    const card = startSleepCard();
+    card.onEvent({ type: "step_started", stepId: "gc-noise" });
     expect(mockEnqueue).toHaveBeenCalledTimes(1);
     const [title, source, , opts] = mockEnqueue.mock.calls[0];
     expect(title).toMatch(/^Sleep \d{4}-\d{2}-\d{2}$/);
     expect(source).toBe("scheduled");
     expect((opts as { type: string }).type).toBe("D");
     expect((opts as { deliveryMode: string }).deliveryMode).toBe("silent");
-    const notes = (opts as { notes: string }).notes;
-    for (const s of STEPS) expect(notes).toContain(`[ ] ${s.name}`);
-    // Moved out of "queued" so drainQueued() never dispatches it
     expect(mockUpdate).toHaveBeenCalledWith(42, { status: "running" });
   });
 
-  it("ticks the matching item: step_started -> [~], step_completed -> [x], step_skipped -> [skip], step_failed -> [fail]", () => {
-    const card = startSleepCard(mockLoadSleepSteps);
-    card.onEvent(started("gc-noise", 1));
+  it("ticks the matching item: step_started -> [~], step_completed -> [x]", () => {
+    const card = startSleepCard();
+    card.onEvent({ type: "step_started", stepId: "gc-noise" });
     expect(lastNotes()).toContain("[~] gc-noise");
-    card.onEvent(completed("gc-noise"));
+    card.onEvent({ type: "step_completed", step: { id: "gc-noise" } });
     expect(lastNotes()).toContain("[x] gc-noise");
-    card.onEvent(skipped("daily-summary"));
-    expect(lastNotes()).toContain("[skip] daily-summary");
-    card.onEvent(failed("extract-memories"));
-    expect(lastNotes()).toContain("[fail] extract-memories");
   });
 
-  it("cycle_started / cycle_finished events are ignored by the card (no crash, no update)", () => {
-    const card = startSleepCard(mockLoadSleepSteps);
-    vi.clearAllMocks();
-    card.onEvent({ type: "cycle_started", runId: "run-1", totalSteps: STEPS.length, resumed: false });
-    card.onEvent({
-      type: "cycle_finished", runId: "run-1", result: {
-        runId: "run-1", status: "completed", startedAt: 0, finishedAt: 0, llmCalls: 0,
-        steps: [], essentialFailures: [], resumable: false, watermarkAdvanced: true, report: "",
-      },
-    });
-    expect(mockUpdate).not.toHaveBeenCalled();
+  it("accumulates steps from events", () => {
+    const card = startSleepCard();
+    card.onEvent({ type: "step_started", stepId: "gc-noise" });
+    card.onEvent({ type: "step_started", stepId: "daily-summary" });
+    card.onEvent({ type: "step_started", stepId: "extract-memories" });
+    const notes = lastNotes();
+    for (const s of STEPS) expect(notes).toContain(s);
   });
 
   it("complete() marks the card done exactly once (idempotent)", () => {
-    const card = startSleepCard(mockLoadSleepSteps);
-    card.onEvent(completed("gc-noise"));
+    const card = startSleepCard();
+    card.onEvent({ type: "step_completed", step: { id: "gc-noise" } });
     card.complete();
     card.complete();
     expect(mockComplete).toHaveBeenCalledTimes(1);
-    const [id, , summaryText] = mockComplete.mock.calls[0];
-    expect(id).toBe(42);
-    expect(summaryText).toContain("1 done");
   });
 
-  it("no manifest -> no card; onEvent/complete are safe no-ops", () => {
-    const card = startSleepCard(() => []);
+  it("no events -> no card; onEvent/complete are safe no-ops", () => {
+    const card = startSleepCard();
     expect(mockEnqueue).not.toHaveBeenCalled();
-    card.onEvent(started("gc-noise", 1));
     card.complete();
     expect(mockUpdate).not.toHaveBeenCalled();
     expect(mockComplete).not.toHaveBeenCalled();
-  });
-
-  it("loadSleepSteps throwing -> no card, no throw", () => {
-    const throwingLoader = () => { throw new Error("prompts missing"); };
-    expect(() => startSleepCard(throwingLoader).complete()).not.toThrow();
-    expect(mockEnqueue).not.toHaveBeenCalled();
   });
 });

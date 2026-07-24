@@ -31,6 +31,19 @@ vi.mock("../components/env-schema.js", () => ({
   getEnv: vi.fn(() => ({ modelApiTimeoutMs: 30000 })),
 }));
 
+function makeFakeClient(): any {
+  return {
+    sleep: {
+      start: vi.fn(),
+      status: vi.fn(),
+      resume: vi.fn(),
+      cancel: vi.fn(),
+      events: vi.fn(),
+      runtime: { open: vi.fn(), next: vi.fn(), complete: vi.fn(), fail: vi.fn(), close: vi.fn() },
+    },
+  };
+}
+
 describe("phaseSleep — #1429 precedence and construction", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -51,7 +64,6 @@ describe("phaseSleep — #1429 precedence and construction", () => {
   it("returns skipped and records memory_disabled when memory is disabled", async () => {
     const ctx = createBootCtx({
       memoryConfig: { memoryEnabled: false, memoryDir: "" } as any,
-      abmindModule: {} as any,
       sendSystemMessage: vi.fn(),
     });
 
@@ -64,10 +76,10 @@ describe("phaseSleep — #1429 precedence and construction", () => {
     expect(mockCreateSleepHandle).not.toHaveBeenCalled();
   });
 
-  it("returns skipped and records abmind_not_loaded when abmindModule is null", async () => {
+  it("returns skipped and records daemon_not_connected when client is null", async () => {
     const ctx = createBootCtx({
       memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
-      abmindModule: null,
+      client: null,
       sendSystemMessage: vi.fn(),
     });
 
@@ -75,7 +87,7 @@ describe("phaseSleep — #1429 precedence and construction", () => {
     const result = await phaseSleep(ctx);
 
     expect(result).toBe("skipped");
-    expect(ctx.sleepUnavailable?.code).toBe("abmind_not_loaded");
+    expect(ctx.sleepUnavailable?.code).toBe("daemon_not_connected");
     expect(ctx.sleepHandle).toBeNull();
     expect(mockCreateSleepHandle).not.toHaveBeenCalled();
   });
@@ -83,7 +95,7 @@ describe("phaseSleep — #1429 precedence and construction", () => {
   it("returns skipped and records heartbeat_unavailable when sendSystemMessage is absent", async () => {
     const ctx = createBootCtx({
       memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
-      abmindModule: {} as any,
+      client: makeFakeClient(),
       sendSystemMessage: undefined,
     });
 
@@ -102,10 +114,9 @@ describe("phaseSleep — #1429 precedence and construction", () => {
       getSessionById: vi.fn().mockReturnValue(null),
       allocateDreamySession: vi.fn(),
     };
-    const fakeModule = {};
     const ctx = createBootCtx({
       memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
-      abmindModule: fakeModule as any,
+      client: makeFakeClient(),
       sendSystemMessage: vi.fn(),
       sessionManager: fakeSessionManager as any,
     });
@@ -117,13 +128,13 @@ describe("phaseSleep — #1429 precedence and construction", () => {
     expect(ctx.sleepUnavailable).toBeNull();
     expect(ctx.sleepHandle).not.toBeNull();
     expect(mockCreateSleepHandle).toHaveBeenCalledTimes(1);
-    expect(mockCreateSleepHandle.mock.calls[0]?.[0]?.api).toBe(fakeModule);
+    expect(mockCreateSleepHandle.mock.calls[0]?.[0]?.client).toBe(ctx.client);
   });
 
-  it("memory disabled takes precedence over missing abmindModule", async () => {
+  it("memory disabled takes precedence over missing client", async () => {
     const ctx = createBootCtx({
       memoryConfig: { memoryEnabled: false, memoryDir: "" } as any,
-      abmindModule: null,
+      client: null,
       sendSystemMessage: vi.fn(),
     });
 
@@ -138,7 +149,7 @@ describe("phaseSleep — #1429 precedence and construction", () => {
     const { getSystemTaskRegistry } = await import("../components/tasks/system-task-registry.js");
     const ctx = createBootCtx({
       memoryConfig: { memoryEnabled: false, memoryDir: "" } as any,
-      abmindModule: null,
+      client: null,
       sendSystemMessage: vi.fn(),
     });
 
