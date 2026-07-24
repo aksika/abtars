@@ -197,7 +197,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
         timeEnd: input.timeEnd,
         stages: input.stages,
       });
-      const hits: RuntimeRecallHit[] = result.results.map(r => ({
+      const hits: RuntimeRecallHit[] = result.results.map((r: any) => ({
         content: r.content,
         score: r.score,
         date: r.date,

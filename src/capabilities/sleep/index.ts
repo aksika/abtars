@@ -182,7 +182,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       ? client.sleep.resume(undefined, level)
       : client.sleep.start(mode, level, fresh);
 
-    startPromise.then(result => {
+    startPromise.then((result: { status: string; runId?: string; reason?: string }) => {
       if (result.status === "accepted" && result.runId) {
         currentRunId = result.runId;
         providerPump().finally(() => { cleanup(); opts.onCycleEnd?.(); });
@@ -192,7 +192,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         opts.onCycleEnd?.();
         logWarn("sleep", `Sleep not accepted: ${result.status}${result.reason ? ": " + result.reason : ""}`);
       }
-    }).catch(err => {
+    }).catch((err: unknown) => {
       cleanup();
       opts.onCycleEnd?.();
       logWarn("sleep", `Sleep start failed: ${(err as Error).message}`);
