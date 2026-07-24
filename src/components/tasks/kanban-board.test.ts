@@ -166,6 +166,49 @@ describe("kanban-board", () => {
   });
 });
 
+describe("kanbanUpdate priority normalization", () => {
+  it("stores lowercase priority as uppercase", () => {
+    const id = mod.kanbanEnqueue("low update", "test");
+    mod.kanbanUpdate(id, { priority: "high" });
+    const card = mod.kanbanList("*")[0]!;
+    expect(card.priority).toBe("HIGH");
+  });
+
+  it("stores mixed-case priority as uppercase", () => {
+    const id = mod.kanbanEnqueue("mixed update", "test");
+    mod.kanbanUpdate(id, { priority: "mEdIuM" });
+    const card = mod.kanbanList("*")[0]!;
+    expect(card.priority).toBe("MEDIUM");
+  });
+
+  it("falls back to MEDIUM for invalid priority", () => {
+    const id = mod.kanbanEnqueue("invalid update", "test");
+    mod.kanbanUpdate(id, { priority: "URGENT" });
+    const card = mod.kanbanList("*")[0]!;
+    expect(card.priority).toBe("MEDIUM");
+  });
+
+  it("falls back to MEDIUM for empty string priority", () => {
+    const id = mod.kanbanEnqueue("empty update", "test");
+    mod.kanbanUpdate(id, { priority: "" });
+    const card = mod.kanbanList("*")[0]!;
+    expect(card.priority).toBe("MEDIUM");
+  });
+
+  it("preserves existing priority when priority is omitted", () => {
+    const id = mod.kanbanEnqueue("omit update", "test", undefined, { priority: "CRITICAL" });
+    mod.kanbanUpdate(id, { labels: "only-labels" });
+    const card = mod.kanbanList("*")[0]!;
+    expect(card.priority).toBe("CRITICAL");
+    expect(card.labels).toBe("only-labels");
+  });
+
+  it("does not throw on invalid priority", () => {
+    const id = mod.kanbanEnqueue("no throw", "test");
+    expect(() => mod.kanbanUpdate(id, { priority: "bogus" })).not.toThrow();
+  });
+});
+
 describe("kanbanRetryOrFail (#1411)", () => {
   it("increments retry_count and writes future next_retry_at", () => {
     const id = mod.kanbanEnqueue("Retry me", "agent");

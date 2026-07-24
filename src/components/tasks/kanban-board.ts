@@ -137,14 +137,22 @@ function dbOrNull(): SqliteDb | null {
 
 import type { Delivery } from "./task-types.js";
 
+export type KanbanPriority = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
+
+const VALID_PRIORITIES = new Set<KanbanPriority>(["CRITICAL", "HIGH", "MEDIUM", "LOW"]);
+
+export function normalizePriority(raw: string | undefined | null): KanbanPriority {
+  if (!raw) return "MEDIUM";
+  const upper = raw.toUpperCase();
+  return VALID_PRIORITIES.has(upper as KanbanPriority) ? upper as KanbanPriority : "MEDIUM";
+}
+
 export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string }): number {
   const d = dbOrNull();
   if (!d) return 0;
   const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
   const deliveryMode = raw === "report" ? "deliver" : raw;
-  const VALID_PRIORITIES = new Set(["CRITICAL", "HIGH", "MEDIUM", "LOW"]);
-  const normalizedPriority = opts?.priority?.toUpperCase();
-  const priority = normalizedPriority && VALID_PRIORITIES.has(normalizedPriority) ? normalizedPriority : "MEDIUM";
+  const priority = normalizePriority(opts?.priority);
   const stmt = d.prepare(
     `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -309,8 +317,16 @@ export function kanbanUpdate(id: number, fields: Partial<Pick<KanbanCard, "title
   const sets: string[] = ["updated_at = datetime('now')"];
   const vals: unknown[] = [];
   for (const [k, v] of Object.entries(fields)) {
-    if (v !== undefined) { sets.push(`${k} = ?`); vals.push(v); }
+    if (v === undefined) continue;
+    if (k === "priority") {
+      sets.push("priority = ?");
+      vals.push(normalizePriority(v as string));
+    } else {
+      sets.push(`${k} = ?`);
+      vals.push(v);
+    }
   }
+  if (vals.length === 0) return;
   vals.push(id);
   d.prepare(`UPDATE kanban_board SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
 }
