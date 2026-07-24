@@ -139,7 +139,9 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         }
 
         for (const ev of eventsResult.events) {
-          afterSeq = ev.seq + 1;
+          // The server returns events with seq > afterSeq, so keep the last
+          // seen sequence number rather than skipping the next event.
+          afterSeq = ev.seq;
           if (ev.event.type === "cycle_started") {
             progress = { percent: 0, step: "starting" };
           }
