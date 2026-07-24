@@ -125,8 +125,12 @@ describe("CronQueue settlement (nextRunAt cursor)", () => {
   let queue: CronQueue;
   let activeChildren: child_process.ChildProcess[];
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    vi.mocked(stateStore.incrementFailures).mockReturnValue(0);
+    vi.mocked(stateStore.readState).mockReturnValue(null);
+    const { readLastPromptAt } = await import("../transport/bridge-lock-transport.js");
+    vi.mocked(readLastPromptAt).mockReturnValue(0);
     activeChildren = [];
     vi.mocked(child_process.spawn).mockImplementation((() => {
       const c = makeFakeChild();
@@ -182,5 +186,124 @@ describe("CronQueue idle-gate", () => {
     const entry = makeEntry({ kind: "agent", prompt: "test", delivery: "report" });
     queue.enqueue(entry);
     expect(queue.pending).toBe(0);
+  });
+});
+
+describe("CronQueue agent output validation", () => {
+  let queue: CronQueue;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.mocked(stateStore.incrementFailures).mockReturnValue(0);
+    vi.mocked(stateStore.readState).mockReturnValue(null);
+    const { readLastPromptAt } = await import("../transport/bridge-lock-transport.js");
+    vi.mocked(readLastPromptAt).mockReturnValue(0);
+    queue = new CronQueue("kiro-cli", ".");
+  });
+
+  function flush(): Promise<void> {
+    return new Promise(resolve => setImmediate(resolve));
+  }
+
+  async function waitForUpdateState(id: string): Promise<void> {
+    await vi.waitFor(() => {
+      const calls = vi.mocked(stateStore.updateState).mock.calls.filter(c => c[0] === id);
+      expect(calls.length).toBeGreaterThan(0);
+    }, { timeout: 1000, interval: 1 });
+  }
+
+  it("fails on empty string response", async () => {
+    const { spin } = await import("../spin.js");
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: "" });
+    const entry = makeEntry({ id: "empty-str", kind: "agent", prompt: "test", delivery: "report", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("empty-str");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("empty-str", expect.objectContaining({ retrying: true }));
+  });
+
+  it("fails on whitespace-only response", async () => {
+    const { spin } = await import("../spin.js");
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: "   \n  \t  " });
+    const entry = makeEntry({ id: "ws", kind: "agent", prompt: "test", delivery: "report", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("ws");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("ws", expect.objectContaining({ retrying: true }));
+  });
+
+  it("fails on empty structured output (exit_code 0 with empty stdout/stderr)", async () => {
+    const { spin } = await import("../spin.js");
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: JSON.stringify({ exit_code: 0, stdout: "", stderr: "" }) });
+    const entry = makeEntry({ id: "struct-empty", kind: "agent", prompt: "test", delivery: "silent", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("struct-empty");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("struct-empty", expect.objectContaining({ retrying: true }));
+  });
+
+  it("fails on synthetic sentinel (no output)", async () => {
+    const { spin } = await import("../spin.js");
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: "(no output)" });
+    const entry = makeEntry({ id: "sentinel", kind: "agent", prompt: "test", delivery: "silent", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("sentinel");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("sentinel", expect.objectContaining({ retrying: true }));
+  });
+
+  it("fails on synthetic sentinel (task completed)", async () => {
+    const { spin } = await import("../spin.js");
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: "(task completed)" });
+    const entry = makeEntry({ id: "sentinel2", kind: "agent", prompt: "test", delivery: "silent", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("sentinel2");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("sentinel2", expect.objectContaining({ retrying: true }));
+  });
+
+  it("fails on report output shorter than 100 bytes", async () => {
+    const { spin } = await import("../spin.js");
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: "short" });
+    const entry = makeEntry({ id: "short-rpt", kind: "agent", prompt: "test", delivery: "report", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("short-rpt");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("short-rpt", expect.objectContaining({ retrying: true }));
+  });
+
+  it("passes on valid report output at threshold (100 bytes)", async () => {
+    const { spin } = await import("../spin.js");
+    const { kanbanComplete, kanbanFail } = await import("./kanban-board.js");
+    const content = "x".repeat(100);
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: content });
+    const entry = makeEntry({ id: "valid-rpt", kind: "agent", prompt: "test", delivery: "report", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("valid-rpt");
+    const updateCalls = vi.mocked(stateStore.updateState).mock.calls.filter(c => c[0] === "valid-rpt");
+    const lastCall = updateCalls[updateCalls.length - 1];
+    expect(lastCall[1]).toMatchObject({ retrying: false });
+  });
+
+  it("passes on valid non-report output (any non-empty)", async () => {
+    const { spin } = await import("../spin.js");
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: "valid output here" });
+    const entry = makeEntry({ id: "valid-nr", kind: "agent", prompt: "test", delivery: "silent", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("valid-nr");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("valid-nr", expect.objectContaining({ retrying: false }));
+  });
+
+  it("fails on structured report output under 100 bytes", async () => {
+    const { spin } = await import("../spin.js");
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: JSON.stringify({ exit_code: 0, stdout: "short", stderr: "" }) });
+    const entry = makeEntry({ id: "short-struct", kind: "agent", prompt: "test", delivery: "report", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("short-struct");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("short-struct", expect.objectContaining({ retrying: true }));
+  });
+
+  it("passes on structured output with valid stdout", async () => {
+    const { spin } = await import("../spin.js");
+    const stdoutContent = "x".repeat(100);
+    vi.mocked(spin.dispatchAwait).mockResolvedValue({ cardId: 5, result: JSON.stringify({ exit_code: 0, stdout: stdoutContent, stderr: "" }) });
+    const entry = makeEntry({ id: "struct-ok", kind: "agent", prompt: "test", delivery: "report", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("struct-ok");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("struct-ok", expect.objectContaining({ retrying: false }));
   });
 });

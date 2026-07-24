@@ -15,6 +15,49 @@ import { isSystemEntry, formatTaskLabel } from "./task-types.js";
 import { getSystemTaskRegistry } from "./system-task-registry.js";
 import { localDate } from "../../utils/date.js";
 
+type ValidatedOutput =
+  | { ok: true; content: string }
+  | { ok: false; reason: string };
+
+function validateAgentOutput(raw: unknown, delivery: string | undefined): ValidatedOutput {
+  if (raw === null || raw === undefined) {
+    return { ok: false, reason: "task produced no output" };
+  }
+  let content: string;
+  if (typeof raw === "string") {
+    content = raw;
+  } else {
+    return { ok: false, reason: "task produced no output (non-string response)" };
+  }
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === "object" && "exit_code" in parsed) {
+      const stdout = typeof parsed.stdout === "string" ? parsed.stdout : "";
+      const stderr = typeof parsed.stderr === "string" ? parsed.stderr : "";
+      if (!stdout && !stderr) {
+        return { ok: false, reason: "task produced no output (empty stdout and stderr)" };
+      }
+      content = stdout || stderr;
+    }
+  } catch {
+    // not structured JSON output, use as-is
+  }
+  if (!content.trim()) {
+    return { ok: false, reason: "task produced no output (empty/whitespace-only)" };
+  }
+  const trimmed = content.trim();
+  if (trimmed === "(no output)" || trimmed === "(task completed)") {
+    return { ok: false, reason: `task produced no output (sentinel: "${trimmed}")` };
+  }
+  if (delivery === "report") {
+    const byteLen = Buffer.byteLength(content, "utf-8");
+    if (byteLen < 100) {
+      return { ok: false, reason: `report output too short (${byteLen} bytes, minimum 100)` };
+    }
+  }
+  return { ok: true, content };
+}
+
 const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const RETRY_DELAY_MS = 10 * 60 * 1000;
@@ -532,13 +575,21 @@ export class CronQueue {
       delivery: entry.delivery,
     })
       .then(({ cardId: boardId, result: response }) => {
-        let cleaned = response || "(no output)";
-        try {
-          const parsed = JSON.parse(cleaned);
-          if (parsed && typeof parsed === "object" && "exit_code" in parsed) {
-            cleaned = parsed.stdout || parsed.stderr || "(task completed)";
+        const validation = validateAgentOutput(response, entry.delivery);
+        if (!validation.ok) {
+          const reason = validation.reason;
+          logWarn(TAG, `Agent "${entry.id}" produced invalid output: ${reason}`);
+          kanbanFail(boardId, reason);
+          settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), reason, undefined, boardId, this.trigger());
+          const paused = this.checkAutoPause(entry, 1, reason);
+          if (!paused) {
+            this.tryInjectFailure(entry, `❌ ${reason}`);
+            onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.prompt ?? "", `❌ ${reason}`);
           }
-        } catch (err) { logAndSwallow(TAG, "JSON.parse task output", err); }
+          return;
+        }
+
+        const cleaned = validation.content;
         const summary = cleaned.slice(0, 500);
         let exitCode = 0;
         let dodResult = "";
