@@ -9,7 +9,9 @@ import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
-import type { AbtarsMemoryRuntime } from "../memory-runtime.js";
+import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
+import { attemptMemoryMutation } from "../memory-runtime.js";
+import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import type { InboundMessage } from "../../types/platform.js";
 import type { UserRegistry } from "../user-registry.js";
@@ -136,10 +138,25 @@ export async function buildPrompt(
   logTrace(TAG, `recordMessage gate: memory=${memoryRuntime?.state === "ready"} userId=${userId} userRole=${userRole}`);
   let currentMessageId: number | undefined;
   if (memoryRuntime?.state === "ready" && userRole !== "guest" && !text.startsWith("[SESSION START]")) {
-    const numericMsgId = typeof msg.messageId === "number" ? msg.messageId : undefined;
-    const messageTimestamp = Date.now();
-    const id = await memoryRuntime.recordMessage({ role: "user", content: text, timestamp: messageTimestamp, userId, sessionId: sessionKey, platformMessageId: numericMsgId }, `message-${userId}-${msg.platform}-${numericMsgId ?? messageTimestamp}`);
-    if (typeof id === "number") currentMessageId = id;
+    const messageIdStr = typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "";
+    const messageTimestamp = msg.timestamp;
+    const operationKey = messageIdStr
+      ? inboundMessageKey(msg.platform, msg.channelId, msg.threadId, userId, messageIdStr)
+      : inboundExecutionKey(msg.platform, msg.channelId, msg.threadId, userId, `${sessionKey}:${messageTimestamp}`);
+    const phase: MemoryWritePhase = "before_model";
+    const result = await attemptMemoryMutation({
+      phase,
+      family: "inbound",
+      operationKey,
+      run: () => memoryRuntime!.recordMessage(
+        { role: "user", content: text, timestamp: messageTimestamp, userId, sessionId: sessionKey, platformMessageId: typeof msg.messageId === "number" || typeof msg.messageId === "string" ? msg.messageId : undefined },
+        operationKey,
+      ),
+    });
+    if (result.ok) {
+      const r = result as { ok: true; value: { id: number | null } };
+      currentMessageId = r.value.id ?? undefined;
+    }
   }
 
   // --- Active recall ---

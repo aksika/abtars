@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import type { AbmindClient } from "abmind";
 
 import { logWarn } from "./logger.js";
+import type { MemoryMutationFamily } from "./memory-operation-key.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -12,7 +14,7 @@ export interface RecordMessageInput {
   role: string;
   content: string;
   timestamp: number;
-  platformMessageId?: number;
+  platformMessageId?: number | string;
   emotionScore?: number;
   typeHint?: string;
   topicHint?: string;
@@ -317,4 +319,41 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
 
 function emptySoulBundle(): SessionSoulBundle {
   return { soul: "", profile: "", notes: "", memoryTools: "", coreFacts: "" };
+}
+
+// ── Memory mutation isolation ─────────────────────────────────────────────
+
+export type MemoryWritePhase = "before_model" | "after_delivery" | "feedback";
+
+/**
+ * Attempt a memory mutation with safe isolation: catches typed abmind errors,
+ * logs one bounded diagnostic, and never retries.
+ *
+ * Callers map failure to undefined/no memory ID and continue. A failed memory
+ * write does not disable the memory runtime or prevent model invocation.
+ */
+export async function attemptMemoryMutation<T>(input: {
+  phase: MemoryWritePhase;
+  family: MemoryMutationFamily;
+  operationKey: string;
+  run: () => Promise<T>;
+}): Promise<{ ok: true; value: T } | { ok: false }> {
+  try {
+    const value = await input.run();
+    return { ok: true, value };
+  } catch (err) {
+    const code =
+      err && typeof err === "object" && "code" in err
+        ? String((err as { code: unknown }).code)
+        : "unknown";
+    const keyFingerprint = createHash("sha256")
+      .update(input.operationKey, "utf-8")
+      .digest("hex")
+      .slice(0, 12);
+    logWarn(
+      "memory-mutation",
+      `phase=${input.phase} family=${input.family} error=${code} key=${keyFingerprint}..`,
+    );
+    return { ok: false };
+  }
 }

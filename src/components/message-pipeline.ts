@@ -11,6 +11,8 @@ import { loadUsers } from "./user-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
+import { attemptMemoryMutation } from "./memory-runtime.js";
+import { assistantMessageKey, feedbackKey } from "./memory-operation-key.js";
 
 /** Retry a send operation on transient network errors (fetch failed, timeout, 5xx). */
 async function retrySend<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
@@ -48,13 +50,15 @@ const TAG = "pipeline";
 const PRIMING_MAX = 8;
 
 // #824: Track which recalled memory IDs were active per agent message (for emoji feedback)
-// Map<platform_message_id, recalled_memory_ids[]> with 1h TTL
-const recalledIdsPerMessage = new Map<number, number[]>();
+// Map<platform_message_id_string, recalled_memory_ids[]> with 1h TTL
+// Keys are lossless string representations of platform message IDs (Discord snowflakes,
+// Telegram integers, etc.) — never use Number() to avoid precision loss.
+const recalledIdsPerMessage = new Map<string, number[]>();
 const RECALL_MAP_TTL = 60 * 60_000;
 setInterval(() => { /* prune entries older than TTL — best-effort, no timestamp tracking needed for small maps */ if (recalledIdsPerMessage.size > 200) recalledIdsPerMessage.clear(); }, RECALL_MAP_TTL);
 
 /** Look up recalled memory IDs for a given platform message (for reaction-based feedback). */
-export function getRecalledIdsForMessage(platformMsgId: number): number[] | undefined {
+export function getRecalledIdsForMessage(platformMsgId: string): number[] | undefined {
   return recalledIdsPerMessage.get(platformMsgId);
 }
 
@@ -438,7 +442,14 @@ export async function handleInboundMessage(
       // Record assistant response to memory
       if (deps.memoryRuntime?.state === "ready" && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
         const timestamp = Date.now();
-        await deps.memoryRuntime.recordMessage({ role: "assistant", content: userResponse, timestamp, userId, sessionId: activeSessionId }, `assistant-${userId}-${activeSessionId}-${timestamp}`);
+        const deliveryId = deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`;
+        const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
+        await attemptMemoryMutation({
+          phase: "after_delivery",
+          family: "assistant",
+          operationKey,
+          run: () => deps.memoryRuntime!.recordMessage({ role: "assistant", content: userResponse, timestamp, userId, sessionId: activeSessionId }, operationKey),
+        });
       }
       if (isVoice && ttsConfig && adapter.sendVoice) {
         try {
@@ -513,11 +524,19 @@ export async function handleInboundMessage(
     // --- Record to memory (skip for guests and greeting injects) ---
     const isGuest = registry.byUserId.get(userId)?.role === "guest";
     if (deps.memoryRuntime?.state === "ready" && !isGuest && !text.startsWith("[SESSION START]")) {
-      await deps.memoryRuntime.recordMessage({
-        role: "assistant", content: userResponse,
-        timestamp: Date.now(), userId, sessionId: activeSessionId,
-        platformMessageId: typeof lastSentMsgId === "number" ? lastSentMsgId : undefined,
-      }, `assistant-${userId}-${activeSessionId}-${lastSentMsgId ?? Date.now()}`);
+      const timestamp = Date.now();
+      const deliveryId = lastSentMsgId != null ? String(lastSentMsgId) : (deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`);
+      const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
+      await attemptMemoryMutation({
+        phase: "after_delivery",
+        family: "assistant",
+        operationKey,
+        run: () => deps.memoryRuntime!.recordMessage({
+          role: "assistant", content: userResponse,
+          timestamp, userId, sessionId: activeSessionId,
+          platformMessageId: lastSentMsgId != null ? String(lastSentMsgId) : undefined,
+        }, operationKey),
+      });
     }
 
     // --- TTS for voice notes ---
@@ -556,12 +575,19 @@ export async function handleInboundMessage(
           const { detectCitations } = mod;
           const citedIds = detectCitations(userResponse, recalledHits);
           for (const memoryId of citedIds) {
-            await deps.memoryRuntime.recordFeedback({ userId, memoryId, feedbackType: "cite" }, `cite-${userId}-${memoryId}-${lastSentMsgId ?? Date.now()}`);
+            const messageIdForFeedback = lastSentMsgId != null ? String(lastSentMsgId) : deliveryCorrelation?.executionId ?? `${activeSessionId}-${Date.now()}`;
+            const operationKey = feedbackKey(msg.platform, msg.channelId, userId, messageIdForFeedback, memoryId, "cite");
+            await attemptMemoryMutation({
+              phase: "after_delivery",
+              family: "feedback",
+              operationKey,
+              run: () => deps.memoryRuntime!.recordFeedback({ userId, memoryId, feedbackType: "cite" }, operationKey),
+            });
           }
           logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
           // Track recalledIds for emoji reaction feedback (1h TTL)
           if (lastSentMsgId != null) {
-            recalledIdsPerMessage.set(Number(lastSentMsgId), recalledHits.map(h => h.id));
+            recalledIdsPerMessage.set(String(lastSentMsgId), recalledHits.map(h => h.id));
           }
         }
       } catch (err) {
