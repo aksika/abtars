@@ -75,8 +75,31 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
 
   const eventProducer = new RemotePiEventProducer({ store });
   const deliveryManager = new RemotePiDeliveryManager({ store, eventProducer, localPeerName });
-  const controlHandler = new RemotePiControlHandler({ store, service });
-  const originReducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb));
+  const controlHandler = new RemotePiControlHandler({ store, service, eventProducer });
+  const originReducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb), (projection, event) => {
+    // #1358: keep the single #1357 origin card as the user-visible projection.
+    // Kanban has no interrupted/awaiting-input states, so those remain active.
+    const cardStatus = projection.latest_status === "completed"
+      ? "done"
+      : ["failed", "cancelled"].includes(projection.latest_status)
+        ? "failed"
+        : projection.latest_status === "queued" ? "queued" : "running";
+    const sets = ["status = ?", "updated_at = datetime('now')"];
+    const values: unknown[] = [cardStatus];
+    if (["done", "failed"].includes(cardStatus)) sets.push("completed_at = datetime('now')");
+    if (projection.result_summary !== undefined) { sets.push("result_summary = ?"); values.push(projection.result_summary); }
+    if (projection.error_summary !== undefined) { sets.push("error = ?"); values.push(projection.error_summary); }
+    if (event.kind === "resumed") { sets.push("result_summary = NULL", "error = NULL", "completed_at = NULL"); }
+    // The event card_id is the owner's Pi card. Resolve the origin-side
+    // delegation card by the durable remote run reference instead of ever
+    // mutating the owner's card ID in this process.
+    const localCard = (taskDb.prepare(`SELECT id, notes FROM kanban_board WHERE source = 'peer'`).all() as Array<{ id: number; notes?: string | null }>).find((row) => {
+      try { return (JSON.parse(row.notes ?? "{}") as Record<string, unknown>).remote_run_id === projection.run_id; } catch { return false; }
+    });
+    if (!localCard) return;
+    values.push(localCard.id);
+    taskDb.prepare(`UPDATE kanban_board SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+  });
 
   setRemotePiComponents({ eventProducer, delivery: deliveryManager, controlHandler, originReducer });
 
@@ -89,12 +112,25 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
       run,
       previousStatus: _fromStatus,
       originPeer: run.originPeer,
-      originRequestId: run.originChatId ?? run.id,
+      originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
     }).then(() => {
       // Attempt immediate WS push after producing
       deliveryManager.pushEvents(runId, run.originPeer!).catch(() => {});
     }).catch(err => {
       logError(TAG, `Failed to produce lifecycle event for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  });
+
+  executor.onProgress((runId, progressPayload) => {
+    const run = store.get(runId);
+    if (!run?.originPeer) return;
+    eventProducer.produceProgress({
+      run,
+      originPeer: run.originPeer,
+      originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+      progressPayload,
+    }).then(() => deliveryManager.pushEvents(runId, run.originPeer!).catch(() => {})).catch(err => {
+      logError(TAG, `Failed to produce progress event for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
     });
   });
 
@@ -116,6 +152,23 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   for (const cardId of recovery.queuedCardIds) {
     logInfo(TAG, `Waking preserved queued Pi card ${cardId}`);
     requestReconcile(cardId);
+  }
+
+  // #1358: Startup recovery — push unacknowledged remote Pi events for all
+  // delegated runs. On restart, events produced before the crash are still
+  // in the outbox (unacknowledged). This scan ensures they reach the origin
+  // after the first WSS connection becomes available.
+  try {
+    await eventProducer.recoverMissingEvents();
+    const pending = store.findRunsWithUnacknowledgedEvents();
+    if (pending.length > 0) {
+      logInfo(TAG, `Remote Pi recovery: ${pending.length} run(s) with unacknowledged events`);
+      for (const row of pending) {
+        deliveryManager.pushEvents(row.run_id, row.origin_peer).catch(() => {});
+      }
+    }
+  } catch (err) {
+    logError(TAG, `Remote Pi event recovery scan failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // #1360: Register Pi executor capabilities in the peer-health store

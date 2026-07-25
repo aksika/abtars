@@ -34,6 +34,7 @@ export class PiExecutor {
   private _onCapacityReleased: (() => void) | null = null;
   /** #1358 — Lifecycle transition hook for remote Pi event production. */
   private _onTransition: ((runId: string, fromStatus: string | undefined, toStatus: string) => void) | null = null;
+  private _onProgress: ((runId: string, payload: string) => void) | null = null;
 
   constructor(config: PiExecutorConfig, store: PiRunStore) {
     this.config = config;
@@ -55,6 +56,11 @@ export class PiExecutor {
     this._onTransition = cb;
   }
 
+  /** Register a callback for bounded public progress emission. */
+  onProgress(cb: (runId: string, payload: string) => void): void {
+    this._onProgress = cb;
+  }
+
   /** #1358 — Fire the transition hook for a run. */
   private _fireTransition(runId: string, fromStatus: string | undefined, toStatus: string): void {
     if (this._onTransition) {
@@ -73,6 +79,8 @@ export class PiExecutor {
     const run = this.store.get(runId);
     if (!run || run.executionGeneration !== generation) return "error";
     if (run.status !== "starting") return "error";
+
+    this._fireTransition(runId, "queued", "starting");
 
     // Register live ownership immediately, before spawn
     const placeholder: OwnedProcess = {
@@ -133,6 +141,7 @@ export class PiExecutor {
         error: `Launch exception: ${err instanceof Error ? err.message : String(err)}`,
       });
       nerve.fire("card:failed", run.cardId);
+      this._fireTransition(runId, "starting", "failed");
       return "error";
     }
   }
@@ -319,6 +328,7 @@ export class PiExecutor {
       this.store.restorePendingUi({ runId, generation, requestId, requestType: claim.requestType });
     } else {
       this.store.recordUiReplyOutcome({ runId, generation, requestId, outcome: "delivery_unknown" });
+      this._fireTransition(runId, "awaiting_input", "running");
     }
     this.store.touchActivity(runId);
     return { claimed: true, requestType: claim.requestType };
@@ -388,6 +398,7 @@ export class PiExecutor {
     });
     if (settlement.committed) {
       nerve.fire("card:failed", settlement.cardId);
+      this._fireTransition(runId, undefined, outcome);
     }
   }
 
@@ -433,7 +444,10 @@ export class PiExecutor {
     this.store.touchActivity(runId);
 
     const proj = projectPiEvent(event);
-    for (const p of proj.progress) this.store.addProgress(runId, p.type, p.json);
+    for (const p of proj.progress) {
+      this.store.addProgress(runId, p.type, p.json);
+      this._onProgress?.(runId, p.json);
+    }
     if (proj.log?.level === "warn") logWarn(TAG, `${proj.log.message} [run=${runId}]`);
     else if (proj.log?.level === "debug") logDebug(TAG, `${proj.log.message} [run=${runId}]`);
 

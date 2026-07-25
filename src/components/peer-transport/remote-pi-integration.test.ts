@@ -15,6 +15,7 @@ import { RemotePiEventProducer, buildPublicProjection } from "./remote-pi-event-
 import { RemotePiControlHandler } from "./remote-pi-control-handler.js";
 import { RemotePiDeliveryManager } from "./remote-pi-delivery.js";
 import { RemotePiOriginReducer, SqliteProjectionStore } from "./remote-pi-origin-projection.js";
+import { handlePushLifecycleEvent } from "./remote-pi-agent-api-integration.js";
 import { PiRunStore } from "../pi-executor/pi-run-store.js";
 import type { PiRunService } from "../pi-executor/pi-run-service.js";
 import {
@@ -75,7 +76,7 @@ describe("Remote Pi Integration (#1358)", () => {
     taskDb = createTaskDatabase(db);
     store = new PiRunStore({ db: taskDb });
     producer = new RemotePiEventProducer({ store });
-    deliveryManager = new RemotePiDeliveryManager({ store, producer, localPeerName: "origin-peer" });
+    deliveryManager = new RemotePiDeliveryManager({ store, eventProducer: producer, localPeerName: "origin-peer" });
     originReducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb));
 
     const mockService = {
@@ -363,6 +364,28 @@ describe("Remote Pi Integration (#1358)", () => {
       originReducer.reduce(e1);
       expect(originReducer.acknowledgeCursor(runId, 1)).toBe(true);
       expect(originReducer.getCursor(runId)?.sequence).toBe(1);
+    });
+
+    it("rejects a changed payload replay for an already committed sequence", () => {
+      const runId = "conflict-origin-" + randomUUID().slice(0, 6);
+      const first = buildEvent({ run_id: runId, sequence: 1, kind: "running", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      const changed = buildEvent({
+        run_id: runId, sequence: 1, kind: "running", origin_peer: "origin-peer", origin_request_id: "req-1",
+        projection: { status: "completed", generation: 1, result_summary: "different" },
+      });
+      expect(originReducer.reduce(first)).toBe(true);
+      expect(originReducer.reduce(changed)).toBe(false);
+      expect(originReducer.getProjection(runId)?.latest_status).toBe("running");
+    });
+
+    it("invokes the card projector only for accepted contiguous events", () => {
+      const projected: number[] = [];
+      const reducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb), (p) => projected.push(p.latest_sequence));
+      const e1 = buildEvent({ run_id: "project-card", sequence: 1, kind: "accepted", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      const e3 = buildEvent({ run_id: "project-card", sequence: 3, kind: "progress", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      expect(reducer.reduce(e1)).toBe(true);
+      expect(reducer.reduce(e3)).toBe(false);
+      expect(projected).toEqual([1]);
     });
   });
 
@@ -766,7 +789,7 @@ describe("Remote Pi Integration (#1358)", () => {
 
   describe("Remote-Pi delivery drain (#1455)", () => {
     beforeEach(() => {
-      deliveryManager = new RemotePiDeliveryManager({ store, producer, localPeerName: "origin-peer" });
+      deliveryManager = new RemotePiDeliveryManager({ store, eventProducer: producer, localPeerName: "origin-peer" });
     });
 
     it("pushEvents returns 0 when route is null", async () => {
@@ -826,6 +849,285 @@ describe("Remote Pi Integration (#1358)", () => {
       // Wait for both to complete
       await Promise.all([p1, p2]);
       expect(drainInFlight.size).toBe(0);
+    });
+
+    it("drainPeer sends events for runs with unacknowledged events", async () => {
+      const runId = "drain-event-test-" + randomUUID().slice(0, 6);
+      store.createPiCardAndRun({
+        runId, sessionId: randomUUID(),
+        title: "Pi: test", goal: "test", workspaceAlias: "test-ws",
+        ownerPrincipalId: "peer:origin-peer", origin: "peer",
+        originPeer: "origin-peer",
+      });
+      expect(store.get(runId)).not.toBeNull();
+
+      const event = buildEvent({ run_id: runId, sequence: 1, kind: "progress", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      store.appendEvent({
+        runId, cardId: 42, generation: 1, sequence: 1,
+        eventId: event.event_id, contentSha256: event.content_sha256,
+        originPeer: "origin-peer", originRequestId: "req-1", kind: "progress",
+        occurredAt: event.occurred_at, projectionJson: JSON.stringify(event.projection),
+      });
+
+      // Verify event is in unacknowledged list
+      const pending = store.findRunsWithUnacknowledgedEvents();
+      expect(pending.length).toBeGreaterThanOrEqual(1);
+      const ourRun = pending.find(r => r.run_id === runId);
+      expect(ourRun).toBeDefined();
+      expect(ourRun!.origin_peer).toBe("origin-peer");
+
+      const sent: Array<{ method: string; payload: unknown }> = [];
+      const mockRoute = {
+        hasRoute: () => true,
+        sendPush: vi.fn((_peer: string, method: string, _payload: unknown) => { sent.push({ method, payload: _payload }); return true; }),
+        requestConnection: vi.fn(),
+      };
+      deliveryManager.setRouteInterface(mockRoute);
+
+      await deliveryManager.drainPeer("origin-peer");
+      expect(sent.length).toBeGreaterThanOrEqual(1);
+      expect(sent[0].method).toBe("pi.lifecycle.v1");
+    });
+  });
+
+  // ── Recovery tests: restart and disconnect scenarios ─────────────────────
+
+  describe("Recovery: restart and disconnect", () => {
+    it("reconstructs queued after a crash between accepted and queued append", async () => {
+      const runId = "accepted-only-" + randomUUID().slice(0, 6);
+      store.createPiCardAndRun({
+        runId, sessionId: randomUUID(), title: "Pi: test", goal: "test",
+        workspaceAlias: "test-ws", ownerPrincipalId: "peer:origin-peer",
+        origin: "peer", originPeer: "origin-peer", originRequestId: "req-1",
+      });
+      const run = store.get(runId)!;
+      await producer.produceEvent({ run: { ...run, status: "queued" }, kind: "accepted", originPeer: "origin-peer", originRequestId: "req-1" });
+
+      expect(await producer.recoverMissingEvents("origin-peer")).toBe(1);
+      expect(store.getEventsAfter({ runId, afterSequence: 0, limit: 10 }).map(e => e.kind)).toEqual(["accepted", "queued"]);
+    });
+
+    it("unacknowledged events survive a 'restart' (new delivery manager with same store)", async () => {
+      const runId = "restart-test-" + randomUUID().slice(0, 6);
+      store.createPiCardAndRun({
+        runId, sessionId: randomUUID(),
+        title: "Pi: test", goal: "test", workspaceAlias: "test-ws",
+        ownerPrincipalId: "peer:origin-peer", origin: "peer",
+        originPeer: "origin-peer",
+      });
+
+      // Produce events with valid hashes before "crash"
+      const e1 = buildEvent({ run_id: runId, sequence: 1, kind: "running", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      store.appendEvent({
+        runId, cardId: 42, generation: 1, sequence: 1,
+        eventId: e1.event_id, contentSha256: e1.content_sha256,
+        originPeer: "origin-peer", originRequestId: "req-1", kind: "running",
+        occurredAt: e1.occurred_at, projectionJson: JSON.stringify(e1.projection),
+      });
+      const e2 = buildEvent({ run_id: runId, sequence: 2, kind: "progress", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      store.appendEvent({
+        runId, cardId: 42, generation: 1, sequence: 2,
+        eventId: e2.event_id, contentSha256: e2.content_sha256,
+        originPeer: "origin-peer", originRequestId: "req-1", kind: "progress",
+        occurredAt: e2.occurred_at, projectionJson: JSON.stringify(e2.projection),
+      });
+
+      // "Restart": create fresh delivery manager using same store
+      const newDelivery = new RemotePiDeliveryManager({ store, eventProducer: producer, localPeerName: "origin-peer" });
+      const pending = store.findRunsWithUnacknowledgedEvents();
+      expect(pending.some(r => r.run_id === runId && r.origin_peer === "origin-peer")).toBe(true);
+
+      // After restart, drain should push unacknowledged events
+      const sent: Array<{ method: string; payload: unknown }> = [];
+      const mockRoute = {
+        hasRoute: () => true,
+        sendPush: vi.fn((_peer: string, method: string, payload: unknown) => { sent.push({ method, payload }); return true; }),
+        requestConnection: vi.fn(),
+      };
+      newDelivery.setRouteInterface(mockRoute);
+      await newDelivery.drainPeer("origin-peer");
+      expect(sent.length).toBe(2);
+    });
+
+    it("origin restarts from committed cursor — ignores already-acked events", async () => {
+      const runId = "origin-restart-run";
+      const originReducer2 = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb));
+
+      // Produce events from owner perspective
+      for (let i = 1; i <= 3; i++) {
+        store.appendEvent({
+          runId, cardId: 42, generation: 1, sequence: i,
+          eventId: deriveEventId(runId, i), contentSha256: "a".repeat(64),
+          originPeer: "p", originRequestId: `req-${i}`, kind: "progress",
+          occurredAt: new Date().toISOString(), projectionJson: JSON.stringify({ status: "running", generation: 1 }),
+        });
+      }
+
+      // Origin reduces events 1-2 and acks
+      const e1 = buildEvent({ run_id: runId, sequence: 1, kind: "accepted", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      const e2 = buildEvent({ run_id: runId, sequence: 2, kind: "running", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      expect(originReducer2.reduce(e1)).toBe(true);
+      expect(originReducer2.reduce(e2)).toBe(true);
+      expect(originReducer2.acknowledgeCursor(runId, 2)).toBe(true);
+      expect(originReducer2.getCursor(runId)?.sequence).toBe(2);
+
+      // "Restart" — create fresh reducer with same store
+      const originReducerRecovered = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb));
+      const cursor = originReducerRecovered.getCursor(runId);
+      expect(cursor).not.toBeNull();
+      expect(cursor!.sequence).toBe(2);
+
+      // After restart, origin should fetch events after cursor 2 and reduce seq 3
+      const e3 = buildEvent({ run_id: runId, sequence: 3, kind: "running", origin_peer: "origin-peer", origin_request_id: "req-3" });
+      expect(originReducerRecovered.reduce(e3)).toBe(true);
+      expect(originReducerRecovered.getProjection(runId)?.latest_sequence).toBe(3);
+
+      // Stale event from before cursor is rejected
+      expect(originReducerRecovered.reduce(e1)).toBe(false);
+    });
+
+    it("events produced during disconnect are pushed on reconnect", async () => {
+      const run = createMockRun({ status: "running" });
+      store.createPiCardAndRun({
+        runId: run.id, sessionId: run.currentSessionId!,
+        title: "Pi: test", goal: "test", workspaceAlias: "test-ws",
+        ownerPrincipalId: "peer:origin-peer", origin: "peer",
+        originPeer: "origin-peer",
+      });
+      const fresh = store.get(run.id)!;
+
+      // Produce events while origin is disconnected (no route)
+      const noRoute = {
+        hasRoute: () => false, sendPush: vi.fn(), requestConnection: vi.fn(),
+      };
+      deliveryManager.setRouteInterface(noRoute);
+      await deliveryManager.pushEvents(fresh.id, "origin-peer");
+
+      await producer.produceEvent({
+        run: fresh, kind: "running", originPeer: "origin-peer", originRequestId: "req-1",
+      });
+      await producer.produceEvent({
+        run: fresh, kind: "progress", originPeer: "origin-peer", originRequestId: "req-1",
+      });
+
+      // Verify events accumulated
+      const events = store.getEventsAfter({ runId: fresh.id, afterSequence: 0, limit: 10 });
+      expect(events.length).toBe(2);
+
+      // Reconnect: route becomes available, drain pushes pending events
+      const sent: Array<{ method: string; payload: unknown }> = [];
+      const reconnectedRoute = {
+        hasRoute: () => true,
+        sendPush: vi.fn((_peer: string, method: string, payload: unknown) => { sent.push({ method, payload }); return true; }),
+        requestConnection: vi.fn(),
+      };
+      deliveryManager.setRouteInterface(reconnectedRoute);
+
+      await deliveryManager.drainPeer("origin-peer");
+      expect(sent.length).toBe(2);
+      expect(sent.every(s => s.method === "pi.lifecycle.v1")).toBe(true);
+    });
+
+    it("ack flow via handlePushLifecycleEvent: first push acks, duplicate re-acks, acked event not resent", async () => {
+      const runId = "via-handler-" + randomUUID().slice(0, 6);
+      store.createPiCardAndRun({
+        runId, sessionId: randomUUID(),
+        title: "Pi: test", goal: "test", workspaceAlias: "test-ws",
+        ownerPrincipalId: "peer:origin-peer", origin: "peer",
+        originPeer: "origin-peer",
+      });
+
+      // Owner produces event
+      const event = buildEvent({ run_id: runId, sequence: 1, kind: "running", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      store.appendEvent({
+        runId, cardId: 42, generation: 1, sequence: 1,
+        eventId: event.event_id, contentSha256: event.content_sha256,
+        originPeer: "origin-peer", originRequestId: "req-1", kind: "running",
+        occurredAt: event.occurred_at, projectionJson: JSON.stringify(event.projection),
+      });
+
+      // First push through the production handler
+      const r1 = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", event);
+      expect(r1.success).toBe(true);
+      expect(r1.runId).toBe(runId);
+      expect(r1.sequence).toBe(1);
+      expect("duplicate" in r1 ? r1.duplicate : false).toBe(false);
+
+      // Origin acknowledges (the ack that push handler would send via broker)
+      store.acknowledgeEvents(runId, r1.sequence);
+
+      // Event is no longer unacknowledged — drain sends nothing
+      expect(store.getUnacknowledgedEvents(runId, 10).length).toBe(0);
+      const sent: Array<{ method: string }> = [];
+      deliveryManager.setRouteInterface({
+        hasRoute: () => true,
+        sendPush: vi.fn((_p: string, m: string) => { sent.push({ method: m }); return true; }),
+        requestConnection: vi.fn(),
+      });
+      await deliveryManager.drainPeer("origin-peer");
+      expect(sent.length).toBe(0);
+
+      // Simulate lost ack: owner resends same event.
+      // Handler must return success with duplicate:true so the caller
+      // re-sends the cumulative ack.
+      const r2 = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", event);
+      expect(r2.success).toBe(true);
+      expect("duplicate" in r2 ? r2.duplicate : false).toBe(true);
+      expect(r2.runId).toBe(runId);
+      expect(r2.sequence).toBe(1);
+    });
+
+    it("gap detection via handlePushLifecycleEvent: seq 3 rejected with gapDetected, seq 2 fills gap, seq 3 succeeds", async () => {
+      const runId = "via-gap-handler-" + randomUUID().slice(0, 6);
+      store.createPiCardAndRun({
+        runId, sessionId: randomUUID(),
+        title: "Pi: test", goal: "test", workspaceAlias: "test-ws",
+        ownerPrincipalId: "peer:origin-peer", origin: "peer",
+        originPeer: "origin-peer",
+      });
+
+      const e1 = buildEvent({ run_id: runId, sequence: 1, kind: "accepted", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      const e2 = buildEvent({ run_id: runId, sequence: 2, kind: "running", origin_peer: "origin-peer", origin_request_id: "req-1" });
+      const e3 = buildEvent({ run_id: runId, sequence: 3, kind: "progress", origin_peer: "origin-peer", origin_request_id: "req-1" });
+
+      store.appendEvent({
+        runId, cardId: 42, generation: 1, sequence: 1,
+        eventId: e1.event_id, contentSha256: e1.content_sha256,
+        originPeer: "origin-peer", originRequestId: "req-1", kind: "accepted",
+        occurredAt: e1.occurred_at, projectionJson: JSON.stringify(e1.projection),
+      });
+      store.appendEvent({
+        runId, cardId: 42, generation: 1, sequence: 2,
+        eventId: e2.event_id, contentSha256: e2.content_sha256,
+        originPeer: "origin-peer", originRequestId: "req-1", kind: "running",
+        occurredAt: e2.occurred_at, projectionJson: JSON.stringify(e2.projection),
+      });
+      store.appendEvent({
+        runId, cardId: 42, generation: 1, sequence: 3,
+        eventId: e3.event_id, contentSha256: e3.content_sha256,
+        originPeer: "origin-peer", originRequestId: "req-1", kind: "progress",
+        occurredAt: e3.occurred_at, projectionJson: JSON.stringify(e3.projection),
+      });
+
+      // Seq 1: first push succeeds
+      const r1 = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", e1);
+      expect(r1.success).toBe(true);
+      expect(r1.sequence).toBe(1);
+
+      // Seq 3 before seq 2: detected as gap
+      const r3 = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", e3);
+      expect(r3.success).toBe(false);
+      expect("gapDetected" in r3 ? r3.gapDetected : false).toBe(true);
+
+      // Seq 2 fills the gap
+      const r2 = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", e2);
+      expect(r2.success).toBe(true);
+      expect(r2.sequence).toBe(2);
+
+      // Now seq 3 succeeds (no longer a gap)
+      const r3b = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", e3);
+      expect(r3b.success).toBe(true);
+      expect(r3b.sequence).toBe(3);
     });
   });
 });

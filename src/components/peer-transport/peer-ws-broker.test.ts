@@ -822,24 +822,23 @@ describe("PeerWsBroker", () => {
     client.close();
   });
 
-  it("push handler is invoked for frames on accepted socket", async () => {
+  it("rejects unsigned lifecycle push frames on accepted sockets", async () => {
     const broker = await makeBroker();
     const pushHandler = vi.fn();
     broker.registerPushHandler(pushHandler);
 
-    const { server, client, serverConn } = await connectedPair();
+    const { server, client } = await connectedPair();
     // Attach the server-side connection as an "accepted" socket
     broker.attachSocket({ peer: "kp", direction: "accepted", socket: client });
     await new Promise(r => setTimeout(r, 50));
 
-    // Send from the remote side (serverConn simulates the remote peer)
-    // The broker listens on client for messages
+    // Lifecycle pushes must carry a valid authenticated envelope.
     client.emit("message", Buffer.from(JSON.stringify({
       type: "push", method: "pi.lifecycle.v1", payload: { event: "test" },
     })));
     await new Promise(r => setTimeout(r, 50));
 
-    expect(pushHandler).toHaveBeenCalledWith("kp", "pi.lifecycle.v1", { event: "test" });
+    expect(pushHandler).not.toHaveBeenCalled();
     server.close();
     client.close();
   });

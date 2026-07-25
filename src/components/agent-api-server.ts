@@ -1040,8 +1040,8 @@ export class AgentApiServer {
     }
     const { loadPeerConfig } = await import("./peer-config.js");
     const localPeerName = loadPeerConfig().self.name;
-    const { handlePushLifecycleEvent } = await import("./peer-transport/remote-pi-agent-api-integration.js");
-    const result = await handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, caller, body as any);
+    const { handlePushLifecycleEvent, authorizeRemotePiOwner } = await import("./peer-transport/remote-pi-agent-api-integration.js");
+    const result = await handlePushLifecycleEvent({ originReducer: reducer, localPeerName, authorizeOwner: authorizeRemotePiOwner }, caller, body as any);
     if (result.success) {
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
     } else {

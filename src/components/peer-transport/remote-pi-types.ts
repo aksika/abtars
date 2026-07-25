@@ -411,6 +411,9 @@ export function validateEventV1(event: RemotePiEventV1): void {
 
   // Validate projection
   validatePublicProjection(event.projection);
+  if (event.projection.generation !== event.generation) {
+    throw new Error("Event generation does not match projection generation");
+  }
 
   // Validate event_id matches derived value
   const expectedEventId = deriveEventId(event.run_id, event.sequence);

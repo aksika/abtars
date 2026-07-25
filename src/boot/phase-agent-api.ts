@@ -138,6 +138,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
               goal: combinedGoal,
               workspaceAlias: request.target.workspace_alias,
               priority: request.priority,
+              deliveryPolicy: request.target.delivery,
               model: request.target.model
                 ? { provider: request.target.model.provider, modelId: request.target.model.model_id, thinking: request.target.model.thinking }
                 : undefined,
@@ -145,6 +146,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
                 principalId: `peer:${originPeer}`,
                 origin: "peer",
                 peer: originPeer,
+                requestId: request.request_id,
               },
             }, { userId: `peer:${originPeer}` }, {
               clientId: `peer:${originPeer}`,
@@ -152,6 +154,16 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
               requestId: request.request_id,
               requestHash,
             });
+            // #1358: persist creation facts in the owner outbox before the
+            // delegation response is returned.
+            const { getRemotePiProducer, getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
+            const producer = getRemotePiProducer();
+            const createdRun = piService.store.get(result.runId);
+            if (producer && createdRun) {
+              await producer.produceEvent({ run: createdRun, kind: "accepted", originPeer, originRequestId: request.request_id });
+              await producer.produceEvent({ run: createdRun, kind: "queued", originPeer, originRequestId: request.request_id });
+              getRemotePiDelivery()?.pushEvents(result.runId, originPeer).catch(() => {});
+            }
             return { ok: true, runId: result.runId, cardId: result.cardId, generation: result.generation, sessionId: result.sessionId };
           } catch (err) {
             return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -160,12 +172,30 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
 
         agentApiServer.setPeerHelpService(helpService);
 
-        // Register broker request handler for help wire methods
+        // Register broker request handler for help + remote Pi wire methods
         broker.registerRequestHandler(async (peer, method, payload, _frameId) => {
           if (method === "help.request.v1") return helpService.handleHelpRequest(peer, payload);
           if (method === "help.status.v1") return helpService.handleHelpStatus(peer, payload);
           if (method === "help.withdraw.v1") return helpService.handleHelpWithdraw(peer, payload);
           if (method === "help.event.v1") return helpService.handleContributionEvent(peer, payload);
+          if (method === "pi.events.list.v1" || method === "pi.events.ack.v1" || method === "pi.control.v1") {
+            const { getRemotePiDelivery, getRemotePiControlHandler } = await import("../components/peer-transport/remote-pi-registry.js");
+            const { wsHandlePiEventsListV1, wsHandlePiEventsAckV1, wsHandlePiControlV1 } = await import("../components/peer-transport/remote-pi-agent-api-integration.js");
+            const delivery = getRemotePiDelivery();
+            if (method === "pi.events.list.v1") {
+              if (!delivery) throw new Error("Delivery manager not available");
+              return wsHandlePiEventsListV1({ deliveryManager: delivery }, peer, payload);
+            }
+            if (method === "pi.events.ack.v1") {
+              if (!delivery) throw new Error("Delivery manager not available");
+              return wsHandlePiEventsAckV1({ deliveryManager: delivery }, peer, payload);
+            }
+            if (method === "pi.control.v1") {
+              const controlHandler = getRemotePiControlHandler();
+              if (!controlHandler) throw new Error("Control handler not available");
+              return wsHandlePiControlV1({ controlHandler, deliveryManager: delivery! }, peer, `peer:${peer}`, payload);
+            }
+          }
           throw new Error(`Unknown help method: ${method}`);
         });
 
@@ -185,13 +215,45 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
           }
           if (method === "pi.lifecycle.v1") {
             try {
-              const { getRemotePiOriginReducer } = await import("../components/peer-transport/remote-pi-registry.js");
+              const { getRemotePiOriginReducer, getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
               const reducer = getRemotePiOriginReducer();
               if (!reducer) return;
               const { loadPeerConfig } = await import("../components/peer-config.js");
               const localPeerName = loadPeerConfig().self.name;
-              const { handlePushLifecycleEvent } = await import("../components/peer-transport/remote-pi-agent-api-integration.js");
-              handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, peer, payload as any).catch(() => {});
+              const { handlePushLifecycleEvent, authorizeRemotePiOwner } = await import("../components/peer-transport/remote-pi-agent-api-integration.js");
+              const result = await handlePushLifecycleEvent({ originReducer: reducer, localPeerName, authorizeOwner: authorizeRemotePiOwner }, peer, payload as any);
+
+              if (result.success) {
+                // Send cumulative acknowledgement to the owner so it can
+                // drain/compact its outbox. Fire-and-forget — if the ack
+                // is lost the owner will resend on the next drain tick;
+                // the duplicate handler above re-sends the ack.
+                broker.sendRequest(peer, "pi.events.ack.v1", {
+                  version: 1,
+                  run_id: result.runId,
+                  sequence: result.sequence,
+                }).catch(() => {});
+              } else if (result.gapDetected) {
+                // Gap detected — initiate catch-up using the committed
+                // latest_sequence, NOT acknowledged_sequence. Pull missing
+                // events from the owner and reduce them contiguously.
+                const delivery = getRemotePiDelivery();
+                if (delivery) {
+                  const event = payload as any;
+                  const runId = event.run_id as string;
+                  const latestSeq = reducer.getProjection(runId)?.latest_sequence ?? 0;
+                  delivery.catchUp(
+                    runId,
+                    peer,
+                    latestSeq,
+                    async (e) => {
+                      if (!reducer.reduce(e)) {
+                        throw new Error(`Catch-up: failed to reduce event ${e.event_id} for run ${runId}`);
+                      }
+                    },
+                  ).catch(() => {});
+                }
+              }
             } catch { /* best effort */ }
           }
         });

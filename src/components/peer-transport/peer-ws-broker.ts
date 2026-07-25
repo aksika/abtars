@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { randomBytes } from "node:crypto";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { signWsRequest, verifyWsRequestSignature } from "./peer-auth.js";
 import { PeerNonceStore } from "./peer-nonce-store.js";
@@ -17,6 +18,7 @@ export const MAX_SIG_BYTES = 128;          // base64 Ed25519 sig
 export const MAX_BODY_BYTES = 524_288;     // 512 KiB body
 export const MAX_TIMESTAMP_STR_BYTES = 16; // "9999999999"
 export const HELP_METHODS = new Set(["help.request.v1", "help.status.v1", "help.withdraw.v1", "help.event.v1"]);
+export const PI_REQUEST_METHODS = new Set(["pi.events.list.v1", "pi.events.ack.v1", "pi.control.v1"]);
 
 const WIRE_TOKEN_RE = /^[A-Za-z0-9._:-]+$/;
 const NONCE_RE = /^[0-9a-f]{32}$/;
@@ -217,7 +219,22 @@ export class PeerWsBroker {
     if (!PUSH_ALLOWLIST.has(method)) return false;
     const socket = this.bestSocket(peer);
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-    socket.send(JSON.stringify({ type: "push", method, payload }));
+    if (method === "pi.lifecycle.v1") {
+      const config = loadPeerConfig();
+      const requestId = `push_${randomBytes(16).toString("hex")}`;
+      const body = JSON.stringify(payload);
+      const auth = signWsRequest(
+        config.self.name,
+        requestId,
+        method,
+        `/${method}`,
+        body,
+        config.self.signingKey,
+      );
+      socket.send(JSON.stringify({ type: "push", version: 1, method, id: requestId, body, auth }));
+    } else {
+      socket.send(JSON.stringify({ type: "push", method, payload }));
+    }
     return true;
   }
 
@@ -334,6 +351,36 @@ export class PeerWsBroker {
       }
 
       if (msg.type === "push") {
+        if (msg.method === "pi.lifecycle.v1") {
+          const config = loadPeerConfig();
+          const peerEntry = config.peers[peer];
+          const auth = msg.auth;
+          if (
+            msg.version !== 1 ||
+            typeof msg.id !== "string" ||
+            typeof msg.body !== "string" ||
+            utf8Bytes(msg.body) > MAX_BODY_BYTES ||
+            !auth || auth.peerId !== peer ||
+            !peerEntry?.verifyKey
+          ) return;
+          const sigResult = verifyWsRequestSignature(
+            { peerId: auth.peerId, requestId: msg.id, ts: String(auth.ts ?? ""), nonce: auth.nonce, sig: auth.sig },
+            msg.method,
+            `/${msg.method}`,
+            msg.body,
+            peerEntry.verifyKey,
+          );
+          if (!sigResult.ok) return;
+          if (!this.nonceStore) {
+            try { this.nonceStore = new PeerNonceStore(); } catch { return; }
+          }
+          const claim = this.nonceStore.claim(peer, auth.nonce);
+          if (!claim.ok) return;
+          try {
+            this.pushHandler?.(peer, msg.method, JSON.parse(msg.body));
+          } catch { /* malformed lifecycle payload */ }
+          return;
+        }
         this.pushHandler?.(peer, msg.method, msg.payload);
         return;
       }
@@ -359,7 +406,7 @@ export class PeerWsBroker {
       this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request method");
       return;
     }
-    if (!HELP_METHODS.has(msg.method)) {
+    if (!HELP_METHODS.has(msg.method) && !PI_REQUEST_METHODS.has(msg.method)) {
       this.rejectRequest(peer, msg, gen, "unsupported_method", "Unsupported request method");
       return;
     }

@@ -329,6 +329,88 @@ export class RemotePiEventProducer {
   }
 
   /**
+   * Recover state facts whose transition hook was interrupted by a process
+   * crash. The run row is authoritative; an absent/stale outbox projection is
+   * repaired before normal delivery draining resumes.
+   */
+  async recoverMissingEvents(originPeer?: string): Promise<number> {
+    let repaired = 0;
+    for (const run of this.deps.store.list()) {
+      if (!run.originPeer || (originPeer && run.originPeer !== originPeer)) continue;
+      const max = this.deps.store.getMaxSequence(run.id);
+      const latest = max > 0
+        ? this.deps.store.getEventsAfter({ runId: run.id, afterSequence: max - 1, limit: 1 })[0]
+        : undefined;
+      let projectionStatus: string | undefined;
+      let projectionGeneration: number | undefined;
+      const latestKind = latest?.kind;
+      if (latest) {
+        try {
+          const projection = JSON.parse(latest.projection_json) as { status?: string; generation?: number };
+          projectionStatus = projection.status;
+          projectionGeneration = latest.generation;
+        } catch { /* malformed local row is handled by normal delivery validation */ }
+      }
+      // Creation emits accepted and queued as separate facts. If a crash
+      // happened before either append, restore both facts before reconciling
+      // the run's current state so the origin sees the complete lifecycle.
+      if (!latest) {
+        const accepted = await this.produceEvent({
+          run: { ...run, status: "queued" },
+          kind: "accepted",
+          originPeer: run.originPeer,
+          originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+        });
+        if (accepted) repaired++;
+        const queued = await this.produceEvent({
+          run: { ...run, status: "queued" },
+          kind: "queued",
+          originPeer: run.originPeer,
+          originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+        });
+        if (queued) repaired++;
+        if (run.status !== "queued") {
+          const current = await this.produceFromTransition({
+            run,
+            previousStatus: "queued",
+            originPeer: run.originPeer,
+            originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+          });
+          if (current) repaired++;
+        }
+        continue;
+      }
+      if (latestKind === "accepted") {
+        const queued = await this.produceEvent({
+          run: { ...run, status: "queued" },
+          kind: "queued",
+          originPeer: run.originPeer,
+          originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+        });
+        if (queued) repaired++;
+        if (run.status !== "queued") {
+          const current = await this.produceFromTransition({
+            run,
+            previousStatus: "queued",
+            originPeer: run.originPeer,
+            originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+          });
+          if (current) repaired++;
+        }
+      } else if (!latest || projectionStatus !== run.status || projectionGeneration !== run.executionGeneration) {
+        const result = await this.produceFromTransition({
+          run,
+          previousStatus: projectionStatus,
+          originPeer: run.originPeer,
+          originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+        });
+        if (result) repaired++;
+      }
+    }
+    return repaired;
+  }
+
+  /**
    * Build a complete event envelope from stored event data.
    * Uses the card_id and occurred_at stored alongside the event.
    */

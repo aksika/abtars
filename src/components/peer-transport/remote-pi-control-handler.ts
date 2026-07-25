@@ -23,6 +23,7 @@ import {
 } from "./remote-pi-types.js";
 import type { PiRunStore } from "../pi-executor/pi-run-store.js";
 import { buildPublicProjection } from "./remote-pi-projection.js";
+import type { RemotePiEventProducer } from "./remote-pi-event-producer.js";
 import { logInfo, logWarn, logError, logTrace } from "../logger.js";
 
 const TAG = "remote-pi-control-handler";
@@ -30,6 +31,7 @@ const TAG = "remote-pi-control-handler";
 export interface ControlHandlerDeps {
   store: PiRunStore;
   service: PiRunService;
+  eventProducer?: RemotePiEventProducer;
 }
 
 /**
@@ -60,7 +62,10 @@ export class RemotePiControlHandler {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logError(TAG, `Invalid control request from ${authenticatedPeer.peerName}: ${message}`);
-      return createControlError(request.command_id, "INTERNAL_ERROR", "Invalid request schema", { details: message });
+      const commandId = request && typeof request === "object" && typeof (request as { command_id?: unknown }).command_id === "string"
+        ? (request as { command_id: string }).command_id
+        : "";
+      return createControlError(commandId, "INTERNAL_ERROR", "Invalid request schema", { details: message });
     }
 
     // Check payload size
@@ -435,7 +440,16 @@ export class RemotePiControlHandler {
     // Call PiRunService.resume
     try {
       await this.deps.service.resume(request.run_id, principal);
-      const projection = this._buildPublicProjection(this.deps.store.get(request.run_id)!);
+      const resumedRun = this.deps.store.get(request.run_id)!;
+      if (this.deps.eventProducer) {
+        await this.deps.eventProducer.produceResumed({
+          run: resumedRun,
+          newGeneration: resumedRun.executionGeneration,
+          originPeer: authenticatedPeer.peerName,
+          originRequestId: resumedRun.originRequestId ?? resumedRun.originChatId ?? resumedRun.id,
+        });
+      }
+      const projection = this._buildPublicProjection(resumedRun);
       return {
         version: 1,
         command_id: request.command_id,

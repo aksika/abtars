@@ -90,6 +90,8 @@ export class PiRunService {
         originPlatform: input.owner.platform,
         originChatId: input.owner.chatId,
         originPeer: input.owner.peer,
+        originRequestId: input.owner.requestId,
+        deliveryPolicy: input.deliveryPolicy,
         modelProvider: model?.provider,
         modelId: model?.modelId,
         thinking: model?.thinking,

@@ -24,6 +24,8 @@ export interface CreatePiRunInput {
   originPlatform?: string;
   originChatId?: string;
   originPeer?: string;
+  originRequestId?: string;
+  deliveryPolicy?: "leave_remote" | "patch_artifact" | "commit_push";
   modelProvider?: string;
   modelId?: string;
   thinking?: string;
@@ -78,6 +80,8 @@ export class PiRunStore {
       origin_platform TEXT,
       origin_chat_id TEXT,
       origin_peer TEXT,
+      origin_request_id TEXT,
+      delivery_policy TEXT NOT NULL DEFAULT 'leave_remote',
       execution_generation INTEGER NOT NULL DEFAULT 1,
       current_session_id TEXT,
       status TEXT NOT NULL DEFAULT 'queued',
@@ -98,6 +102,8 @@ export class PiRunStore {
       usage_json TEXT,
       error TEXT
     )`);
+    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN origin_request_id TEXT`); } catch {}
+    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN delivery_policy TEXT NOT NULL DEFAULT 'leave_remote'`); } catch {}
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pi_runs_status ON pi_runs(status)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pi_runs_card_id ON pi_runs(card_id)`);
     // #1395 — diagnostic reply-outcome columns (idempotent)
@@ -174,12 +180,13 @@ export class PiRunStore {
       if (!cardId || cardId < 1) throw new Error("Failed to allocate card ID for Pi run");
 
       this.db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id,
-        origin, origin_platform, origin_chat_id, origin_peer, execution_generation, current_session_id, status,
-        model_provider, model_id, thinking)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'queued', ?, ?, ?)`).run(
+        origin, origin_platform, origin_chat_id, origin_peer, origin_request_id, delivery_policy,
+        execution_generation, current_session_id, status, model_provider, model_id, thinking)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'queued', ?, ?, ?)`).run(
         input.runId, cardId, input.workspaceAlias, input.goal,
         input.ownerPrincipalId, input.origin, input.originPlatform ?? null,
-        input.originChatId ?? null, input.originPeer ?? null,
+        input.originChatId ?? null, input.originPeer ?? null, input.originRequestId ?? null,
+        input.deliveryPolicy ?? "leave_remote",
         input.sessionId,
         input.modelProvider ?? null, input.modelId ?? null, input.thinking ?? null,
       );
@@ -679,6 +686,8 @@ export class PiRunStore {
       originPlatform: (row.origin_platform as string | null) ?? undefined,
       originChatId: (row.origin_chat_id as string | null) ?? undefined,
       originPeer: (row.origin_peer as string | null) ?? undefined,
+      originRequestId: (row.origin_request_id as string | null) ?? undefined,
+      deliveryPolicy: (row.delivery_policy as "leave_remote" | "patch_artifact" | "commit_push" | null) ?? "leave_remote",
       executionGeneration: row.execution_generation as number,
       currentSessionId: (row.current_session_id as string | null) ?? undefined,
       status: row.status as PiRunStatus,

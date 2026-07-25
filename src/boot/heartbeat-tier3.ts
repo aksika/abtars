@@ -108,6 +108,36 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     });
   }).catch(err => logAndSwallow(TAG, "reconciler", err));
 
+  // #1358: Drain unacknowledged remote Pi events for all connected peers
+  // on each heartbeat tick. This is the reconciliation mechanism: events
+  // that were produced but couldn't be pushed (origin offline, transient
+  // WS failure) are retried here. No independent timer — reuses heartbeat.
+  // The delivery manager is resolved lazily inside execute() so this task
+  // survives boot-order races where phasePiExecutor hasn't run yet.
+  heartbeat.registerTask({
+    name: "remote-pi-drain",
+    execute: async () => {
+      try {
+        const { getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
+        const delivery = getRemotePiDelivery();
+        if (!delivery || typeof delivery.drainPeer !== "function") return { state: "idle" };
+        const { getRemotePiProducer } = await import("../components/peer-transport/remote-pi-registry.js");
+        await getRemotePiProducer()?.recoverMissingEvents();
+        const { getPeerWsBroker } = await import("../components/peer-transport/peer-ws-broker.js");
+        const broker = getPeerWsBroker();
+        const connectedPeers = broker.getConnectedPeers();
+        for (const peer of connectedPeers) {
+          try {
+            await delivery.drainPeer(peer);
+          } catch { /* isolated — one peer failure does not block others */ }
+        }
+        return { state: "ran" as const };
+      } catch {
+        return { state: "idle" };
+      }
+    },
+  });
+
   import("../components/spin.js").then(({ spin }) => {
     heartbeat.registerTask({
       name: "spin-tick",
