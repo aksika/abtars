@@ -18,7 +18,7 @@ export interface PeerHelpAdmissionPolicy {
   }): "accept" | "decline" | "defer" | "ignore";
 }
 
-export type PeerHelpHandler = (originPeer: string, request: PeerHelpRequestV1, admission: { decision: "accept"; contributionRef: string }) => Promise<{ ok: boolean; runId?: string; error?: string }>;
+export type PeerHelpHandler = (originPeer: string, request: PeerHelpRequestV1, admission: { decision: "accept"; contributionRef: string }) => Promise<{ ok: boolean; runId?: string; cardId?: number; generation?: number; sessionId?: string; error?: string }>;
 
 const builtinPolicy: PeerHelpAdmissionPolicy = {
   decide(input) {
@@ -98,6 +98,47 @@ export class PeerHelpService {
       return { version: 1, request_id: request.request_id, decision: "declined", reason_code: "conflict", reason: "request_id reused with different content" };
     }
     if (reservation.status === "in_flight") {
+      // #1357: For Pi targets, reconcile via the Pi idempotency ledger. If a PiRun
+      // was already created (crash after piService.run() but before acceptPi()),
+      // mark the help as accepted and return the stored response.
+      if (request.target?.executor === "pi") {
+        try {
+          const { reserveRequest } = await import("../pi-request-ledger.js");
+          const { canonicalRequestHash } = await import("./contract.js");
+          const requestHash = canonicalRequestHash(request);
+          const piLedgerResult = reserveRequest(`peer:${originPeer}`, "help.pi", request.request_id, requestHash);
+          if (piLedgerResult.ok && piLedgerResult.entry.state === "completed" && piLedgerResult.entry.responseJson) {
+            const stored = JSON.parse(piLedgerResult.entry.responseJson) as {
+              task_id?: number;
+              run_id?: string;
+              generation?: number;
+              session_id?: string;
+            };
+            // The Pi ledger stores the creation response, while the help ledger
+            // owns the contribution identity. Rebuild the help response instead
+            // of returning the lower-level Pi response directly.
+            const storedResponse: PeerHelpResponseV1 = {
+              version: 1,
+              request_id: request.request_id,
+              decision: "accepted",
+              contribution_ref: generateContributionRef(),
+              remote_run_id: stored.run_id,
+              remote_card_id: stored.task_id,
+              remote_generation: stored.generation,
+              remote_session_id: stored.session_id,
+            };
+            logInfo(TAG, `Reconciled in-flight Pi request ${request.request_id} from ${originPeer}: PiRun already exists`);
+            // Mark the help record as accepted to prevent future in_flight
+            this.store.acceptPi(
+              { originPeer, requestId: request.request_id, requestHash },
+              storedResponse.remote_run_id ?? "",
+              storedResponse,
+            );
+            return storedResponse;
+          }
+        } catch { /* best effort reconciliation */ }
+      }
+
       // Same request redelivered while the original is still being processed.
       // Do not create duplicate work; defer so the requester neither fans out
       // to another peer nor treats this as an acceptance.
@@ -162,6 +203,11 @@ export class PeerHelpService {
           reason: piResult.error ?? "Pi execution setup failed",
         };
       }
+      // Set remote identifiers BEFORE acceptPi so the persisted replay response includes them
+      response.remote_run_id = piResult.runId;
+      response.remote_card_id = piResult.cardId;
+      response.remote_generation = piResult.generation;
+      response.remote_session_id = piResult.sessionId;
       this.store.acceptPi(
         { originPeer, requestId: request.request_id, requestHash },
         piResult.runId ?? "",

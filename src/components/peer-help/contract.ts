@@ -34,6 +34,11 @@ export interface PeerHelpResponseV1 {
   reason_code?: string;
   reason?: string;
   retry_after?: string;
+  /** #1357: Remote Pi identifiers (present when executor='pi' and decision='accepted'). */
+  remote_run_id?: string;
+  remote_card_id?: number;
+  remote_generation?: number;
+  remote_session_id?: string;
 }
 
 export interface PeerHelpStatusRequestV1 {
@@ -92,6 +97,7 @@ const MAX_EVIDENCE_BYTES = 1_000_000;
 const MAX_ARTIFACTS = 20;
 const MAX_REQUEST_ID_LENGTH = 128;
 const REQUEST_ID_RE = /^[A-Za-z0-9._:\-]+$/;
+const MAX_REMOTE_ID_LENGTH = 128;
 
 export const HELP_DEFAULTS = {
   maxGoalLength: MAX_GOAL_LENGTH,
@@ -179,6 +185,18 @@ export function parseHelpRequest(raw: unknown): { ok: true; value: PeerHelpReque
     const t = r.target as Record<string, unknown>;
     if (t.executor === "pi") {
       if (!isNonEmptyString(t.workspace_alias)) return { ok: false, error: "workspace_alias required for pi executor" };
+      if (t.model !== undefined) {
+        if (typeof t.model !== "object" || t.model === null || Array.isArray(t.model)) return { ok: false, error: "model must be an object" };
+        const model = t.model as Record<string, unknown>;
+        if (!isNonEmptyString(model.provider) || model.provider.length > MAX_REMOTE_ID_LENGTH ||
+            !isNonEmptyString(model.model_id) || model.model_id.length > MAX_REMOTE_ID_LENGTH ||
+            (model.thinking !== undefined && (typeof model.thinking !== "string" || model.thinking.length > MAX_REMOTE_ID_LENGTH))) {
+          return { ok: false, error: "invalid model" };
+        }
+      }
+      if (t.delivery !== undefined && !["commit_push", "patch_artifact", "leave_remote"].includes(t.delivery as string)) {
+        return { ok: false, error: "invalid delivery policy" };
+      }
     } else if (t.executor !== "agent") {
       return { ok: false, error: "target executor must be 'agent' or 'pi'" };
     }
@@ -207,6 +225,10 @@ export function parseHelpResponse(raw: unknown): { ok: true; value: PeerHelpResp
   if (!validateRequestId(r.request_id)) return { ok: false, error: "invalid request_id" };
   if (!["accepted", "declined", "deferred"].includes(r.decision as string)) return { ok: false, error: "invalid decision" };
   if (r.decision === "accepted" && !isNonEmptyString(r.contribution_ref)) return { ok: false, error: "contribution_ref required for accepted" };
+  if (r.remote_run_id !== undefined && (!isNonEmptyString(r.remote_run_id) || r.remote_run_id.length > MAX_REMOTE_ID_LENGTH)) return { ok: false, error: "invalid remote_run_id" };
+  if (r.remote_card_id !== undefined && (!Number.isSafeInteger(r.remote_card_id) || (r.remote_card_id as number) < 1)) return { ok: false, error: "invalid remote_card_id" };
+  if (r.remote_generation !== undefined && (!Number.isSafeInteger(r.remote_generation) || (r.remote_generation as number) < 1)) return { ok: false, error: "invalid remote_generation" };
+  if (r.remote_session_id !== undefined && (!isNonEmptyString(r.remote_session_id) || r.remote_session_id.length > MAX_REMOTE_ID_LENGTH)) return { ok: false, error: "invalid remote_session_id" };
   if (!isOptionalString(r.reason)) return { ok: false, error: "reason must be a string" };
   if (typeof r.reason === "string" && r.reason.length > MAX_REASON_LENGTH) return { ok: false, error: `reason exceeds ${MAX_REASON_LENGTH} chars` };
   if (r.retry_after !== undefined && !isISODate(r.retry_after)) return { ok: false, error: "retry_after must be ISO date" };
@@ -220,6 +242,11 @@ export function parseHelpResponse(raw: unknown): { ok: true; value: PeerHelpResp
       reason_code: r.reason_code as string | undefined,
       reason: r.reason as string | undefined,
       retry_after: r.retry_after as string | undefined,
+      // #1357: Remote Pi identifiers (present when executor='pi')
+      remote_run_id: r.remote_run_id as string | undefined,
+      remote_card_id: typeof r.remote_card_id === "number" ? r.remote_card_id : undefined,
+      remote_generation: typeof r.remote_generation === "number" ? r.remote_generation : undefined,
+      remote_session_id: r.remote_session_id as string | undefined,
     },
   };
 }

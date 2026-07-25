@@ -71,7 +71,11 @@ export class Bridge {
     });
     await step("dashboard", () => this.ctx.dashboardServer?.stop());
     await step("services", () => this.ctx.registry.stopAll());
-    await step("pi-executor", () => this.ctx.piExecutorService?.executor.interruptAll());
+    await step("pi-executor", () => {
+      this.ctx.piExecutorService?.executor.interruptAll();
+      // #1357: Withdraw Pi capability registration on shutdown
+      this.ctx._piCapDisposer?.();
+    });
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
     await     step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", async () => {

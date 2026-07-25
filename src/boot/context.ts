@@ -131,6 +131,8 @@ export interface BootCtx {
 
   // ── #1314: Pi coding executor ──────────────────────────────────────────
   piExecutorService?: import("../components/pi-executor/pi-run-service.js").PiRunService;
+  /** #1357: Disposer for Pi executor capability registration. Called on shutdown. */
+  _piCapDisposer?: () => void;
 }
 
 /**

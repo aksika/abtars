@@ -95,6 +95,69 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
           nerve,
         );
         const helpService = new PeerHelpService(store, () => getLocalCapabilities());
+
+        // #1357: Wire Pi executor handler for typed Pi delegation requests
+        helpService.setPiHandler(async (originPeer, request, _admission) => {
+          const piService = ctx.piExecutorService;
+          if (!piService) {
+            return { ok: false, error: "Pi executor not available on this peer" };
+          }
+          if (!request.target || request.target.executor !== "pi") {
+            return { ok: false, error: "Not a Pi delegation request" };
+          }
+          try {
+            // Build goal with optional context appended (#1357: pass request.context)
+            const boundedGoal = request.goal.slice(0, 100_000);
+            const boundedContext = request.context ? request.context.slice(0, 50_000) : "";
+            const combinedGoal = boundedContext
+              ? `${boundedGoal}\n\nContext: ${boundedContext}`
+              : boundedGoal;
+
+            // #1357: Reserve Pi idempotency slot before creating the run.
+            // If the same request was already processed (crash recovery), return
+            // the existing run identifiers instead of creating a duplicate.
+            const { reserveRequest } = await import("../components/pi-request-ledger.js");
+            const { canonicalRequestHash } = await import("../components/peer-help/contract.js");
+            const requestHash = canonicalRequestHash(request);
+            const piLedger = reserveRequest(`peer:${originPeer}`, "help.pi", request.request_id, requestHash);
+            if (!piLedger.ok) {
+              if (piLedger.code === "duplicate_conflict") {
+                return { ok: false, error: "Request ID reused with different content (conflict)" };
+              }
+              // outcome_unknown: previous dispatch was started but response not persisted
+              // Return error so help service marks this as unknown — origin retries later
+              return { ok: false, error: "Previous Pi dispatch has unknown outcome — retry" };
+            }
+            if (piLedger.entry.state === "completed" && piLedger.entry.responseJson) {
+              // Replay: previous PiRun already exists, return stored identifiers
+              const stored = JSON.parse(piLedger.entry.responseJson) as { run_id: string; task_id: number; generation: number; session_id: string };
+              return { ok: true, runId: stored.run_id, cardId: stored.task_id, generation: stored.generation, sessionId: stored.session_id };
+            }
+
+            const result = await piService.run({
+              goal: combinedGoal,
+              workspaceAlias: request.target.workspace_alias,
+              priority: request.priority,
+              model: request.target.model
+                ? { provider: request.target.model.provider, modelId: request.target.model.model_id, thinking: request.target.model.thinking }
+                : undefined,
+              owner: {
+                principalId: `peer:${originPeer}`,
+                origin: "peer",
+                peer: originPeer,
+              },
+            }, { userId: `peer:${originPeer}` }, {
+              clientId: `peer:${originPeer}`,
+              operation: "help.pi",
+              requestId: request.request_id,
+              requestHash,
+            });
+            return { ok: true, runId: result.runId, cardId: result.cardId, generation: result.generation, sessionId: result.sessionId };
+          } catch (err) {
+            return { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        });
+
         agentApiServer.setPeerHelpService(helpService);
 
         // Register broker request handler for help wire methods

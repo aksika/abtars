@@ -21,7 +21,6 @@ export interface SignedPeerInventoryV1 {
 
 interface StoredInventory {
   payload: PeerInventoryPayloadV1;
-  receivedAt: number;
 }
 
 const INVENTORY_SIGNATURE_DOMAIN = "abtars-peer-inventory-v1";
@@ -90,7 +89,7 @@ export function verifyAndStoreInventory(sourcePeer: string, envelope: SignedPeer
     return false;
   }
 
-  inventories.set(sourcePeer, { payload: parsed, receivedAt: Date.now() });
+  inventories.set(sourcePeer, { payload: parsed });
   return true;
 }
 

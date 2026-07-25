@@ -57,10 +57,19 @@ export const peerAskHelpTool: ToolDefinition = {
       if (args.model) {
         try {
           const m = typeof args.model === "string" ? JSON.parse(args.model) : args.model;
-          if (m.provider && m.model_id) target.model = { provider: m.provider, model_id: m.model_id, thinking: m.thinking };
+          if (!m || typeof m !== "object" || Array.isArray(m) || typeof m.provider !== "string" || !m.provider ||
+              typeof m.model_id !== "string" || !m.model_id || (m.thinking !== undefined && typeof m.thinking !== "string")) {
+            return JSON.stringify({ error: "model must be valid JSON {provider, model_id, thinking?}" });
+          }
+          target.model = { provider: m.provider, model_id: m.model_id, thinking: m.thinking };
         } catch { return JSON.stringify({ error: "model must be valid JSON {provider, model_id, thinking?}" }); }
       }
-      if (args.delivery) target.delivery = args.delivery as "commit_push" | "patch_artifact" | "leave_remote";
+      if (args.delivery) {
+        if (!["commit_push", "patch_artifact", "leave_remote"].includes(args.delivery)) {
+          return JSON.stringify({ error: "delivery must be commit_push, patch_artifact, or leave_remote" });
+        }
+        target.delivery = args.delivery as "commit_push" | "patch_artifact" | "leave_remote";
+      }
       effectiveRequires.push("pi-executor", `workspace:${workspaceAlias}`);
     }
 
@@ -74,7 +83,9 @@ export const peerAskHelpTool: ToolDefinition = {
       if (candidates.length === 0) {
         return JSON.stringify({ error: `No connected peer with capabilities: [${deduped.join(", ")}]` });
       }
-      candidates.sort();
+      // #1357/#1433: Static inventory is a capability hint only. Candidate
+      // order is deterministic; receiver admission remains authoritative.
+      candidates.sort((a, b) => a.localeCompare(b));
       peer = candidates[0]!;
       logDebug(TAG, `Auto-selected peer ${peer} for requires=[${deduped.join(",")}]`);
     } else if (!peer) {
@@ -83,8 +94,18 @@ export const peerAskHelpTool: ToolDefinition = {
       if (connected.length === 0) {
         return JSON.stringify({ error: "No connected peers available" });
       }
-      connected.sort();
+      connected.sort((a, b) => a.localeCompare(b));
       peer = connected[0]!;
+    }
+
+    // #1433/#1357: An explicit peer with no inventory may still be asked over a
+    // live route; receiver admission is authoritative. Contradictory inventory
+    // is an early rejection, never a fallback to another peer.
+    if (peer && deduped.length > 0) {
+      const { getPeerInventory, hasAllCapabilities } = await import("../peer-transport/peer-inventory.js");
+      if (getPeerInventory(peer) && !hasAllCapabilities(peer, deduped)) {
+        return JSON.stringify({ error: `Peer ${peer} does not have the required capabilities: [${deduped.join(", ")}]` });
+      }
     }
 
     if (!peer) {
@@ -119,15 +140,24 @@ export const peerAskHelpTool: ToolDefinition = {
       const response = await transport.askHelp(peer, request);
 
       if (response.decision === "accepted") {
-        const notes = {
+        const notes: Record<string, unknown> = {
           peer, goal, requires: deduped, executor: executor ?? "agent", request_id: requestId,
           outcome: "accepted", contribution_ref: response.contribution_ref,
         };
+        // #1357: Store remote Pi identifiers if present
+        if (response.remote_run_id) notes.remote_run_id = response.remote_run_id;
+        if (response.remote_card_id !== undefined) notes.remote_card_id = response.remote_card_id;
+        if (response.remote_generation !== undefined) notes.remote_generation = response.remote_generation;
+        if (response.remote_session_id) notes.remote_session_id = response.remote_session_id;
         kanbanUpdate(localCardId, { notes: JSON.stringify(notes) });
         logInfo(TAG, `Help accepted by ${peer}: ref=${response.contribution_ref}`);
         return JSON.stringify({
           ok: true, local_card_id: localCardId, peer, decision: "accepted",
           contribution_ref: response.contribution_ref, request_id: requestId,
+          remote_run_id: response.remote_run_id,
+          remote_card_id: response.remote_card_id,
+          remote_generation: response.remote_generation,
+          remote_session_id: response.remote_session_id,
         });
       }
 
@@ -139,7 +169,9 @@ export const peerAskHelpTool: ToolDefinition = {
         const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
         const { hasAllCapabilities } = await import("../peer-transport/peer-inventory.js");
         const connected = getPeerWsBroker().getConnectedPeers().filter(p => p !== peer);
-        const nextCandidate = connected.find(p => deduped.length === 0 || hasAllCapabilities(p, deduped));
+        const eligible = connected.filter(p => deduped.length === 0 || hasAllCapabilities(p, deduped));
+        eligible.sort((a, b) => a.localeCompare(b));
+        const nextCandidate = eligible[0];
         if (nextCandidate) {
           const newRequestId = randomUUID();
           const fallbackRequest: PeerHelpRequestV1 = { ...request, request_id: newRequestId };

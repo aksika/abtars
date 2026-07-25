@@ -7,6 +7,7 @@ const mockGetHelpStatus = vi.fn();
 const mockWithdrawHelp = vi.fn();
 const mockGetConnectedPeers = vi.fn();
 const mockHasAllCapabilities = vi.fn();
+const mockGetPeerInventory = vi.fn();
 const mockHasRoute = vi.fn();
 
 vi.mock("../tasks/kanban-board.js", () => ({
@@ -24,6 +25,7 @@ vi.mock("../peer-transport/index.js", () => ({
 
 vi.mock("../peer-transport/peer-inventory.js", () => ({
   hasAllCapabilities: (...args: unknown[]) => mockHasAllCapabilities(...args),
+  getPeerInventory: (...args: unknown[]) => mockGetPeerInventory(...args),
 }));
 
 vi.mock("../peer-transport/peer-ws-broker.js", () => ({
@@ -41,6 +43,7 @@ let mod: typeof import("./peer-help-tools.js");
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  mockGetPeerInventory.mockReturnValue(undefined);
   mod = await import("./peer-help-tools.js");
 });
 
@@ -97,6 +100,29 @@ describe("peer_ask_help", () => {
     expect(result.decision).toBe("accepted");
     expect(result.contribution_ref).toBe("help_abc123");
     expect(mockAskHelp).toHaveBeenCalled();
+  });
+
+  it("allows an explicit peer without inventory to reach receiver admission", async () => {
+    mockGetPeerInventory.mockReturnValue(undefined);
+    mockHasAllCapabilities.mockReturnValue(false);
+    mockAskHelp.mockResolvedValue({
+      version: 1, request_id: "req-explicit-no-inventory", decision: "accepted", contribution_ref: "help_explicit",
+    });
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "do something", peer: "kp", requires: ["pi-executor"], request_id: "req-explicit-no-inventory",
+    }));
+    expect(result.decision).toBe("accepted");
+    expect(mockAskHelp).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an explicit peer whose inventory contradicts requirements", async () => {
+    mockGetPeerInventory.mockReturnValue({ peer: "kp", capabilities: ["docker"] });
+    mockHasAllCapabilities.mockReturnValue(false);
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "do something", peer: "kp", requires: ["pi-executor"], request_id: "req-explicit-missing-cap",
+    }));
+    expect(result.error).toContain("required capabilities");
+    expect(mockAskHelp).not.toHaveBeenCalled();
   });
 
   it("surfaces decline from peer", async () => {
@@ -170,6 +196,21 @@ describe("peer_ask_help", () => {
     const firstId = mockAskHelp.mock.calls[0]?.[1]?.request_id;
     const secondId = mockAskHelp.mock.calls[1]?.[1]?.request_id;
     expect(firstId).not.toBe(secondId);
+  });
+
+  it("tries fallback peers in deterministic name order", async () => {
+    mockKanbanEnqueue.mockReturnValue(5);
+    mockGetConnectedPeers.mockReturnValue(["zeta", "alpha", "beta"]);
+    mockHasAllCapabilities.mockReturnValue(true);
+    mockAskHelp
+      .mockResolvedValueOnce({ version: 1, request_id: "req-order", decision: "declined" })
+      .mockResolvedValueOnce({ version: 1, request_id: "req-order-2", decision: "accepted", contribution_ref: "help_ordered" });
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "do something", requires: ["docker"], request_id: "req-order",
+    }));
+    expect(result.decision).toBe("accepted");
+    expect(mockAskHelp.mock.calls[0]?.[0]).toBe("alpha");
+    expect(mockAskHelp.mock.calls[1]?.[0]).toBe("beta");
   });
 });
 

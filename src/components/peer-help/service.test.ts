@@ -10,6 +10,7 @@ const mockRecordWithdrawal = vi.hoisted(() => vi.fn());
 const mockGetPublicStatus = vi.hoisted(() => vi.fn());
 const mockRecordContributionEvent = vi.hoisted(() => vi.fn());
 const mockKanbanList = vi.hoisted(() => vi.fn(() => []));
+const mockPiLedgerReserve = vi.hoisted(() => vi.fn());
 
 vi.mock("../peer-config.js", () => ({
   loadPeerConfig: () => ({
@@ -23,6 +24,10 @@ vi.mock("../peer-config.js", () => ({
 
 vi.mock("../tasks/kanban-board.js", () => ({
   kanbanList: mockKanbanList,
+}));
+
+vi.mock("../pi-request-ledger.js", () => ({
+  reserveRequest: mockPiLedgerReserve,
 }));
 
 function mockStore() {
@@ -163,6 +168,36 @@ describe("PeerHelpService — handleHelpRequest", () => {
     mockReserve.mockReturnValue({ status: "in_flight" });
     const resp = await svc.handleHelpRequest("kp", validRequest());
     expect(resp.decision).toBe("deferred");
+  });
+
+  it("reconciles an already-created PiRun with a complete help response", async () => {
+    const { svc, store } = await makeService();
+    mockReserve.mockReturnValue({ status: "in_flight" });
+    mockPiLedgerReserve.mockReturnValue({
+      ok: true,
+      entry: {
+        state: "completed",
+        responseJson: JSON.stringify({ task_id: 42, run_id: "run-1", generation: 1, session_id: "session-1" }),
+      },
+    });
+
+    const resp = await svc.handleHelpRequest("kp", validRequest({
+      target: { executor: "pi", workspace_alias: "devbox" },
+    }));
+
+    expect(resp).toMatchObject({
+      decision: "accepted",
+      remote_card_id: 42,
+      remote_run_id: "run-1",
+      remote_generation: 1,
+      remote_session_id: "session-1",
+    });
+    expect(resp.contribution_ref).toMatch(/^help_[0-9a-f]{16}$/);
+    expect(mockAcceptPi).toHaveBeenCalledWith(
+      expect.objectContaining({ originPeer: "kp", requestId: "req1" }),
+      "run-1",
+      expect.objectContaining({ contribution_ref: resp.contribution_ref }),
+    );
   });
 });
 

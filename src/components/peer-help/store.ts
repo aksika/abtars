@@ -286,4 +286,15 @@ export class PeerHelpStore {
       `UPDATE peer_help_requests SET updated_at = datetime('now') WHERE origin_peer = ? AND request_id = ?`
     ).run(originPeer, requestId);
   }
+
+  /** #1357: Retrieve stored response for a help request (used for reconciliation). */
+  getStoredResponse(originPeer: string, requestId: string): PeerHelpResponseV1 | null {
+    const row = this.db.prepare(
+      "SELECT state, response_json FROM peer_help_requests WHERE origin_peer = ? AND request_id = ?"
+    ).get(originPeer, requestId) as Pick<PeerHelpRow, "state" | "response_json"> | undefined;
+    if (!row || !row.response_json) return null;
+    try {
+      return JSON.parse(row.response_json) as PeerHelpResponseV1;
+    } catch { return null; }
+  }
 }
