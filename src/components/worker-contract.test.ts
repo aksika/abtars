@@ -58,7 +58,7 @@ const MINIMAL_ENVELOPE: Record<string, unknown> = {
   outcome: "completed",
   criteria: [
     { criterion_id: "c1", status: "passed", evidence_ids: ["v1"] },
-    { criterion_id: "c2", status: "passed", evidence_ids: ["v2"] },
+    { criterion_id: "c2", status: "passed", evidence_ids: ["a1"] },
   ],
   checks: [
     {
