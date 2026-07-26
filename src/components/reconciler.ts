@@ -17,13 +17,14 @@ import {
 import { logInfo, logWarn } from "./logger.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
+import { SpinWorkerAdapter } from "./spin-worker-adapter.js";
+import type { SwarmExecutorAdapter, ExecutionClaim } from "./swarm-executor-types.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { ProjectReviewStore, type ProjectState } from "./project-acceptance/project-review-store.js";
 import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
-import type { AttemptLifecycle } from "./worker-supervision-store.js";
+import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js";
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
-import { getControl } from "./execution-control.js";
 
 const TAG = "reconciler";
 const MAX_WORKERS = 10;
@@ -32,9 +33,19 @@ const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 let _shutdownRequested = false;
 
 let _piService: PiRunService | null = null;
+let _workerAdapter: SwarmExecutorAdapter | null = null;
 
 export function setPiService(service: PiRunService | null): void {
   _piService = service;
+}
+
+/** Dependency seam for tests and alternate local Worker executors. */
+export function setWorkerAdapter(adapter: SwarmExecutorAdapter | null): void {
+  _workerAdapter = adapter;
+}
+
+function workerAdapter(): SwarmExecutorAdapter {
+  return _workerAdapter ??= new SpinWorkerAdapter();
 }
 
 export function requestShutdown(): void {
@@ -71,7 +82,7 @@ async function reconcileCard(cardId: number): Promise<void> {
     do {
       s.dirty = false;
       if (_shutdownRequested) return;
-      deriveAction(cardId);
+      await deriveAction(cardId);
     } while (s.dirty);
   } finally {
     s.running = false;
@@ -80,22 +91,22 @@ async function reconcileCard(cardId: number): Promise<void> {
 
 // ── Derive action ─────────────────────────────────────────────────────────────
 
-function deriveAction(cardId: number): void {
+async function deriveAction(cardId: number): Promise<void> {
   if (cardId <= 0) return;
   const card = kanbanGetCard(cardId);
   if (!card) return;
 
   // Project card (type "O") — reconcile children
   if (card.type === "O" && card.status === "running") {
-    reconcileProject(cardId);
+    await reconcileProject(cardId);
     return;
   }
 
   // Non-project card — check if supervised and reconcile individually
-  reconcileChildCard(card);
+  await reconcileChildCard(card);
 }
 
-function reconcileProject(projectId: number): void {
+async function reconcileProject(projectId: number): Promise<void> {
   const project = kanbanGetCard(projectId);
   if (!project || project.status !== "running") return;
 
@@ -120,7 +131,7 @@ function reconcileProject(projectId: number): void {
 
   // Circuit breaker: wall-clock — always first
   if (now > deadlineMs) {
-    abortProject(projectId, children, deadlineMs === projectStart + MAX_WALL_CLOCK_MS
+    await abortProject(projectId, children, deadlineMs === projectStart + MAX_WALL_CLOCK_MS
       ? "wall-clock exceeded (30min)"
       : "configured hard deadline exceeded");
     return;
@@ -169,18 +180,18 @@ function reconcileProject(projectId: number): void {
 
   // Circuit breaker: token budget
   if (project.max_tokens && (project.tokens_used ?? 0) >= project.max_tokens) {
-    abortProject(projectId, children, `budget exceeded (${project.tokens_used}/${project.max_tokens} tokens)`);
+    await abortProject(projectId, children, `budget exceeded (${project.tokens_used}/${project.max_tokens} tokens)`);
     return;
   }
 
   // Circuit breaker: too many workers
   if (children.length > MAX_WORKERS) {
-    abortProject(projectId, children, `too many workers (${children.length})`);
+    await abortProject(projectId, children, `too many workers (${children.length})`);
     return;
   }
 
   for (const child of children) {
-    reconcileChildCard(child);
+    await reconcileChildCard(child);
   }
 
   // Handle needs_input: check for answered input requests
@@ -443,7 +454,7 @@ function reconcilePiCard(card: KanbanCard): void {
   });
 }
 
-function reconcileChildCard(card: KanbanCard): void {
+async function reconcileChildCard(card: KanbanCard): Promise<void> {
   // #1405: Pi lane — route type='pi' cards through Pi executor, not Worker dispatch
   if (card.type === "pi") {
     reconcilePiCard(card);
@@ -464,7 +475,8 @@ function reconcileChildCard(card: KanbanCard): void {
     if (!isUnblocked(card)) return;
     if (latestAttempt && latestAttempt.lifecycle === "pending") {
       logInfo(TAG, `Claiming supervised card ${card.id}`);
-      spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
+      const contract = svc.getContractForCard(card.id);
+      if (contract) await startSupervisedWorker(card, latestAttempt, contract);
     }
     // Fail closed: no pending attempt → leave card unchanged for supervision service recovery
     return;
@@ -487,6 +499,46 @@ function reconcileChildCard(card: KanbanCard): void {
   if (latestAttempt && latestAttempt.lifecycle === "cancel_requested") {
     return;
   }
+}
+
+async function startSupervisedWorker(
+  card: KanbanCard,
+  attempt: AttemptRow,
+  contract: WorkerAcceptanceContractV1,
+): Promise<void> {
+  const capacity = await workerAdapter().capacity();
+  if (capacity.available <= 0) return;
+
+  const store = new WorkerSupervisionStore();
+  const claim = store.claimAttempt(
+    card.id,
+    contract.id,
+    "agent",
+    "spin-local",
+    attempt.generation || 1,
+  );
+  if (!claim) return;
+
+  if (!store.markAttemptStartObservable(claim.attemptId)) {
+    store.failAttempt(claim.attemptId);
+    kanbanFail(card.id, "worker claim could not enter starting state");
+    return;
+  }
+
+  let observation;
+  try {
+    observation = await workerAdapter().start(claim);
+  } catch (err) {
+    observation = { kind: "start_failed" as const, reason: String(err), retryable: true };
+  }
+
+  if (observation.kind === "started" || observation.kind === "already_started") {
+    store.markAttemptRunning(claim.attemptId);
+    return;
+  }
+
+  store.failAttempt(claim.attemptId);
+  kanbanFail(card.id, `worker start failed: ${observation.reason}`);
 }
 
 function isTerminal(lc: AttemptLifecycle): boolean {
@@ -585,46 +637,76 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
   }
 }
 
-function abortProject(projectId: number, children: KanbanCard[], reason: string): void {
+async function abortProject(projectId: number, children: KanbanCard[], reason: string): Promise<void> {
   logWarn(TAG, `ABORT project ${projectId}: ${reason}`);
   for (const card of children) {
     if (card.status !== "running" && card.status !== "queued") continue;
-    cancelChild(card, reason);
+    await cancelChild(card, reason);
   }
   kanbanFail(projectId, reason);
 }
 
-function cancelChild(card: KanbanCard, reason: string): void {
+async function cancelChild(card: KanbanCard, reason: string): Promise<void> {
   const store = new WorkerSupervisionStore();
   const attempt = store.getLatestAttempt(card.id);
   if (!attempt || store.isAttemptTerminal(attempt.lifecycle)) {
     kanbanFail(card.id, `project aborted: ${reason}`);
     return;
   }
-  store.requestCancel(attempt.id, `project_abort: ${reason}`);
-  if (attempt.executor_kind === "agent" || attempt.executor_kind === "worker") {
-    const ctrl = getControl(attempt.id, attempt.generation);
-    if (ctrl) {
-      ctrl.requestCancel("project_abort").catch(() => {});
+
+  // A pending attempt has no process to interrupt. Cancel it durably before
+  // failing the card so a queued wakeup cannot dispatch it after the abort.
+  if (attempt.lifecycle === "pending") {
+    if (store.cancelPendingAttempt(attempt.id, `project_abort: ${reason}`)) {
+      kanbanFail(card.id, `project aborted: ${reason}`);
     }
+    return;
+  }
+
+  if (!store.requestCancel(attempt.id, `project_abort: ${reason}`)) return;
+
+  const claim: ExecutionClaim = {
+    attemptId: attempt.id,
+    cardId: card.id,
+    contractId: attempt.contract_id,
+    executorKind: attempt.executor_kind === "pi" ? "pi" : attempt.executor_kind === "remote" ? "remote" : "agent",
+    executorId: attempt.executor_id,
+    generation: attempt.generation,
+    claimedAt: attempt.claimed_at ?? attempt.started_at,
+  };
+
+  let observation;
+  if (claim.executorKind === "agent") {
+    observation = await workerAdapter().cancel(claim, "project_abort");
   } else if (attempt.executor_kind === "pi") {
     const svc = _piService;
     if (svc) {
       const run = svc.store.getByCardId(card.id);
       if (run) {
-        svc.executor.cancel(run.id).catch(() => {});
+        try {
+          await svc.executor.cancel(run.id);
+          store.cancelAttempt(attempt.id);
+          kanbanFail(card.id, `project aborted: ${reason}`);
+        } catch {
+          return;
+        }
       }
     }
   }
-  logInfo(TAG, `Cancelled card ${card.id} attempt=${attempt.id} via ${attempt.executor_kind} adapter (reason: project_abort)`);
+
+  if (observation?.kind === "cancelled" || observation?.kind === "already_terminal") {
+    store.cancelAttempt(attempt.id);
+    kanbanFail(card.id, `project aborted: ${reason}`);
+  }
+  logInfo(TAG, `Cancellation requested for card ${card.id} attempt=${attempt.id} via ${attempt.executor_kind} (reason: project_abort)`);
 }
 
-function getLatestAttemptInfo(cardId: number): { lifecycle: AttemptLifecycle; id: string } | null {
+function getLatestAttemptInfo(cardId: number): AttemptRow | null {
   try {
     const store = new WorkerSupervisionStore();
     const latest = store.getLatestAttempt(cardId);
     if (!latest) return null;
-    return { lifecycle: latest.lifecycle, id: latest.id };
+    return latest;
   } catch { return null; }
 }
 

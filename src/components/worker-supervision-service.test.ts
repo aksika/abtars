@@ -141,5 +141,24 @@ describe("WorkerSupervisionService", () => {
       expect(second.settled).toBe(false);
       expect(second.summary).toContain("conflict");
     });
+
+    it("ignores a late result from an older attempt", () => {
+      const svc = new Service();
+      const created = svc.createChild("Build report", 101, 100, "orc");
+      if ("error" in created) throw new Error(created.error);
+      const store = new Store();
+      const first = store.getAttempt(created.attemptId)!;
+      store.insertAttempt({
+        id: "a_newer", card_id: 101, contract_id: first.contract_id,
+        ordinal: 2, executor_kind: "local_worker", executor_id: "spin-01",
+        status: "running", started_at: "2026-07-12T00:01:00.000Z",
+      });
+
+      const outcome = svc.collectAndSettle(101, "<summary>late</summary>", undefined, first.id, first.generation);
+      expect(outcome.settled).toBe(false);
+      expect(outcome.stale).toBe(true);
+      expect(store.getAttempt("a_newer")!.lifecycle).toBe("running");
+      expect(store.getResult(first.id)).toBeUndefined();
+    });
   });
 });

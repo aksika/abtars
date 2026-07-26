@@ -12,7 +12,9 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   readonly kind = "agent" as const;
 
   async capacity(): Promise<ExecutorCapacity> {
-    return { available: 3, max: 3 };
+    const max = 3;
+    const running = typeof spin.getRunningCount === "function" ? spin.getRunningCount("W") : 0;
+    return { available: Math.max(0, max - running), max };
   }
 
   async start(claim: ExecutionClaim): Promise<StartObservation> {
@@ -77,8 +79,14 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     logInfo(TAG, `Cancelled Worker ${claim.cardId} attempt=${claim.attemptId} reason=${reason} result=${result}`);
 
     if (result === "already_terminal") {
-      return { kind: "already_terminal", lifecycle: "cancelled" };
+      const attempt = store.getAttempt(claim.attemptId);
+      return { kind: "already_terminal", lifecycle: attempt?.lifecycle ?? "cancelled" };
     }
+
+    // The executor has acknowledged cancellation. Persist terminal state before
+    // allowing any late finish/fail callback to touch the card.
+    ctrl.markTerminal("cancelled");
+    store.cancelAttempt(claim.attemptId);
 
     // Keep control until terminal settlement — do not delete here
     return { kind: "cancelled", attemptId: claim.attemptId };

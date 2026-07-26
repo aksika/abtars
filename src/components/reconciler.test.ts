@@ -47,13 +47,41 @@ vi.mock("./worker-supervision-service.js", () => {
 });
 
 const getLatestAttemptMock = vi.fn().mockReturnValue(null);
+const claimAttemptMock = vi.fn().mockImplementation((cardId: number, contractId: string, executorKind: string, executorId: string, generation: number) => ({
+  attemptId: "a_1", cardId, contractId, executorKind, executorId, generation, claimedAt: new Date().toISOString(),
+}));
+const markAttemptStartObservableMock = vi.fn().mockReturnValue(true);
+const markAttemptRunningMock = vi.fn().mockReturnValue(true);
+const failAttemptMock = vi.fn().mockReturnValue(true);
+const cancelPendingAttemptMock = vi.fn().mockReturnValue(true);
+const requestCancelMock = vi.fn().mockReturnValue(true);
+const cancelAttemptMock = vi.fn().mockReturnValue(true);
 vi.mock("./worker-supervision-store.js", () => {
   return {
     WorkerSupervisionStore: class {
       getLatestAttempt = getLatestAttemptMock;
+      claimAttempt = claimAttemptMock;
+      markAttemptStartObservable = markAttemptStartObservableMock;
+      markAttemptRunning = markAttemptRunningMock;
+      failAttempt = failAttemptMock;
+      cancelPendingAttempt = cancelPendingAttemptMock;
+      requestCancel = requestCancelMock;
+      cancelAttempt = cancelAttemptMock;
+      isAttemptTerminal = (lifecycle: string) => ["completed", "failed", "cancelled", "timed_out"].includes(lifecycle);
     },
   };
 });
+
+vi.mock("./spin-worker-adapter.js", () => ({
+  SpinWorkerAdapter: class {
+    capacity = vi.fn().mockResolvedValue({ available: 3, max: 3 });
+    start = vi.fn().mockImplementation((claim: { cardId: number }) => {
+      dispatchMock({ type: "W", cardId: claim.cardId });
+      return Promise.resolve({ kind: "started", attemptId: "a_1", generation: 1, executorId: "spin-local" });
+    });
+    cancel = vi.fn().mockResolvedValue({ kind: "cancelled", attemptId: "a_1" });
+  },
+}));
 
 // These are imported by reconcileProject / evaluateLease — mock as no-ops
 vi.mock("./executor-lease-store.js", () => ({
@@ -144,6 +172,7 @@ beforeEach(async () => {
   reviewStoreMock = makeReviewStoreMock();
   isUnblockedMock.mockReturnValue(true);
   getLatestAttemptMock.mockReturnValue(null);
+  getContractForCardMock.mockReturnValue(undefined);
   cardHasContractMock.mockReturnValue(false);
   kanbanRunningProjectIdsMock.mockReturnValue([]);
   kanbanFailMock.mockReset();
@@ -218,6 +247,7 @@ describe("Reconciler — #1411 domain guard", () => {
   describe("supervised cards (has contract)", () => {
     it("queued card with pending attempt dispatches once", async () => {
       cardHasContractMock.mockReturnValue(true);
+      getContractForCardMock.mockReturnValue({ id: "c_1" });
       getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending" });
       kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued" }));
       mod.requestReconcile(1);
@@ -230,6 +260,7 @@ describe("Reconciler — #1411 domain guard", () => {
 
     it("dispatches exactly once under duplicate wakeups", async () => {
       cardHasContractMock.mockReturnValue(true);
+      getContractForCardMock.mockReturnValue({ id: "c_1" });
       getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending" });
       kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued" }));
       for (let i = 0; i < 10; i++) {
@@ -261,6 +292,7 @@ describe("Reconciler — #1411 domain guard", () => {
 
     it("two supervised card IDs can each make progress", async () => {
       cardHasContractMock.mockReturnValue(true);
+      getContractForCardMock.mockReturnValue({ id: "c_1" });
       getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending" });
 
       kanbanGetCardMock.mockImplementation((id: number) => {

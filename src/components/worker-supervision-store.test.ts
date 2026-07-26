@@ -196,6 +196,19 @@ describe("WorkerSupervisionStore", () => {
     const attempt = store.getAttempt("a_test_001");
     expect(attempt!.status).toBe("settled");
     expect(attempt!.settled_at).not.toBeNull();
+    expect(attempt!.lifecycle).toBe("completed");
+  });
+
+  it("pending cancellation is terminal and cannot be claimed", () => {
+    const store = new Store();
+    store.insertAttempt({
+      id: "a_pending_cancel", card_id: 101, contract_id: "c_test_001",
+      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      status: "pending", started_at: "2026-07-12T00:00:00.000Z",
+    });
+    expect(store.cancelPendingAttempt("a_pending_cancel", "project_abort")).toBe(true);
+    expect(store.getAttempt("a_pending_cancel")!.lifecycle).toBe("cancelled");
+    expect(store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1)).toBeNull();
   });
 
   it("settleResult replays identical result", () => {

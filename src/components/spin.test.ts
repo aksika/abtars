@@ -123,6 +123,17 @@ describe("Spin — unified session router (#943)", () => {
       const session = spin.getActiveSession("aksika", "telegram");
       expect(session.transport).toBe(transport);
     });
+
+    it("records endedAt when a user ends a session", () => {
+      const created = spin.createSession("adrika", "telegram", "C");
+      expect(typeof created).not.toBe("string");
+      const session = created as import("./spin-types.js").ManagedSession;
+
+      const ended = spin.endSession("adrika", "telegram", session.shortIndex);
+      expect(typeof ended).not.toBe("string");
+      expect((ended as unknown as Record<string, unknown>)["endedAt"]).toEqual(expect.any(Number));
+      expect((ended as import("./spin-types.js").ManagedSession).status).toBe("ended");
+    });
   });
 
   describe("injectGreeting", () => {

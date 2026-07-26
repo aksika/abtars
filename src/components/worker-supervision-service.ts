@@ -10,6 +10,11 @@ import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 const MAX_RESULT_LENGTH = 500;
 const MAX_CHECK_OUTPUT_LENGTH = 10_000;
 
+/** Map internal executor names to the stable Worker result-contract vocabulary. */
+export function toWorkerExecutorKind(kind: string): "local_worker" | "remote_worker" {
+  return kind === "remote" || kind === "remote_worker" ? "remote_worker" : "local_worker";
+}
+
 export class WorkerSupervisionService {
   private store: WorkerSupervisionStore;
 
@@ -140,13 +145,33 @@ export class WorkerSupervisionService {
     cardId: number,
     workerResult: string,
     workingDir?: string,
-  ): { settled: boolean; summary: string; envelope?: WorkerResultEnvelopeV1 } {
+    attemptId?: string,
+    generation?: number,
+  ): { settled: boolean; summary: string; envelope?: WorkerResultEnvelopeV1; stale?: boolean } {
     const contract = this.getContractForCard(cardId);
     if (!contract) return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
 
     const attempts = this.store.getAttemptsForCard(cardId);
     const latestAttempt = attempts[attempts.length - 1];
-    if (!latestAttempt) return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
+    let targetAttempt = attemptId ? this.store.getAttempt(attemptId) : latestAttempt;
+    if (!latestAttempt || !targetAttempt || targetAttempt.card_id !== cardId) {
+      return { settled: false, summary: "stale execution result ignored", stale: true };
+    }
+    if (attemptId && (latestAttempt.id !== attemptId || (generation !== undefined && targetAttempt.generation !== generation))) {
+      return { settled: false, summary: "stale execution result ignored", stale: true };
+    }
+
+    // Keep the legacy direct service API usable for callers that have not yet
+    // been migrated to Reconciler-issued claims. Production supervised Spin
+    // always supplies attemptId and therefore cannot bypass the claim path.
+    if (!attemptId && targetAttempt.lifecycle === "pending") {
+      const claim = this.store.claimAttempt(cardId, contract.id, "agent", "legacy-service", targetAttempt.generation || 1);
+      if (!claim) return { settled: false, summary: "execution claim rejected", stale: true };
+      targetAttempt = this.store.getAttempt(claim.attemptId);
+      if (!targetAttempt || !this.store.markAttemptRunning(targetAttempt.id)) {
+        return { settled: false, summary: "execution claim rejected", stale: true };
+      }
+    }
 
     const workerReport = this.parseWorkerReport(workerResult);
     const checks = this.runChecks(contract, workingDir);
@@ -158,13 +183,13 @@ export class WorkerSupervisionService {
     const envelope: WorkerResultEnvelopeV1 = {
       schema_version: 1,
       attempt: {
-        id: latestAttempt.id,
-        ordinal: latestAttempt.ordinal,
+        id: targetAttempt.id,
+        ordinal: targetAttempt.ordinal,
         contract_id: contract.id,
         contract_digest: contract.digest,
-        executor_kind: latestAttempt.executor_kind as "local_worker" | "remote_worker",
-        executor_id: latestAttempt.executor_id,
-        started_at: latestAttempt.started_at,
+        executor_kind: toWorkerExecutorKind(targetAttempt.executor_kind),
+        executor_id: targetAttempt.executor_id,
+        started_at: targetAttempt.started_at,
         finished_at: new Date().toISOString(),
       },
       outcome,
@@ -178,15 +203,18 @@ export class WorkerSupervisionService {
       },
     };
 
-    const result = settleResult(this.store, latestAttempt.id, envelope, outcome === "completed" ? "settled" : "failed");
+    const result = settleResult(this.store, targetAttempt.id, envelope, outcome === "completed" ? "settled" : "failed");
     if (result === SettlementResult.Conflict) {
       return { settled: false, summary: "[conflict] duplicate attempt with different result" };
+    }
+    if (result === SettlementResult.Rejected) {
+      return { settled: false, summary: "stale execution result ignored", stale: true };
     }
 
     // #1367: Emit durable milestone progress on settlement
     try {
       const emitter = new ExecutorProgressEmitter();
-      emitter.emitMilestone(latestAttempt.id, contract.provenance.card_id, latestAttempt.executor_id, contract.id, outcome === "completed" ? "all criteria passed" : "criteria failed");
+      emitter.emitMilestone(targetAttempt.id, contract.provenance.card_id, targetAttempt.executor_id, contract.id, outcome === "completed" ? "all criteria passed" : "criteria failed");
     } catch { /* progress emission is best-effort */ }
 
     const summary = outcome === "completed"

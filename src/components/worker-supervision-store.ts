@@ -111,6 +111,19 @@ export class WorkerSupervisionStore {
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN claimed_at TEXT`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN hard_deadline_at TEXT`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN cancel_reason TEXT`); } catch {}
+    // Backfill lifecycle for rows created before the #1364 state machine.
+    db.exec(`
+      UPDATE worker_attempts
+      SET lifecycle = CASE
+        WHEN status IN ('settled', 'completed') THEN 'completed'
+        WHEN status = 'failed' THEN 'failed'
+        WHEN status = 'cancelled' THEN 'cancelled'
+        WHEN status = 'timed_out' THEN 'timed_out'
+        WHEN status = 'running' THEN 'running'
+        ELSE lifecycle
+      END
+      WHERE lifecycle = 'pending' AND status <> 'pending'
+    `);
   }
 
   insertContract(contract: WorkerAcceptanceContractV1, cardId: number): void {
@@ -144,10 +157,19 @@ export class WorkerSupervisionStore {
     status: string;
     started_at: string;
   }): void {
+    const lifecycle: AttemptLifecycle = attempt.status === "running"
+      ? "running"
+      : attempt.status === "settled" || attempt.status === "completed"
+        ? "completed"
+        : attempt.status === "failed"
+          ? "failed"
+          : attempt.status === "cancelled"
+            ? "cancelled"
+            : "pending";
     this.db.prepare(`
-      INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, remote_task_id, status, started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(attempt.id, attempt.card_id, attempt.contract_id, attempt.ordinal, attempt.executor_kind, attempt.executor_id, attempt.remote_task_id ?? null, attempt.status, attempt.started_at);
+      INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, remote_task_id, status, lifecycle, started_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(attempt.id, attempt.card_id, attempt.contract_id, attempt.ordinal, attempt.executor_kind, attempt.executor_id, attempt.remote_task_id ?? null, attempt.status, lifecycle, attempt.started_at);
   }
 
   getAttempt(attemptId: string): AttemptRow | undefined {
@@ -162,8 +184,11 @@ export class WorkerSupervisionStore {
     return this.db.prepare(`SELECT * FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(cardId) as AttemptRow | undefined;
   }
 
-  settleAttempt(attemptId: string, status: string): void {
-    this.db.prepare(`UPDATE worker_attempts SET status = ?, settled_at = ? WHERE id = ?`).run(status, new Date().toISOString(), attemptId);
+  settleAttempt(attemptId: string, status: string): boolean {
+    if (status === "settled" || status === "completed") return this.completeAttempt(attemptId);
+    if (status === "cancelled") return this.cancelAttempt(attemptId);
+    if (status === "timed_out") return this.timeoutAttempt(attemptId);
+    return this.failAttempt(attemptId);
   }
 
   // ── #1364: Lifecycle and claim operations ──────────────────────────────
@@ -241,20 +266,41 @@ export class WorkerSupervisionStore {
     });
   }
 
+  /** Cancel work that has not been claimed yet so it can never be dispatched. */
+  cancelPendingAttempt(attemptId: string, reason: string): boolean {
+    return this.lifecycleTransition(attemptId, ["pending"], "cancelled", {
+      status: "cancelled",
+      cancel_reason: reason,
+      settled_at: new Date().toISOString(),
+    });
+  }
+
   completeAttempt(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed");
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed", {
+      status: "settled",
+      settled_at: new Date().toISOString(),
+    });
   }
 
   failAttempt(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "failed");
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "failed", {
+      status: "failed",
+      settled_at: new Date().toISOString(),
+    });
   }
 
   cancelAttempt(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "cancelled");
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "cancelled", {
+      status: "cancelled",
+      settled_at: new Date().toISOString(),
+    });
   }
 
   timeoutAttempt(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "timed_out");
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "timed_out", {
+      status: "timed_out",
+      settled_at: new Date().toISOString(),
+    });
   }
 
   isAttemptTerminal(lifecycle: AttemptLifecycle): boolean {
@@ -316,6 +362,7 @@ export enum SettlementResult {
   Settled = "settled",
   Replayed = "replayed",
   Conflict = "conflict",
+  Rejected = "rejected",
 }
 
 function envelopeDigest(envelope: WorkerResultEnvelopeV1): string {
@@ -337,8 +384,9 @@ export function settleResult(
       if (replayed === "conflict") return SettlementResult.Conflict;
       return SettlementResult.Replayed;
     }
+    const settled = store.settleAttempt(attemptId, status);
+    if (!settled) return SettlementResult.Rejected;
     store.insertResult(attemptId, envelope);
-    store.settleAttempt(attemptId, status);
     return SettlementResult.Settled;
   });
 }

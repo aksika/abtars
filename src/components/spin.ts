@@ -150,7 +150,7 @@ export class Spin {
     const r = Sessions.endSession(this.sessions, this.nextIndex, session.userId, session.platform, session.shortIndex);
     if (typeof r === "string") return false;
     this.nextIndex = r.nextIndex;
-    this.releaseSessionTransport(r.ended);
+    this.finalizeSession(r.ended, "external_ended");
     return true;
   }
 
@@ -162,7 +162,7 @@ export class Spin {
     const r = Sessions.endSession(this.sessions, this.nextIndex, userId, platform, index);
     if (typeof r === "string") return r;
     this.nextIndex = r.nextIndex;
-    this.releaseSessionTransport(r.ended);
+    this.finalizeSession(r.ended, "ended");
     return r.ended;
   }
 
@@ -170,7 +170,7 @@ export class Spin {
     const r = Sessions.killSession(this.sessions, this.nextIndex, userId, platform, index);
     if (typeof r === "string") return r;
     this.nextIndex = r.nextIndex;
-    this.releaseSessionTransport(r.killed);
+    this.finalizeSession(r.killed, "killed");
     return r.killed;
   }
 
@@ -385,7 +385,7 @@ export class Spin {
 
   destroyAll(): void {
     for (const s of this.sessions.values()) {
-      this.releaseSessionTransport(s);
+      this.finalizeSession(s, "shutdown");
     }
     if (this.orcSession) { try { this.orcSession.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } this.orcSession = null; }
     this.sessions.clear();
@@ -784,11 +784,21 @@ export class Spin {
       } catch { /* artifact-tools unavailable (e.g. test env) — skip */ }
       // #1366: Collect evidence and settle for supervised Workers
       let workerSummary = result.slice(0, 500);
+      let staleWorkerResult = false;
       if (spec.contractId || spec.type === "W") {
         try {
           const svc = new WorkerSupervisionService();
-          const outcome = svc.collectAndSettle(cardId, result, session.workingDir);
-          if (outcome.settled) workerSummary = outcome.summary;
+          const generation = spec.executionControl?.generation;
+          const outcome = svc.collectAndSettle(cardId, result, session.workingDir, spec.attemptId, generation);
+          if (outcome.settled) {
+            workerSummary = outcome.summary;
+            if (spec.executionControl) {
+              spec.executionControl.markTerminal(outcome.envelope?.outcome === "completed" ? "completed" : "failed");
+            }
+          } else if (outcome.stale) {
+            staleWorkerResult = true;
+            logWarn(TAG, `Card ${cardId}: stale Worker result ignored (attempt=${spec.attemptId ?? "unknown"})`);
+          }
         } catch { /* non-supervised Workers pass through unchanged */ }
       }
       // #1363 Task 10: supervised O-cards own their lifecycle via projectStateToKanban.
@@ -809,7 +819,7 @@ export class Spin {
           logWarn(TAG, `Card ${cardId}: cannot verify project supervision — deferring terminal settlement: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      if (shouldKanbanComplete) {
+      if (shouldKanbanComplete && !staleWorkerResult) {
         kanbanComplete(cardId, null, workerSummary);
       }
       // Supervised project results are emitted by ProjectReviewService only
@@ -860,6 +870,7 @@ export class Spin {
     const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
     logWarn(TAG, `${spec.type} spin failed: ${msg}`);
     pushLog(session, `failed: ${msg.slice(0, 80)}`);
+    let staleWorkerFailure = false;
     if (cardId !== undefined) {
       // #1248: If terminal already won (cancellation), skip fail settlement
       if (spec.executionControl?.terminal) {
@@ -867,8 +878,26 @@ export class Spin {
         this.markDone(spec.type, cardId);
         return;
       }
-      kanbanRetryOrFail(cardId, msg);
-      if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
+      if (spec.attemptId) {
+        try {
+          const store = new WorkerSupervisionStore();
+          const attempt = store.getAttempt(spec.attemptId);
+          const latest = store.getLatestAttempt(cardId);
+          const generationMatches = spec.executionControl?.generation === undefined
+            || attempt?.generation === spec.executionControl.generation;
+          if (!attempt || !latest || latest.id !== attempt.id || !generationMatches) {
+            staleWorkerFailure = true;
+            logWarn(TAG, `Card ${cardId}: stale Worker failure ignored (attempt=${spec.attemptId})`);
+          } else {
+            store.failAttempt(spec.attemptId);
+            spec.executionControl?.markTerminal("failed");
+          }
+        } catch { /* best effort; Kanban failure remains the visible fallback */ }
+      }
+      if (!staleWorkerFailure) {
+        kanbanRetryOrFail(cardId, msg);
+        if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
+      }
     }
 
     // #1319: Publish execution.failed before clearing association
@@ -1142,10 +1171,11 @@ export class Spin {
 
   /** #1364: Idempotent session finalization — records endedAt, releases resources exactly once. */
   private finalizeSession(session: ManagedSession, reason: string): void {
-    if (session.status === "ended") return; // already finalized
+    const metadata = session as unknown as Record<string, unknown>;
+    if (session.status === "ended" && metadata["endedAt"] !== undefined) return;
     this.releaseSessionTransport(session);
     session.active = false;
-    (session as unknown as Record<string, unknown>)["endedAt"] = Date.now();
+    metadata["endedAt"] = Date.now();
     session.status = "ended";
     pushLog(session, `finalized: ${reason}`);
     logDebug(TAG, `Session finalized: ${session.userId} id=${session.id} reason=${reason}`);
@@ -1197,6 +1227,11 @@ export class Spin {
       for (const id of set) ids.push(id);
     }
     return ids;
+  }
+
+  /** Current executor occupancy for a session type (used by Reconciler adapters). */
+  getRunningCount(type: SessionType): number {
+    return this.running.get(type)?.size ?? 0;
   }
 
   private publishActiveCardIds(): void {
