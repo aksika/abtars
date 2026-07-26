@@ -109,7 +109,7 @@ export class ReviewCaseAssembler {
     this.supStore = new WorkerSupervisionStore();
   }
 
-  assembleCase(projectCardId: number, generation: number, round: number): ReviewCaseSnapshot | { error: string } {
+  async assembleCase(projectCardId: number, generation: number, round: number): Promise<ReviewCaseSnapshot | { error: string }> {
     const contractRow = this.reviewStore.getContractByProjectCardId(projectCardId);
     if (!contractRow) return { error: `no root contract for project ${projectCardId}` };
 
@@ -117,14 +117,14 @@ export class ReviewCaseAssembler {
     const supervision = this.reviewStore.getSupervision(projectCardId);
     if (!supervision) return { error: `no supervision state for project ${projectCardId}` };
 
-    // Load children
-    const { kanbanGetChildren } = require("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
+    // Load children via ESM dynamic import (vitest mock intercepts these)
+    const { kanbanGetChildren } = await import("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
     const children = kanbanGetChildren(projectCardId);
 
     // Also gather peer contribution cards linked to this project
     const contributions: Array<{ card_id: number; peer: string; outcome: string; projection_summary: string }> = [];
     try {
-      const { kanbanList } = require("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
+      const { kanbanList } = await import("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
       const peerCards = kanbanList("done", undefined).filter(c => c.source === "peer" && c.type === "contribution");
       for (const pc of peerCards) {
         const notes = pc.notes ? (() => { try { return JSON.parse(pc.notes) as Record<string, unknown>; } catch { return {}; } })() : {};

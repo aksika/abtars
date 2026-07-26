@@ -348,7 +348,7 @@ async function reconcileProject(projectId: number): Promise<void> {
 
   // Assemble full review case
   const assembler = new ReviewCaseAssembler();
-  const snapshot = assembler.assembleCase(projectId, supervision.generation, supervision.review_round + 1);
+  const snapshot = await assembler.assembleCase(projectId, supervision.generation, supervision.review_round + 1);
 
   if ("error" in snapshot) {
     logWarn(TAG, `Project ${projectId}: review case assembly failed — ${snapshot.error}`);
