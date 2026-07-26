@@ -132,10 +132,15 @@ export function setSeatbelt(active: boolean, policy?: import("../seatbelt/policy
   _seatbeltPolicy = policy ?? null;
 }
 
+import { fingerprintCommand, previewCommand } from "./tool-failure-diagnostic.js";
+
 function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve) => {
     let bin = "bash";
     let args = ["-c", cmd];
+    let timedOut = false;
+    let aborted = false;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 
     // #906: Wrap in OS sandbox if seatbelt active and command needs sandboxing
     if (_seatbeltActive && _seatbeltPolicy) {
@@ -147,24 +152,54 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promis
       }
     }
 
-    const child = execFile(bin, args, { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-      const result: Record<string, unknown> = {};
+    const child = execFile(bin, args, { maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (signal && !signal.aborted) {
+        const onAbort = (): void => { /* already cleaned up */ };
+        try { signal.removeEventListener("abort", onAbort); } catch {}
+      }
+
+      const result: Record<string, unknown> = {
+        command_fingerprint: fingerprintCommand(cmd),
+        command_preview: previewCommand(cmd),
+        timed_out: timedOut,
+        aborted,
+      };
       if (stdout) result["stdout"] = stdout.slice(0, 50_000);
       if (stderr) result["stderr"] = stderr.slice(0, 10_000);
-      if (err) result["exit_code"] = (err as NodeJS.ErrnoException & { code?: number }).code ?? 1;
-      else result["exit_code"] = 0;
+      if (err) {
+        const nodeErr = err as NodeJS.ErrnoException & { code?: number; signal?: string; killed?: boolean };
+        if (nodeErr.code !== undefined && typeof nodeErr.code === "number") {
+          result["exit_code"] = nodeErr.code;
+        } else {
+          result["exit_code"] = null;
+          if (typeof nodeErr.code === "string") result["process_error_code"] = nodeErr.code;
+        }
+        if (nodeErr.signal) result["signal"] = nodeErr.signal;
+      } else {
+        result["exit_code"] = 0;
+      }
       resolve(JSON.stringify(result));
     });
+
     if (signal) {
-      if (signal.aborted) { child.kill("SIGTERM"); return; }
+      if (signal.aborted) { child.kill("SIGTERM"); aborted = true; return; }
       const onAbort = (): void => {
+        aborted = true;
         child.kill("SIGTERM");
-        // #1003: escalate to SIGKILL if child doesn't exit within 3s
         setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
       };
       signal.addEventListener("abort", onAbort, { once: true });
-      child.on("exit", () => signal.removeEventListener("abort", onAbort));
+      child.on("exit", () => {
+        signal.removeEventListener("abort", onAbort);
+      });
     }
+
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
+    }, timeout);
   });
 }
 

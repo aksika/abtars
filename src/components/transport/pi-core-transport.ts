@@ -1,4 +1,4 @@
-import { logDebug } from "../logger.js";
+import { logDebug, logInfo } from "../logger.js";
 import type { IKiroTransport, PromptRequestContext, RuntimeUsageSnapshot, RuntimeStatusSnapshot } from "./kiro-transport.js";
 import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
 import type { ModelHealthRegistry } from "./model-health-registry.js";
@@ -16,6 +16,8 @@ import type { OutputObserver } from "../session-output-feed.js";
 import type { PiContextOrchestrator } from "./pi-core-context.js";
 import { buildPiModel, pickPiApi } from "./pi-ai-adapter.js";
 import { candidateKey } from "./model-candidates.js";
+import { PiCoreToolExecutionError, mergeSafetyIncident } from "./tool-failure-diagnostic.js";
+import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 
 const TAG = "pi-core-transport";
 
@@ -69,6 +71,8 @@ export class PiCoreTransport implements IKiroTransport {
   private _toolCallsSucceeded = 0;
   private _lastResponse = "";
   private _intermediateText = "";
+  /** Most recent tool failure diagnostic from the current sendPrompt call. */
+  private _lastToolFailure: ToolFailureDiagnosticV1 | null = null;
 
   /** Last candidate that produced semantic output; reused by specialists. */
   lastSuccessfulCandidate: CandidateSpec | null = null;
@@ -143,6 +147,7 @@ export class PiCoreTransport implements IKiroTransport {
     this._lastResponse = "";
     this._intermediateText = "";
     this._toolCallsSucceeded = 0;
+    this._lastToolFailure = null;
 
     // Use provided executionId or allocate a new one
     const executionId = context?.executionId ?? `${sessionKey}_${Date.now()}_${++executionSeq}`;
@@ -230,6 +235,9 @@ export class PiCoreTransport implements IKiroTransport {
       signal: undefined,
       sandboxPolicy: this.sandboxPolicy,
       safety,
+      onToolFailure: (diag) => {
+        this._lastToolFailure = diag;
+      },
     };
     const tools = createPiAgentTools(toolContext);
 
@@ -316,7 +324,24 @@ export class PiCoreTransport implements IKiroTransport {
         if (snap) this._lastUsage = snap;
       }
 
-      return responseText;
+      if (responseText.trim() !== "") {
+        logDebug(TAG, `sendPrompt: returning ${responseText.length}ch assistant text`);
+        return responseText;
+      }
+
+      if (this._lastToolFailure) {
+        const incident = safety.lastTerminalIncident;
+        const merged = mergeSafetyIncident(
+          this._lastToolFailure,
+          incident?.type,
+          incident?.type === "candidate_round_limit",
+        );
+        logInfo(TAG, `sendPrompt: empty response with terminal tool failure — throwing diagnostic`);
+        throw new PiCoreToolExecutionError(merged);
+      }
+
+      logDebug(TAG, `sendPrompt: empty response with no tool failure — returning ""`);
+      return "";
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
       if (this.activeHost === host) this.activeHost = null;

@@ -45,6 +45,7 @@ export interface PiExecutionSafetyController {
   recordClassifiedStoreLiteral(literal: string): void;
   scrubClassifiedLiterals(messages: AbtarsAgentMessage[]): AbtarsAgentMessage[];
   get incident(): BehaviorIncident | null;
+  get lastTerminalIncident(): BehaviorIncident | null;
   get paused(): boolean;
   get stopped(): boolean;
 }
@@ -65,6 +66,7 @@ export function createPiExecutionSafetyController(
   let _stopped = false;
   let _stopReason = "";
   let _incident: BehaviorIncident | null = null;
+  let _lastTerminalIncident: BehaviorIncident | null = null;
 
   const classifiedLiterals: Set<string> = new Set();
   const loopGuard = new ToolLoopGuard();
@@ -77,6 +79,7 @@ export function createPiExecutionSafetyController(
     get maxPromptRounds() { return mp; },
     get activeCandidateKey() { return activeCandidate; },
     get incident() { return _incident; },
+    get lastTerminalIncident() { return _lastTerminalIncident; },
     get paused() { return _paused; },
     get stopped() { return _stopped; },
 
@@ -90,6 +93,7 @@ export function createPiExecutionSafetyController(
       } catch {
         logWarn(TAG, `Exact repeat detected: ${name}`);
         _incident = { type: "exact_repeat", candidateKey: activeCandidate, toolName: name, roundsUsed: promptRounds };
+        _lastTerminalIncident = _incident;
         batchCancelled = true;
         return { decision: "error", reason: `Exact repeat of ${name} — tool blocked` };
       }
@@ -105,6 +109,7 @@ export function createPiExecutionSafetyController(
       } catch {
         logWarn(TAG, `Repeated failure detected: ${name}`);
         _incident = { type: "repeated_failure", candidateKey: activeCandidate, toolName: name, roundsUsed: promptRounds };
+        _lastTerminalIncident = _incident;
         batchCancelled = true;
         return { decision: "error", reason: `Repeated failure of ${name} — tool blocked` };
       }
@@ -117,6 +122,7 @@ export function createPiExecutionSafetyController(
       if (_paused) return { decision: "pause" };
       if (promptRounds >= mp) {
         _incident = { type: "prompt_round_limit", candidateKey, roundsUsed: promptRounds };
+        _lastTerminalIncident = _incident;
         return { decision: "stop", reason: `Prompt round limit (${mp}) reached` };
       }
 
@@ -129,6 +135,7 @@ export function createPiExecutionSafetyController(
         // Candidate-round limit: exclude this candidate, don't stop execution.
         // The #1445 FallbackPolicy will select the next eligible candidate.
         _incident = { type: "candidate_round_limit", candidateKey, roundsUsed: candidateRounds };
+        _lastTerminalIncident = _incident;
         policy.excludedKeys.add(candidateKey);
         const [model, endpoint] = candidateKey.split("@");
         if (model && endpoint) policy.registry.recordError(model, endpoint, "weak");
