@@ -44,8 +44,8 @@ describe("WorkerSupervisionService", () => {
 
   it("createChild returns error for duplicate card", () => {
     const svc = new Service();
-    svc.createChild("Build report", 101, 100, "orc");
-    const result = svc.createChild("Another report", 101, 100, "orc");
+    svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }] });
+    const result = svc.createChild("Another report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }] });
     expect("error" in result).toBe(true);
     if ("error" in result) {
       expect(result.error).toContain("already has a contract");
@@ -70,14 +70,17 @@ describe("WorkerSupervisionService", () => {
   it("cardHasContract returns correct state", () => {
     const svc = new Service();
     expect(svc.cardHasContract(101)).toBe(false);
-    svc.createChild("Build report", 101, 100, "orc");
+    svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }] });
     expect(svc.cardHasContract(101)).toBe(true);
   });
 
   it("rejects evidence-free supervised children (no criteria)", () => {
     const svc = new Service();
     const result = svc.createChild("Do something", 101, 100, "orc");
-    expect("error" in result).toBe(false);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("at least one acceptance criterion");
+    }
   });
 
   it("renderContractForPrompt produces XML-formatted contract", () => {
@@ -144,7 +147,7 @@ describe("WorkerSupervisionService", () => {
 
     it("ignores a late result from an older attempt", () => {
       const svc = new Service();
-      const created = svc.createChild("Build report", 101, 100, "orc");
+      const created = svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }] });
       if ("error" in created) throw new Error(created.error);
       const store = new Store();
       const first = store.getAttempt(created.attemptId)!;

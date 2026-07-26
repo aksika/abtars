@@ -4,6 +4,7 @@ import { findUncoveredCriteria } from "./project-contract.js";
 import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
+import { redactEnvelope } from "../worker-contract.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -184,7 +185,7 @@ export class ReviewCaseAssembler {
         criterion_statuses: criterionStatuses,
         attempts: attempts.length,
         executor_kind: latestAttempt?.executor_kind ?? "unknown",
-        result: envelope,
+        result: envelope ? redactEnvelope(envelope) : undefined,
       });
     }
 

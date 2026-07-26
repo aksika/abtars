@@ -42,12 +42,16 @@ export class WorkerSupervisionService {
       return { error: `card #${cardId} already has a contract` };
     }
 
+    if (!opts?.criteria || opts.criteria.length === 0) {
+      return { error: "supervised children require at least one acceptance criterion; goal-only supervised dispatch is rejected" };
+    }
+
     const contractId = opts?.contractId ?? createContractId();
     const raw: Record<string, unknown> = {
       schema_version: 1,
       id: contractId,
       goal: rawGoal,
-      criteria: opts?.criteria ?? [{ id: "c1", description: rawGoal }],
+      criteria: opts.criteria,
       provenance: {
         root_card_id: rootCardId,
         card_id: cardId,
