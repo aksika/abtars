@@ -10,9 +10,12 @@ const mockHasAllCapabilities = vi.fn();
 const mockGetPeerInventory = vi.fn();
 const mockHasRoute = vi.fn();
 
+const mockDb: any = { prepare: () => ({ run: () => ({ changes: 1 }), get: () => undefined, all: () => [] }), exec: () => {}, transaction: (fn: any) => fn() };
 vi.mock("../tasks/kanban-board.js", () => ({
   kanbanEnqueue: (...args: unknown[]) => mockKanbanEnqueue(...args),
   kanbanUpdate: (...args: unknown[]) => mockKanbanUpdate(...args),
+  kanbanGetCard: () => undefined,
+  requireTaskDatabase: () => mockDb,
 }));
 
 vi.mock("../peer-transport/index.js", () => ({

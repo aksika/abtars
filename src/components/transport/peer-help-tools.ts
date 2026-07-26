@@ -1,7 +1,9 @@
 import type { ToolDefinition } from "./tool-registry.js";
 import type { PeerHelpRequestV1 } from "../peer-help/contract.js";
+import { canonicalRequestHash } from "../peer-help/contract.js";
+import { ContributionStore } from "../peer-help/contribution-store.js";
 import { getPeerTransport } from "../peer-transport/index.js";
-import { kanbanEnqueue, kanbanUpdate } from "../tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanUpdate, kanbanGetCard, requireTaskDatabase } from "../tasks/kanban-board.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { randomUUID } from "node:crypto";
 
@@ -128,32 +130,44 @@ export const peerAskHelpTool: ToolDefinition = {
 
     let localCardId: number | undefined;
     try {
-      const pendingNotes = { peer, goal, requires: deduped, executor: executor ?? "agent", request_id: requestId, outcome: "pending" };
+      const activeOrc = await getActiveOrcProjectId();
+
+      const requestHash = canonicalRequestHash(request);
+      const contributionStore = getContributionStore();
+
+      const reserveResult = contributionStore.reserve(peer, requestId, requestHash, activeOrc, null, null);
+      if (reserveResult.status === "conflict") {
+        return JSON.stringify({ error: `Request ${requestId} to ${peer} conflicts with an existing contribution with different parameters` });
+      }
+      const contributionRef = reserveResult.contributionRef ?? `help_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+
+      const pendingNotes = { peer, goal, requires: deduped, executor: executor ?? "agent", request_id: requestId, outcome: "pending", contribution_ref: contributionRef };
       localCardId = kanbanEnqueue(`[help:${peer}] ${goal.slice(0, 80)}`, "peer", requestId, {
         type: "contribution",
         priority: priority ?? "MEDIUM",
         notes: JSON.stringify(pendingNotes),
         sourcePeer: peer,
+        parent_id: activeOrc ?? undefined,
       });
       if (!localCardId) return JSON.stringify({ error: "Failed to persist help request", request_id: requestId });
 
       const response = await transport.askHelp(peer, request);
 
       if (response.decision === "accepted") {
+        contributionStore.transitionToAccepted(peer, requestId);
         const notes: Record<string, unknown> = {
           peer, goal, requires: deduped, executor: executor ?? "agent", request_id: requestId,
-          outcome: "accepted", contribution_ref: response.contribution_ref,
+          outcome: "accepted", contribution_ref: response.contribution_ref ?? contributionRef,
         };
-        // #1357: Store remote Pi identifiers if present
         if (response.remote_run_id) notes.remote_run_id = response.remote_run_id;
         if (response.remote_card_id !== undefined) notes.remote_card_id = response.remote_card_id;
         if (response.remote_generation !== undefined) notes.remote_generation = response.remote_generation;
         if (response.remote_session_id) notes.remote_session_id = response.remote_session_id;
         kanbanUpdate(localCardId, { notes: JSON.stringify(notes) });
-        logInfo(TAG, `Help accepted by ${peer}: ref=${response.contribution_ref}`);
+        logInfo(TAG, `Help accepted by ${peer}: ref=${response.contribution_ref ?? contributionRef}`);
         return JSON.stringify({
           ok: true, local_card_id: localCardId, peer, decision: "accepted",
-          contribution_ref: response.contribution_ref, request_id: requestId,
+          contribution_ref: response.contribution_ref ?? contributionRef, request_id: requestId,
           remote_run_id: response.remote_run_id,
           remote_card_id: response.remote_card_id,
           remote_generation: response.remote_generation,
@@ -161,6 +175,7 @@ export const peerAskHelpTool: ToolDefinition = {
         });
       }
 
+      contributionStore.transitionToNonStarted(peer, requestId, response.decision as any);
       const notes = { peer, goal, requires: deduped, executor: executor ?? "agent", request_id: requestId, outcome: response.decision };
       kanbanUpdate(localCardId, { notes: JSON.stringify(notes) });
       logInfo(TAG, `Help ${response.decision} by ${peer}${response.reason ? `: ${response.reason}` : ""}`);
@@ -266,6 +281,27 @@ export const peerWithdrawHelpTool: ToolDefinition = {
     }
   },
 };
+
+let _contributionDb: any = null;
+function getContributionStore(): ContributionStore {
+  if (!_contributionDb) {
+    const db = requireTaskDatabase();
+    _contributionDb = new ContributionStore(db, {
+      kanbanGetCard: (id: number) => kanbanGetCard(id) ?? undefined,
+      kanbanUpdate,
+      kanbanComplete: () => {},
+      kanbanFail: () => {},
+    });
+  }
+  return _contributionDb;
+}
+
+async function getActiveOrcProjectId(): Promise<number | null> {
+  try {
+    const { getActiveOrcCard } = await import("./orc-tools.js");
+    return getActiveOrcCard();
+  } catch { return null; }
+}
 
 export function getPeerHelpTools(): ToolDefinition[] {
   return [peerAskHelpTool, peerHelpStatusTool, peerWithdrawHelpTool];

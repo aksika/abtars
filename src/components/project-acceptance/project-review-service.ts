@@ -1,11 +1,12 @@
 import { ProjectReviewStore } from "./project-review-store.js";
 import { ProjectReviewValidator, type ProjectReviewDecisionV1 } from "./project-review-validator.js";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
+import type { ContributionProjectionV1 } from "../peer-help/contract.js";
 import { nerve } from "../nerve.js";
 
 const MAX_INVALID_PROPOSALS = 5;
 
-function buildPeerAcceptanceEvent(cardId: number, decisionId: string, synthesis: string): { peer: string; payload: unknown } | undefined {
+function buildPeerAcceptanceEvent(cardId: number, decisionId: string, synthesis: string, caseSnapshot?: ReviewCaseSnapshot): { peer: string; payload: unknown } | undefined {
   try {
     const { kanbanGetCard } = require("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
     const card = kanbanGetCard(cardId);
@@ -14,22 +15,51 @@ function buildPeerAcceptanceEvent(cardId: number, decisionId: string, synthesis:
     const requestId = typeof notes.request_id === "string" ? notes.request_id : undefined;
     const contributionRef = typeof notes.contribution_ref === "string" ? notes.contribution_ref : undefined;
     if (!requestId || !contributionRef) return undefined;
+
+    const projection: ContributionProjectionV1 | undefined = caseSnapshot && buildTerminalProjection(caseSnapshot, card.source_peer);
+    const eventId = `accept_${decisionId}`;
+
     return {
       peer: card.source_peer,
       payload: {
         version: 1,
-        event_id: `accept_${decisionId}`,
+        event_id: eventId,
         sequence: 0,
         request_id: requestId,
         contribution_ref: contributionRef,
         kind: "completed",
         occurred_at: new Date().toISOString(),
         summary: synthesis.slice(0, 1000),
+        projection,
       },
     };
   } catch {
     return undefined;
   }
+}
+
+function buildTerminalProjection(snapshot: ReviewCaseSnapshot, receiverPeer: string): ContributionProjectionV1 {
+  const evidence: Array<{ id: string; kind: string; summary: string; observed_by: string }> = [];
+  for (const ci of snapshot.criterion_inputs) {
+    for (const eid of ci.observed_evidence_ids) {
+      evidence.push({ id: eid, kind: "check", summary: "observed", observed_by: receiverPeer });
+    }
+    for (const eid of ci.artifact_observation_ids) {
+      evidence.push({ id: eid, kind: "artifact", summary: "present", observed_by: receiverPeer });
+    }
+  }
+  return {
+    outcome: "completed",
+    summary: snapshot.budgets?.wall_clock_ms ? `Accepted after ${snapshot.budgets.wall_clock_ms}ms` : "Accepted",
+    evidence,
+    artifacts: [],
+    provenance: {
+      receiver_peer: receiverPeer,
+      receiver_project_ref: snapshot.root_contract?.id ?? `project_${snapshot.project_card_id}`,
+      acceptance_id: `accept_${snapshot.project_card_id}_${Date.now()}`,
+      accepted_at: new Date().toISOString(),
+    },
+  };
 }
 
 export async function drainAcceptanceOutbox(): Promise<number> {
@@ -115,7 +145,7 @@ export class ProjectReviewService {
     switch (decision.action) {
       case "accept": {
         // Atomic settlement: decision + supervision + kanban in one transaction
-        const peerEvent = buildPeerAcceptanceEvent(cardId, `accept_${cardId}_${Date.now()}`, decision.synthesis);
+        const peerEvent = buildPeerAcceptanceEvent(cardId, `accept_${cardId}_${Date.now()}`, decision.synthesis, caseSnapshot);
         const { decisionId } = this.store.settleAcceptance(
           cardId,
           decision.review_case_id,

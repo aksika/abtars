@@ -128,13 +128,31 @@ export class ReviewCaseAssembler {
       const peerCards = kanbanList("done", undefined).filter(c => c.source === "peer" && c.type === "contribution");
       for (const pc of peerCards) {
         const notes = pc.notes ? (() => { try { return JSON.parse(pc.notes) as Record<string, unknown>; } catch { return {}; } })() : {};
-        // A contribution belongs to this project if its notes reference the project_card_id
-        if (notes.project_card_id === projectCardId || notes.parent_project_id === projectCardId) {
+        if (notes.parent_project_id === projectCardId || (pc.parent_id === projectCardId)) {
+          const projection = notes.projection ? (typeof notes.projection === "string" ? notes.projection : JSON.stringify(notes.projection)) : (pc.result_summary ?? "");
           contributions.push({
             card_id: pc.id,
-            peer: pc.source_peer ?? "unknown",
+            peer: pc.source_peer ?? (typeof notes.peer === "string" ? notes.peer : "unknown"),
             outcome: pc.status,
-            projection_summary: pc.result_summary?.slice(0, 200) ?? "",
+            projection_summary: projection.slice(0, 200),
+          });
+        }
+      }
+    } catch {}
+
+    try {
+      const { requireTaskDatabase } = await import("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
+      const db = requireTaskDatabase();
+      const rows = db.prepare(
+        "SELECT peer, proxy_card_id, state, projection_json FROM peer_contributions WHERE project_card_id = ?",
+      ).all(projectCardId) as Array<{ peer: string; proxy_card_id: number | null; state: string; projection_json: string | null }>;
+      for (const r of rows) {
+        if (!contributions.some(c => r.proxy_card_id && c.card_id === r.proxy_card_id)) {
+          contributions.push({
+            card_id: r.proxy_card_id ?? 0,
+            peer: r.peer,
+            outcome: r.state,
+            projection_summary: r.projection_json ? r.projection_json.slice(0, 200) : "",
           });
         }
       }

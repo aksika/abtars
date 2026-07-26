@@ -76,6 +76,7 @@ export interface PeerContributionEventV1 {
   summary?: string;
   evidence?: WorkerResultEnvelopeV1;
   artifacts?: BoundedArtifactRef[];
+  projection?: ContributionProjectionV1;
 }
 
 export const HELP_WIRE_METHODS = [
@@ -123,6 +124,26 @@ export interface WorkerResultEnvelopeV1 {
   artifacts?: BoundedArtifactRef[];
   tokens_used?: number;
   metadata?: Record<string, unknown>;
+}
+
+export interface ContributionProvenanceV1 {
+  receiver_peer: string;
+  receiver_project_ref: string;
+  acceptance_id: string;
+  accepted_at: string;
+}
+
+export interface ContributionProjectionV1 {
+  outcome: "completed" | "failed";
+  summary: string;
+  evidence: ReadonlyArray<{
+    id: string;
+    kind: string;
+    summary: string;
+    observed_by: string;
+  }>;
+  artifacts: ReadonlyArray<BoundedArtifactRef>;
+  provenance: ContributionProvenanceV1;
 }
 
 export interface BoundedArtifactRef {
@@ -293,6 +314,13 @@ export function parseContributionEvent(raw: unknown): { ok: true; value: PeerCon
   if (typeof r.sequence !== "number" || r.sequence < 0) return { ok: false, error: "sequence must be a non-negative number" };
   if (!["progress", "completed", "failed", "withdrawal_noted"].includes(r.kind as string)) return { ok: false, error: "invalid kind" };
   if (!isISODate(r.occurred_at)) return { ok: false, error: "invalid occurred_at" };
+  if (r.projection !== undefined) {
+    if (typeof r.projection !== "object" || r.projection === null) return { ok: false, error: "projection must be an object" };
+    const p = r.projection as Record<string, unknown>;
+    if (!["completed", "failed"].includes(p.outcome as string)) return { ok: false, error: "invalid projection outcome" };
+    if (typeof p.summary !== "string" || p.summary.length === 0) return { ok: false, error: "projection summary required" };
+    if (typeof p.provenance !== "object" || p.provenance === null) return { ok: false, error: "projection provenance required" };
+  }
   return { ok: true, value: r as unknown as PeerContributionEventV1 };
 }
 

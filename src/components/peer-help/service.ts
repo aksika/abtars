@@ -1,6 +1,7 @@
 import type { PeerHelpRequestV1, PeerHelpResponseV1, HelpDecision } from "./contract.js";
-import { parseHelpRequest, canonicalRequestHash, generateContributionRef } from "./contract.js";
+import { parseHelpRequest, parseContributionEvent, canonicalRequestHash, generateContributionRef } from "./contract.js";
 import { PeerHelpStore } from "./store.js";
+import { ContributionStore } from "./contribution-store.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { loadPeerConfig } from "../peer-config.js";
 
@@ -53,6 +54,7 @@ const builtinPolicy: PeerHelpAdmissionPolicy = {
 
 export class PeerHelpService {
   private store: PeerHelpStore;
+  private contributionStore: ContributionStore | null = null;
   private policy: PeerHelpAdmissionPolicy;
   private capabilityRegistry: () => string[];
   private piHandler: PeerHelpHandler | null = null;
@@ -65,6 +67,10 @@ export class PeerHelpService {
     this.store = store;
     this.capabilityRegistry = capabilityRegistry;
     this.policy = policy ?? builtinPolicy;
+  }
+
+  setContributionStore(store: ContributionStore): void {
+    this.contributionStore = store;
   }
 
   setPiHandler(handler: PeerHelpHandler): void {
@@ -268,15 +274,32 @@ export class PeerHelpService {
   }
 
   async handleContributionEvent(originPeer: string, raw: unknown): Promise<{ ok: boolean }> {
-    const { parseContributionEvent } = await import("./contract.js");
     const parsed = parseContributionEvent(raw);
-    if (!parsed.ok) {
-      return { ok: false };
-    }
+    if (!parsed.ok) return { ok: false };
 
     const event = parsed.value;
-    this.store.recordContributionEvent(originPeer, event.request_id, event.contribution_ref, event.kind === "completed" ? "completed" : event.kind === "failed" ? "failed" : "running");
-    return { ok: true };
+    const cs = this.contributionStore;
+    if (!cs) {
+      this.store.recordContributionEvent(originPeer, event.request_id, event.contribution_ref,
+        event.kind === "completed" ? "completed" : event.kind === "failed" ? "failed" : "running");
+      return { ok: true };
+    }
+
+    const projectionJson = event.projection ? JSON.stringify(event.projection) : null;
+    const payloadDigest = projectionJson ?? `${event.kind}_${event.summary ?? ""}_${event.occurred_at}`;
+    const result = cs.applyEvent(originPeer, event, payloadDigest, projectionJson);
+
+    if ((result === "applied" || result === "duplicate") && (event.kind === "completed" || event.kind === "failed")) {
+      try {
+        const row = cs.getContribution(originPeer, event.request_id);
+        if (row?.project_card_id) {
+          const { requestReconcile } = await import("../reconciler.js");
+          requestReconcile(row.project_card_id);
+        }
+      } catch {}
+    }
+
+    return { ok: result !== "rejected" };
   }
 
   private async countActivePeerProjects(): Promise<number> {
