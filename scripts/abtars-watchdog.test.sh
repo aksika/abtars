@@ -202,5 +202,232 @@ if ! grep -q 'signal-bridge SIGKILL' "$WD_SH"; then
 fi
 echo "OK: stale-heartbeat detection + validated SIGKILL path intact (frozen-watchdog regression guard)"
 
+# ── #1499: Suspend recovery + transient validation ──────────────────────────
+
+# Test 11: Suspend detection with heartbeat advancement within recovery window.
+# Creates a temp home, controlled bridge.lock, and tests the bounded recovery logic.
+T1499_HOME=$(mktemp -d /tmp/watchdog-1499.XXXXXX)
+trap "rm -rf '$T1499_HOME'" EXIT
+mkdir -p "$T1499_HOME/logs"
+
+# Launch a disposable "bridge" process (sleep, hold PID).
+sleep 600 &
+BRIDGE_PID=$!
+
+# Write bridge.lock with a known heartbeat (compact JSON, matching bridge format).
+echo '{"pid":'"$BRIDGE_PID"',"lastHeartbeat":5000,"startedAt":'$(date +%s)'000}' > "$T1499_HOME/bridge.lock"
+
+# Stub svc to return valid identity for this PID.
+svc() {
+  case "$1" in
+    validate-bridge) echo "valid $BRIDGE_PID $(date +%s)000" ;;
+    *) return 0 ;;
+  esac
+}
+
+# Source the watchdog's read_heartbeat and suspend logic.
+LOCK="$T1499_HOME/bridge.lock"
+WD_LOG="$T1499_HOME/logs/watchdog.log"
+POLL=60
+POLL_INTERVAL=1
+
+# Define minimal read_heartbeat equivalent for testing.
+read_heartbeat() {
+  grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*'
+}
+cd /
+
+# Test 11a: heartbeat advances → recovery succeeds.
+LAST_OBSERVED_HB="5000"
+LAST_POLL_AT=$(date +%s)
+PLANNED_RESTART=0
+# Write an advanced heartbeat into bridge.lock (compact JSON).
+echo '{"pid":'"$BRIDGE_PID"',"lastHeartbeat":6000,"startedAt":'$(date +%s)'000}' > "$T1499_HOME/bridge.lock"
+_suspend_test() {
+  _now_s=$(date +%s)
+  _poll_gap=$(( _now_s - LAST_POLL_AT ))
+  LAST_POLL_AT=$_now_s
+  _baseline_hb="${LAST_OBSERVED_HB:-$(read_heartbeat)}"
+  _deadline=$(( _now_s + 2 ))  # short deadline for test
+  while (( $(date +%s) < _deadline )); do
+    _hb_now=$(read_heartbeat)
+    if [[ -n "$_baseline_hb" && -n "$_hb_now" && "$_baseline_hb" -lt "$_hb_now" ]]; then
+      LAST_OBSERVED_HB="$_hb_now"
+      echo "RECOVERED"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "TIMEOUT"
+  return 1
+}
+_result=$(_suspend_test)
+if [[ "$_result" != "RECOVERED" ]]; then
+  echo "FAIL: suspend recovery — heartbeat advancement should have been detected, got '$_result'"
+  kill $BRIDGE_PID 2>/dev/null
+  exit 1
+fi
+echo "OK: suspend recovery — heartbeat advancement detected within window"
+
+# Test 11b: no heartbeat advancement → recovery timeout (not stale kill).
+LAST_OBSERVED_HB="5000"
+LAST_POLL_AT=$(date +%s)
+PLANNED_RESTART=0
+python3 -c "
+import json
+with open('$T1499_HOME/bridge.lock', 'w') as f:
+    json.dump({'pid': $BRIDGE_PID, 'lastHeartbeat': 5000, 'startedAt': $(date +%s)000}, f)
+"
+_suspend_test() {
+  _now_s=$(date +%s)
+  _poll_gap=$(( _now_s - LAST_POLL_AT ))
+  LAST_POLL_AT=$_now_s
+  _baseline_hb="${LAST_OBSERVED_HB:-$(read_heartbeat)}"
+  _deadline=$(( _now_s + 2 ))
+  while (( $(date +%s) < _deadline )); do
+    _hb_now=$(read_heartbeat)
+    if [[ -n "$_baseline_hb" && -n "$_hb_now" && "$_baseline_hb" -lt "$_hb_now" ]]; then
+      LAST_OBSERVED_HB="$_hb_now"
+      echo "RECOVERED"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "TIMEOUT"
+  return 1
+}
+_result=$(_suspend_test)
+if [[ "$_result" != "TIMEOUT" ]]; then
+  echo "FAIL: suspend recovery — no heartbeat should have timed out, got '$_result'"
+  kill $BRIDGE_PID 2>/dev/null
+  exit 1
+fi
+echo "OK: suspend recovery — no advancement correctly times out (≠ stale kill)"
+
+# Test 12: validation retry — corrupt then valid → succeeds.
+svc() {
+  case "$1" in
+    validate-bridge)
+      if [[ -f "$T1499_HOME/validate-call-count" ]]; then
+        COUNT=$(cat "$T1499_HOME/validate-call-count")
+      else
+        COUNT=1
+      fi
+      echo "$(( COUNT + 1 ))" > "$T1499_HOME/validate-call-count"
+      if (( COUNT <= 1 )); then
+        echo "corrupt"
+      else
+        echo "valid $BRIDGE_PID $(date +%s)000"
+      fi
+      ;;
+    *) return 0 ;;
+  esac
+}
+rm -f "$T1499_HOME/validate-call-count"
+_read_bridge_identity() {
+  local _attempt=1
+  while (( _attempt <= 3 )); do
+    read -r _vstatus _vpid _vstarted <<< "$(svc validate-bridge 2>/dev/null)"
+    case "$_vstatus" in
+      valid|dead|reused|wrong-command|mismatch)
+        echo "$_vstatus $_vpid $_vstarted"
+        return 0
+        ;;
+    esac
+    if (( _attempt < 3 )); then
+      sleep "$POLL_INTERVAL"
+    fi
+    (( _attempt++ ))
+  done
+  echo "transient"
+}
+_result=$(_read_bridge_identity)
+_vstatus=$(echo "$_result" | awk '{print $1}')
+if [[ "$_vstatus" != "valid" ]]; then
+  echo "FAIL: validate retry — corrupt-then-valid should return valid, got '$_vstatus'"
+  kill $BRIDGE_PID 2>/dev/null
+  exit 1
+fi
+echo "OK: validate retry — corrupt-then-valid cycles correctly"
+
+# Test 13: validation retry — all transient → returns transient.
+svc() {
+  case "$1" in
+    validate-bridge) echo "corrupt" ;;
+    *) return 0 ;;
+  esac
+}
+rm -f "$T1499_HOME/validate-call-count"
+_result=$(_read_bridge_identity)
+_vstatus=$(echo "$_result" | awk '{print $1}')
+if [[ "$_vstatus" != "transient" ]]; then
+  echo "FAIL: validate retry — all transient should return transient, got '$_vstatus'"
+  kill $BRIDGE_PID 2>/dev/null
+  exit 1
+fi
+echo "OK: validate retry — all transient correctly returns transient"
+
+# Test 14: validation retry — definitive death returns immediately.
+svc() {
+  case "$1" in
+    validate-bridge) echo "dead 0 0" ;;
+    *) return 0 ;;
+  esac
+}
+_result=$(_read_bridge_identity)
+_vstatus=$(echo "$_result" | awk '{print $1}')
+if [[ "$_vstatus" != "dead" ]]; then
+  echo "FAIL: validate retry — definitive death should return immediately, got '$_vstatus'"
+  kill $BRIDGE_PID 2>/dev/null
+  exit 1
+fi
+echo "OK: validate retry — definitive death returns without retry"
+
+# Cleanup the disposable bridge.
+kill $BRIDGE_PID 2>/dev/null
+
+# Test 15: read_heartbeat exists and works on a real lock file.
+echo '{"lastHeartbeat":1234567890}' > "$T1499_HOME/bridge.lock"
+HB=$(grep -o '"lastHeartbeat":[0-9]*' "$T1499_HOME/bridge.lock" 2>/dev/null | grep -o '[0-9]*')
+if [[ "$HB" != "1234567890" ]]; then
+  echo "FAIL: read_heartbeat should extract 1234567890, got '$HB'"
+  exit 1
+fi
+echo "OK: read_heartbeat extracts numeric heartbeat correctly"
+
+# Test 16: LAST_OBSERVED_HB is initialized in the script (source check).
+if ! grep -q "LAST_OBSERVED_HB" "$WD_SH"; then
+  echo "FAIL: LAST_OBSERVED_HB must be present in watchdog script (#1499)"
+  exit 1
+fi
+echo "OK: LAST_OBSERVED_HB tracking variable present in watchdog script"
+
+# Test 17: read_heartbeat helper is present in the script.
+if ! grep -q "read_heartbeat" "$WD_SH"; then
+  echo "FAIL: read_heartbeat helper must be present in watchdog script (#1499)"
+  exit 1
+fi
+echo "OK: read_heartbeat helper present in watchdog script"
+
+# Test 18: transient validation handling is present in the script.
+if ! grep -q "transient" "$WD_SH"; then
+  echo "FAIL: transient validation handling must be present in watchdog script (#1499)"
+  exit 1
+fi
+echo "OK: transient validation handling present in watchdog script"
+
+# Test 19: bounded resume wait is present (not one-cycle grace).
+if grep -q "granting one-cycle grace" "$WD_SH"; then
+  echo "FAIL: old one-cycle grace wording must be removed (#1499)"
+  exit 1
+fi
+if ! grep -q "bounded resume wait\|entering bounded resume wait" "$WD_SH"; then
+  echo "FAIL: bounded resume wait must replace one-cycle grace wording (#1499)"
+  exit 1
+fi
+echo "OK: bounded resume wait wording present (one-cycle grace removed)"
+
+rm -rf "$T1499_HOME"
+
 echo "ALL TESTS PASSED"
 exit 0

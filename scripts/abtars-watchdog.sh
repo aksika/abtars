@@ -25,6 +25,11 @@ fi
 svc() { node "$SUPERVISOR_CLI" "$@"; }
 logw() { echo "$(date +%FT%T) $*" >> "$WD_LOG"; }
 
+# Read numeric lastHeartbeat from bridge.lock (R2.2: read-only, never mutates).
+read_heartbeat() {
+  grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*'
+}
+
 # ── Singleton: flock (Linux) / lockf (macOS). The inode is never unlinked. ──
 exec 200>>"$AB/.bridge.flock"
 if command -v flock &>/dev/null; then
@@ -162,7 +167,9 @@ fi
 PID=""
 PLANNED_RESTART=0
 START_REASON="watchdog-respawn"
+LAST_OBSERVED_HB=""
 adopt_or_spawn
+LAST_OBSERVED_HB="$(read_heartbeat)"
 
 # ── Main loop ────────────────────────────────────────────────────────────
 while true; do
@@ -176,25 +183,67 @@ while true; do
       break   # outer loop respawns — NOT an unplanned death
     fi
 
-    # Suspend detection (clock jumped): grant one-cycle grace.
+    # Suspend detection (clock jumped): bounded fresh-heartbeat wait (R4.2).
     _now_s=$(date +%s)
     _poll_gap=$(( _now_s - LAST_POLL_AT ))
     LAST_POLL_AT=$_now_s
     if (( _poll_gap > POLL * 3 )); then
-      logw "Suspend detected (poll gap ${_poll_gap}s >> ${POLL}s) — granting one-cycle grace"
-      sleep "$POLL_INTERVAL"
+      logw "Suspend detected (poll gap ${_poll_gap}s >> ${POLL}s) — entering bounded resume wait"
+      _baseline_hb="${LAST_OBSERVED_HB:-$(read_heartbeat)}"
+      _deadline=$(( _now_s + POLL ))
+      while (( $(date +%s) < _deadline )); do
+        poll_state
+        [[ "$PLANNED_RESTART" -eq 1 ]] && break
+        _hb_now=$(read_heartbeat)
+        if [[ -n "$_baseline_hb" && -n "$_hb_now" && "$_baseline_hb" -lt "$_hb_now" ]]; then
+          LAST_OBSERVED_HB="$_hb_now"
+          logw "Resume recovery: fresh heartbeat detected within ${POLL}s — resuming normal monitoring"
+          break
+        fi
+        sleep "$POLL_INTERVAL"
+      done
+      if [[ "$PLANNED_RESTART" -eq 1 ]]; then
+        break   # outer loop respawns
+      fi
       continue
     fi
 
     # Bridge alive and still the validated process? Never trust a cached PID:
-    # PID reuse must be classified before any signal is sent.
-    read -r _vstatus _vpid _vstarted <<< "$(svc validate-bridge 2>/dev/null)"
-    if [[ "$_vstatus" != "valid" || "$_vpid" != "$PID" ]]; then
-      wait "$PID" 2>/dev/null   # reap the child
-      # #1328: read the bridge's SELF-REPORTED exit code (lastExitCode), gated on
-      # lastExitAt > SPAWNED_AT so a stale prior-death code is never reused.
-      # Read-only (R2.2 forbids independent JSON *mutation*, not reads).
-      EXIT_CODE=$(python3 -c "
+    # PID reuse must be classified before any signal is sent. Bounded retry
+    # for transient results (empty output, corrupt) — see design #1499.
+    # Bounded retry for transient validate-bridge results (#1499).
+    # Returns "transient" when all attempts exhausted without a definitive result.
+    _read_bridge_identity() {
+      local _attempt=1
+      while (( _attempt <= 3 )); do
+        read -r _vstatus _vpid _vstarted <<< "$(svc validate-bridge 2>/dev/null)"
+        case "$_vstatus" in
+          valid|dead|reused|wrong-command|mismatch)
+            echo "$_vstatus $_vpid $_vstarted"
+            return 0
+            ;;
+        esac
+        if (( _attempt < 3 )); then
+          poll_state
+          sleep "$POLL_INTERVAL"
+        fi
+        (( _attempt++ ))
+      done
+      echo "transient"
+    }
+    read -r _vstatus _vpid _vstarted <<< "$(_read_bridge_identity)"
+    if [[ "$PLANNED_RESTART" -eq 1 ]]; then
+      break   # outer loop handles the planned restart
+    fi
+    case "$_vstatus" in
+      valid)
+        if [[ "$_vpid" != "$PID" ]]; then
+          # Validated PID mismatch — existing terminal behavior.
+          wait "$PID" 2>/dev/null   # reap the child
+          # #1328: read the bridge's SELF-REPORTED exit code (lastExitCode), gated on
+          # lastExitAt > SPAWNED_AT so a stale prior-death code is never reused.
+          # Read-only (R2.2 forbids independent JSON *mutation*, not reads).
+          EXIT_CODE=$(python3 -c "
 import json
 try:
     d = json.load(open('$LOCK'))
@@ -204,10 +253,55 @@ try:
 except Exception:
     print('')
 " 2>/dev/null)
-      [[ -z "$EXIT_CODE" ]] && EXIT_CODE="unknown"
-      DEATH_REASON="process-gone:exit=$EXIT_CODE"
-      break
-    fi
+          [[ -z "$EXIT_CODE" ]] && EXIT_CODE="unknown"
+          DEATH_REASON="process-gone:exit=$EXIT_CODE"
+          break
+        fi
+        # Update observed heartbeat for resume-baseline tracking.
+        _fresh_hb=$(read_heartbeat)
+        [[ -n "$_fresh_hb" ]] && LAST_OBSERVED_HB="$_fresh_hb"
+        ;;
+      transient)
+        # Exhausted transient validation attempts: fall back to cached PID liveness.
+        if kill -0 "$PID" 2>/dev/null; then
+          logw "Validation transient after 3 attempts — cached PID $PID still alive, deferring cycle"
+          sleep "$POLL_INTERVAL"
+          continue
+        fi
+        # Cached PID is dead — existing process-gone path.
+        wait "$PID" 2>/dev/null   # reap the child
+        EXIT_CODE=$(python3 -c "
+import json
+try:
+    d = json.load(open('$LOCK'))
+    ec = d.get('lastExitCode')
+    ea = d.get('lastExitAt', 0)
+    print(ec if (ec is not None and ea / 1000 > $SPAWNED_AT) else '')
+except Exception:
+    print('')
+" 2>/dev/null)
+        [[ -z "$EXIT_CODE" ]] && EXIT_CODE="unknown"
+        DEATH_REASON="process-gone:exit=$EXIT_CODE"
+        break
+        ;;
+      dead|reused|wrong-command|mismatch)
+        # Definitive identity result — existing terminal behavior unchanged.
+        wait "$PID" 2>/dev/null   # reap the child
+        EXIT_CODE=$(python3 -c "
+import json
+try:
+    d = json.load(open('$LOCK'))
+    ec = d.get('lastExitCode')
+    ea = d.get('lastExitAt', 0)
+    print(ec if (ec is not None and ea / 1000 > $SPAWNED_AT) else '')
+except Exception:
+    print('')
+" 2>/dev/null)
+        [[ -z "$EXIT_CODE" ]] && EXIT_CODE="unknown"
+        DEATH_REASON="process-gone:exit=$EXIT_CODE"
+        break
+        ;;
+    esac
 
     # Stale heartbeat? (skip boot grace — 180s from SPAWNED_AT, which for an
     # adopted bridge is its true process age, so no new boot grace is granted)
