@@ -237,8 +237,8 @@ export function renderOperatorStatus(view: StatusView): string {
   if (view.daemon) {
     const d = view.daemon;
     lines.push(`  daemon:        ${d.unit} (${d.scope})`);
-    lines.push(`                 ${stateIcon(d.active)} ${d.active}`);
-    if (d.mainPid !== null) lines.push(`                 pid: ${d.mainPid}`);
+    const pidSuffix = d.mainPid !== null ? ` (pid ${d.mainPid})` : "";
+    lines.push(`                 ${stateIcon(d.active)} ${d.active}${pidSuffix}`);
     if (d.bridgeUptimeSeconds !== null) {
       lines.push(`                 bridge uptime: ${formatUptime(d.bridgeUptimeSeconds * 1000)}`);
     }

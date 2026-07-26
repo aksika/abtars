@@ -103,8 +103,7 @@ describe("renderOperatorStatus", () => {
   it("renders the daemon block when daemon info is present", () => {
     const out = renderOperatorStatus(makeOperatorView());
     expect(out).toContain("  daemon:        abtars (system)");
-    expect(out).toContain("                 ● active (running)");
-    expect(out).toContain("                 pid: 12340");
+    expect(out).toContain("                 ● active (running) since Fri 2026-07-10 15:30:00 UTC; 5min ago (pid 12340)");
     expect(out).toContain("                 bridge uptime: 5m");
     expect(out).toContain("                 start reason: watchdog-respawn");
   });
