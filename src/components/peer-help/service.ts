@@ -289,7 +289,7 @@ export class PeerHelpService {
     const payloadDigest = projectionJson ?? `${event.kind}_${event.summary ?? ""}_${event.occurred_at}`;
     const result = cs.applyEvent(originPeer, event, payloadDigest, projectionJson);
 
-    if ((result === "applied" || result === "duplicate") && (event.kind === "completed" || event.kind === "failed")) {
+    if (result === "applied" && (event.kind === "completed" || event.kind === "failed")) {
       try {
         const row = cs.getContribution(originPeer, event.request_id);
         if (row?.project_card_id) {

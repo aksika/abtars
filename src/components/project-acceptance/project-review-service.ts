@@ -17,7 +17,7 @@ function buildPeerAcceptanceEvent(cardId: number, decisionId: string, synthesis:
     if (!requestId || !contributionRef) return undefined;
 
     const projection: ContributionProjectionV1 | undefined = caseSnapshot && buildTerminalProjection(caseSnapshot, card.source_peer);
-    const eventId = `accept_${decisionId}`;
+    const eventId = `accept_${requestId}_${contributionRef}_${decisionId.replace(/[^a-zA-Z0-9]/g, "_")}`.slice(0, 128);
 
     return {
       peer: card.source_peer,
@@ -39,23 +39,26 @@ function buildPeerAcceptanceEvent(cardId: number, decisionId: string, synthesis:
 }
 
 function buildTerminalProjection(snapshot: ReviewCaseSnapshot, receiverPeer: string): ContributionProjectionV1 {
+  const MAX_EVIDENCE_ITEMS = 20;
+  const MAX_EVIDENCE_ID_LENGTH = 128;
   const evidence: Array<{ id: string; kind: string; summary: string; observed_by: string }> = [];
   for (const ci of snapshot.criterion_inputs) {
-    for (const eid of ci.observed_evidence_ids) {
-      evidence.push({ id: eid, kind: "check", summary: "observed", observed_by: receiverPeer });
+    for (const eid of ci.observed_evidence_ids.slice(0, MAX_EVIDENCE_ITEMS)) {
+      evidence.push({ id: eid.slice(0, MAX_EVIDENCE_ID_LENGTH), kind: "check", summary: "observed", observed_by: receiverPeer.slice(0, 64) });
     }
-    for (const eid of ci.artifact_observation_ids) {
-      evidence.push({ id: eid, kind: "artifact", summary: "present", observed_by: receiverPeer });
+    for (const eid of ci.artifact_observation_ids.slice(0, MAX_EVIDENCE_ITEMS)) {
+      evidence.push({ id: eid.slice(0, MAX_EVIDENCE_ID_LENGTH), kind: "artifact", summary: "present", observed_by: receiverPeer.slice(0, 64) });
     }
   }
   return {
+    schema_version: 1,
     outcome: "completed",
-    summary: snapshot.budgets?.wall_clock_ms ? `Accepted after ${snapshot.budgets.wall_clock_ms}ms` : "Accepted",
-    evidence,
+    summary: `Accepted after ${snapshot.budgets?.wall_clock_ms ?? 0}ms`,
+    evidence: evidence.slice(0, MAX_EVIDENCE_ITEMS),
     artifacts: [],
     provenance: {
       receiver_peer: receiverPeer,
-      receiver_project_ref: snapshot.root_contract?.id ?? `project_${snapshot.project_card_id}`,
+      receiver_project_ref: snapshot.root_contract?.id?.slice(0, 128) ?? `project_${snapshot.project_card_id}`,
       acceptance_id: `accept_${snapshot.project_card_id}_${Date.now()}`,
       accepted_at: new Date().toISOString(),
     },

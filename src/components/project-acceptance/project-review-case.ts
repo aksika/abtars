@@ -75,12 +75,14 @@ export interface ReviewCaseSnapshot {
     executor_kind: string;
   }[];
 
-  /** #1433: Peer contribution cards linked to this project — claims, not observations */
+  /** #1433/#1493: Peer contribution cards linked to this project — claims, not observations */
   peer_contributions: readonly {
     card_id: number;
     peer: string;
     outcome: string;
     projection_summary: string;
+    root_criteria: readonly string[];
+    provenance: string;
   }[];
 
   budgets: {
@@ -122,7 +124,7 @@ export class ReviewCaseAssembler {
     const children = kanbanGetChildren(projectCardId);
 
     // Also gather peer contribution cards linked to this project
-    const contributions: Array<{ card_id: number; peer: string; outcome: string; projection_summary: string }> = [];
+    const contributions: Array<{ card_id: number; peer: string; outcome: string; projection_summary: string; root_criteria: readonly string[]; provenance: string }> = [];
     try {
       const { kanbanList } = await import("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
       const peerCards = kanbanList("done", undefined).filter(c => c.source === "peer" && c.type === "contribution");
@@ -130,11 +132,14 @@ export class ReviewCaseAssembler {
         const notes = pc.notes ? (() => { try { return JSON.parse(pc.notes) as Record<string, unknown>; } catch { return {}; } })() : {};
         if (notes.parent_project_id === projectCardId || (pc.parent_id === projectCardId)) {
           const projection = notes.projection ? (typeof notes.projection === "string" ? notes.projection : JSON.stringify(notes.projection)) : (pc.result_summary ?? "");
+          const rootCriteria: string[] = Array.isArray(notes.root_criteria) ? notes.root_criteria as string[] : [];
           contributions.push({
             card_id: pc.id,
             peer: pc.source_peer ?? (typeof notes.peer === "string" ? notes.peer : "unknown"),
             outcome: pc.status,
             projection_summary: projection.slice(0, 200),
+            root_criteria: rootCriteria,
+            provenance: (typeof notes.provenance === "object" && notes.provenance !== null) ? JSON.stringify(notes.provenance) : "",
           });
         }
       }
@@ -144,15 +149,20 @@ export class ReviewCaseAssembler {
       const { requireTaskDatabase } = await import("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
       const db = requireTaskDatabase();
       const rows = db.prepare(
-        "SELECT peer, proxy_card_id, state, projection_json FROM peer_contributions WHERE project_card_id = ?",
-      ).all(projectCardId) as Array<{ peer: string; proxy_card_id: number | null; state: string; projection_json: string | null }>;
+        "SELECT peer, proxy_card_id, state, projection_json, root_criteria_json FROM peer_contributions WHERE project_card_id = ?",
+      ).all(projectCardId) as Array<{ peer: string; proxy_card_id: number | null; state: string; projection_json: string | null; root_criteria_json: string | null }>;
       for (const r of rows) {
         if (!contributions.some(c => r.proxy_card_id && c.card_id === r.proxy_card_id)) {
+          const projection = r.projection_json ? (() => { try { return JSON.parse(r.projection_json) as Record<string, unknown>; } catch { return null; } })() : null;
+          const provenance = projection?.provenance ? JSON.stringify(projection.provenance) : "";
+          const rootCriteria: string[] = r.root_criteria_json ? (() => { try { return JSON.parse(r.root_criteria_json) as string[]; } catch { return []; } })() : [];
           contributions.push({
             card_id: r.proxy_card_id ?? 0,
             peer: r.peer,
             outcome: r.state,
             projection_summary: r.projection_json ? r.projection_json.slice(0, 200) : "",
+            root_criteria: rootCriteria,
+            provenance,
           });
         }
       }

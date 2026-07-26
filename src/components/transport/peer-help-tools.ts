@@ -3,7 +3,7 @@ import type { PeerHelpRequestV1 } from "../peer-help/contract.js";
 import { canonicalRequestHash } from "../peer-help/contract.js";
 import { ContributionStore } from "../peer-help/contribution-store.js";
 import { getPeerTransport } from "../peer-transport/index.js";
-import { kanbanEnqueue, kanbanUpdate, kanbanGetCard, requireTaskDatabase } from "../tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanUpdate, kanbanGetCard, requireTaskDatabase } from "../tasks/kanban-board.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { randomUUID } from "node:crypto";
 
@@ -20,6 +20,7 @@ export const peerAskHelpTool: ToolDefinition = {
       priority: { type: "string", enum: ["CRITICAL", "HIGH", "MEDIUM", "LOW"], description: "Priority hint (receiver decides order locally)" },
       context: { type: "string", description: "Optional context to include" },
       requires: { type: "array", items: { type: "string" }, description: "Required capabilities (e.g. ['corporate-network'])" },
+      root_criteria: { type: "array", items: { type: "string" }, description: "Root criterion IDs this contribution is expected to cover (linked to active Orc project)" },
       executor: { type: "string", enum: ["agent", "pi"], description: "Execution target type. 'pi' for coding delegation (#1357)" },
       workspace_alias: { type: "string", description: "Peer-local workspace alias (required when executor='pi')" },
       model: { type: "string", description: "JSON object {provider, model_id, thinking?} for Pi execution" },
@@ -37,6 +38,7 @@ export const peerAskHelpTool: ToolDefinition = {
     const { goal, priority, context, executor } = args;
     let peer = args.peer;
     const requires: string[] = args.requires ? (typeof args.requires === "string" ? JSON.parse(args.requires) : args.requires) : [];
+    const rootCriteria: string[] = args.root_criteria ? (typeof args.root_criteria === "string" ? JSON.parse(args.root_criteria) : args.root_criteria) : [];
 
     if (!goal) return JSON.stringify({ error: "goal is required" });
 
@@ -135,7 +137,8 @@ export const peerAskHelpTool: ToolDefinition = {
       const requestHash = canonicalRequestHash(request);
       const contributionStore = getContributionStore();
 
-      const reserveResult = contributionStore.reserve(peer, requestId, requestHash, activeOrc, null, null);
+      const rootCriteriaJson = rootCriteria.length > 0 ? JSON.stringify(rootCriteria) : null;
+      const reserveResult = contributionStore.reserve(peer, requestId, requestHash, activeOrc, null, rootCriteriaJson);
       if (reserveResult.status === "conflict") {
         return JSON.stringify({ error: `Request ${requestId} to ${peer} conflicts with an existing contribution with different parameters` });
       }
@@ -150,6 +153,7 @@ export const peerAskHelpTool: ToolDefinition = {
         parent_id: activeOrc ?? undefined,
       });
       if (!localCardId) return JSON.stringify({ error: "Failed to persist help request", request_id: requestId });
+      kanbanRunning(localCardId);
 
       const response = await transport.askHelp(peer, request);
 

@@ -195,6 +195,7 @@ export class ContributionStore {
 
     if (row.state === "completed" || row.state === "failed") {
       if (row.terminal_event_id === event.event_id && row.terminal_digest === payloadDigest) return "duplicate";
+      try { console.warn(`[contribution-store] conflict: terminal event for settled contribution ${peer}/${event.request_id}`); } catch {}
       return "conflict";
     }
 
@@ -204,6 +205,11 @@ export class ContributionStore {
 
     if (existingEvent) {
       return existingEvent.payload_digest === payloadDigest ? "duplicate" : "conflict";
+    }
+
+    if (event.sequence <= row.last_sequence) {
+      try { console.warn(`[contribution-store] reorder: sequence ${event.sequence} <= last ${row.last_sequence} for ${peer}/${event.request_id} — rejecting`); } catch {}
+      return "conflict";
     }
 
     if (event.kind === "completed" || event.kind === "failed") {

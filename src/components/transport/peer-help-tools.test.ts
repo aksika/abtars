@@ -14,6 +14,7 @@ const mockDb: any = { prepare: () => ({ run: () => ({ changes: 1 }), get: () => 
 vi.mock("../tasks/kanban-board.js", () => ({
   kanbanEnqueue: (...args: unknown[]) => mockKanbanEnqueue(...args),
   kanbanUpdate: (...args: unknown[]) => mockKanbanUpdate(...args),
+  kanbanRunning: vi.fn(),
   kanbanGetCard: () => undefined,
   requireTaskDatabase: () => mockDb,
 }));

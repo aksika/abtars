@@ -134,6 +134,7 @@ export interface ContributionProvenanceV1 {
 }
 
 export interface ContributionProjectionV1 {
+  schema_version: 1;
   outcome: "completed" | "failed";
   summary: string;
   evidence: ReadonlyArray<{
