@@ -163,7 +163,7 @@ function supervisionSummary(cardId: number): string {
 
 function projectSupervisionSummary(cardId: number): string {
   try {
-    const { ProjectReviewStore } = require("../project-acceptance/project-review-store.js") as typeof import("../project-acceptance/project-review-store.js");
+    const { ProjectReviewStore, summarizeReviewCase } = require("../project-acceptance/project-review-store.js") as typeof import("../project-acceptance/project-review-store.js");
     const store = new ProjectReviewStore();
     const sup = store.getSupervision(cardId);
     if (!sup) return "";
@@ -172,6 +172,7 @@ function projectSupervisionSummary(cardId: number): string {
     if (sup.review_round) s += ` review:${sup.review_round}`;
     if (sup.repair_round) s += ` repair:${sup.repair_round}`;
     if (sup.blocked_reason) s += ` blocked:${sup.blocked_reason.slice(0, 80)}`;
+    s += summarizeReviewCase(store.getLatestReviewCase(cardId));
     if (sup.state === "accepted" && sup.accepted_decision_id) {
       s += ` accepted:${sup.accepted_decision_id.slice(0, 12)}`;
       try {

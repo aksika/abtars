@@ -19,6 +19,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // by spin-profiles.ts at runtime, so vi.mock works at the top of the test file.
 const orcLockUpdates: Array<string | number | null> = [];
 const activeOrcCardUpdates: Array<number | null> = [];
+const projectSupervision = new Map<number, unknown>();
+let projectStoreReadFails = false;
+const callbackSend = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("./transport/bridge-lock-transport.js", () => ({
   updateBridgeLockField: (field: string, val: unknown) => {
@@ -29,6 +32,21 @@ vi.mock("./transport/bridge-lock-transport.js", () => ({
 
 vi.mock("./transport/orc-tools.js", () => ({
   setActiveOrcCard: (val: number | null) => activeOrcCardUpdates.push(val),
+}));
+
+vi.mock("./project-acceptance/project-review-store.js", () => ({
+  ProjectReviewStore: class {
+    constructor() {
+      if (projectStoreReadFails) throw new Error("review store unavailable");
+    }
+    getSupervision(cardId: number): unknown {
+      return projectSupervision.get(cardId);
+    }
+  },
+}));
+
+vi.mock("./peer-transport/index.js", () => ({
+  getPeerTransport: () => ({ send: callbackSend }),
 }));
 
 vi.mock("./spin-notifications.js", () => ({
@@ -174,6 +192,9 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
   beforeEach(() => {
     spin = new Spin();
+    projectSupervision.clear();
+    projectStoreReadFails = false;
+    callbackSend.mockClear();
     setUserRegistryOverride(makeRegistry([
       makeUser("aksika", "master", 111),
       makeUser("adrika", "user", 222),
@@ -374,6 +395,32 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const noGoal = await spin.spin({ type: "S", prompt: "background", await: true });
       expect(withGoal.cardId).toBeDefined();
       expect(noGoal.cardId).toBeUndefined();
+    });
+
+    it("does not callback or complete a supervised O-card from the execution turn", async () => {
+      const cardId = kanbanEnqueue("supervised project", "peer");
+      projectSupervision.set(cardId, { state: "executing" });
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).not.toBe("done");
+      expect(callbackSend).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when O-card supervision cannot be read", async () => {
+      const cardId = kanbanEnqueue("unreadable project", "peer");
+      projectStoreReadFails = true;
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).not.toBe("done");
+      expect(callbackSend).not.toHaveBeenCalled();
     });
   });
 

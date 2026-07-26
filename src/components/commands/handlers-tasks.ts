@@ -209,7 +209,7 @@ function renderDetail(c: Awaited<ReturnType<typeof import("../tasks/kanban-board
   if (c.type) lines.push(`Type:     ${c.type}`);
   if (c.type === "O") {
     try {
-      const { ProjectReviewStore } = require("../project-acceptance/project-review-store.js") as typeof import("../project-acceptance/project-review-store.js");
+      const { ProjectReviewStore, summarizeReviewCase } = require("../project-acceptance/project-review-store.js") as typeof import("../project-acceptance/project-review-store.js");
       const store = new ProjectReviewStore();
       const sup = store.getSupervision(c.id);
       if (sup) {
@@ -218,6 +218,8 @@ function renderDetail(c: Awaited<ReturnType<typeof import("../tasks/kanban-board
         if (sup.review_round || sup.repair_round) lines.push(` Round:   review=${sup.review_round} repair=${sup.repair_round}`);
         if (sup.blocked_reason) lines.push(` Blocked: ${sup.blocked_reason.slice(0, 100)}`);
         if (sup.accepted_decision_id) lines.push(` Accept:  ${sup.accepted_decision_id.slice(0, 16)}`);
+        const reviewSummary = summarizeReviewCase(store.getLatestReviewCase(c.id));
+        if (reviewSummary) lines.push(` Review: ${reviewSummary.trim()}`);
       }
     } catch {}
   }

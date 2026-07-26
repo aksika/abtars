@@ -61,6 +61,33 @@ export interface ReviewCaseRow {
   superseded_at: string | null;
 }
 
+/** Bounded review facts shared by the Orc and task-list visibility surfaces. */
+export function summarizeReviewCase(row: ReviewCaseRow | undefined): string {
+  if (!row) return "";
+  try {
+    const snapshot = JSON.parse(row.case_json) as {
+      root_contract?: { criteria?: unknown[] };
+      criterion_inputs?: Array<{ coverage_hint?: string; retry_lineage_ids?: unknown[] }>;
+      uncovered_criteria?: unknown[];
+      contradiction_candidates?: unknown[];
+      child_summaries?: Array<{ attempts?: number }>;
+      budgets?: { total_cost?: number; total_tokens?: number };
+    };
+    const inputs = snapshot.criterion_inputs ?? [];
+    const totalCriteria = snapshot.root_contract?.criteria?.length ?? 0;
+    const coveredCriteria = inputs.filter(i => i.coverage_hint === "supported").length;
+    const gaps = snapshot.uncovered_criteria?.length ?? 0;
+    const contradictions = snapshot.contradiction_candidates?.length ?? 0;
+    const lineage = inputs.reduce((n, i) => n + (i.retry_lineage_ids?.length ?? 0), 0)
+      + (snapshot.child_summaries ?? []).filter(c => (c.attempts ?? 0) > 1).length;
+    const cost = snapshot.budgets?.total_cost === undefined ? "?" : String(snapshot.budgets.total_cost);
+    const tokens = snapshot.budgets?.total_tokens === undefined ? "?" : String(snapshot.budgets.total_tokens);
+    return ` coverage:${coveredCriteria}/${totalCriteria} gaps:${gaps} contradictions:${contradictions} lineage:${lineage} cost:${cost} tokens:${tokens}`;
+  } catch {
+    return " review:unavailable";
+  }
+}
+
 export interface ReviewDecisionRow {
   id: string;
   review_case_id: string;
@@ -444,6 +471,10 @@ export class ProjectReviewStore {
 
   getLatestOpenCase(projectCardId: number): ReviewCaseRow | undefined {
     return this.db.prepare(`SELECT * FROM project_review_cases WHERE project_card_id = ? AND status = 'open' ORDER BY round DESC LIMIT 1`).get(projectCardId) as ReviewCaseRow | undefined;
+  }
+
+  getLatestReviewCase(projectCardId: number): ReviewCaseRow | undefined {
+    return this.db.prepare(`SELECT * FROM project_review_cases WHERE project_card_id = ? ORDER BY round DESC, created_at DESC LIMIT 1`).get(projectCardId) as ReviewCaseRow | undefined;
   }
 
   getCasesForProject(projectCardId: number): ReviewCaseRow[] {

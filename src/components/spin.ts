@@ -794,17 +794,28 @@ export class Spin {
       // #1363 Task 10: supervised O-cards own their lifecycle via projectStateToKanban.
       // Do not let finishSpin prematurely mark them done — the reconciler decides terminal state.
       let shouldKanbanComplete = true;
+      let supervisedProject = false;
       if (spec.type === "O") {
         try {
           const { ProjectReviewStore } = require("./project-acceptance/project-review-store.js") as typeof import("./project-acceptance/project-review-store.js");
           const store = new ProjectReviewStore();
-          shouldKanbanComplete = !store.getSupervision(cardId);
-        } catch { /* no project-review-store — legacy path */ }
+          supervisedProject = Boolean(store.getSupervision(cardId));
+          shouldKanbanComplete = !supervisedProject;
+        } catch (err) {
+          // Fail closed: an O-card whose supervision state cannot be read must
+          // never be completed or reported as successful by the executor.
+          shouldKanbanComplete = false;
+          supervisedProject = true;
+          logWarn(TAG, `Card ${cardId}: cannot verify project supervision — deferring terminal settlement: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
       if (shouldKanbanComplete) {
         kanbanComplete(cardId, null, workerSummary);
       }
-      if (spec.callbackPeer) {
+      // Supervised project results are emitted by ProjectReviewService only
+      // after accepted settlement commits. The execution turn must not send a
+      // premature peer "done" callback.
+      if (spec.callbackPeer && !supervisedProject) {
         const card = kanbanGetCard(cardId);
         fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
       }
