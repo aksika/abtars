@@ -161,9 +161,31 @@ function supervisionSummary(cardId: number): string {
   } catch { return ""; }
 }
 
+function projectSupervisionSummary(cardId: number): string {
+  try {
+    const { ProjectReviewStore } = require("../project-acceptance/project-review-store.js") as typeof import("../project-acceptance/project-review-store.js");
+    const store = new ProjectReviewStore();
+    const sup = store.getSupervision(cardId);
+    if (!sup) return "";
+    let s = `project:${sup.state}`;
+    if (sup.generation) s += ` gen:${sup.generation}`;
+    if (sup.review_round) s += ` review:${sup.review_round}`;
+    if (sup.repair_round) s += ` repair:${sup.repair_round}`;
+    if (sup.blocked_reason) s += ` blocked:${sup.blocked_reason.slice(0, 80)}`;
+    if (sup.state === "accepted" && sup.accepted_decision_id) {
+      s += ` accepted:${sup.accepted_decision_id.slice(0, 12)}`;
+      try {
+        const card = require("../tasks/kanban-board.js").kanbanGetCard(cardId);
+        if (card?.delivered_at) s += ` delivered:${card.delivered_at.slice(0, 10)}`;
+      } catch {}
+    }
+    return ` [${s}]`;
+  } catch { return ""; }
+}
+
 const checkWorkersTool: ToolDefinition = {
   name: "check_workers",
-  description: "Check status of all workers on the current project. Returns their status and results, including supervision info for supervised Workers (#1366).",
+  description: "Check status of all workers on the current project. Returns their status and results, including project supervision info (#1363) and Worker supervision info (#1366).",
   parameters: {
     type: "object",
     properties: {
@@ -174,9 +196,13 @@ const checkWorkersTool: ToolDefinition = {
   async execute(args: Record<string, string>): Promise<string> {
     const cardId = args.project_card_id ? Number(args.project_card_id) : _activeOrcCardId;
     if (!cardId) return "[err] No active Orc project and no project_card_id provided.";
-    const { kanbanGetChildren } = await import("../tasks/kanban-board.js");
+    const { kanbanGetCard, kanbanGetChildren } = await import("../tasks/kanban-board.js");
+    const projectCard = kanbanGetCard(cardId);
+    let header = `Project #${cardId}`;
+    if (projectCard?.title) header += ` "${projectCard.title.slice(0, 60)}"`;
+    const projSup = projectSupervisionSummary(cardId);
+    if (projSup) header += projSup;
     const children = kanbanGetChildren(cardId);
-    if (children.length === 0) return "No workers spawned yet.";
 
     // Check for pending input requests on this project
     let inputNote = "";
@@ -191,6 +217,7 @@ const checkWorkersTool: ToolDefinition = {
       }
     } catch {}
 
+    if (children.length === 0) return `${header}\nNo workers spawned yet.${inputNote}`;
     const lines = children.map(c => {
       const icon = c.status === "done" ? "*" : c.status === "running" ? "~" : c.status === "failed" ? "x" : "+";
       const result = c.result_summary ? ` — ${c.result_summary.slice(0, 100)}` : "";
@@ -199,7 +226,7 @@ const checkWorkersTool: ToolDefinition = {
       const sup = supervisionSummary(c.id);
       return `${icon} #${c.id} ${c.title || "(untitled)"} (${c.status})${tokens}${source}${sup}${result}`;
     });
-    return `Workers (${children.length}):\n${lines.join("\n")}${inputNote}`;
+    return `${header}\nWorkers (${children.length}):\n${lines.join("\n")}${inputNote}`;
   },
 };
 

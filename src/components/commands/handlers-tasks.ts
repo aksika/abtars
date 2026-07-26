@@ -207,6 +207,20 @@ function renderDetail(c: Awaited<ReturnType<typeof import("../tasks/kanban-board
     `Status:   ${c.status}  |  Priority: ${c.priority}  |  Source: ${c.source}`,
   ];
   if (c.type) lines.push(`Type:     ${c.type}`);
+  if (c.type === "O") {
+    try {
+      const { ProjectReviewStore } = require("../project-acceptance/project-review-store.js") as typeof import("../project-acceptance/project-review-store.js");
+      const store = new ProjectReviewStore();
+      const sup = store.getSupervision(c.id);
+      if (sup) {
+        lines.push(`Project:  ${sup.state}`);
+        if (sup.generation) lines.push(` Gen:     ${sup.generation}`);
+        if (sup.review_round || sup.repair_round) lines.push(` Round:   review=${sup.review_round} repair=${sup.repair_round}`);
+        if (sup.blocked_reason) lines.push(` Blocked: ${sup.blocked_reason.slice(0, 100)}`);
+        if (sup.accepted_decision_id) lines.push(` Accept:  ${sup.accepted_decision_id.slice(0, 16)}`);
+      }
+    } catch {}
+  }
   if (c.labels) lines.push(`Labels:   ${c.labels}`);
   if (c.assignee && c.assignee !== "professor") lines.push(`Assignee: ${c.assignee}`);
   if (c.due_at) lines.push(`Due:      ${c.due_at.slice(0, 10)}`);

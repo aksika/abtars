@@ -791,7 +791,19 @@ export class Spin {
           if (outcome.settled) workerSummary = outcome.summary;
         } catch { /* non-supervised Workers pass through unchanged */ }
       }
-      kanbanComplete(cardId, null, workerSummary);
+      // #1363 Task 10: supervised O-cards own their lifecycle via projectStateToKanban.
+      // Do not let finishSpin prematurely mark them done — the reconciler decides terminal state.
+      let shouldKanbanComplete = true;
+      if (spec.type === "O") {
+        try {
+          const { ProjectReviewStore } = require("./project-acceptance/project-review-store.js") as typeof import("./project-acceptance/project-review-store.js");
+          const store = new ProjectReviewStore();
+          shouldKanbanComplete = !store.getSupervision(cardId);
+        } catch { /* no project-review-store — legacy path */ }
+      }
+      if (shouldKanbanComplete) {
+        kanbanComplete(cardId, null, workerSummary);
+      }
       if (spec.callbackPeer) {
         const card = kanbanGetCard(cardId);
         fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
