@@ -90,7 +90,7 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
   const { checkCommand, classifyCommand } = require("../guardrails.js") as typeof import("../guardrails.js");
   const cmdBlock = checkCommand(cmd);
   if (cmdBlock) {
-    logWarn("tool-registry", `Guardrails blocked: ${cmd.slice(0, 200)}`);
+    logWarn("tool-registry", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
     return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: cmdBlock, exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
   }
 
@@ -99,7 +99,7 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
   if (tier === "auth-required" && _actionGate) {
     return _actionGate.requestAuth("bash-auth", cmd).then((granted) => {
       if (!granted) {
-        logWarn("tool-registry", `Auth denied for: ${cmd.slice(0, 200)}`);
+        logWarn("tool-registry", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
         return JSON.stringify({ error: "policy_rejected", stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
       }
       return executeBash(cmd, timeout, signal);
@@ -107,7 +107,7 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
   }
 
   if (isBridgeSpawnCommand(cmd)) {
-    logWarn("tool-registry", `Blocked bridge-spawn command: ${cmd.slice(0, 200)}`);
+    logWarn("tool-registry", `Blocked bridge-spawn command [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
     return Promise.resolve(JSON.stringify({
       error: "policy_rejected",
       stderr: "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision; use launchctl inspection commands (launchctl list, launchctl print) or signal the existing process instead.",
@@ -117,7 +117,7 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
     }));
   }
   if (isBridgeKillCommand(cmd)) {
-    logWarn("tool-registry", `Blocked bridge-kill command: ${cmd.slice(0, 200)}`);
+    logWarn("tool-registry", `Blocked bridge-kill command [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
     return Promise.resolve(JSON.stringify({
       error: "policy_rejected",
       stderr: "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset or restart the bridge manually.",
