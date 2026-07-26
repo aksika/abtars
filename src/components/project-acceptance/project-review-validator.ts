@@ -171,10 +171,30 @@ export class ProjectReviewValidator {
       }
     }
 
-    // Evidence references must point to known items in the case
+    // Build set of valid evidence IDs from the case snapshot
+    const validEvidenceIds = new Set<string>();
+    for (const ci of caseSnapshot.criterion_inputs) {
+      for (const eid of ci.observed_evidence_ids) validEvidenceIds.add(eid);
+      for (const eid of ci.failed_or_inconclusive_check_ids) validEvidenceIds.add(eid);
+      for (const eid of ci.artifact_observation_ids) validEvidenceIds.add(eid);
+    }
+    for (const cc of caseSnapshot.contradiction_candidates) {
+      for (const eid of cc.evidence_ids) validEvidenceIds.add(eid);
+    }
+
+    // Evidence references in decisions must be known
     for (const c of decision.criteria) {
       for (const eid of c.evidence_ids) {
-        if (caseSnapshot.child_summaries.some(cs => cs.contract_id === eid || `card_${cs.card_id}` === eid)) continue;
+        if (!validEvidenceIds.has(eid)) {
+          errors.push(error("bad_reference", `$.criteria[${c.criterion_id}].evidence_ids`, `unknown evidence id "${eid}"`));
+        }
+      }
+    }
+    for (const cc of decision.contradictions) {
+      for (const eid of cc.evidence_ids) {
+        if (!validEvidenceIds.has(eid)) {
+          errors.push(error("bad_reference", `$.contradictions[${cc.id}].evidence_ids`, `unknown evidence id "${eid}"`));
+        }
       }
     }
 
@@ -225,6 +245,10 @@ export class ProjectReviewValidator {
       if (rootCriterionIds.has(c.criterion_id) && c.verdict !== "satisfied") {
         errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}]`, `required criterion "${c.criterion_id}" is ${c.verdict}, not satisfied`));
       }
+      // Satisfied criteria must cite evidence
+      if (c.verdict === "satisfied" && c.evidence_ids.length === 0) {
+        errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].evidence_ids`, `satisfied criterion "${c.criterion_id}" has no evidence`));
+      }
     }
 
     // Every required output must have valid disposition
@@ -250,6 +274,21 @@ export class ProjectReviewValidator {
     for (const r of decision.residual_risks) {
       if (r.blocking) {
         errors.push(error("invalid_proposal", `$.residual_risks`, "blocking residual risk prevents acceptance"));
+      }
+    }
+
+    // #1363 Task 6: enforce hard deadline and budgets
+    if (caseSnapshot.root_contract.limits?.hard_deadline_at) {
+      const deadline = new Date(caseSnapshot.root_contract.limits.hard_deadline_at).getTime();
+      if (Date.now() > deadline) {
+        errors.push(error("invalid_proposal", "$.limits.hard_deadline_at", "project hard deadline has passed"));
+      }
+    }
+    if (caseSnapshot.root_contract.limits?.max_cost !== undefined) {
+      if (caseSnapshot.budgets.total_cost === undefined) {
+        errors.push(error("invalid_proposal", "$.limits.max_cost", "cost usage is unavailable; cannot verify the configured max_cost"));
+      } else if (caseSnapshot.budgets.total_cost > caseSnapshot.root_contract.limits.max_cost) {
+        errors.push(error("invalid_proposal", "$.limits.max_cost", `cost ${caseSnapshot.budgets.total_cost} exceeds limit ${caseSnapshot.root_contract.limits.max_cost}`));
       }
     }
 

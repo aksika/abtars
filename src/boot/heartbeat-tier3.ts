@@ -97,13 +97,30 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
 
   heartbeat.registerTask(createUserSessionExpiryTask());
 
-  import("../components/reconciler.js").then(({ startReconciler, scanActiveProjects }) => {
+  import("../components/reconciler.js").then(({ startReconciler, scanActiveProjects, retryPendingReviewRequests }) => {
     startReconciler();
     heartbeat.registerTask({
       name: "reconciler-resync",
       execute: async () => {
         scanActiveProjects();
-        return { state: "ran" as const };
+        const { ProjectReviewStore } = await import("../components/project-acceptance/project-review-store.js");
+        const expired = new ProjectReviewStore().abandonExpiredRequests();
+        return { state: expired > 0 ? "ran" : "idle" as const };
+      },
+    });
+    heartbeat.registerTask({
+      name: "review-request-retry",
+      execute: async () => {
+        const count = retryPendingReviewRequests();
+        return { state: count > 0 ? "ran" : "idle" as const };
+      },
+    });
+    heartbeat.registerTask({
+      name: "project-acceptance-outbox",
+      execute: async () => {
+        const { drainAcceptanceOutbox } = await import("../components/project-acceptance/project-review-service.js");
+        const count = await drainAcceptanceOutbox();
+        return { state: count > 0 ? "ran" : "idle" as const };
       },
     });
   }).catch(err => logAndSwallow(TAG, "reconciler", err));

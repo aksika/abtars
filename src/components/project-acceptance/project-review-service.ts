@@ -1,13 +1,63 @@
 import { ProjectReviewStore } from "./project-review-store.js";
 import { ProjectReviewValidator, type ProjectReviewDecisionV1 } from "./project-review-validator.js";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
+import { nerve } from "../nerve.js";
+
+const MAX_INVALID_PROPOSALS = 5;
+
+function buildPeerAcceptanceEvent(cardId: number, decisionId: string, synthesis: string): { peer: string; payload: unknown } | undefined {
+  try {
+    const { kanbanGetCard } = require("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
+    const card = kanbanGetCard(cardId);
+    if (!card?.source_peer || !card.notes) return undefined;
+    const notes = JSON.parse(card.notes) as Record<string, unknown>;
+    const requestId = typeof notes.request_id === "string" ? notes.request_id : undefined;
+    const contributionRef = typeof notes.contribution_ref === "string" ? notes.contribution_ref : undefined;
+    if (!requestId || !contributionRef) return undefined;
+    return {
+      peer: card.source_peer,
+      payload: {
+        version: 1,
+        event_id: `accept_${decisionId}`,
+        sequence: 0,
+        request_id: requestId,
+        contribution_ref: contributionRef,
+        kind: "completed",
+        occurred_at: new Date().toISOString(),
+        summary: synthesis.slice(0, 1000),
+      },
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export async function drainAcceptanceOutbox(): Promise<number> {
+  const store = new ProjectReviewStore();
+  const pending = store.getPendingAcceptanceOutbox();
+  if (pending.length === 0) return 0;
+  const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
+  const broker = getPeerWsBroker();
+  if (!broker) return 0;
+  let sent = 0;
+  for (const row of pending) {
+    try {
+      await broker.sendRequest(row.peer, "help.event.v1", JSON.parse(row.payload_json));
+      if (store.markAcceptanceOutboxSent(row.id)) sent++;
+    } catch (err) {
+      store.markAcceptanceOutboxAttempt(row.id, err instanceof Error ? err.message : String(err));
+    }
+  }
+  return sent;
+}
 
 export type ReviewOutcome =
   | { kind: "accepted"; decisionId: string; summary: string }
   | { kind: "repair"; decisionId: string; summary: string }
   | { kind: "blocked"; decisionId: string; summary: string }
   | { kind: "needs_input"; decisionId: string; summary: string }
-  | { kind: "invalid"; errors: readonly string[] };
+  | { kind: "invalid"; errors: readonly string[] }
+  | { kind: "blocked_invalid"; decisionId: string; summary: string };
 
 export class ProjectReviewService {
   private store: ProjectReviewStore;
@@ -41,29 +91,41 @@ export class ProjectReviewService {
     // Validate the decision
     const errors = this.validator.validateDecision(decision, caseSnapshot);
     if (errors.length > 0) {
-      return { kind: "invalid", errors: errors.map(e => `[${e.path}] ${e.message}`) };
+      // Track invalid proposals
+      const { total, requestId } = this.store.incrementInvalidProposals(decision.review_case_id);
+      if (total >= MAX_INVALID_PROPOSALS && requestId) {
+        const cardId = decision.project_card_id;
+        const { decisionId } = this.store.settleBlocked(cardId, decision.review_case_id, { action: "blocked", reason: "Exceeded max invalid proposals" }, `Exceeded ${MAX_INVALID_PROPOSALS} invalid proposals`);
+        this.store.markReviewRequestSettled(requestId);
+        try { nerve.fire("card:failed", cardId); } catch {}
+        return {
+          kind: "blocked_invalid",
+          decisionId,
+          summary: `Project blocked after ${total} invalid proposals`,
+        };
+      }
+      return {
+        kind: "invalid",
+        errors: errors.map(e => `[${e.path}] ${e.message}`),
+      };
     }
 
-    const decisionDigest = `rd_${decision.project_card_id}_${decision.review_case_id}_${Date.now()}`;
-
-    // Persist decision
-    const { id: decisionId } = this.store.insertDecision(
-      decision.review_case_id,
-      decision,
-      decisionDigest,
-    );
-
-    // Transition state based on action
     const cardId = decision.project_card_id;
 
     switch (decision.action) {
       case "accept": {
-        this.store.setState(cardId, "accepted", { accepted_decision_id: decisionId });
-        // Update kanban card
-        try {
-          const { kanbanComplete } = require("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
-          kanbanComplete(cardId, null, decision.synthesis.slice(0, 500));
-        } catch {}
+        // Atomic settlement: decision + supervision + kanban in one transaction
+        const peerEvent = buildPeerAcceptanceEvent(cardId, `accept_${cardId}_${Date.now()}`, decision.synthesis);
+        const { decisionId } = this.store.settleAcceptance(
+          cardId,
+          decision.review_case_id,
+          decision,
+          decision.synthesis,
+          peerEvent,
+        );
+
+        // Fire events after commit
+        try { nerve.fire("card:done", cardId); } catch {}
         return {
           kind: "accepted",
           decisionId,
@@ -73,10 +135,18 @@ export class ProjectReviewService {
 
       case "repair": {
         const repairItems = decision.repair?.items ?? [];
-        this.store.setState(cardId, "repair_planned", {
-          generation: caseSnapshot.generation,
-        });
-        this.store.incrementGeneration(cardId);
+        // Persist the decision, advance generation, close the review turn, and
+        // reserve repair budget together so a restart cannot leave an open
+        // case blocking the next review round.
+        const totalRepairTokens = repairItems.reduce((sum, i) => sum + (i.budget?.max_tokens ?? 0), 0);
+        const { decisionId } = this.store.settleRepair(
+          cardId,
+          decision.review_case_id,
+          decision,
+          caseSnapshot.generation,
+          totalRepairTokens,
+        );
+
         return {
           kind: "repair",
           decisionId,
@@ -86,14 +156,15 @@ export class ProjectReviewService {
 
       case "blocked": {
         const blocker = decision.blocker!;
-        this.store.setState(cardId, "blocked", {
-          blocked_reason: blocker.blocker_class,
-          accepted_decision_id: decisionId,
-        });
-        try {
-          const { kanbanFail } = require("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
-          kanbanFail(cardId, `blocked: ${blocker.blocker_class}`);
-        } catch {}
+        // Atomic settlement: decision + supervision + kanban in one transaction
+        const { decisionId } = this.store.settleBlocked(
+          cardId,
+          decision.review_case_id,
+          decision,
+          blocker.blocker_class,
+        );
+        // Fire events after commit
+        try { nerve.fire("card:failed", cardId); } catch {}
         return {
           kind: "blocked",
           decisionId,
@@ -103,9 +174,22 @@ export class ProjectReviewService {
 
       case "needs_input": {
         const inputReq = decision.input_request!;
-        this.store.setState(cardId, "needs_input", {
-          active_review_case_id: decision.review_case_id,
-        });
+        const { decisionId } = this.store.settleNeedsInput(
+          cardId,
+          decision.review_case_id,
+          decision,
+          {
+            question: inputReq.question,
+            affectedCriterionIds: inputReq.affected_criterion_ids,
+            expectedResponseKind: inputReq.expected_response_kind,
+            context: inputReq.context,
+          },
+        );
+        // #1363 Task 8: Release Orc capacity — clear active card so Orc can serve other projects
+        try {
+          const { setActiveOrcCard } = require("../transport/orc-tools.js") as typeof import("../transport/orc-tools.js");
+          setActiveOrcCard(null);
+        } catch {}
         return {
           kind: "needs_input",
           decisionId,

@@ -10,7 +10,7 @@
 import { nerve } from "./nerve.js";
 import { spin } from "./spin.js";
 import {
-  kanbanFail, kanbanComplete, kanbanUpdate,
+  kanbanFail, kanbanUpdate,
   kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds,
   isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
@@ -22,6 +22,7 @@ import { ProjectReviewStore, type ProjectState } from "./project-acceptance/proj
 import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle } from "./worker-supervision-store.js";
+import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
 
 const TAG = "reconciler";
 const MAX_WORKERS = 10;
@@ -97,17 +98,70 @@ function reconcileProject(projectId: number): void {
   const project = kanbanGetCard(projectId);
   if (!project || project.status !== "running") return;
 
+  const reviewStore = new ProjectReviewStore();
+  const hasRootContract = reviewStore.contractExists(projectId);
+  const contractRow = hasRootContract ? reviewStore.getContractByProjectCardId(projectId) : undefined;
   const children = kanbanGetChildren(projectId);
 
   const now = Date.now();
   const projectStart = new Date(project.created_at + "Z").getTime();
+  let deadlineMs = projectStart + MAX_WALL_CLOCK_MS;
+  if (contractRow) {
+    try {
+      const contract = JSON.parse(contractRow.contract_json) as { limits?: { hard_deadline_at?: string } };
+      const configuredDeadline = contract.limits?.hard_deadline_at ? Date.parse(contract.limits.hard_deadline_at) : NaN;
+      if (Number.isFinite(configuredDeadline)) deadlineMs = configuredDeadline;
+    } catch {
+      // The contract was normalized before insertion; retain the safety cap if
+      // an old/corrupt row cannot provide a usable deadline.
+    }
+  }
 
-  // Circuit breaker: wall-clock — evaluated before zero-child early return
-  // so an expired project with no children is failed explicitly.
-  if (now - projectStart > MAX_WALL_CLOCK_MS) {
-    abortProject(projectId, children, "wall-clock exceeded (30min)");
+  // Circuit breaker: wall-clock — always first
+  if (now > deadlineMs) {
+    abortProject(projectId, children, deadlineMs === projectStart + MAX_WALL_CLOCK_MS
+      ? "wall-clock exceeded (30min)"
+      : "configured hard deadline exceeded");
     return;
   }
+
+  // ── Contract admission gate (#1363 Task 1a) — before zero-child return ──
+  if (!hasRootContract) {
+    const supervision = reviewStore.getSupervision(projectId);
+    if (!supervision) {
+      // No contract, no supervision — create awaiting_contract and wake Orc
+      reviewStore.ensureAwaitingContract(projectId);
+      logInfo(TAG, `Project ${projectId}: awaiting contract — dispatching Orc authoring turn`);
+      try {
+        spin.dispatch({ type: "O", goal: `Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, source: "agent", cardId: projectId });
+      } catch (err) {
+        logWarn(TAG, `Project ${projectId}: failed to dispatch Orc for contract authoring — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else if (supervision.state === "awaiting_contract") {
+      // Orc should already have been dispatched — retry if not
+      logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
+      try {
+      spin.dispatch({ type: "O", goal: `Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, source: "agent", cardId: projectId });
+      } catch {}
+    }
+    return;
+  }
+
+  // Supervised project — load supervision state
+  const supervision = reviewStore.getSupervision(projectId);
+  if (!supervision) {
+    logWarn(TAG, `Project ${projectId}: root contract exists but no supervision state — initializing`);
+    if (contractRow) {
+      reviewStore.initializeSupervision(projectId, contractRow.id);
+    }
+    return;
+  }
+
+  // Skip if project is already in a terminal state
+  if (supervision.state === "accepted" || supervision.state === "blocked") return;
+
+  // Handle awaiting_contract: Orc will use define_project_contract tool
+  if (supervision.state === "awaiting_contract") return;
 
   // Zero children before deadline — stay running, may still spawn work
   if (children.length === 0) return;
@@ -128,40 +182,135 @@ function reconcileProject(projectId: number): void {
     reconcileChildCard(child);
   }
 
-  // ── Project acceptance gate (#1363) ─────────────────────────────────────
-  const reviewStore = new ProjectReviewStore();
-  const hasRootContract = reviewStore.contractExists(projectId);
+  // Handle needs_input: check for answered input requests
+  if (supervision.state === "needs_input") {
+    const answered = reviewStore.getAnsweredInputRequests(projectId);
+    if (answered.length > 0) {
+      logInfo(TAG, `Project ${projectId}: ${answered.length} input(s) answered — creating new review case`);
+      reviewStore.clearInputNotice(projectId);
+      // Transition back to executing, then let the readiness check create a new case
+      const nextRound = supervision.review_round + 1;
+      reviewStore.stateTransition(projectId, ["needs_input"], "executing", { review_round: nextRound });
+      // Fall through to the normal readiness check below (new round creates a new case)
+    } else {
+      const pending = reviewStore.getPendingInputRequests().filter(r => r.project_card_id === projectId);
+      if (pending.length === 0) {
+        logWarn(TAG, `Project ${projectId}: needs_input state but no pending or answered requests — recovering`);
+        reviewStore.setState(projectId, "executing", { review_round: supervision.review_round + 1 });
+        // Fall through to readiness check
+      } else {
+        return; // still waiting — nothing to do
+      }
+    }
+  }
 
-  // Legacy unsupervised project — keep old behavior
-  if (!hasRootContract) {
-    if (children.every(c => c.status === "done" || c.status === "delivered")) {
-      logInfo(TAG, `Project ${projectId}: all children done (unsupervised)`);
-      const summaries = children.map(c => c.result_summary).filter(Boolean).join("\n");
-      kanbanComplete(projectId, null, summaries.slice(0, 500));
+  // Handle review_requested: retry dispatch if request is still pending, bound by attempts/deadline
+
+  // Handle review_requested: retry dispatch if request is still pending, bound by attempts/deadline
+  if (supervision.state === "review_requested") {
+    const openCase = reviewStore.getLatestOpenCase(projectId);
+    if (openCase) {
+      const existingReq = reviewStore.getReviewRequestByCaseId(openCase.id);
+      if (!existingReq) {
+        // No request — create one and dispatch (keep pending for retry)
+        const { id: rrId } = reviewStore.insertReviewRequest(projectId, openCase.id, supervision.generation);
+        try {
+          spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${openCase.id}`, source: "agent", cardId: projectId });
+          reviewStore.bumpReviewRequestAttempt(rrId);
+        } catch (err) {
+          logWarn(TAG, `Project ${projectId}: dispatch failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else if (existingReq.status === "pending") {
+        // cooldown check in getPendingReviewRequests prevents rapid retry
+        try {
+          spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${openCase.id}`, source: "agent", cardId: projectId });
+          reviewStore.bumpReviewRequestAttempt(existingReq.id);
+        } catch (err) {
+          logWarn(TAG, `Project ${projectId}: retry dispatch failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else if (existingReq.status === "abandoned") {
+        logWarn(TAG, `Project ${projectId}: review request abandoned — settling blocked`);
+        reviewStore.settleBlocked(projectId, openCase.id, { action: "blocked", reason: "Review request abandoned (attempts/deadline)" }, "Review abandoned");
+        try { nerve.fire("card:failed", projectId); } catch {}
+      }
     }
     return;
   }
 
-  // Supervised project — use acceptance gate
-  const supervision = reviewStore.getSupervision(projectId);
-  if (!supervision) {
-    // Root contract exists but supervision not initialized yet
-    logWarn(TAG, `Project ${projectId}: root contract exists but no supervision state — initializing`);
+  // Handle repair_planned: create child cards for each repair item
+  if (supervision.state === "repair_planned") {
+    const decision = reviewStore.getLatestDecisionForProject(projectId);
+    if (!decision) {
+      logWarn(TAG, `Project ${projectId}: repair_planned but no decision found`);
+      return;
+    }
+    const parsed = JSON.parse(decision.decision_json) as { repair?: { items: Array<{ id: string; affected_criterion_ids: string[]; strategy: string; required_evidence: string; capabilities: string[]; budget: { max_attempts?: number; max_tokens?: number } }> } };
+    const items = parsed.repair?.items ?? [];
+    if (items.length === 0) {
+      logWarn(TAG, `Project ${projectId}: repair_planned but no repair items`);
+      return;
+    }
+    // Load root contract for criterion mapping
     const contractRow = reviewStore.getContractByProjectCardId(projectId);
-    if (contractRow) {
-      reviewStore.initializeSupervision(projectId, contractRow.id);
+    const rootContract = contractRow ? JSON.parse(contractRow.contract_json) as { criteria: Array<{ id: string; description: string }> } : null;
+
+    const rootCardId = (() => {
+      try { return require("./tasks/kanban-board.js").resolveRootId(projectId) ?? projectId; } catch { return projectId; }
+    })();
+
+    for (const item of items) {
+      const goal = `Repair: ${item.strategy.slice(0, 200)}`;
+      logInfo(TAG, `Project ${projectId}: creating repair worker for item ${item.id} (criteria: ${item.affected_criterion_ids.join(",")})`);
+
+      // Build #1366 contract with root criterion mapping
+      const criteria = rootContract?.criteria
+        .filter(c => item.affected_criterion_ids.includes(c.id))
+        .map(c => ({ id: c.id, description: c.description })) ?? [];
+
+      const contract: WorkerAcceptanceContractV1 = {
+        schema_version: 1,
+        id: `repair_${projectId}_${item.id}_${Date.now()}`,
+        digest: "",
+        goal,
+        criteria: criteria.length > 0 ? criteria : [{ id: "repair", description: goal }],
+        expected_artifacts: [],
+        verification_commands: [],
+        required_capabilities: item.capabilities ?? [],
+        supports_root_criteria: [...item.affected_criterion_ids],
+        limits: { max_tokens: item.budget?.max_tokens },
+        provenance: { root_card_id: rootCardId, card_id: 0, authored_by: "orc", created_at: new Date().toISOString() },
+      };
+
+      try {
+        spin.spawnChild(projectId, { goal, source: "agent", contract });
+      } catch (err) {
+        logWarn(TAG, `Project ${projectId}: failed to dispatch repair worker for item ${item.id} — ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
+    reviewStore.setState(projectId, "repairing");
     return;
   }
 
-  // Skip if project is already in a terminal state
-  if (supervision.state === "accepted" || supervision.state === "blocked") return;
+  // Check if repair workers have completed
+  if (supervision.state === "repairing") {
+    const allTerminal = children.length > 0 && children.every(c => {
+      const terminalStatuses = ["done", "delivered", "failed"];
+      return terminalStatuses.includes(c.status);
+    });
+    if (allTerminal) {
+      logInfo(TAG, `Project ${projectId}: all repair children terminal — creating new review round`);
+      reviewStore.setState(projectId, "executing", { repair_round: supervision.repair_round + 1 });
+      // Fall through to readiness check below
+    } else {
+      return;
+    }
+  }
 
-  // Check if project is in repair mode — let repair work complete
-  if (supervision.state === "repair_planned" || supervision.state === "repairing") return;
+  // Re-read children after state transitions/reconciliation above (Fix 4: avoid stale snapshot)
+  const finalChildren = kanbanGetChildren(projectId);
 
   // Check review readiness: all children must be terminal
-  const allChildrenTerminal = children.every(c => {
+  const allChildrenTerminal = finalChildren.every(c => {
     const terminalStatuses = ["done", "delivered", "failed"];
     return terminalStatuses.includes(c.status);
   });
@@ -194,18 +343,61 @@ function reconcileProject(projectId: number): void {
     return;
   }
 
+  // Atomically insert case, transition state, and create durable review request
   const snapshotDigest = `rc_${projectId}_${supervision.generation}_${supervision.review_round + 1}`;
-  const { id: caseId } = reviewStore.insertReviewCase(
-    projectId,
-    supervision.generation,
-    supervision.review_round + 1,
-    snapshot,
-    snapshotDigest,
-  );
+  let caseId = "";
+  let reviewRequestId = "";
 
-  logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created (gen=${supervision.generation}, round=${supervision.review_round + 1}, criteria=${snapshot.root_contract.criteria.length}, uncovered=${snapshot.uncovered_criteria.length}, contradictions=${snapshot.contradiction_count})`);
+  reviewStore.db.transaction(() => {
+    const { id: cId } = reviewStore.insertReviewCase(
+      projectId,
+      supervision.generation,
+      supervision.review_round + 1,
+      snapshot,
+      snapshotDigest,
+    );
+    caseId = cId;
 
-  // TODO(Task 6): Create Orc review request / wake Orc session
+    const transitioned = reviewStore.stateTransition(
+      projectId,
+      ["review_ready"] as ProjectState[],
+      "review_requested",
+    );
+    if (!transitioned) throw new Error(`failed to transition project ${projectId} to review_requested`);
+
+    const { id: rrId } = reviewStore.insertReviewRequest(projectId, cId, supervision.generation);
+    reviewRequestId = rrId;
+  });
+
+  logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created, request ${reviewRequestId} (gen=${supervision.generation}, round=${supervision.review_round + 1})`);
+
+  // Attempt to dispatch Orc — keep request pending so heartbeat retry can recover
+  try {
+    spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${caseId}`, source: "agent", cardId: projectId });
+    reviewStore.bumpReviewRequestAttempt(reviewRequestId);
+  } catch (err) {
+    logWarn(TAG, `Project ${projectId}: failed to dispatch Orc review — ${err instanceof Error ? err.message : String(err)} (request ${reviewRequestId} stays pending)`);
+  }
+}
+
+/** #1363 Task 6: Drive review dispatch from pending requests. Returns count dispatched. */
+function dispatchPendingReviewRequests(): number {
+  const store = new ProjectReviewStore();
+  const pending = store.getPendingReviewRequests();
+  let dispatched = 0;
+  for (const req of pending) {
+    try {
+      spin.dispatch({ type: "O", goal: `Review project #${req.project_card_id}: project_card_id=${req.project_card_id}, project_generation=${req.generation}, review_case_id=${req.review_case_id}`, source: "agent", cardId: req.project_card_id });
+      // Keep the request pending. spin.dispatch() returns successfully even
+      // when the Orc concurrency gate leaves the card queued; marking it
+      // dispatched here would make that durable request unrecoverable.
+      store.bumpReviewRequestAttempt(req.id);
+      dispatched++;
+    } catch (err) {
+      logWarn(TAG, `Failed to dispatch pending review request ${req.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return dispatched;
 }
 
 // ── #1405: Pi executor lane ──────────────────────────────────────────────────
@@ -426,11 +618,28 @@ export function requestReconcileForProject(cardId: number): void {
   wakeCard(cardId);
 }
 
+/** #1363 Task 6: Retry pending review requests. Returns count dispatched. */
+export function retryPendingReviewRequests(): number {
+  return dispatchPendingReviewRequests();
+}
+
 /** #1414: Scan all running O-type projects and schedule reconciliation. Returns candidate count. */
 export function scanActiveProjects(): number {
   const projectIds = kanbanRunningProjectIds();
   for (const projectId of projectIds) wakeCard(projectId);
   return projectIds.length;
+}
+
+/** Answer a pending input request. Returns true if the answer was accepted. */
+export function answerInputRequest(requestId: string, response: string): boolean {
+  const store = new ProjectReviewStore();
+  const answered = store.answerInputRequest(requestId, response);
+  if (answered) {
+    // Wake the project
+    const rows = store.db.prepare(`SELECT project_card_id FROM project_input_requests WHERE id = ?`).get(requestId) as { project_card_id: number } | undefined;
+    if (rows) requestReconcile(rows.project_card_id);
+  }
+  return answered;
 }
 
 export function startReconciler(): void {

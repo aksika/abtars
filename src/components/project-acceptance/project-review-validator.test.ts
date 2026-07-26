@@ -40,13 +40,18 @@ describe("ProjectReviewValidator", () => {
           { id: "o1", description: "Report", kind: "file", required: true },
           { id: "o2", description: "Notes", kind: "logical", required: false },
         ],
+        limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
       },
-      criterion_inputs: [],
+      criterion_inputs: [
+        { criterion_id: "c1", description: "Works", evidence_expectation: "artifact", mapped_child_contract_ids: [], observed_evidence_ids: ["v1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: ["a1"], retry_lineage_ids: [], coverage_hint: "supported" },
+        { criterion_id: "c2", description: "Accurate", evidence_expectation: "synthesis", mapped_child_contract_ids: [], observed_evidence_ids: ["v2"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" },
+      ],
       contradiction_candidates: [],
       uncovered_criteria: [],
       child_summaries: [],
+      peer_contributions: [],
       budgets: { total_cost: 0, total_tokens: 0, wall_clock_ms: 1000, review_round: 1, repair_round: 0 },
-      evidence_ref_count: 0,
+      evidence_ref_count: 2,
       contradiction_count: 0,
     };
   }
@@ -196,6 +201,20 @@ describe("ProjectReviewValidator", () => {
   });
 
   describe("accept validation", () => {
+    it("rejects acceptance when a configured cost cap has no usage data", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const cappedSnapshot: ReviewCaseSnapshot = {
+        ...snapshot,
+        root_contract: {
+          ...snapshot.root_contract,
+          limits: { ...snapshot.root_contract.limits!, max_cost: 1 },
+        },
+        budgets: { ...snapshot.budgets, total_cost: undefined },
+      };
+      const errors = validator.validateDecision(makeValidDecision(pid, {}, caseId), cappedSnapshot);
+      expect(errors.some(e => e.path === "$.limits.max_cost")).toBe(true);
+    });
+
     it("rejects accept when a required criterion is not satisfied", () => {
       const { caseId, pid, snapshot } = setupCase();
       const decision = makeValidDecision(pid, {

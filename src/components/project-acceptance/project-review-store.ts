@@ -4,6 +4,7 @@ import type { ProjectAcceptanceContractV1 } from "./project-contract.js";
 // ── Project supervision states ────────────────────────────────────────────────
 
 export type ProjectState =
+  | "awaiting_contract"
   | "executing"
   | "review_ready"
   | "review_requested"
@@ -15,7 +16,7 @@ export type ProjectState =
   | "accepted";
 
 export const VALID_PROJECT_STATES: readonly ProjectState[] = [
-  "executing", "review_ready", "review_requested", "reviewing",
+  "awaiting_contract", "executing", "review_ready", "review_requested", "reviewing",
   "repair_planned", "repairing", "needs_input", "blocked", "accepted",
 ];
 
@@ -80,6 +81,13 @@ export function projectStateToKanban(state: ProjectState): KanbanProjection {
   }
 }
 
+export function initializeProjectSupervision(store: ProjectReviewStore, projectCardId: number, contractId: string): void {
+  store.db.prepare(`
+    INSERT OR REPLACE INTO project_supervision (project_card_id, contract_id, state, updated_at)
+    VALUES (?, ?, 'awaiting_contract', ?)
+  `).run(projectCardId, contractId, new Date().toISOString());
+}
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 export class ProjectReviewStore {
@@ -104,7 +112,8 @@ export class ProjectReviewStore {
       CREATE TABLE IF NOT EXISTS project_supervision (
         project_card_id INTEGER PRIMARY KEY,
         contract_id TEXT UNIQUE NOT NULL,
-        state TEXT NOT NULL DEFAULT 'executing' CHECK(state IN ('executing','review_ready','review_requested','reviewing','repair_planned','repairing','needs_input','blocked','accepted')),
+        state TEXT NOT NULL DEFAULT 'awaiting_contract' CHECK(state IN ('awaiting_contract','executing','review_ready','review_requested','reviewing','repair_planned','repairing','needs_input','blocked','accepted')),
+        invalid_contract_proposals INTEGER NOT NULL DEFAULT 0,
         generation INTEGER NOT NULL DEFAULT 1,
         review_round INTEGER NOT NULL DEFAULT 0,
         repair_round INTEGER NOT NULL DEFAULT 0,
@@ -112,6 +121,48 @@ export class ProjectReviewStore {
         accepted_decision_id TEXT,
         blocked_reason TEXT,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS project_review_requests (
+        id TEXT PRIMARY KEY,
+        project_card_id INTEGER NOT NULL,
+        review_case_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','dispatched','settled','abandoned')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        invalid_proposals INTEGER NOT NULL DEFAULT 0,
+        deadline_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(review_case_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS project_acceptance_outbox (
+        id TEXT PRIMARY KEY,
+        project_card_id INTEGER NOT NULL,
+        peer TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        sent_at TEXT,
+        UNIQUE(project_card_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS project_input_requests (
+        id TEXT PRIMARY KEY,
+        project_card_id INTEGER NOT NULL,
+        review_case_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        affected_criterion_ids TEXT NOT NULL,
+        expected_response_kind TEXT NOT NULL DEFAULT 'text',
+        context TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL,
+        answered_at TEXT,
+        response_text TEXT
       );
 
       CREATE TABLE IF NOT EXISTS project_review_cases (
@@ -161,11 +212,20 @@ export class ProjectReviewStore {
 
   // ── Supervision state ─────────────────────────────────────────────────
 
-  initializeSupervision(projectCardId: number, contractId: string): void {
+  initializeSupervision(projectCardId: number, contractId: string, initialState: ProjectState = "executing"): void {
     this.db.prepare(`
-      INSERT INTO project_supervision (project_card_id, contract_id, state, updated_at)
-      VALUES (?, ?, 'executing', ?)
-    `).run(projectCardId, contractId, new Date().toISOString());
+      INSERT OR REPLACE INTO project_supervision (project_card_id, contract_id, state, updated_at)
+      VALUES (?, ?, ?, ?)
+    `).run(projectCardId, contractId, initialState, new Date().toISOString());
+  }
+
+  /** Create the durable admission state before the first Orc authoring turn. */
+  ensureAwaitingContract(projectCardId: number): boolean {
+    const result = this.db.prepare(`
+      INSERT OR IGNORE INTO project_supervision (project_card_id, contract_id, state, updated_at)
+      VALUES (?, '', 'awaiting_contract', ?)
+    `).run(projectCardId, new Date().toISOString());
+    return result.changes > 0;
   }
 
   getSupervision(projectCardId: number): ProjectSupervisionRow | undefined {
@@ -220,6 +280,153 @@ export class ProjectReviewStore {
     return TERMINAL_PROJECT_STATES.includes(row.state);
   }
 
+  // ── Review requests ────────────────────────────────────────────────────
+
+  insertReviewRequest(projectCardId: number, reviewCaseId: string, generation: number, deadlineAt?: string): { id: string } {
+    const id = `rr_${projectCardId}_${Date.now()}`;
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO project_review_requests (id, project_card_id, review_case_id, generation, deadline_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, projectCardId, reviewCaseId, generation, deadlineAt ?? null, now, now);
+    return { id };
+  }
+
+  /** #1363 Task 6: requests that need dispatch — pending, under max attempts, and not recently retried */
+  getPendingReviewRequests(maxAttempts = 5, retryCooldownMs = 30_000): Array<{ id: string; project_card_id: number; review_case_id: string; generation: number; attempts: number; deadline_at: string | null }> {
+    const cooldown = new Date(Date.now() - retryCooldownMs).toISOString();
+    return this.db.prepare(`
+      SELECT id, project_card_id, review_case_id, generation, attempts, deadline_at
+      FROM project_review_requests
+      WHERE status = 'pending' AND attempts < ? AND updated_at < ?
+      ORDER BY created_at ASC
+    `).all(maxAttempts, cooldown) as Array<{ id: string; project_card_id: number; review_case_id: string; generation: number; attempts: number; deadline_at: string | null }>;
+  }
+
+  /** Bump attempt counter but keep status pending — allows retry after cooldown */
+  bumpReviewRequestAttempt(requestId: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE project_review_requests SET attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'pending'
+    `).run(new Date().toISOString(), requestId);
+    return result.changes > 0;
+  }
+
+  abandonExpiredRequests(maxAttempts = 5): number {
+    const now = new Date().toISOString();
+    // Abandon requests that exceeded max attempts or passed deadline
+    const exceededAttempts = this.db.prepare(`
+      UPDATE project_review_requests SET status = 'abandoned', updated_at = ?, last_error = 'exceeded max attempts'
+      WHERE status IN ('pending','dispatched') AND attempts >= ?
+    `).run(maxAttempts);
+    const expired = this.db.prepare(`
+      UPDATE project_review_requests SET status = 'abandoned', updated_at = ?, last_error = 'deadline passed'
+      WHERE status IN ('pending','dispatched') AND deadline_at IS NOT NULL AND deadline_at < ?
+    `).run(now, now);
+    return exceededAttempts.changes + expired.changes;
+  }
+
+  markReviewRequestDispatched(requestId: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE project_review_requests SET status = 'dispatched', attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'pending'
+    `).run(new Date().toISOString(), requestId);
+    return result.changes > 0;
+  }
+
+  markReviewRequestSettled(requestId: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE project_review_requests SET status = 'settled', updated_at = ? WHERE id = ? AND status IN ('pending','dispatched')
+    `).run(new Date().toISOString(), requestId);
+    return result.changes > 0;
+  }
+
+  incrementInvalidProposals(caseId: string): { total: number; requestId: string } {
+    const existing = this.db.prepare(`SELECT id, invalid_proposals FROM project_review_requests WHERE review_case_id = ?`).get(caseId) as { id: string; invalid_proposals: number } | undefined;
+    if (!existing) return { total: 0, requestId: "" };
+    const total = existing.invalid_proposals + 1;
+    this.db.prepare(`UPDATE project_review_requests SET invalid_proposals = ?, updated_at = ? WHERE id = ?`).run(total, new Date().toISOString(), existing.id);
+    return { total, requestId: existing.id };
+  }
+
+  getReviewRequestByCaseId(reviewCaseId: string): { id: string; status: string } | undefined {
+    return this.db.prepare(`SELECT id, status FROM project_review_requests WHERE review_case_id = ?`).get(reviewCaseId) as { id: string; status: string } | undefined;
+  }
+
+  getPendingAcceptanceOutbox(limit = 20): Array<{ id: string; project_card_id: number; peer: string; payload_json: string; attempts: number }> {
+    return this.db.prepare(`
+      SELECT id, project_card_id, peer, payload_json, attempts
+      FROM project_acceptance_outbox WHERE sent_at IS NULL ORDER BY created_at ASC LIMIT ?
+    `).all(limit) as Array<{ id: string; project_card_id: number; peer: string; payload_json: string; attempts: number }>;
+  }
+
+  markAcceptanceOutboxSent(id: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE project_acceptance_outbox SET sent_at = ?, updated_at = ? WHERE id = ? AND sent_at IS NULL
+    `).run(new Date().toISOString(), new Date().toISOString(), id);
+    return result.changes > 0;
+  }
+
+  markAcceptanceOutboxAttempt(id: string, error: string): void {
+    this.db.prepare(`
+      UPDATE project_acceptance_outbox SET attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ? AND sent_at IS NULL
+    `).run(error.slice(0, 1000), new Date().toISOString(), id);
+  }
+
+  // ── Input requests ────────────────────────────────────────────────────
+
+  insertInputRequest(
+    projectCardId: number,
+    reviewCaseId: string,
+    question: string,
+    affectedCriterionIds: string[],
+    expectedResponseKind: string,
+    context?: string,
+  ): { id: string } {
+    const id = `ir_${projectCardId}_${Date.now()}`;
+    this.db.prepare(`
+      INSERT INTO project_input_requests (id, project_card_id, review_case_id, question, affected_criterion_ids, expected_response_kind, context, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, projectCardId, reviewCaseId, question, JSON.stringify(affectedCriterionIds), expectedResponseKind, context ?? null, new Date().toISOString());
+    return { id };
+  }
+
+  getAnsweredInputRequests(projectCardId: number): Array<{ id: string; question: string; response_text: string }> {
+    return this.db.prepare(`
+      SELECT id, question, response_text FROM project_input_requests WHERE project_card_id = ? AND status = 'answered' ORDER BY answered_at ASC
+    `).all(projectCardId) as Array<{ id: string; question: string; response_text: string }>;
+  }
+
+  getPendingInputRequestsForProject(projectCardId: number): Array<{ id: string; project_card_id: number; question: string; expected_response_kind: string; created_at: string }> {
+    return this.db.prepare(`
+      SELECT id, project_card_id, question, expected_response_kind, created_at FROM project_input_requests WHERE project_card_id = ? AND status = 'pending' ORDER BY created_at ASC
+    `).all(projectCardId) as Array<{ id: string; project_card_id: number; question: string; expected_response_kind: string; created_at: string }>;
+  }
+
+  getPendingInputRequests(): Array<{ id: string; project_card_id: number; question: string; created_at: string }> {
+    return this.db.prepare(`
+      SELECT id, project_card_id, question, created_at FROM project_input_requests WHERE status = 'pending' ORDER BY created_at ASC
+    `).all() as Array<{ id: string; project_card_id: number; question: string; created_at: string }>;
+  }
+
+  answerInputRequest(requestId: string, responseText: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE project_input_requests SET status = 'answered', response_text = ?, answered_at = ? WHERE id = ? AND status = 'pending'
+    `).run(responseText, new Date().toISOString(), requestId);
+    return result.changes > 0;
+  }
+
+  setInputNotice(projectCardId: number, question: string): void {
+    this.db.prepare(`
+      UPDATE kanban_board SET error = ?, updated_at = datetime('now') WHERE id = ?
+    `).run(`needs_input: ${question}`.slice(0, 1000), projectCardId);
+  }
+
+  clearInputNotice(projectCardId: number): void {
+    this.db.prepare(`
+      UPDATE kanban_board SET error = NULL, updated_at = datetime('now')
+      WHERE id = ? AND error LIKE 'needs_input:%'
+    `).run(projectCardId);
+  }
+
   // ── Review cases ──────────────────────────────────────────────────────
 
   insertReviewCase(projectCardId: number, generation: number, round: number, snapshot: unknown, snapshotDigest: string): { id: string } {
@@ -259,12 +466,214 @@ export class ProjectReviewStore {
     return { id };
   }
 
+  /**
+   * Atomically settle an accepted decision: persist decision, set supervision to
+   * accepted, and update kanban card to done — all in one transaction.
+   * Returns the decision ID. Caller must fire nerve events after commit.
+   */
+  settleAcceptance(
+    cardId: number,
+    reviewCaseId: string,
+    decision: unknown,
+    synthesis: string,
+    peerEvent?: { peer: string; payload: unknown },
+  ): { decisionId: string } {
+    const decisionId = `rd_settle_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const decisionDigest = `sd_${cardId}_${reviewCaseId}_${Date.now()}`;
+    const now = new Date().toISOString();
+
+    this.db.transaction(() => {
+      // Insert decision
+      this.db.prepare(`
+        INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(decisionId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
+
+      // Set supervision to accepted
+      this.db.prepare(`
+        UPDATE project_supervision SET state = 'accepted', accepted_decision_id = ?, updated_at = ? WHERE project_card_id = ?
+      `).run(decisionId, now, cardId);
+
+      // Update kanban card via projectStateToKanban mapping
+      this.db.prepare(`
+        UPDATE kanban_board SET status = ?, result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?
+      `).run(projectStateToKanban("accepted"), synthesis.slice(0, 4000), cardId);
+
+      // Close the case and request in the same transaction as acceptance. If
+      // settlement fails, the open case remains retryable instead of being
+      // left superseded with no accepted decision.
+      this.db.prepare(`
+        UPDATE project_review_cases SET status = 'accepted' WHERE id = ? AND status = 'open'
+      `).run(reviewCaseId);
+      this.db.prepare(`
+        UPDATE project_review_requests SET status = 'settled', updated_at = ?
+        WHERE review_case_id = ? AND status IN ('pending', 'dispatched')
+      `).run(now, reviewCaseId);
+
+      if (peerEvent) {
+        const payload = peerEvent.payload && typeof peerEvent.payload === "object"
+          ? { ...(peerEvent.payload as Record<string, unknown>), acceptance_id: decisionId }
+          : peerEvent.payload;
+        this.db.prepare(`
+          INSERT OR IGNORE INTO project_acceptance_outbox
+            (id, project_card_id, peer, payload_json, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(`ao_${decisionId}`, cardId, peerEvent.peer, JSON.stringify(payload), now, now);
+      }
+    });
+
+    return { decisionId };
+  }
+
+  /**
+   * Atomically settle a blocked decision: persist decision, set supervision to blocked,
+   * and update kanban card to failed.
+   */
+  settleBlocked(
+    cardId: number,
+    reviewCaseId: string,
+    decision: unknown,
+    blockerClass: string,
+  ): { decisionId: string } {
+    const decisionId = `rd_block_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const decisionDigest = `sd_blk_${cardId}_${reviewCaseId}_${Date.now()}`;
+    const now = new Date().toISOString();
+
+    this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(decisionId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
+
+      this.db.prepare(`
+        UPDATE project_supervision SET state = 'blocked', blocked_reason = ?, accepted_decision_id = ?, updated_at = ? WHERE project_card_id = ?
+      `).run(blockerClass, decisionId, now, cardId);
+
+      this.db.prepare(`
+        UPDATE kanban_board SET status = ?, error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?
+      `).run(projectStateToKanban("blocked"), `blocked: ${blockerClass}`.slice(0, 1000), cardId);
+
+      this.db.prepare(`
+        UPDATE project_review_cases SET status = 'superseded', superseded_at = ? WHERE id = ? AND status = 'open'
+      `).run(now, reviewCaseId);
+      this.db.prepare(`
+        UPDATE project_review_requests SET status = 'settled', updated_at = ?
+        WHERE review_case_id = ? AND status IN ('pending', 'dispatched')
+      `).run(now, reviewCaseId);
+    });
+
+    return { decisionId };
+  }
+
+  /** Atomically persist a repair decision, advance its generation, and close the review turn. */
+  settleRepair(
+    cardId: number,
+    reviewCaseId: string,
+    decision: unknown,
+    expectedGeneration: number,
+    additionalTokens: number,
+  ): { decisionId: string } {
+    const decisionId = `rd_repair_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const decisionDigest = `sd_repair_${cardId}_${reviewCaseId}_${Date.now()}`;
+    const now = new Date().toISOString();
+
+    this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(decisionId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
+
+      const state = this.db.prepare(`
+        UPDATE project_supervision
+        SET state = 'repair_planned', generation = generation + 1, updated_at = ?
+        WHERE project_card_id = ? AND generation = ? AND state IN ('review_ready', 'review_requested', 'reviewing')
+      `).run(now, cardId, expectedGeneration);
+      if (state.changes !== 1) throw new Error(`stale or already-settled repair for project ${cardId}`);
+
+      if (additionalTokens > 0) {
+        this.db.prepare(`
+          UPDATE kanban_board SET max_tokens = COALESCE(max_tokens, 0) + ?, updated_at = datetime('now') WHERE id = ?
+        `).run(additionalTokens, cardId);
+      }
+
+      this.db.prepare(`
+        UPDATE project_review_cases SET status = 'superseded', superseded_at = ? WHERE id = ? AND status = 'open'
+      `).run(now, reviewCaseId);
+      this.db.prepare(`
+        UPDATE project_review_requests SET status = 'settled', updated_at = ?
+        WHERE review_case_id = ? AND status IN ('pending', 'dispatched')
+      `).run(now, reviewCaseId);
+    });
+
+    return { decisionId };
+  }
+
+  /** Atomically persist a needs-input decision, publish its local notice, and close the review turn. */
+  settleNeedsInput(
+    cardId: number,
+    reviewCaseId: string,
+    decision: unknown,
+    input: {
+      question: string;
+      affectedCriterionIds: string[];
+      expectedResponseKind: string;
+      context?: string;
+    },
+  ): { decisionId: string } {
+    const decisionId = `rd_input_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const decisionDigest = `sd_input_${cardId}_${reviewCaseId}_${Date.now()}`;
+    const inputId = `ir_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const now = new Date().toISOString();
+
+    this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(decisionId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
+
+      const state = this.db.prepare(`
+        UPDATE project_supervision SET state = 'needs_input', active_review_case_id = ?, updated_at = ?
+        WHERE project_card_id = ? AND state IN ('review_ready', 'review_requested', 'reviewing')
+      `).run(reviewCaseId, now, cardId);
+      if (state.changes !== 1) throw new Error(`stale or already-settled input request for project ${cardId}`);
+
+      this.db.prepare(`
+        INSERT INTO project_input_requests
+          (id, project_card_id, review_case_id, question, affected_criterion_ids, expected_response_kind, context, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(inputId, cardId, reviewCaseId, input.question, JSON.stringify(input.affectedCriterionIds), input.expectedResponseKind, input.context ?? null, now);
+
+      this.db.prepare(`
+        UPDATE kanban_board SET error = ?, updated_at = datetime('now') WHERE id = ?
+      `).run(`needs_input: ${input.question}`.slice(0, 1000), cardId);
+
+      this.db.prepare(`
+        UPDATE project_review_cases SET status = 'superseded', superseded_at = ? WHERE id = ? AND status = 'open'
+      `).run(now, reviewCaseId);
+      this.db.prepare(`
+        UPDATE project_review_requests SET status = 'settled', updated_at = ?
+        WHERE review_case_id = ? AND status IN ('pending', 'dispatched')
+      `).run(now, reviewCaseId);
+    });
+
+    return { decisionId };
+  }
+
   getDecision(decisionId: string): ReviewDecisionRow | undefined {
     return this.db.prepare(`SELECT * FROM project_review_decisions WHERE id = ?`).get(decisionId) as ReviewDecisionRow | undefined;
   }
 
   getDecisionByCaseId(reviewCaseId: string): ReviewDecisionRow | undefined {
     return this.db.prepare(`SELECT * FROM project_review_decisions WHERE review_case_id = ?`).get(reviewCaseId) as ReviewDecisionRow | undefined;
+  }
+
+  getLatestDecisionForProject(projectCardId: number): ReviewDecisionRow | undefined {
+    return this.db.prepare(`
+      SELECT d.* FROM project_review_decisions d
+      JOIN project_review_cases c ON d.review_case_id = c.id
+      WHERE c.project_card_id = ?
+      ORDER BY d.created_at DESC LIMIT 1
+    `).get(projectCardId) as ReviewDecisionRow | undefined;
   }
 
   hasDecisionForCase(reviewCaseId: string): boolean {

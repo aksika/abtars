@@ -62,9 +62,55 @@ vi.mock("./executor-lease-store.js", () => ({
   })),
 }));
 
+function makeReviewStoreMock() {
+  const transactionImpl = vi.fn((fn: () => void) => fn());
+  return {
+    contractExists: vi.fn().mockReturnValue(false),
+    getSupervision: vi.fn().mockReturnValue(undefined),
+    ensureAwaitingContract: vi.fn().mockReturnValue(true),
+    initializeSupervision: vi.fn(),
+    getContractByProjectCardId: vi.fn().mockReturnValue(undefined),
+    getLatestOpenCase: vi.fn().mockReturnValue(undefined),
+    stateTransition: vi.fn().mockReturnValue(false),
+    getLatestDecisionForProject: vi.fn().mockReturnValue(undefined),
+    getAnsweredInputRequests: vi.fn().mockReturnValue([]),
+    getPendingInputRequests: vi.fn().mockReturnValue([]),
+    clearInputNotice: vi.fn(),
+    insertReviewCase: vi.fn().mockReturnValue({ id: "rc_test_1" }),
+    insertReviewRequest: vi.fn().mockReturnValue({ id: "rr_test_1" }),
+    markReviewRequestDispatched: vi.fn().mockReturnValue(true),
+    getReviewRequestByCaseId: vi.fn().mockReturnValue(undefined),
+    setState: vi.fn(),
+    db: { transaction: transactionImpl },
+  };
+}
+
 vi.mock("./project-acceptance/project-review-store.js", () => ({
   ProjectReviewStore: vi.fn().mockImplementation(function() {
-    return { contractExists: vi.fn().mockReturnValue(false) };
+    return reviewStoreMock ?? makeReviewStoreMock();
+  }),
+}));
+
+vi.mock("./project-acceptance/project-review-case.js", () => ({
+  ReviewCaseAssembler: vi.fn().mockImplementation(function() {
+    return {
+      assembleCase: vi.fn().mockReturnValue({
+        schema_version: 1,
+        project_card_id: 1,
+        generation: 1,
+        round: 1,
+        created_at: new Date().toISOString(),
+        root_contract: { id: "pc_test_1", digest: "d1", goal: "test", criteria: [], required_outputs: [], limits: { max_tokens: 100000, max_cost: undefined, hard_deadline_at: undefined, max_review_rounds: 5, max_repair_rounds: 3 } },
+        criterion_inputs: [],
+        contradiction_candidates: [],
+        uncovered_criteria: [],
+        child_summaries: [],
+        peer_contributions: [],
+        budgets: { total_cost: 0, total_tokens: 0, wall_clock_ms: 1000, review_round: 1, repair_round: 0 },
+        evidence_ref_count: 0,
+        contradiction_count: 0,
+      }),
+    };
   }),
 }));
 
@@ -78,9 +124,24 @@ vi.mock("./retry/retry-service.js", () => ({
 // ── Import after mocks ─────────────────────────────────────────────────────────
 
 let mod: typeof import("./reconciler.js");
+let reviewStoreMock: {
+  contractExists: ReturnType<typeof vi.fn>;
+  getSupervision: ReturnType<typeof vi.fn>;
+  ensureAwaitingContract: ReturnType<typeof vi.fn>;
+  initializeSupervision: ReturnType<typeof vi.fn>;
+  getContractByProjectCardId: ReturnType<typeof vi.fn>;
+  getLatestOpenCase: ReturnType<typeof vi.fn>;
+  stateTransition: ReturnType<typeof vi.fn>;
+  getLatestDecisionForProject: ReturnType<typeof vi.fn>;
+  getAnsweredInputRequests: ReturnType<typeof vi.fn>;
+  getPendingInputRequests: ReturnType<typeof vi.fn>;
+  clearInputNotice: ReturnType<typeof vi.fn>;
+  setState: ReturnType<typeof vi.fn>;
+};
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  reviewStoreMock = makeReviewStoreMock();
   isUnblockedMock.mockReturnValue(true);
   getLatestAttemptMock.mockReturnValue(null);
   cardHasContractMock.mockReturnValue(false);
@@ -308,8 +369,25 @@ describe("Reconciler — #1411 domain guard", () => {
       expect(kanbanFailMock).toHaveBeenCalledWith(1, expect.stringContaining("wall-clock"));
     });
 
-    it("non-expired project with all-terminal children completes normally (unsupervised)", async () => {
-      // Unsupervised path: contractExists returns false → legacy completion
+      it("supervised project with all-terminal children transitions to review_ready and dispatches Orc", async () => {
+      // reviewStoreMock is already fresh from beforeEach
+      reviewStoreMock.contractExists.mockReturnValue(true);
+      reviewStoreMock.getSupervision.mockReturnValue({
+        project_card_id: 1,
+        contract_id: "pc_test_1",
+        state: "executing",
+        generation: 1,
+        review_round: 0,
+        repair_round: 0,
+        active_review_case_id: null,
+        accepted_decision_id: null,
+        blocked_reason: null,
+        updated_at: new Date().toISOString(),
+      });
+      reviewStoreMock.stateTransition
+        .mockReturnValueOnce(true)   // executing → review_ready
+        .mockReturnValueOnce(true);  // review_ready → review_requested (inside transaction)
+
       const card = makeCard({
         id: 1, status: "running", type: "O",
         created_at: new Date().toISOString(),
@@ -323,7 +401,29 @@ describe("Reconciler — #1411 domain guard", () => {
       mod.requestReconcile(1);
       await flush();
 
-      expect(kanbanCompleteMock).toHaveBeenCalledWith(1, null, expect.any(String));
+      expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+      expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["review_ready"], "review_requested");
+      expect(reviewStoreMock.insertReviewRequest).toHaveBeenCalledWith(1, "rc_test_1", 1);
+      expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "O", cardId: 1 }));
+      expect(kanbanCompleteMock).not.toHaveBeenCalled();
+    });
+
+    it("project with all-terminal children but no contract does not auto-complete (legacy removed)", async () => {
+      // No root contract → should not auto-complete
+      const card = makeCard({
+        id: 1, status: "running", type: "O",
+        created_at: new Date().toISOString(),
+      });
+      kanbanGetCardMock.mockReturnValue(card);
+      kanbanGetChildrenMock.mockReturnValue([
+        { ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 },
+        { ...makeCard({ id: 3, status: "done", type: "W" }), parent_id: 1 },
+      ]);
+
+      mod.requestReconcile(1);
+      await flush();
+
+      expect(kanbanCompleteMock).not.toHaveBeenCalled();
     });
   });
 });

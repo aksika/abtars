@@ -55,6 +55,7 @@ const spawnWorkerTool: ToolDefinition = {
       goal: { type: "string", description: "What the worker should accomplish (detailed instruction)" },
       title: { type: "string", description: "Short label for the worker card (optional)" },
       priority: { type: "string", description: "CRITICAL | HIGH | MEDIUM | LOW", enum: ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
+      project_card_id: { type: "number", description: "Explicit supervised project card ID" },
       criteria: { type: "string", description: "JSON array of {id, description} acceptance criteria (supervised)" },
       expected_artifacts: { type: "string", description: "JSON array of {id, kind, ref, required, criterion_ids} expected artifacts (supervised)" },
       verification_commands: { type: "string", description: "JSON array of {id, argv, cwd, timeout_ms, criterion_ids} verification commands (supervised)" },
@@ -64,7 +65,17 @@ const spawnWorkerTool: ToolDefinition = {
     required: ["goal"],
   },
   async execute(args: Record<string, string>): Promise<string> {
-    if (!_activeOrcCardId) return "[err] No active Orc project. spawn_worker only works during orchestration.";
+    const projectCardId = args.project_card_id ? Number(args.project_card_id) : _activeOrcCardId;
+    if (!projectCardId) return "[err] No active Orc project. spawn_worker only works during orchestration.";
+
+    // #1363 Task 7: refuse spawn during review/repair/input turns
+    const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+    const reviewStore = new ProjectReviewStore();
+    const sup = reviewStore.getSupervision(projectCardId);
+    if (sup && (sup.state === "review_requested" || sup.state === "reviewing" || sup.state === "repair_planned" || sup.state === "repairing" || sup.state === "needs_input")) {
+      return `[err] Cannot spawn workers while project is in state "${sup.state}". Finalize review or wait for repair to complete.`;
+    }
+
     const goal = args.goal;
     if (!goal) return "[err] goal is required";
     const { spin } = await import("../spin.js");
@@ -87,14 +98,14 @@ const spawnWorkerTool: ToolDefinition = {
       limits: {},
       provenance: { root_card_id: 0, card_id: 0, authored_by: "orc", created_at: "" },
     } : undefined;
-    const cardId = spin.spawnChild(_activeOrcCardId, {
+    const cardId = spin.spawnChild(projectCardId, {
       goal,
       title: args.title || goal.slice(0, 40),
       source: "agent",
       priority: args.priority as any,
       contract,
     });
-    logInfo(TAG, `spawn_worker card:${cardId} parent:${_activeOrcCardId} — ${(args.title || goal).slice(0, 60)}${hasStructuredData ? " [supervised]" : ""}`);
+    logInfo(TAG, `spawn_worker card:${cardId} parent:${projectCardId} — ${(args.title || goal).slice(0, 60)}${hasStructuredData ? " [supervised]" : ""}`);
     return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"${hasStructuredData ? " [supervised]" : ""}`;
   },
 };
@@ -153,12 +164,33 @@ function supervisionSummary(cardId: number): string {
 const checkWorkersTool: ToolDefinition = {
   name: "check_workers",
   description: "Check status of all workers on the current project. Returns their status and results, including supervision info for supervised Workers (#1366).",
-  parameters: { type: "object", properties: {}, required: [] },
-  async execute(): Promise<string> {
-    if (!_activeOrcCardId) return "[err] No active Orc project.";
+  parameters: {
+    type: "object",
+    properties: {
+      project_card_id: { type: "number", description: "Explicit supervised project card ID" },
+    },
+    required: [],
+  },
+  async execute(args: Record<string, string>): Promise<string> {
+    const cardId = args.project_card_id ? Number(args.project_card_id) : _activeOrcCardId;
+    if (!cardId) return "[err] No active Orc project and no project_card_id provided.";
     const { kanbanGetChildren } = await import("../tasks/kanban-board.js");
-    const children = kanbanGetChildren(_activeOrcCardId);
+    const children = kanbanGetChildren(cardId);
     if (children.length === 0) return "No workers spawned yet.";
+
+    // Check for pending input requests on this project
+    let inputNote = "";
+    try {
+      const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+      const store = new ProjectReviewStore();
+      const pendingInputs = store.getPendingInputRequestsForProject(cardId);
+      if (pendingInputs.length > 0) {
+        inputNote = `\n\n⚠ ${pendingInputs.length} pending input request(s):\n` + pendingInputs.map(r =>
+          `  [${r.id}] ${r.question.slice(0, 200)} (response kind: ${r.expected_response_kind})`
+        ).join("\n");
+      }
+    } catch {}
+
     const lines = children.map(c => {
       const icon = c.status === "done" ? "*" : c.status === "running" ? "~" : c.status === "failed" ? "x" : "+";
       const result = c.result_summary ? ` — ${c.result_summary.slice(0, 100)}` : "";
@@ -167,7 +199,7 @@ const checkWorkersTool: ToolDefinition = {
       const sup = supervisionSummary(c.id);
       return `${icon} #${c.id} ${c.title || "(untitled)"} (${c.status})${tokens}${source}${sup}${result}`;
     });
-    return `Workers (${children.length}):\n${lines.join("\n")}`;
+    return `Workers (${children.length}):\n${lines.join("\n")}${inputNote}`;
   },
 };
 
@@ -180,20 +212,22 @@ const cancelWorkerTool: ToolDefinition = {
     type: "object",
     properties: {
       card_id: { type: "string", description: "The card ID of the worker to cancel" },
+      project_card_id: { type: "number", description: "Explicit supervised project card ID" },
     },
     required: ["card_id"],
   },
   async execute(args: Record<string, string>): Promise<string> {
-    if (!_activeOrcCardId) return "[err] No active Orc project.";
+    const projectCardId = args.project_card_id ? Number(args.project_card_id) : _activeOrcCardId;
+    if (!projectCardId) return "[err] No active Orc project and no project_card_id provided.";
     const cardId = parseInt(args.card_id ?? "", 10);
     if (isNaN(cardId)) return "[err] Invalid card_id.";
     const { kanbanGetCard, kanbanFail } = await import("../tasks/kanban-board.js");
     const card = kanbanGetCard(cardId);
     if (!card) return `[err] Card #${cardId} not found.`;
-    if (card.parent_id !== _activeOrcCardId) return `[err] Card #${cardId} is not a child of this project.`;
+    if (card.parent_id !== projectCardId) return `[err] Card #${cardId} is not a child of this project.`;
     if (card.status === "done" || card.status === "delivered") return `Card #${cardId} already completed.`;
     kanbanFail(cardId, "cancelled by Orc");
-    logInfo(TAG, `cancel_worker card:${cardId} (parent:${_activeOrcCardId})`);
+    logInfo(TAG, `cancel_worker card:${cardId} (parent:${projectCardId})`);
     return `x Worker #${cardId} cancelled.`;
   },
 };
@@ -208,6 +242,7 @@ const reviewWorkerFailureTool: ToolDefinition = {
     properties: {
       attempt_id: { type: "string", description: "The attempt ID to review (shown in check_workers output)" },
       action: { type: "string", description: "retry | stop | needs_input", enum: ["retry", "stop", "needs_input"] },
+      project_card_id: { type: "number", description: "Explicit supervised project card ID" },
       strategy: { type: "string", description: "If retry: what strategy to change (instruction for the next attempt)" },
       do_not_repeat: { type: "string", description: "JSON array of things not to repeat on the next attempt" },
       preferred_executor: { type: "string", description: "Optional preferred executor ID for the retry" },
@@ -216,7 +251,8 @@ const reviewWorkerFailureTool: ToolDefinition = {
     required: ["attempt_id", "action"],
   },
   async execute(args: Record<string, string>): Promise<string> {
-    if (!_activeOrcCardId) return "[err] No active Orc project.";
+    const projectCardId = args.project_card_id ? Number(args.project_card_id) : _activeOrcCardId;
+    if (!projectCardId) return "[err] No active Orc project.";
     const attemptId = args.attempt_id;
     if (!attemptId) return "[err] attempt_id is required";
     const action = args.action;
@@ -224,7 +260,7 @@ const reviewWorkerFailureTool: ToolDefinition = {
     try {
       const { RetryService } = await import("../retry/retry-service.js");
       const service = new RetryService();
-      const packet = service.getReviewPacket(attemptId, _activeOrcCardId);
+      const packet = service.getReviewPacket(attemptId, projectCardId);
       if ("error" in packet) return `[err] ${packet.error}`;
 
       const doNotRepeat: string[] = args.do_not_repeat ? JSON.parse(args.do_not_repeat) : [];
@@ -237,24 +273,142 @@ const reviewWorkerFailureTool: ToolDefinition = {
       };
 
       if (action === "retry") {
-        const result = service.buildOrcDirective(attemptId, _activeOrcCardId, response);
+        const result = service.buildOrcDirective(attemptId, projectCardId, response);
         if ("error" in result) return `[err] ${result.error}`;
         if (result.directive) {
           return `✓ Retry directive created for attempt ${attemptId}. Next attempt ordinal: ${result.directive.target_ordinal}. Mode: ${result.directive.mode}. Fingerprint: ${result.directive.semantic_change_fingerprint.slice(0, 16)}...`;
         }
         return `[err] No directive created`;
       } else if (action === "stop") {
-        const result = service.buildOrcDirective(attemptId, _activeOrcCardId, response);
+        const result = service.buildOrcDirective(attemptId, projectCardId, response);
         if ("error" in result) return `${result.error}`;
         return `✓ Stop recorded for attempt ${attemptId}. Worker will not be retried.`;
       } else {
-        const result = service.buildOrcDirective(attemptId, _activeOrcCardId, response);
+        const result = service.buildOrcDirective(attemptId, projectCardId, response);
         if ("error" in result) return `${result.error}`;
         return `✓ Needs-input recorded for attempt ${attemptId}. Fresh operator input required before retry.`;
       }
     } catch (err) {
       logInfo(TAG, `review_worker_failure error: ${err}`);
       return `[err] ${String(err)}`;
+    }
+  },
+};
+
+// ── define_project_contract (#1363 Task 1a) ─────────────────────────────────────
+
+const MAX_INVALID_CONTRACT_PROPOSALS = 3;
+
+const defineProjectContractTool: ToolDefinition = {
+  name: "define_project_contract",
+  description: "Author a root acceptance contract for the current supervised project. Required before any workers can be spawned.",
+  parameters: {
+    type: "object",
+    properties: {
+      goal: { type: "string", description: "Project goal" },
+      project_card_id: { type: "number", description: "Explicit supervised project card ID" },
+      criteria: { type: "string", description: "JSON array of {id, description, evidence_expectation} — required: true, evidence_expectation: observed|artifact|synthesis" },
+      required_outputs: { type: "string", description: "JSON array of {id, description, kind, required} — kind: file|directory|report|logical" },
+      constraints: { type: "string", description: "JSON array of constraint strings" },
+      hard_deadline_at: { type: "string", description: "ISO deadline (optional)" },
+      max_tokens: { type: "number", description: "Max tokens (optional)" },
+      max_cost: { type: "number", description: "Max cost (optional)" },
+    },
+    required: ["goal", "criteria", "project_card_id"],
+  },
+  async execute(args: Record<string, string>): Promise<string> {
+    const cardId = Number(args.project_card_id);
+    if (!Number.isSafeInteger(cardId) || cardId < 1) return "[err] project_card_id is required and must be a positive integer.";
+
+    try {
+      const { normalizeContract, createContractId } = await import("../project-acceptance/project-contract.js");
+      const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+
+      const store = new ProjectReviewStore();
+      const supervision = store.getSupervision(cardId);
+
+      // Only valid when awaiting_contract or no supervision yet
+      if (supervision && supervision.state !== "awaiting_contract") {
+        return `[err] Project is in state "${supervision.state}", not awaiting_contract`;
+      }
+
+      // Parse inputs
+      let criteria: unknown[];
+      try { criteria = JSON.parse(args.criteria ?? "[]") as unknown[]; } catch { return "[err] criteria must be valid JSON array"; }
+      if (criteria.length === 0) return "[err] At least one criterion is required";
+
+      let outputs: unknown[] = [];
+      try { outputs = JSON.parse(args.required_outputs ?? "[]") as unknown[]; } catch { return "[err] required_outputs must be valid JSON array"; }
+
+      let constraints: string[] = [];
+      try { constraints = JSON.parse(args.constraints ?? "[]") as string[]; } catch { return "[err] constraints must be valid JSON array"; }
+
+      // Build raw contract object
+      const now = new Date().toISOString();
+      const card = (await import("../tasks/kanban-board.js")).kanbanGetCard(cardId);
+      const raw: Record<string, unknown> = {
+        schema_version: 1,
+        id: createContractId(),
+        digest: "",
+        project_card_id: cardId,
+        goal: args.goal ?? "",
+        criteria,
+        required_outputs: outputs,
+        constraints,
+        limits: {
+          hard_deadline_at: args.hard_deadline_at || undefined,
+          max_tokens: args.max_tokens ? Number(args.max_tokens) : undefined,
+          max_cost: args.max_cost ? Number(args.max_cost) : undefined,
+          max_review_rounds: 10,   // policy, not from Orc
+          max_repair_rounds: 5,    // policy, not from Orc
+        },
+        provenance: {
+          requested_by: card?.source ?? "agent",
+          authored_by: "orc",
+          created_at: now,
+        },
+      };
+
+      const normalized = normalizeContract(raw);
+      if (!normalized.ok) {
+        const errs = normalized.errors.map(e => `  [${e.path}] ${e.message}`).join("\n");
+
+        // Track invalid proposals
+        if (supervision) {
+          const row = store.db.prepare(`SELECT invalid_contract_proposals FROM project_supervision WHERE project_card_id = ?`).get(cardId) as { invalid_contract_proposals: number } | undefined;
+          const attempts = (row?.invalid_contract_proposals ?? 0) + 1;
+          store.db.prepare(`UPDATE project_supervision SET invalid_contract_proposals = ? WHERE project_card_id = ?`).run(attempts, cardId);
+          if (attempts >= MAX_INVALID_CONTRACT_PROPOSALS) {
+            store.settleBlocked(cardId, "contract_admission", { action: "blocked", reason: "Invalid contract proposals exhausted" }, "Invalid contract proposals exhausted");
+            return `✗ Project blocked after ${attempts} invalid proposals.\n${errs}`;
+          }
+        }
+
+        const attemptNum = supervision ? (store.db.prepare(`SELECT invalid_contract_proposals FROM project_supervision WHERE project_card_id = ?`).get(cardId) as { invalid_contract_proposals: number } | undefined)?.invalid_contract_proposals ?? 1 : 1;
+        return `[err] Invalid contract:\n${errs}\n\nAttempt ${attemptNum}/${MAX_INVALID_CONTRACT_PROPOSALS}. Provide a corrected contract.`;
+      }
+
+      // Insert contract + initialize supervision + project budget
+      store.db.transaction(() => {
+        store.insertContract(normalized.contract);
+        store.initializeSupervision(cardId, normalized.contract.id, "executing");
+
+        // Project budget limits onto kanban card
+        const maxTokens = normalized.contract.limits.max_tokens;
+        const maxCost = normalized.contract.limits.max_cost;
+        if (maxTokens !== undefined || maxCost !== undefined) {
+          const sets: string[] = [];
+          const vals: unknown[] = [];
+          if (maxTokens !== undefined) { sets.push("max_tokens = ?"); vals.push(maxTokens); }
+          if (maxCost !== undefined) { sets.push("max_cost = ?"); vals.push(maxCost); }
+          vals.push(cardId);
+          store.db.prepare(`UPDATE kanban_board SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+        }
+      });
+
+      return `✓ Root contract defined (${normalized.contract.id}, digest: ${normalized.contract.digest.slice(0, 12)}…). Project may now spawn workers.`;
+    } catch (err) {
+      return `[err] define_project_contract error: ${String(err)}`;
     }
   },
 };
@@ -268,6 +422,9 @@ const reviewProjectTool: ToolDefinition = {
     type: "object",
     properties: {
       action: { type: "string", description: "accept | repair | blocked | needs_input", enum: ["accept", "repair", "blocked", "needs_input"] },
+      project_card_id: { type: "number", description: "Explicit supervised project card ID" },
+      project_generation: { type: "number", description: "Expected project supervision generation" },
+      review_case_id: { type: "string", description: "Explicit review case ID" },
       criteria: { type: "string", description: "JSON array of {criterion_id, verdict, evidence_ids, rationale} — every root criterion must have a verdict" },
       outputs: { type: "string", description: "JSON array of {output_id, disposition, evidence_ids}" },
       contradictions: { type: "string", description: "JSON array of {id, affected_criterion_ids, evidence_ids, disposition, rationale}" },
@@ -278,10 +435,16 @@ const reviewProjectTool: ToolDefinition = {
       what_was_attempted: { type: "string", description: "What was attempted before blocking (required if action=blocked)" },
       input_question: { type: "string", description: "Question for user input (required if action=needs_input)" },
     },
-    required: ["action", "criteria", "synthesis"],
+    required: ["action", "project_card_id", "project_generation", "review_case_id", "criteria", "synthesis"],
   },
   async execute(args: Record<string, string>): Promise<string> {
-    if (!_activeOrcCardId) return "[err] No active Orc project.";
+    const projectCardId = Number(args.project_card_id);
+    const projectGeneration = Number(args.project_generation);
+    if (!Number.isSafeInteger(projectCardId) || projectCardId < 1) return "[err] project_card_id is required and must be a positive integer.";
+    if (!Number.isSafeInteger(projectGeneration) || projectGeneration < 1) return "[err] project_generation is required and must be a positive integer.";
+    const explicitCaseId = args.review_case_id;
+    if (!explicitCaseId) return "[err] review_case_id is required.";
+
     const action = args.action ?? "";
     if (!["accept", "repair", "blocked", "needs_input"].includes(action)) return "[err] action must be accept, repair, blocked, or needs_input";
 
@@ -295,12 +458,24 @@ const reviewProjectTool: ToolDefinition = {
       const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
 
       const store = new ProjectReviewStore();
-      const supervision = store.getSupervision(_activeOrcCardId);
+      const supervision = store.getSupervision(projectCardId);
       if (!supervision) return "[err] No project supervision state found. Is this a supervised project?";
-      if (supervision.state !== "review_ready" && supervision.state !== "reviewing") return `[err] Project is in state "${supervision.state}", not review_ready`;
+      if (supervision.generation !== projectGeneration) return `[err] Project generation mismatch: expected ${supervision.generation}, got ${projectGeneration}`;
+      if (supervision.state !== "review_ready" && supervision.state !== "review_requested" && supervision.state !== "reviewing") return `[err] Project is in state "${supervision.state}", not ready for review`;
 
-      const openCase = store.getLatestOpenCase(_activeOrcCardId);
-      if (!openCase) return "[err] No open review case found";
+      // If explicit case ID provided, validate it; otherwise find latest open case
+      let openCase;
+      if (explicitCaseId) {
+        openCase = store.getReviewCase(explicitCaseId);
+        if (!openCase) return `[err] Review case "${explicitCaseId}" not found`;
+        if (openCase.project_card_id !== projectCardId) return `[err] Case "${explicitCaseId}" does not belong to project ${projectCardId}`;
+      }
+      if (!openCase || openCase.status !== "open") return `[err] Review case "${explicitCaseId}" is not open`;
+
+      // Transition from review_requested to reviewing if needed
+      if (supervision.state === "review_requested") {
+        store.stateTransition(projectCardId, ["review_requested"], "reviewing");
+      }
 
       const service = new ProjectReviewService();
 
@@ -327,10 +502,10 @@ const reviewProjectTool: ToolDefinition = {
 
       const decision: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1 = {
         schema_version: 1,
-        id: `rd_${_activeOrcCardId}_${Date.now()}`,
-        project_card_id: _activeOrcCardId,
+        id: `rd_${projectCardId}_${Date.now()}`,
+        project_card_id: projectCardId,
         review_case_id: openCase.id,
-        project_generation: supervision.generation,
+        project_generation: projectGeneration,
         action: action as import("../project-acceptance/project-review-validator.js").ProjectReviewAction,
         criteria,
         outputs,
@@ -351,6 +526,7 @@ const reviewProjectTool: ToolDefinition = {
         case "repair":
           return `→ Repair planned (${result.decisionId}). ${result.summary}`;
         case "blocked":
+        case "blocked_invalid":
           return `✗ Project blocked (${result.decisionId}). ${result.summary}`;
         case "needs_input":
           return `? Input requested (${result.decisionId}). ${result.summary}`;
@@ -366,5 +542,5 @@ const reviewProjectTool: ToolDefinition = {
 // ── Export ────────────────────────────────────────────────────────────────────
 
 export function getOrcTools(): ToolDefinition[] {
-  return [spawnWorkerTool, checkWorkersTool, cancelWorkerTool, reviewWorkerFailureTool, reviewProjectTool];
+  return [defineProjectContractTool, spawnWorkerTool, checkWorkersTool, cancelWorkerTool, reviewWorkerFailureTool, reviewProjectTool];
 }

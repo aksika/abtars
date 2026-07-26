@@ -9,6 +9,16 @@ export interface DeliverDeps {
 }
 
 export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<void> {
+  // #1363 Task 9: O-type cards (projects) only deliver if they have an accepted supervision state
+  if (card.type === "O") {
+    const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+    const store = new ProjectReviewStore();
+    const sup = store.getSupervision(card.id);
+    if (!sup || sup.state !== "accepted") {
+      return; // No delivery for non-accepted O-cards
+    }
+  }
+
   kanbanSetDelivering(card.id);
   const chatId = deps.chatIdFor(card);
 

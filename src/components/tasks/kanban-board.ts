@@ -69,6 +69,7 @@ export interface KanbanCard {
   completed_at: string | null;
   delivered_at: string | null;
   max_tokens: number | null;
+  max_cost: number | null;
   tokens_used: number | null;
   delivery_mode: string;
   chat_id: string | null;
@@ -113,6 +114,7 @@ function db(): SqliteDb | null {
     )`);
     // Migrations — safe to re-run (silently skip if column exists)
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_tokens INTEGER`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_cost REAL`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN progress TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_mode TEXT DEFAULT 'deliver'`); } catch {}
