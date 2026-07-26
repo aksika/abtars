@@ -514,16 +514,28 @@ function collectDaemon(
   let activeRaw = "unknown";
   let mainPid: number | null = null;
   if (isMac) {
-    // launchctl list output: PID\tstatus\tlabel
-    // PID > 0 = running, PID = "-" = loaded but stopped, exit code 3 = not loaded
+    // launchctl list output: old macOS = tab-separated "PID\tstatus\tlabel",
+    // new macOS = plist format with "PID = <number>;"
     const pidField = output.split("\t")[0]?.trim();
     if (pidField === "-" || r?.status === 3 || (output === "" && r?.status !== 0)) {
       activeRaw = "loaded (not running)";
-    } else if (pidField) {
+    } else if (pidField && /^\d+$/.test(pidField)) {
       const parsed = parseInt(pidField, 10);
-      if (!isNaN(parsed) && parsed > 0) {
+      if (parsed > 0) {
         mainPid = parsed;
         activeRaw = "running";
+      }
+    } else {
+      // New macOS plist format: extract "PID" = <number>;
+      const pidMatch = output.match(/"PID"\s*=\s*(\d+);/);
+      if (pidMatch?.[1]) {
+        const parsed = parseInt(pidMatch[1], 10);
+        if (parsed > 0) {
+          mainPid = parsed;
+          activeRaw = "running";
+        } else {
+          activeRaw = "loaded (not running)";
+        }
       }
     }
   } else {

@@ -306,6 +306,30 @@ describe("collectDaemon macOS launchd probe labels", () => {
     const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
     expect(probeUnit).toBe("abtars-watchdog");
   });
+
+  it("parses new macOS plist format: running PID", () => {
+    const plistOutput = `{
+  "PID" = 31235;
+  "Label" = "com.abtars.watchdog";
+  "LastExitStatus" = 0;
+  "LimitLoadToSessionType" = "Aqua";
+  "OnDemand" = false;
+}`;
+    const pidMatch = plistOutput.match(/"PID"\s*=\s*(\d+);/);
+    expect(pidMatch?.[1]).toBe("31235");
+    const parsed = pidMatch?.[1] ? parseInt(pidMatch[1], 10) : null;
+    expect(parsed).toBe(31235);
+  });
+
+  it("parses new macOS plist format: not running (PID = 0)", () => {
+    const plistOutput = `{
+  "PID" = 0;
+  "Label" = "com.abtars.watchdog";
+  "LastExitStatus" = 256;
+}`;
+    const pidMatch = plistOutput.match(/"PID"\s*=\s*(\d+);/);
+    expect(pidMatch?.[1]).toBe("0");
+  });
 });
 
 // ── systemctl timeout: /status cannot hang ───────────────────────────────────
