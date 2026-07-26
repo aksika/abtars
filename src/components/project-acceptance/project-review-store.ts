@@ -344,7 +344,7 @@ export class ProjectReviewStore {
     const exceededAttempts = this.db.prepare(`
       UPDATE project_review_requests SET status = 'abandoned', updated_at = ?, last_error = 'exceeded max attempts'
       WHERE status IN ('pending','dispatched') AND attempts >= ?
-    `).run(maxAttempts);
+    `).run(now, maxAttempts);
     const expired = this.db.prepare(`
       UPDATE project_review_requests SET status = 'abandoned', updated_at = ?, last_error = 'deadline passed'
       WHERE status IN ('pending','dispatched') AND deadline_at IS NOT NULL AND deadline_at < ?

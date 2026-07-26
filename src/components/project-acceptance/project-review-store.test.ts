@@ -249,6 +249,17 @@ describe("ProjectReviewStore", () => {
     });
   });
 
+  describe("review request maintenance", () => {
+    it("abandons requests at the attempt limit", () => {
+      const { store: s } = setupProject();
+      const requestId = s.insertReviewRequest(123, "case-maintenance", 1).id;
+      s.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(5, requestId);
+
+      expect(s.abandonExpiredRequests()).toBe(1);
+      expect(s.db.prepare("SELECT status FROM project_review_requests WHERE id = ?").get(requestId)).toEqual({ status: "abandoned" });
+    });
+  });
+
   describe("projectStateToKanban", () => {
     const cases: Array<[ProjectState, string]> = [
       ["executing", "running"],
