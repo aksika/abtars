@@ -258,6 +258,8 @@ export function validateContract(raw: unknown): ValidationResult {
     errors.push(error("too_long", "$.goal", `goal exceeds ${MAX_GOAL_LENGTH} characters`));
   }
 
+  const criterionIds = new Set<string>();
+
   if (!Array.isArray(obj["criteria"])) {
     errors.push(error("missing_field", "$.criteria", "criteria is required"));
   } else {
@@ -267,7 +269,6 @@ export function validateContract(raw: unknown): ValidationResult {
     if (obj["criteria"].length > MAX_CRITERIA_COUNT) {
       errors.push(error("too_many", "$.criteria", `criteria count exceeds ${MAX_CRITERIA_COUNT}`));
     }
-    const ids = new Set<string>();
     errors.push(...errCollect(obj["criteria"] as unknown[], (c, i) => {
       const path = `$.criteria[${i}]`;
       const e: ValidationIssue[] = [];
@@ -278,10 +279,10 @@ export function validateContract(raw: unknown): ValidationResult {
       const cObj = c as Record<string, unknown>;
       if (!isNonEmptyString(cObj["id"])) {
         e.push(error("missing_field", `${path}.id`, "criterion id is required"));
-      } else if (ids.has(cObj["id"] as string)) {
+      } else if (criterionIds.has(cObj["id"] as string)) {
         e.push(error("duplicate_id", `${path}.id`, `duplicate criterion id "${cObj["id"]}"`));
       } else {
-        ids.add(cObj["id"] as string);
+        criterionIds.add(cObj["id"] as string);
       }
       if (!isNonEmptyString(cObj["description"])) {
         e.push(error("missing_field", `${path}.description`, "criterion description is required"));
@@ -337,6 +338,12 @@ export function validateContract(raw: unknown): ValidationResult {
             e.push(error("type_error", `${path}.criterion_ids`, "must be an array"));
           } else if (aObj["criterion_ids"].length > MAX_CRITERIA_IDS_PER_ITEM) {
             e.push(error("too_many", `${path}.criterion_ids`, `exceeds ${MAX_CRITERIA_IDS_PER_ITEM} criterion IDs`));
+          } else if (criterionIds.size > 0) {
+            for (const ref of aObj["criterion_ids"] as string[]) {
+              if (!criterionIds.has(ref)) {
+                e.push(error("bad_reference", `${path}.criterion_ids`, `unknown criterion id "${ref}"`));
+              }
+            }
           }
         }
         return e;
@@ -387,8 +394,18 @@ export function validateContract(raw: unknown): ValidationResult {
             }
           }
         }
-        if (cmdObj["cwd"] !== undefined && !isNonEmptyString(cmdObj["cwd"] as string)) {
-          e.push(error("type_error", `${path}.cwd`, "cwd must be a non-empty string"));
+        if (cmdObj["cwd"] !== undefined) {
+          if (!isNonEmptyString(cmdObj["cwd"] as string)) {
+            e.push(error("type_error", `${path}.cwd`, "cwd must be a non-empty string"));
+          } else {
+            const cwd = cmdObj["cwd"] as string;
+            if (hasTraversal(cwd)) {
+              e.push(error("traversal", `${path}.cwd`, "cwd must be a relative path without traversal"));
+            }
+            if (cwd.startsWith("/")) {
+              e.push(error("bad_format", `${path}.cwd`, "cwd must be a relative path, not absolute"));
+            }
+          }
         }
         const timeoutMs = cmdObj["timeout_ms"];
         if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -401,6 +418,12 @@ export function validateContract(raw: unknown): ValidationResult {
             e.push(error("type_error", `${path}.criterion_ids`, "must be an array"));
           } else if (cmdObj["criterion_ids"].length > MAX_CRITERIA_IDS_PER_ITEM) {
             e.push(error("too_many", `${path}.criterion_ids`, `exceeds ${MAX_CRITERIA_IDS_PER_ITEM} criterion IDs`));
+          } else if (criterionIds.size > 0) {
+            for (const ref of cmdObj["criterion_ids"] as string[]) {
+              if (!criterionIds.has(ref)) {
+                e.push(error("bad_reference", `${path}.criterion_ids`, `unknown criterion id "${ref}"`));
+              }
+            }
           }
         }
         return e;
@@ -421,6 +444,24 @@ export function validateContract(raw: unknown): ValidationResult {
           errors.push(error("type_error", `$.required_capabilities[${i}]`, "each capability must be a non-empty string"));
         } else if ((cap as string).length > MAX_CAPABILITY_LENGTH) {
           errors.push(error("too_long", `$.required_capabilities[${i}]`, `capability exceeds ${MAX_CAPABILITY_LENGTH} characters`));
+        }
+      }
+    }
+  }
+
+  if (obj["supports_root_criteria"] !== undefined) {
+    if (!Array.isArray(obj["supports_root_criteria"])) {
+      errors.push(error("type_error", "$.supports_root_criteria", "must be an array"));
+    } else {
+      const seen = new Set<string>();
+      for (let i = 0; i < (obj["supports_root_criteria"] as unknown[]).length; i++) {
+        const ref = (obj["supports_root_criteria"] as unknown[])[i];
+        if (!isNonEmptyString(ref as string)) {
+          errors.push(error("type_error", `$.supports_root_criteria[${i}]`, "each root criterion id must be a non-empty string"));
+        } else if (seen.has(ref as string)) {
+          errors.push(error("duplicate_id", `$.supports_root_criteria[${i}]`, `duplicate root criterion id "${ref}"`));
+        } else {
+          seen.add(ref as string);
         }
       }
     }

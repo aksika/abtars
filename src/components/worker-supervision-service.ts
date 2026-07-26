@@ -1,8 +1,8 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { WorkerSupervisionStore, settleResult, SettlementResult } from "./worker-supervision-store.js";
-import { normalizeContract, createContractId, createAttemptId } from "./worker-contract.js";
+import { normalizeContract, createContractId, createAttemptId, validateEnvelope } from "./worker-contract.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation } from "./worker-contract.js";
 import type { TaskDatabase } from "./tasks/kanban-board.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
@@ -80,18 +80,20 @@ export class WorkerSupervisionService {
       return { error: `contract validation failed: ${normalized.errors.map(e => e.message).join("; ")}` };
     }
 
-    this.store.insertContract(normalized.contract, cardId);
-
-    const attemptId = opts?.attemptId ?? createAttemptId();
-    this.store.insertAttempt({
-      id: attemptId,
-      card_id: cardId,
-      contract_id: normalized.contract.id,
-      ordinal: this.store.nextOrdinal(cardId),
-      executor_kind: "local_worker",
-      executor_id: "spin",
-      status: "pending",
-      started_at: new Date().toISOString(),
+    const attemptId = this.store.db.transaction(() => {
+      this.store.insertContract(normalized.contract, cardId);
+      const id = opts?.attemptId ?? createAttemptId();
+      this.store.insertAttempt({
+        id,
+        card_id: cardId,
+        contract_id: normalized.contract.id,
+        ordinal: this.store.nextOrdinal(cardId),
+        executor_kind: "local_worker",
+        executor_id: "spin",
+        status: "pending",
+        started_at: new Date().toISOString(),
+      });
+      return id;
     });
 
     return { contract: normalized.contract, attemptId };
@@ -182,8 +184,9 @@ export class WorkerSupervisionService {
     const artifacts = this.observeArtifacts(contract, workingDir);
     const criteria = this.deriveCriteria(contract, checks, artifacts);
     const allPassed = criteria.every(c => c.status === "passed");
-    const outcome = allPassed ? "completed" : "failed";
 
+    // Execution outcome is always "completed" when the Worker ran and checks
+    // executed. Failed criteria mean unmet acceptance, not execution failure.
     const envelope: WorkerResultEnvelopeV1 = {
       schema_version: 1,
       attempt: {
@@ -196,7 +199,7 @@ export class WorkerSupervisionService {
         started_at: targetAttempt.started_at,
         finished_at: new Date().toISOString(),
       },
-      outcome,
+      outcome: "completed",
       criteria,
       checks,
       artifacts,
@@ -207,7 +210,12 @@ export class WorkerSupervisionService {
       },
     };
 
-    const result = settleResult(this.store, targetAttempt.id, envelope, outcome === "completed" ? "settled" : "failed");
+    const envelopeValidation = validateEnvelope(envelope);
+    if (!envelopeValidation.ok) {
+      return { settled: false, summary: `envelope validation failed: ${envelopeValidation.errors.map(e => e.message).join("; ")}` };
+    }
+
+    const result = settleResult(this.store, targetAttempt.id, envelope, "settled");
     if (result === SettlementResult.Conflict) {
       return { settled: false, summary: "[conflict] duplicate attempt with different result" };
     }
@@ -218,10 +226,10 @@ export class WorkerSupervisionService {
     // #1367: Emit durable milestone progress on settlement
     try {
       const emitter = new ExecutorProgressEmitter();
-      emitter.emitMilestone(targetAttempt.id, contract.provenance.card_id, targetAttempt.executor_id, contract.id, outcome === "completed" ? "all criteria passed" : "criteria failed");
+      emitter.emitMilestone(targetAttempt.id, contract.provenance.card_id, targetAttempt.executor_id, contract.id, allPassed ? "all criteria passed" : "criteria failed");
     } catch { /* progress emission is best-effort */ }
 
-    const summary = outcome === "completed"
+    const summary = allPassed
       ? `✓ ${criteria.filter(c => c.status === "passed").length}/${criteria.length} criteria passed`
       : `✗ ${criteria.filter(c => c.status === "failed").length}/${criteria.length} criteria failed`;
 
@@ -268,7 +276,17 @@ export class WorkerSupervisionService {
       let timedOut = false;
 
       try {
-        const cwd = cmd.cwd ? (workingDir ? resolve(workingDir, cmd.cwd) : cmd.cwd) : (workingDir ?? process.cwd());
+        const resolvedDir = cmd.cwd ? (workingDir ? resolve(workingDir, cmd.cwd) : cmd.cwd) : (workingDir ?? process.cwd());
+        if (workingDir && !resolvedDir.startsWith(resolve(workingDir))) {
+          stderr = `rejected: cwd escapes workspace (${resolvedDir})`;
+          return {
+            check_id: cmd.id, argv: cmd.argv, cwd: cmd.cwd,
+            started_at: startedAt, finished_at: new Date().toISOString(),
+            timed_out: false, exit_code: null, signal: null,
+            stdout_excerpt: "", stderr_excerpt: stderr.slice(0, MAX_CHECK_OUTPUT_LENGTH),
+          };
+        }
+        const cwd = resolvedDir;
         const result = execFileSync(cmd.argv[0]!, cmd.argv.slice(1), {
           cwd,
           timeout: cmd.timeout_ms,
@@ -280,7 +298,7 @@ export class WorkerSupervisionService {
         stderr = result.stderr.toString("utf-8").slice(0, MAX_CHECK_OUTPUT_LENGTH);
       } catch (err: unknown) {
         const e = err as ExecError;
-        if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+        if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || e.code === "ETIMEDOUT") {
           timedOut = true;
         } else if (e.killed) {
           timedOut = true;
@@ -314,13 +332,16 @@ export class WorkerSupervisionService {
     return contract.expected_artifacts.map(a => {
       const ref = a.ref;
       const absPath = workingDir ? resolve(workingDir, ref) : ref;
+      if (workingDir && !absPath.startsWith(resolve(workingDir))) {
+        return { artifact_id: a.id, exists: false, kind: a.kind, ref, error: "path escapes workspace" };
+      }
       try {
         if (!existsSync(absPath)) {
           return { artifact_id: a.id, exists: false, kind: a.kind, ref, error: "not found" };
         }
         const st = statSync(absPath);
         const digest = a.kind === "file"
-          ? createHash("sha256").update(absPath).digest("hex").slice(0, 16)
+          ? createHash("sha256").update(readFileSync(absPath)).digest("hex").slice(0, 16)
           : undefined;
         return {
           artifact_id: a.id,

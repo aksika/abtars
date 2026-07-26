@@ -793,7 +793,7 @@ export class Spin {
           if (outcome.settled) {
             workerSummary = outcome.summary;
             if (spec.executionControl) {
-              spec.executionControl.markTerminal(outcome.envelope?.outcome === "completed" ? "completed" : "failed");
+              spec.executionControl.markTerminal(outcome.envelope ? "completed" : "failed");
             }
           } else if (outcome.stale) {
             staleWorkerResult = true;
@@ -1053,12 +1053,21 @@ export class Spin {
 
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {
     if (request.type === "O") throw new Error("Cannot nest orchestrators");
-    const cardId = this.dispatch({ ...request, type: "W", parentCardId }).cardId;
+    // Create card first (kanbanEnqueue is synchronous, no spin start)
+    const cardTitle = request.title ?? request.goal.slice(0, 80);
+    const cardId = kanbanEnqueue(cardTitle, request.source ?? "agent", undefined, {
+      priority: (request.priority ?? "MEDIUM") as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+      type: "W",
+      parent_id: parentCardId,
+      notes: request.contract ? JSON.stringify({ supervised: true }) : undefined,
+    });
+    // Create contract + attempt BEFORE spin starts, so the card is never
+    // visible to Reconciler/Spin without supervision data.
     if (request.contract && cardId) {
       try {
         const service = new WorkerSupervisionService();
         const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
-        service.createChild(request.goal, cardId, rootCardId, "orc", {
+        const result = service.createChild(request.goal, cardId, rootCardId, "orc", {
           criteria: request.contract.criteria as Array<{ id: string; description: string }>,
           expectedArtifacts: request.contract.expected_artifacts as Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>,
           verificationCommands: request.contract.verification_commands as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
@@ -1066,10 +1075,58 @@ export class Spin {
           supportsRootCriteria: request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : undefined,
           limits: { ...request.contract.limits },
         });
+        if ("error" in result) {
+          logWarn(TAG, `spawnChild: contract rejected for card ${cardId}: ${result.error}`);
+          return cardId;
+        }
+        request.attemptId = result.attemptId;
+        void this.spin({
+          type: "W",
+          goal: request.goal,
+          cardId,
+          parentCardId,
+          title: request.title,
+          priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
+          source: request.source,
+          contractId: result.contract.id,
+          attemptId: result.attemptId,
+          executionControl: request.executionControl,
+          deliveryMode: request.deliveryMode,
+          delivery: request.delivery,
+          agent: request.agent,
+          timeoutMs: request.timeoutMs,
+          callbackPeer: request.callbackPeer,
+          sourcePeer: request.sourcePeer,
+          chatId: request.chatId ? Number(request.chatId) : undefined,
+          await: false,
+        });
+        return cardId;
       } catch (err) {
-        logWarn(TAG, `spawnChild: failed to create contract for card ${cardId}: ${err}`);
+        logWarn(TAG, `spawnChild: contract creation failed for card ${cardId}: ${err}`);
+        return cardId;
       }
     }
+    // Now start spin — contract+attempt are guaranteed to exist.
+    void this.spin({
+      type: "W",
+      goal: request.goal,
+      cardId,
+      parentCardId,
+      title: request.title,
+      priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
+      source: request.source,
+      contractId: request.contract?.id,
+      attemptId: request.attemptId,
+      executionControl: request.executionControl,
+      deliveryMode: request.deliveryMode,
+      delivery: request.delivery,
+      agent: request.agent,
+      timeoutMs: request.timeoutMs,
+      callbackPeer: request.callbackPeer,
+      sourcePeer: request.sourcePeer,
+      chatId: request.chatId ? Number(request.chatId) : undefined,
+      await: false,
+    });
     return cardId;
   }
 
