@@ -94,7 +94,7 @@ export function parseBashResultToDiagnostic(
     const signal = typeof parsed.signal === "string" ? parsed.signal : undefined;
     const processErrorCode = typeof parsed.process_error_code === "string" ? parsed.process_error_code : undefined;
     const fp = typeof parsed.command_fingerprint === "string" ? parsed.command_fingerprint : undefined;
-    const preview = typeof parsed.command_preview === "string" ? parsed.command_preview : undefined;
+    const preview = typeof parsed.command_preview === "string" ? capAndRedact(parsed.command_preview, PREVIEW_CAP) : undefined;
     const hasError = parsed.error != null;
 
     const hasBashFields = "exit_code" in parsed || "timed_out" in parsed || "process_error_code" in parsed;
@@ -105,7 +105,7 @@ export function parseBashResultToDiagnostic(
     if (timedOut) reason = "timeout";
     else if (aborted) reason = "aborted";
     else if (processErrorCode) reason = "spawn_error";
-    else if (exitCode === 126 && hasError) reason = "policy_rejected";
+    else if (exitCode === 126) reason = "policy_rejected";
     else if (exitCode === 0 || exitCode === null) {
       if (hasError) reason = "unknown";
       else return null;
@@ -155,7 +155,7 @@ export function parseToolResultToDiagnostic(
         reason: "unknown",
         timed_out: false,
         aborted: false,
-        stderr_excerpt: truncateTo(String(parsed.error), STDERR_CAP),
+        stderr_excerpt: capAndRedact(String(parsed.error), STDERR_CAP),
       };
     }
   } catch {
@@ -177,8 +177,8 @@ export function buildUnknownDiagnostic(
     reason: "unknown",
     timed_out: false,
     aborted: false,
-    stderr_excerpt: errorMessage ? truncateTo(errorMessage, STDERR_CAP) : undefined,
-    command_preview: errorMessage ? truncateTo(errorMessage, PREVIEW_CAP) : undefined,
+    stderr_excerpt: errorMessage ? capAndRedact(errorMessage, STDERR_CAP) : undefined,
+    command_preview: errorMessage ? capAndRedact(errorMessage, PREVIEW_CAP) : undefined,
   };
 }
 
@@ -203,6 +203,7 @@ export function mergeSafetyIncident(
 export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
   const parts: string[] = [`Tool ${d.tool} failed`];
 
+  if (d.execution_id) parts.push(`eid:${d.execution_id}`);
   if (d.command_preview) parts.push(`cmd: ${d.command_preview}`);
   if (d.command_fingerprint) parts.push(`fp:${d.command_fingerprint}`);
 

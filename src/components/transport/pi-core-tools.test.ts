@@ -6,6 +6,7 @@ import { FallbackPolicy } from "./fallback-policy.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { buildPolicy } from "../tool-sandbox.js";
+import { PiCoreToolExecutionError } from "./tool-failure-diagnostic.js";
 
 function makeRegistry() {
   return new ModelHealthRegistry();
@@ -90,6 +91,59 @@ describe("createPiAgentTools", () => {
       expect(typeof result).toBe("object");
       expect(Array.isArray(result.content)).toBe(true);
       expect(result.details).toBeDefined();
+    }
+  });
+
+  it("calls onToolFailure when tool returns a failure result", async () => {
+    const onToolFailure = vi.fn();
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["irc_send"] }),
+      onToolFailure,
+    });
+    const tools = createPiAgentTools(ctx);
+    const ircTool = tools.find((t) => t.name === "irc_send");
+    if (ircTool) {
+      await ircTool.execute("call_1", { channel: "#test", message: "hello" });
+      expect(onToolFailure).toHaveBeenCalledTimes(1);
+      expect(onToolFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "unknown", tool: "irc_send" }),
+      );
+    }
+  });
+
+  it("throws PiCoreToolExecutionError on exact_repeat from beforeTool", async () => {
+    const onToolFailure = vi.fn();
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["irc_send"] }),
+      onToolFailure,
+    });
+    const tools = createPiAgentTools(ctx);
+    const ircTool = tools.find((t) => t.name === "irc_send");
+    if (ircTool) {
+      await ircTool.execute("call_1", { channel: "#test", message: "dup" });
+      await ircTool.execute("call_2", { channel: "#test", message: "dup" });
+      await expect(ircTool.execute("call_3", { channel: "#test", message: "dup" }))
+        .rejects.toThrow(PiCoreToolExecutionError);
+      expect(onToolFailure).toHaveBeenCalledTimes(3);
+    }
+  });
+
+  it("throws PiCoreToolExecutionError after repeated tool failure", async () => {
+    const onToolFailure = vi.fn();
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["irc_send"] }),
+      onToolFailure,
+    });
+    const tools = createPiAgentTools(ctx);
+    const ircTool = tools.find((t) => t.name === "irc_send");
+    if (ircTool) {
+      // Use different args to avoid exact_repeat; afterTool failure detection
+      // classifies each error response as a failure, triggering repeated_failure on the 3rd.
+      await ircTool.execute("call_1", { channel: "#test", message: "hello" });
+      await ircTool.execute("call_2", { channel: "#test", message: "world" });
+      await expect(ircTool.execute("call_3", { channel: "#test", message: "foo" }))
+        .rejects.toThrow(PiCoreToolExecutionError);
+      expect(onToolFailure).toHaveBeenCalledTimes(3);
     }
   });
 

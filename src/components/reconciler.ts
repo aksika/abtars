@@ -506,6 +506,23 @@ async function startSupervisedWorker(
   attempt: AttemptRow,
   contract: WorkerAcceptanceContractV1,
 ): Promise<void> {
+  // Check required capabilities before claiming.
+  if (contract.required_capabilities && contract.required_capabilities.length > 0) {
+    if (card.type === "pi") {
+      const svc = _piService;
+      if (!svc) {
+        kanbanFail(card.id, "Pi service unavailable for pi-type card with required capabilities");
+        return;
+      }
+      if (!contract.required_capabilities.every(c => c === "pi")) {
+        kanbanFail(card.id, `Pi executor only supports "pi" capability, requires: ${contract.required_capabilities.join(", ")}`);
+        return;
+      }
+    }
+    // Agent (Spin) executor supports all standard capabilities — no explicit
+    // capability check needed beyond the concurrency gate.
+  }
+
   const capacity = await workerAdapter().capacity();
   if (capacity.available <= 0) return;
 

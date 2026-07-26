@@ -1,4 +1,4 @@
-import { logInfo } from "../logger.js";
+import { logWarn } from "../logger.js";
 import type { AgentTool, AgentToolResult } from "./pi-core-types.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
 import { getToolDefinitions, executeToolCall } from "./tool-registry.js";
@@ -91,7 +91,9 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
         };
       }
       if (toolDecision.decision === "error") {
-        throw new Error(toolDecision.reason);
+        const decisionDiag = buildUnknownDiagnostic(context.executionId, def.name, toolDecision.reason);
+        context.onToolFailure?.(decisionDiag);
+        throw new PiCoreToolExecutionError(decisionDiag);
       }
 
       // onToolStart fires from Pi lifecycle event (tool_execution_start), not from wrapper.
@@ -109,8 +111,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
         const diag = parseToolResultToDiagnostic(result, context.executionId, def.name);
         if (diag) {
           lastDiag = diag;
-          context.onToolFailure?.(diag);
-          logInfo(TAG, `Tool ${def.name} failed: ${diag.reason}${diag.command_fingerprint ? " fp:" + diag.command_fingerprint : ""}`);
+          logWarn(TAG, `Tool ${def.name} failed [${diag.execution_id}]: ${diag.reason}${diag.command_fingerprint ? " fp:" + diag.command_fingerprint : ""}`);
         }
 
         if (def.name === "memory_store") {
@@ -129,15 +130,15 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
         const outcome = context.safety.afterTool(def.name, result);
         outcomeRecorded = true;
         if (outcome.decision === "error") {
-          if (lastDiag) {
-            const mergedDiag = { ...lastDiag, reason: "repeated_failure" as const, safety_incident: "repeated_failure" as const };
-            context.onToolFailure?.(mergedDiag);
-            throw new PiCoreToolExecutionError(mergedDiag);
-          }
-          throw new PiCoreToolExecutionError(
-            buildUnknownDiagnostic(context.executionId, def.name, outcome.reason),
-          );
+          const finalDiag = lastDiag
+            ? { ...lastDiag, reason: "repeated_failure" as const, safety_incident: "repeated_failure" as const }
+            : buildUnknownDiagnostic(context.executionId, def.name, outcome.reason);
+          context.onToolFailure?.(finalDiag);
+          throw new PiCoreToolExecutionError(finalDiag);
         }
+
+        // Report fallible outcome to transport AFTER afterTool confirms it's a single failure
+        if (lastDiag) context.onToolFailure?.(lastDiag);
 
         context.onToolSuccess?.();
 
@@ -152,7 +153,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
         const errorMsg = err instanceof Error ? err.message : String(err);
         const fallbackDiag = buildUnknownDiagnostic(context.executionId, def.name, errorMsg);
         context.onToolFailure?.(fallbackDiag);
-        logInfo(TAG, `Tool ${def.name} execution failed (${errorClass})`);
+        logWarn(TAG, `Tool ${def.name} execution failed [${context.executionId}] (${errorClass})`);
 
         if (!outcomeRecorded) {
           context.safety.afterTool(def.name, JSON.stringify({ error: errorClass }));

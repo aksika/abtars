@@ -3,10 +3,14 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { WorkerSupervisionStore, settleResult, SettlementResult } from "./worker-supervision-store.js";
 import { normalizeContract, createContractId, createAttemptId, validateEnvelope } from "./worker-contract.js";
+import { logWarn } from "./logger.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation } from "./worker-contract.js";
 import type { TaskDatabase } from "./tasks/kanban-board.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
+import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
+import { validateCriterionMapping } from "./project-acceptance/project-contract.js";
 
+const TAG = "worker-supervision-service";
 const MAX_RESULT_LENGTH = 500;
 const MAX_CHECK_OUTPUT_LENGTH = 10_000;
 
@@ -44,6 +48,22 @@ export class WorkerSupervisionService {
 
     if (!opts?.criteria || opts.criteria.length === 0) {
       return { error: "supervised children require at least one acceptance criterion; goal-only supervised dispatch is rejected" };
+    }
+
+    if (opts?.supportsRootCriteria && opts.supportsRootCriteria.length > 0) {
+      const reviewStore = new ProjectReviewStore();
+      const rootContractRow = reviewStore.getContractByProjectCardId(rootCardId);
+      if (!rootContractRow) {
+        return { error: `root contract not found for project ${rootCardId}; cannot validate criterion mapping` };
+      }
+      const rootContract = JSON.parse(rootContractRow.contract_json);
+      const mappingErrors = validateCriterionMapping(rootContract, {
+        child_contract_id: opts.contractId ?? "(pending)",
+        supports_root_criteria: opts.supportsRootCriteria,
+      });
+      if (mappingErrors.length > 0) {
+        return { error: `root-criterion mapping rejected: ${mappingErrors.map(e => e.message).join("; ")}` };
+      }
     }
 
     const contractId = opts?.contractId ?? createContractId();
@@ -212,7 +232,9 @@ export class WorkerSupervisionService {
 
     const envelopeValidation = validateEnvelope(envelope);
     if (!envelopeValidation.ok) {
-      return { settled: false, summary: `envelope validation failed: ${envelopeValidation.errors.map(e => e.message).join("; ")}` };
+      const msg = `envelope validation failed: ${envelopeValidation.errors.map(e => e.message).join("; ")}`;
+      logWarn(TAG, msg);
+      throw new Error(msg);
     }
 
     const result = settleResult(this.store, targetAttempt.id, envelope, "settled");

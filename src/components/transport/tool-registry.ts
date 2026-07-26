@@ -91,7 +91,7 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
   const cmdBlock = checkCommand(cmd);
   if (cmdBlock) {
     logWarn("tool-registry", `Guardrails blocked: ${cmd.slice(0, 200)}`);
-    return Promise.resolve(JSON.stringify({ stderr: cmdBlock, exit_code: 126 }));
+    return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: cmdBlock, exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
   }
 
   // Action gate: auth-required commands
@@ -100,7 +100,7 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
     return _actionGate.requestAuth("bash-auth", cmd).then((granted) => {
       if (!granted) {
         logWarn("tool-registry", `Auth denied for: ${cmd.slice(0, 200)}`);
-        return JSON.stringify({ stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126 });
+        return JSON.stringify({ error: "policy_rejected", stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
       }
       return executeBash(cmd, timeout, signal);
     });
@@ -109,15 +109,21 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
   if (isBridgeSpawnCommand(cmd)) {
     logWarn("tool-registry", `Blocked bridge-spawn command: ${cmd.slice(0, 200)}`);
     return Promise.resolve(JSON.stringify({
+      error: "policy_rejected",
       stderr: "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision; use launchctl inspection commands (launchctl list, launchctl print) or signal the existing process instead.",
       exit_code: 126,
+      command_fingerprint: fingerprintCommand(cmd),
+      command_preview: previewCommand(cmd),
     }));
   }
   if (isBridgeKillCommand(cmd)) {
     logWarn("tool-registry", `Blocked bridge-kill command: ${cmd.slice(0, 200)}`);
     return Promise.resolve(JSON.stringify({
+      error: "policy_rejected",
       stderr: "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset or restart the bridge manually.",
       exit_code: 126,
+      command_fingerprint: fingerprintCommand(cmd),
+      command_preview: previewCommand(cmd),
     }));
   }
   return executeBash(cmd, timeout, signal);
@@ -182,24 +188,26 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promis
       resolve(JSON.stringify(result));
     });
 
-    if (signal) {
-      if (signal.aborted) { child.kill("SIGTERM"); aborted = true; return; }
-      const onAbort = (): void => {
-        aborted = true;
-        child.kill("SIGTERM");
-        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      child.on("exit", () => {
-        signal.removeEventListener("abort", onAbort);
-      });
-    }
-
     timeoutTimer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
       setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
     }, timeout);
+
+    if (signal) {
+      const onAbort = (): void => {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        aborted = true;
+        child.kill("SIGTERM");
+        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+        child.on("exit", () => signal.removeEventListener("abort", onAbort));
+      }
+    }
   });
 }
 

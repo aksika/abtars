@@ -799,7 +799,12 @@ export class Spin {
             staleWorkerResult = true;
             logWarn(TAG, `Card ${cardId}: stale Worker result ignored (attempt=${spec.attemptId ?? "unknown"})`);
           }
-        } catch { /* non-supervised Workers pass through unchanged */ }
+        } catch (err) {
+          if (spec.contractId) {
+            staleWorkerResult = true;
+            logWarn(TAG, `Card ${cardId}: evidence settlement failed — blocking kanbanComplete: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
       }
       // #1363 Task 10: supervised O-cards own their lifecycle via projectStateToKanban.
       // Do not let finishSpin prematurely mark them done — the reconciler decides terminal state.
@@ -1053,7 +1058,33 @@ export class Spin {
 
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {
     if (request.type === "O") throw new Error("Cannot nest orchestrators");
-    // Create card first (kanbanEnqueue is synchronous, no spin start)
+
+    // Pre-validate contract structure before creating any state.
+    if (request.contract) {
+      const { normalizeContract } = require("./worker-contract.js") as typeof import("./worker-contract.js");
+      const preCheck = normalizeContract({
+        schema_version: 1,
+        id: request.contract.id || "",
+        goal: request.goal,
+        criteria: request.contract.criteria,
+        expected_artifacts: request.contract.expected_artifacts,
+        verification_commands: request.contract.verification_commands,
+        required_capabilities: request.contract.required_capabilities,
+        supports_root_criteria: request.contract.supports_root_criteria,
+        limits: request.contract.limits,
+        provenance: {
+          root_card_id: 0,
+          card_id: 0,
+          authored_by: "orc",
+          created_at: new Date().toISOString(),
+        },
+      });
+      if (!preCheck.ok) {
+        throw new Error(`Contract validation failed: ${preCheck.errors.map(e => e.message).join("; ")}`);
+      }
+    }
+
+    // Create card (kanbanEnqueue is synchronous, no spin start)
     const cardTitle = request.title ?? request.goal.slice(0, 80);
     const cardId = kanbanEnqueue(cardTitle, request.source ?? "agent", undefined, {
       priority: (request.priority ?? "MEDIUM") as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
@@ -1064,49 +1095,43 @@ export class Spin {
     // Create contract + attempt BEFORE spin starts, so the card is never
     // visible to Reconciler/Spin without supervision data.
     if (request.contract && cardId) {
-      try {
-        const service = new WorkerSupervisionService();
-        const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
-        const result = service.createChild(request.goal, cardId, rootCardId, "orc", {
-          criteria: request.contract.criteria as Array<{ id: string; description: string }>,
-          expectedArtifacts: request.contract.expected_artifacts as Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>,
-          verificationCommands: request.contract.verification_commands as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
-          requiredCapabilities: [...request.contract.required_capabilities],
-          supportsRootCriteria: request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : undefined,
-          limits: { ...request.contract.limits },
-        });
-        if ("error" in result) {
-          logWarn(TAG, `spawnChild: contract rejected for card ${cardId}: ${result.error}`);
-          return cardId;
-        }
-        request.attemptId = result.attemptId;
-        void this.spin({
-          type: "W",
-          goal: request.goal,
-          cardId,
-          parentCardId,
-          title: request.title,
-          priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
-          source: request.source,
-          contractId: result.contract.id,
-          attemptId: result.attemptId,
-          executionControl: request.executionControl,
-          deliveryMode: request.deliveryMode,
-          delivery: request.delivery,
-          agent: request.agent,
-          timeoutMs: request.timeoutMs,
-          callbackPeer: request.callbackPeer,
-          sourcePeer: request.sourcePeer,
-          chatId: request.chatId ? Number(request.chatId) : undefined,
-          await: false,
-        });
-        return cardId;
-      } catch (err) {
-        logWarn(TAG, `spawnChild: contract creation failed for card ${cardId}: ${err}`);
-        return cardId;
+      const service = new WorkerSupervisionService();
+      const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+      const result = service.createChild(request.goal, cardId, rootCardId, "orc", {
+        criteria: request.contract.criteria as Array<{ id: string; description: string }>,
+        expectedArtifacts: request.contract.expected_artifacts as Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>,
+        verificationCommands: request.contract.verification_commands as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
+        requiredCapabilities: [...request.contract.required_capabilities],
+        supportsRootCriteria: request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : undefined,
+        limits: { ...request.contract.limits },
+      });
+      if ("error" in result) {
+        throw new Error(`Contract creation rejected: ${result.error}`);
       }
+      request.attemptId = result.attemptId;
+      void this.spin({
+        type: "W",
+        goal: request.goal,
+        cardId,
+        parentCardId,
+        title: request.title,
+        priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
+        source: request.source,
+        contractId: result.contract.id,
+        attemptId: result.attemptId,
+        executionControl: request.executionControl,
+        deliveryMode: request.deliveryMode,
+        delivery: request.delivery,
+        agent: request.agent,
+        timeoutMs: request.timeoutMs,
+        callbackPeer: request.callbackPeer,
+        sourcePeer: request.sourcePeer,
+        chatId: request.chatId ? Number(request.chatId) : undefined,
+        await: false,
+      });
+      return cardId;
     }
-    // Now start spin — contract+attempt are guaranteed to exist.
+    // No contract — legacy unsupervised path.
     void this.spin({
       type: "W",
       goal: request.goal,

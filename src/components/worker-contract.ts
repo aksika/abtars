@@ -634,21 +634,115 @@ export function validateEnvelope(raw: unknown): ValidationResult {
     errors.push(error("type_error", "$.outcome", `invalid outcome "${String(obj["outcome"])}"`));
   }
 
-  if (!Array.isArray(obj["criteria"])) {
+  const validStatuses: CriterionStatus[] = ["passed", "failed", "not_run", "inconclusive"];
+  const criteriaArr = obj["criteria"];
+  if (!Array.isArray(criteriaArr)) {
     errors.push(error("missing_field", "$.criteria", "criteria results are required"));
+  } else {
+    for (let i = 0; i < criteriaArr.length; i++) {
+      const c = criteriaArr[i] as Record<string, unknown> | undefined;
+      if (!c || typeof c !== "object") {
+        errors.push(error("type_error", `$.criteria[${i}]`, "each criterion result must be an object"));
+        continue;
+      }
+      if (!isNonEmptyString(c["criterion_id"])) {
+        errors.push(error("missing_field", `$.criteria[${i}].criterion_id`, "criterion_id is required"));
+      }
+      if (!validStatuses.includes(c["status"] as CriterionStatus)) {
+        errors.push(error("type_error", `$.criteria[${i}].status`, `invalid status "${String(c["status"])}"`));
+      }
+      if (c["evidence_ids"] !== undefined && (!Array.isArray(c["evidence_ids"]) || !(c["evidence_ids"] as unknown[]).every(isNonEmptyString))) {
+        errors.push(error("type_error", `$.criteria[${i}].evidence_ids`, "evidence_ids must be an array of strings"));
+      }
+    }
   }
 
-  if (!Array.isArray(obj["checks"])) {
+  // Build the set of known check and artifact IDs for evidence link validation
+  const knownCheckIds = new Set<string>();
+  const checksArr = obj["checks"];
+  if (!Array.isArray(checksArr)) {
     errors.push(error("missing_field", "$.checks", "checks are required"));
+  } else {
+    for (let i = 0; i < checksArr.length; i++) {
+      const ch = checksArr[i] as Record<string, unknown> | undefined;
+      if (!ch || typeof ch !== "object") {
+        errors.push(error("type_error", `$.checks[${i}]`, "each check must be an object"));
+        continue;
+      }
+      if (!isNonEmptyString(ch["check_id"])) {
+        errors.push(error("missing_field", `$.checks[${i}].check_id`, "check_id is required"));
+      } else {
+        knownCheckIds.add(ch["check_id"] as string);
+      }
+      if (!Array.isArray(ch["argv"]) || !(ch["argv"] as unknown[]).every(isString)) {
+        errors.push(error("type_error", `$.checks[${i}].argv`, "argv must be an array of strings"));
+      }
+      if (typeof ch["exit_code"] !== "number" && ch["exit_code"] !== null) {
+        errors.push(error("type_error", `$.checks[${i}].exit_code`, "exit_code must be a number or null"));
+      }
+      if (typeof ch["timed_out"] !== "boolean") {
+        errors.push(error("type_error", `$.checks[${i}].timed_out`, "timed_out must be a boolean"));
+      }
+    }
   }
 
-  if (!Array.isArray(obj["artifacts"])) {
+  const knownArtifactIds = new Set<string>();
+  const artifactsArr = obj["artifacts"];
+  if (!Array.isArray(artifactsArr)) {
     errors.push(error("missing_field", "$.artifacts", "artifacts are required"));
+  } else {
+    for (let i = 0; i < artifactsArr.length; i++) {
+      const a = artifactsArr[i] as Record<string, unknown> | undefined;
+      if (!a || typeof a !== "object") {
+        errors.push(error("type_error", `$.artifacts[${i}]`, "each artifact must be an object"));
+        continue;
+      }
+      if (!isNonEmptyString(a["artifact_id"])) {
+        errors.push(error("missing_field", `$.artifacts[${i}].artifact_id`, "artifact_id is required"));
+      } else {
+        knownArtifactIds.add(a["artifact_id"] as string);
+      }
+      if (typeof a["exists"] !== "boolean") {
+        errors.push(error("type_error", `$.artifacts[${i}].exists`, "exists must be a boolean"));
+      }
+    }
+  }
+
+  // Validate evidence_ids reference known check or artifact IDs
+  if (criteriaArr && Array.isArray(criteriaArr)) {
+    for (let i = 0; i < criteriaArr.length; i++) {
+      const c = criteriaArr[i] as Record<string, unknown> | undefined;
+      if (!c || !Array.isArray(c["evidence_ids"])) continue;
+      for (let j = 0; j < (c["evidence_ids"] as unknown[]).length; j++) {
+        const eid = (c["evidence_ids"] as unknown[])[j] as string;
+        if (!knownCheckIds.has(eid) && !knownArtifactIds.has(eid)) {
+          errors.push(error("bad_reference", `$.criteria[${i}].evidence_ids[${j}]`, `unknown evidence id "${eid}"`));
+        }
+      }
+    }
   }
 
   const wr = obj["worker_report"];
   if (typeof wr !== "object" || wr === null) {
     errors.push(error("missing_field", "$.worker_report", "worker_report is required"));
+  } else {
+    const wrObj = wr as Record<string, unknown>;
+    if (typeof wrObj["summary"] !== "string") {
+      errors.push(error("type_error", "$.worker_report.summary", "summary must be a string"));
+    }
+    if (!Array.isArray(wrObj["claims"])) {
+      errors.push(error("missing_field", "$.worker_report.claims", "claims are required"));
+    }
+    if (wrObj["unresolved_risks"] !== undefined && !Array.isArray(wrObj["unresolved_risks"])) {
+      errors.push(error("type_error", "$.worker_report.unresolved_risks", "unresolved_risks must be an array"));
+    }
+  }
+
+  // Validate usage if present
+  if (obj["usage"] !== undefined) {
+    if (typeof obj["usage"] !== "object" || obj["usage"] === null) {
+      errors.push(error("type_error", "$.usage", "usage must be an object"));
+    }
   }
 
   if (errors.length > 0) {

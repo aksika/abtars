@@ -132,13 +132,12 @@ export function createPiExecutionSafetyController(
       }
 
       if (candidateRounds >= mc) {
-        // Candidate-round limit: exclude this candidate, don't stop execution.
-        // The #1445 FallbackPolicy will select the next eligible candidate.
+        // Candidate-round limit: exclude this candidate for this prompt only.
+        // Do NOT record a provider-level health error — command failures are not
+        // evidence that the provider/model is unhealthy (#1497 spec §4).
         _incident = { type: "candidate_round_limit", candidateKey, roundsUsed: candidateRounds };
         _lastTerminalIncident = _incident;
         policy.excludedKeys.add(candidateKey);
-        const [model, endpoint] = candidateKey.split("@");
-        if (model && endpoint) policy.registry.recordError(model, endpoint, "weak");
         return { decision: "stop", reason: `Candidate round limit (${mc}) for ${candidateKey}` };
       }
 
@@ -171,7 +170,8 @@ export function createPiExecutionSafetyController(
         const [model, endpoint] = candidate.split("@");
         if (model && endpoint) {
           policy.excludedKeys.add(candidate);
-          policy.registry.recordError(model, endpoint, "weak");
+          // Do NOT record a provider-level health error — command failures
+          // are prompt-local, not evidence of provider unhealth (#1497 §4).
           logDebug(TAG, `Excluded candidate ${candidate} after ${inc.type}`);
         }
       }

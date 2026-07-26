@@ -309,6 +309,25 @@ describe("CronQueue agent output validation", () => {
     expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("short-struct", expect.objectContaining({ retrying: true }));
   });
 
+  it("propagates PiCoreToolExecutionError diagnostic through .catch() path", async () => {
+    const { spin } = await import("../spin.js");
+    const { buildUnknownDiagnostic, PiCoreToolExecutionError } = await import("../transport/tool-failure-diagnostic.js");
+    const diag = buildUnknownDiagnostic("exec_1", "execute_bash", "command not found: gws-cli");
+    const typedErr = new PiCoreToolExecutionError(diag);
+    vi.mocked(spin.dispatchAwait).mockRejectedValue(typedErr);
+    const entry = makeEntry({ id: "typed-fail", kind: "agent", prompt: "test", delivery: "silent", schedule: "*/5 * * * *" });
+    queue.enqueue(entry);
+    await waitForUpdateState("typed-fail");
+    // The .catch() path should record the rendered diagnostic as the failure reason
+    const updateCalls = vi.mocked(stateStore.updateState).mock.calls.filter(c => c[0] === "typed-fail");
+    expect(updateCalls.length).toBeGreaterThan(0);
+    const lastCall = updateCalls[updateCalls.length - 1];
+    expect(lastCall[1]).toMatchObject({ retrying: true });
+    // The rendered diagnostic message should be visible in the failure output
+    expect(typedErr.message).toContain("gws-cli");
+    expect(typedErr.message).toContain("execute_bash");
+  });
+
   it("passes on structured output with valid stdout", async () => {
     const { spin } = await import("../spin.js");
     const stdoutContent = "x".repeat(100);

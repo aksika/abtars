@@ -88,6 +88,12 @@ describe("parseBashResultToDiagnostic", () => {
     expect(d!.reason).toBe("policy_rejected");
   });
 
+  it("detects policy rejection (exit 126 without error field — guardrail path)", () => {
+    const result = JSON.stringify({ exit_code: 126, stderr: "blocked by guardrail", command_fingerprint: "abc", command_preview: "rm" });
+    const d = parseBashResultToDiagnostic(result, execId, "execute_bash");
+    expect(d!.reason).toBe("policy_rejected");
+  });
+
   it("caps and redacts stderr", () => {
     const longStderr = "API_KEY=sk-aaaaaaaaaaaaaaaaaaaaaa " + "x".repeat(600);
     const result = JSON.stringify({ exit_code: 1, stderr: longStderr, command_fingerprint: "abc", command_preview: "cmd" });
@@ -105,6 +111,12 @@ describe("parseBashResultToDiagnostic", () => {
 
   it("returns null for malformed JSON", () => {
     expect(parseBashResultToDiagnostic("not json", execId, "execute_bash")).toBeNull();
+  });
+
+  it("redacts secrets from command_preview in bash result", () => {
+    const result = JSON.stringify({ exit_code: 1, stderr: "err", command_fingerprint: "abc", command_preview: "curl -H 'Authorization: Bearer sk-aaaaaaaaaaaaaaaaaaaaaa' https://example.com" });
+    const d = parseBashResultToDiagnostic(result, execId, "execute_bash");
+    expect(d!.command_preview).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
   });
 });
 
@@ -131,6 +143,12 @@ describe("parseToolResultToDiagnostic", () => {
   it("returns null for non-JSON results", () => {
     expect(parseToolResultToDiagnostic("plain text output", execId, "irc_send")).toBeNull();
   });
+
+  it("redacts secrets from error field in non-bash tool results", () => {
+    const d = parseToolResultToDiagnostic(JSON.stringify({ error: "API_KEY=sk-aaaaaaaaaaaaaaaaaaaaaa" }), execId, "memory_recall");
+    expect(d).not.toBeNull();
+    expect(d!.stderr_excerpt).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
+  });
 });
 
 describe("buildUnknownDiagnostic", () => {
@@ -144,6 +162,12 @@ describe("buildUnknownDiagnostic", () => {
   it("truncates long error messages", () => {
     const d = buildUnknownDiagnostic("exec_1", "execute_bash", "x".repeat(1000));
     expect(d.stderr_excerpt!.length).toBeLessThanOrEqual(500);
+  });
+
+  it("redacts secrets from error message in buildUnknownDiagnostic", () => {
+    const d = buildUnknownDiagnostic("exec_1", "execute_bash", "API_KEY=sk-aaaaaaaaaaaaaaaaaaaaaa passed to command");
+    expect(d.stderr_excerpt).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
+    expect(d.command_preview).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
   });
 });
 
@@ -189,6 +213,7 @@ describe("renderDiagnostic", () => {
     };
     const rendered = renderDiagnostic(d);
     expect(rendered).toContain("Tool execute_bash failed");
+    expect(rendered).toContain("eid:e1");
     expect(rendered).toContain("fp:abc123def456");
     expect(rendered).toContain("exit:1");
     expect(rendered).toContain("stderr: No such file");

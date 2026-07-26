@@ -61,6 +61,18 @@ describe("createPiExecutionSafetyController", () => {
     expect(ctrl.beginProviderTurn("k2").decision).toBe("continue");
   });
 
+  it("candidate limit excludes candidate locally but does not record provider health error", () => {
+    const ctrl = createPiExecutionSafetyController(policy, { maxCandidateRounds: 2 });
+    ctrl.beginProviderTurn("test-model@https://api.test/v1");
+    ctrl.beginProviderTurn("test-model@https://api.test/v1");
+    const result = ctrl.beginProviderTurn("test-model@https://api.test/v1");
+    expect(result.decision).toBe("stop");
+    expect(result.reason).toContain("Candidate round limit");
+    expect(policy.excludedKeys.has("test-model@https://api.test/v1")).toBe(true);
+    // Provider health should NOT be degraded by command failures (#1497)
+    expect(registry.getHealth().size).toBe(0);
+  });
+
   it("detects exact repeat in beforeTool", () => {
     const ctrl = createPiExecutionSafetyController(policy);
     ctrl.beginProviderTurn("k1");
@@ -108,6 +120,35 @@ describe("createPiExecutionSafetyController", () => {
     ctrl.beforeTool("read", { path: "/a" });
     ctrl.beforeTool("read", { path: "/a" }); // 3rd call triggers repeat
     expect(ctrl.incident?.type).toBe("exact_repeat");
+  });
+
+  it("lastTerminalIncident is set alongside incident on exact repeat", () => {
+    const ctrl = createPiExecutionSafetyController(policy);
+    ctrl.beginProviderTurn("k1");
+    ctrl.beforeTool("read", { path: "/a" });
+    ctrl.beforeTool("read", { path: "/a" });
+    ctrl.beforeTool("read", { path: "/a" });
+    expect(ctrl.lastTerminalIncident?.type).toBe("exact_repeat");
+    expect(ctrl.lastTerminalIncident?.candidateKey).toBe("k1");
+    expect(ctrl.lastTerminalIncident?.toolName).toBe("read");
+  });
+
+  it("lastTerminalIncident persists after prepareNextTurn clears incident", () => {
+    const ctrl = createPiExecutionSafetyController(policy);
+    ctrl.beginProviderTurn("k1");
+    ctrl.beforeTool("read", { path: "/a" });
+    ctrl.beforeTool("read", { path: "/a" });
+    ctrl.beforeTool("read", { path: "/a" }); // exact_repeat
+    ctrl.prepareNextTurn({ candidateKey: "k1", roundsUsed: 3, maxRounds: 40, incident: ctrl.incident });
+    expect(ctrl.incident).toBeNull();
+    expect(ctrl.lastTerminalIncident?.type).toBe("exact_repeat");
+  });
+
+  it("candidate limit sets lastTerminalIncident with candidate_round_limit type", () => {
+    const ctrl = createPiExecutionSafetyController(policy, { maxCandidateRounds: 1 });
+    ctrl.beginProviderTurn("k1");
+    ctrl.beginProviderTurn("k1");
+    expect(ctrl.lastTerminalIncident?.type).toBe("candidate_round_limit");
   });
 
   it("requestPause makes prepareNextTurn return undefined (no update)", () => {
