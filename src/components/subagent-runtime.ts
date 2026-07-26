@@ -172,6 +172,8 @@ export class SubagentRuntime {
     }
 
     let closed = false;
+    let cancelled = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     const start = Date.now();
 
     const execId = `runtime_${sessionKey}_${Date.now()}_${randomBytes(4).toString("hex")}`;
@@ -184,25 +186,35 @@ export class SubagentRuntime {
       lastUsage: () => transport.lastUsage?.() ?? null,
 
       send: async (prompt, image, context) => {
+        if (cancelled) throw new Error("Execution cancelled");
         const response = await transport.sendPrompt(sessionKey, prompt, image, {
           ...context,
           executionId: context?.executionId ?? execId,
         });
+        if (cancelled) throw new Error("Execution cancelled");
         logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
         return response ?? "";
       },
 
-      cancel: async (_reason: import("./swarm-executor-types.js").CancelReason) => {
-        // Logical cancellation: mark closed so future send() is a no-op
-        // No shared transport interrupt to avoid affecting sibling executions
-        if (closed) return;
-        logDebug(TAG, `${key} exec.cancel (${_reason})`);
-        closed = true;
+      cancel: async (reason: import("./swarm-executor-types.js").CancelReason) => {
+        if (closed || cancelled) return;
+        cancelled = true;
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        logDebug(TAG, `${key} exec.cancel (${reason})`);
+        // Each open execution has a unique cache key, so interrupting this
+        // transport cannot cancel a sibling execution. This is required for
+        // ACP and tmux, which do not implement setTimeoutOverride().
+        try {
+          await transport.sendInterrupt(reason);
+        } catch (err) {
+          logAndSwallow(TAG, "exec.cancel", err);
+        }
       },
 
       close: async () => {
         if (closed) return;
         closed = true;
+        if (timeoutHandle) clearTimeout(timeoutHandle);
 
         // Reset overrides — transport stays in cache (cleaned by shutdown())
         if (opts?.timeoutMs && transport.setTimeoutOverride) {
@@ -216,6 +228,15 @@ export class SubagentRuntime {
         logDebug(TAG, `${key} exec closed (${elapsed}ms, ${model})`);
       },
     };
+
+    // PiCoreTransport has its own host timer, but ACP and tmux do not expose
+    // a timeout override. Keep this execution-level deadline as the universal
+    // fallback; duplicate cancellation on PiCore is harmless and idempotent.
+    if (opts?.timeoutMs && opts.timeoutMs > 0) {
+      timeoutHandle = setTimeout(() => {
+        void exec.cancel("deadline");
+      }, opts.timeoutMs);
+    }
 
     return exec;
   }

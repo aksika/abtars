@@ -337,4 +337,18 @@ describe("CronQueue agent output validation", () => {
     await waitForUpdateState("struct-ok");
     expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("struct-ok", expect.objectContaining({ retrying: false }));
   });
+
+  it("timeout cancellation fails the task, clears currentJob, and advances the queue", async () => {
+    const { spin } = await import("../spin.js");
+    vi.mocked(spin.dispatchAwait).mockRejectedValue(new Error("Agent timed out"));
+    const first = makeEntry({ id: "timeout-first", kind: "agent", prompt: "test", delivery: "silent", schedule: "*/5 * * * *" });
+    queue.enqueue(first);
+    await waitForUpdateState("timeout-first");
+    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("timeout-first", expect.objectContaining({ retrying: true }));
+    expect(queue.currentJob).toBeNull();
+    const second = makeEntry({ id: "timeout-second", kind: "agent", prompt: "test", delivery: "silent", schedule: "*/5 * * * *" });
+    queue.enqueue(second);
+    await waitForUpdateState("timeout-second");
+    expect(queue.currentJob).toBeNull();
+  });
 });

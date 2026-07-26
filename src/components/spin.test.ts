@@ -238,4 +238,29 @@ describe("Spin — unified session router (#943)", () => {
       expect(adapter.injectMessage).not.toHaveBeenCalled();
     });
   });
+
+  describe("killSession (#1501)", () => {
+    it("kills a background session by index from the owner's telegram scope", () => {
+      const bg = spin.createSubSession("aksika", "background", "T");
+      expect(typeof bg).not.toBe("string");
+      const session = bg as import("./spin-types.js").ManagedSession;
+      const idx = session.shortIndex;
+
+      const result = spin.killSession("aksika", "telegram", idx);
+      expect(typeof result).not.toBe("string");
+      expect((result as import("./spin-types.js").ManagedSession).status).toBe("ended");
+      expect((result as import("./spin-types.js").ManagedSession).transport).toBeUndefined();
+
+      const all = spin.listAllSessions();
+      expect(all.some(s => s.shortIndex === idx)).toBe(false);
+
+      const bgSessions = all.filter(s => s.platform === "background" && s.userId === "aksika");
+      expect(bgSessions.length).toBe(0);
+    });
+
+    it("still returns platform-scoped error for non-background miss", () => {
+      const result = spin.killSession("aksika", "telegram", 999);
+      expect(result).toContain("not found on telegram");
+    });
+  });
 });

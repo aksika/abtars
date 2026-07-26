@@ -168,7 +168,14 @@ export class Spin {
 
   killSession(userId: string, platform: string, index: number): ManagedSession | string {
     const r = Sessions.killSession(this.sessions, this.nextIndex, userId, platform, index);
-    if (typeof r === "string") return r;
+    if (typeof r === "string") {
+      const bg = this.getSessionByGlobalIndex(index);
+      if (bg && bg.userId === userId && bg.platform === "background") {
+        this.finalizeSession(bg, "killed");
+        return bg;
+      }
+      return r;
+    }
     this.nextIndex = r.nextIndex;
     this.finalizeSession(r.killed, "killed");
     return r.killed;

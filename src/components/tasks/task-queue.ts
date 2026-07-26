@@ -563,14 +563,11 @@ export class CronQueue {
 
     const { spin } = await import("../spin.js");
 
-    this.timeout = setTimeout(() => {
-      logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min)`);
-    }, AGENT_TIMEOUT_MS);
-
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
     const sessionType = (AGENT_SESSION[entry.agent] ?? "T") as import("../spin-types.js").SessionType;
 
     spin.dispatchAwait({
+      timeoutMs: AGENT_TIMEOUT_MS,
       type: sessionType,
       title: formatTaskLabel(entry.id),
       goal: prompt,
@@ -632,10 +629,8 @@ export class CronQueue {
         }
       })
       .catch((err: unknown) => {
-        const boardId = 0;
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
-        kanbanFail(boardId, err instanceof Error ? err.message : String(err));
-        settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err), undefined, boardId, this.trigger());
+        settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err), undefined, undefined, this.trigger());
         const paused = this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
         if (!paused) {
           const errMsg = `❌ Failed: ${err instanceof Error ? err.message : String(err)}`;
