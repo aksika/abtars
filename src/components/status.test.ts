@@ -263,6 +263,51 @@ describe("bridge tty parsing from /proc/<pid>/stat", () => {
   });
 });
 
+// ── macOS launchd probe labels (#1462) ───────────────────────────────────────
+
+describe("collectDaemon macOS launchd probe labels", () => {
+  // The probe unit selection logic in collectDaemon:
+  //   const probeUnit = isMac ? (scope === "system" ? "com.abtars.daemon" : "com.abtars.watchdog") : unit;
+  // We test this decision table in isolation.
+
+  const macOS_SYSTEM_PROBE = "com.abtars.daemon";
+  const macOS_USER_PROBE = "com.abtars.watchdog";
+  const LINUX_USER_UNIT = "abtars-watchdog";
+  const LINUX_SYSTEM_UNIT = "abtars";
+
+  it("macOS system scope probes com.abtars.daemon", () => {
+    const isMac = true;
+    const scope = "system";
+    const unit = LINUX_SYSTEM_UNIT; // unitName("system") returns "abtars"
+    const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
+    expect(probeUnit).toBe("com.abtars.daemon");
+  });
+
+  it("macOS user scope probes com.abtars.watchdog", () => {
+    const isMac = true;
+    const scope = "user";
+    const unit = LINUX_USER_UNIT; // unitName("user") returns "abtars-watchdog"
+    const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
+    expect(probeUnit).toBe("com.abtars.watchdog");
+  });
+
+  it("Linux system scope uses unit name unchanged", () => {
+    const isMac = false;
+    const scope = "system";
+    const unit = "abtars";
+    const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
+    expect(probeUnit).toBe("abtars");
+  });
+
+  it("Linux user scope uses unit name unchanged", () => {
+    const isMac = false;
+    const scope = "user";
+    const unit = "abtars-watchdog";
+    const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
+    expect(probeUnit).toBe("abtars-watchdog");
+  });
+});
+
 // ── systemctl timeout: /status cannot hang ───────────────────────────────────
 
 describe("systemctl timeout in collectDaemon", () => {

@@ -491,9 +491,8 @@ function collectDaemon(
   const unit = unitName(scope);
   const isMac = process.platform === "darwin";
   // The display name stays human-friendly, while launchd must be queried by
-  // the plist label. `launchctl list abtars-watchdog` always reports unknown
-  // because the actual label is `com.abtars.watchdog`.
-  const probeUnit = isMac ? "com.abtars.watchdog" : unit;
+  // the actual plist label. User scope = com.abtars.watchdog, system scope = com.abtars.daemon.
+  const probeUnit = isMac ? (scope === "system" ? "com.abtars.daemon" : "com.abtars.watchdog") : unit;
   const r = (() => {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
