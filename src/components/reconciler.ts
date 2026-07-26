@@ -23,6 +23,7 @@ import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle } from "./worker-supervision-store.js";
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
+import { getControl } from "./execution-control.js";
 
 const TAG = "reconciler";
 const MAX_WORKERS = 10;
@@ -587,11 +588,35 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
 function abortProject(projectId: number, children: KanbanCard[], reason: string): void {
   logWarn(TAG, `ABORT project ${projectId}: ${reason}`);
   for (const card of children) {
-    if (card.status === "running" || card.status === "queued") {
-      kanbanFail(card.id, `project aborted: ${reason}`);
-    }
+    if (card.status !== "running" && card.status !== "queued") continue;
+    cancelChild(card, reason);
   }
   kanbanFail(projectId, reason);
+}
+
+function cancelChild(card: KanbanCard, reason: string): void {
+  const store = new WorkerSupervisionStore();
+  const attempt = store.getLatestAttempt(card.id);
+  if (!attempt || store.isAttemptTerminal(attempt.lifecycle)) {
+    kanbanFail(card.id, `project aborted: ${reason}`);
+    return;
+  }
+  store.requestCancel(attempt.id, `project_abort: ${reason}`);
+  if (attempt.executor_kind === "agent" || attempt.executor_kind === "worker") {
+    const ctrl = getControl(attempt.id, attempt.generation);
+    if (ctrl) {
+      ctrl.requestCancel("project_abort").catch(() => {});
+    }
+  } else if (attempt.executor_kind === "pi") {
+    const svc = _piService;
+    if (svc) {
+      const run = svc.store.getByCardId(card.id);
+      if (run) {
+        svc.executor.cancel(run.id).catch(() => {});
+      }
+    }
+  }
+  logInfo(TAG, `Cancelled card ${card.id} attempt=${attempt.id} via ${attempt.executor_kind} adapter (reason: project_abort)`);
 }
 
 function getLatestAttemptInfo(cardId: number): { lifecycle: AttemptLifecycle; id: string } | null {
