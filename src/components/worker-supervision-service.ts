@@ -1,6 +1,6 @@
-import { existsSync, statSync, readFileSync } from "node:fs";
+import { existsSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { WorkerSupervisionStore, settleResult, SettlementResult } from "./worker-supervision-store.js";
 import { normalizeContract, createContractId, createAttemptId, validateEnvelope } from "./worker-contract.js";
 import { logWarn } from "./logger.js";
@@ -13,6 +13,43 @@ import { validateCriterionMapping } from "./project-acceptance/project-contract.
 const TAG = "worker-supervision-service";
 const MAX_RESULT_LENGTH = 500;
 const MAX_CHECK_OUTPUT_LENGTH = 10_000;
+
+/** Return a stable admission error when a child claims root criteria it cannot support. */
+export function validateWorkerRootCriteria(
+  rootCardId: number,
+  childContractId: string,
+  supportsRootCriteria: readonly string[],
+): string | undefined {
+  if (supportsRootCriteria.length === 0) return undefined;
+
+  const reviewStore = new ProjectReviewStore();
+  const rootContractRow = reviewStore.getContractByProjectCardId(rootCardId);
+  if (!rootContractRow) {
+    return `root contract not found for project ${rootCardId}; cannot validate criterion mapping`;
+  }
+  const rootContract = JSON.parse(rootContractRow.contract_json);
+  const mappingErrors = validateCriterionMapping(rootContract, {
+    child_contract_id: childContractId || "(pending)",
+    supports_root_criteria: supportsRootCriteria,
+  });
+  if (mappingErrors.length > 0) {
+    return `root-criterion mapping rejected: ${mappingErrors.map(e => e.message).join("; ")}`;
+  }
+  return undefined;
+}
+
+function isWithinWorkspace(workingDir: string, candidate: string): boolean {
+  try {
+    const base = resolve(workingDir);
+    const target = resolve(candidate);
+    const baseReal = realpathSync(base);
+    const targetReal = realpathSync(target);
+    const rel = relative(baseReal, targetReal);
+    return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+  } catch {
+    return false;
+  }
+}
 
 /** Map internal executor names to the stable Worker result-contract vocabulary. */
 export function toWorkerExecutorKind(kind: string): "local_worker" | "remote_worker" {
@@ -51,19 +88,8 @@ export class WorkerSupervisionService {
     }
 
     if (opts?.supportsRootCriteria && opts.supportsRootCriteria.length > 0) {
-      const reviewStore = new ProjectReviewStore();
-      const rootContractRow = reviewStore.getContractByProjectCardId(rootCardId);
-      if (!rootContractRow) {
-        return { error: `root contract not found for project ${rootCardId}; cannot validate criterion mapping` };
-      }
-      const rootContract = JSON.parse(rootContractRow.contract_json);
-      const mappingErrors = validateCriterionMapping(rootContract, {
-        child_contract_id: opts.contractId ?? "(pending)",
-        supports_root_criteria: opts.supportsRootCriteria,
-      });
-      if (mappingErrors.length > 0) {
-        return { error: `root-criterion mapping rejected: ${mappingErrors.map(e => e.message).join("; ")}` };
-      }
+      const mappingError = validateWorkerRootCriteria(rootCardId, opts.contractId ?? "(pending)", opts.supportsRootCriteria);
+      if (mappingError) return { error: mappingError };
     }
 
     const contractId = opts?.contractId ?? createContractId();
@@ -299,7 +325,7 @@ export class WorkerSupervisionService {
 
       try {
         const resolvedDir = cmd.cwd ? (workingDir ? resolve(workingDir, cmd.cwd) : cmd.cwd) : (workingDir ?? process.cwd());
-        if (workingDir && !resolvedDir.startsWith(resolve(workingDir))) {
+        if (workingDir && !isWithinWorkspace(workingDir, resolvedDir)) {
           stderr = `rejected: cwd escapes workspace (${resolvedDir})`;
           return {
             check_id: cmd.id, argv: cmd.argv, cwd: cmd.cwd,
@@ -354,7 +380,7 @@ export class WorkerSupervisionService {
     return contract.expected_artifacts.map(a => {
       const ref = a.ref;
       const absPath = workingDir ? resolve(workingDir, ref) : ref;
-      if (workingDir && !absPath.startsWith(resolve(workingDir))) {
+      if (workingDir && !isWithinWorkspace(workingDir, absPath)) {
         return { artifact_id: a.id, exists: false, kind: a.kind, ref, error: "path escapes workspace" };
       }
       try {

@@ -13,7 +13,7 @@ import { getMasterUserId } from "./master-user.js";
 import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver, QueuedSessionInstruction } from "./spin-types.js";
 import { sessionType } from "./spin-types.js";
 import { profileFor, isValidSessionType, type SessionProfile } from "./spin-profiles.js";
-import { WorkerSupervisionService } from "./worker-supervision-service.js";
+import { WorkerSupervisionService, validateWorkerRootCriteria } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
@@ -1082,6 +1082,13 @@ export class Spin {
       if (!preCheck.ok) {
         throw new Error(`Contract validation failed: ${preCheck.errors.map(e => e.message).join("; ")}`);
       }
+      const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+      const mappingError = validateWorkerRootCriteria(
+        rootCardId,
+        request.contract.id || "(pending)",
+        request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : [],
+      );
+      if (mappingError) throw new Error(mappingError);
     }
 
     // Create card (kanbanEnqueue is synchronous, no spin start)

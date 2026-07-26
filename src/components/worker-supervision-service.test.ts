@@ -7,6 +7,8 @@ import { vi } from "vitest";
 let TEST_HOME: string;
 let Service: typeof import("./worker-supervision-service.js").WorkerSupervisionService;
 let Store: typeof import("./worker-supervision-store.js").WorkerSupervisionStore;
+let validateWorkerRootCriteria: typeof import("./worker-supervision-service.js").validateWorkerRootCriteria;
+let ReviewStore: typeof import("./project-acceptance/project-review-store.js").ProjectReviewStore;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -15,8 +17,11 @@ beforeEach(async () => {
   vi.doMock("../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
   const svcMod = await import("./worker-supervision-service.js");
   Service = svcMod.WorkerSupervisionService;
+  validateWorkerRootCriteria = svcMod.validateWorkerRootCriteria;
   const storeMod = await import("./worker-supervision-store.js");
   Store = storeMod.WorkerSupervisionStore;
+  const reviewMod = await import("./project-acceptance/project-review-store.js");
+  ReviewStore = reviewMod.ProjectReviewStore;
 });
 
 afterEach(() => {
@@ -81,6 +86,25 @@ describe("WorkerSupervisionService", () => {
     if ("error" in result) {
       expect(result.error).toContain("at least one acceptance criterion");
     }
+  });
+
+  it("rejects root-criterion mappings that are unknown to the immutable root contract", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 1,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [{ id: "root_c1", description: "Root criterion", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    expect(validateWorkerRootCriteria(100, "child_c1", ["root_missing"]))
+      .toContain("unknown root criterion id");
   });
 
   it("renderContractForPrompt produces XML-formatted contract", () => {
