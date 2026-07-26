@@ -24,6 +24,7 @@ describe("createHousekeepingTask", () => {
   beforeEach(() => {
     clock = 100_000_000;
     deps = defaultDeps();
+    process.env["UPDATES_CHECK_ENABLED"] = "false";
   });
 
   it("runs due children on first tick (nextEligibleAt starts at 0)", async () => {

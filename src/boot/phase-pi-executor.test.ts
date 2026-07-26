@@ -14,6 +14,7 @@ const mockPiRunStore = vi.hoisted(() => vi.fn(function (_opts: unknown) {
 const mockPiExecutor = vi.hoisted(() => vi.fn(function () {
   return {
     onTransition: vi.fn(),
+    onProgress: vi.fn(),
     startWithClaim: vi.fn(),
   };
 }));
