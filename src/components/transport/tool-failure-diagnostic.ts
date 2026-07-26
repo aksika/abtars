@@ -93,7 +93,8 @@ export function parseBashResultToDiagnostic(
     const aborted = parsed.aborted === true;
     const signal = typeof parsed.signal === "string" ? parsed.signal : undefined;
     const processErrorCode = typeof parsed.process_error_code === "string" ? parsed.process_error_code : undefined;
-    const fp = typeof parsed.command_fingerprint === "string" ? parsed.command_fingerprint : undefined;
+    const fp = typeof parsed.command_fingerprint === "string" && /^[0-9a-f]{16}$/i.test(parsed.command_fingerprint)
+      ? parsed.command_fingerprint : undefined;
     const preview = typeof parsed.command_preview === "string" ? capAndRedact(parsed.command_preview, PREVIEW_CAP) : undefined;
     const hasError = parsed.error != null;
 
@@ -101,11 +102,13 @@ export function parseBashResultToDiagnostic(
 
     if (!hasBashFields) return null;
 
+    const isPolicyRejected = parsed.error === "policy_rejected";
+
     let reason: ToolFailureReason = "nonzero_exit";
     if (timedOut) reason = "timeout";
     else if (aborted) reason = "aborted";
     else if (processErrorCode) reason = "spawn_error";
-    else if (exitCode === 126) reason = "policy_rejected";
+    else if (isPolicyRejected) reason = "policy_rejected";
     else if (exitCode === 0 || exitCode === null) {
       if (hasError) reason = "unknown";
       else return null;
@@ -178,7 +181,8 @@ export function buildUnknownDiagnostic(
     timed_out: false,
     aborted: false,
     stderr_excerpt: errorMessage ? capAndRedact(errorMessage, STDERR_CAP) : undefined,
-    command_preview: errorMessage ? capAndRedact(errorMessage, PREVIEW_CAP) : undefined,
+    // command_preview intentionally omitted for unknown/exceptions —
+    // never place untrusted error text into the command field (#1497 review).
   };
 }
 

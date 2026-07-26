@@ -141,6 +141,19 @@ export function setSeatbelt(active: boolean, policy?: import("../seatbelt/policy
 import { fingerprintCommand, previewCommand } from "./tool-failure-diagnostic.js";
 
 function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promise<string> {
+  // Check pre-aborted signal BEFORE spawning — a cancelled request must
+  // never execute side effects (#1497 review).
+  if (signal?.aborted) {
+    return Promise.resolve(JSON.stringify({
+      exit_code: null,
+      timed_out: false,
+      aborted: true,
+      stderr: "Execution cancelled before start",
+      command_fingerprint: fingerprintCommand(cmd),
+      command_preview: previewCommand(cmd),
+    }));
+  }
+
   return new Promise((resolve) => {
     let bin = "bash";
     let args = ["-c", cmd];
@@ -160,10 +173,6 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promis
 
     const child = execFile(bin, args, { maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (signal && !signal.aborted) {
-        const onAbort = (): void => { /* already cleaned up */ };
-        try { signal.removeEventListener("abort", onAbort); } catch {}
-      }
 
       const result: Record<string, unknown> = {
         command_fingerprint: fingerprintCommand(cmd),
@@ -201,12 +210,8 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promis
         child.kill("SIGTERM");
         setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
       };
-      if (signal.aborted) {
-        onAbort();
-      } else {
-        signal.addEventListener("abort", onAbort, { once: true });
-        child.on("exit", () => signal.removeEventListener("abort", onAbort));
-      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      child.on("exit", () => signal.removeEventListener("abort", onAbort));
     }
   });
 }

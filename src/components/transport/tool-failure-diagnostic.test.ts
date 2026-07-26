@@ -9,6 +9,7 @@ import {
   renderDiagnostic,
   PiCoreToolExecutionError,
 } from "./tool-failure-diagnostic.js";
+import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 
 describe("fingerprintCommand", () => {
   it("produces deterministic 16-char hex fingerprint", () => {
@@ -82,16 +83,16 @@ describe("parseBashResultToDiagnostic", () => {
     expect(d!.aborted).toBe(true);
   });
 
-  it("detects policy rejection (exit 126 with error)", () => {
-    const result = JSON.stringify({ exit_code: 126, error: "blocked", stderr: "policy violation", command_fingerprint: "abc", command_preview: "rm -rf /" });
+  it("detects policy rejection via error: policy_rejected marker", () => {
+    const result = JSON.stringify({ exit_code: 126, error: "policy_rejected", stderr: "blocked by guardrail", command_fingerprint: "abcd1234abcd1234", command_preview: "rm" });
     const d = parseBashResultToDiagnostic(result, execId, "execute_bash");
     expect(d!.reason).toBe("policy_rejected");
   });
 
-  it("detects policy rejection (exit 126 without error field — guardrail path)", () => {
-    const result = JSON.stringify({ exit_code: 126, stderr: "blocked by guardrail", command_fingerprint: "abc", command_preview: "rm" });
+  it("classifies exit 126 without policy_rejected marker as nonzero_exit", () => {
+    const result = JSON.stringify({ exit_code: 126, stderr: "permission denied", command_fingerprint: "abcd1234abcd1234", command_preview: "chmod" });
     const d = parseBashResultToDiagnostic(result, execId, "execute_bash");
-    expect(d!.reason).toBe("policy_rejected");
+    expect(d!.reason).toBe("nonzero_exit");
   });
 
   it("caps and redacts stderr", () => {
@@ -114,9 +115,21 @@ describe("parseBashResultToDiagnostic", () => {
   });
 
   it("redacts secrets from command_preview in bash result", () => {
-    const result = JSON.stringify({ exit_code: 1, stderr: "err", command_fingerprint: "abc", command_preview: "curl -H 'Authorization: Bearer sk-aaaaaaaaaaaaaaaaaaaaaa' https://example.com" });
+    const result = JSON.stringify({ exit_code: 1, stderr: "err", command_fingerprint: "abcd1234abcd1234", command_preview: "curl -H 'Authorization: Bearer sk-aaaaaaaaaaaaaaaaaaaaaa' https://example.com" });
     const d = parseBashResultToDiagnostic(result, execId, "execute_bash");
     expect(d!.command_preview).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
+  });
+
+  it("rejects non-16-char-hex command_fingerprint", () => {
+    const result = JSON.stringify({ exit_code: 1, stderr: "err", command_fingerprint: "not-a-valid-fingerprint", command_preview: "cmd" });
+    const d = parseBashResultToDiagnostic(result, execId, "execute_bash");
+    expect(d!.command_fingerprint).toBeUndefined();
+  });
+
+  it("rejects unsafe string in command_fingerprint field", () => {
+    const result = JSON.stringify({ exit_code: 1, stderr: "err", command_fingerprint: "sk-aaaaaaaaaaaaaaaaaaaaaa", command_preview: "cmd" });
+    const d = parseBashResultToDiagnostic(result, execId, "execute_bash");
+    expect(d!.command_fingerprint).toBeUndefined();
   });
 });
 
@@ -167,14 +180,15 @@ describe("buildUnknownDiagnostic", () => {
   it("redacts secrets from error message in buildUnknownDiagnostic", () => {
     const d = buildUnknownDiagnostic("exec_1", "execute_bash", "API_KEY=sk-aaaaaaaaaaaaaaaaaaaaaa passed to command");
     expect(d.stderr_excerpt).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
-    expect(d.command_preview).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
+    // command_preview is intentionally omitted for unknown diagnostics (#1497 review)
+    expect(d.command_preview).toBeUndefined();
   });
 });
 
 describe("mergeSafetyIncident", () => {
-  const base: ReturnType<typeof buildUnknownDiagnostic> = {
+  const base: ToolFailureDiagnosticV1 = {
     version: 1, execution_id: "e1", tool: "execute_bash", reason: "nonzero_exit",
-    timed_out: false, aborted: false, exit_code: 1, command_fingerprint: "abc", command_preview: "cmd",
+    timed_out: false, aborted: false, exit_code: 1, command_fingerprint: "abcd1234abcd1234",
   };
 
   it("upgrades reason to repeated_failure", () => {
@@ -203,7 +217,7 @@ describe("renderDiagnostic", () => {
       execution_id: "e1",
       tool: "execute_bash",
       reason: "nonzero_exit" as const,
-      command_fingerprint: "abc123def456",
+      command_fingerprint: "abcd1234abcd1234",
       command_preview: "ls /nonexistent",
       exit_code: 1,
       timed_out: false,
@@ -214,7 +228,7 @@ describe("renderDiagnostic", () => {
     const rendered = renderDiagnostic(d);
     expect(rendered).toContain("Tool execute_bash failed");
     expect(rendered).toContain("eid:e1");
-    expect(rendered).toContain("fp:abc123def456");
+    expect(rendered).toContain("fp:abcd1234abcd1234");
     expect(rendered).toContain("exit:1");
     expect(rendered).toContain("stderr: No such file");
   });
@@ -247,6 +261,7 @@ describe("PiCoreToolExecutionError", () => {
       timed_out: false,
       aborted: false,
       exit_code: 127,
+      command_fingerprint: "abcd1234abcd1234",
       command_preview: "nonexistent",
     };
     const err = new PiCoreToolExecutionError(d);
