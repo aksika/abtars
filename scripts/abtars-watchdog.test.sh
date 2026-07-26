@@ -217,23 +217,20 @@ BRIDGE_PID=$!
 # Write bridge.lock with a known heartbeat (compact JSON, matching bridge format).
 echo '{"pid":'"$BRIDGE_PID"',"lastHeartbeat":5000,"startedAt":'$(date +%s)'000}' > "$T1499_HOME/bridge.lock"
 
-# Stub svc to return valid identity for this PID.
+# Source the production helpers without starting the watchdog or acquiring its
+# singleton lock. The test overrides only external state I/O and poll_state.
+ABTARS_HOME="$T1499_HOME" ABTARS_WATCHDOG_SOURCE_ONLY=1 source "$WD_SH"
+LOCK="$T1499_HOME/bridge.lock"
+WD_LOG="$T1499_HOME/logs/watchdog.log"
+POLL=2
+POLL_INTERVAL=1
+poll_state() { :; }
 svc() {
   case "$1" in
     validate-bridge) echo "valid $BRIDGE_PID $(date +%s)000" ;;
+    signal-bridge) echo "SIGNALLED" >> "$T1499_HOME/signals" ;;
     *) return 0 ;;
   esac
-}
-
-# Source the watchdog's read_heartbeat and suspend logic.
-LOCK="$T1499_HOME/bridge.lock"
-WD_LOG="$T1499_HOME/logs/watchdog.log"
-POLL=60
-POLL_INTERVAL=1
-
-# Define minimal read_heartbeat equivalent for testing.
-read_heartbeat() {
-  grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*'
 }
 cd /
 
@@ -243,31 +240,17 @@ LAST_POLL_AT=$(date +%s)
 PLANNED_RESTART=0
 # Write an advanced heartbeat into bridge.lock (compact JSON).
 echo '{"pid":'"$BRIDGE_PID"',"lastHeartbeat":6000,"startedAt":'$(date +%s)'000}' > "$T1499_HOME/bridge.lock"
-_suspend_test() {
-  _now_s=$(date +%s)
-  _poll_gap=$(( _now_s - LAST_POLL_AT ))
-  LAST_POLL_AT=$_now_s
-  _baseline_hb="${LAST_OBSERVED_HB:-$(read_heartbeat)}"
-  _deadline=$(( _now_s + 2 ))  # short deadline for test
-  while (( $(date +%s) < _deadline )); do
-    _hb_now=$(read_heartbeat)
-    if [[ -n "$_baseline_hb" && -n "$_hb_now" && "$_baseline_hb" -lt "$_hb_now" ]]; then
-      LAST_OBSERVED_HB="$_hb_now"
-      echo "RECOVERED"
-      return 0
-    fi
-    sleep 1
-  done
-  echo "TIMEOUT"
-  return 1
-}
-_result=$(_suspend_test)
-if [[ "$_result" != "RECOVERED" ]]; then
-  echo "FAIL: suspend recovery — heartbeat advancement should have been detected, got '$_result'"
+if ! wait_for_resume_heartbeat "$LAST_OBSERVED_HB" "$(date +%s)"; then
+  echo "FAIL: suspend recovery helper returned failure on fresh heartbeat"
   kill $BRIDGE_PID 2>/dev/null
   exit 1
 fi
-echo "OK: suspend recovery — heartbeat advancement detected within window"
+if [[ "$LAST_OBSERVED_HB" != "6000" ]]; then
+  echo "FAIL: production suspend recovery helper did not record fresh heartbeat"
+  kill $BRIDGE_PID 2>/dev/null
+  exit 1
+fi
+echo "OK: production suspend recovery helper detects heartbeat advancement"
 
 # Test 11b: no heartbeat advancement → recovery timeout (not stale kill).
 LAST_OBSERVED_HB="5000"
@@ -278,31 +261,14 @@ import json
 with open('$T1499_HOME/bridge.lock', 'w') as f:
     json.dump({'pid': $BRIDGE_PID, 'lastHeartbeat': 5000, 'startedAt': $(date +%s)000}, f)
 "
-_suspend_test() {
-  _now_s=$(date +%s)
-  _poll_gap=$(( _now_s - LAST_POLL_AT ))
-  LAST_POLL_AT=$_now_s
-  _baseline_hb="${LAST_OBSERVED_HB:-$(read_heartbeat)}"
-  _deadline=$(( _now_s + 2 ))
-  while (( $(date +%s) < _deadline )); do
-    _hb_now=$(read_heartbeat)
-    if [[ -n "$_baseline_hb" && -n "$_hb_now" && "$_baseline_hb" -lt "$_hb_now" ]]; then
-      LAST_OBSERVED_HB="$_hb_now"
-      echo "RECOVERED"
-      return 0
-    fi
-    sleep 1
-  done
-  echo "TIMEOUT"
-  return 1
-}
-_result=$(_suspend_test)
-if [[ "$_result" != "TIMEOUT" ]]; then
-  echo "FAIL: suspend recovery — no heartbeat should have timed out, got '$_result'"
+rm -f "$T1499_HOME/signals"
+wait_for_resume_heartbeat "$LAST_OBSERVED_HB" "$(date +%s)"
+if [[ -e "$T1499_HOME/signals" ]]; then
+  echo "FAIL: suspend recovery helper must not signal during bounded wait"
   kill $BRIDGE_PID 2>/dev/null
   exit 1
 fi
-echo "OK: suspend recovery — no advancement correctly times out (≠ stale kill)"
+echo "OK: production suspend recovery helper times out without signalling"
 
 # Test 12: validation retry — corrupt then valid → succeeds.
 svc() {
@@ -324,31 +290,38 @@ svc() {
   esac
 }
 rm -f "$T1499_HOME/validate-call-count"
-_read_bridge_identity() {
-  local _attempt=1
-  while (( _attempt <= 3 )); do
-    read -r _vstatus _vpid _vstarted <<< "$(svc validate-bridge 2>/dev/null)"
-    case "$_vstatus" in
-      valid|dead|reused|wrong-command|mismatch)
-        echo "$_vstatus $_vpid $_vstarted"
-        return 0
-        ;;
-    esac
-    if (( _attempt < 3 )); then
-      sleep "$POLL_INTERVAL"
-    fi
-    (( _attempt++ ))
-  done
-  echo "transient"
-}
-_result=$(_read_bridge_identity)
+_result=$(read_bridge_identity)
 _vstatus=$(echo "$_result" | awk '{print $1}')
 if [[ "$_vstatus" != "valid" ]]; then
-  echo "FAIL: validate retry — corrupt-then-valid should return valid, got '$_vstatus'"
+  echo "FAIL: production validate retry — corrupt-then-valid should return valid, got '$_vstatus'"
   kill $BRIDGE_PID 2>/dev/null
   exit 1
 fi
-echo "OK: validate retry — corrupt-then-valid cycles correctly"
+echo "OK: production validate retry — corrupt-then-valid cycles correctly"
+
+# Test 12b: malformed recognized status must retry, not become process-gone.
+rm -f "$T1499_HOME/validate-call-count"
+svc() {
+  case "$1" in
+    validate-bridge)
+      if [[ ! -f "$T1499_HOME/validate-call-count" ]]; then
+        echo 1 > "$T1499_HOME/validate-call-count"
+        echo "valid $BRIDGE_PID"
+      else
+        echo "valid $BRIDGE_PID $(date +%s)000"
+      fi
+      ;;
+    *) return 0 ;;
+  esac
+}
+_result=$(read_bridge_identity)
+_vstatus=$(echo "$_result" | awk '{print $1}')
+if [[ "$_vstatus" != "valid" ]]; then
+  echo "FAIL: malformed valid response must retry, got '$_result'"
+  kill $BRIDGE_PID 2>/dev/null
+  exit 1
+fi
+echo "OK: malformed recognized response retries through production helper"
 
 # Test 13: validation retry — all transient → returns transient.
 svc() {
@@ -358,7 +331,7 @@ svc() {
   esac
 }
 rm -f "$T1499_HOME/validate-call-count"
-_result=$(_read_bridge_identity)
+_result=$(read_bridge_identity)
 _vstatus=$(echo "$_result" | awk '{print $1}')
 if [[ "$_vstatus" != "transient" ]]; then
   echo "FAIL: validate retry — all transient should return transient, got '$_vstatus'"
@@ -374,7 +347,7 @@ svc() {
     *) return 0 ;;
   esac
 }
-_result=$(_read_bridge_identity)
+_result=$(read_bridge_identity)
 _vstatus=$(echo "$_result" | awk '{print $1}')
 if [[ "$_vstatus" != "dead" ]]; then
   echo "FAIL: validate retry — definitive death should return immediately, got '$_vstatus'"

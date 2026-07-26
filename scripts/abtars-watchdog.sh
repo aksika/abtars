@@ -9,17 +9,21 @@ POLL=60          # documented poll cadence
 POLL_INTERVAL=5  # bounded state-poll slice (R3.5: check durable state <=5s)
 WD_LOG="$AB/logs/watchdog.log"
 
-# Resolve supervisor-state CLI entry (dev/alpha/stable/rollback)
+# Resolve supervisor-state CLI entry (dev/alpha/stable/rollback). The source-only
+# mode is used by the focused shell regression test to exercise the production
+# helpers without starting a watchdog or acquiring the singleton lock.
 SUPERVISOR_CLI=""
-for candidate in "$AB/app/bundle/abtars-supervisor-state.js" "$AB/../src/abtars/bundle/abtars-supervisor-state.js"; do
-  if [[ -f "$candidate" ]]; then
-    SUPERVISOR_CLI="$candidate"
-    break
+if [[ "${ABTARS_WATCHDOG_SOURCE_ONLY:-0}" != "1" ]]; then
+  for candidate in "$AB/app/bundle/abtars-supervisor-state.js" "$AB/../src/abtars/bundle/abtars-supervisor-state.js"; do
+    if [[ -f "$candidate" ]]; then
+      SUPERVISOR_CLI="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$SUPERVISOR_CLI" ]]; then
+    echo "$(date +%FT%T) FATAL: abtars-supervisor-state.js not found" >> "$WD_LOG"
+    exit 1
   fi
-done
-if [[ -z "$SUPERVISOR_CLI" ]]; then
-  echo "$(date +%FT%T) FATAL: abtars-supervisor-state.js not found" >> "$WD_LOG"
-  exit 1
 fi
 
 svc() { node "$SUPERVISOR_CLI" "$@"; }
@@ -30,24 +34,26 @@ read_heartbeat() {
   grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*'
 }
 
-# ── Singleton: flock (Linux) / lockf (macOS). The inode is never unlinked. ──
-exec 200>>"$AB/.bridge.flock"
-if command -v flock &>/dev/null; then
-  flock -w 5 200 || exit 0     # duplicate contender -> exit 0 (R5.2)
-else
-  lockf -s -t 5 200 || exit 0  # macOS retained path (R9)
+if [[ "${ABTARS_WATCHDOG_SOURCE_ONLY:-0}" != "1" ]]; then
+  # ── Singleton: flock (Linux) / lockf (macOS). The inode is never unlinked. ──
+  exec 200>>"$AB/.bridge.flock"
+  if command -v flock &>/dev/null; then
+    flock -w 5 200 || exit 0     # duplicate contender -> exit 0 (R5.2)
+  else
+    lockf -s -t 5 200 || exit 0  # macOS retained path (R9)
+  fi
+
+  # Record watchdog ownership of bridge.lock via the bundled helper (R2.2 — the
+  # shell must not mutate JSON directly; this replaces the former inline python3).
+  svc set-watchdog-pid "$$" 2>/dev/null
+
+  # Signal traps: set in-memory flags only (R4.1). Never kill/lock/mutate here.
+  TERMINATE_FLAG=0
+  WAKE_FLAG=0
+  trap '' HUP
+  trap 'TERMINATE_FLAG=1' TERM INT
+  trap 'WAKE_FLAG=1' USR1
 fi
-
-# Record watchdog ownership of bridge.lock via the bundled helper (R2.2 — the
-# shell must not mutate JSON directly; this replaces the former inline python3).
-svc set-watchdog-pid "$$" 2>/dev/null
-
-# Signal traps: set in-memory flags only (R4.1). Never kill/lock/mutate here.
-TERMINATE_FLAG=0
-WAKE_FLAG=0
-trap '' HUP
-trap 'TERMINATE_FLAG=1' TERM INT
-trap 'WAKE_FLAG=1' USR1
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 migrate_supervisor_state() {
@@ -125,6 +131,64 @@ poll_state() {
   apply_command || true
 }
 
+# Return a complete, validated supervisor response or "transient". A status
+# alone is not enough: truncated output such as "valid" must not bypass the
+# retry path and become a false process-gone result.
+read_bridge_identity() {
+  local attempt=1 identity vstatus vpid vstarted vextra
+  while (( attempt <= 3 )); do
+    identity="$(svc validate-bridge 2>/dev/null)"
+    vstatus=""
+    vpid=""
+    vstarted=""
+    vextra=""
+    read -r vstatus vpid vstarted vextra <<< "$identity"
+    case "$vstatus" in
+      valid|dead|reused|wrong-command|mismatch)
+        if [[ "$vpid" =~ ^[0-9]+$ && "$vstarted" =~ ^[0-9]+$ && -z "$vextra" ]]; then
+          if [[ "$vstatus" != "valid" || "$vpid" != "0" ]]; then
+            printf '%s %s %s\n' "$vstatus" "$vpid" "$vstarted"
+            return 0
+          fi
+        fi
+        ;;
+    esac
+    if (( attempt < 3 )); then
+      poll_state
+      if [[ "$PLANNED_RESTART" -eq 1 ]]; then
+        echo "transient"
+        return 0
+      fi
+      sleep "$POLL_INTERVAL"
+    fi
+    (( attempt++ ))
+  done
+  echo "transient"
+}
+
+# Wait for a heartbeat newer than the pre-suspend baseline. Return 0 after a
+# fresh heartbeat or bounded timeout, and 2 when a planned restart was applied.
+wait_for_resume_heartbeat() {
+  local baseline_hb="$1" start_s="$2" deadline hb_now
+  deadline=$(( start_s + POLL ))
+  while (( $(date +%s) < deadline )); do
+    poll_state
+    [[ "$PLANNED_RESTART" -eq 1 ]] && return 2
+    hb_now="$(read_heartbeat)"
+    if [[ -n "$baseline_hb" && -n "$hb_now" && "$baseline_hb" -lt "$hb_now" ]]; then
+      LAST_OBSERVED_HB="$hb_now"
+      logw "Resume recovery: fresh heartbeat detected within ${POLL}s — resuming normal monitoring"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+  return 0
+}
+
+if [[ "${ABTARS_WATCHDOG_SOURCE_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 # Spawn exactly one bridge. $! is the real node PID (exec replaces the subshell).
 # NB: `exec` and `nohup node` MUST stay on one physical line — the #1261 guard
 # asserts this so $! is the node PID, not a bash subshell.
@@ -190,19 +254,8 @@ while true; do
     if (( _poll_gap > POLL * 3 )); then
       logw "Suspend detected (poll gap ${_poll_gap}s >> ${POLL}s) — entering bounded resume wait"
       _baseline_hb="${LAST_OBSERVED_HB:-$(read_heartbeat)}"
-      _deadline=$(( _now_s + POLL ))
-      while (( $(date +%s) < _deadline )); do
-        poll_state
-        [[ "$PLANNED_RESTART" -eq 1 ]] && break
-        _hb_now=$(read_heartbeat)
-        if [[ -n "$_baseline_hb" && -n "$_hb_now" && "$_baseline_hb" -lt "$_hb_now" ]]; then
-          LAST_OBSERVED_HB="$_hb_now"
-          logw "Resume recovery: fresh heartbeat detected within ${POLL}s — resuming normal monitoring"
-          break
-        fi
-        sleep "$POLL_INTERVAL"
-      done
-      if [[ "$PLANNED_RESTART" -eq 1 ]]; then
+      wait_for_resume_heartbeat "$_baseline_hb" "$_now_s"
+      if [[ "$?" -eq 2 ]]; then
         break   # outer loop respawns
       fi
       continue
@@ -211,27 +264,7 @@ while true; do
     # Bridge alive and still the validated process? Never trust a cached PID:
     # PID reuse must be classified before any signal is sent. Bounded retry
     # for transient results (empty output, corrupt) — see design #1499.
-    # Bounded retry for transient validate-bridge results (#1499).
-    # Returns "transient" when all attempts exhausted without a definitive result.
-    _read_bridge_identity() {
-      local _attempt=1
-      while (( _attempt <= 3 )); do
-        read -r _vstatus _vpid _vstarted <<< "$(svc validate-bridge 2>/dev/null)"
-        case "$_vstatus" in
-          valid|dead|reused|wrong-command|mismatch)
-            echo "$_vstatus $_vpid $_vstarted"
-            return 0
-            ;;
-        esac
-        if (( _attempt < 3 )); then
-          poll_state
-          sleep "$POLL_INTERVAL"
-        fi
-        (( _attempt++ ))
-      done
-      echo "transient"
-    }
-    read -r _vstatus _vpid _vstarted <<< "$(_read_bridge_identity)"
+    read -r _vstatus _vpid _vstarted <<< "$(read_bridge_identity)"
     if [[ "$PLANNED_RESTART" -eq 1 ]]; then
       break   # outer loop handles the planned restart
     fi
