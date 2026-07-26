@@ -1,5 +1,5 @@
 import type { PeerHelpRequestV1, PeerHelpResponseV1, HelpDecision } from "./contract.js";
-import { parseHelpRequest, parseContributionEvent, canonicalRequestHash, generateContributionRef } from "./contract.js";
+import { parseHelpRequest, parseContributionEvent, canonicalRequestHash, contributionEventDigest, generateContributionRef } from "./contract.js";
 import { PeerHelpStore } from "./store.js";
 import { ContributionStore } from "./contribution-store.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
@@ -278,15 +278,17 @@ export class PeerHelpService {
     if (!parsed.ok) return { ok: false };
 
     const event = parsed.value;
+    if (event.projection && event.projection.provenance.receiver_peer !== originPeer) {
+      return { ok: false };
+    }
     const cs = this.contributionStore;
     if (!cs) {
-      this.store.recordContributionEvent(originPeer, event.request_id, event.contribution_ref,
-        event.kind === "completed" ? "completed" : event.kind === "failed" ? "failed" : "running");
-      return { ok: true };
+      logWarn(TAG, "Contribution event received before requester contribution store was wired");
+      return { ok: false };
     }
 
     const projectionJson = event.projection ? JSON.stringify(event.projection) : null;
-    const payloadDigest = projectionJson ?? `${event.kind}_${event.summary ?? ""}_${event.occurred_at}`;
+    const payloadDigest = contributionEventDigest(event);
     const result = cs.applyEvent(originPeer, event, payloadDigest, projectionJson);
 
     if (result === "applied" && (event.kind === "completed" || event.kind === "failed")) {
@@ -299,7 +301,7 @@ export class PeerHelpService {
       } catch {}
     }
 
-    return { ok: result !== "rejected" };
+    return { ok: result === "applied" || result === "duplicate" };
   }
 
   private async countActivePeerProjects(): Promise<number> {

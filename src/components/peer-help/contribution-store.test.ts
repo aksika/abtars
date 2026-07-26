@@ -33,14 +33,30 @@ const noopKanban = {
 };
 
 function makeEvent(overrides: Partial<PeerContributionEventV1> = {}): PeerContributionEventV1 {
+  const kind = overrides.kind ?? "progress";
   return {
     version: 1,
     event_id: `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     sequence: 0,
     request_id: "req_test_1",
     contribution_ref: "help_test_ref",
-    kind: "progress",
+    kind,
     occurred_at: new Date().toISOString(),
+    ...(kind === "completed" || kind === "failed" ? {
+      projection: {
+        schema_version: 1,
+        outcome: kind,
+        summary: "done",
+        evidence: [],
+        artifacts: [],
+        provenance: {
+          receiver_peer: "peer1",
+          receiver_project_ref: "project1",
+          acceptance_id: "accept1",
+          accepted_at: new Date().toISOString(),
+        },
+      },
+    } : {}),
     ...overrides,
   };
 }
@@ -93,6 +109,29 @@ describe("ContributionStore", () => {
       expect(r1.contributionRef).toBeTruthy();
       expect(r2.contributionRef).toBeTruthy();
       expect(r1.contributionRef).not.toBe(r2.contributionRef);
+    });
+
+    it("creates one running proxy and reuses it on request replay", () => {
+      harness.raw.exec(`CREATE TABLE kanban_board (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT, source TEXT, source_id TEXT, priority TEXT, status TEXT,
+        type TEXT, goal TEXT, notes TEXT, parent_id INTEGER,
+        delivery_mode TEXT, source_peer TEXT
+      )`);
+      const input = {
+        peer: "peer1", requestId: "req_proxy", requestHash: "hash_proxy",
+        projectCardId: 100, title: "help", goal: "do help", priority: "HIGH",
+        sourcePeer: "peer1", proxyCardId: undefined,
+        notes: { root_criteria: ["c1"], outcome: "pending" },
+      };
+      const first = store.reserveProxy(input);
+      const second = store.reserveProxy(input);
+      expect(first.status).toBe("new");
+      expect(first.proxyCardId).toBeGreaterThan(0);
+      expect(second).toEqual({ status: "replay", contributionRef: first.contributionRef, proxyCardId: first.proxyCardId });
+      expect(store.getContribution("peer1", "req_proxy")?.proxy_card_id).toBe(first.proxyCardId);
+      expect((harness.raw.prepare("SELECT COUNT(*) AS n FROM kanban_board").get() as any).n).toBe(1);
+      expect((harness.raw.prepare("SELECT status, type, parent_id FROM kanban_board").get() as any)).toEqual({ status: "running", type: "contribution", parent_id: 100 });
     });
   });
 
@@ -170,6 +209,13 @@ describe("ContributionStore", () => {
       expect(result).toBe("rejected");
     });
 
+    it("rejects an event with a mismatched contribution reference", () => {
+      store.reserve("p", "r", "h", null, null, null);
+      store.transitionToAccepted("p", "r");
+      const evt = makeEvent({ request_id: "r", contribution_ref: "help_other", sequence: 1, kind: "completed" });
+      expect(store.applyEvent("p", evt, "d", JSON.stringify(evt.projection))).toBe("rejected");
+    });
+
     it("duplicate event with same ID and digest returns duplicate", () => {
       store.reserve("p", "r", "h", null, null, null);
       store.transitionToAccepted("p", "r");
@@ -182,17 +228,17 @@ describe("ContributionStore", () => {
       store.reserve("p", "r", "h", null, null, null);
       store.transitionToAccepted("p", "r");
       const evt = makeEvent({ request_id: "r", event_id: "evt1", contribution_ref: store.getContribution("p", "r")!.contribution_ref, sequence: 1, kind: "completed" });
-      expect(store.applyEvent("p", evt, "digest1", null)).toBe("applied");
-      expect(store.applyEvent("p", evt, "digest2", null)).toBe("conflict");
+      expect(store.applyEvent("p", evt, "digest1", JSON.stringify(evt.projection))).toBe("applied");
+      expect(store.applyEvent("p", evt, "digest2", JSON.stringify(evt.projection))).toBe("conflict");
     });
 
     it("second terminal event after first-terminal-wins returns conflict", () => {
       store.reserve("p", "r", "h", null, null, null);
       store.transitionToAccepted("p", "r");
       const e1 = makeEvent({ request_id: "r", event_id: "evt1", contribution_ref: store.getContribution("p", "r")!.contribution_ref, sequence: 1, kind: "completed" });
-      expect(store.applyEvent("p", e1, "d1", null)).toBe("applied");
+      expect(store.applyEvent("p", e1, "d1", JSON.stringify(e1.projection))).toBe("applied");
       const e2 = makeEvent({ request_id: "r", event_id: "evt2", contribution_ref: store.getContribution("p", "r")!.contribution_ref, sequence: 2, kind: "completed" });
-      expect(store.applyEvent("p", e2, "d2", null)).toBe("conflict");
+      expect(store.applyEvent("p", e2, "d2", JSON.stringify(e2.projection))).toBe("conflict");
     });
 
     it("rejects out-of-order progress event (lower sequence)", () => {

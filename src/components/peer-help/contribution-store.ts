@@ -1,4 +1,5 @@
 import type { PeerContributionEventV1 } from "./contract.js";
+import { randomUUID } from "node:crypto";
 
 export type ContributionState =
   | "pending" | "accepted" | "running"
@@ -81,6 +82,19 @@ interface KanbanBoard {
   kanbanFail(id: number, error: string): void;
 }
 
+export interface ProxyReservation {
+  peer: string;
+  requestId: string;
+  requestHash: string;
+  projectCardId: number | null;
+  proxyCardId?: number;
+  title: string;
+  goal: string;
+  priority: string;
+  notes: Record<string, unknown>;
+  sourcePeer: string;
+}
+
 export class ContributionStore {
   private db: Db;
   private kanban: KanbanBoard;
@@ -148,6 +162,74 @@ export class ContributionStore {
     return { status: "new", contributionRef };
   }
 
+  reserveProxy(input: ProxyReservation): { status: "new" | "replay" | "conflict"; contributionRef?: string; proxyCardId?: number } {
+    return this.db.transaction(() => {
+      const existing = this.db.prepare(
+        "SELECT * FROM peer_contributions WHERE peer = ? AND request_id = ?",
+      ).get(input.peer, input.requestId) as ContributionRow | undefined;
+
+      if (existing) {
+        if (existing.request_hash !== input.requestHash) return { status: "conflict" as const };
+        if (existing.proxy_card_id) {
+          return { status: "replay" as const, contributionRef: existing.contribution_ref, proxyCardId: existing.proxy_card_id };
+        }
+      }
+
+      const contributionRef = existing?.contribution_ref ?? `help_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+      const notes = JSON.stringify({ ...input.notes, contribution_ref: contributionRef });
+      const normalizedPriority = ["CRITICAL", "HIGH", "MEDIUM", "LOW"].includes(input.priority.toUpperCase())
+        ? input.priority.toUpperCase() : "MEDIUM";
+      const proxyCardId = input.proxyCardId ?? Number(this.db.prepare(
+        `INSERT INTO kanban_board
+          (title, source, source_id, priority, status, type, goal, notes, parent_id, delivery_mode, source_peer)
+         VALUES (?, 'peer', ?, ?, 'running', 'contribution', ?, ?, ?, 'silent', ?)`
+      ).run(
+        input.title, input.requestId, normalizedPriority, input.goal, notes,
+        input.projectCardId, input.sourcePeer,
+      ).lastInsertRowid);
+      if (!proxyCardId) throw new Error("Failed to create contribution proxy");
+
+      if (existing) {
+        this.db.prepare(
+          `UPDATE peer_contributions SET proxy_card_id = ?, updated_at = datetime('now')
+           WHERE peer = ? AND request_id = ? AND proxy_card_id IS NULL`
+        ).run(proxyCardId, input.peer, input.requestId);
+        return { status: "replay" as const, contributionRef, proxyCardId };
+      }
+
+      this.db.prepare(
+        `INSERT INTO peer_contributions
+          (peer, request_id, request_hash, contribution_ref, project_card_id, proxy_card_id,
+           root_criteria_json, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`
+      ).run(
+        input.peer, input.requestId, input.requestHash, contributionRef,
+        input.projectCardId, proxyCardId,
+        input.notes.root_criteria ? JSON.stringify(input.notes.root_criteria) : null,
+      );
+      return { status: "new" as const, contributionRef, proxyCardId };
+    });
+  }
+
+  adoptContributionRef(peer: string, requestId: string, contributionRef: string): boolean {
+    const row = this.getContribution(peer, requestId);
+    if (!row) return false;
+    if (row.contribution_ref === contributionRef) return true;
+    const existing = this.getContributionByRef(contributionRef);
+    if (existing && (existing.peer !== peer || existing.request_id !== requestId)) return false;
+    return this.db.prepare(
+      `UPDATE peer_contributions SET contribution_ref = ?, updated_at = datetime('now')
+       WHERE peer = ? AND request_id = ? AND state IN ('pending','accepted','unknown')`
+    ).run(contributionRef, peer, requestId).changes > 0;
+  }
+
+  detachProxy(peer: string, requestId: string): boolean {
+    return this.db.prepare(
+      `UPDATE peer_contributions SET proxy_card_id = NULL, updated_at = datetime('now')
+       WHERE peer = ? AND request_id = ? AND state IN ('declined','deferred','unknown')`
+    ).run(peer, requestId).changes > 0;
+  }
+
   transitionToAccepted(peer: string, requestId: string): boolean {
     return this.transitionState(peer, requestId, ["pending"], "accepted");
   }
@@ -188,10 +270,12 @@ export class ContributionStore {
 
   applyEvent(peer: string, event: PeerContributionEventV1, payloadDigest: string, projectionJson: string | null): "applied" | "duplicate" | "conflict" | "rejected" {
     const row = this.db.prepare(
-      "SELECT state, last_sequence, terminal_event_id, terminal_digest FROM peer_contributions WHERE peer = ? AND request_id = ?",
-    ).get(peer, event.request_id) as Pick<ContributionRow, "state" | "last_sequence" | "terminal_event_id" | "terminal_digest"> | undefined;
+      "SELECT state, contribution_ref, last_sequence, terminal_event_id, terminal_digest, proxy_card_id FROM peer_contributions WHERE peer = ? AND request_id = ?",
+    ).get(peer, event.request_id) as Pick<ContributionRow, "state" | "contribution_ref" | "last_sequence" | "terminal_event_id" | "terminal_digest" | "proxy_card_id"> | undefined;
 
     if (!row) return "rejected";
+    if (row.contribution_ref !== event.contribution_ref) return "rejected";
+    if ((event.kind === "completed" || event.kind === "failed") && !projectionJson) return "rejected";
 
     if (row.state === "completed" || row.state === "failed") {
       if (row.terminal_event_id === event.event_id && row.terminal_digest === payloadDigest) return "duplicate";
@@ -200,11 +284,14 @@ export class ContributionStore {
     }
 
     const existingEvent = this.db.prepare(
-      "SELECT payload_digest FROM peer_contribution_events WHERE peer = ? AND event_id = ?",
-    ).get(peer, event.event_id) as Pick<EventRow, "payload_digest"> | undefined;
+      "SELECT request_id, contribution_ref, sequence, payload_digest FROM peer_contribution_events WHERE peer = ? AND event_id = ?",
+    ).get(peer, event.event_id) as Pick<EventRow, "request_id" | "contribution_ref" | "sequence" | "payload_digest"> | undefined;
 
     if (existingEvent) {
-      return existingEvent.payload_digest === payloadDigest ? "duplicate" : "conflict";
+      return existingEvent.request_id === event.request_id &&
+        existingEvent.contribution_ref === event.contribution_ref &&
+        existingEvent.sequence === event.sequence &&
+        existingEvent.payload_digest === payloadDigest ? "duplicate" : "conflict";
     }
 
     if (event.sequence <= row.last_sequence) {
@@ -212,30 +299,30 @@ export class ContributionStore {
       return "conflict";
     }
 
-    if (event.kind === "completed" || event.kind === "failed") {
-      this.db.prepare(
-        `UPDATE peer_contributions SET state = ?, last_sequence = ?, terminal_event_id = ?, terminal_digest = ?, projection_json = ?, updated_at = datetime('now')
-         WHERE peer = ? AND request_id = ?`,
-      ).run(
-        event.kind === "completed" ? "completed" : "failed",
-        event.sequence, event.event_id, payloadDigest, projectionJson,
-        peer, event.request_id,
-      );
-    } else {
-      this.db.prepare(
-        `UPDATE peer_contributions SET state = 'running', last_sequence = ?, updated_at = datetime('now')
-         WHERE peer = ? AND request_id = ?`,
-      ).run(event.sequence, peer, event.request_id);
-    }
+    this.db.transaction(() => {
+      if (event.kind === "completed" || event.kind === "failed") {
+        this.db.prepare(
+          `UPDATE peer_contributions SET state = ?, last_sequence = ?, terminal_event_id = ?, terminal_digest = ?, projection_json = ?, updated_at = datetime('now')
+           WHERE peer = ? AND request_id = ?`,
+        ).run(
+          event.kind === "completed" ? "completed" : "failed",
+          event.sequence, event.event_id, payloadDigest, projectionJson,
+          peer, event.request_id,
+        );
+      } else {
+        this.db.prepare(
+          `UPDATE peer_contributions SET state = 'running', last_sequence = ?, updated_at = datetime('now')
+           WHERE peer = ? AND request_id = ?`,
+        ).run(event.sequence, peer, event.request_id);
+      }
 
-    this.db.prepare(
-      `INSERT INTO peer_contribution_events (peer, event_id, request_id, contribution_ref, sequence, payload_digest, projection_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-    ).run(peer, event.event_id, event.request_id, event.contribution_ref, event.sequence, payloadDigest, projectionJson);
+      this.db.prepare(
+        `INSERT INTO peer_contribution_events (peer, event_id, request_id, contribution_ref, sequence, payload_digest, projection_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+      ).run(peer, event.event_id, event.request_id, event.contribution_ref, event.sequence, payloadDigest, projectionJson);
+    });
 
-    const proxyCardId = (this.db.prepare(
-      "SELECT proxy_card_id FROM peer_contributions WHERE peer = ? AND request_id = ?",
-    ).get(peer, event.request_id) as Pick<ContributionRow, "proxy_card_id"> | undefined)?.proxy_card_id;
+    const proxyCardId = row.proxy_card_id;
 
     if ((event.kind === "completed" || event.kind === "failed") && proxyCardId) {
       if (event.kind === "completed") {

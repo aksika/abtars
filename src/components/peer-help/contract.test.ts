@@ -201,6 +201,30 @@ describe("parseContributionEvent", () => {
       contribution_ref: "help_abc", kind: "bogus", occurred_at: "2026-07-17T12:00:00Z",
     }).ok).toBe(false);
   });
+
+  it("requires a bounded projection for terminal events", () => {
+    expect(parseContributionEvent({
+      version: 1, event_id: "evt1", sequence: 0, request_id: "r1",
+      contribution_ref: "help_abc", kind: "completed", occurred_at: "2026-07-17T12:00:00Z",
+    }).ok).toBe(false);
+  });
+
+  it("rejects malformed terminal evidence and artifact entries", () => {
+    const base = {
+      version: 1, event_id: "evt1", sequence: 0, request_id: "r1",
+      contribution_ref: "help_abc", kind: "completed", occurred_at: "2026-07-17T12:00:00Z",
+      projection: {
+        schema_version: 1, outcome: "completed", summary: "done",
+        evidence: [], artifacts: [],
+        provenance: {
+          receiver_peer: "peer1", receiver_project_ref: "project1",
+          acceptance_id: "accept1", accepted_at: "2026-07-17T12:00:00Z",
+        },
+      },
+    };
+    expect(parseContributionEvent({ ...base, projection: { ...base.projection, evidence: [{ id: "e1" }] } }).ok).toBe(false);
+    expect(parseContributionEvent({ ...base, projection: { ...base.projection, artifacts: [{ name: "out" }] } }).ok).toBe(false);
+  });
 });
 
 describe("normalizeCapabilities", () => {

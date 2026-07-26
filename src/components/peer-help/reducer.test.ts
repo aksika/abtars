@@ -44,14 +44,30 @@ const noopKanban = {
 const noopNerve = { fire: () => {} };
 
 function makeEvent(overrides: Partial<PeerContributionEventV1> = {}): PeerContributionEventV1 {
+  const kind = overrides.kind ?? "progress";
   return {
     version: 1,
     event_id: `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     sequence: 0,
     request_id: "r1",
     contribution_ref: "cr1",
-    kind: "progress",
+    kind,
     occurred_at: new Date().toISOString(),
+    ...(kind === "completed" || kind === "failed" ? {
+      projection: {
+        schema_version: 1,
+        outcome: kind,
+        summary: "done",
+        evidence: [],
+        artifacts: [],
+        provenance: {
+          receiver_peer: "peer1",
+          receiver_project_ref: "project1",
+          acceptance_id: "accept1",
+          accepted_at: new Date().toISOString(),
+        },
+      },
+    } : {}),
     ...overrides,
   };
 }
@@ -156,7 +172,7 @@ describe("PeerHelpService contribution reduction (#1493)", () => {
     expect((await service.handleContributionEvent("peer1", evt1 as any)).ok).toBe(true);
     await new Promise(r => setTimeout(r, 0));
     expect(reconcileCalls.filter(c => c === 42).length).toBe(1);
-    expect((await service.handleContributionEvent("peer1", evt2 as any)).ok).toBe(true);
+    expect((await service.handleContributionEvent("peer1", evt2 as any)).ok).toBe(false);
     await new Promise(r => setTimeout(r, 0));
     expect(reconcileCalls.filter(c => c === 42).length).toBe(1);
   });

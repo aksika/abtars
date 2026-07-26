@@ -149,7 +149,7 @@ export class ReviewCaseAssembler {
       const { requireTaskDatabase } = await import("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
       const db = requireTaskDatabase();
       const rows = db.prepare(
-        "SELECT peer, proxy_card_id, state, projection_json, root_criteria_json FROM peer_contributions WHERE project_card_id = ?",
+        "SELECT peer, proxy_card_id, state, projection_json, root_criteria_json FROM peer_contributions WHERE project_card_id = ? AND proxy_card_id IS NOT NULL AND state IN ('completed','failed','declined','deferred')",
       ).all(projectCardId) as Array<{ peer: string; proxy_card_id: number | null; state: string; projection_json: string | null; root_criteria_json: string | null }>;
       for (const r of rows) {
         if (!contributions.some(c => r.proxy_card_id && c.card_id === r.proxy_card_id)) {

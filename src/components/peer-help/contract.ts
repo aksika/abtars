@@ -96,6 +96,7 @@ const MAX_REASON_LENGTH = 2000;
 const MAX_SUMMARY_LENGTH = 10_000;
 const MAX_EVIDENCE_BYTES = 1_000_000;
 const MAX_ARTIFACTS = 20;
+const MAX_PROJECTION_ITEM_LENGTH = 2_000;
 const MAX_REQUEST_ID_LENGTH = 128;
 const REQUEST_ID_RE = /^[A-Za-z0-9._:\-]+$/;
 const MAX_REMOTE_ID_LENGTH = 128;
@@ -315,14 +316,80 @@ export function parseContributionEvent(raw: unknown): { ok: true; value: PeerCon
   if (typeof r.sequence !== "number" || r.sequence < 0) return { ok: false, error: "sequence must be a non-negative number" };
   if (!["progress", "completed", "failed", "withdrawal_noted"].includes(r.kind as string)) return { ok: false, error: "invalid kind" };
   if (!isISODate(r.occurred_at)) return { ok: false, error: "invalid occurred_at" };
+  const terminal = r.kind === "completed" || r.kind === "failed";
+  if (terminal && r.projection === undefined) return { ok: false, error: "terminal projection required" };
+  if (!terminal && r.projection !== undefined) return { ok: false, error: "projection only allowed on terminal event" };
   if (r.projection !== undefined) {
     if (typeof r.projection !== "object" || r.projection === null) return { ok: false, error: "projection must be an object" };
     const p = r.projection as Record<string, unknown>;
-    if (!["completed", "failed"].includes(p.outcome as string)) return { ok: false, error: "invalid projection outcome" };
-    if (typeof p.summary !== "string" || p.summary.length === 0) return { ok: false, error: "projection summary required" };
+    if (p.schema_version !== 1) return { ok: false, error: "unsupported projection version" };
+    if (p.outcome !== r.kind) return { ok: false, error: "projection outcome does not match event kind" };
+    if (typeof p.summary !== "string" || p.summary.length === 0 || p.summary.length > MAX_SUMMARY_LENGTH) return { ok: false, error: "projection summary is invalid" };
+    if (!Array.isArray(p.evidence) || p.evidence.length > 20) return { ok: false, error: "projection evidence is invalid" };
+    if (!Array.isArray(p.artifacts) || p.artifacts.length > MAX_ARTIFACTS) return { ok: false, error: "projection artifacts are invalid" };
+    if (Buffer.byteLength(JSON.stringify({ evidence: p.evidence, artifacts: p.artifacts }), "utf8") > MAX_EVIDENCE_BYTES) {
+      return { ok: false, error: "projection evidence exceeds byte limit" };
+    }
+    for (const item of p.evidence) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) return { ok: false, error: "projection evidence item is invalid" };
+      const evidence = item as Record<string, unknown>;
+      if (!isNonEmptyString(evidence.id) || evidence.id.length > MAX_REMOTE_ID_LENGTH ||
+          !isNonEmptyString(evidence.kind) || evidence.kind.length > MAX_REMOTE_ID_LENGTH ||
+          !isNonEmptyString(evidence.summary) || evidence.summary.length > MAX_PROJECTION_ITEM_LENGTH ||
+          !isNonEmptyString(evidence.observed_by) || evidence.observed_by.length > MAX_REMOTE_ID_LENGTH) {
+        return { ok: false, error: "projection evidence item is invalid" };
+      }
+    }
+    for (const item of p.artifacts) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) return { ok: false, error: "projection artifact is invalid" };
+      const artifact = item as Record<string, unknown>;
+      if (!isNonEmptyString(artifact.name) || artifact.name.length > MAX_PROJECTION_ITEM_LENGTH ||
+          !isNonEmptyString(artifact.content_type) || artifact.content_type.length > MAX_REMOTE_ID_LENGTH ||
+          !Number.isSafeInteger(artifact.size_bytes) || (artifact.size_bytes as number) < 0 ||
+          !isNonEmptyString(artifact.ref) || artifact.ref.length > MAX_PROJECTION_ITEM_LENGTH) {
+        return { ok: false, error: "projection artifact is invalid" };
+      }
+    }
     if (typeof p.provenance !== "object" || p.provenance === null) return { ok: false, error: "projection provenance required" };
+    const provenance = p.provenance as Record<string, unknown>;
+    if (!isNonEmptyString(provenance.receiver_peer) || provenance.receiver_peer.length > MAX_REMOTE_ID_LENGTH ||
+        !isNonEmptyString(provenance.receiver_project_ref) || provenance.receiver_project_ref.length > MAX_REMOTE_ID_LENGTH ||
+        !isNonEmptyString(provenance.acceptance_id) || provenance.acceptance_id.length > MAX_REMOTE_ID_LENGTH ||
+        !isISODate(provenance.accepted_at)) {
+      return { ok: false, error: "projection provenance is invalid" };
+    }
   }
   return { ok: true, value: r as unknown as PeerContributionEventV1 };
+}
+
+export function canonicalContributionHash(
+  request: PeerHelpRequestV1,
+  projectCardId: number | null,
+  rootCriteria: readonly string[],
+): string {
+  const { createHash } = require("node:crypto");
+  return createHash("sha256").update(JSON.stringify({
+    request_hash: canonicalRequestHash(request),
+    project_card_id: projectCardId,
+    root_criteria: [...rootCriteria].sort(),
+  })).digest("hex");
+}
+
+export function contributionEventDigest(event: PeerContributionEventV1): string {
+  const { createHash } = require("node:crypto");
+  return createHash("sha256").update(JSON.stringify({
+    version: event.version,
+    event_id: event.event_id,
+    sequence: event.sequence,
+    request_id: event.request_id,
+    contribution_ref: event.contribution_ref,
+    kind: event.kind,
+    occurred_at: event.occurred_at,
+    summary: event.summary,
+    evidence: event.evidence,
+    artifacts: event.artifacts,
+    projection: event.projection,
+  })).digest("hex");
 }
 
 export function canonicalRequestHash(request: PeerHelpRequestV1): string {

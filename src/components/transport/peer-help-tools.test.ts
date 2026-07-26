@@ -9,11 +9,17 @@ const mockGetConnectedPeers = vi.fn();
 const mockHasAllCapabilities = vi.fn();
 const mockGetPeerInventory = vi.fn();
 const mockHasRoute = vi.fn();
+const mockReserveProxy = vi.fn(() => ({ status: "new", contributionRef: "help_local", proxyCardId: 42 }));
+const mockAdoptContributionRef = vi.fn(() => true);
+const mockTransitionToAccepted = vi.fn(() => true);
+const mockTransitionToNonStarted = vi.fn(() => true);
+const mockDetachProxy = vi.fn(() => true);
 
 const mockDb: any = { prepare: () => ({ run: () => ({ changes: 1 }), get: () => undefined, all: () => [] }), exec: () => {}, transaction: (fn: any) => fn() };
 vi.mock("../tasks/kanban-board.js", () => ({
   kanbanEnqueue: (...args: unknown[]) => mockKanbanEnqueue(...args),
   kanbanUpdate: (...args: unknown[]) => mockKanbanUpdate(...args),
+  kanbanFail: vi.fn(),
   kanbanRunning: vi.fn(),
   kanbanGetCard: () => undefined,
   requireTaskDatabase: () => mockDb,
@@ -30,6 +36,18 @@ vi.mock("../peer-transport/index.js", () => ({
 vi.mock("../peer-transport/peer-inventory.js", () => ({
   hasAllCapabilities: (...args: unknown[]) => mockHasAllCapabilities(...args),
   getPeerInventory: (...args: unknown[]) => mockGetPeerInventory(...args),
+}));
+
+vi.mock("../peer-help/contribution-store.js", () => ({
+  ContributionStore: vi.fn().mockImplementation(function () {
+    return {
+    reserveProxy: mockReserveProxy,
+    adoptContributionRef: mockAdoptContributionRef,
+    transitionToAccepted: mockTransitionToAccepted,
+    transitionToNonStarted: mockTransitionToNonStarted,
+    detachProxy: mockDetachProxy,
+    };
+  }),
 }));
 
 vi.mock("../peer-transport/peer-ws-broker.js", () => ({
@@ -165,24 +183,18 @@ describe("peer_ask_help", () => {
     expect(mockAskHelp).toHaveBeenCalledTimes(1);
   });
 
-  it("creates local contribution card keyed by (peer, request_id)", async () => {
-    mockKanbanEnqueue.mockReturnValue(3);
+  it("creates a project-linked non-dispatchable contribution proxy", async () => {
     mockAskHelp.mockResolvedValue({
       version: 1, request_id: "req-card", decision: "accepted", contribution_ref: "help_xyz",
     });
     const result = JSON.parse(await mod.peerAskHelpTool.execute({
       goal: "analyze logs", peer: "kp", request_id: "req-card",
     }));
-    expect(result.local_card_id).toBe(3);
-    // Verify the card was enqueued with type "contribution" and correct metadata
-    const enqueueCall = mockKanbanEnqueue.mock.calls[0];
-    expect(enqueueCall[0]).toContain("[help:kp]");
-    expect(enqueueCall[2]).toBe("req-card");
-    expect(enqueueCall[3]?.type).toBe("contribution");
-    expect(enqueueCall[3]?.sourcePeer).toBe("kp");
-    // No remote ownership fields in notes
-    expect(enqueueCall[3]?.notes).not.toContain("remote_task_id");
-    expect(enqueueCall[3]?.notes).not.toContain("remote_session_id");
+    expect(result.local_card_id).toBe(42);
+    expect(mockReserveProxy).toHaveBeenCalledWith(expect.objectContaining({
+      peer: "kp", requestId: "req-card", proxyCardId: undefined,
+      sourcePeer: "kp", projectCardId: null,
+    }));
   });
 
   it("uses distinct request ID for each peer after decline", async () => {

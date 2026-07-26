@@ -84,6 +84,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
       try {
         const { PeerHelpService } = await import("../components/peer-help/service.js");
         const { PeerHelpStore } = await import("../components/peer-help/store.js");
+        const { ContributionStore } = await import("../components/peer-help/contribution-store.js");
         const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
         const { nerve } = await import("../components/nerve.js");
         const { kanbanEnqueue, kanbanGetCard, kanbanUpdate, kanbanList, kanbanComplete, kanbanFail } = await import("../components/tasks/kanban-board.js");
@@ -95,6 +96,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
           nerve,
         );
         const helpService = new PeerHelpService(store, () => getLocalCapabilities());
+        helpService.setContributionStore(new ContributionStore(db, { kanbanGetCard, kanbanUpdate, kanbanComplete, kanbanFail }));
 
         // #1357: Wire Pi executor handler for typed Pi delegation requests
         helpService.setPiHandler(async (originPeer, request, _admission) => {

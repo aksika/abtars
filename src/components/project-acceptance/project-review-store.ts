@@ -508,8 +508,9 @@ export class ProjectReviewStore {
     decision: unknown,
     synthesis: string,
     peerEvent?: { peer: string; payload: unknown },
+    acceptanceId?: string,
   ): { decisionId: string } {
-    const decisionId = `rd_settle_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const decisionId = acceptanceId ?? `rd_settle_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const decisionDigest = `sd_${cardId}_${reviewCaseId}_${Date.now()}`;
     const now = new Date().toISOString();
 

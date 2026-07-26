@@ -1,13 +1,23 @@
 import type { ToolDefinition } from "./tool-registry.js";
 import type { PeerHelpRequestV1 } from "../peer-help/contract.js";
-import { canonicalRequestHash } from "../peer-help/contract.js";
+import { canonicalContributionHash } from "../peer-help/contract.js";
 import { ContributionStore } from "../peer-help/contribution-store.js";
 import { getPeerTransport } from "../peer-transport/index.js";
-import { kanbanEnqueue, kanbanRunning, kanbanUpdate, kanbanGetCard, requireTaskDatabase } from "../tasks/kanban-board.js";
+import { kanbanUpdate, kanbanFail, kanbanGetCard, requireTaskDatabase } from "../tasks/kanban-board.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { randomUUID } from "node:crypto";
 
 const TAG = "peer-help";
+
+function parseStringArray(value: unknown, field: string): string[] {
+  let parsed: unknown = value;
+  if (typeof value === "string") parsed = JSON.parse(value);
+  if (parsed === undefined) return [];
+  if (!Array.isArray(parsed) || parsed.some(v => typeof v !== "string" || v.length === 0 || v.length > 128)) {
+    throw new Error(`${field} must be an array of non-empty strings at most 128 characters long`);
+  }
+  return [...new Set(parsed)].slice(0, 50);
+}
 
 export const peerAskHelpTool: ToolDefinition = {
   name: "peer_ask_help",
@@ -37,8 +47,14 @@ export const peerAskHelpTool: ToolDefinition = {
 
     const { goal, priority, context, executor } = args;
     let peer = args.peer;
-    const requires: string[] = args.requires ? (typeof args.requires === "string" ? JSON.parse(args.requires) : args.requires) : [];
-    const rootCriteria: string[] = args.root_criteria ? (typeof args.root_criteria === "string" ? JSON.parse(args.root_criteria) : args.root_criteria) : [];
+    let requires: string[];
+    let rootCriteria: string[];
+    try {
+      requires = parseStringArray(args.requires, "requires");
+      rootCriteria = parseStringArray(args.root_criteria, "root_criteria");
+    } catch (err) {
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+    }
 
     if (!goal) return JSON.stringify({ error: "goal is required" });
 
@@ -131,47 +147,76 @@ export const peerAskHelpTool: ToolDefinition = {
     };
 
     let localCardId: number | undefined;
+    let activeContributionPeer: string | undefined = peer;
+    let activeContributionRequestId = requestId;
     try {
       const activeOrc = await getActiveOrcProjectId();
+      if (rootCriteria.length > 0) {
+        if (!activeOrc) return JSON.stringify({ error: "root_criteria requires an active Orc project" });
+        const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+        const contractRow = new ProjectReviewStore().getContractByProjectCardId(activeOrc);
+        if (!contractRow) return JSON.stringify({ error: `active Orc project #${activeOrc} has no root acceptance contract` });
+        const contract = JSON.parse(contractRow.contract_json) as { criteria?: Array<{ id?: string }> };
+        const valid = new Set((contract.criteria ?? []).map(c => c.id).filter((id): id is string => typeof id === "string"));
+        const invalid = rootCriteria.filter(id => !valid.has(id));
+        if (invalid.length > 0) return JSON.stringify({ error: `root_criteria not found in project #${activeOrc}: ${invalid.join(", ")}` });
+      }
 
-      const requestHash = canonicalRequestHash(request);
+      const requestHash = canonicalContributionHash(request, activeOrc, rootCriteria);
       const contributionStore = getContributionStore();
 
-      const rootCriteriaJson = rootCriteria.length > 0 ? JSON.stringify(rootCriteria) : null;
-      const reserveResult = contributionStore.reserve(peer, requestId, requestHash, activeOrc, null, rootCriteriaJson);
+      const reserveResult = contributionStore.reserveProxy({
+        peer,
+        requestId,
+        requestHash,
+        projectCardId: activeOrc,
+        title: `[help:${peer}] ${goal.slice(0, 80)}`,
+        goal,
+        priority: priority ?? "MEDIUM",
+        sourcePeer: peer,
+        proxyCardId: undefined,
+        notes: {
+          peer,
+          goal,
+          requires: deduped,
+          root_criteria: rootCriteria,
+          executor: executor ?? "agent",
+          request_id: requestId,
+          outcome: "pending",
+        },
+      });
       if (reserveResult.status === "conflict") {
         return JSON.stringify({ error: `Request ${requestId} to ${peer} conflicts with an existing contribution with different parameters` });
       }
       const contributionRef = reserveResult.contributionRef ?? `help_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-
-      const pendingNotes = { peer, goal, requires: deduped, executor: executor ?? "agent", request_id: requestId, outcome: "pending", contribution_ref: contributionRef };
-      localCardId = kanbanEnqueue(`[help:${peer}] ${goal.slice(0, 80)}`, "peer", requestId, {
-        type: "contribution",
-        priority: priority ?? "MEDIUM",
-        notes: JSON.stringify(pendingNotes),
-        sourcePeer: peer,
-        parent_id: activeOrc ?? undefined,
-      });
+      localCardId = reserveResult.proxyCardId;
+      activeContributionPeer = peer;
+      activeContributionRequestId = requestId;
       if (!localCardId) return JSON.stringify({ error: "Failed to persist help request", request_id: requestId });
-      kanbanRunning(localCardId);
 
       const response = await transport.askHelp(peer, request);
 
       if (response.decision === "accepted") {
+        const acceptedRef = response.contribution_ref ?? contributionRef;
+        if (!contributionStore.adoptContributionRef(peer, requestId, acceptedRef)) {
+          return JSON.stringify({ error: "Accepted response has a conflicting contribution reference", request_id: requestId, local_card_id: localCardId });
+        }
         contributionStore.transitionToAccepted(peer, requestId);
         const notes: Record<string, unknown> = {
-          peer, goal, requires: deduped, executor: executor ?? "agent", request_id: requestId,
-          outcome: "accepted", contribution_ref: response.contribution_ref ?? contributionRef,
+          peer, goal, requires: deduped, root_criteria: rootCriteria,
+          parent_project_id: activeOrc ?? undefined,
+          executor: executor ?? "agent", request_id: requestId,
+          outcome: "accepted", contribution_ref: acceptedRef,
         };
         if (response.remote_run_id) notes.remote_run_id = response.remote_run_id;
         if (response.remote_card_id !== undefined) notes.remote_card_id = response.remote_card_id;
         if (response.remote_generation !== undefined) notes.remote_generation = response.remote_generation;
         if (response.remote_session_id) notes.remote_session_id = response.remote_session_id;
         kanbanUpdate(localCardId, { notes: JSON.stringify(notes) });
-        logInfo(TAG, `Help accepted by ${peer}: ref=${response.contribution_ref ?? contributionRef}`);
+        logInfo(TAG, `Help accepted by ${peer}: ref=${acceptedRef}`);
         return JSON.stringify({
           ok: true, local_card_id: localCardId, peer, decision: "accepted",
-          contribution_ref: response.contribution_ref ?? contributionRef, request_id: requestId,
+          contribution_ref: acceptedRef, request_id: requestId,
           remote_run_id: response.remote_run_id,
           remote_card_id: response.remote_card_id,
           remote_generation: response.remote_generation,
@@ -180,7 +225,7 @@ export const peerAskHelpTool: ToolDefinition = {
       }
 
       contributionStore.transitionToNonStarted(peer, requestId, response.decision as any);
-      const notes = { peer, goal, requires: deduped, executor: executor ?? "agent", request_id: requestId, outcome: response.decision };
+      const notes = { peer, goal, requires: deduped, root_criteria: rootCriteria, parent_project_id: activeOrc ?? undefined, executor: executor ?? "agent", request_id: requestId, outcome: response.decision, contribution_ref: contributionRef };
       kanbanUpdate(localCardId, { notes: JSON.stringify(notes) });
       logInfo(TAG, `Help ${response.decision} by ${peer}${response.reason ? `: ${response.reason}` : ""}`);
 
@@ -194,20 +239,52 @@ export const peerAskHelpTool: ToolDefinition = {
         if (nextCandidate) {
           const newRequestId = randomUUID();
           const fallbackRequest: PeerHelpRequestV1 = { ...request, request_id: newRequestId };
+          contributionStore.detachProxy(peer, requestId);
+          const fallbackHash = canonicalContributionHash(fallbackRequest, activeOrc, rootCriteria);
+          const fallbackReservation = contributionStore.reserveProxy({
+            peer: nextCandidate,
+            requestId: newRequestId,
+            requestHash: fallbackHash,
+            projectCardId: activeOrc,
+            proxyCardId: localCardId,
+            title: `[help:${nextCandidate}] ${goal.slice(0, 80)}`,
+            goal,
+            priority: priority ?? "MEDIUM",
+            sourcePeer: nextCandidate,
+            notes: {
+              peer: nextCandidate,
+              goal,
+              requires: deduped,
+              root_criteria: rootCriteria,
+              parent_project_id: activeOrc ?? undefined,
+              executor: executor ?? "agent",
+              request_id: newRequestId,
+              outcome: "pending",
+            },
+          });
+          if (fallbackReservation.status === "conflict") throw new Error("Fallback contribution reservation conflicted");
+          activeContributionPeer = nextCandidate;
+          activeContributionRequestId = newRequestId;
           const fallbackResponse = await transport.askHelp(nextCandidate, fallbackRequest);
-          const fallbackNotes = { peer: nextCandidate, goal, requires: deduped, executor: executor ?? "agent", request_id: newRequestId, outcome: fallbackResponse.decision };
+          const fallbackRef = fallbackReservation.contributionRef ?? `help_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+          const fallbackNotes = { peer: nextCandidate, goal, requires: deduped, root_criteria: rootCriteria, parent_project_id: activeOrc ?? undefined, executor: executor ?? "agent", request_id: newRequestId, outcome: fallbackResponse.decision, contribution_ref: fallbackResponse.contribution_ref ?? fallbackRef };
           if (fallbackResponse.decision === "accepted") {
-            Object.assign(fallbackNotes, { contribution_ref: fallbackResponse.contribution_ref });
+            const acceptedFallbackRef = fallbackResponse.contribution_ref ?? fallbackRef;
+            if (!contributionStore.adoptContributionRef(nextCandidate, newRequestId, acceptedFallbackRef)) throw new Error("Fallback response has a conflicting contribution reference");
+            contributionStore.transitionToAccepted(nextCandidate, newRequestId);
             kanbanUpdate(localCardId, { notes: JSON.stringify(fallbackNotes) });
             return JSON.stringify({
               ok: true, local_card_id: localCardId, peer: nextCandidate, decision: "accepted",
-              contribution_ref: fallbackResponse.contribution_ref, request_id: newRequestId,
+              contribution_ref: acceptedFallbackRef, request_id: newRequestId,
               fallback: true,
             });
           }
+          contributionStore.transitionToNonStarted(nextCandidate, newRequestId, fallbackResponse.decision as any);
           kanbanUpdate(localCardId, { notes: JSON.stringify(fallbackNotes) });
         }
       }
+
+      kanbanFail(localCardId, `peer help ${response.decision}`);
 
       return JSON.stringify({
         ok: true, local_card_id: localCardId, peer, decision: response.decision,
@@ -215,6 +292,13 @@ export const peerAskHelpTool: ToolDefinition = {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (localCardId) {
+        try {
+          const store = getContributionStore();
+          if (activeContributionPeer) store.transitionToNonStarted(activeContributionPeer, activeContributionRequestId, "unknown");
+          kanbanUpdate(localCardId, { notes: JSON.stringify({ outcome: "unknown", request_id: requestId }) });
+        } catch {}
+      }
       logWarn(TAG, `peer_ask_help failed: ${message}`);
       return JSON.stringify({ error: `peer_ask_help failed: ${message}`, outcome: "unknown", request_id: requestId, local_card_id: localCardId });
     }
@@ -303,7 +387,10 @@ function getContributionStore(): ContributionStore {
 async function getActiveOrcProjectId(): Promise<number | null> {
   try {
     const { getActiveOrcCard } = await import("./orc-tools.js");
-    return getActiveOrcCard();
+    const cardId = getActiveOrcCard();
+    if (!cardId) return null;
+    const card = kanbanGetCard(cardId);
+    return card?.type === "O" ? cardId : null;
   } catch { return null; }
 }
 
