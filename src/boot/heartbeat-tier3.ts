@@ -7,7 +7,6 @@ import { checkCron, readPendingReminders, clearPendingReminders } from "../compo
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
-import { createCronCallback } from "./phase-pipeline-deps.js";
 import { runModelHealthCheck } from "./heartbeat-model-health.js";
 import type { BootCtx } from "./context.js";
 
@@ -17,15 +16,13 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   const { heartbeat, transport, cronQueue, memoryRuntime, config, pipelineDeps, capabilities } = ctx;
   if (!heartbeat || !transport || !cronQueue || !pipelineDeps) return;
 
-  const cronCallback = createCronCallback(ctx);
-
   heartbeat.registerTask({
     name: "tasks",
     execute: async () => {
       const dueTasks = checkCron();
       let ran = false;
       for (const entry of dueTasks) {
-        cronQueue.enqueue(entry, cronCallback);
+        cronQueue.enqueue(entry);
         ran = true;
       }
 

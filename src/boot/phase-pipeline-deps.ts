@@ -24,7 +24,7 @@ import { loadTransport, resolveAgent } from "../components/transport-config.js";
 import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
-import type { TaskCompleteCallback } from "../components/tasks/task-queue.js";
+
 import { getEnv } from "../components/env-schema.js";
 import { unavailable } from "../capabilities/sleep/index.js";
 
@@ -78,18 +78,11 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     },
     (chatId, title, _reason) => {
       if (!ctx.telegramAdapter) return;
-      const msg = `⛔ "${title}" needs manual fix, further errors suppressed.\nResume with: /task resume <id>`;
+      const msg = `"${title}" auto-paused.\nResume with: /task resume <id>`;
       ctx.telegramAdapter.sendNotification(String(chatId), msg);
     },
   );
   ctx.cronQueue = cronQueue;
-
-  // cronCallback closes over ctx — reads telegramAdapter lazily (set in phase-platforms)
-  const cronCallback: TaskCompleteCallback = (_chatId, _message, _result, _dodFiles) => {
-    // #857: delivery handled by kanban board poll in heartbeat-tasks.
-    // Board was already updated by task-queue (kanbanComplete/kanbanFail).
-    // Main agent picks up done cards and delivers on next interaction.
-  };
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
   const { setEnqueueCron } = await import("../components/transport/tool-registry.js");
@@ -97,7 +90,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     try {
       const entry = cronReadEntry(id);
       if (!entry) return `❌ Entry ${id} not found`;
-      return cronQueue.enqueue(entry, cronCallback, manual);
+      return cronQueue.enqueue(entry, undefined, manual);
     } catch (err) {
       return `❌ ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -237,9 +230,4 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   return "ran";
 }
 
-/** Export cronCallback factory for phase-heartbeat's age-check task re-enqueue. */
-export function createCronCallback(_ctx: BootCtx): TaskCompleteCallback {
-  return (_chatId, _message, _result, _dodFiles) => {
-    // #857/#1020: delivery handled exclusively by kanban board (phase-heartbeat card:done handler).
-  };
-}
+

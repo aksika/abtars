@@ -184,7 +184,17 @@ export function readTaskFile(taskFile: string): TaskFileResult | null {
 
   const dir = dirname(filePath);
   const base = basename(filePath, ".md");
-  const associated = readdirSync(dir).filter(f => f !== base + ".md" && !f.startsWith(".")).sort();
+  const BACKUP_EXTS = new Set([".bak", ".backup", ".tmp", ".swp"]);
+  const associated = readdirSync(dir)
+    .filter(f => {
+      if (f === base + ".md") return false;
+      if (f.startsWith(".")) return false;
+      const ext = f.includes(".") ? f.slice(f.lastIndexOf(".")).toLowerCase() : "";
+      if (BACKUP_EXTS.has(ext)) return false;
+      if (f.endsWith("~")) return false;
+      return true;
+    })
+    .sort();
   if (associated.length > 0) {
     let injected = "\n\n---\n## Associated files\n";
     let totalChars = 0;
@@ -362,8 +372,8 @@ export class CronQueue {
     const count = incrementFailures(entry.id);
     if (count >= 3) {
       setAutoPaused(entry.id, true);
-      logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${count} consecutive failures`);
-      this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), lastError.slice(0, 200));
+      logWarn(TAG, `Auto-paused "${entry.id}" after ${count} consecutive failures`);
+      this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), `failed ${count}x: ${lastError.slice(0, 150)}`);
       return true;
     }
     return false;

@@ -13,6 +13,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   let listing: string;
   try {
     const { readEntries } = await import("../tasks/task-store.js");
+    const { readState } = await import("../tasks/task-state-store.js");
     const entries = readEntries();
     const active = entries.filter((e: any) => !e.fired);
     active.sort((a: any, b: any) => {
@@ -43,14 +44,19 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
           runsToday = allowed.has(dow);
         }
       }
+      const state = readState(e.id);
+      const autoPaused = state?.autoPaused ?? false;
+      const defPaused = e.paused ?? false;
+      const isPaused = autoPaused || defPaused;
       const succeeded = e.history?.some((h: any) => h.exitCode === 0 && new Date(h.ts).toDateString() === today.toDateString());
       const failed = e.history?.some((h: any) => h.exitCode !== undefined && h.exitCode !== 0 && new Date(h.ts).toDateString() === today.toDateString());
       const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
       const running = ctx.cronCurrentJob?.entryId === e.id;
-      const tick = e.paused ? "⏸" : !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
+      const tick = isPaused ? "p" : !runsToday ? "-" : succeeded ? "+" : running ? "~" : failed ? "x" : started ? "x" : "+";
       const label = formatTaskLabel(e.id);
       const name = label.length > 18 ? label.slice(0, 18) : label;
-      return `${tick}  ${name.padEnd(20)}${sched.padEnd(16)}${label}`;
+      const pauseMarker = autoPaused ? ` [auto-paused:${state?.consecutiveFailures ?? 0}f]` : "";
+      return `${tick}  ${name.padEnd(20)}${sched.padEnd(16)}${label}${pauseMarker}`;
     });
     listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
   } catch (err) {

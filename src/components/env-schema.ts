@@ -33,7 +33,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "WORKING_DIR", type: "string", default: "~/.abtars/workspace", description: "Agent working directory (sandbox)" },
   { env: "MAIN_CHAT_ID", type: "string", description: "Primary chat ID for operator notifications" },
   { env: "MAIN_CHAT_PROVIDER", type: "string", default: "telegram", description: "Platform for MAIN_CHAT_ID: telegram | discord" },
-  { env: "LOG_LEVEL", type: "string", default: "low", description: "Log level: off, low, debug" },
+  { env: "LOG_LEVEL", type: "string", default: "low", description: "Log level: off, low, debug, trace" },
   { env: "LOG_FORMAT", type: "string", default: "text", description: "Log format: text or json" },
 
   // ── Transport ──
