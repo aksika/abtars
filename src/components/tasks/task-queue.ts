@@ -538,7 +538,12 @@ export class CronQueue {
     logTrace(TAG, `task_run_reserved run=${runId} task=${entry.id}`);
 
     const state = readState(entry.id);
-    const isRetry = state?.retrying === true;
+    // #1502 Task 9: a manual trigger starts its own bounded run group — it must
+    // not inherit attempt-2/retry identity from a sticky retrying flag left by a
+    // prior scheduled failure. Otherwise /task run <id> while a retry is pending
+    // would be recorded as trigger="retry" attempt=2 and consume the group's
+    // single retry instead of starting fresh.
+    const isRetry = !manual && state?.retrying === true;
     const groupAttempt: 1 | 2 = isRetry ? 2 : 1;
     const groupTrigger: "schedule" | "manual" | "retry" = isRetry ? "retry" : manual ? "manual" : "schedule";
 
@@ -610,7 +615,7 @@ export class CronQueue {
         if (exitCode === 0) {
           const kanbanSummary = isReport ? (summary || "report artifact verified") : (response ?? "");
           kanbanComplete(boardId, resultPath, kanbanSummary);
-          updateState(entry.id, { retrying: false, priorFailure: undefined });
+          updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, priorFailure: undefined });
           resetFailures(entry.id);
           advanceNextRun(entry.id, entry.schedule);
           appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "success", detail: settlementDetail || summary, resultPath: resultPath ?? undefined, kanbanCardId: boardId, runId });
