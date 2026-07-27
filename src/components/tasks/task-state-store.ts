@@ -15,6 +15,9 @@ export interface TaskRuntimeState {
   retryAt?: number;
   retrying?: boolean;
   completed?: boolean;
+  /** #1502 Task 9: durable identity for the one retry belonging to a run group. */
+  retryGroupId?: string;
+  retryAttempt?: 1 | 2;
   consecutiveFailures: number;
   consecutiveDeferrals: number;
   autoPaused: boolean;

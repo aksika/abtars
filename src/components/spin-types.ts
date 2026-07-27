@@ -181,6 +181,8 @@ export interface SpinRequest {
   attemptId?: string;
   /** #1502: Who owns Kanban settlement. "spin" (default) = finishSpin/failSpin settle the card. "caller" = runner settles after validation. */
   settlementOwner?: "spin" | "caller";
+  /** #1502 Task 10: explicit task-local cwd/env for tool execution. */
+  executionScope?: import("./tasks/task-package.js").ToolExecutionScope;
 }
 
 // ── #1271: unified session API ──────────────────────────────────────────
@@ -245,6 +247,8 @@ export interface SpinSessionSpec {
   executionControl?: import("./execution-control.js").WorkerExecutionControl;
   // #1502: Who owns Kanban settlement. "spin" (default) = finishSpin/failSpin settle the card. "caller" = runner settles after validation.
   settlementOwner?: "spin" | "caller";
+  /** #1502 Task 10: explicit task-local cwd/env for tool execution. */
+  executionScope?: import("./tasks/task-package.js").ToolExecutionScope;
 
   // Extension / future-proofing
   metadata?: Record<string, unknown>;  // session-scoped initial data, set ONCE at allocation

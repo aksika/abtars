@@ -10,6 +10,8 @@ import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
 import { incrementFailures, incrementDeferrals, resetFailures, setAutoPaused, advanceNextRun, updateState, readState } from "./task-state-store.js";
 import { appendRun } from "./task-history-store.js";
 import { kanbanComplete, kanbanFail } from "./kanban-board.js";
+import { createExecutionScope } from "./task-package.js";
+import { logTaskDebug } from "./task-log-ctx.js";
 import type { ScheduledTask } from "./task-types.js";
 import { isSystemEntry, formatTaskLabel } from "./task-types.js";
 import { getSystemTaskRegistry } from "./system-task-registry.js";
@@ -114,6 +116,14 @@ function getEntryMessage(entry: ScheduledTask): string {
 
 let _settleSeq = 0;
 
+interface TaskRunGroup {
+  groupId: string;
+  taskId: string;
+  trigger: "schedule" | "manual";
+  attempt: 1 | 2;
+  priorFailure?: string;
+}
+
 /**
  * Single settlement point for a run. Appends history and updates the scheduling
  * cursor. Protected by terminal latch: once a runId is settled, subsequent calls
@@ -211,6 +221,7 @@ async function checkDoD(paths: string[]): Promise<{ passed: boolean; details: st
 export type TaskCompleteCallback = (chatId: number, message: string, result: string, dodFiles?: string[]) => void;
 export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
 export type TaskPausedCallback = (chatId: number, title: string, reason: string) => void;
+export type AgentTaskRunner = (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string }>;
 
 interface QueuedJob {
   entry: ScheduledTask;
@@ -233,11 +244,13 @@ export class CronQueue {
   private timeout: ReturnType<typeof setTimeout> | null = null;
   private readonly onFailInject?: FailInjectCallback;
   private readonly onTaskPaused?: TaskPausedCallback;
+  private readonly agentRunner?: AgentTaskRunner;
   private readonly failCounts = new Map<string, { date: string; count: number }>();
 
-  constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback, onTaskPaused?: TaskPausedCallback) {
+  constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback, onTaskPaused?: TaskPausedCallback, agentRunner?: AgentTaskRunner) {
     this.onFailInject = onFailInject;
     this.onTaskPaused = onTaskPaused;
+    this.agentRunner = agentRunner;
     const stale = loadStaleState();
     if (stale) {
       if (stale.currentJob) {
@@ -385,7 +398,7 @@ export class CronQueue {
   }
 
   private runOrc(entry: ScheduledTask & { kind: "orc" }, _manual?: boolean): void {
-    logInfo(TAG, `▶ Orc: "${entry.goal.slice(0, 60)}"`);
+    logTaskDebug("task_execution_started", { task: entry.id }, "kind=orc");
     import("../spin.js").then(({ spin }) => {
       spin.dispatch({ type: "O", goal: entry.goal, source: "task", priority: entry.priority ?? "MEDIUM" });
       this.clearCurrent();
@@ -398,7 +411,7 @@ export class CronQueue {
   }
 
   private runScript(entry: ScheduledTask & { kind: "script" }, onComplete?: TaskCompleteCallback, manual?: boolean): void {
-    logInfo(TAG, `▶ Script: "${entry.command.slice(0, 60)}"`);
+    logTaskDebug("task_execution_started", { task: entry.id }, "kind=script");
     try {
       const child = spawn("bash", ["-c", entry.command], { stdio: ["ignore", "pipe", "pipe"] });
       this.setCurrent(entry, child.pid ?? 0, "script", manual);
@@ -409,7 +422,7 @@ export class CronQueue {
 
       child.on("exit", (code) => {
         const status = code === 0 ? "✓" : `❌ (exit ${code})`;
-        logInfo(TAG, `■ Script ${status}: "${entry.command.slice(0, 60)}"`);
+        logTaskDebug("task_settled", { task: entry.id }, `kind=script outcome=${status}`);
         settleRun(entry, code === 0 ? "success" : "failed", this._current?.startedAt ?? Date.now(), output.slice(0, 200), undefined, undefined, this.trigger());
         const paused = this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
         const followUp = entry.followUp;
@@ -446,13 +459,14 @@ export class CronQueue {
       });
 
       child.on("error", (err) => {
-        logWarn(TAG, `Script spawn failed: ${err.message}`);
+        logWarn(TAG, `Script spawn failed for task=${entry.id} (error_chars=${err.message.length})`);
         onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.command, `❌ Failed: ${err.message}`);
         this.clearCurrent();
         this.processNext();
       });
     } catch (err) {
-      logWarn(TAG, `Script error: ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `Script error for task=${entry.id} (error_chars=${message.length})`);
       this.clearCurrent();
       this.processNext();
     }
@@ -497,7 +511,7 @@ export class CronQueue {
       }
     }
 
-    logInfo(TAG, `Agent: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
+    logTaskDebug("task_package_loaded", { task: entry.id }, `delivery=${entry.delivery}`);
 
     if (entry.targetUserId) {
       this.setCurrent(entry, 0, "agent", manual);
@@ -526,7 +540,6 @@ export class CronQueue {
     const workspace = join(abtarsHome(), "workspace", entry.id);
     mkdirSync(workspace, { recursive: true });
 
-    const { spin } = await import("../spin.js");
     const { registerControl, removeControl } = await import("../execution-control.js");
 
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
@@ -535,26 +548,40 @@ export class CronQueue {
     const runId = `${entry.id}_${Date.now()}_${++_settleSeq}`;
     const execControl = registerControl(runId, { cardId: undefined });
 
-    logTrace(TAG, `task_run_reserved run=${runId} task=${entry.id}`);
-
     const state = readState(entry.id);
     // #1502 Task 9: a manual trigger starts its own bounded run group — it must
     // not inherit attempt-2/retry identity from a sticky retrying flag left by a
     // prior scheduled failure. Otherwise /task run <id> while a retry is pending
     // would be recorded as trigger="retry" attempt=2 and consume the group's
     // single retry instead of starting fresh.
-    const isRetry = !manual && state?.retrying === true;
-    const groupAttempt: 1 | 2 = isRetry ? 2 : 1;
-    const groupTrigger: "schedule" | "manual" | "retry" = isRetry ? "retry" : manual ? "manual" : "schedule";
+    const persistedRetryGroup = !manual && state?.retrying && state.retryGroupId && state.retryAttempt === 1
+      ? state.retryGroupId
+      : undefined;
+    const group: TaskRunGroup = {
+      groupId: persistedRetryGroup ?? `${entry.id}:group:${runId}`,
+      taskId: entry.id,
+      trigger: manual ? "manual" : "schedule",
+      attempt: persistedRetryGroup ? 2 : 1,
+      priorFailure: persistedRetryGroup ? state?.priorFailure : undefined,
+    };
+    const isRetry = group.attempt === 2;
+    const groupAttempt = group.attempt;
+    const groupTrigger: "schedule" | "manual" | "retry" = isRetry ? "retry" : group.trigger;
+    logTaskDebug("task_run_reserved", { task: entry.id, run: group.groupId, attempt: groupAttempt, exec: runId });
 
-    if (isRetry && state?.priorFailure) {
-      const priorBlock = `[PREVIOUS ATTEMPT]\nThe previous attempt failed: ${state.priorFailure}\nChange strategy; do not repeat the failed action unchanged.\n[/PREVIOUS ATTEMPT]\n\n`;
+    if (isRetry && group.priorFailure) {
+      const priorBlock = `[PREVIOUS ATTEMPT]\nThe previous attempt failed: ${group.priorFailure}\nChange strategy; do not repeat the failed action unchanged.\n[/PREVIOUS ATTEMPT]\n\n`;
       prompt = priorBlock + prompt;
       logInfo(TAG, `Retrying "${entry.id}" with prior-failure diagnostic`);
       logTrace(TAG, `task_retry_with_diagnostic run=${runId} task=${entry.id} attempt=2`);
     }
 
-    spin.dispatchAwait({
+    let runner = this.agentRunner;
+    if (!runner) {
+      const { spin } = await import("../spin.js");
+      runner = spin.dispatchAwait.bind(spin);
+    }
+    runner({
       timeoutMs: AGENT_TIMEOUT_MS,
       type: sessionType,
       title: formatTaskLabel(entry.id),
@@ -566,6 +593,7 @@ export class CronQueue {
       delivery: entry.delivery,
       settlementOwner: "caller",
       executionControl: execControl,
+      executionScope: createExecutionScope(entry.id),
     })
       .then(async ({ cardId: boardId, result: response }) => {
         const startedAt = this._current?.startedAt ?? Date.now();
@@ -577,8 +605,8 @@ export class CronQueue {
           const reason = execControl.cancelReason ?? "cancelled";
           try { kanbanFail(boardId, `run ${reason}`); } catch { /* best effort */ }
           advanceNextRun(entry.id, entry.schedule);
-          updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, priorFailure: undefined });
-          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "cancelled", detail: `cancelled: ${reason}`, kanbanCardId: boardId, runId });
+          updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined });
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "cancelled", detail: `cancelled: ${reason}`, kanbanCardId: boardId, runId, groupId: group.groupId });
           logInfo(TAG, `Run "${entry.id}" settled as cancelled (control won: ${reason})`);
           return;
         }
@@ -628,24 +656,24 @@ export class CronQueue {
         if (exitCode === 0) {
           const kanbanSummary = isReport ? (summary || "report artifact verified") : (response ?? "");
           kanbanComplete(boardId, resultPath, kanbanSummary);
-          updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, priorFailure: undefined });
+          updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined });
           resetFailures(entry.id);
           advanceNextRun(entry.id, entry.schedule);
-          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "success", detail: settlementDetail || summary, resultPath: resultPath ?? undefined, kanbanCardId: boardId, runId });
-          logTrace(TAG, `task_settled run=${runId} outcome=success`);
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "success", detail: settlementDetail || summary, resultPath: resultPath ?? undefined, kanbanCardId: boardId, runId, groupId: group.groupId });
+          logTaskDebug("task_settled", { task: entry.id, run: group.groupId, exec: runId }, "outcome=success");
         } else {
           kanbanFail(boardId, settlementDetail || summary);
           if (groupAttempt === 1 && entry.schedule) {
             const retryAt = Date.now() + RETRY_DELAY_MS;
-            updateState(entry.id, { lastFinishedAt: Date.now(), nextRunAt: retryAt, retryAt, retrying: true, priorFailure: (settlementDetail || summary).slice(0, 200) });
-            appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: settlementDetail || summary, resultPath: undefined, kanbanCardId: boardId, runId });
+            updateState(entry.id, { lastFinishedAt: Date.now(), nextRunAt: retryAt, retryAt, retrying: true, retryGroupId: group.groupId, retryAttempt: 1, priorFailure: (settlementDetail || summary).slice(0, 200) });
+            appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: settlementDetail || summary, resultPath: undefined, kanbanCardId: boardId, runId, groupId: group.groupId });
             logInfo(TAG, `Retry scheduled for "${entry.id}": attempt 1 failed, retry in ${RETRY_DELAY_MS / 60000}min`);
-            logTrace(TAG, `task_retry_scheduled run=${runId} task=${entry.id} attempt=1`);
+            logTaskDebug("task_retry_scheduled", { task: entry.id, run: group.groupId, attempt: 1, exec: runId });
           } else {
             advanceNextRun(entry.id, entry.schedule);
-            updateState(entry.id, { retrying: false, priorFailure: undefined, lastFinishedAt: Date.now() });
-            appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: settlementDetail || summary, resultPath: undefined, kanbanCardId: boardId, runId });
-            logTrace(TAG, `task_settled run=${runId} outcome=failed attempt=${groupAttempt}`);
+            updateState(entry.id, { retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined, lastFinishedAt: Date.now() });
+            appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: settlementDetail || summary, resultPath: undefined, kanbanCardId: boardId, runId, groupId: group.groupId });
+            logTaskDebug("task_settled", { task: entry.id, run: group.groupId, attempt: groupAttempt, exec: runId }, "outcome=failed");
             const failCount = incrementFailures(entry.id);
             if (failCount >= 3) {
               setAutoPaused(entry.id, true);
@@ -664,19 +692,19 @@ export class CronQueue {
         // settler can fail the Kanban card — otherwise a rejected dispatchAwait
         // (execution throw / pre-exec failure) orphans the card in "running".
         const boardId = (err as { cardId?: number }).cardId;
-        logWarn(TAG, `Agent failed: ${msg}`);
+        logWarn(TAG, `Agent failed for task=${entry.id} (error_chars=${msg.length})`);
         if (boardId !== undefined) {
           try { kanbanFail(boardId, msg.slice(0, 500)); } catch { /* best effort */ }
         }
         if (groupAttempt === 1 && entry.schedule) {
           const retryAt = Date.now() + RETRY_DELAY_MS;
-          updateState(entry.id, { lastFinishedAt: Date.now(), nextRunAt: retryAt, retryAt, retrying: true, priorFailure: msg.slice(0, 200) });
-          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: msg, kanbanCardId: boardId, runId });
-          logInfo(TAG, `Retry scheduled for "${entry.id}": attempt 1 failed, retry in ${RETRY_DELAY_MS / 60000}min`);
+          updateState(entry.id, { lastFinishedAt: Date.now(), nextRunAt: retryAt, retryAt, retrying: true, retryGroupId: group.groupId, retryAttempt: 1, priorFailure: msg.slice(0, 200) });
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: msg, kanbanCardId: boardId, runId, groupId: group.groupId });
+          logTaskDebug("task_retry_scheduled", { task: entry.id, run: group.groupId, attempt: 1, exec: runId });
         } else {
           advanceNextRun(entry.id, entry.schedule);
-          updateState(entry.id, { retrying: false, priorFailure: undefined, lastFinishedAt: Date.now() });
-          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: msg, kanbanCardId: boardId, runId });
+          updateState(entry.id, { retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined, lastFinishedAt: Date.now() });
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: msg, kanbanCardId: boardId, runId, groupId: group.groupId });
           const failCount = incrementFailures(entry.id);
           if (failCount >= 3) {
             setAutoPaused(entry.id, true);

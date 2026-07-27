@@ -588,6 +588,7 @@ export class Spin {
         userId: spec.userId ?? userId,
         beforeMessageId: spec.currentMessageId,
         directContextTurn: spec.directContextTurn,
+        executionScope: spec.executionScope,
         executionTelemetry,
         orchestrator: (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator } | undefined)?.contextOrchestrator,
       };
@@ -895,8 +896,9 @@ export class Spin {
     if (session.instructionQueue.length > 0) expireInstructions(session, "execution_failed");
 
     const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
-    logWarn(TAG, `${spec.type} spin failed: ${msg}`);
-    pushLog(session, `failed: ${msg.slice(0, 80)}`);
+    const errorKind = err instanceof Error ? err.name : typeof err;
+    logWarn(TAG, `${spec.type} spin failed (error=${errorKind}, error_chars=${msg.length})`);
+    pushLog(session, `failed (${errorKind})`);
     let staleWorkerFailure = false;
     if (cardId !== undefined) {
       // #1248: If terminal already won (cancellation), skip fail settlement
@@ -1043,6 +1045,7 @@ export class Spin {
       attemptId: request.attemptId,
       executionControl: request.executionControl,
       settlementOwner: request.settlementOwner,
+      executionScope: request.executionScope,
     });
     return { cardId };
   }
@@ -1077,6 +1080,7 @@ export class Spin {
       await: true,
       settlementOwner: request.settlementOwner,
       executionControl: request.executionControl,
+      executionScope: request.executionScope,
     });
     return { cardId: cardId!, result: result! };
   }
@@ -1152,6 +1156,7 @@ export class Spin {
         contractId: result.contract.id,
         attemptId: result.attemptId,
         executionControl: request.executionControl,
+        executionScope: request.executionScope,
         deliveryMode: request.deliveryMode,
         delivery: request.delivery,
         agent: request.agent,
@@ -1175,6 +1180,7 @@ export class Spin {
       contractId: request.contract?.id,
       attemptId: request.attemptId,
       executionControl: request.executionControl,
+      executionScope: request.executionScope,
       deliveryMode: request.deliveryMode,
       delivery: request.delivery,
       agent: request.agent,

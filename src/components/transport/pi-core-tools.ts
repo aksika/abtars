@@ -7,6 +7,7 @@ import type { SandboxPolicy } from "../tool-sandbox.js";
 import { checkTool } from "../tool-sandbox.js";
 import { PiCoreToolExecutionError, parseToolResultToDiagnostic, buildUnknownDiagnostic } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
+import type { ToolExecutionScope } from "../tasks/task-package.js";
 
 const TAG = "pi-core-tools";
 
@@ -20,6 +21,8 @@ export interface PiCoreToolContext {
   onToolFailure?: (diagnostic: ToolFailureDiagnosticV1) => void;
   /** Wrap a JSON schema object as a Pi-compatible TypeScript schema (Type.Unsafe). */
   createUnsafeSchema?: (schema: Record<string, unknown>) => Record<string, unknown>;
+  /** #1502 Task 10: task-local execution scope. */
+  executionScope?: ToolExecutionScope;
 }
 
 function adaptParameters(params: Record<string, unknown>): Record<string, unknown> {
@@ -106,6 +109,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
           userId: context.userId,
           signal: signal ?? context.signal,
           sandboxPolicy: context.sandboxPolicy,
+          executionScope: context.executionScope,
         });
 
         const diag = parseToolResultToDiagnostic(result, context.executionId, def.name);

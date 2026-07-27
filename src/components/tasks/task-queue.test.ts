@@ -354,3 +354,23 @@ describe("CronQueue agent output validation", () => {
     expect(queue.currentJob).toBeNull();
   });
 });
+
+describe("CronQueue task-run wiring (#1502)", () => {
+  it("passes a task execution scope to the runner and does not inherit a sticky retry flag", async () => {
+    const runner = vi.fn().mockResolvedValue({ cardId: 5, result: "x".repeat(100) });
+    vi.mocked(stateStore.readState).mockReturnValue({
+      nextRunAt: Date.now(), consecutiveFailures: 0, consecutiveDeferrals: 0,
+      autoPaused: false, retrying: true, priorFailure: "do not leak this into a new group",
+    });
+    const queue = new CronQueue("kiro-cli", ".", undefined, undefined, runner);
+    const entry = makeEntry({ id: "scoped-run", kind: "agent", prompt: "produce report", delivery: "report" });
+    queue.enqueue(entry, undefined, true);
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    expect(runner).toHaveBeenCalledOnce();
+    const request = runner.mock.calls[0]![0];
+    expect(request.executionScope?.cwd).toContain("scoped-run");
+    expect(request.executionScope?.env.WORKSPACE).toBe(request.executionScope?.cwd);
+    expect(request.goal).not.toContain("PREVIOUS ATTEMPT");
+  });
+});

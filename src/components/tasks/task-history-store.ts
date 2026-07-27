@@ -21,6 +21,8 @@ export interface TaskRunEvent {
   detail?: string;
   resultPath?: string;
   kanbanCardId?: number;
+  /** #1502 Task 9: groups attempts 1 and 2 without relying on retrying alone. */
+  groupId?: string;
 }
 
 function historyPath(): string {

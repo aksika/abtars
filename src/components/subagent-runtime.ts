@@ -130,7 +130,8 @@ export class SubagentRuntime {
       this._lastUsage = exec.lastUsage();
       return response ?? "";
     } catch (err) {
-      logWarn(TAG, `${agent} complete failed: ${err instanceof Error ? err.message : String(err)}`);
+      const detail = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `${agent} complete failed (error_chars=${detail.length})`);
       this.cache.delete(agent);
       throw err;
     } finally {

@@ -4,6 +4,7 @@
  */
 
 import type { PiContextOrchestrator } from "./pi-core-context.js";
+import type { ToolExecutionScope } from "../tasks/task-package.js";
 
 /**
  * Per-call request metadata threaded from the pipeline through to the
@@ -32,6 +33,8 @@ export interface PromptRequestContext {
   };
   /** #1444: execution telemetry scope for provider-call correlation. */
   executionTelemetry?: import("../execution-telemetry.js").ExecutionTelemetryScope;
+  /** #1502 Task 10: task-local cwd/env; never mutate process.env. */
+  executionScope?: ToolExecutionScope;
   /** Durable context authority for Pi-core's exclusive before-message projection. */
   orchestrator?: PiContextOrchestrator;
 }

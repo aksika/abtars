@@ -17,3 +17,18 @@ export function fmtLogCtx(ctx: TaskLogCtx): string {
   if (ctx.exec) parts.push(`exec=${ctx.exec}`);
   return parts.join(" ");
 }
+
+/** Emit compact correlation-only events; payloads never belong in these helpers. */
+export function logTaskDebug(event: string, ctx: TaskLogCtx, details?: string): void {
+  logDebug("task-pipeline", `${event}${formatCtx(ctx)}${details ? ` ${details}` : ""}`);
+}
+
+export function logTaskTrace(event: string, ctx: TaskLogCtx, details?: string): void {
+  logTrace("task-pipeline", `${event}${formatCtx(ctx)}${details ? ` ${details}` : ""}`);
+}
+
+function formatCtx(ctx: TaskLogCtx): string {
+  const formatted = fmtLogCtx(ctx);
+  return formatted ? ` ${formatted}` : "";
+}
+import { logDebug, logTrace } from "../logger.js";

@@ -1,4 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+vi.mock("../guardrails.js", () => ({
+  checkCommand: () => null,
+  classifyCommand: () => "allow",
+}));
 import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, setMemoryBackend } from "./tool-registry.js";
 
 describe("isBridgeSpawnCommand", () => {
@@ -77,6 +85,28 @@ describe("executeToolCall", () => {
     const result = await executeToolCall("nonexistent_tool", {});
     const parsed = JSON.parse(result);
     expect(parsed.error).toContain("Unknown tool");
+  });
+
+  it("runs bash inside an explicit task scope without mutating the parent environment (#1502 Task 10)", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "abtars-task-scope-"));
+    const before = process.env["WORKSPACE"];
+    try {
+      delete process.env["WORKSPACE"];
+      const result = await executeToolCall("execute_bash", {
+        command: "printf '%s\\n%s\\n' \"$PWD\" \"$WORKSPACE\"",
+      }, {
+        userId: "test",
+        executionScope: { cwd, env: Object.freeze({ WORKSPACE: cwd }) },
+      });
+      const parsed = JSON.parse(result) as { exit_code: number; stdout: string };
+      expect(parsed.exit_code).toBe(0);
+      expect(parsed.stdout.trim().split("\n")).toEqual([cwd, cwd]);
+      expect(process.env["WORKSPACE"]).toBeUndefined();
+    } finally {
+      if (before === undefined) delete process.env["WORKSPACE"];
+      else process.env["WORKSPACE"] = before;
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });
 

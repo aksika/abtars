@@ -13,6 +13,8 @@ import { logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { getMasterUserId } from "../master-user.js";
+import type { ToolExecutionScope } from "../tasks/task-package.js";
+import { checkCommand, classifyCommand } from "../guardrails.js";
 
 const TAG = "tool_registry";
 
@@ -30,7 +32,7 @@ export type ToolDefinition = {
   readonly parameters: Record<string, unknown>;
   // Implementations receive the provider's JSON object unchanged. Legacy
   // command-backed tools normalize individual values at their own boundary.
-  execute(args: Record<string, unknown>, context?: { userId: string; signal?: AbortSignal }): Promise<string>;
+  execute(args: Record<string, unknown>, context?: { userId: string; signal?: AbortSignal; executionScope?: ToolExecutionScope }): Promise<string>;
 };
 
 /** Tool implementations may still consume textual CLI-style values, but the
@@ -85,9 +87,8 @@ function isBridgeKillCommand(cmd: string): boolean {
   return false;
 }
 
-function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
+function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal, executionScope?: ToolExecutionScope): Promise<string> {
   // Guardrails: command check
-  const { checkCommand, classifyCommand } = require("../guardrails.js") as typeof import("../guardrails.js");
   const cmdBlock = checkCommand(cmd);
   if (cmdBlock) {
     logWarn("tool-registry", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
@@ -102,7 +103,7 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
         logWarn("tool-registry", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
         return JSON.stringify({ error: "policy_rejected", stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
       }
-      return executeBash(cmd, timeout, signal);
+      return executeBash(cmd, timeout, signal, executionScope);
     });
   }
 
@@ -126,7 +127,7 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
       command_preview: previewCommand(cmd),
     }));
   }
-  return executeBash(cmd, timeout, signal);
+  return executeBash(cmd, timeout, signal, executionScope);
 }
 
 let _seatbeltActive = false;
@@ -140,7 +141,7 @@ export function setSeatbelt(active: boolean, policy?: import("../seatbelt/policy
 
 import { fingerprintCommand, previewCommand } from "./tool-failure-diagnostic.js";
 
-function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promise<string> {
+function executeBash(cmd: string, timeout: number, signal?: AbortSignal, executionScope?: ToolExecutionScope): Promise<string> {
   // Check pre-aborted signal BEFORE spawning — a cancelled request must
   // never execute side effects (#1497 review).
   if (signal?.aborted) {
@@ -171,7 +172,11 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promis
       }
     }
 
-    const child = execFile(bin, args, { maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    const child = execFile(bin, args, {
+      maxBuffer: 1024 * 1024,
+      cwd: executionScope?.cwd,
+      env: executionScope ? { ...process.env, ...executionScope.env } : undefined,
+    }, (err, stdout, stderr) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
 
       const result: Record<string, unknown> = {
@@ -247,7 +252,7 @@ const bashTool: ToolDefinition = {
     properties: { command: { type: "string", description: "The bash command to execute" } },
     required: ["command"],
   },
-  execute: (args, context) => runBash(stringValue(args["command"]), BASH_TIMEOUT_MS, context?.signal),
+  execute: (args, context) => runBash(stringValue(args["command"]), BASH_TIMEOUT_MS, context?.signal, context?.executionScope),
 };
 
 let _storeCount = 0;
@@ -683,7 +688,7 @@ function checkSkillRead(toolName: string, args: Record<string, unknown>): void {
   }
 }
 
-export async function executeToolCall(name: string, args: Record<string, unknown>, context?: { userId: string; signal?: AbortSignal; sandboxPolicy?: SandboxPolicy }): Promise<string> {
+export async function executeToolCall(name: string, args: Record<string, unknown>, context?: { userId: string; signal?: AbortSignal; sandboxPolicy?: SandboxPolicy; executionScope?: ToolExecutionScope }): Promise<string> {
   // Sandbox enforcement
   if (context?.sandboxPolicy) {
     const toolCheck = checkTool(name, context.sandboxPolicy);
