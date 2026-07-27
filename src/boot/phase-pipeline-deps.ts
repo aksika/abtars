@@ -224,6 +224,10 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { initChannelSync } = await import("../components/tasks/kanban-channel.js");
   initChannelSync();
 
+  // #1505: Reconcile any active runs from a prior process crash
+  const { reconcileActiveTaskRuns } = await import("../components/tasks/task-checker.js");
+  await reconcileActiveTaskRuns();
+
   // Register Tier 3 heartbeat tasks (cron, housekeeping, self-healer, etc.)
   const { registerTier3Tasks } = await import("./heartbeat-tier3.js");
   await registerTier3Tasks(ctx);

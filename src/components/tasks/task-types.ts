@@ -35,6 +35,17 @@ interface TaskBase extends SchedulePolicy {
   delivery: Delivery;
 }
 
+export interface ReportContract {
+  artifact: string;
+  requiredSections: string[];
+  minBytes: number;
+  requires: {
+    files: string[];
+    executables: string[];
+    tools: string[];
+  };
+}
+
 export type ScheduledTask =
   | (TaskBase & {
       kind: "reminder";
@@ -48,6 +59,7 @@ export type ScheduledTask =
       agent: "task" | "professor" | "browsie" | "coding" | "dreamy";
       maxToolRounds?: number;
       targetUserId?: string;
+      report?: ReportContract;
     })
   | (TaskBase & {
       kind: "script";
@@ -148,9 +160,36 @@ export function normalize(raw: unknown): NormalizeResult {
       const agent = agentRaw as "task" | "professor" | "browsie" | "coding" | "dreamy";
       const maxToolRounds = typeof e["maxToolRounds"] === "number" ? e["maxToolRounds"] as number : undefined;
       const targetUserId = typeof e["targetUserId"] === "string" ? e["targetUserId"] : undefined;
+      const reportRaw = e["report"];
+      let report: ReportContract | undefined;
+      if (base.delivery === "report") {
+        if (typeof reportRaw !== "object" || reportRaw === null) {
+          return { ok: false, error: `report contract is required for delivery=report tasks`, id };
+        }
+        const r = reportRaw as Record<string, unknown>;
+        const artifact = typeof r["artifact"] === "string" ? r["artifact"] : "";
+        const requiredSections = Array.isArray(r["requiredSections"]) ? r["requiredSections"].filter((s: unknown) => typeof s === "string" && s.length > 0) : [];
+        const minBytes = typeof r["minBytes"] === "number" ? r["minBytes"] : 0;
+        if (!artifact || typeof artifact !== "string" || (!artifact.startsWith("/") && !artifact.startsWith("~/"))) {
+          return { ok: false, error: `report.artifact must be an absolute or ~/ path`, id };
+        }
+        if (requiredSections.length === 0) {
+          return { ok: false, error: `report.requiredSections must be a non-empty array of Markdown headings`, id };
+        }
+        if (!Number.isInteger(minBytes) || minBytes < 100) {
+          return { ok: false, error: `report.minBytes must be an integer >= 100`, id };
+        }
+        const requiresRaw = typeof r["requires"] === "object" && r["requires"] !== null ? r["requires"] as Record<string, unknown> : {};
+        const filesArr = Array.isArray(requiresRaw["files"]) ? requiresRaw["files"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
+        const executablesArr = Array.isArray(requiresRaw["executables"]) ? requiresRaw["executables"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
+        const toolsArr = Array.isArray(requiresRaw["tools"]) ? requiresRaw["tools"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
+        report = { artifact, requiredSections, minBytes, requires: { files: filesArr, executables: executablesArr, tools: toolsArr } };
+      } else if (reportRaw !== undefined) {
+        return { ok: false, error: `report contract is only valid for delivery=report tasks`, id };
+      }
       return {
         ok: true,
-        entry: { ...base, kind: "agent", prompt, taskFile, agent, maxToolRounds, targetUserId },
+        entry: { ...base, kind: "agent", prompt, taskFile, agent, maxToolRounds, targetUserId, report },
       };
     }
     case "script": {

@@ -85,7 +85,7 @@ function add(args: string[]): void {
     enabled: true,
     priority: "medium" as const,
     chatId,
-    delivery: isSystem ? "silent" as const : (kind === "reminder" ? "announce" as const : "report" as const),
+    delivery: isSystem ? "silent" as const : (kind === "reminder" ? "announce" as const : "announce" as const),
     schedule,
     at,
   };

@@ -1,5 +1,8 @@
 import type { KanbanCard } from "./kanban-board.js";
-import { kanbanMarkDelivered, kanbanClaimDelivery } from "./kanban-board.js";
+import { kanbanMarkDelivered, kanbanClaimDelivery, kanbanGetCard, requireTaskDatabase } from "./kanban-board.js";
+import { logDebug, logWarn } from "../logger.js";
+
+const TAG = "kanban-delivery";
 
 export interface DeliverDeps {
   sendMessage: (chatId: string, text: string) => Promise<void>;
@@ -9,7 +12,6 @@ export interface DeliverDeps {
 }
 
 export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<void> {
-  // #1363 Task 9: O-type cards (projects) only deliver if they have an accepted supervision state
   if (card.type === "O") {
     const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
     const store = new ProjectReviewStore();
@@ -19,8 +21,19 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     }
   }
 
-  // Claim and increment atomically. Two heartbeat ticks holding the same
-  // stale card object cannot both enter the delivery side effects.
+  // Only deliver cards with result_path (report artifacts) or result_summary
+  // Skip cards that have already been delivered or have unknown delivery state
+  const fresh = kanbanGetCard(card.id);
+  if (!fresh) return;
+  if (fresh.status === "delivered") {
+    logDebug(TAG, `Card ${card.id} already delivered — skipping`);
+    return;
+  }
+  if (fresh.delivery_result === "unknown") {
+    logDebug(TAG, `Card ${card.id} delivery_result=unknown — skipping auto-retry`);
+    return;
+  }
+
   if (!kanbanClaimDelivery(card.id)) return;
   const chatId = deps.chatIdFor(card);
 
@@ -29,21 +42,73 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     return;
   }
 
+  if (card.result_path) {
+    try {
+      await deps.sendDocument(chatId, card.result_path, card.title);
+      markSent(card.id, "sent");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `sendDocument failed for card ${card.id}: ${msg}`);
+      markUnknown(card.id);
+    }
+    return;
+  }
+
   if (card.delivery_mode === "announce") {
     const text = card.result_summary
       ? `${card.title} complete.\n\n${card.result_summary}`
       : `${card.title} complete.`;
-    await deps.sendMessage(chatId, text);
-    kanbanMarkDelivered(card.id);
+    try {
+      await deps.sendMessage(chatId, text);
+      markSent(card.id, "sent");
+    } catch {
+      markUnknown(card.id);
+    }
     return;
   }
 
-  if (card.result_path) {
-    await deps.sendDocument(chatId, card.result_path, card.title);
-    kanbanMarkDelivered(card.id);
-    return;
-  }
   const summary = card.result_summary ? `\n\n${card.result_summary}` : "";
-  await deps.sendMessage(chatId, `${card.title} complete.${summary}`);
-  kanbanMarkDelivered(card.id);
+  try {
+    await deps.sendMessage(chatId, `${card.title} complete.${summary}`);
+    markSent(card.id, "sent");
+  } catch {
+    markUnknown(card.id);
+  }
 }
+
+function markSent(cardId: number, receipt: string): void {
+  try {
+    const db = requireTaskDatabase();
+    db.prepare(
+      `UPDATE kanban_board SET status = 'delivered', delivery_result = 'sent', delivery_receipt = ?, delivered_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+    ).run(receipt, cardId);
+    logDebug(TAG, `Card ${cardId}: marked sent`);
+  } catch (err) {
+    logWarn(TAG, `markSent failed for card ${cardId}: ${err}`);
+  }
+}
+
+function markUnknown(cardId: number): void {
+  try {
+    const db = requireTaskDatabase();
+    db.prepare(
+      `UPDATE kanban_board SET status = 'done', delivery_result = 'unknown', updated_at = datetime('now') WHERE id = ? AND delivery_result IS NULL`
+    ).run(cardId);
+    logWarn(TAG, `Card ${cardId}: delivery_result=unknown (send failed)`);
+  } catch (err) {
+    logWarn(TAG, `markUnknown failed for card ${cardId}: ${err}`);
+  }
+}
+
+export function markDefinitelyNotSent(cardId: number): void {
+  try {
+    const db = requireTaskDatabase();
+    db.prepare(
+      `UPDATE kanban_board SET delivery_result = 'definitely_not_sent', status = 'done', updated_at = datetime('now') WHERE id = ?`
+    ).run(cardId);
+    logDebug(TAG, `Card ${cardId}: delivery_result=definitely_not_sent`);
+  } catch (err) {
+    logWarn(TAG, `markDefinitelyNotSent failed for card ${cardId}: ${err}`);
+  }
+}
+

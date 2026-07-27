@@ -74,6 +74,9 @@ export interface KanbanCard {
   delivery_mode: string;
   chat_id: string | null;
   source_peer: string | null;
+  delivery_claimed_at: string | null;
+  delivery_result: string | null;
+  delivery_receipt: string | null;
 }
 
 let _db: SqliteDb | null = null;
@@ -123,6 +126,9 @@ function db(): SqliteDb | null {
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN source_peer TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN goal TEXT`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_claimed_at TEXT`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_result TEXT CHECK(delivery_result IS NULL OR delivery_result IN ('sent','definitely_not_sent','unknown'))`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_receipt TEXT`); } catch {}
   } catch {
     logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
     _db = null;

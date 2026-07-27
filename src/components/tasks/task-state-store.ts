@@ -8,6 +8,31 @@ import type { ScheduledTask } from "./task-types.js";
 
 const TAG = "task_state_store";
 
+export type TaskRunPhase =
+  | "reserved"
+  | "preflight"
+  | "queued"
+  | "executing"
+  | "cancelling"
+  | "validating"
+  | "settling"
+  | "delivery_pending";
+
+export interface ActiveTaskRun {
+  runId: string;
+  groupId: string;
+  attempt: 1 | 2;
+  trigger: "schedule" | "manual" | "retry";
+  occurrenceAt: number;
+  reservedAt: number;
+  deadlineAt: number;
+  phase: TaskRunPhase;
+  lastProgressAt: number;
+  cardId?: number;
+  sessionId?: string;
+  executionId?: string;
+}
+
 export interface TaskRuntimeState {
   nextRunAt: number | null;
   lastStartedAt?: number;
@@ -23,6 +48,8 @@ export interface TaskRuntimeState {
   autoPaused: boolean;
   /** #1502: Failure diagnostic from the first attempt, carried to retry. */
   priorFailure?: string;
+  /** #1505: Active run reservation — exclusive occurrence ownership. */
+  activeRun?: ActiveTaskRun;
 }
 
 type TaskStateFile = Record<string, TaskRuntimeState>;
@@ -194,4 +221,61 @@ export function setRetrying(taskId: string, retrying: boolean, retryAt?: number)
     }
     return state;
   });
+}
+
+export type ReserveRunResult =
+  | { ok: true; run: ActiveTaskRun }
+  | { ok: false; active: ActiveTaskRun };
+
+export function reserveRun(taskId: string, candidate: Omit<ActiveTaskRun, "reservedAt" | "phase" | "lastProgressAt">): ReserveRunResult {
+  let result: ReserveRunResult = { ok: false, active: undefined! };
+  writeAtomic(state => {
+    const existing = state[taskId];
+    if (existing?.activeRun) {
+      result = { ok: false, active: existing.activeRun };
+      return state;
+    }
+    const run: ActiveTaskRun = {
+      ...candidate,
+      reservedAt: Date.now(),
+      phase: "reserved",
+      lastProgressAt: Date.now(),
+    };
+    state[taskId] = {
+      ...(existing ?? { nextRunAt: null, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false }),
+      activeRun: run,
+      lastStartedAt: Date.now(),
+    };
+    result = { ok: true, run };
+    return state;
+  });
+  return result;
+}
+
+export function updateActiveRun(taskId: string, runId: string, patch: Partial<ActiveTaskRun>): boolean {
+  let found = false;
+  writeAtomic(state => {
+    const existing = state[taskId];
+    if (!existing?.activeRun || existing.activeRun.runId !== runId) return state;
+    state[taskId] = { ...existing, activeRun: { ...existing.activeRun, ...patch } };
+    found = true;
+    return state;
+  });
+  return found;
+}
+
+export function settleActiveRun(taskId: string, runId: string, statePatch: Partial<TaskRuntimeState>): boolean {
+  let found = false;
+  writeAtomic(state => {
+    const existing = state[taskId];
+    if (!existing?.activeRun || existing.activeRun.runId !== runId) return state;
+    state[taskId] = {
+      ...existing,
+      ...statePatch,
+      activeRun: undefined,
+    };
+    found = true;
+    return state;
+  });
+  return found;
 }

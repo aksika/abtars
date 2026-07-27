@@ -37,6 +37,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     logger.setLogLevel("trace");
     logger.setFileLogging(true);
     const canary = "PROMPT_CONTEXT_COMMAND_STDERR_ENV_ASSISTANT_CANARY";
+    const artifactPath = join(home, "workspace", "report-task", "report.md");
     mkdirSync(join(home, "workspace", "report-task"), { recursive: true });
     writeFileSync(join(home, "workspace", "report-task", "CONTEXT.md"), canary);
     const modelBoundary = vi.fn(async (request: import("../../components/spin-types.js").SpinRequest) => {
@@ -47,6 +48,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
         chatId: request.chatId ? String(request.chatId) : undefined,
       });
       board.kanbanRunning(cardId);
+      writeFileSync(artifactPath, "# Report\n" + `${canary} report line\n`.repeat(20));
       return { cardId, result: `${canary} report line\n`.repeat(20) };
     });
     const queue = new CronQueue("unused", home, undefined, undefined, modelBoundary);
@@ -54,6 +56,12 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       id: "report-task", kind: "agent", prompt: `${canary} produce report`,
       agent: "task", delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium", chatId: "42",
+      report: {
+        artifact: artifactPath,
+        requiredSections: ["# Report"],
+        minBytes: 100,
+        requires: { files: [], executables: [], tools: [] },
+      },
     }, true);
 
     await waitForIdle(queue);
@@ -65,7 +73,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
 
     const done = board.kanbanList("done");
     expect(done).toHaveLength(1);
-    expect(done[0]!.result_path).toContain("report-task-");
+    expect(done[0]!.result_path).toBe(artifactPath);
     expect(existsSync(done[0]!.result_path!)).toBe(true);
 
     const deps = {
@@ -85,7 +93,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     logger.flushLogs();
     const logPath = join(home, "logs", `bridge-${new Date().toISOString().slice(0, 10)}.log`);
     const logs = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
-    expect(logs).toContain("task_run_reserved");
+    expect(logs).toContain("task_execution_started");
     expect(logs).toContain("task_settled");
     expect(logs).not.toContain(canary);
   });
@@ -103,6 +111,12 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       id: "short-task", kind: "agent", prompt: "produce report",
       agent: "task", delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium",
+      report: {
+        artifact: join(home, "workspace", "short-task", "report.md"),
+        requiredSections: ["# test"],
+        minBytes: 100,
+        requires: { files: [], executables: [], tools: [] },
+      },
     }, true);
     await waitForIdle(queue);
 
@@ -113,12 +127,9 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     // no success delivery candidate and remains visibly failed for retry policy.
   });
 
-  it("treats a verified DoD artifact as authoritative over a short assistant response", async () => {
-    const taskDir = join(home, "tasks");
+  it("treats a verified structured report contract artifact as authoritative", async () => {
     const artifact = join(home, "workspace", "dod-task", "report.md");
-    mkdirSync(taskDir, { recursive: true });
     mkdirSync(join(home, "workspace", "dod-task"), { recursive: true });
-    writeFileSync(join(taskDir, "dod-task.md"), `# Generate report\n\n## Definition of Done\n- ${artifact}\n`);
 
     const modelBoundary = vi.fn(async (request: import("../../components/spin-types.js").SpinRequest) => {
       writeFileSync(artifact, "# Verified report\n" + "content\n".repeat(30));
@@ -128,8 +139,14 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     });
     const queue = new CronQueue("unused", home, undefined, undefined, modelBoundary);
     queue.enqueue({
-      id: "dod-task", kind: "agent", taskFile: join(taskDir, "dod-task.md"),
+      id: "dod-task", kind: "agent", prompt: "produce report",
       agent: "task", delivery: "report", at: new Date().toISOString(), enabled: true, priority: "medium",
+      report: {
+        artifact,
+        requiredSections: ["# Verified report"],
+        minBytes: 100,
+        requires: { files: [], executables: [], tools: [] },
+      },
     }, true);
 
     await vi.waitFor(() => expect(modelBoundary).toHaveBeenCalledOnce(), { timeout: 2_000, interval: 5 });

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve, join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
-import { logWarn, logTrace } from "../logger.js";
+import { logTrace } from "../logger.js";
 import { abtarsHome } from "../../paths.js";
 import { localDate } from "../../utils/date.js";
 
@@ -10,7 +10,6 @@ const TAG = "task-package";
 export interface TaskPackageResult {
   ok: true;
   prompt: string;
-  dodPaths: string[];
   contextFiles: Array<{ name: string; chars: number }>;
 }
 
@@ -28,26 +27,7 @@ export function loadTaskPackage(taskFile: string): TaskPackageResult | TaskPacka
   const today = localDate();
   const content = raw.replace(/\{today\}/g, today);
 
-  const dodIdx = content.indexOf("## Definition of Done");
-  let prompt: string;
-  let dodPaths: string[] = [];
-  if (dodIdx === -1) {
-    prompt = content.trim();
-  } else {
-    prompt = content.slice(0, dodIdx).trim();
-    const dodSection = content.slice(dodIdx);
-    dodPaths = dodSection.split("\n")
-      .filter(l => l.match(/^- /))
-      .map(l => l.replace(/^- /, "").trim())
-      .filter(p => {
-        if (p.length === 0 || p.includes(" ") || p.includes("\t") || (!p.startsWith("/") && !p.startsWith("~"))) {
-          logWarn(TAG, `Rejected malformed DoD path: "${p}" — must be absolute or ~/ path`);
-          return false;
-        }
-        return true;
-      })
-      .map(p => resolve(p.replace(/^~/, homedir())));
-  }
+  let prompt = content.trim();
 
   const dir = dirname(filePath);
   const base = basename(filePath, ".md");
@@ -102,9 +82,9 @@ export function loadTaskPackage(taskFile: string): TaskPackageResult | TaskPacka
     prompt += injected;
   }
 
-  logTrace(TAG, `task_package_loaded definition=${basename(filePath)} context_count=${contextFiles.length} context_chars=${contextFiles.reduce((sum, file) => sum + file.chars, 0)} dod_count=${dodPaths.length}`);
+  logTrace(TAG, `task_package_loaded definition=${basename(filePath)} context_count=${contextFiles.length} context_chars=${contextFiles.reduce((sum, file) => sum + file.chars, 0)}`);
 
-  return { ok: true, prompt, dodPaths, contextFiles };
+  return { ok: true, prompt, contextFiles };
 }
 
 export type DeliveryMode = "silent" | "deliver" | "announce" | "report";

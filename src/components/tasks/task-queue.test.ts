@@ -19,6 +19,9 @@ vi.mock("./task-state-store.js", () => ({
   advanceNextRun: vi.fn(),
   updateState: vi.fn(),
   readState: vi.fn(() => null),
+  reserveRun: vi.fn().mockReturnValue({ ok: true, run: { runId: "test-run", groupId: "test-group", attempt: 1, trigger: "manual", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() } }),
+  updateActiveRun: vi.fn().mockReturnValue(true),
+  settleActiveRun: vi.fn().mockReturnValue(true),
 }));
 
 vi.mock("./task-failure-buffer.js", () => ({
@@ -47,6 +50,13 @@ vi.mock("../spin.js", () => ({
     injectGreeting: vi.fn().mockResolvedValue("ok"),
   },
 }));
+
+vi.mock("./scheduled-task-runner.js", () => {
+  const MockRunner = function () {
+    this.run = vi.fn().mockResolvedValue({ status: "success", safeDetail: "mocked" });
+  };
+  return { ScheduledTaskRunner: MockRunner };
+});
 
 function makeFakeChild(): child_process.ChildProcess {
   const child = new EventEmitter() as unknown as child_process.ChildProcess;

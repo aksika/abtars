@@ -21,8 +21,8 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     execute: async () => {
       const dueTasks = checkCron();
       let ran = false;
-      for (const entry of dueTasks) {
-        cronQueue.enqueue(entry);
+      for (const reserved of dueTasks) {
+        cronQueue.enqueue(reserved.entry, false, reserved.run);
         ran = true;
       }
 

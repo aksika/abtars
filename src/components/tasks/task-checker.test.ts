@@ -11,6 +11,8 @@ vi.mock("./task-state-store.js", () => ({
   readState: vi.fn(() => ({ nextRunAt: Date.now() - 1000, consecutiveFailures: 0, autoPaused: false })),
   updateState: vi.fn(),
   advanceNextRun: vi.fn(),
+  reserveRun: vi.fn().mockReturnValue({ ok: true, run: { runId: "test-run", groupId: "test-group", attempt: 1, trigger: "schedule", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() } }),
+  settleActiveRun: vi.fn(),
 }));
 
 vi.mock("./task-history-store.js", () => ({

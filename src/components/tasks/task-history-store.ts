@@ -7,7 +7,7 @@ import type { TaskKind } from "./task-types.js";
 
 const TAG = "task_history_store";
 
-export type TaskOutcome = "success" | "failed" | "noop" | "deferred" | "skipped" | "cancelled";
+export type TaskOutcome = "success" | "failed" | "noop" | "deferred" | "skipped" | "cancelled" | "definition_failed" | "timed_out";
 
 export interface TaskRunEvent {
   runId: string;
@@ -92,6 +92,19 @@ export function todaySuccessCount(taskId: string, now: number = Date.now()): num
     e.outcome === "success" &&
     e.finishedAt >= todayStart
   ).length;
+}
+
+export function hasRun(runId: string): boolean {
+  const lines = readAllLines();
+  const events = parseEvents(lines);
+  return events.some(e => e.runId === runId);
+}
+
+export function appendRunOnce(event: Omit<TaskRunEvent, "runId"> & { runId?: string }): string | null {
+  const runId = event.runId ?? randomUUID().slice(0, 12);
+  if (hasRun(runId)) return null;
+  appendRun({ ...event, runId });
+  return runId;
 }
 
 export function latestOutcomeByTask(_now: number = Date.now()): Map<string, TaskRunEvent> {

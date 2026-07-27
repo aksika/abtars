@@ -4,6 +4,13 @@ import type { ScheduledTask } from "./task-types.js";
 
 const NOW = new Date("2026-07-11T02:00:00Z").getTime();
 
+const SAMPLE_CONTRACT = {
+  artifact: "/tmp/report.md",
+  requiredSections: ["# Summary"],
+  minBytes: 100,
+  requires: { files: [], executables: [], tools: [] },
+};
+
 function baseAgent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: "agent1",
@@ -13,6 +20,7 @@ function baseAgent(overrides: Record<string, unknown> = {}): Record<string, unkn
     agent: "task",
     chatId: "100",
     delivery: "report",
+    report: SAMPLE_CONTRACT,
     ...overrides,
   };
 }
@@ -41,22 +49,22 @@ describe("normalize + validation", () => {
     });
 
     it("accepts a valid one-shot at", () => {
-      const r = normalize({ id: "s1", kind: "agent", at: "2026-07-12T08:00:00Z", prompt: "test", agent: "task", chatId: "1", delivery: "report" }, NOW);
+      const r = normalize({ id: "s1", kind: "agent", at: "2026-07-12T08:00:00Z", prompt: "test", agent: "task", chatId: "1", delivery: "report", report: SAMPLE_CONTRACT }, NOW);
       expect(r.ok).toBe(true);
     });
 
     it("rejects entry with both schedule and at", () => {
-      const r = normalize({ id: "s1", kind: "agent", schedule: "0 9 * * *", at: "2026-07-12T08:00:00Z", prompt: "test", chatId: "1", delivery: "report" }, NOW);
+      const r = normalize({ id: "s1", kind: "agent", schedule: "0 9 * * *", at: "2026-07-12T08:00:00Z", prompt: "test", chatId: "1", delivery: "report", report: SAMPLE_CONTRACT }, NOW);
       expect(r.ok).toBe(false);
     });
 
     it("rejects entry with no schedule and no at", () => {
-      const r = normalize({ id: "s1", kind: "agent", prompt: "test", chatId: "1", delivery: "report" }, NOW);
+      const r = normalize({ id: "s1", kind: "agent", prompt: "test", chatId: "1", delivery: "report", report: SAMPLE_CONTRACT }, NOW);
       expect(r.ok).toBe(false);
     });
 
     it("rejects missing kind", () => {
-      const r = normalize({ id: "x", schedule: "0 9 * * *", prompt: "test", chatId: "1", delivery: "report" }, NOW);
+      const r = normalize({ id: "x", schedule: "0 9 * * *", prompt: "test", chatId: "1", delivery: "report", report: SAMPLE_CONTRACT }, NOW);
       expect(r.ok).toBe(false);
     });
 
@@ -84,7 +92,7 @@ describe("normalize + validation", () => {
     });
 
     it("agent validates", () => {
-      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", agent: "task", chatId: "1", delivery: "report" }, NOW);
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", agent: "task", chatId: "1", delivery: "report", report: SAMPLE_CONTRACT }, NOW);
       expect(r.ok).toBe(true);
       if (r.ok) expect(r.entry.kind).toBe("agent");
     });
@@ -100,7 +108,7 @@ describe("normalize + validation", () => {
     });
 
     it("agent with taskFile validates", () => {
-      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", taskFile: "~/tasks/TASK.md", agent: "task", chatId: "1", delivery: "report" }, NOW);
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", taskFile: "~/tasks/TASK.md", agent: "task", chatId: "1", delivery: "announce" }, NOW);
       expect(r.ok).toBe(true);
       if (r.ok) expect((r.entry as ScheduledTask & { kind: "agent" }).taskFile).toBe("~/tasks/TASK.md");
     });
