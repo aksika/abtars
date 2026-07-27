@@ -145,6 +145,10 @@ export interface ManagedSession {
   // #1332/#1361: Cooperative steering queue for any active execution
   instructionQueue: QueuedSessionInstruction[];
   activeExecutionId?: string;
+  /** #1502 §7: execution control bound to the active run, so killSession /
+   *  endSession / shutdown can cancel the underlying execution without the
+   *  caller being in scope. Set by spin() from spec.executionControl. */
+  executionControl?: import("./execution-control.js").ExecutionControl;
   /** #1361: True while the current execution is accepting steering continuations. */
   steeringAccepting: boolean;
 

@@ -23,7 +23,7 @@ export type StartObservation =
   | { kind: "already_started"; attemptId: string; generation: number; executorId: string }
   | { kind: "start_failed"; reason: string; retryable: boolean };
 
-export type CancelReason = "operator" | "deadline" | "project_abort" | "shutdown" | "superseded";
+export type CancelReason = "operator" | "deadline" | "project_abort" | "shutdown" | "superseded" | "session_end";
 
 export type CancelObservation =
   | { kind: "cancelled"; attemptId: string }

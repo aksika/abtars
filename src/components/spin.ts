@@ -501,6 +501,11 @@ export class Spin {
 
     // #1332: Assign execution generation for steering continuity
     session.activeExecutionId = `${session.id}_${stepIndex}_${Date.now()}`;
+    // #1502 §7: attach the caller-supplied execution control to the session so
+    // killSession/endSession/shutdown can reach it without knowing the caller.
+    // (Stale references after close are harmless — executor.cancel no-ops once
+    // the execution is closed, and the registry entry is removed in finally.)
+    if (spec.executionControl) session.executionControl = spec.executionControl;
 
     // #1444: Execution telemetry scope — tracks provider calls for this generation
     const executionTelemetry = createExecutionTelemetryScope(session.activeExecutionId);
@@ -738,7 +743,16 @@ export class Spin {
       // Covers: pre-exec throws (steps 4-6) AND awaited execution failures (step 7).
       // failSpin calls markDone + drainQueued — concurrency slot always released.
       await this.failSpin(spec, profile, session, cardId, stepIndex, started, err, terminate);
-      if (spec.await) throw err;                    // awaited callers still see the error
+      if (spec.await) {
+        // #1502: surface the cardId on rejection so caller-owned settlers (the
+        // scheduled-task runner) can fail the Kanban card. Under caller ownership
+        // failSpin skips kanbanRetryOrFail, so without this the card would be
+        // orphaned in "running" whenever dispatchAwait rejects.
+        if (cardId !== undefined && err instanceof Error && !(err as { cardId?: number }).cardId) {
+          (err as Error & { cardId?: number }).cardId = cardId;
+        }
+        throw err;                    // awaited callers still see the error
+      }
       return { sessionId: session.id, cardId };     // fire-and-forget: recorded, no unhandled rejection
     }
   }

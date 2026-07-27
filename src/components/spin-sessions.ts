@@ -13,6 +13,23 @@ export function pushLog(session: ManagedSession, event: string): void {
   if (session.log.length > MAX_LOG) session.log.shift();
 }
 
+/**
+ * #1502 §7: cancel any active execution bound to the session and release its
+ * transport. Called by endSession/killSession so a terminating session does
+ * not leave a Pi execution running or a transient transport cached. Both the
+ * control's requestCancel and the transport release are idempotent / guarded.
+ */
+function cancelSessionExecution(session: ManagedSession, reason: import("./swarm-executor-types.js").CancelReason): void {
+  const ctrl = session.executionControl;
+  if (ctrl && !ctrl.terminal) {
+    void ctrl.requestCancel(reason).catch(() => {});
+  }
+  const release = session.releaseTransport;
+  if (release) {
+    try { void release(); } catch { /* best effort */ }
+  }
+}
+
 export function allocateSession(
   sessions: Map<string, ManagedSession>, nextIndex: number,
   type: SessionType, userId: string, platform: string, chatId: number,
@@ -161,6 +178,7 @@ export function endSession(sessions: Map<string, ManagedSession>, nextIndex: num
   const target = findAddressableSession(sessions, userId, platform, targetIdx);
   if (!target) return `Session #${targetIdx} not found on ${platform}.`;
 
+  cancelSessionExecution(target, "session_end");
   const wasActive = target.active;
   target.status = "ended";
   target.active = false;
@@ -174,6 +192,7 @@ export function killSession(sessions: Map<string, ManagedSession>, nextIndex: nu
   const target = findAddressableSession(sessions, userId, platform, index);
   if (!target) return `Session #${index} not found on ${platform}.`;
 
+  cancelSessionExecution(target, "operator");
   const wasActive = target.active;
   target.status = "ended";
   target.active = false;

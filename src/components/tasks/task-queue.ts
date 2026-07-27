@@ -570,6 +570,19 @@ export class CronQueue {
       .then(async ({ cardId: boardId, result: response }) => {
         const startedAt = this._current?.startedAt ?? Date.now();
 
+        // #1502 §7: if cancellation won (kill/shutdown marked the control), do
+        // not deliver or retry — settle exactly once as cancelled. Without this,
+        // a run killed mid-flight could still deliver a result on completion.
+        if (execControl.cancelled) {
+          const reason = execControl.cancelReason ?? "cancelled";
+          try { kanbanFail(boardId, `run ${reason}`); } catch { /* best effort */ }
+          advanceNextRun(entry.id, entry.schedule);
+          updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, priorFailure: undefined });
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "cancelled", detail: `cancelled: ${reason}`, kanbanCardId: boardId, runId });
+          logInfo(TAG, `Run "${entry.id}" settled as cancelled (control won: ${reason})`);
+          return;
+        }
+
         const isReport = entry.delivery === "report";
         let exitCode = 0;
         let resultPath: string | null = null;
@@ -647,16 +660,23 @@ export class CronQueue {
       .catch((err: unknown) => {
         const startedAt = this._current?.startedAt ?? Date.now();
         const msg = err instanceof Error ? err.message : String(err);
+        // #1502: spin() attaches the cardId to the rejected error so a caller-owned
+        // settler can fail the Kanban card — otherwise a rejected dispatchAwait
+        // (execution throw / pre-exec failure) orphans the card in "running".
+        const boardId = (err as { cardId?: number }).cardId;
         logWarn(TAG, `Agent failed: ${msg}`);
+        if (boardId !== undefined) {
+          try { kanbanFail(boardId, msg.slice(0, 500)); } catch { /* best effort */ }
+        }
         if (groupAttempt === 1 && entry.schedule) {
           const retryAt = Date.now() + RETRY_DELAY_MS;
           updateState(entry.id, { lastFinishedAt: Date.now(), nextRunAt: retryAt, retryAt, retrying: true, priorFailure: msg.slice(0, 200) });
-          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: msg, runId });
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: msg, kanbanCardId: boardId, runId });
           logInfo(TAG, `Retry scheduled for "${entry.id}": attempt 1 failed, retry in ${RETRY_DELAY_MS / 60000}min`);
         } else {
           advanceNextRun(entry.id, entry.schedule);
           updateState(entry.id, { retrying: false, priorFailure: undefined, lastFinishedAt: Date.now() });
-          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: msg, runId });
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: msg, kanbanCardId: boardId, runId });
           const failCount = incrementFailures(entry.id);
           if (failCount >= 3) {
             setAutoPaused(entry.id, true);
