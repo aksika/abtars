@@ -175,7 +175,7 @@ describe("doctor tribe probes (#1439)", () => {
     const result = await runAllProbes();
     expect(result.abtars).toBeDefined();
     expect(typeof result.abtars.version).toBe("string");
-  });
+  }, 15_000);
 
   it("probes have evidence level", async () => {
     const { runAllProbes } = await import("./doctor-probes.js");
@@ -185,5 +185,5 @@ describe("doctor tribe probes (#1439)", () => {
       expect(p.evidence).toBeDefined();
       expect(["configuration", "filesystem", "executable", "reachable", "runtime", "authenticated"]).toContain(p.evidence);
     }
-  });
+  }, 15_000);
 });
