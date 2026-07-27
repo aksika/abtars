@@ -1,0 +1,234 @@
+{
+  "runId": "e2e-1785193059873-66f6d5ae",
+  "timestamp": "2026-07-27T22:57:40.024Z",
+  "summary": {
+    "total": 22,
+    "passed": 21,
+    "failed": 1,
+    "blocked": 0
+  },
+  "milestones": [
+    {
+      "id": "M01",
+      "name": "Build identity",
+      "status": "PASS",
+      "scenario": "deployment",
+      "expected": "build-info.json exists",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    },
+    {
+      "id": "M06",
+      "name": "Structured report contract accepted",
+      "status": "PASS",
+      "scenario": "normalize",
+      "expected": "valid contract returns ok",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": []
+    },
+    {
+      "id": "M07",
+      "name": "Legacy report task accepted without contract",
+      "status": "PASS",
+      "scenario": "normalize",
+      "expected": "no contract accepted with warning",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    },
+    {
+      "id": "M07b",
+      "name": "Non-report task rejects report contract",
+      "status": "PASS",
+      "scenario": "normalize",
+      "expected": "report rejected on non-report delivery",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    },
+    {
+      "id": "M08",
+      "name": "Required file validated",
+      "status": "PASS",
+      "scenario": "preflight",
+      "expected": "missing file rejected",
+      "observed": "pass",
+      "durationMs": 2,
+      "evidence": []
+    },
+    {
+      "id": "M08b",
+      "name": "Existing file passes preflight",
+      "status": "PASS",
+      "scenario": "preflight",
+      "expected": "file present accepted",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    },
+    {
+      "id": "M09",
+      "name": "Missing executable rejected",
+      "status": "PASS",
+      "scenario": "preflight",
+      "expected": "missing exe fails",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": []
+    },
+    {
+      "id": "M04",
+      "name": "reserveRun exclusive ownership",
+      "status": "PASS",
+      "scenario": "scheduler",
+      "expected": "first ok, second fails",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    },
+    {
+      "id": "M05",
+      "name": "settleActiveRun clears reservation",
+      "status": "PASS",
+      "scenario": "scheduler",
+      "expected": "activeRun cleared",
+      "observed": "pass",
+      "durationMs": 2,
+      "evidence": []
+    },
+    {
+      "id": "M13",
+      "name": "register/remove control cycle",
+      "status": "PASS",
+      "scenario": "runner",
+      "expected": "control exists then removed",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    },
+    {
+      "id": "M13b",
+      "name": "requestCancel sets cancelled flag",
+      "status": "PASS",
+      "scenario": "runner",
+      "expected": "cancel works",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": []
+    },
+    {
+      "id": "M35",
+      "name": "Rejects nonexistent artifact",
+      "status": "PASS",
+      "scenario": "artifact",
+      "expected": "not found fails",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    },
+    {
+      "id": "M36",
+      "name": "Accepts valid artifact",
+      "status": "FAIL",
+      "scenario": "artifact",
+      "expected": "valid file passes",
+      "observed": "valid artifact rejected: cannot read artifact content",
+      "durationMs": 1,
+      "evidence": [
+        "valid artifact rejected: cannot read artifact content"
+      ]
+    },
+    {
+      "id": "M37",
+      "name": "Rejects missing heading",
+      "status": "PASS",
+      "scenario": "artifact",
+      "expected": "heading not found fails",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": []
+    },
+    {
+      "id": "M38",
+      "name": "Rejects stale preexisting artifact",
+      "status": "PASS",
+      "scenario": "artifact",
+      "expected": "unchanged mtime fails",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": []
+    },
+    {
+      "id": "M39",
+      "name": "appendRunOnce deduplicates by run ID",
+      "status": "PASS",
+      "scenario": "settlement",
+      "expected": "duplicate returns null",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": []
+    },
+    {
+      "id": "M10",
+      "name": "CONTEXT.md can be loaded",
+      "status": "PASS",
+      "scenario": "runner",
+      "expected": "context file exists",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    },
+    {
+      "id": "M11",
+      "name": "Execution scope scoped to task ID",
+      "status": "PASS",
+      "scenario": "runner",
+      "expected": "cwd contains task ID",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    },
+    {
+      "id": "M33",
+      "name": "State read/write round-trips",
+      "status": "PASS",
+      "scenario": "state",
+      "expected": "timestamps match",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": []
+    },
+    {
+      "id": "M34",
+      "name": "reconcileActiveTaskRuns clears stale runs",
+      "status": "PASS",
+      "scenario": "state",
+      "expected": "stale deadline cleared",
+      "observed": "pass",
+      "durationMs": 3,
+      "evidence": []
+    },
+    {
+      "id": "M45",
+      "name": "getTaskView returns coherent state",
+      "status": "PASS",
+      "scenario": "operators",
+      "expected": "definition and state present",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    },
+    {
+      "id": "M44",
+      "name": "Log directory created",
+      "status": "PASS",
+      "scenario": "observability",
+      "expected": "logs dir exists",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": []
+    }
+  ]
+}

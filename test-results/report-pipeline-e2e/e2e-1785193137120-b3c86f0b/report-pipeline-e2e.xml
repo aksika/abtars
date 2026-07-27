@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="report-pipeline-e2e" tests="22" failures="0">
+  <testcase name="M01: Build identity" classname="deployment" time="0.000">
+  </testcase>
+  <testcase name="M06: Structured report contract accepted" classname="normalize" time="0.001">
+  </testcase>
+  <testcase name="M07: Legacy report task accepted without contract" classname="normalize" time="0.000">
+  </testcase>
+  <testcase name="M07b: Non-report task rejects report contract" classname="normalize" time="0.000">
+  </testcase>
+  <testcase name="M08: Required file validated" classname="preflight" time="0.001">
+  </testcase>
+  <testcase name="M08b: Existing file passes preflight" classname="preflight" time="0.001">
+  </testcase>
+  <testcase name="M09: Missing executable rejected" classname="preflight" time="0.000">
+  </testcase>
+  <testcase name="M04: reserveRun exclusive ownership" classname="scheduler" time="0.001">
+  </testcase>
+  <testcase name="M05: settleActiveRun clears reservation" classname="scheduler" time="0.007">
+  </testcase>
+  <testcase name="M13: register/remove control cycle" classname="runner" time="0.000">
+  </testcase>
+  <testcase name="M13b: requestCancel sets cancelled flag" classname="runner" time="0.000">
+  </testcase>
+  <testcase name="M35: Rejects nonexistent artifact" classname="artifact" time="0.001">
+  </testcase>
+  <testcase name="M36: Accepts valid artifact" classname="artifact" time="0.001">
+  </testcase>
+  <testcase name="M37: Rejects missing heading" classname="artifact" time="0.000">
+  </testcase>
+  <testcase name="M38: Rejects stale preexisting artifact" classname="artifact" time="0.001">
+  </testcase>
+  <testcase name="M39: appendRunOnce deduplicates by run ID" classname="settlement" time="0.000">
+  </testcase>
+  <testcase name="M10: CONTEXT.md can be loaded" classname="runner" time="0.001">
+  </testcase>
+  <testcase name="M11: Execution scope scoped to task ID" classname="runner" time="0.000">
+  </testcase>
+  <testcase name="M33: State read/write round-trips" classname="state" time="0.000">
+  </testcase>
+  <testcase name="M34: reconcileActiveTaskRuns clears stale runs" classname="state" time="0.003">
+  </testcase>
+  <testcase name="M45: getTaskView returns coherent state" classname="operators" time="0.000">
+  </testcase>
+  <testcase name="M44: Log directory created" classname="observability" time="0.001">
+  </testcase>
+</testsuite>

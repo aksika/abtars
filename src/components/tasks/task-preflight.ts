@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, accessSync, mkdirSync, constants as fsConstants } from "node:fs";
+import { existsSync, lstatSync, accessSync, mkdirSync, readFileSync, constants as fsConstants } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -258,10 +258,5 @@ export function validateReportArtifact(
 }
 
 function readFileSyncSafe(p: string): string | undefined {
-  try {
-    const { readFileSync } = require("node:fs") as typeof import("node:fs");
-    return readFileSync(p, "utf-8");
-  } catch {
-    return undefined;
-  }
+  try { return readFileSync(p, "utf-8"); } catch { return undefined; }
 }
