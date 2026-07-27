@@ -164,26 +164,30 @@ export function normalize(raw: unknown): NormalizeResult {
       let report: ReportContract | undefined;
       if (base.delivery === "report") {
         if (typeof reportRaw !== "object" || reportRaw === null) {
-          return { ok: false, error: `report contract is required for delivery=report tasks`, id };
+          // Legacy tasks without structured contract: pass through with a warning
+          // so existing production tasks (daily-ai, weekly-ai, finance-daily) are
+          // not silently quarantined. Preflight will reject at execution time.
+          report = undefined;
+        } else {
+          const r = reportRaw as Record<string, unknown>;
+          const artifact = typeof r["artifact"] === "string" ? r["artifact"] : "";
+          const requiredSections = Array.isArray(r["requiredSections"]) ? r["requiredSections"].filter((s: unknown) => typeof s === "string" && s.length > 0) : [];
+          const minBytes = typeof r["minBytes"] === "number" ? r["minBytes"] : 0;
+          if (!artifact || typeof artifact !== "string" || (!artifact.startsWith("/") && !artifact.startsWith("~/"))) {
+            return { ok: false, error: `report.artifact must be an absolute or ~/ path`, id };
+          }
+          if (requiredSections.length === 0) {
+            return { ok: false, error: `report.requiredSections must be a non-empty array of Markdown headings`, id };
+          }
+          if (!Number.isInteger(minBytes) || minBytes < 100) {
+            return { ok: false, error: `report.minBytes must be an integer >= 100`, id };
+          }
+          const requiresRaw = typeof r["requires"] === "object" && r["requires"] !== null ? r["requires"] as Record<string, unknown> : {};
+          const filesArr = Array.isArray(requiresRaw["files"]) ? requiresRaw["files"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
+          const executablesArr = Array.isArray(requiresRaw["executables"]) ? requiresRaw["executables"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
+          const toolsArr = Array.isArray(requiresRaw["tools"]) ? requiresRaw["tools"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
+          report = { artifact, requiredSections, minBytes, requires: { files: filesArr, executables: executablesArr, tools: toolsArr } };
         }
-        const r = reportRaw as Record<string, unknown>;
-        const artifact = typeof r["artifact"] === "string" ? r["artifact"] : "";
-        const requiredSections = Array.isArray(r["requiredSections"]) ? r["requiredSections"].filter((s: unknown) => typeof s === "string" && s.length > 0) : [];
-        const minBytes = typeof r["minBytes"] === "number" ? r["minBytes"] : 0;
-        if (!artifact || typeof artifact !== "string" || (!artifact.startsWith("/") && !artifact.startsWith("~/"))) {
-          return { ok: false, error: `report.artifact must be an absolute or ~/ path`, id };
-        }
-        if (requiredSections.length === 0) {
-          return { ok: false, error: `report.requiredSections must be a non-empty array of Markdown headings`, id };
-        }
-        if (!Number.isInteger(minBytes) || minBytes < 100) {
-          return { ok: false, error: `report.minBytes must be an integer >= 100`, id };
-        }
-        const requiresRaw = typeof r["requires"] === "object" && r["requires"] !== null ? r["requires"] as Record<string, unknown> : {};
-        const filesArr = Array.isArray(requiresRaw["files"]) ? requiresRaw["files"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
-        const executablesArr = Array.isArray(requiresRaw["executables"]) ? requiresRaw["executables"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
-        const toolsArr = Array.isArray(requiresRaw["tools"]) ? requiresRaw["tools"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
-        report = { artifact, requiredSections, minBytes, requires: { files: filesArr, executables: executablesArr, tools: toolsArr } };
       } else if (reportRaw !== undefined) {
         return { ok: false, error: `report contract is only valid for delivery=report tasks`, id };
       }
