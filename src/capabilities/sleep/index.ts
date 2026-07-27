@@ -24,7 +24,7 @@ export interface SleepOpts {
   onComplete: () => void;
   onCycleEnd?: () => void;
   allocateSleepSession?: (name: string) => void;
-  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; await: boolean }) => Promise<{ result?: string; sessionId?: string }> };
+  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; settlementOwner: "spin" | "caller"; await: boolean }) => Promise<{ result?: string; sessionId?: string }> };
   bufferSystemEvent: (report: string) => void | Promise<void>;
 }
 
@@ -100,6 +100,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
             prompt: req.prompt,
             sessionId: nightSessionId,
             timeoutMs: Math.max(5000, req.deadline - Date.now()),
+            settlementOwner: "spin",
             await: true,
           });
           if (spinResult.sessionId && !nightSessionId) nightSessionId = spinResult.sessionId;

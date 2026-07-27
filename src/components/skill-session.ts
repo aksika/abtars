@@ -120,6 +120,7 @@ export async function launchSkill(skillName: string, userId: string, chatId: str
     source: "task",
     timeoutMs: timeout,
     chatId,
+    settlementOwner: "spin",
   });
 
   // Track active session

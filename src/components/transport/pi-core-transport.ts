@@ -16,7 +16,7 @@ import type { OutputObserver } from "../session-output-feed.js";
 import type { PiContextOrchestrator } from "./pi-core-context.js";
 import { buildPiModel, pickPiApi } from "./pi-ai-adapter.js";
 import { candidateKey } from "./model-candidates.js";
-import { PiCoreToolExecutionError, mergeSafetyIncident } from "./tool-failure-diagnostic.js";
+import { PiCoreToolExecutionError, buildSafetyDiagnostic, mergeSafetyIncident } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 
 const TAG = "pi-core-transport";
@@ -339,6 +339,11 @@ export class PiCoreTransport implements IKiroTransport {
         );
         logInfo(TAG, `sendPrompt: empty response with terminal tool failure — throwing diagnostic`);
         throw new PiCoreToolExecutionError(merged);
+      }
+
+      if (safety.terminalSafetyFailure && safety.lastTerminalIncident) {
+        logInfo(TAG, `sendPrompt: terminal Pi safety failure (${safety.lastTerminalIncident.type})`);
+        throw new PiCoreToolExecutionError(buildSafetyDiagnostic(executionId, safety.lastTerminalIncident));
       }
 
       logDebug(TAG, `sendPrompt: empty response with no tool failure — returning ""`);

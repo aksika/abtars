@@ -45,6 +45,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
         contract: contract ?? undefined,
         attemptId: claim.attemptId,
         executionControl: ctrl,
+        settlementOwner: "spin",
       });
     } catch (err) {
       removeControl(`${claim.attemptId}:${claim.generation}`);

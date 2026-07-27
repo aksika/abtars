@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve, join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
-import { logWarn } from "../logger.js";
+import { logWarn, logTrace } from "../logger.js";
 import { abtarsHome } from "../../paths.js";
 import { localDate } from "../../utils/date.js";
 
@@ -101,6 +101,8 @@ export function loadTaskPackage(taskFile: string): TaskPackageResult | TaskPacka
     }
     prompt += injected;
   }
+
+  logTrace(TAG, `task_package_loaded definition=${basename(filePath)} context_count=${contextFiles.length} context_chars=${contextFiles.reduce((sum, file) => sum + file.chars, 0)} dod_count=${dodPaths.length}`);
 
   return { ok: true, prompt, dodPaths, contextFiles };
 }

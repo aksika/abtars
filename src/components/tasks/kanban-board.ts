@@ -220,8 +220,8 @@ export function kanbanComplete(id: number, resultPath: string | null, summary: s
   if (!d) return;
   const card = d.prepare("SELECT status, delivery_attempts FROM kanban_board WHERE id = ?").get(id) as { status: string; delivery_attempts: number } | undefined;
   if (!card) return;
-  // Idempotent: skip if already delivering/delivered
-  if (card.status === "delivering" || card.status === "delivered") {
+  // Idempotent: one successful settlement emits one card:done event.
+  if (card.status === "done" || card.status === "delivering" || card.status === "delivered") {
     logDebug("kanban", `Card ${id}: already ${card.status} — skipping kanbanComplete`);
     return;
   }
@@ -273,6 +273,22 @@ export function kanbanSetDelivering(id: number): void {
   const d = dbOrNull();
   if (!d) return;
   d.prepare(`UPDATE kanban_board SET status = 'delivering', updated_at = datetime('now') WHERE id = ?`).run(id);
+}
+
+/** Atomically claim one delivery attempt for a completed card. */
+export function kanbanClaimDelivery(id: number): boolean {
+  const d = dbOrNull();
+  if (!d) return false;
+  const result = d.prepare(
+    `UPDATE kanban_board
+     SET status = 'delivering', delivery_attempts = COALESCE(delivery_attempts, 0) + 1, updated_at = datetime('now')
+     WHERE id = ? AND status = 'done' AND COALESCE(delivery_attempts, 0) < 5`,
+  ).run(id) as { changes?: number };
+  if ((result.changes ?? 0) !== 1) {
+    logDebug("kanban-delivery", `delivery_skipped_duplicate card=${id}`);
+    return false;
+  }
+  return true;
 }
 
 export function kanbanMarkDelivered(id: number): void {

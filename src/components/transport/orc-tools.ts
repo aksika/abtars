@@ -104,6 +104,7 @@ const spawnWorkerTool: ToolDefinition = {
       source: "agent",
       priority: args.priority as any,
       contract,
+      settlementOwner: "spin",
     });
     logInfo(TAG, `spawn_worker card:${cardId} parent:${projectCardId} — ${(args.title || goal).slice(0, 60)}${hasStructuredData ? " [supervised]" : ""}`);
     return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"${hasStructuredData ? " [supervised]" : ""}`;

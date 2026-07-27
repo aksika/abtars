@@ -145,7 +145,7 @@ async function reconcileProject(projectId: number): Promise<void> {
       reviewStore.ensureAwaitingContract(projectId);
       logInfo(TAG, `Project ${projectId}: awaiting contract — dispatching Orc authoring turn`);
       try {
-        spin.dispatch({ type: "O", goal: `Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, source: "agent", cardId: projectId });
+        spin.dispatch({ type: "O", goal: `Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
       } catch (err) {
         logWarn(TAG, `Project ${projectId}: failed to dispatch Orc for contract authoring — ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -153,7 +153,7 @@ async function reconcileProject(projectId: number): Promise<void> {
       // Orc should already have been dispatched — retry if not
       logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
       try {
-      spin.dispatch({ type: "O", goal: `Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, source: "agent", cardId: projectId });
+        spin.dispatch({ type: "O", goal: `Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
       } catch {}
     }
     return;
@@ -227,7 +227,7 @@ async function reconcileProject(projectId: number): Promise<void> {
         // No request — create one and dispatch (keep pending for retry)
         const { id: rrId } = reviewStore.insertReviewRequest(projectId, openCase.id, supervision.generation);
         try {
-          spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${openCase.id}`, source: "agent", cardId: projectId });
+          spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${openCase.id}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
           reviewStore.bumpReviewRequestAttempt(rrId);
         } catch (err) {
           logWarn(TAG, `Project ${projectId}: dispatch failed — ${err instanceof Error ? err.message : String(err)}`);
@@ -235,7 +235,7 @@ async function reconcileProject(projectId: number): Promise<void> {
       } else if (existingReq.status === "pending") {
         // cooldown check in getPendingReviewRequests prevents rapid retry
         try {
-          spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${openCase.id}`, source: "agent", cardId: projectId });
+          spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${openCase.id}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
           reviewStore.bumpReviewRequestAttempt(existingReq.id);
         } catch (err) {
           logWarn(TAG, `Project ${projectId}: retry dispatch failed — ${err instanceof Error ? err.message : String(err)}`);
@@ -294,7 +294,7 @@ async function reconcileProject(projectId: number): Promise<void> {
       };
 
       try {
-        spin.spawnChild(projectId, { goal, source: "agent", contract });
+        spin.spawnChild(projectId, { goal, source: "agent", contract, settlementOwner: "spin" });
       } catch (err) {
         logWarn(TAG, `Project ${projectId}: failed to dispatch repair worker for item ${item.id} — ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -385,7 +385,7 @@ async function reconcileProject(projectId: number): Promise<void> {
 
   // Attempt to dispatch Orc — keep request pending so heartbeat retry can recover
   try {
-    spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${caseId}`, source: "agent", cardId: projectId });
+    spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${caseId}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
     reviewStore.bumpReviewRequestAttempt(reviewRequestId);
   } catch (err) {
     logWarn(TAG, `Project ${projectId}: failed to dispatch Orc review — ${err instanceof Error ? err.message : String(err)} (request ${reviewRequestId} stays pending)`);
@@ -399,7 +399,7 @@ function dispatchPendingReviewRequests(): number {
   let dispatched = 0;
   for (const req of pending) {
     try {
-      spin.dispatch({ type: "O", goal: `Review project #${req.project_card_id}: project_card_id=${req.project_card_id}, project_generation=${req.generation}, review_case_id=${req.review_case_id}`, source: "agent", cardId: req.project_card_id });
+      spin.dispatch({ type: "O", goal: `Review project #${req.project_card_id}: project_card_id=${req.project_card_id}, project_generation=${req.generation}, review_case_id=${req.review_case_id}`, source: "agent", cardId: req.project_card_id, settlementOwner: "spin" });
       // Keep the request pending. spin.dispatch() returns successfully even
       // when the Orc concurrency gate leaves the card queued; marking it
       // dispatched here would make that durable request unrecoverable.
@@ -631,7 +631,7 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
         }
         logInfo(TAG, `Auto-retry card ${card.id}: attempt ${latestAttempt.ordinal} -> ${directiveResult.directive.target_ordinal} (${classification.primary})`);
         kanbanUpdate(card.id, { status: "queued" });
-        spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined });
+        spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined, settlementOwner: "spin" });
         break;
       }
       case "orc_review": {

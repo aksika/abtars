@@ -66,6 +66,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
           await ctx.sessionManager.spin({
             type: "S",
             prompt: msg,
+            settlementOwner: "spin",
             await: true,
           });
         } catch (err) {
@@ -90,7 +91,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     try {
       const entry = cronReadEntry(id);
       if (!entry) return `❌ Entry ${id} not found`;
-      return cronQueue.enqueue(entry, undefined, manual);
+      return cronQueue.enqueue(entry, manual);
     } catch (err) {
       return `❌ ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -154,7 +155,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const orcCard = readBridgeLockField<number>("orc_active");
   if (orcCard) {
     logInfo("boot", `Orc was active (card #${orcCard}) — resuming`);
-    spin.dispatch({ type: "O", goal: "Resume: reconcile kanban state for your active project", source: "agent", cardId: orcCard });
+    spin.dispatch({ type: "O", goal: "Resume: reconcile kanban state for your active project", source: "agent", cardId: orcCard, settlementOwner: "spin" });
   }
 
   // Build pipelineDeps. References ctx fields; later phases mutate ctx.sleepHandle /
@@ -229,5 +230,3 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   return "ran";
 }
-
-

@@ -54,7 +54,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       id: "report-task", kind: "agent", prompt: `${canary} produce report`,
       agent: "task", delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium", chatId: "42",
-    }, undefined, true);
+    }, true);
 
     await waitForIdle(queue);
     expect(modelBoundary).toHaveBeenCalledOnce();
@@ -103,7 +103,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       id: "short-task", kind: "agent", prompt: "produce report",
       agent: "task", delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium",
-    }, undefined, true);
+    }, true);
     await waitForIdle(queue);
 
     const failed = board.kanbanList("failed");
@@ -111,5 +111,32 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     expect(failed[0]!.status).toBe("failed");
     // The delivery poll consumes done/pending cards only; a failed report has
     // no success delivery candidate and remains visibly failed for retry policy.
+  });
+
+  it("treats a verified DoD artifact as authoritative over a short assistant response", async () => {
+    const taskDir = join(home, "tasks");
+    const artifact = join(home, "workspace", "dod-task", "report.md");
+    mkdirSync(taskDir, { recursive: true });
+    mkdirSync(join(home, "workspace", "dod-task"), { recursive: true });
+    writeFileSync(join(taskDir, "dod-task.md"), `# Generate report\n\n## Definition of Done\n- ${artifact}\n`);
+
+    const modelBoundary = vi.fn(async (request: import("../../components/spin-types.js").SpinRequest) => {
+      writeFileSync(artifact, "# Verified report\n" + "content\n".repeat(30));
+      const cardId = board.kanbanEnqueue(request.title ?? "scheduled report", "task", "dod-task", { type: request.type, delivery: request.delivery });
+      board.kanbanRunning(cardId);
+      return { cardId, result: "ok" };
+    });
+    const queue = new CronQueue("unused", home, undefined, undefined, modelBoundary);
+    queue.enqueue({
+      id: "dod-task", kind: "agent", taskFile: join(taskDir, "dod-task.md"),
+      agent: "task", delivery: "report", at: new Date().toISOString(), enabled: true, priority: "medium",
+    }, true);
+
+    await vi.waitFor(() => expect(modelBoundary).toHaveBeenCalledOnce(), { timeout: 2_000, interval: 5 });
+    await waitForIdle(queue);
+    const done = board.kanbanList("done");
+    expect(done).toHaveLength(1);
+    expect(done[0]!.result_path).toBe(artifact);
+    expect(board.kanbanList("failed")).toHaveLength(0);
   });
 });

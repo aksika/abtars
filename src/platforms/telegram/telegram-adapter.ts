@@ -482,7 +482,7 @@ export class TelegramAdapter implements PlatformAdapter {
           // #1271: reaction signal goes through spin() (model-call chokepoint)
           const { result: response } = await spin.spin({
             type: "A", sessionId: activeId, prompt: signal,
-            userId: reactionUser, await: true,
+            userId: reactionUser, settlementOwner: "spin", await: true,
           });
           logDebug(TAG, `Sent reaction signal to transport for chat ${chatId}`);
           if (response) {

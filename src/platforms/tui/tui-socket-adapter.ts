@@ -1004,6 +1004,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
         type: "O",
         sessionId: orcEntry.id,
         prompt: `[USER] ${text}`,
+        settlementOwner: "spin",
         await: true,
       });
       // #1398: Guard against replacement during the async spin call.

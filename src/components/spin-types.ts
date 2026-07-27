@@ -179,8 +179,8 @@ export interface SpinRequest {
   contract?: import("./worker-contract.js").WorkerAcceptanceContractV1;
   /** #1366: Pre-allocated attempt ID for supervision correlation. */
   attemptId?: string;
-  /** #1502: Who owns Kanban settlement. "spin" (default) = finishSpin/failSpin settle the card. "caller" = runner settles after validation. */
-  settlementOwner?: "spin" | "caller";
+  /** #1502: Every caller must explicitly choose the single Kanban settlement owner. */
+  settlementOwner: "spin" | "caller";
   /** #1502 Task 10: explicit task-local cwd/env for tool execution. */
   executionScope?: import("./tasks/task-package.js").ToolExecutionScope;
 }
@@ -245,8 +245,8 @@ export interface SpinSessionSpec {
   attemptId?: string;
   // #1248: Execution control for cancellation
   executionControl?: import("./execution-control.js").WorkerExecutionControl;
-  // #1502: Who owns Kanban settlement. "spin" (default) = finishSpin/failSpin settle the card. "caller" = runner settles after validation.
-  settlementOwner?: "spin" | "caller";
+  // #1502: Every caller must explicitly choose the single Kanban settlement owner.
+  settlementOwner: "spin" | "caller";
   /** #1502 Task 10: explicit task-local cwd/env for tool execution. */
   executionScope?: import("./tasks/task-package.js").ToolExecutionScope;
 

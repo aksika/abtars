@@ -294,6 +294,7 @@ export async function handleInboundMessage(
       userId,
       currentMessageId,
       directContextTurn,
+      settlementOwner: "spin",
       await: true,
     }).then(r => r.result ?? "");
     // #1292: the model call is started early to overlap with the setReaction/sendTyping

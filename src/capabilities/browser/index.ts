@@ -25,7 +25,7 @@ export function register(_api: CapabilityApi): void {
           const { taskId, prompt, timeoutMs } = JSON.parse(line);
 
           import("../../components/spin.js").then(({ spin: s }) => {
-            const { cardId } = s.dispatch({ type: "B", goal: prompt, source: "agent", timeoutMs });
+    const { cardId } = s.dispatch({ type: "B", goal: prompt, source: "agent", timeoutMs, settlementOwner: "spin" });
             conn.write(JSON.stringify({ ok: true, taskId, cardId, status: "spawned" }) + "\n");
           }).catch((err) => {
             conn.write(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }) + "\n");

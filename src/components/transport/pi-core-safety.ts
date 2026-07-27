@@ -50,6 +50,8 @@ export interface PiExecutionSafetyController {
   get stopped(): boolean;
   /** #1502: Whether a corrective turn has been admitted for the current incident. */
   get correctiveAdmitted(): boolean;
+  /** True only when a safety policy has actually terminated the execution. */
+  get terminalSafetyFailure(): boolean;
 }
 
 export function createPiExecutionSafetyController(
@@ -70,6 +72,7 @@ export function createPiExecutionSafetyController(
   let _incident: BehaviorIncident | null = null;
   let _lastTerminalIncident: BehaviorIncident | null = null;
   let _correctiveAdmitted = false;
+  let _terminalSafetyFailure = false;
 
   const classifiedLiterals: Set<string> = new Set();
   const loopGuard = new ToolLoopGuard();
@@ -97,6 +100,7 @@ export function createPiExecutionSafetyController(
     get paused() { return _paused; },
     get stopped() { return _stopped; },
     get correctiveAdmitted() { return _correctiveAdmitted; },
+    get terminalSafetyFailure() { return _terminalSafetyFailure; },
 
     beforeTool(name: string, args: Record<string, unknown>): ToolDecision {
       if (batchCancelled) return { decision: "skip" };
@@ -111,6 +115,7 @@ export function createPiExecutionSafetyController(
         if (_correctiveAdmitted) {
           _lastTerminalIncident = _incident;
           batchCancelled = true;
+          _terminalSafetyFailure = true;
           return { decision: "error", reason: `Exact repeat of ${name} — tool blocked — already admitted corrective turn` };
         }
         _lastTerminalIncident = _incident;
@@ -132,6 +137,7 @@ export function createPiExecutionSafetyController(
         if (_correctiveAdmitted) {
           _lastTerminalIncident = _incident;
           batchCancelled = true;
+          _terminalSafetyFailure = true;
           return { decision: "error", reason: `Repeated failure of ${name} — tool blocked — already admitted corrective turn` };
         }
         _lastTerminalIncident = _incident;
@@ -148,6 +154,7 @@ export function createPiExecutionSafetyController(
       if (promptRounds >= mp) {
         _incident = { type: "prompt_round_limit", candidateKey, roundsUsed: promptRounds };
         _lastTerminalIncident = _incident;
+        _terminalSafetyFailure = true;
         return { decision: "stop", reason: `Prompt round limit (${mp}) reached` };
       }
 
@@ -241,6 +248,7 @@ export function createPiExecutionSafetyController(
           logWarn(TAG, `Equivalent incident recurs after corrective admission — terminating`);
           logTrace(TAG, `pi_corrective_turn_terminal candidate=${candidate} type=${inc.type}`);
           _lastTerminalIncident = inc;
+          _terminalSafetyFailure = true;
           return undefined;
         }
 

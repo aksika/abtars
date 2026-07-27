@@ -189,6 +189,17 @@ describe("CronQueue idle-gate", () => {
     queue.enqueue(entry);
     expect(queue.pending).toBe(0);
   });
+
+  it("records idle-gate deferral without incrementing failure state", async () => {
+    const { readLastPromptAt } = await import("../transport/bridge-lock-transport.js");
+    vi.mocked(readLastPromptAt).mockReturnValue(Date.now());
+    const entry = makeEntry({ id: "deferred-history", kind: "agent", prompt: "test", delivery: "report" });
+    queue.enqueue(entry);
+    expect(vi.mocked(stateStore.incrementDeferrals)).toHaveBeenCalledWith("deferred-history");
+    expect(vi.mocked(stateStore.incrementFailures)).not.toHaveBeenCalledWith("deferred-history");
+    const { appendRun } = await import("./task-history-store.js");
+    expect(vi.mocked(appendRun)).toHaveBeenCalledWith(expect.objectContaining({ taskId: "deferred-history", outcome: "deferred" }));
+  });
 });
 
 describe("CronQueue agent output validation", () => {
@@ -364,7 +375,7 @@ describe("CronQueue task-run wiring (#1502)", () => {
     });
     const queue = new CronQueue("kiro-cli", ".", undefined, undefined, runner);
     const entry = makeEntry({ id: "scoped-run", kind: "agent", prompt: "produce report", delivery: "report" });
-    queue.enqueue(entry, undefined, true);
+    queue.enqueue(entry, true);
     await new Promise(resolve => setTimeout(resolve, 25));
 
     expect(runner).toHaveBeenCalledOnce();

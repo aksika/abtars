@@ -1,8 +1,8 @@
 import { logAndSwallow } from "../log-and-swallow.js";
 import { addTaskFailure } from "./task-failure-buffer.js";
 import { spawn } from "node:child_process";
-import { existsSync, statSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, accessSync, writeFileSync, mkdirSync, readFileSync, renameSync, constants as fsConstants } from "node:fs";
+import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
@@ -11,7 +11,7 @@ import { incrementFailures, incrementDeferrals, resetFailures, setAutoPaused, ad
 import { appendRun } from "./task-history-store.js";
 import { kanbanComplete, kanbanFail } from "./kanban-board.js";
 import { createExecutionScope } from "./task-package.js";
-import { logTaskDebug } from "./task-log-ctx.js";
+import { logTaskDebug, logTaskTrace } from "./task-log-ctx.js";
 import type { ScheduledTask } from "./task-types.js";
 import { isSystemEntry, formatTaskLabel } from "./task-types.js";
 import { getSystemTaskRegistry } from "./system-task-registry.js";
@@ -70,6 +70,7 @@ function validateAgentOutput(raw: unknown, minBytes?: number): ValidatedOutput {
 const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const RETRY_DELAY_MS = 10 * 60 * 1000;
+const MAX_IDLE_DEFERRALS = 5;
 
 /** #1502: Terminal latch — prevents stale late results from overwriting settled outcomes. */
 const _settledRunIds = new Set<string>();
@@ -158,7 +159,13 @@ function writeResultFile(entryId: string, content: string): string | null {
     const dir = join(abtarsHome(), "workspace", entryId);
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `${entryId}-${localDate()}.md`);
-    writeFileSync(file, content, "utf-8");
+    const temp = `${file}.${process.pid}.tmp`;
+    writeFileSync(temp, content, "utf-8");
+    renameSync(temp, file);
+    const stat = lstatSync(file);
+    accessSync(file, fsConstants.R_OK);
+    if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    logTaskTrace("report_artifact_materialized", { task: entryId }, `bytes=${stat.size}`);
     return file;
   } catch (err) { logAndSwallow(TAG, "writeResultFile", err); return null; }
 }
@@ -172,14 +179,16 @@ async function checkDoD(paths: string[]): Promise<{ passed: boolean; details: st
   if (paths.length === 0) return { passed: true, details: "no DoD defined" };
   const results: string[] = [];
   let allPassed = true;
-  for (const p of paths) {
+  for (const [pathIndex, p] of paths.entries()) {
+    const label = `artifact[${pathIndex}]${basename(p) ? `:${basename(p)}` : ""}`;
     let size: number | null = null;
     let isRegular = true;
     if (existsSync(p)) {
       try {
-        const st = statSync(p);
+        const st = lstatSync(p);
         size = st.size;
-        isRegular = st.isFile();
+        isRegular = st.isFile() && !st.isSymbolicLink();
+        if (isRegular) accessSync(p, fsConstants.R_OK);
       } catch {
         size = null;
       }
@@ -190,9 +199,10 @@ async function checkDoD(paths: string[]): Promise<{ passed: boolean; details: st
         if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.min(remaining, 200)));
         if (existsSync(p)) {
           try {
-            const st = statSync(p);
+            const st = lstatSync(p);
             size = st.size;
-            isRegular = st.isFile();
+            isRegular = st.isFile() && !st.isSymbolicLink();
+            if (isRegular) accessSync(p, fsConstants.R_OK);
           } catch {
             size = null;
           }
@@ -200,32 +210,31 @@ async function checkDoD(paths: string[]): Promise<{ passed: boolean; details: st
         }
       }
     }
+    logTaskTrace("report_artifact_check", {}, `path_index=${paths.indexOf(p)} exists=${size !== null} regular=${isRegular} bytes=${size ?? 0}`);
     if (size === null) {
-      results.push(`missing: ${p}`);
+      results.push(`missing: ${label}`);
       allPassed = false;
     } else if (!isRegular) {
       // #1502: spec requires a regular readable file — reject directories,
       // devices, and symlinks that happen to live at the declared path.
-      results.push(`not a regular file: ${p}`);
+      results.push(`not a regular file: ${label}`);
       allPassed = false;
     } else if (size < DOD_MIN_BYTES) {
-      results.push(`too small (${size}B): ${p}`);
+      results.push(`too small (${size}B): ${label} (${size}B)`);
       allPassed = false;
     } else {
-      results.push(`${p} (${size}B)`);
+      results.push(`${label} (${size}B)`);
     }
   }
   return { passed: allPassed, details: results.join("\n") };
 }
 
-export type TaskCompleteCallback = (chatId: number, message: string, result: string, dodFiles?: string[]) => void;
 export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
 export type TaskPausedCallback = (chatId: number, title: string, reason: string) => void;
 export type AgentTaskRunner = (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string }>;
 
 interface QueuedJob {
   entry: ScheduledTask;
-  onComplete?: TaskCompleteCallback;
   manual?: boolean;
 }
 
@@ -266,7 +275,7 @@ export class CronQueue {
   get currentJob(): RunningJob | null { return this._current; }
   get pending(): number { return this.queue.length; }
 
-  enqueue(entry: ScheduledTask, onComplete?: TaskCompleteCallback, manual?: boolean): string | null {
+  enqueue(entry: ScheduledTask, manual?: boolean): string | null {
     if (this._current?.entryId === entry.id) {
       return `⏳ Already running: "${getEntryMessage(entry).slice(0, 60)}"`;
     }
@@ -281,8 +290,9 @@ export class CronQueue {
       if (rank < qRank) break;
       i++;
     }
-    this.queue.splice(i, 0, { entry, onComplete, manual });
+    this.queue.splice(i, 0, { entry, manual });
     logInfo(TAG, `Enqueued "${entry.id}" (${entry.kind}, ${entry.priority ?? "medium"}${manual ? ", manual" : ""}) — ${this.queue.length} pending`);
+    logTaskTrace("task_queue_state", { task: entry.id }, `pending=${this.queue.length} manual=${manual === true}`);
     persistState(this._current, this.queue);
 
     if (!this._current) this.processNext();
@@ -297,11 +307,11 @@ export class CronQueue {
     if (isSystemEntry(entry)) {
       this.runSystem(entry, manual);
     } else if (entry.kind === "script") {
-      this.runScript(entry, job.onComplete, manual);
+      this.runScript(entry, manual);
     } else if (entry.kind === "orc") {
       this.runOrc(entry, manual);
     } else if (entry.kind === "agent") {
-      this.runAgent(entry, job.onComplete, manual);
+      this.runAgent(entry, manual);
     } else if (entry.kind === "reminder") {
       logInfo(TAG, `Reminder "${entry.id}" already delivered — skipping`);
       this.processNext();
@@ -400,7 +410,7 @@ export class CronQueue {
   private runOrc(entry: ScheduledTask & { kind: "orc" }, _manual?: boolean): void {
     logTaskDebug("task_execution_started", { task: entry.id }, "kind=orc");
     import("../spin.js").then(({ spin }) => {
-      spin.dispatch({ type: "O", goal: entry.goal, source: "task", priority: entry.priority ?? "MEDIUM" });
+      spin.dispatch({ type: "O", goal: entry.goal, source: "task", priority: entry.priority ?? "MEDIUM", settlementOwner: "spin" });
       this.clearCurrent();
       this.processNext();
     }).catch((err) => {
@@ -410,7 +420,7 @@ export class CronQueue {
     });
   }
 
-  private runScript(entry: ScheduledTask & { kind: "script" }, onComplete?: TaskCompleteCallback, manual?: boolean): void {
+  private runScript(entry: ScheduledTask & { kind: "script" }, manual?: boolean): void {
     logTaskDebug("task_execution_started", { task: entry.id }, "kind=script");
     try {
       const child = spawn("bash", ["-c", entry.command], { stdio: ["ignore", "pipe", "pipe"] });
@@ -442,17 +452,12 @@ export class CronQueue {
             prompt: agentPrompt,
             agent: followUpAgent,
           };
-          this.enqueue(agentEntry, onComplete);
+          this.enqueue(agentEntry);
           return;
         }
         if (code !== 0) {
           if (!paused) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
           addTaskFailure({ taskName: formatTaskLabel(entry.id), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: Date.now(), consecutiveFailures: 1 });
-        }
-        if (!paused) {
-          if (code !== 0 || output.trim()) {
-            onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.command, `${status}\n${(output || "(no output)").slice(0, 500)}`);
-          }
         }
         this.clearCurrent();
         this.processNext();
@@ -460,7 +465,6 @@ export class CronQueue {
 
       child.on("error", (err) => {
         logWarn(TAG, `Script spawn failed for task=${entry.id} (error_chars=${err.message.length})`);
-        onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.command, `❌ Failed: ${err.message}`);
         this.clearCurrent();
         this.processNext();
       });
@@ -472,30 +476,38 @@ export class CronQueue {
     }
   }
 
-  private async runAgent(entry: ScheduledTask & { kind: "agent" }, _onComplete?: TaskCompleteCallback, manual?: boolean): Promise<void> {
+  private async runAgent(entry: ScheduledTask & { kind: "agent" }, manual?: boolean): Promise<void> {
     if (!manual) {
       const idleMs = Date.now() - readLastPromptAt();
       if (idleMs < 90_000) {
         logInfo(TAG, `Deferring agent task "${entry.id}" — user active ${Math.round(idleMs / 1000)}s ago`);
         const count = incrementDeferrals(entry.id);
-        if (count >= 5) {
-          logWarn(TAG, `Idle gate exhausted for "${entry.id}" after ${count} deferrals — advancing`);
+        if (count >= MAX_IDLE_DEFERRALS) {
+          logWarn(TAG, `Idle gate exhausted for "${entry.id}" after ${count} deferrals — running despite active user`);
+          logTaskDebug("task_deferred_budget_exhausted", { task: entry.id }, `deferrals=${count}`);
+        } else {
+          const deferredAt = Date.now();
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: "schedule", startedAt: deferredAt, finishedAt: deferredAt, outcome: "deferred", detail: `idle_gate:user_active deferrals=${count}` });
+          logTaskDebug("task_deferred", { task: entry.id }, `reason=idle_gate deferrals=${count}`);
+          logTaskTrace("task_deferred_predicate", { task: entry.id }, `idle_ms=${idleMs} deferrals=${count}`);
+          advanceNextRun(entry.id, entry.schedule);
+          this.clearCurrent();
+          this.processNext();
+          return;
         }
-        advanceNextRun(entry.id, entry.schedule);
-        this.clearCurrent();
-        this.processNext();
-        return;
       }
     }
 
     let prompt = entry.prompt ?? "";
     let dodPaths: string[] = [];
+    let contextFileSummary = "count=0";
     if (entry.taskFile) {
       const { loadTaskPackage } = await import("./task-package.js");
       const task = loadTaskPackage(entry.taskFile);
       if (task.ok) {
         prompt = task.prompt;
         dodPaths = task.dodPaths;
+        contextFileSummary = `count=${task.contextFiles.length} chars=${task.contextFiles.reduce((sum, file) => sum + file.chars, 0)}`;
       } else {
         logWarn(TAG, `Falling back to inline message for "${entry.id}": ${task.error}`);
       }
@@ -512,6 +524,7 @@ export class CronQueue {
     }
 
     logTaskDebug("task_package_loaded", { task: entry.id }, `delivery=${entry.delivery}`);
+    logTaskTrace("task_package_context", { task: entry.id }, contextFileSummary);
 
     if (entry.targetUserId) {
       this.setCurrent(entry, 0, "agent", manual);
@@ -547,6 +560,7 @@ export class CronQueue {
 
     const runId = `${entry.id}_${Date.now()}_${++_settleSeq}`;
     const execControl = registerControl(runId, { cardId: undefined });
+    logTaskTrace("task_workspace_scope", { task: entry.id, exec: runId }, "scope=task-local");
 
     const state = readState(entry.id);
     // #1502 Task 9: a manual trigger starts its own bounded run group — it must
@@ -616,6 +630,7 @@ export class CronQueue {
         let resultPath: string | null = null;
         let summary = "";
         let settlementDetail = "";
+        logTaskTrace("task_validation_started", { task: entry.id, card: boardId, exec: runId }, `report=${isReport} dod=${dodPaths.length} response_bytes=${Buffer.byteLength(response ?? "", "utf8")}`);
 
         if (isReport && dodPaths.length > 0) {
           const dod = await checkDoD(dodPaths);
@@ -718,6 +733,7 @@ export class CronQueue {
       .finally(() => {
         removeControl(runId);
         clearRunSettled(runId);
+        logTaskTrace("task_resources_released", { task: entry.id, exec: runId }, "control=removed queue=advanced");
         this.clearCurrent();
         this.processNext();
       });

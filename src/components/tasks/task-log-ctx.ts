@@ -24,6 +24,7 @@ export function logTaskDebug(event: string, ctx: TaskLogCtx, details?: string): 
 }
 
 export function logTaskTrace(event: string, ctx: TaskLogCtx, details?: string): void {
+  if (!isLogLevel("trace")) return;
   logTrace("task-pipeline", `${event}${formatCtx(ctx)}${details ? ` ${details}` : ""}`);
 }
 
@@ -31,4 +32,4 @@ function formatCtx(ctx: TaskLogCtx): string {
   const formatted = fmtLogCtx(ctx);
   return formatted ? ` ${formatted}` : "";
 }
-import { logDebug, logTrace } from "../logger.js";
+import { isLogLevel, logDebug, logTrace } from "../logger.js";

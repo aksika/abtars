@@ -1,6 +1,5 @@
 import type { KanbanCard } from "./kanban-board.js";
-import { kanbanMarkDelivered, kanbanSetDelivering, requireTaskDatabase } from "./kanban-board.js";
-import { logDebug } from "../logger.js";
+import { kanbanMarkDelivered, kanbanClaimDelivery } from "./kanban-board.js";
 
 export interface DeliverDeps {
   sendMessage: (chatId: string, text: string) => Promise<void>;
@@ -20,23 +19,9 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     }
   }
 
-  // Idempotent: skip if already delivered or delivering
-  if (card.status === "delivered") {
-    logDebug("kanban-delivery", `Card ${card.id}: already delivered — skipping duplicate`);
-    return;
-  }
-  if (card.status === "delivering") {
-    logDebug("kanban-delivery", `Card ${card.id}: already delivering — skipping duplicate`);
-    return;
-  }
-
-  // Increment delivery_attempts
-  try {
-    const db = requireTaskDatabase();
-    db.prepare("UPDATE kanban_board SET delivery_attempts = COALESCE(delivery_attempts, 0) + 1, updated_at = datetime('now') WHERE id = ?").run(card.id);
-  } catch { /* best effort */ }
-
-  kanbanSetDelivering(card.id);
+  // Claim and increment atomically. Two heartbeat ticks holding the same
+  // stale card object cannot both enter the delivery side effects.
+  if (!kanbanClaimDelivery(card.id)) return;
   const chatId = deps.chatIdFor(card);
 
   if (card.delivery_mode === "silent") {

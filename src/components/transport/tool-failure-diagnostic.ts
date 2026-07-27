@@ -14,6 +14,8 @@ export type ToolFailureReason =
   | "aborted"
   | "policy_rejected"
   | "repeated_failure"
+  | "candidate_round_limit"
+  | "prompt_round_limit"
   | "candidate_exhausted"
   | "unknown";
 
@@ -195,12 +197,35 @@ export function mergeSafetyIncident(
   if (incidentType) {
     if (incidentType === "repeated_failure") reason = "repeated_failure";
     else if (incidentType === "candidate_round_limit") reason = "candidate_exhausted";
+    else if (incidentType === "prompt_round_limit") reason = "prompt_round_limit";
   }
   return {
     ...diagnostic,
     reason,
     safety_incident: incidentType as ToolFailureDiagnosticV1["safety_incident"],
     candidate_exhausted: candidateExhausted ?? diagnostic.candidate_exhausted,
+  };
+}
+
+/** Build a structured failure when Pi stopped before a tool produced a diagnostic. */
+export function buildSafetyDiagnostic(
+  executionId: string,
+  incident: { type: BehaviorIncidentType; toolName?: string },
+): ToolFailureDiagnosticV1 {
+  const reason = incident.type === "candidate_round_limit"
+    ? "candidate_round_limit"
+    : incident.type === "prompt_round_limit"
+      ? "prompt_round_limit"
+      : "unknown";
+  return {
+    version: 1,
+    execution_id: executionId,
+    tool: incident.toolName ?? "pi-safety",
+    reason,
+    timed_out: false,
+    aborted: false,
+    safety_incident: incident.type,
+    candidate_exhausted: incident.type === "candidate_round_limit",
   };
 }
 
@@ -223,6 +248,10 @@ export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
     parts.push("reason: 3 consecutive failures");
   } else if (d.reason === "candidate_exhausted") {
     parts.push("reason: no eligible candidate");
+  } else if (d.reason === "candidate_round_limit") {
+    parts.push("reason: candidate round limit");
+  } else if (d.reason === "prompt_round_limit") {
+    parts.push("reason: prompt round limit");
   } else if (d.reason === "unknown") {
     parts.push("reason: unknown error");
   }

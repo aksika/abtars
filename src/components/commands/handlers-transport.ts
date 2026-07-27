@@ -383,7 +383,7 @@ export async function handleContinue(_text: string, ctx: CommandContext): Promis
   const { result: response } = await ctx.sessionManager.spin({
     type: "A", sessionId: ctx.sessionKey,
     prompt: "[SYSTEM] Something went wrong during your previous response. Continue from where you left off.",
-    userId: ctx.userId, await: true,
+    userId: ctx.userId, settlementOwner: "spin", await: true,
   });
   if (response) await ctx.reply(response);
   return true;

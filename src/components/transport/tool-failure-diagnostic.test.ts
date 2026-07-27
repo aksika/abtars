@@ -5,6 +5,7 @@ import {
   parseBashResultToDiagnostic,
   parseToolResultToDiagnostic,
   buildUnknownDiagnostic,
+  buildSafetyDiagnostic,
   mergeSafetyIncident,
   renderDiagnostic,
   PiCoreToolExecutionError,
@@ -182,6 +183,16 @@ describe("buildUnknownDiagnostic", () => {
     expect(d.stderr_excerpt).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
     // command_preview is intentionally omitted for unknown diagnostics (#1497 review)
     expect(d.command_preview).toBeUndefined();
+  });
+});
+
+describe("buildSafetyDiagnostic", () => {
+  it("keeps round-limit failures structured without raw model/tool content", () => {
+    const d = buildSafetyDiagnostic("exec_1", { type: "prompt_round_limit" });
+    expect(d.reason).toBe("prompt_round_limit");
+    expect(d.tool).toBe("pi-safety");
+    expect(d.command_preview).toBeUndefined();
+    expect(renderDiagnostic(d)).toContain("prompt round limit");
   });
 });
 

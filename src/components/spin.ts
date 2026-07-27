@@ -437,7 +437,7 @@ export class Spin {
   async sendUserToOrc(message: string): Promise<string | null> {
     const orcSession = [...this.sessions.values()].find(s => s.id.includes("_O_") && s.status !== "ended");
     if (!orcSession) return null;
-    const { result } = await this.spin({ type: "O", sessionId: orcSession.id, prompt: `[USER] ${message}`, await: true });
+    const { result } = await this.spin({ type: "O", sessionId: orcSession.id, prompt: `[USER] ${message}`, settlementOwner: "spin", await: true });
     return result ?? null;
   }
 
@@ -979,6 +979,7 @@ export class Spin {
       prompt: opts.prompt,
       timeoutMs: opts.timeoutMs,
       agent: opts.agent,
+      settlementOwner: "spin",
       await: true,
     });
     return result ?? "";
@@ -1164,6 +1165,7 @@ export class Spin {
         callbackPeer: request.callbackPeer,
         sourcePeer: request.sourcePeer,
         chatId: request.chatId ? Number(request.chatId) : undefined,
+        settlementOwner: "spin",
         await: false,
       });
       return cardId;
@@ -1188,6 +1190,7 @@ export class Spin {
       callbackPeer: request.callbackPeer,
       sourcePeer: request.sourcePeer,
       chatId: request.chatId ? Number(request.chatId) : undefined,
+      settlementOwner: "spin",
       await: false,
     });
     return cardId;
@@ -1219,7 +1222,7 @@ export class Spin {
       }
       if (this.canDispatch(type, card.id)) {
         const goal = (card as any).goal || card.title;
-        this.dispatch({ type, goal, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id });
+        this.dispatch({ type, goal, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id, settlementOwner: "spin" });
       }
     }
   }

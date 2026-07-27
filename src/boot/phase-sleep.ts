@@ -54,7 +54,7 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
     },
     sessionManager: {
       spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; await: boolean }) => {
-        return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, await: true });
+        return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, settlementOwner: "spin", await: true });
       },
     },
     bufferSystemEvent: async (report: string) => {

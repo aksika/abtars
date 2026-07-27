@@ -222,7 +222,7 @@ Do NOT attempt to fix code you don't understand.`;
   (async () => {
     try {
       const { spin } = await import("./spin.js");
-      const { result } = await spin.dispatchAwait({ type: "H", goal: prompt, title: `SHA: ${errorKey.slice(0, 20)}`, source: "agent" });
+      const { result } = await spin.dispatchAwait({ type: "H", goal: prompt, title: `SHA: ${errorKey.slice(0, 20)}`, source: "agent", settlementOwner: "spin" });
       recordResult("autofix-unknown", errorKey, true);
       logAutoFix(`AGENT OK: ${errorKey} → ${result.slice(0, 200)}`);
       notify(adapter, chatId, `🧠 SHA agent fixed: ${errorKey.slice(0, 40)}\n${result.slice(0, 300)}`);

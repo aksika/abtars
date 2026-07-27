@@ -44,6 +44,24 @@ describe("kanban-board", () => {
     expect(cards[0].completed_at).not.toBeNull();
   });
 
+  it("does not emit a second completion for an already-done card", () => {
+    const id = mod.kanbanEnqueue("Once", "task");
+    mod.kanbanRunning(id);
+    mod.kanbanComplete(id, null, "first");
+    mod.kanbanComplete(id, null, "second");
+    expect(mod.kanbanList("done")).toHaveLength(1);
+    expect(mod.kanbanGetCard(id)!.result_summary).toBe("first");
+  });
+
+  it("claims one delivery attempt atomically", () => {
+    const id = mod.kanbanEnqueue("Claim once", "task");
+    mod.kanbanRunning(id);
+    mod.kanbanComplete(id, null, "done");
+    expect(mod.kanbanClaimDelivery(id)).toBe(true);
+    expect(mod.kanbanClaimDelivery(id)).toBe(false);
+    expect(mod.kanbanGetCard(id)!.delivery_attempts).toBe(1);
+  });
+
   it("transitions to failed with error", () => {
     const id = mod.kanbanEnqueue("Failing task", "agent");
     mod.kanbanRunning(id);
