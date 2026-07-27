@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="report-pipeline-e2e" tests="48" failures="0">
+  <testcase name="M01: Build identity" classname="deployment" time="0.000">
+  </testcase>
+  <testcase name="M02: Heartbeat invokes scheduler" classname="deployment" time="0.000">
+  </testcase>
+  <testcase name="M03: Scheduler recognizes due task" classname="deployment" time="0.000">
+  </testcase>
+  <testcase name="M04: One occurrence retains exclusive ownership" classname="scheduler" time="0.000">
+  </testcase>
+  <testcase name="M05: Valid task enters queue once" classname="scheduler" time="0.000">
+  </testcase>
+  <testcase name="M06: Structured report contract parses" classname="normalize" time="0.000">
+  </testcase>
+  <testcase name="M07: Invalid contract terminates before model" classname="preflight" time="0.000">
+  </testcase>
+  <testcase name="M08: Required input files validated" classname="preflight" time="0.000">
+  </testcase>
+  <testcase name="M09: Required executables validated" classname="preflight" time="0.000">
+  </testcase>
+  <testcase name="M10: Associated context is deterministic" classname="preflight" time="0.000">
+  </testcase>
+  <testcase name="M11: Workspace scoped to run" classname="preflight" time="0.000">
+  </testcase>
+  <testcase name="M12: Run identity allocated" classname="scheduler" time="0.000">
+  </testcase>
+  <testcase name="M13: Execution control registered" classname="runner" time="0.000">
+  </testcase>
+  <testcase name="M14: Kanban card created after preflight" classname="runner" time="0.000">
+  </testcase>
+  <testcase name="M15: Pi host initializes" classname="execution" time="0.000">
+  </testcase>
+  <testcase name="M16: Provider/model selection" classname="execution" time="0.000">
+  </testcase>
+  <testcase name="M17: Provider response events" classname="execution" time="0.000">
+  </testcase>
+  <testcase name="M18: Tool calls dispatch" classname="execution" time="0.000">
+  </testcase>
+  <testcase name="M19: Tools can read/write workspace" classname="execution" time="0.000">
+  </testcase>
+  <testcase name="M20: No-progress detection" classname="execution" time="0.000">
+  </testcase>
+  <testcase name="M21: Corrective recovery" classname="execution" time="0.000">
+  </testcase>
+  <testcase name="M22: Candidate-round threshold" classname="execution" time="0.000">
+  </testcase>
+  <testcase name="M23: Prompt-wide limit yields diagnostic" classname="execution" time="0.000">
+  </testcase>
+  <testcase name="M24: Failed execution closes resources" classname="cleanup" time="0.000">
+  </testcase>
+  <testcase name="M25: Failed execution settles card once" classname="settlement" time="0.000">
+  </testcase>
+  <testcase name="M26: Failed execution writes history" classname="settlement" time="0.000">
+  </testcase>
+  <testcase name="M27: Retry bounded to one attempt" classname="retry" time="0.000">
+  </testcase>
+  <testcase name="M28: Retry receives prior context" classname="retry" time="0.000">
+  </testcase>
+  <testcase name="M29: Retry reaches terminal outcome" classname="retry" time="0.000">
+  </testcase>
+  <testcase name="M30: Deadline reaches cancellation" classname="timeout" time="0.000">
+  </testcase>
+  <testcase name="M31: Retry writes history" classname="retry" time="0.000">
+  </testcase>
+  <testcase name="M32: Retry and active fields clear" classname="settlement" time="0.000">
+  </testcase>
+  <testcase name="M33: Persisted timestamps coherent" classname="state" time="0.000">
+  </testcase>
+  <testcase name="M34: Stuck run not advanced/duplicated" classname="scheduler" time="0.000">
+  </testcase>
+  <testcase name="M35: Report artifact created" classname="artifact" time="0.000">
+  </testcase>
+  <testcase name="M36: Artifact freshness proven" classname="artifact" time="0.000">
+  </testcase>
+  <testcase name="M37: Structured acceptance evaluated" classname="artifact" time="0.000">
+  </testcase>
+  <testcase name="M38: Validation precedes success" classname="settlement" time="0.000">
+  </testcase>
+  <testcase name="M39: Successful settlement idempotent" classname="settlement" time="0.000">
+  </testcase>
+  <testcase name="M40: Delivery after validation" classname="delivery" time="0.000">
+  </testcase>
+  <testcase name="M41: Once delivery confirmed" classname="delivery" time="0.000">
+  </testcase>
+  <testcase name="M42: Delivery retry without regenerate" classname="delivery" time="0.000">
+  </testcase>
+  <testcase name="M43: Cleanup after all paths" classname="cleanup" time="0.000">
+  </testcase>
+  <testcase name="M44: Logs reconstruct every stage" classname="observability" time="0.000">
+  </testcase>
+  <testcase name="M45: Task listing agrees with state" classname="operators" time="0.000">
+  </testcase>
+  <testcase name="M46: daily-ai end-to-end" classname="production" time="0.000">
+  </testcase>
+  <testcase name="M47: weekly-ai end-to-end" classname="production" time="0.000">
+  </testcase>
+  <testcase name="M48: finance-daily end-to-end" classname="production" time="0.000">
+  </testcase>
+</testsuite>

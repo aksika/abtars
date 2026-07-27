@@ -91,7 +91,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     expect(history).toContain('"outcome":"success"');
     expect(history).toContain('"kanbanCardId":1');
     logger.flushLogs();
-    const logPath = join(home, "logs", `bridge-${new Date().toISOString().slice(0, 10)}.log`);
+    const logPath = logger.getLogFile();
     const logs = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
     expect(logs).toContain("task_execution_started");
     expect(logs).toContain("task_settled");

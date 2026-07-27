@@ -5,7 +5,7 @@ import { existsSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logWarn } from "../logger.js";
-import { incrementFailures, resetFailures, setAutoPaused, updateState, readState, reserveRun } from "./task-state-store.js";
+import { incrementFailures, resetFailures, setAutoPaused, advanceNextRun, updateState, readState, reserveRun } from "./task-state-store.js";
 import { appendRun } from "./task-history-store.js";
 import { logTaskDebug } from "./task-log-ctx.js";
 import type { ScheduledTask } from "./task-types.js";
@@ -255,7 +255,12 @@ export class CronQueue {
 
       child.on("exit", (code) => {
         const finishedAt = Date.now();
-        appendRun({ taskId: entry.id, kind: entry.kind, trigger: this.trigger(entry.id, manual) === "retry" ? "retry" : manual ? "manual" : "schedule", startedAt: this._current?.startedAt ?? finishedAt, finishedAt, outcome: code === 0 ? "success" : "failed", detail: output.slice(0, 200), groupId: `${entry.id}:script:${finishedAt}` });
+        const outcome = code === 0 ? "success" : "failed";
+        appendRun({ taskId: entry.id, kind: entry.kind, trigger: this.trigger(entry.id, manual) === "retry" ? "retry" : manual ? "manual" : "schedule", startedAt: this._current?.startedAt ?? finishedAt, finishedAt, outcome, detail: output.slice(0, 200), groupId: `${entry.id}:script:${finishedAt}` });
+        if (outcome === "success") {
+          advanceNextRun(entry.id, entry.schedule);
+          resetFailures(entry.id);
+        }
         const paused = this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
         const followUp = entry.followUp;
         if (code === 0 && output.trim() && followUp) {
