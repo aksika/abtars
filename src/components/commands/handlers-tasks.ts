@@ -126,11 +126,29 @@ export async function handleTaskPause(text: string, ctx: CommandContext): Promis
   const action = match[2]!.toLowerCase();
   const id = match[3]!.trim();
   try {
-    const raw = await execAsync("abtars-task", [action, id], 5000);
-    const data = JSON.parse(raw || "{}");
-    await ctx.reply(data.ok ? `✓ ${id} ${action}d` : `❌ ${data.error ?? "unknown error"}`);
+    const { setAutoPaused } = await import("../tasks/task-state-store.js");
+    if (action === "pause") {
+      setAutoPaused(id, true);
+      await ctx.reply(`Paused: ${id}`);
+    } else {
+      const { readState } = await import("../tasks/task-state-store.js");
+      const { readEntry } = await import("../tasks/task-store.js");
+      const state = readState(id);
+      const entry = readEntry(id);
+      if (!state) {
+        await ctx.reply(`No state found for: ${id}`);
+        return true;
+      }
+      setAutoPaused(id, false);
+      const { resetFailures, advanceNextRun } = await import("../tasks/task-state-store.js");
+      resetFailures(id);
+      if (entry?.schedule) {
+        advanceNextRun(id, entry.schedule);
+      }
+      await ctx.reply(`Resumed: ${id}`);
+    }
   } catch (err) {
-    await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+    await ctx.reply(`Failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   return true;
 }

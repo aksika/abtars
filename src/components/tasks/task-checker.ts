@@ -2,7 +2,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo, logWarn, logTrace } from "../logger.js";
 import { readEntries as dbReadEntries } from "./task-store.js";
 import { advanceNextRun, updateState, readState } from "./task-state-store.js";
 import { todaySuccessCount, appendRun } from "./task-history-store.js";
@@ -92,6 +92,7 @@ export function checkCron(): ScheduledTask[] {
     if (decision.run) {
       const now = Date.now();
       updateState(entry.id, { lastStartedAt: now });
+      logTrace(TAG, `task_schedule_due task=${entry.id}`);
 
       if (entry.kind === "reminder") {
         appendReminder({ chatId: parseInt(entry.chatId ?? "0", 10), message: entry.text, createdAt: now });
@@ -103,6 +104,8 @@ export function checkCron(): ScheduledTask[] {
       }
     } else if (decision.reason === "auto_paused" || decision.reason === "no_state") {
       logWarn(TAG, `Schedule skip for "${entry.id}": reason=${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}`);
+    } else {
+      logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=${decision.reason}`);
     }
   }
 

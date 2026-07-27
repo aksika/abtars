@@ -5,7 +5,7 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSy
 import { resolve, join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
 import { incrementFailures, incrementDeferrals, resetFailures, setAutoPaused, advanceNextRun, updateState, readState } from "./task-state-store.js";
 import { appendRun } from "./task-history-store.js";
@@ -68,6 +68,12 @@ function validateAgentOutput(raw: unknown, minBytes?: number): ValidatedOutput {
 const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const RETRY_DELAY_MS = 10 * 60 * 1000;
+
+/** #1502: Terminal latch — prevents stale late results from overwriting settled outcomes. */
+const _settledRunIds = new Set<string>();
+function isRunSettled(runId: string): boolean { return _settledRunIds.has(runId); }
+function markRunSettled(runId: string): void { _settledRunIds.add(runId); }
+function clearRunSettled(runId: string): void { _settledRunIds.delete(runId); }
 const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
 const STATE_FILE = join(homedir(), ".abtars", "state", "task-queue-state.json");
 
@@ -106,18 +112,22 @@ function getEntryMessage(entry: ScheduledTask): string {
   return "";
 }
 
+let _settleSeq = 0;
+
 /**
  * Single settlement point for a run. Appends history and updates the scheduling
- * cursor. `nextRunAt` is the sole source of truth for the next fire time:
- *  - success/noop/skipped: advance a recurring task to its next cron occurrence
- *    (or mark a one-shot completed) and clear any retry flag from a prior failure;
- *  - deferred: the caller reschedules nextRunAt to the deferral time — do not advance;
- *  - failed (recurring): reschedule as a bounded retry (checkAutoPause caps attempts);
- *  - failed (one-shot): terminal — mark completed so it never re-fires.
+ * cursor. Protected by terminal latch: once a runId is settled, subsequent calls
+ * for the same runId are ignored.
  */
-function settleRun(entry: ScheduledTask, outcome: "success" | "failed" | "noop" | "deferred" | "skipped", startedAt: number, detail?: string, resultPath?: string, kanbanCardId?: number, trigger: "schedule" | "manual" | "retry" = "schedule"): void {
+function settleRun(entry: ScheduledTask, outcome: "success" | "failed" | "noop" | "deferred" | "skipped", startedAt: number, detail?: string, resultPath?: string, kanbanCardId?: number, trigger: "schedule" | "manual" | "retry" = "schedule", runId?: string): void {
+  if (runId && isRunSettled(runId)) {
+    logDebug("cron-queue", `Stale settlement ignored for "${entry.id}" run=${runId}`);
+    return;
+  }
+  if (runId) markRunSettled(runId);
+
   const finishedAt = Date.now();
-  appendRun({ taskId: entry.id, kind: entry.kind, trigger, startedAt, finishedAt, outcome, detail, resultPath, kanbanCardId });
+  appendRun({ taskId: entry.id, kind: entry.kind, trigger, startedAt, finishedAt, outcome, detail, resultPath, kanbanCardId, runId });
 
   if (outcome === "success" || outcome === "noop" || outcome === "skipped") {
     advanceNextRun(entry.id, entry.schedule);
@@ -561,11 +571,16 @@ export class CronQueue {
     mkdirSync(workspace, { recursive: true });
 
     const { spin } = await import("../spin.js");
+    const { registerControl, removeControl } = await import("../execution-control.js");
 
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
     const sessionType = (AGENT_SESSION[entry.agent] ?? "T") as import("../spin-types.js").SessionType;
 
     const trigger = this.trigger();
+    const runId = `${entry.id}_${Date.now()}_${++_settleSeq}`;
+    const execControl = registerControl(runId, { cardId: undefined });
+
+    logTrace(TAG, `Reserving run run=${runId} task=${entry.id}`);
 
     spin.dispatchAwait({
       timeoutMs: AGENT_TIMEOUT_MS,
@@ -578,6 +593,7 @@ export class CronQueue {
       maxToolRounds: entry.maxToolRounds,
       delivery: entry.delivery,
       settlementOwner: "caller",
+      executionControl: execControl,
     })
       .then(async ({ cardId: boardId, result: response }) => {
         const startedAt = this._current?.startedAt ?? Date.now();
@@ -626,7 +642,7 @@ export class CronQueue {
           kanbanFail(boardId, failReason);
         }
 
-        settleRun(entry, settlementOutcome, startedAt, settlementDetail || summary, resultPath ?? undefined, boardId, trigger);
+        settleRun(entry, settlementOutcome, startedAt, settlementDetail || summary, resultPath ?? undefined, boardId, trigger, runId);
         const paused = this.checkAutoPause(entry, exitCode, settlementDetail || summary);
 
         if (exitCode !== 0 && !paused) {
@@ -637,13 +653,15 @@ export class CronQueue {
         const startedAt = this._current?.startedAt ?? Date.now();
         const msg = err instanceof Error ? err.message : String(err);
         logWarn(TAG, `Agent failed: ${msg}`);
-        settleRun(entry, "failed", startedAt, msg, undefined, undefined, trigger);
+        settleRun(entry, "failed", startedAt, msg, undefined, undefined, trigger, runId);
         const paused = this.checkAutoPause(entry, 1, msg);
         if (!paused) {
           this.tryInjectFailure(entry, msg);
         }
       })
       .finally(() => {
+        removeControl(runId);
+        clearRunSettled(runId);
         this.clearCurrent();
         this.processNext();
       });

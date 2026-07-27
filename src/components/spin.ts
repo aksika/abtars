@@ -1062,6 +1062,7 @@ export class Spin {
       chatId: request.chatId ? Number(request.chatId) : undefined,
       await: true,
       settlementOwner: request.settlementOwner,
+      executionControl: request.executionControl,
     });
     return { cardId: cardId!, result: result! };
   }

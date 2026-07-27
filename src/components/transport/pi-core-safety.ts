@@ -1,4 +1,4 @@
-import { logDebug, logWarn } from "../logger.js";
+import { logDebug, logWarn, logTrace } from "../logger.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { AgentContext, AgentLoopTurnUpdate, AgentMessage, AbtarsAgentMessage, SafetyPrepareNextTurnContext, ModelApi, ToolDecision, TurnDecision } from "./pi-core-types.js";
 import { ToolLoopGuard } from "./tool-loop-guard.js";
@@ -198,11 +198,13 @@ export function createPiExecutionSafetyController(
             policy.excludedKeys.add(candidate);
           }
           logDebug(TAG, `Processing incident ${inc.type} for candidate ${candidate} (correctiveAdmitted=${_correctiveAdmitted})`);
+          logTrace(TAG, `pi_behavior_incident type=${inc.type} candidate=${candidate} correctiveAdmitted=${_correctiveAdmitted}`);
         }
 
         const next = policy.selectModel();
         if (next) {
           logDebug(TAG, `prepareNextTurn: switching to ${next.model} via ${next.provider}`);
+          logTrace(TAG, `pi_candidate_switched from=${candidate} to=${next.model} reason=${inc.type}`);
           const nextModel = context.modelForCandidate?.(`${next.model}@${next.endpoint}`);
           if (!nextModel) {
             logWarn(TAG, `Candidate ${next.model} selected without a public Pi model; ending turn`);
@@ -219,12 +221,14 @@ export function createPiExecutionSafetyController(
 
         if (_correctiveAdmitted) {
           logWarn(TAG, `Equivalent incident recurs after corrective admission — terminating`);
+          logTrace(TAG, `pi_corrective_turn_terminal candidate=${candidate} type=${inc.type}`);
           _lastTerminalIncident = inc;
           return undefined;
         }
 
         policy.excludedKeys.delete(candidate);
         logDebug(TAG, `No alternate candidate for ${candidate} — retaining sole candidate with corrective turn`);
+        logTrace(TAG, `pi_corrective_turn_admitted candidate=${candidate} type=${inc.type}`);
 
         const soleModel = context.modelForCandidate?.(candidate);
         if (!soleModel) {
