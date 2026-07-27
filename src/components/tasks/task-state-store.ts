@@ -18,6 +18,8 @@ export interface TaskRuntimeState {
   consecutiveFailures: number;
   consecutiveDeferrals: number;
   autoPaused: boolean;
+  /** #1502: Failure diagnostic from the first attempt, carried to retry. */
+  priorFailure?: string;
 }
 
 type TaskStateFile = Record<string, TaskRuntimeState>;

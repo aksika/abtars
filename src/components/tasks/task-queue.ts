@@ -1,8 +1,8 @@
 import { logAndSwallow } from "../log-and-swallow.js";
 import { addTaskFailure } from "./task-failure-buffer.js";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { resolve, join, dirname, basename } from "node:path";
+import { existsSync, statSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
@@ -155,74 +155,8 @@ function writeResultFile(entryId: string, content: string): string | null {
 
 const DOD_MIN_BYTES = 100;
 
-function todayStr(): string {
-  return localDate();
-}
-
-export interface TaskFileResult {
-  prompt: string;
-  dodPaths: string[];
-}
-
-export function readTaskFile(taskFile: string): TaskFileResult | null {
-  const filePath = resolve(taskFile.replace(/^~/, homedir()));
-  if (!existsSync(filePath)) { logWarn(TAG, `Task file not found: ${filePath}`); return null; }
-  const raw = readFileSync(filePath, "utf-8");
-  const today = todayStr();
-  const content = raw.replace(/\{today\}/g, today);
-
-  const dodIdx = content.indexOf("## Definition of Done");
-  let prompt: string;
-  let dodPaths: string[] = [];
-  if (dodIdx === -1) {
-    prompt = content.trim();
-  } else {
-    prompt = content.slice(0, dodIdx).trim();
-    const dodSection = content.slice(dodIdx);
-    dodPaths = dodSection.split("\n")
-      .filter(l => l.match(/^- /))
-      .map(l => l.replace(/^- /, "").trim())
-      .filter(p => {
-        if (p.length === 0 || p.includes(" ") || p.includes("\t") || (!p.startsWith("/") && !p.startsWith("~"))) {
-          logWarn(TAG, `Rejected malformed DoD path: "${p}" — must be absolute or ~/ path`);
-          return false;
-        }
-        return true;
-      })
-      .map(p => resolve(p.replace(/^~/, homedir())));
-  }
-
-  const dir = dirname(filePath);
-  const base = basename(filePath, ".md");
-  const BACKUP_EXTS = new Set([".bak", ".backup", ".tmp", ".swp"]);
-  const associated = readdirSync(dir)
-    .filter(f => {
-      if (f === base + ".md") return false;
-      if (f.startsWith(".")) return false;
-      const ext = f.includes(".") ? f.slice(f.lastIndexOf(".")).toLowerCase() : "";
-      if (BACKUP_EXTS.has(ext)) return false;
-      if (f.endsWith("~")) return false;
-      return true;
-    })
-    .sort();
-  if (associated.length > 0) {
-    let injected = "\n\n---\n## Associated files\n";
-    let totalChars = 0;
-    const CAP = 10_000;
-    for (const f of associated) {
-      const fc = readFileSync(join(dir, f), "utf-8");
-      if (totalChars + fc.length > CAP) {
-        injected += `\n[${f}]: (truncated — full file at ${join(dir, f)})\n`;
-        break;
-      }
-      injected += `\n### ${f}\n\`\`\`\n${fc}\n\`\`\`\n`;
-      totalChars += fc.length;
-    }
-    prompt += injected;
-  }
-
-  return { prompt, dodPaths };
-}
+export { loadTaskPackage, createExecutionScope } from "./task-package.js";
+export type { TaskPackageResult, ToolExecutionScope } from "./task-package.js";
 
 async function checkDoD(paths: string[]): Promise<{ passed: boolean; details: string }> {
   if (paths.length === 0) return { passed: true, details: "no DoD defined" };
@@ -543,12 +477,13 @@ export class CronQueue {
     let prompt = entry.prompt ?? "";
     let dodPaths: string[] = [];
     if (entry.taskFile) {
-      const task = readTaskFile(entry.taskFile);
-      if (task) {
+      const { loadTaskPackage } = await import("./task-package.js");
+      const task = loadTaskPackage(entry.taskFile);
+      if (task.ok) {
         prompt = task.prompt;
         dodPaths = task.dodPaths;
       } else {
-        logWarn(TAG, `Falling back to inline message for "${entry.id}"`);
+        logWarn(TAG, `Falling back to inline message for "${entry.id}": ${task.error}`);
       }
     }
 
@@ -562,7 +497,7 @@ export class CronQueue {
       }
     }
 
-    logInfo(TAG, `▶ Agent: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
+    logInfo(TAG, `Agent: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
 
     if (entry.targetUserId) {
       this.setCurrent(entry, 0, "agent", manual);
@@ -571,7 +506,7 @@ export class CronQueue {
         const response = await spin.injectGreeting(entry.targetUserId, prompt);
         if (response) {
           settleRun(entry, "success", this._current?.startedAt ?? Date.now(), undefined, undefined, undefined, this.trigger());
-          logInfo(TAG, `✓ Greeting delivered to ${entry.targetUserId}`);
+          logInfo(TAG, `Greeting delivered to ${entry.targetUserId}`);
         } else {
           settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), "greeting returned no response", undefined, undefined, this.trigger());
           logWarn(TAG, `Greeting failed for ${entry.targetUserId}`);
@@ -597,11 +532,22 @@ export class CronQueue {
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
     const sessionType = (AGENT_SESSION[entry.agent] ?? "T") as import("../spin-types.js").SessionType;
 
-    const trigger = this.trigger();
     const runId = `${entry.id}_${Date.now()}_${++_settleSeq}`;
     const execControl = registerControl(runId, { cardId: undefined });
 
-    logTrace(TAG, `Reserving run run=${runId} task=${entry.id}`);
+    logTrace(TAG, `task_run_reserved run=${runId} task=${entry.id}`);
+
+    const state = readState(entry.id);
+    const isRetry = state?.retrying === true;
+    const groupAttempt: 1 | 2 = isRetry ? 2 : 1;
+    const groupTrigger: "schedule" | "manual" | "retry" = isRetry ? "retry" : manual ? "manual" : "schedule";
+
+    if (isRetry && state?.priorFailure) {
+      const priorBlock = `[PREVIOUS ATTEMPT]\nThe previous attempt failed: ${state.priorFailure}\nChange strategy; do not repeat the failed action unchanged.\n[/PREVIOUS ATTEMPT]\n\n`;
+      prompt = priorBlock + prompt;
+      logInfo(TAG, `Retrying "${entry.id}" with prior-failure diagnostic`);
+      logTrace(TAG, `task_retry_with_diagnostic run=${runId} task=${entry.id} attempt=2`);
+    }
 
     spin.dispatchAwait({
       timeoutMs: AGENT_TIMEOUT_MS,
@@ -623,7 +569,6 @@ export class CronQueue {
         let exitCode = 0;
         let resultPath: string | null = null;
         let summary = "";
-        let settlementOutcome: "success" | "failed" = "failed";
         let settlementDetail = "";
 
         if (isReport && dodPaths.length > 0) {
@@ -642,9 +587,6 @@ export class CronQueue {
             const cleaned = validation.content;
             summary = cleaned.slice(0, 500);
             if (isReport) {
-              // #1502: a report without explicit DoD must materialize its
-              // artifact. A failed write is a failed run, not a silent success
-              // delivered with no artifact.
               const written = writeResultFile(entry.id, cleaned);
               if (written) {
                 resultPath = written;
@@ -666,31 +608,58 @@ export class CronQueue {
         }
 
         if (exitCode === 0) {
-          settlementOutcome = "success";
-          // #1502: a verified report artifact with empty/short assistant text still
-          // gets a neutral summary rather than delivering an empty caption.
           const kanbanSummary = isReport ? (summary || "report artifact verified") : (response ?? "");
           kanbanComplete(boardId, resultPath, kanbanSummary);
+          updateState(entry.id, { retrying: false, priorFailure: undefined });
+          resetFailures(entry.id);
+          advanceNextRun(entry.id, entry.schedule);
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "success", detail: settlementDetail || summary, resultPath: resultPath ?? undefined, kanbanCardId: boardId, runId });
+          logTrace(TAG, `task_settled run=${runId} outcome=success`);
         } else {
-          const failReason = settlementDetail || response?.slice(0, 500) || "task failed";
-          kanbanFail(boardId, failReason);
-        }
-
-        settleRun(entry, settlementOutcome, startedAt, settlementDetail || summary, resultPath ?? undefined, boardId, trigger, runId);
-        const paused = this.checkAutoPause(entry, exitCode, settlementDetail || summary);
-
-        if (exitCode !== 0 && !paused) {
-          this.tryInjectFailure(entry, `${settlementDetail || summary}`);
+          kanbanFail(boardId, settlementDetail || summary);
+          if (groupAttempt === 1 && entry.schedule) {
+            const retryAt = Date.now() + RETRY_DELAY_MS;
+            updateState(entry.id, { lastFinishedAt: Date.now(), nextRunAt: retryAt, retryAt, retrying: true, priorFailure: (settlementDetail || summary).slice(0, 200) });
+            appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: settlementDetail || summary, resultPath: undefined, kanbanCardId: boardId, runId });
+            logInfo(TAG, `Retry scheduled for "${entry.id}": attempt 1 failed, retry in ${RETRY_DELAY_MS / 60000}min`);
+            logTrace(TAG, `task_retry_scheduled run=${runId} task=${entry.id} attempt=1`);
+          } else {
+            advanceNextRun(entry.id, entry.schedule);
+            updateState(entry.id, { retrying: false, priorFailure: undefined, lastFinishedAt: Date.now() });
+            appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: settlementDetail || summary, resultPath: undefined, kanbanCardId: boardId, runId });
+            logTrace(TAG, `task_settled run=${runId} outcome=failed attempt=${groupAttempt}`);
+            const failCount = incrementFailures(entry.id);
+            if (failCount >= 3) {
+              setAutoPaused(entry.id, true);
+              logWarn(TAG, `Auto-paused "${entry.id}" after ${failCount} run groups failed`);
+              this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), `failed ${failCount} groups: ${(settlementDetail || summary).slice(0, 100)}`);
+            } else {
+              this.tryInjectFailure(entry, `${settlementDetail || summary}`);
+            }
+          }
         }
       })
       .catch((err: unknown) => {
         const startedAt = this._current?.startedAt ?? Date.now();
         const msg = err instanceof Error ? err.message : String(err);
         logWarn(TAG, `Agent failed: ${msg}`);
-        settleRun(entry, "failed", startedAt, msg, undefined, undefined, trigger, runId);
-        const paused = this.checkAutoPause(entry, 1, msg);
-        if (!paused) {
-          this.tryInjectFailure(entry, msg);
+        if (groupAttempt === 1 && entry.schedule) {
+          const retryAt = Date.now() + RETRY_DELAY_MS;
+          updateState(entry.id, { lastFinishedAt: Date.now(), nextRunAt: retryAt, retryAt, retrying: true, priorFailure: msg.slice(0, 200) });
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: msg, runId });
+          logInfo(TAG, `Retry scheduled for "${entry.id}": attempt 1 failed, retry in ${RETRY_DELAY_MS / 60000}min`);
+        } else {
+          advanceNextRun(entry.id, entry.schedule);
+          updateState(entry.id, { retrying: false, priorFailure: undefined, lastFinishedAt: Date.now() });
+          appendRun({ taskId: entry.id, kind: entry.kind, trigger: groupTrigger, startedAt, finishedAt: Date.now(), outcome: "failed", detail: msg, runId });
+          const failCount = incrementFailures(entry.id);
+          if (failCount >= 3) {
+            setAutoPaused(entry.id, true);
+            logWarn(TAG, `Auto-paused "${entry.id}" after ${failCount} run groups failed`);
+            this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), `failed ${failCount} groups: ${msg.slice(0, 100)}`);
+          } else {
+            this.tryInjectFailure(entry, msg);
+          }
         }
       })
       .finally(() => {
