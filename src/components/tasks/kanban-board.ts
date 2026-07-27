@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
-import { logWarn } from "../logger.js";
+import { logWarn, logDebug } from "../logger.js";
 import { isValidSessionType } from "../spin-profiles.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
@@ -218,6 +218,13 @@ export function kanbanRunning(id: number): void {
 export function kanbanComplete(id: number, resultPath: string | null, summary: string): void {
   const d = dbOrNull();
   if (!d) return;
+  const card = d.prepare("SELECT status, delivery_attempts FROM kanban_board WHERE id = ?").get(id) as { status: string; delivery_attempts: number } | undefined;
+  if (!card) return;
+  // Idempotent: skip if already delivering/delivered
+  if (card.status === "delivering" || card.status === "delivered") {
+    logDebug("kanban", `Card ${id}: already ${card.status} — skipping kanbanComplete`);
+    return;
+  }
   d.prepare(
     `UPDATE kanban_board SET status = 'done', result_path = ?, result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(resultPath, summary.slice(0, 4000), id);
@@ -258,7 +265,7 @@ export function kanbanPending(): KanbanCard[] {
   const d = dbOrNull();
   if (!d) return [];
   return d.prepare(
-    `SELECT * FROM kanban_board WHERE status = 'done' AND delivery_attempts < 3 ORDER BY priority = 'CRITICAL' DESC, priority = 'HIGH' DESC, created_at ASC`
+    `SELECT * FROM kanban_board WHERE status = 'done' AND delivery_attempts < 5 ORDER BY priority = 'CRITICAL' DESC, priority = 'HIGH' DESC, created_at ASC`
   ).all() as KanbanCard[];
 }
 

@@ -12,7 +12,9 @@ vi.mock("node:child_process", async () => {
 
 vi.mock("./task-state-store.js", () => ({
   incrementFailures: vi.fn().mockReturnValue(0),
+  incrementDeferrals: vi.fn().mockReturnValue(0),
   resetFailures: vi.fn(),
+  resetDeferrals: vi.fn(),
   setAutoPaused: vi.fn(),
   advanceNextRun: vi.fn(),
   updateState: vi.fn(),

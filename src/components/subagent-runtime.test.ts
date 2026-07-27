@@ -38,11 +38,19 @@ describe("SubagentRuntime", () => {
     expect(mockSendPrompt).toHaveBeenCalledWith("system:dreamy", "test prompt", undefined, expect.objectContaining({ executionId: expect.any(String), outputObserver: undefined }));
   });
 
-  it("caches transport — second call reuses", async () => {
+  it("reuses transport for reuse-strategy agents", async () => {
+    await runtime.complete("professor", "first");
+    await runtime.complete("professor", "second");
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(1);
+    expect(mockSendPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("creates fresh transport per call for fresh-strategy agents (#1502)", async () => {
     await runtime.complete("dreamy", "first");
     await runtime.complete("dreamy", "second");
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledTimes(1);
+    expect(createSubagentTransport).toHaveBeenCalledTimes(2);
     expect(mockSendPrompt).toHaveBeenCalledTimes(2);
   });
 
@@ -89,10 +97,11 @@ describe("SubagentRuntime", () => {
     expect(mockDestroy).toHaveBeenCalledTimes(2);
   });
 
-  it("fresh session resets before sending", async () => {
+  it("fresh session creates new transport (#1502)", async () => {
     await runtime.complete("dreamy", "first");
     await runtime.complete("dreamy", "second", { session: "fresh" });
-    expect(mockResetSession).toHaveBeenCalledWith("system:dreamy");
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(2);
   });
 
   // --- session() tests ---

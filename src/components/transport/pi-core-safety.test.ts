@@ -39,37 +39,55 @@ describe("createPiExecutionSafetyController", () => {
 
   it("tracks prompt rounds across candidates", () => {
     const ctrl = createPiExecutionSafetyController(policy, { maxPromptRounds: 3 });
-    expect(ctrl.beginProviderTurn("k1").decision).toBe("continue");
-    expect(ctrl.beginProviderTurn("k1").decision).toBe("continue");
-    expect(ctrl.beginProviderTurn("k1").decision).toBe("continue");
-    const result = ctrl.beginProviderTurn("k2");
+    const key = "test-model@https://api.test/v1";
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    const result = ctrl.beginProviderTurn(key);
     expect(result.decision).toBe("stop");
   });
 
-  it("tracks candidate-specific rounds", () => {
+  it("tracks candidate-specific rounds and continues when no alternate exists", () => {
     const ctrl = createPiExecutionSafetyController(policy, { maxCandidateRounds: 2 });
-    expect(ctrl.beginProviderTurn("k1").decision).toBe("continue");
-    expect(ctrl.beginProviderTurn("k1").decision).toBe("continue");
-    const result = ctrl.beginProviderTurn("k1");
-    expect(result.decision).toBe("stop");
+    const key = "test-model@https://api.test/v1";
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    // With only one candidate, candidate limit continues instead of stopping (#1502)
+    const result = ctrl.beginProviderTurn(key);
+    expect(result.decision).toBe("continue");
   });
 
   it("resets candidate rounds on candidate change", () => {
     const ctrl = createPiExecutionSafetyController(policy, { maxCandidateRounds: 2 });
-    expect(ctrl.beginProviderTurn("k1").decision).toBe("continue");
-    expect(ctrl.beginProviderTurn("k1").decision).toBe("continue");
-    expect(ctrl.beginProviderTurn("k2").decision).toBe("continue");
+    expect(ctrl.beginProviderTurn("test-model@https://api.test/v1").decision).toBe("continue");
+    expect(ctrl.beginProviderTurn("other-model@https://other.test/v1").decision).toBe("continue");
   });
 
-  it("candidate limit excludes candidate locally but does not record provider health error", () => {
+  it("candidate limit continues when no alternate exists and does not record provider health error", () => {
     const ctrl = createPiExecutionSafetyController(policy, { maxCandidateRounds: 2 });
-    ctrl.beginProviderTurn("test-model@https://api.test/v1");
-    ctrl.beginProviderTurn("test-model@https://api.test/v1");
-    const result = ctrl.beginProviderTurn("test-model@https://api.test/v1");
+    const key = "test-model@https://api.test/v1";
+    ctrl.beginProviderTurn(key);
+    ctrl.beginProviderTurn(key);
+    const result = ctrl.beginProviderTurn(key);
+    // Sole candidate: continue instead of stopping (#1502)
+    expect(result.decision).toBe("continue");
+    // Provider health should NOT be degraded by command failures (#1497)
+    expect(registry.getHealth().size).toBe(0);
+  });
+
+  it("candidate limit switches when alternate candidate exists", () => {
+    const altCandidates = [
+      { model: "model-a", provider: "prov-a", endpoint: "https://a.test/v1", maxContext: 128000, apiKey: "key-a", source: "primary" },
+      { model: "model-b", provider: "prov-b", endpoint: "https://b.test/v1", maxContext: 128000, apiKey: "key-b", source: "primary" },
+    ];
+    const altPolicy = new FallbackPolicy(altCandidates, registry);
+    const ctrl = createPiExecutionSafetyController(altPolicy, { maxCandidateRounds: 2 });
+    ctrl.beginProviderTurn("model-a@https://a.test/v1");
+    ctrl.beginProviderTurn("model-a@https://a.test/v1");
+    const result = ctrl.beginProviderTurn("model-a@https://a.test/v1");
     expect(result.decision).toBe("stop");
     expect(result.reason).toContain("Candidate round limit");
-    expect(policy.excludedKeys.has("test-model@https://api.test/v1")).toBe(true);
-    // Provider health should NOT be degraded by command failures (#1497)
+    expect(altPolicy.excludedKeys.has("model-a@https://a.test/v1")).toBe(true);
     expect(registry.getHealth().size).toBe(0);
   });
 

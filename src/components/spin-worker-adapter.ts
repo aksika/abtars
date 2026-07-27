@@ -3,7 +3,7 @@ import { spin } from "./spin.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
-import { registerControl, removeControlByAttempt, getControl } from "./execution-control.js";
+import { registerControl, removeControl, getControl } from "./execution-control.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
 
 const TAG = "spin-worker-adapter";
@@ -22,7 +22,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     if (!card) return { kind: "start_failed", reason: "card not found", retryable: false };
 
     // Register generation-bound control before async dispatch
-    const ctrl = registerControl(claim.attemptId, claim.generation, claim.cardId);
+    const ctrl = registerControl(`${claim.attemptId}:${claim.generation}`, { attemptId: claim.attemptId, generation: claim.generation, cardId: claim.cardId });
 
     const sup = new WorkerSupervisionService();
     const contract = sup.getContractForCard(claim.cardId);
@@ -47,7 +47,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
         executionControl: ctrl,
       });
     } catch (err) {
-      removeControlByAttempt(claim.attemptId);
+      removeControl(`${claim.attemptId}:${claim.generation}`);
       return { kind: "start_failed", reason: String(err), retryable: true };
     }
 
@@ -55,7 +55,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   }
 
   async cancel(claim: ExecutionClaim, reason: CancelReason): Promise<CancelObservation> {
-    const ctrl = getControl(claim.attemptId, claim.generation);
+    const ctrl = getControl(`${claim.attemptId}:${claim.generation}`);
     if (!ctrl) {
       // Check durable state — may already be terminal
       const store = new WorkerSupervisionStore();
@@ -93,7 +93,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   }
 
   async inspect(claim: ExecutionClaim): Promise<ExecutionObservation> {
-    const ctrl = getControl(claim.attemptId, claim.generation);
+    const ctrl = getControl(`${claim.attemptId}:${claim.generation}`);
     if (!ctrl) {
       const store = new WorkerSupervisionStore();
       const attempt = store.getAttempt(claim.attemptId);

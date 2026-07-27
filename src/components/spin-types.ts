@@ -175,6 +175,8 @@ export interface SpinRequest {
   contract?: import("./worker-contract.js").WorkerAcceptanceContractV1;
   /** #1366: Pre-allocated attempt ID for supervision correlation. */
   attemptId?: string;
+  /** #1502: Who owns Kanban settlement. "spin" (default) = finishSpin/failSpin settle the card. "caller" = runner settles after validation. */
+  settlementOwner?: "spin" | "caller";
 }
 
 // ── #1271: unified session API ──────────────────────────────────────────
@@ -237,6 +239,8 @@ export interface SpinSessionSpec {
   attemptId?: string;
   // #1248: Execution control for cancellation
   executionControl?: import("./execution-control.js").WorkerExecutionControl;
+  // #1502: Who owns Kanban settlement. "spin" (default) = finishSpin/failSpin settle the card. "caller" = runner settles after validation.
+  settlementOwner?: "spin" | "caller";
 
   // Extension / future-proofing
   metadata?: Record<string, unknown>;  // session-scoped initial data, set ONCE at allocation

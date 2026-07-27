@@ -31,8 +31,8 @@ function ensureDir(): void {
   mkdirSync(dirname(historyPath()), { recursive: true });
 }
 
-export function appendRun(event: Omit<TaskRunEvent, "runId">): string {
-  const runId = randomUUID().slice(0, 12);
+export function appendRun(event: Omit<TaskRunEvent, "runId"> & { runId?: string }): string {
+  const runId = event.runId ?? randomUUID().slice(0, 12);
   const full: TaskRunEvent = { ...event, runId };
   ensureDir();
   try {

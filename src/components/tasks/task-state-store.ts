@@ -16,6 +16,7 @@ export interface TaskRuntimeState {
   retrying?: boolean;
   completed?: boolean;
   consecutiveFailures: number;
+  consecutiveDeferrals: number;
   autoPaused: boolean;
 }
 
@@ -64,8 +65,19 @@ export function initializeState(entries: ScheduledTask[]): void {
       state[id] = {
         nextRunAt: deriveNextRun(entries.find(e => e.id === id)!),
         consecutiveFailures: 0,
+        consecutiveDeferrals: 0,
         autoPaused: false,
       };
+      changed = true;
+    }
+    const existing = state[id]!;
+    if (existing.autoPaused && (existing.consecutiveFailures ?? 0) === 0) {
+      logInfo(TAG, `Self-repair: clearing incoherent autoPaused for "${id}" (zero failures)`);
+      existing.autoPaused = false;
+      changed = true;
+    }
+    if (existing.consecutiveDeferrals === undefined) {
+      existing.consecutiveDeferrals = 0;
       changed = true;
     }
   }
@@ -96,7 +108,7 @@ function deriveNextRun(task: ScheduledTask): number | null {
 
 export function updateState(taskId: string, update: Partial<TaskRuntimeState>): void {
   writeAtomic(state => {
-    const existing = state[taskId] ?? { nextRunAt: null, consecutiveFailures: 0, autoPaused: false };
+    const existing = state[taskId] ?? { nextRunAt: null, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false };
     state[taskId] = { ...existing, ...update };
     return state;
   });
@@ -119,7 +131,7 @@ export function advanceNextRun(taskId: string, schedule?: string): boolean {
 export function incrementFailures(taskId: string): number {
   let count = 0;
   writeAtomic(state => {
-    const existing = state[taskId] ?? { nextRunAt: null, consecutiveFailures: 0, autoPaused: false };
+    const existing = state[taskId] ?? { nextRunAt: null, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false };
     count = (existing.consecutiveFailures ?? 0) + 1;
     state[taskId] = { ...existing, consecutiveFailures: count };
     return state;
@@ -129,7 +141,28 @@ export function incrementFailures(taskId: string): number {
 
 export function resetFailures(taskId: string): void {
   writeAtomic(state => {
-    if (state[taskId]) state[taskId].consecutiveFailures = 0;
+    if (state[taskId]) {
+      state[taskId].consecutiveFailures = 0;
+      state[taskId].consecutiveDeferrals = 0;
+    }
+    return state;
+  });
+}
+
+export function incrementDeferrals(taskId: string): number {
+  let count = 0;
+  writeAtomic(state => {
+    const existing = state[taskId] ?? { nextRunAt: null, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false };
+    count = (existing.consecutiveDeferrals ?? 0) + 1;
+    state[taskId] = { ...existing, consecutiveDeferrals: count };
+    return state;
+  });
+  return count;
+}
+
+export function resetDeferrals(taskId: string): void {
+  writeAtomic(state => {
+    if (state[taskId]) state[taskId].consecutiveDeferrals = 0;
     return state;
   });
 }

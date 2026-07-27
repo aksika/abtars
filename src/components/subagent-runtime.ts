@@ -216,16 +216,24 @@ export class SubagentRuntime {
         closed = true;
         if (timeoutHandle) clearTimeout(timeoutHandle);
 
-        // Reset overrides — transport stays in cache (cleaned by shutdown())
-        if (opts?.timeoutMs && transport.setTimeoutOverride) {
-          transport.setTimeoutOverride(null);
+        if (sessionStrategy === "fresh") {
+          // Interrupt if still active, destroy transport, remove cache entry
+          if (!cancelled) {
+            try { await transport.sendInterrupt?.("execution_closed"); } catch { /* best effort */ }
+          }
+          try { transport.destroy(); } catch { /* best effort */ }
+          this.cache.delete(cacheKey);
+          logDebug(TAG, `${key} ephemeral exec closed — transport destroyed, cache removed`);
+        } else {
+          // Reset overrides — persistent transport stays in cache
+          if (opts?.timeoutMs && transport.setTimeoutOverride) {
+            transport.setTimeoutOverride(null);
+          }
+          if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+            transport.setMaxToolRoundsOverride(null);
+          }
+          logDebug(TAG, `${key} exec closed (${Date.now() - start}ms, ${model})`);
         }
-        if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
-          transport.setMaxToolRoundsOverride(null);
-        }
-
-        const elapsed = Date.now() - start;
-        logDebug(TAG, `${key} exec closed (${elapsed}ms, ${model})`);
       },
     };
 

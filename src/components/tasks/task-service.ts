@@ -14,7 +14,7 @@ export interface TaskView {
 
 export function getTaskView(task: ScheduledTask, runningTaskIds: Set<string> = new Set()): TaskView {
   const s = stateStore.readState(task.id) ?? {
-    nextRunAt: null, consecutiveFailures: 0, autoPaused: false,
+    nextRunAt: null, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false,
   };
   const runs = historyStore.recentRuns(task.id, 5);
   return {
@@ -38,9 +38,16 @@ export function setEnabled(taskId: string, enabled: boolean): void {
   writeEntries(entries);
 }
 
-export function resumeAutoPaused(taskId: string): void {
+export function resumeAutoPaused(taskId: string, schedule?: string): boolean {
+  const state = stateStore.readState(taskId);
+  if (!state) return false;
+  const wasPaused = state.autoPaused;
   stateStore.setAutoPaused(taskId, false);
   stateStore.resetFailures(taskId);
+  if (schedule) {
+    stateStore.advanceNextRun(taskId, schedule);
+  }
+  return wasPaused;
 }
 
 export function triggerNow(taskId: string, tasks: ScheduledTask[]): boolean {
@@ -49,6 +56,7 @@ export function triggerNow(taskId: string, tasks: ScheduledTask[]): boolean {
   const now = Date.now();
   stateStore.updateState(taskId, { nextRunAt: now - 1000 });
   stateStore.setAutoPaused(taskId, false);
+  stateStore.resetFailures(taskId);
   return true;
 }
 

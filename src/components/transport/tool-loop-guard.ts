@@ -27,35 +27,98 @@ export class ToolBehaviorError extends Error {
   }
 }
 
+interface CallFingerprint {
+  name: string;
+  hash: string;
+}
+
+interface FailureFingerprint {
+  tool: string;
+  outcomeFingerprint: string;
+}
+
 export class ToolLoopGuard {
-  private readonly callSignatures: Array<{ name: string; hash: string }> = [];
-  private readonly consecutiveFailures = new Map<string, number>();
+  private lastCall: CallFingerprint | null = null;
+  private consecutiveExactCalls = 0;
+  private lastFailure: FailureFingerprint | null = null;
+  private consecutiveEquivalentFailures = 0;
+  private hadProgressSinceIncident = false;
+  private _incidentAtRound = 0;
+  private _roundsUsed = 0;
 
   observeCall(name: string, rawArguments: string): void {
+    this._roundsUsed++;
     const hash = createHash("sha256").update(rawArguments).digest("hex").slice(0, 8);
-    this.callSignatures.push({ name, hash });
-    const count = this.callSignatures.filter(s => s.name === name && s.hash === hash).length;
-    if (count >= 3) {
-      throw new ToolBehaviorError("exact_repeat", this.callSignatures.length, name);
+    const fp: CallFingerprint = { name, hash };
+
+    if (this.lastCall && this.lastCall.name === name && this.lastCall.hash === hash && !this.hadProgressSinceIncident) {
+      this.consecutiveExactCalls++;
+    } else {
+      this.consecutiveExactCalls = 1;
+    }
+
+    this.lastCall = fp;
+    this.hadProgressSinceIncident = false;
+
+    if (this.consecutiveExactCalls >= 3) {
+      this._incidentAtRound = this._roundsUsed;
+      throw new ToolBehaviorError("exact_repeat", this._roundsUsed, name);
     }
   }
 
   observeOutcome(name: string, result: string): ToolOutcome {
     const outcome = classifyOutcome(result);
+    const outcomeFp = deriveOutcomeFingerprint(result);
+
     if (outcome === "failure") {
-      const streak = (this.consecutiveFailures.get(name) ?? 0) + 1;
-      this.consecutiveFailures.set(name, streak);
-      if (streak >= 3) {
-        throw new ToolBehaviorError("repeated_failure", this.callSignatures.length, name);
+      if (this.lastFailure
+        && this.lastFailure.tool === name
+        && this.lastFailure.outcomeFingerprint === outcomeFp
+        && !this.hadProgressSinceIncident) {
+        this.consecutiveEquivalentFailures++;
+      } else {
+        this.consecutiveEquivalentFailures = 1;
+      }
+      this.lastFailure = { tool: name, outcomeFingerprint: outcomeFp };
+
+      if (this.consecutiveEquivalentFailures >= 3) {
+        this._incidentAtRound = this._roundsUsed;
+        throw new ToolBehaviorError("repeated_failure", this._roundsUsed, name);
       }
     } else {
-      this.consecutiveFailures.set(name, 0);
+      this.consecutiveEquivalentFailures = 0;
+      this.hadProgressSinceIncident = true;
     }
     return outcome;
   }
 
   get roundsUsed(): number {
-    return this.callSignatures.length;
+    return this._roundsUsed;
+  }
+
+  get incidentAtRound(): number {
+    return this._incidentAtRound;
+  }
+
+  resetIncidentState(): void {
+    this._incidentAtRound = 0;
+    this.hadProgressSinceIncident = false;
+  }
+}
+
+function deriveOutcomeFingerprint(result: string): string {
+  try {
+    const parsed = JSON.parse(result);
+    const parts: string[] = [];
+    if (parsed.exit_code != null) parts.push(`exit:${parsed.exit_code}`);
+    if (parsed.signal != null) parts.push(`sig:${parsed.signal}`);
+    if (parsed.error != null) {
+      const errStr = typeof parsed.error === "string" ? parsed.error : String(parsed.error);
+      parts.push(`err:${errStr.slice(0, 80)}`);
+    }
+    return parts.join("|") || "unknown";
+  } catch {
+    return "success";
   }
 }
 

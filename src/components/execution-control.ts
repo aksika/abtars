@@ -1,45 +1,53 @@
 import { logDebug } from "./logger.js";
 import type { CancelReason } from "./swarm-executor-types.js";
 
-export type WorkerTerminalOutcome = "completed" | "failed" | "cancelled" | "timed_out";
+export type TerminalOutcome = "completed" | "failed" | "cancelled" | "timed_out";
 
-export interface WorkerExecutionControl {
-  readonly attemptId: string;
-  readonly generation: number;
-  readonly cardId: number;
+export interface ExecutionControl {
+  readonly executionRef: string;
+  readonly cardId?: number;
+  /** #1366: Worker attempt ID (set for supervised cards only). */
+  readonly attemptId?: string;
+  /** #1366: Worker generation (set for supervised cards only). */
+  readonly generation?: number;
   readonly cancelled: boolean;
   readonly cancelReason?: CancelReason;
   readonly terminal: boolean;
-  readonly terminalOutcome?: WorkerTerminalOutcome;
+  readonly terminalOutcome?: TerminalOutcome;
 
   bind(cancel: (reason: CancelReason) => Promise<void> | void): boolean;
   requestCancel(reason: CancelReason): Promise<"cancelled" | "already_terminal" | "not_found">;
-  markTerminal(outcome: WorkerTerminalOutcome): boolean;
+  markTerminal(outcome: TerminalOutcome): boolean;
 }
+
+export type WorkerExecutionControl = ExecutionControl;
+export type WorkerTerminalOutcome = TerminalOutcome;
 
 const TAG = "exec-control";
 
-class ExecutionControlImpl implements WorkerExecutionControl {
-  readonly attemptId: string;
-  readonly generation: number;
-  readonly cardId: number;
+class ExecutionControlImpl implements ExecutionControl {
+  readonly executionRef: string;
+  readonly attemptId?: string;
+  readonly generation?: number;
+  readonly cardId?: number;
   private _cancelled = false;
   private _cancelReason?: CancelReason;
   private _cancelFn: ((reason: CancelReason) => Promise<void> | void) | null = null;
   private _bound = false;
   private _terminal = false;
-  private _terminalOutcome?: WorkerTerminalOutcome;
+  private _terminalOutcome?: TerminalOutcome;
 
-  constructor(attemptId: string, generation: number, cardId: number) {
-    this.attemptId = attemptId;
-    this.generation = generation;
-    this.cardId = cardId;
+  constructor(executionRef: string, opts?: { cardId?: number; attemptId?: string; generation?: number }) {
+    this.executionRef = executionRef;
+    this.cardId = opts?.cardId;
+    this.attemptId = opts?.attemptId;
+    this.generation = opts?.generation;
   }
 
   get cancelled(): boolean { return this._cancelled; }
   get cancelReason(): CancelReason | undefined { return this._cancelReason; }
   get terminal(): boolean { return this._terminal; }
-  get terminalOutcome(): WorkerTerminalOutcome | undefined { return this._terminalOutcome; }
+  get terminalOutcome(): TerminalOutcome | undefined { return this._terminalOutcome; }
 
   bind(cancel: (reason: CancelReason) => Promise<void> | void): boolean {
     if (this._bound) return false;
@@ -64,7 +72,7 @@ class ExecutionControlImpl implements WorkerExecutionControl {
     return "cancelled";
   }
 
-  markTerminal(outcome: WorkerTerminalOutcome): boolean {
+  markTerminal(outcome: TerminalOutcome): boolean {
     if (this._terminal) return false;
     this._terminal = true;
     this._terminalOutcome = outcome;
@@ -72,44 +80,45 @@ class ExecutionControlImpl implements WorkerExecutionControl {
   }
 }
 
-// ── Registry ──────────────────────────────────────────────────────────────────
+// ── Registry (keyed by executionRef) ──────────────────────────────────────────
 
 const _controls = new Map<string, ExecutionControlImpl>();
 
-function key(attemptId: string, generation: number): string {
-  return `${attemptId}:${generation}`;
-}
-
-export function registerControl(attemptId: string, generation: number, cardId: number): WorkerExecutionControl {
-  const k = key(attemptId, generation);
-  const existing = _controls.get(k);
+export function registerControl(executionRef: string, opts?: { cardId?: number; attemptId?: string; generation?: number }): ExecutionControl {
+  const existing = _controls.get(executionRef);
   if (existing) return existing;
-  const ctrl = new ExecutionControlImpl(attemptId, generation, cardId);
-  _controls.set(k, ctrl);
-  logDebug(TAG, `Registered control attempt=${attemptId} gen=${generation}`);
+  const ctrl = new ExecutionControlImpl(executionRef, opts);
+  _controls.set(executionRef, ctrl);
+  logDebug(TAG, `Registered control ref=${executionRef}`);
   return ctrl;
 }
 
-export function getControl(attemptId: string, generation: number): WorkerExecutionControl | undefined {
-  return _controls.get(key(attemptId, generation));
+export function getControl(executionRef: string): ExecutionControl | undefined {
+  return _controls.get(executionRef);
 }
 
-export function removeControl(attemptId: string, generation: number): void {
-  _controls.delete(key(attemptId, generation));
-  logDebug(TAG, `Removed control attempt=${attemptId} gen=${generation}`);
+export function removeControl(executionRef: string): void {
+  _controls.delete(executionRef);
+  logDebug(TAG, `Removed control ref=${executionRef}`);
 }
 
+/** @deprecated Use registerControl/removeControl with the executionRef. */
+export function registerWorkerControl(attemptId: string, generation: number, cardId: number): ExecutionControl {
+  return registerControl(`${attemptId}:${generation}`, { attemptId, generation, cardId });
+}
+
+/** @deprecated Use removeControl. */
 export function removeControlByAttempt(attemptId: string): void {
   for (const [k, ctrl] of _controls) {
     if (ctrl.attemptId === attemptId) {
       _controls.delete(k);
-      logDebug(TAG, `Removed control attempt=${attemptId} gen=${ctrl.generation}`);
+      logDebug(TAG, `Removed control attempt=${attemptId}`);
     }
   }
 }
 
-export function hasLiveControl(attemptId: string, generation: number): boolean {
-  const ctrl = _controls.get(key(attemptId, generation));
+export function hasLiveControl(executionRef: string): boolean {
+  const ctrl = _controls.get(executionRef);
   if (!ctrl) return false;
   return !ctrl.terminal;
 }

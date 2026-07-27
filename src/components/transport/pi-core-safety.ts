@@ -48,6 +48,8 @@ export interface PiExecutionSafetyController {
   get lastTerminalIncident(): BehaviorIncident | null;
   get paused(): boolean;
   get stopped(): boolean;
+  /** #1502: Whether a corrective turn has been admitted for the current incident. */
+  get correctiveAdmitted(): boolean;
 }
 
 export function createPiExecutionSafetyController(
@@ -67,12 +69,24 @@ export function createPiExecutionSafetyController(
   let _stopReason = "";
   let _incident: BehaviorIncident | null = null;
   let _lastTerminalIncident: BehaviorIncident | null = null;
+  let _correctiveAdmitted = false;
 
   const classifiedLiterals: Set<string> = new Set();
   const loopGuard = new ToolLoopGuard();
 
   const mp = options?.maxPromptRounds ?? MAX_PROMPT_ROUNDS;
   const mc = options?.maxCandidateRounds ?? MAX_CANDIDATE_ROUNDS;
+
+  function buildCorrectiveInstruction(inc: BehaviorIncident): string {
+    const tool = inc.toolName ?? "tool";
+    const incident = inc.type === "exact_repeat" ? "exact repeat of the same action" : "repeated failure of the same action";
+    return [
+      "[SAFETY RECOVERY]",
+      `The previous ${tool} action was blocked for ${incident}.`,
+      "Do not repeat the same action. Choose different arguments or another strategy.",
+      "[/SAFETY RECOVERY]",
+    ].join("\n");
+  }
 
   return {
     get promptRoundsUsed() { return promptRounds; },
@@ -82,6 +96,7 @@ export function createPiExecutionSafetyController(
     get lastTerminalIncident() { return _lastTerminalIncident; },
     get paused() { return _paused; },
     get stopped() { return _stopped; },
+    get correctiveAdmitted() { return _correctiveAdmitted; },
 
     beforeTool(name: string, args: Record<string, unknown>): ToolDecision {
       if (batchCancelled) return { decision: "skip" };
@@ -93,6 +108,11 @@ export function createPiExecutionSafetyController(
       } catch {
         logWarn(TAG, `Exact repeat detected: ${name}`);
         _incident = { type: "exact_repeat", candidateKey: activeCandidate, toolName: name, roundsUsed: promptRounds };
+        if (_correctiveAdmitted) {
+          _lastTerminalIncident = _incident;
+          batchCancelled = true;
+          return { decision: "error", reason: `Exact repeat of ${name} — tool blocked — already admitted corrective turn` };
+        }
         _lastTerminalIncident = _incident;
         batchCancelled = true;
         return { decision: "error", reason: `Exact repeat of ${name} — tool blocked` };
@@ -109,6 +129,11 @@ export function createPiExecutionSafetyController(
       } catch {
         logWarn(TAG, `Repeated failure detected: ${name}`);
         _incident = { type: "repeated_failure", candidateKey: activeCandidate, toolName: name, roundsUsed: promptRounds };
+        if (_correctiveAdmitted) {
+          _lastTerminalIncident = _incident;
+          batchCancelled = true;
+          return { decision: "error", reason: `Repeated failure of ${name} — tool blocked — already admitted corrective turn` };
+        }
         _lastTerminalIncident = _incident;
         batchCancelled = true;
         return { decision: "error", reason: `Repeated failure of ${name} — tool blocked` };
@@ -132,13 +157,17 @@ export function createPiExecutionSafetyController(
       }
 
       if (candidateRounds >= mc) {
-        // Candidate-round limit: exclude this candidate for this prompt only.
-        // Do NOT record a provider-level health error — command failures are not
-        // evidence that the provider/model is unhealthy (#1497 spec §4).
         _incident = { type: "candidate_round_limit", candidateKey, roundsUsed: candidateRounds };
         _lastTerminalIncident = _incident;
         policy.excludedKeys.add(candidateKey);
-        return { decision: "stop", reason: `Candidate round limit (${mc}) for ${candidateKey}` };
+        const next = policy.selectModel();
+        if (next) {
+          logDebug(TAG, `Candidate round limit for ${candidateKey} — switching to ${next.model}`);
+          return { decision: "stop", reason: `Candidate round limit (${mc}) for ${candidateKey} — switching` };
+        }
+        policy.excludedKeys.delete(candidateKey);
+        logDebug(TAG, `Candidate round limit for ${candidateKey} — no alternate, continuing`);
+        return { decision: "continue" };
       }
 
       promptRounds++;
@@ -152,48 +181,75 @@ export function createPiExecutionSafetyController(
         return undefined;
       }
 
-      // Default: no incident → allow next turn unchanged
       if (!_incident) return undefined;
 
       const inc = _incident;
       _incident = null;
       let baseline: AgentMessage[] | undefined;
 
-      // If context projection provides a safe baseline, use it to roll back
-      // the failed tool exchange. This replaces the agent messages with the
-      // last clean state before the incident happened.
       const projectionCtx = context.context as AgentContext | undefined;
       if (projectionCtx?.messages) baseline = projectionCtx.messages;
 
       if (inc.type === "exact_repeat" || inc.type === "repeated_failure") {
         const candidate = context.candidateKey;
-        const [model, endpoint] = candidate.split("@");
-        if (model && endpoint) {
-          policy.excludedKeys.add(candidate);
-          // Do NOT record a provider-level health error — command failures
-          // are prompt-local, not evidence of provider unhealth (#1497 §4).
-          logDebug(TAG, `Excluded candidate ${candidate} after ${inc.type}`);
+        const [candidateModel, _candidateEndpoint] = candidate.split("@");
+        if (candidateModel && _candidateEndpoint) {
+          if (!_correctiveAdmitted) {
+            policy.excludedKeys.add(candidate);
+          }
+          logDebug(TAG, `Processing incident ${inc.type} for candidate ${candidate} (correctiveAdmitted=${_correctiveAdmitted})`);
         }
+
+        const next = policy.selectModel();
+        if (next) {
+          logDebug(TAG, `prepareNextTurn: switching to ${next.model} via ${next.provider}`);
+          const nextModel = context.modelForCandidate?.(`${next.model}@${next.endpoint}`);
+          if (!nextModel) {
+            logWarn(TAG, `Candidate ${next.model} selected without a public Pi model; ending turn`);
+            return undefined;
+          }
+          _correctiveAdmitted = true;
+          return {
+            model: nextModel,
+            context: projectionCtx && baseline
+              ? { ...projectionCtx, messages: baseline }
+              : undefined,
+          };
+        }
+
+        if (_correctiveAdmitted) {
+          logWarn(TAG, `Equivalent incident recurs after corrective admission — terminating`);
+          _lastTerminalIncident = inc;
+          return undefined;
+        }
+
+        policy.excludedKeys.delete(candidate);
+        logDebug(TAG, `No alternate candidate for ${candidate} — retaining sole candidate with corrective turn`);
+
+        const soleModel = context.modelForCandidate?.(candidate);
+        if (!soleModel) {
+          logWarn(TAG, `Sole candidate ${candidate} has no model — ending turn`);
+          return undefined;
+        }
+
+        _correctiveAdmitted = true;
+        loopGuard.resetIncidentState();
+
+        const correctiveMsg = {
+          role: "user",
+          content: buildCorrectiveInstruction(inc),
+          timestamp: Date.now(),
+        } as AgentMessage;
+
+        return {
+          model: soleModel,
+          context: projectionCtx && baseline
+            ? { ...projectionCtx, messages: [...baseline, correctiveMsg] }
+            : undefined,
+        };
       }
 
-      // Try next eligible candidate
-      const next = policy.selectModel();
-      if (!next) return undefined;
-
-      logDebug(TAG, `prepareNextTurn: switching to ${next.model} via ${next.provider}`);
-
-      // Return clean baseline context if available
-      const model = context.modelForCandidate?.(`${next.model}@${next.endpoint}`);
-      if (!model) {
-        logWarn(TAG, `Candidate ${next.model} selected without a public Pi model; ending turn`);
-        return undefined;
-      }
-      return {
-        model,
-        context: projectionCtx && baseline
-          ? { ...projectionCtx, messages: baseline }
-          : undefined,
-      };
+      return undefined;
     },
 
     requestPause(): void {

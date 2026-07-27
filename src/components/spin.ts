@@ -646,6 +646,7 @@ export class Spin {
         sessionTransport = executor.transport as IKiroTransport;
         session.transport = sessionTransport;
         session.transportOwner = "runtime";
+        session.releaseTransport = () => executor.close();
         return {
           send: async (msg, img, ctx) => {
             const enrichedContext = {
@@ -831,7 +832,7 @@ export class Spin {
           logWarn(TAG, `Card ${cardId}: cannot verify project supervision — deferring terminal settlement: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      if (shouldKanbanComplete && !staleWorkerResult) {
+          if (shouldKanbanComplete && !staleWorkerResult && spec.settlementOwner !== "caller") {
         kanbanComplete(cardId, null, workerSummary);
       }
       // Supervised project results are emitted by ProjectReviewService only
@@ -906,7 +907,7 @@ export class Spin {
           }
         } catch { /* best effort; Kanban failure remains the visible fallback */ }
       }
-      if (!staleWorkerFailure) {
+      if (!staleWorkerFailure && spec.settlementOwner !== "caller") {
         kanbanRetryOrFail(cardId, msg);
         if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
       }
@@ -1027,6 +1028,7 @@ export class Spin {
       contractId: request.contract?.id,
       attemptId: request.attemptId,
       executionControl: request.executionControl,
+      settlementOwner: request.settlementOwner,
     });
     return { cardId };
   }
@@ -1059,6 +1061,7 @@ export class Spin {
       parentCardId: request.parentCardId,
       chatId: request.chatId ? Number(request.chatId) : undefined,
       await: true,
+      settlementOwner: request.settlementOwner,
     });
     return { cardId: cardId!, result: result! };
   }

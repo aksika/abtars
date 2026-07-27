@@ -2,7 +2,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
-import { logInfo } from "../logger.js";
+import { logInfo, logWarn } from "../logger.js";
 import { readEntries as dbReadEntries } from "./task-store.js";
 import { advanceNextRun, updateState, readState } from "./task-state-store.js";
 import { todaySuccessCount, appendRun } from "./task-history-store.js";
@@ -11,6 +11,22 @@ import type { ScheduledTask } from "./task-types.js";
 const TAG = "cron-checker";
 const memoryDir = (): string => join(abtarsHome(), "state");
 const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
+
+export type ScheduleReason =
+  | "due"
+  | "not_due"
+  | "disabled"
+  | "auto_paused"
+  | "no_state"
+  | "completed"
+  | "daily_cap"
+  | "stale_advanced";
+
+export interface ScheduleDecision {
+  run: boolean;
+  reason: ScheduleReason;
+  detail?: string;
+}
 
 export interface PendingReminder {
   chatId: number;
@@ -36,46 +52,57 @@ export function appendReminder(r: PendingReminder): void {
   writeFileSync(remindersPath(), JSON.stringify(existing, null, 2), "utf-8");
 }
 
+function decideSchedule(entry: ScheduledTask): ScheduleDecision {
+  if (!entry.enabled) return { run: false, reason: "disabled" };
+
+  const state = readState(entry.id);
+  if (!state) return { run: false, reason: "no_state" };
+  if (state.autoPaused) {
+    return { run: false, reason: "auto_paused", detail: `failures=${state.consecutiveFailures}` };
+  }
+  if (state.completed) return { run: false, reason: "completed" };
+  if (state.nextRunAt && state.nextRunAt > Date.now()) return { run: false, reason: "not_due" };
+
+  if (entry.maxRunsPerDay) {
+    if (todaySuccessCount(entry.id, Date.now()) >= entry.maxRunsPerDay) {
+      advanceNextRun(entry.id, entry.schedule);
+      return { run: false, reason: "daily_cap" };
+    }
+  }
+
+  if (entry.schedule && state.nextRunAt) {
+    const maxDelay = (entry.catchUpHours ?? 0) * 3600_000;
+    const MIN_STALE_MS = 5 * 60_000;
+    const staleThreshold = Math.max(maxDelay, MIN_STALE_MS);
+    if (Date.now() - state.nextRunAt > staleThreshold) {
+      advanceNextRun(entry.id, entry.schedule);
+      return { run: false, reason: "stale_advanced", detail: `was ${Math.round((Date.now() - state.nextRunAt) / 60000)}min overdue` };
+    }
+  }
+
+  return { run: true, reason: "due" };
+}
+
 export function checkCron(): ScheduledTask[] {
   const entries = dbReadEntries();
-  const now = Date.now();
   const dueTasks: ScheduledTask[] = [];
 
   for (const entry of entries) {
-    if (!entry.enabled) continue;
-    const state = readState(entry.id);
-    if (!state) continue;
-    if (state.autoPaused) continue;
-    if (state.completed) continue;
-    if (state.nextRunAt && state.nextRunAt > now) continue;
+    const decision = decideSchedule(entry);
+    if (decision.run) {
+      const now = Date.now();
+      updateState(entry.id, { lastStartedAt: now });
 
-    if (entry.maxRunsPerDay) {
-      if (todaySuccessCount(entry.id, now) >= entry.maxRunsPerDay) {
+      if (entry.kind === "reminder") {
+        appendReminder({ chatId: parseInt(entry.chatId ?? "0", 10), message: entry.text, createdAt: now });
+        appendRun({ taskId: entry.id, kind: "reminder", trigger: "schedule", startedAt: now, finishedAt: now, outcome: "success" });
         advanceNextRun(entry.id, entry.schedule);
-        continue;
+        logInfo(TAG, `Reminder fired: "${entry.text}"`);
+      } else {
+        dueTasks.push(entry);
       }
-    }
-
-    if (entry.schedule && state.nextRunAt) {
-      const maxDelay = (entry.catchUpHours ?? 0) * 3600_000;
-      const MIN_STALE_MS = 5 * 60_000;
-      const staleThreshold = Math.max(maxDelay, MIN_STALE_MS);
-      if (now - state.nextRunAt > staleThreshold) {
-        advanceNextRun(entry.id, entry.schedule);
-        logInfo(TAG, `⏭️ Stale "${entry.id}" — advanced to next occurrence`);
-        continue;
-      }
-    }
-
-    updateState(entry.id, { lastStartedAt: now });
-
-    if (entry.kind === "reminder") {
-      appendReminder({ chatId: parseInt(entry.chatId ?? "0", 10), message: entry.text, createdAt: now });
-      appendRun({ taskId: entry.id, kind: "reminder", trigger: "schedule", startedAt: now, finishedAt: now, outcome: "success" });
-      advanceNextRun(entry.id, entry.schedule);
-      logInfo(TAG, `⏰ Reminder fired: "${entry.text}"`);
-    } else {
-      dueTasks.push(entry);
+    } else if (decision.reason === "auto_paused" || decision.reason === "no_state") {
+      logWarn(TAG, `Schedule skip for "${entry.id}": reason=${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}`);
     }
   }
 

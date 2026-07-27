@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
-import { incrementFailures, resetFailures, setAutoPaused, advanceNextRun, updateState, readState } from "./task-state-store.js";
+import { incrementFailures, incrementDeferrals, resetFailures, setAutoPaused, advanceNextRun, updateState, readState } from "./task-state-store.js";
 import { appendRun } from "./task-history-store.js";
 import { kanbanComplete, kanbanFail } from "./kanban-board.js";
 import type { ScheduledTask } from "./task-types.js";
@@ -19,7 +19,9 @@ type ValidatedOutput =
   | { ok: true; content: string }
   | { ok: false; reason: string };
 
-function validateAgentOutput(raw: unknown, delivery: string | undefined): ValidatedOutput {
+const REPORT_MIN_BYTES = 100;
+
+function validateAgentOutput(raw: unknown, minBytes?: number): ValidatedOutput {
   if (raw === null || raw === undefined) {
     return { ok: false, reason: "task produced no output" };
   }
@@ -55,14 +57,13 @@ function validateAgentOutput(raw: unknown, delivery: string | undefined): Valida
   if (trimmed === "(no output)" || trimmed === "(task completed)") {
     return { ok: false, reason: `task produced no output (sentinel: "${trimmed}")` };
   }
-  if (delivery === "report") {
-    const byteLen = Buffer.byteLength(content, "utf-8");
-    if (byteLen < 100) {
-      return { ok: false, reason: `report output too short (${byteLen} bytes, minimum 100)` };
-    }
+  if (minBytes && Buffer.byteLength(content, "utf-8") < minBytes) {
+    return { ok: false, reason: `output too short (${Buffer.byteLength(content, "utf-8")} bytes, minimum ${minBytes})` };
   }
   return { ok: true, content };
 }
+
+
 
 const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -203,7 +204,7 @@ export function readTaskFile(taskFile: string): TaskFileResult | null {
   return { prompt, dodPaths };
 }
 
-function checkDoD(paths: string[]): { passed: boolean; details: string } {
+async function checkDoD(paths: string[]): Promise<{ passed: boolean; details: string }> {
   if (paths.length === 0) return { passed: true, details: "no DoD defined" };
   const results: string[] = [];
   let allPassed = true;
@@ -215,30 +216,21 @@ function checkDoD(paths: string[]): { passed: boolean; details: string } {
       const deadline = Date.now() + 1500;
       while (Date.now() < deadline) {
         const remaining = deadline - Date.now();
-        if (remaining > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(remaining, 200));
+        if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.min(remaining, 200)));
         if (existsSync(p)) { size = statSync(p).size; break; }
       }
     }
     if (size === null) {
-      results.push(`✗ missing: ${p}`);
+      results.push(`missing: ${p}`);
       allPassed = false;
     } else if (size < DOD_MIN_BYTES) {
-      results.push(`✗ too small (${size}B): ${p}`);
+      results.push(`too small (${size}B): ${p}`);
       allPassed = false;
     } else {
-      results.push(`✓ ${p} (${size}B)`);
+      results.push(`${p} (${size}B)`);
     }
   }
   return { passed: allPassed, details: results.join("\n") };
-}
-
-/** Push nextRunAt out by the retry delay for a recurring task. Used by the
- *  idle-gate deferral, which is not a settled run (the task never executed). */
-function scheduleRetry(entry: ScheduledTask): void {
-  if (!entry.schedule) return;
-  const retryAt = Date.now() + RETRY_DELAY_MS;
-  updateState(entry.id, { nextRunAt: retryAt, retryAt, retrying: true });
-  logInfo(TAG, `Retry scheduled for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
 }
 
 export type TaskCompleteCallback = (chatId: number, message: string, result: string, dodFiles?: string[]) => void;
@@ -491,18 +483,16 @@ export class CronQueue {
     }
   }
 
-  private async runAgent(entry: ScheduledTask & { kind: "agent" }, onComplete?: TaskCompleteCallback, manual?: boolean): Promise<void> {
+  private async runAgent(entry: ScheduledTask & { kind: "agent" }, _onComplete?: TaskCompleteCallback, manual?: boolean): Promise<void> {
     if (!manual) {
       const idleMs = Date.now() - readLastPromptAt();
       if (idleMs < 90_000) {
-        logInfo(TAG, `⏸ Deferring agent task "${entry.id}" — user active ${Math.round(idleMs / 1000)}s ago`);
-        const count = incrementFailures(entry.id);
-        if (count >= 3) {
-          setAutoPaused(entry.id, true);
-          logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${count} idle-gate deferrals`);
-          this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), `idle-gate hit ${count}× in a row`);
+        logInfo(TAG, `Deferring agent task "${entry.id}" — user active ${Math.round(idleMs / 1000)}s ago`);
+        const count = incrementDeferrals(entry.id);
+        if (count >= 5) {
+          logWarn(TAG, `Idle gate exhausted for "${entry.id}" after ${count} deferrals — advancing`);
         }
-        scheduleRetry(entry);
+        advanceNextRun(entry.id, entry.schedule);
         this.clearCurrent();
         this.processNext();
         return;
@@ -559,12 +549,13 @@ export class CronQueue {
 
     const workspace = join(abtarsHome(), "workspace", entry.id);
     mkdirSync(workspace, { recursive: true });
-    process.env["WORKSPACE"] = workspace;
 
     const { spin } = await import("../spin.js");
 
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
     const sessionType = (AGENT_SESSION[entry.agent] ?? "T") as import("../spin-types.js").SessionType;
+
+    const trigger = this.trigger();
 
     spin.dispatchAwait({
       timeoutMs: AGENT_TIMEOUT_MS,
@@ -576,66 +567,70 @@ export class CronQueue {
       chatId: String(entry.chatId),
       maxToolRounds: entry.maxToolRounds,
       delivery: entry.delivery,
+      settlementOwner: "caller",
     })
-      .then(({ cardId: boardId, result: response }) => {
-        const validation = validateAgentOutput(response, entry.delivery);
-        if (!validation.ok) {
-          const reason = validation.reason;
-          logWarn(TAG, `Agent "${entry.id}" produced invalid output: ${reason}`);
-          kanbanFail(boardId, reason);
-          settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), reason, undefined, boardId, this.trigger());
-          const paused = this.checkAutoPause(entry, 1, reason);
-          if (!paused) {
-            this.tryInjectFailure(entry, `❌ ${reason}`);
-            onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.prompt ?? "", `❌ ${reason}`);
-          }
-          return;
-        }
+      .then(async ({ cardId: boardId, result: response }) => {
+        const startedAt = this._current?.startedAt ?? Date.now();
 
-        const cleaned = validation.content;
-        const summary = cleaned.slice(0, 500);
-        let exitCode = 0;
-        let dodResult = "";
-        if (dodPaths.length > 0) {
-          const dod = checkDoD(dodPaths);
-          exitCode = dod.passed ? 0 : 1;
-          dodResult = `\nDoD: ${dod.passed ? "PASSED" : "FAILED"}\n${dod.details}`;
-          logInfo(TAG, `■ Agent DoD ${dod.passed ? "✓" : "❌"}: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"\n${dod.details}`);
-        } else {
-          logInfo(TAG, `■ Agent completed: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
-        }
-
-        const producedFiles = dodPaths.filter(p => existsSync(p));
         const isReport = entry.delivery === "report";
-        const resultPath = producedFiles.length > 0 ? producedFiles[0] : (isReport ? writeResultFile(entry.id, cleaned) : null);
-        if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
+        let exitCode = 0;
+        let resultPath: string | null = null;
+        let summary = "";
+        let settlementOutcome: "success" | "failed" = "failed";
+        let settlementDetail = "";
+
+        if (isReport && dodPaths.length > 0) {
+          const dod = await checkDoD(dodPaths);
+          if (dod.passed) {
+            resultPath = dodPaths[0]!;
+            summary = response.slice(0, 500);
+            exitCode = 0;
+          } else {
+            settlementDetail = `DoD failed: ${dod.details}`;
+            exitCode = 1;
+          }
+        } else if (response) {
+          const validation = validateAgentOutput(response, isReport ? REPORT_MIN_BYTES : undefined);
+          if (validation.ok) {
+            const cleaned = validation.content;
+            summary = cleaned.slice(0, 500);
+            if (isReport) {
+              resultPath = writeResultFile(entry.id, cleaned);
+            }
+            exitCode = 0;
+          } else {
+            settlementDetail = validation.reason;
+            exitCode = 1;
+          }
+        } else {
+          settlementDetail = "task produced no output";
+          exitCode = 1;
+        }
 
         if (exitCode === 0) {
-          const kanbanSummary = isReport ? summary : cleaned;
-          kanbanComplete(boardId, resultPath ?? null, kanbanSummary);
+          settlementOutcome = "success";
+          const kanbanSummary = isReport ? summary : (response ?? "");
+          kanbanComplete(boardId, resultPath, kanbanSummary);
         } else {
-          kanbanFail(boardId, `${summary}${dodResult}`);
+          const failReason = settlementDetail || response?.slice(0, 500) || "task failed";
+          kanbanFail(boardId, failReason);
         }
 
-        settleRun(entry, exitCode === 0 ? "success" : "failed", this._current?.startedAt ?? Date.now(), `${summary}${dodResult}`, resultPath ?? undefined, boardId, this.trigger());
-        const paused = this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
-        const icon = exitCode === 0 ? "✓" : "❌";
-        if (exitCode !== 0) {
-          if (!paused) this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);
-        }
-        if (!paused) {
-          const producedFiles = dodPaths.filter(p => existsSync(p));
-          onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.prompt ?? "", `${icon} ${summary}${dodResult}`, producedFiles.length > 0 ? producedFiles : undefined);
+        settleRun(entry, settlementOutcome, startedAt, settlementDetail || summary, resultPath ?? undefined, boardId, trigger);
+        const paused = this.checkAutoPause(entry, exitCode, settlementDetail || summary);
+
+        if (exitCode !== 0 && !paused) {
+          this.tryInjectFailure(entry, `${settlementDetail || summary}`);
         }
       })
       .catch((err: unknown) => {
-        logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
-        settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err), undefined, undefined, this.trigger());
-        const paused = this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
+        const startedAt = this._current?.startedAt ?? Date.now();
+        const msg = err instanceof Error ? err.message : String(err);
+        logWarn(TAG, `Agent failed: ${msg}`);
+        settleRun(entry, "failed", startedAt, msg, undefined, undefined, trigger);
+        const paused = this.checkAutoPause(entry, 1, msg);
         if (!paused) {
-          const errMsg = `❌ Failed: ${err instanceof Error ? err.message : String(err)}`;
-          this.tryInjectFailure(entry, errMsg);
-          onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.prompt ?? "", errMsg);
+          this.tryInjectFailure(entry, msg);
         }
       })
       .finally(() => {
@@ -643,4 +638,5 @@ export class CronQueue {
         this.processNext();
       });
   }
+
 }
