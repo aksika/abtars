@@ -81,7 +81,7 @@ const DEFAULT_SESSION: Record<AgentName, "fresh" | "reuse"> = {
 const DEFAULT_SPAWN_TIMEOUT_MS = 600_000; // 10 min
 
 export class SubagentRuntime {
-  private readonly cache = new Map<AgentName, CachedAgent>();
+  private readonly cache = new Map<string, CachedAgent>();
   private readonly activeSpawns = new Map<string, { abort: AbortController; startedAt: number }>();
   private _registry: ModelHealthRegistry | null = null;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
@@ -151,13 +151,13 @@ export class SubagentRuntime {
 
     const sessionStrategy = opts?.session ?? DEFAULT_SESSION[agent] ?? "fresh";
 
-    const cached = this.cache.get(key as AgentName);
+    const cached = this.cache.get(key);
     if (cached && sessionStrategy === "fresh") {
       await cached.transport.resetSession?.(cached.sessionKey);
       (await import("./transport/tool-registry.js")).resetStoreCounter();
     }
 
-    const cacheKey = key as AgentName;
+    const cacheKey = key;
     const entry = this.cache.get(cacheKey) ?? await this.createAgent(agent, opts?.sessionType, key);
     const { transport, model } = entry;
     const sessionKey = entry.sessionKey;
@@ -252,12 +252,12 @@ export class SubagentRuntime {
   /** Get a persistent session handle for multi-turn callers. */
   async session(agent: AgentName, key?: string): Promise<AgentSession> {
     const cacheKey = key ? `${agent}:${key}` : agent;
-    const cached = this.cache.get(cacheKey as AgentName) ?? await this.createAgent(agent, undefined, cacheKey);
+    const cached = this.cache.get(cacheKey) ?? await this.createAgent(agent, undefined, cacheKey);
     return {
       sendPrompt: (sessionKey: string, prompt: string) => cached.transport.sendPrompt(sessionKey, prompt),
       destroy: async () => {
         try { cached.transport.destroy(); } catch (err) { logAndSwallow("subagent_runtime", "op", err); }
-        this.cache.delete(cacheKey as AgentName);
+        this.cache.delete(cacheKey);
         logInfo(TAG, `${cacheKey} session destroyed`);
       },
       get isReady() { return cached.transport.isReady; },
@@ -365,7 +365,7 @@ export class SubagentRuntime {
 
     const sessionKey = `system:${cacheKey ?? agent}`;
     const entry: CachedAgent = { transport, model, sessionKey };
-    this.cache.set((cacheKey ?? agent) as AgentName, entry);
+    this.cache.set(cacheKey ?? agent, entry);
     (await import("./transport/tool-registry.js")).resetStoreCounter();
     return entry;
   }

@@ -12,6 +12,19 @@ const TAG = "cron-checker";
 const memoryDir = (): string => join(abtarsHome(), "state");
 const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
 
+// #1502: the heartbeat evaluates schedules on every tick, so never-fires-again
+// skip warnings (auto_paused / no_state) must be rate-limited per task or they
+// replace one silence bug with a log flood. One warn per task per hour.
+const SKIP_WARN_INTERVAL_MS = 60 * 60 * 1000;
+const _skipWarnLimiter = new Map<string, number>();
+function shouldWarnSkip(taskId: string): boolean {
+  const now = Date.now();
+  const last = _skipWarnLimiter.get(taskId) ?? 0;
+  if (now - last < SKIP_WARN_INTERVAL_MS) return false;
+  _skipWarnLimiter.set(taskId, now);
+  return true;
+}
+
 export type ScheduleReason =
   | "due"
   | "not_due"
@@ -103,7 +116,12 @@ export function checkCron(): ScheduledTask[] {
         dueTasks.push(entry);
       }
     } else if (decision.reason === "auto_paused" || decision.reason === "no_state") {
-      logWarn(TAG, `Schedule skip for "${entry.id}": reason=${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}`);
+      if (shouldWarnSkip(entry.id)) {
+        const resumeCmd = decision.reason === "auto_paused" ? ` — resume: /task resume ${entry.id}` : "";
+        logWarn(TAG, `Schedule skip for "${entry.id}": reason=${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}${resumeCmd}`);
+      } else {
+        logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=${decision.reason} (warn rate-limited)`);
+      }
     } else {
       logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=${decision.reason}`);
     }

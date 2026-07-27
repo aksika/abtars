@@ -230,18 +230,39 @@ async function checkDoD(paths: string[]): Promise<{ passed: boolean; details: st
   let allPassed = true;
   for (const p of paths) {
     let size: number | null = null;
+    let isRegular = true;
     if (existsSync(p)) {
-      size = statSync(p).size;
+      try {
+        const st = statSync(p);
+        size = st.size;
+        isRegular = st.isFile();
+      } catch {
+        size = null;
+      }
     } else {
       const deadline = Date.now() + 1500;
       while (Date.now() < deadline) {
         const remaining = deadline - Date.now();
         if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.min(remaining, 200)));
-        if (existsSync(p)) { size = statSync(p).size; break; }
+        if (existsSync(p)) {
+          try {
+            const st = statSync(p);
+            size = st.size;
+            isRegular = st.isFile();
+          } catch {
+            size = null;
+          }
+          break;
+        }
       }
     }
     if (size === null) {
       results.push(`missing: ${p}`);
+      allPassed = false;
+    } else if (!isRegular) {
+      // #1502: spec requires a regular readable file — reject directories,
+      // devices, and symlinks that happen to live at the declared path.
+      results.push(`not a regular file: ${p}`);
       allPassed = false;
     } else if (size < DOD_MIN_BYTES) {
       results.push(`too small (${size}B): ${p}`);
@@ -621,9 +642,20 @@ export class CronQueue {
             const cleaned = validation.content;
             summary = cleaned.slice(0, 500);
             if (isReport) {
-              resultPath = writeResultFile(entry.id, cleaned);
+              // #1502: a report without explicit DoD must materialize its
+              // artifact. A failed write is a failed run, not a silent success
+              // delivered with no artifact.
+              const written = writeResultFile(entry.id, cleaned);
+              if (written) {
+                resultPath = written;
+                exitCode = 0;
+              } else {
+                settlementDetail = "report artifact could not be materialized to workspace";
+                exitCode = 1;
+              }
+            } else {
+              exitCode = 0;
             }
-            exitCode = 0;
           } else {
             settlementDetail = validation.reason;
             exitCode = 1;
@@ -635,7 +667,9 @@ export class CronQueue {
 
         if (exitCode === 0) {
           settlementOutcome = "success";
-          const kanbanSummary = isReport ? summary : (response ?? "");
+          // #1502: a verified report artifact with empty/short assistant text still
+          // gets a neutral summary rather than delivering an empty caption.
+          const kanbanSummary = isReport ? (summary || "report artifact verified") : (response ?? "");
           kanbanComplete(boardId, resultPath, kanbanSummary);
         } else {
           const failReason = settlementDetail || response?.slice(0, 500) || "task failed";

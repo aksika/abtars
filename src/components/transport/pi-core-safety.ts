@@ -167,6 +167,14 @@ export function createPiExecutionSafetyController(
         }
         policy.excludedKeys.delete(candidateKey);
         logDebug(TAG, `Candidate round limit for ${candidateKey} — no alternate, continuing`);
+        // #1502: the prompt-wide limit is the hard bound for a sole candidate,
+        // so keep advancing prompt/candidate rounds even while continuing past
+        // the switch threshold. Without this, a single-candidate report that
+        // crosses the candidate-round limit never reaches the prompt-wide stop
+        // and runs until the execution deadline instead of terminating cleanly.
+        promptRounds++;
+        candidateRounds++;
+        batchCancelled = false;
         return { decision: "continue" };
       }
 
@@ -211,10 +219,20 @@ export function createPiExecutionSafetyController(
             return undefined;
           }
           _correctiveAdmitted = true;
+          loopGuard.resetIncidentState();
+          // #1502 (spec §5): append the corrective instruction to the clean
+          // projected baseline so the alternate candidate sees why recovery
+          // occurred. Without it, the new candidate inherits no feedback and may
+          // repeat the blocked action.
+          const switchCorrective = {
+            role: "user",
+            content: buildCorrectiveInstruction(inc),
+            timestamp: Date.now(),
+          } as AgentMessage;
           return {
             model: nextModel,
             context: projectionCtx && baseline
-              ? { ...projectionCtx, messages: baseline }
+              ? { ...projectionCtx, messages: [...baseline, switchCorrective] }
               : undefined,
           };
         }

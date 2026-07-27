@@ -91,6 +91,28 @@ describe("createPiExecutionSafetyController", () => {
     expect(registry.getHealth().size).toBe(0);
   });
 
+  it("sole candidate keeps advancing promptRounds past the candidate limit and stops at the prompt-wide hard limit (#1502)", () => {
+    // A single-candidate report that crosses the candidate-round threshold must
+    // keep consuming prompt-wide budget so the hard stop remains reachable.
+    // Regression: previously promptRounds froze at the candidate limit and the
+    // run only ended at the execution deadline (30m), never via prompt_round_limit.
+    const ctrl = createPiExecutionSafetyController(policy, { maxCandidateRounds: 2, maxPromptRounds: 4 });
+    const key = "test-model@https://api.test/v1";
+    // turns 1-2: under the candidate limit
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    // turns 3-4: past the candidate limit, sole candidate continues — but
+    // promptRounds must still advance.
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    expect(ctrl.promptRoundsUsed).toBe(4);
+    // turn 5: prompt-wide limit is the final bound
+    const result = ctrl.beginProviderTurn(key);
+    expect(result.decision).toBe("stop");
+    expect(result.reason).toContain("Prompt round limit");
+    expect(ctrl.lastTerminalIncident?.type).toBe("prompt_round_limit");
+  });
+
   it("detects exact repeat in beforeTool", () => {
     const ctrl = createPiExecutionSafetyController(policy);
     ctrl.beginProviderTurn("k1");
