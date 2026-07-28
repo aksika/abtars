@@ -104,6 +104,7 @@ vi.mock("./soul-bundle.js", () => ({
 }));
 
 import { Spin } from "./spin.js";
+import { registerControl } from "./execution-control.js";
 import { kanbanEnqueue } from "./tasks/kanban-board.js";
 import { setUserRegistryOverride, type UserRegistry, type UserEntry } from "./user-registry.js";
 import { profileFor, isValidSessionType, SESSION_PROFILES } from "./spin-profiles.js";
@@ -395,6 +396,38 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const noGoal = await spin.spin({ type: "S", prompt: "background", await: true });
       expect(withGoal.cardId).toBeDefined();
       expect(noGoal.cardId).toBeUndefined();
+    });
+
+    it("releases the T slot when caller terminalizes before a late execution rejection", async () => {
+      let rejectSend: ((error: Error) => void) | undefined;
+      const runtime = makeRuntime();
+      const transport = mockTransport();
+      runtime.openExecution = vi.fn().mockResolvedValue({
+        send: () => new Promise<string>((_resolve, reject) => { rejectSend = reject; }),
+        cancel: async () => { rejectSend?.(new Error("execution cancelled")); },
+        close: vi.fn().mockResolvedValue(undefined),
+        transport,
+        sessionKey: "mock:late",
+        executionId: "mock:late-execution",
+        ephemeral: true,
+        lastUsage: () => null,
+      });
+      spin.setRuntime(runtime as any);
+      const control = registerControl(`spin-slot-${Date.now()}`);
+      const dispatch = spin.dispatchAwait({
+        type: "T",
+        goal: "stalled task",
+        source: "task",
+        settlementOwner: "caller",
+        executionControl: control,
+      });
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(control.cardId).toBeDefined();
+      control.signalCancel("deadline");
+      control.markTerminal("timed_out");
+      await expect(dispatch).rejects.toThrow("execution cancelled");
+      expect(spin.getRunningCount("T")).toBe(0);
     });
 
     it("does not callback or complete a supervised O-card from the execution turn", async () => {
