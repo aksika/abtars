@@ -208,11 +208,16 @@ export class PiCoreTransport implements IKiroTransport {
       }, pickPiApi(first.apiFormat), Boolean(image), first.provider)
       : buildPiModel({ model: "unknown", endpoint: "", maxOutput: 4096, contextWindow: 128000 }, pickPiApi(), Boolean(image), "unknown");
 
+    const timeoutOverride = this.timeoutOverrideMs;
+    const deadlineAt = timeoutOverride && timeoutOverride > 0 ? Date.now() + timeoutOverride : undefined;
+
     // Build StreamFn — no emergency L0, no legacy conversion
     const streamFn = createPiStreamFn({
       policy: this.policy,
       executionId,
       telemetry: context?.executionTelemetry,
+      deadlineAt,
+      providerInactivityTimeoutMs: 180_000,
       onCandidateCommitted: (candidate) => {
         const successful: CandidateSpec = {
           model: candidate.model,

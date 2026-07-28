@@ -45,19 +45,25 @@ export class PiCoreExecutionHost {
   private agent: PiAgent | null = null;
   private unsub: (() => void) | null = null;
   private settled = false;
-  private settlementPromise: Promise<void> | null = null;
-  private settlementResolve: (() => void) | null = null;
-  private idlePromise: Promise<void> | null = null;
+  private _cleanupPromise: Promise<"complete" | "timed_out"> = Promise.resolve("complete");
+  private _terminalResolve: ((value: string) => void) | null = null;
+  readonly terminalPromise: Promise<string>;
   private outstandingLeases: Map<string, OutstandingLease> = new Map();
   private opts: PiCoreExecutionHostOptions;
   private outputObserver?: OutputObserver;
+  private _generation: number;
+  private static _hostCounter = 0;
+
+  get generation(): number { return this._generation; }
 
   constructor(opts: PiCoreExecutionHostOptions) {
     this.executionId = opts.executionId;
     this.sessionId = opts.sessionId;
     this.opts = opts;
     this.outputObserver = opts.outputObserver;
-    logDebug(TAG, `Host created for execution ${this.executionId} (session ${this.sessionId})`);
+    this._generation = ++PiCoreExecutionHost._hostCounter;
+    this.terminalPromise = new Promise((resolve) => { this._terminalResolve = resolve; });
+    logDebug(TAG, `Host created for execution ${this.executionId} (session ${this.sessionId}) gen=${this._generation}`);
   }
 
   async start(loaded: LoadedPiAgentCore): Promise<void> {
@@ -161,7 +167,6 @@ export class PiCoreExecutionHost {
     });
 
     this.state = "running";
-    this.settlementPromise = new Promise((resolve) => { this.settlementResolve = resolve; });
 
     // Send the actual user/current-turn messages via prompt(), not via state.
     const userMessages = [...this.opts.initialState.messages];
@@ -255,15 +260,28 @@ export class PiCoreExecutionHost {
     }
   }
 
+  /** #1506: Signal cancellation without awaiting provider/agent cleanup.
+   *  Claims logical terminal state immediately so waitForSettlement()
+   *  resolves. Cleanup continues in background with 5-second bound. */
   cancel(): void {
     if (this.state === "settled") return;
     if (this.state === "created") {
-      this.settle();
+      this.terminalResolve("cancelled");
+      this.settle("cancelled");
       return;
     }
     this.state = "aborting";
     this.agent?.abort();
+    logInfo(TAG, `Cancel signalled for execution ${this.executionId}`);
+    this.terminalResolve("cancelled");
     this.beginSettle("cancelled");
+  }
+
+  /** Logical terminalization — one-shot latch that waitForSettlement() resolves. */
+  private terminalResolve(reason: string): void {
+    if (this.settled) return;
+    this._terminalResolve?.(reason);
+    this._terminalResolve = null;
   }
 
   private beginSettle(reason: string): void {
@@ -296,10 +314,7 @@ export class PiCoreExecutionHost {
     }
     this.outstandingLeases.clear();
 
-    this.idlePromise = this.waitForIdleCleanup();
-
-    this.settlementResolve?.();
-    this.settlementPromise = null;
+    this._cleanupPromise = this.startBoundedCleanup();
 
     if (this.outputObserver) {
       if (reason === "cancelled") {
@@ -311,16 +326,31 @@ export class PiCoreExecutionHost {
       }
     }
 
-    logInfo(TAG, `Host settled for execution ${this.executionId}`);
+    logInfo(TAG, `Host settled for execution ${this.executionId} gen=${this._generation}`);
   }
 
-  private async waitForIdleCleanup(): Promise<void> {
-    if (!this.agent) return;
+  /** #1506: Bounded cleanup — 5-second timeout on Agent.waitForIdle().
+   *  Returns "complete" or "timed_out". Does NOT delay terminal resolution. */
+  private async startBoundedCleanup(): Promise<"complete" | "timed_out"> {
+    if (!this.agent) return "complete";
+    const timeoutMs = 5000;
     try {
-      await this.agent.waitForIdle();
+      await Promise.race([
+        this.agent.waitForIdle(),
+        new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), timeoutMs)),
+      ]);
+      logInfo(TAG, `Cleanup complete for execution ${this.executionId}`);
+      return "complete";
     } catch (err) {
-      logDebug(TAG, `waitForIdle completed: ${err instanceof Error ? err.message : String(err)}`);
+      logDebug(TAG, `Cleanup error for execution ${this.executionId}: ${err instanceof Error ? err.message : String(err)}`);
+      return "complete";
     }
+  }
+
+  /** #1506: Returns the bounded cleanup result. Callers that need shutdown
+   *  evidence can await this; it does NOT block terminal resolution. */
+  async waitForCleanup(): Promise<"complete" | "timed_out"> {
+    return this._cleanupPromise;
   }
 
   private async handleEvent(event: AgentEvent, _signal?: AbortSignal): Promise<void> {
@@ -375,7 +405,8 @@ export class PiCoreExecutionHost {
   }
 
   private handleAgentEnd(_event: Extract<AgentEvent, { type: "agent_end" }>): void {
-    logInfo(TAG, `Agent ended for execution ${this.executionId}`);
+    this.terminalResolve("agent_end");
+    logInfo(TAG, `Agent ended for execution ${this.executionId} gen=${this._generation}`);
     this.beginSettle("agent_end");
   }
 
@@ -387,15 +418,11 @@ export class PiCoreExecutionHost {
     }
   }
 
+  /** #1506: Await ONLY logical terminalization, not cleanup/waitForIdle.
+   *  This resolves as soon as cancel, agent_end, or a terminal event claims
+   *  the terminal latch — cleanup continues independently. */
   async waitForSettlement(): Promise<void> {
-    if (this.idlePromise) {
-      await this.idlePromise;
-    } else if (this.agent) {
-      await this.agent.waitForIdle();
-    }
-    if (this.settlementPromise) {
-      await this.settlementPromise;
-    }
+    await this.terminalPromise;
   }
 
   get isRunning(): boolean {

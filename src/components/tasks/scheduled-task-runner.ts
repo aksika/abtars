@@ -20,7 +20,6 @@ import type { ResolvedReportContract, ArtifactBaseline } from "./task-preflight.
 
 const TAG = "scheduled-task-runner";
 const MAX_IDLE_DEFERRALS = 5;
-const CANCELLATION_GRACE_MS = 5000;
 const REPORT_MIN_BYTES = 100;
 
 export interface ScheduledTaskRunOutcome {
@@ -240,13 +239,16 @@ async function runWithDeadline(
   runId: string,
 ): Promise<ExecutionRaceResult> {
   return new Promise<ExecutionRaceResult>((resolve) => {
-    const timer = setTimeout(async () => {
+    const CANCEL_GRACE_MS = 5000;
+    const timer = setTimeout(() => {
       logTaskTrace("task_run_deadline_fired", { task: taskId, run: runId }, `timeout_ms=${timeoutMs}`);
       updateActiveRun(taskId, runId, { phase: "cancelling" });
-      await execControl.requestCancel("deadline");
+      // #1506: Non-blocking cancellation — signal without awaiting acknowledgement.
+      // The grace timer fires independently so settlement always proceeds.
+      execControl.signalCancel("deadline");
       setTimeout(() => {
         resolve({ kind: "timed_out", reason: `deadline fired after ${timeoutMs}ms` });
-      }, CANCELLATION_GRACE_MS);
+      }, CANCEL_GRACE_MS);
     }, timeoutMs);
 
     promise

@@ -17,6 +17,9 @@ export interface ExecutionControl {
 
   bind(cancel: (reason: CancelReason) => Promise<void> | void): boolean;
   requestCancel(reason: CancelReason): Promise<"cancelled" | "already_terminal" | "not_found">;
+  /** #1506: Non-blocking cancellation signal — sets state and fires provider interrupt
+   *  without awaiting acknowledgement or cleanup. Use for deadlines and forced terminates. */
+  signalCancel(reason: CancelReason): "cancelled" | "already_terminal" | "not_found";
   markTerminal(outcome: TerminalOutcome): boolean;
 }
 
@@ -68,6 +71,16 @@ class ExecutionControlImpl implements ExecutionControl {
     this._cancelReason = reason;
     if (this._cancelFn) {
       await Promise.resolve(this._cancelFn(reason)).catch(() => {});
+    }
+    return "cancelled";
+  }
+
+  signalCancel(reason: CancelReason): "cancelled" | "already_terminal" | "not_found" {
+    if (this._terminal) return "already_terminal";
+    this._cancelled = true;
+    this._cancelReason = reason;
+    if (this._cancelFn) {
+      queueMicrotask(() => { void Promise.resolve(this._cancelFn!(reason)).catch(() => {}); });
     }
     return "cancelled";
   }

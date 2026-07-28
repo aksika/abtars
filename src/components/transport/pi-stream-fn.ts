@@ -34,6 +34,11 @@ export interface AbtarsPiStreamFnOptions {
   createPiAiAttempt?: ProviderAttemptFactory;
   onCandidateCommitted?: (candidate: ModelCandidate) => void;
   providerRequestIdFactory?: () => string;
+  /** #1506: Max inactivity (no stream event) before candidate is aborted.
+   *  Capped by remaining absolute deadline when passed via deadlineAt. */
+  providerInactivityTimeoutMs?: number;
+  /** #1506: Absolute deadline epoch ms — inactivity timeout is capped by remaining. */
+  deadlineAt?: number;
 }
 
 function zeroUsage(): Usage {
@@ -183,6 +188,35 @@ function wrapEventStream(source: AsyncGenerator<AssistantMessageEvent>, fallback
   } as unknown as AssistantMessageEventStream;
 }
 
+/** #1506: Wrap an async generator with an inactivity timeout.
+ *  If no event is yielded within `timeoutMs`, abort the candidate-local
+ *  controller and yield a provider_stream_timeout error. */
+async function* withInactivityTimeout(
+  source: AsyncIterable<AssistantMessageEvent>,
+  timeoutMs: number,
+  onTimeout: () => void,
+): AsyncGenerator<AssistantMessageEvent> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const resetTimer = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      onTimeout();
+    }, timeoutMs);
+  };
+  try {
+    resetTimer();
+    for await (const event of source) {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      yield event;
+      resetTimer();
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
   return (model: Model<Api>, context: Context, fnOptions: SimpleStreamOptions = {}): AssistantMessageEventStream => {
     const signal = fnOptions.signal ?? new AbortController().signal;
@@ -243,9 +277,23 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           let shouldRetry = false;
           try {
             const inner = await attemptFactory(candidate, piModel, context, attemptOptions, signal);
+            // #1506: Inactivity timeout per candidate
+            let inactivityTimedOut = false;
+            const inactivityMs = Math.min(
+              options.providerInactivityTimeoutMs ?? 180_000,
+              options.deadlineAt ? Math.max(10_000, options.deadlineAt - Date.now()) : 180_000,
+            );
+            const inactivityWrapped = inactivityMs > 0
+              ? withInactivityTimeout(inner, inactivityMs, () => { inactivityTimedOut = true; })
+              : inner;
             const buffered: AssistantMessageEvent[] = [];
             let terminal: AssistantMessage | undefined;
-            for await (const event of inner) {
+            for await (const event of inactivityWrapped) {
+              if (inactivityTimedOut) {
+                finishAttempt("aborted", terminal);
+                yield terminalError(model, "aborted", `provider_stream_timeout after ${inactivityMs}ms inactivity`);
+                return;
+              }
               terminal = terminalResult(event) ?? terminal;
               if (!attemptCommitted && isSemanticEvent(event)) {
                 attemptCommitted = true;
