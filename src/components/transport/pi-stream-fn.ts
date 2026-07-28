@@ -288,11 +288,11 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
               : inner;
             const buffered: AssistantMessageEvent[] = [];
             let terminal: AssistantMessage | undefined;
+            let inactivityAborted = false;
             for await (const event of inactivityWrapped) {
               if (inactivityTimedOut) {
-                finishAttempt("aborted", terminal);
-                yield terminalError(model, "aborted", `provider_stream_timeout after ${inactivityMs}ms inactivity`);
-                return;
+                inactivityAborted = true;
+                break;
               }
               terminal = terminalResult(event) ?? terminal;
               if (!attemptCommitted && isSemanticEvent(event)) {
@@ -330,6 +330,15 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
                   : "success", terminal);
                 return;
               }
+            }
+            if (inactivityAborted) {
+              if (attemptCommitted) {
+                finishAttempt("aborted", terminal);
+                yield terminalError(model, "aborted", `provider_stream_timeout after ${inactivityMs}ms inactivity (semantic output was emitted)`);
+                return;
+              }
+              finishAttempt("aborted", terminal);
+              break;
             }
             if (shouldRetry) continue;
             if (attemptCommitted) {

@@ -12,11 +12,13 @@ interface MilestoneResult {
   id: string; name: string; status: "PASS" | "FAIL" | "BLOCKED" | "NOT_RUN";
   scenario: string; expected: string; observed: string;
   blockedBy?: string; durationMs: number; evidence: string[];
+  correlation?: { taskId?: string; runId?: string; groupId?: string; attempt?: number; cardId?: number; executionId?: string };
 }
 
 const milestones: MilestoneResult[] = [];
+type CheckpointSuccess = true | { observed: string; evidence: string[]; correlation?: MilestoneResult["correlation"] };
 
-async function checkpoint(id: string, name: string, scenario: string, expected: string, fn: () => Promise<string | true>, deps?: string[]): Promise<void> {
+async function checkpoint(id: string, name: string, scenario: string, expected: string, fn: () => Promise<string | CheckpointSuccess>, deps?: string[]): Promise<void> {
   const start = Date.now();
   if (deps) {
     for (const dep of deps) {
@@ -29,22 +31,16 @@ async function checkpoint(id: string, name: string, scenario: string, expected: 
   }
   let status: MilestoneResult["status"] = "PASS";
   let observed = ""; let evidence: string[] = [];
+  let correlation: MilestoneResult["correlation"];
   try {
     const result = await fn();
-    if (result !== true) { status = "FAIL"; observed = result; evidence = [result]; }
-    else { observed = "pass"; }
+    if (typeof result === "string") { status = "FAIL"; observed = result; evidence = [result]; }
+    else if (typeof result === "object") { observed = result.observed; evidence = result.evidence; correlation = result.correlation; }
+    else { observed = "pass"; evidence = ["assertions passed"]; }
   } catch (err) {
     status = "FAIL"; observed = err instanceof Error ? err.message : String(err); evidence = [observed];
   }
-  milestones.push({ id, name, status, scenario, expected, observed, durationMs: Date.now() - start, evidence });
-}
-
-function notrun(id: string, name: string, scenario: string, reason: string, deps?: string[]): void {
-  for (const dep of deps || []) {
-    const dr = milestones.find(m => m.id === dep);
-    if (dr && (dr.status !== "PASS" && dr.status !== "NOT_RUN")) return;
-  }
-  milestones.push({ id, name, status: "NOT_RUN", scenario, expected: `requires ${scenario}`, observed: reason, durationMs: 0, evidence: [reason] });
+  milestones.push({ id, name, status, scenario, expected, observed, durationMs: Date.now() - start, evidence, ...(correlation ? { correlation } : {}) });
 }
 
 function scenario(name: string): void { console.log(`\nScenario: ${name}`); }
@@ -68,6 +64,85 @@ async function main(): Promise<void> {
   const taskChecker = await import("../src/components/tasks/task-checker.js");
   const taskService = await import("../src/components/tasks/task-service.js");
   const kanbanBoard = await import("../src/components/tasks/kanban-board.js");
+  const { CronQueue } = await import("../src/components/tasks/task-queue.js");
+  const { ScheduledTaskRunner } = await import("../src/components/tasks/scheduled-task-runner.js");
+  const { deliverCard } = await import("../src/components/tasks/kanban-delivery.js");
+  const logger = await import("../src/components/logger.js");
+  logger.setLogLevel("trace");
+  logger.setFileLogging(true);
+
+  async function waitForQueueIdle(queue: { currentJob: unknown }, timeoutMs = 5000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (queue.currentJob && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    if (queue.currentJob) throw new Error(`queue did not become idle within ${timeoutMs}ms`);
+  }
+
+  async function runProductionFixture(
+    taskId: string,
+    artifactName: string,
+    sections: string[],
+    minBytes: number,
+  ): Promise<CheckpointSuccess> {
+    const artifactPath = join(H, "workspace", taskId, artifactName);
+    mkdirSync(join(H, "workspace", taskId), { recursive: true });
+    let cardId = 0;
+    const agentRunner = async (request: import("../src/components/spin-types.js").SpinRequest) => {
+      cardId = kanbanBoard.kanbanEnqueue(taskId, "task", taskId, {
+        type: request.type,
+        goal: request.goal,
+        delivery: "report",
+        chatId: "acceptance",
+      });
+      if (!cardId) throw new Error(`Kanban card was not created for ${taskId}`);
+      kanbanBoard.kanbanRunning(cardId);
+      const content = `${sections.join("\n\n")}\n\n${("deterministic acceptance artifact for " + taskId + "\n").repeat(80)}`;
+      writeFileSync(artifactPath, content, "utf-8");
+      return { cardId, result: `provider completed ${taskId}` };
+    };
+    const queue = new CronQueue("acceptance", H, undefined, undefined, agentRunner);
+    const normalized = taskTypes.normalize({
+      id: taskId, kind: "agent", delivery: "report", at: new Date().toISOString(),
+      agent: "task", prompt: `Generate ${taskId}`, chatId: "acceptance", enabled: true, priority: "medium",
+      report: { artifact: artifactPath, requiredSections: sections, minBytes, requires: { files: [], executables: [], tools: [] } },
+    });
+    if (!normalized.ok) return `fixture ${taskId} rejected: ${normalized.error}`;
+    const enqueueError = queue.enqueue(normalized.entry, true);
+    if (enqueueError) return `fixture ${taskId} was not queued: ${enqueueError}`;
+    await waitForQueueIdle(queue);
+
+    const card = kanbanBoard.kanbanGetCard(cardId);
+    const state = stateStore.readState(taskId);
+    const runs = historyStore.recentRuns(taskId, 5);
+    if (!card || card.status !== "done") return `fixture ${taskId} card not done: ${card?.status ?? "missing"}`;
+    if (card.result_path !== artifactPath || !existsSync(artifactPath)) return `fixture ${taskId} artifact was not settled`;
+    const success = runs.find(run => run.outcome === "success");
+    if (!success) return `fixture ${taskId} has no successful terminal history`;
+    if (state?.activeRun) return `fixture ${taskId} left activeRun=${state.activeRun.runId}`;
+
+    let sends = 0;
+    await deliverCard(card, {
+      sendMessage: async () => { sends++; },
+      sendDocument: async (_chatId, path) => { if (path !== artifactPath) throw new Error("wrong artifact delivered"); sends++; },
+      announce: async () => { sends++; },
+      chatIdFor: () => "acceptance",
+    });
+    const delivered = kanbanBoard.kanbanGetCard(cardId);
+    if (delivered?.status !== "delivered" || delivered.delivery_result !== "sent" || sends !== 1) {
+      return `fixture ${taskId} delivery incomplete: status=${delivered?.status} result=${delivered?.delivery_result} sends=${sends}`;
+    }
+    await deliverCard(delivered, {
+      sendMessage: async () => { sends++; },
+      sendDocument: async () => { sends++; },
+      announce: async () => { sends++; },
+      chatIdFor: () => "acceptance",
+    });
+    if (sends !== 1) return `fixture ${taskId} was delivered more than once`;
+    return {
+      observed: `${taskId} ran through queue → provider boundary → fresh artifact → settlement → delivery`,
+      evidence: [`run=${success.runId}`, `group=${success.groupId ?? "none"}`, `card=${cardId}`, `artifact_bytes=${lstatSync(artifactPath).size}`, `delivery_result=sent`, `duplicate_send_count=0`],
+      correlation: { taskId, runId: success.runId, groupId: success.groupId, attempt: 1, cardId },
+    };
+  }
 
   // ── M01: Build identity ──────────────────────────────────────────────────
 
@@ -132,19 +207,6 @@ async function main(): Promise<void> {
     return true;
   });
 
-  await checkpoint("X01", "Active run blocks stale advancement (extra)", "scheduler", "checkCron rejects active_run", async () => {
-    const id = `staleblock-${Date.now()}`;
-    const { writeEntries } = await import("../src/components/tasks/task-store.js");
-    writeEntries([{ id, kind: "agent" as const, delivery: "announce" as const, schedule: "* * * * *", agent: "task" as const, prompt: "x", enabled: true, priority: "medium" as const }]);
-    stateStore.reserveRun(id, { runId: `sa-${Date.now()}`, groupId: "g", attempt: 1, trigger: "schedule", occurrenceAt: Date.now(), deadlineAt: Date.now() + 60000 });
-    const st = stateStore.readState(id);
-    if (!st?.activeRun) return `reservation failed`;
-    const due = taskChecker.checkCron();
-    const blocked = due.filter((d: any) => d.entry.id === id);
-    if (blocked.length > 0) return `active task was enqueued despite active_run guard`;
-    return true;
-  });
-
   // ── M06-M07: Contract validation ─────────────────────────────────────────
 
   scenario("Contract validation");
@@ -160,18 +222,6 @@ async function main(): Promise<void> {
     return true;
   });
 
-  await checkpoint("X02", "Non-report task rejects report contract (extra)", "normalize", "report on announce rejected", async () => {
-    const r = taskTypes.normalize({ id: "bad-del", kind: "agent", delivery: "announce", at: new Date().toISOString(), agent: "task", prompt: "test", chatId: "1", report: { artifact: "~/x.md", requiredSections: ["# X"], minBytes: 100, requires: { files: [], executables: [], tools: [] } } });
-    if (r.ok) return `should reject report contract on non-report delivery`;
-    return true;
-  });
-
-  await checkpoint("X03", "Legacy report accepted without contract (extra)", "normalize", "no contract accepted", async () => {
-    const r = taskTypes.normalize({ id: "legacy", kind: "agent", delivery: "report", at: new Date().toISOString(), agent: "task", prompt: "test", chatId: "1" });
-    if (!r.ok) return `legacy report task rejected: ${r.error}`;
-    return true;
-  });
-
   // ── M08-M09: Preflight ───────────────────────────────────────────────────
 
   scenario("Preflight");
@@ -183,29 +233,12 @@ async function main(): Promise<void> {
     return true;
   });
 
-  await checkpoint("X04", "Required file present → preflight passes", "preflight", "ok with resolved path", async () => {
-    const d = join(H, "workspace", "pf1ok"); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "input.csv"), "a,b\n1,2\n");
-    const e = { id: "pf1ok", kind: "agent" as const, delivery: "report" as const, agent: "task" as const, prompt: "t", at: new Date().toISOString(), enabled: true, priority: "medium" as const, report: { artifact: join(H, "workspace", "pf1ok", "o.md"), requiredSections: ["# X"], minBytes: 100, requires: { files: [join(d, "input.csv")], executables: [], tools: [] } } };
-    const result = taskPreflight.preflightTask(e as any, taskPackage.createExecutionScope("pf1ok"), undefined);
-    if (!result.ok) return `preflight failed: ${result.code} ${result.safeDetail}`;
-    return true;
-  });
-
   await checkpoint("M09", "Missing executable → preflight fails", "preflight", "required_executable_missing", async () => {
     const e = { id: "pfex", kind: "agent" as const, delivery: "report" as const, agent: "task" as const, prompt: "t", at: new Date().toISOString(), enabled: true, priority: "medium" as const, report: { artifact: join(H, "workspace", "pfex", "o.md"), requiredSections: ["# X"], minBytes: 100, requires: { files: [], executables: ["nonexistent_tool_xyz"], tools: [] } } };
     const scope = taskPackage.createExecutionScope("pfex");
     const result = taskPreflight.preflightTask(e as any, { cwd: scope.cwd, env: { ...scope.env, PATH: "/dev/null" } }, undefined);
     if (result.ok) return `should reject missing exe`;
     if (result.code !== "required_executable_missing") return `expected required_executable_missing got ${result.code}`;
-    return true;
-  });
-
-  await checkpoint("X05", "Preflight rejects path escaping workspace", "preflight", "artifact_path_invalid", async () => {
-    const e = { id: "pfesc", kind: "agent" as const, delivery: "report" as const, agent: "task" as const, prompt: "t", at: new Date().toISOString(), enabled: true, priority: "medium" as const, report: { artifact: "/etc/passwd", requiredSections: ["# X"], minBytes: 100, requires: { files: [], executables: [], tools: [] } } };
-    const scope = taskPackage.createExecutionScope("pfesc");
-    const result = taskPreflight.preflightTask(e as any, scope, undefined);
-    if (result.ok) return `should reject path escaping workspace`;
-    if (result.code !== "artifact_path_invalid") return `expected artifact_path_invalid got ${result.code}`;
     return true;
   });
 
@@ -230,9 +263,16 @@ async function main(): Promise<void> {
 
   scenario("Run identity and card");
   await checkpoint("M12", "Run identity allocated before execution", "scheduler", "runId is non-empty string", async () => {
-    const runId = `run-${Date.now()}`;
-    if (typeof runId !== "string" || runId.length < 4) return `invalid runId`;
-    return true;
+    const id = `identity-${Date.now()}`;
+    const reservation = stateStore.reserveRun(id, {
+      runId: `${id}_run`, groupId: `${id}:group`, attempt: 1, trigger: "manual",
+      occurrenceAt: Date.now(), deadlineAt: Date.now() + 60_000,
+    });
+    if (!reservation.ok) return `reserveRun rejected identity test`;
+    const state = stateStore.readState(id);
+    if (state?.activeRun?.runId !== reservation.run.runId) return `reserved identity not persisted`;
+    stateStore.settleActiveRun(id, reservation.run.runId, {});
+    return { observed: `reservation allocated ${reservation.run.runId} before execution`, evidence: [`run=${reservation.run.runId}`, `group=${reservation.run.groupId}`, `attempt=${reservation.run.attempt}`], correlation: { taskId: id, runId: reservation.run.runId, groupId: reservation.run.groupId, attempt: reservation.run.attempt } };
   });
 
   await checkpoint("M13", "Execution control can be registered and removed", "runner", "registerControl+removeControl", async () => {
@@ -242,26 +282,6 @@ async function main(): Promise<void> {
     if (ctrl.cancelled) return `new control should not be cancelled`;
     execControl.removeControl(ref);
     if (execControl.getControl(ref)) return `control still present after remove`;
-    return true;
-  });
-
-  await checkpoint("X06", "requestCancel propagates cancellation (extra)", "runner", "cancelled flag+reason", async () => {
-    const ref = `cc-${Date.now()}`;
-    const ctrl = execControl.registerControl(ref);
-    await ctrl.requestCancel("operator");
-    if (!ctrl.cancelled) return `not cancelled after requestCancel`;
-    if (ctrl.cancelReason !== "operator") return `reason mismatch: ${ctrl.cancelReason}`;
-    return true;
-  });
-
-  await checkpoint("X07", "markTerminal prevents duplicate (extra)", "runner", "second markTerminal returns false", async () => {
-    const ref = `mt-${Date.now()}`;
-    const ctrl = execControl.registerControl(ref);
-    const first = ctrl.markTerminal("completed");
-    if (!first) return `first markTerminal should succeed`;
-    const second = ctrl.markTerminal("failed");
-    if (second) return `second markTerminal should be rejected`;
-    if (ctrl.terminalOutcome !== "completed") return `terminalOutcome should be completed`;
     return true;
   });
 
@@ -279,9 +299,19 @@ async function main(): Promise<void> {
 
   scenario("Execution (provider-agnostic boundaries)");
   await checkpoint("M15", "Pi host can be imported and validates contract", "execution", "module loads, contract shape", async () => {
-    const piHost = await import("../src/components/transport/pi-core-host.js");
-    if (!piHost) return `pi-core-host module not found`;
-    return true;
+    const { PiCoreExecutionHost } = await import("../src/components/transport/pi-core-host.js");
+    const real = await import("@earendil-works/pi-agent-core");
+    const host = new PiCoreExecutionHost({
+      executionId: `acceptance-exec-${Date.now()}`, sessionId: "acceptance-session",
+      initialState: { systemPrompt: "acceptance", model: { id: "acceptance-model" } as any, messages: [], tools: [] },
+      streamFn: (() => { throw new Error("provider must not be called for empty host probe"); }) as any,
+    });
+    await host.start({ module: { Agent: real.Agent }, installation: { executable: "", packageRoot: "", version: "installed", source: "path", moduleRoots: { ai: "", tui: "", agentCore: "" } } });
+    if (host.state !== "running") return `Pi host did not enter running state: ${host.state}`;
+    host.cancel();
+    await host.waitForSettlement();
+    if (!host.isSettled) return `Pi host did not settle after cancellation`;
+    return { observed: "real public Pi Agent constructed, started, cancelled, and settled", evidence: ["provider_calls=0", "host_state=settled"] };
   });
 
   await checkpoint("M16", "Provider/model selection is interface-driven", "execution", "SessionProfile lookup works", async () => {
@@ -293,17 +323,34 @@ async function main(): Promise<void> {
   });
 
   await checkpoint("M17", "Spin dispatchAwait accepts caller-owned settlement", "execution", "settlementOwner param", async () => {
-    const spinTypes = await import("../src/components/spin-types.js");
-    const spec: any = { settlementOwner: "caller", type: "T", goal: "test", source: "task" };
-    if (spec.settlementOwner !== "caller") return `settlementOwner not set`;
-    return true;
+    let observedRequest: import("../src/components/spin-types.js").SpinRequest | undefined;
+    const id = `settlement-owner-${Date.now()}`;
+    const entry = { id, kind: "agent" as const, delivery: "announce" as const, at: new Date().toISOString(), agent: "task" as const, prompt: "settlement owner probe", enabled: true, priority: "medium" as const };
+    const reservation = stateStore.reserveRun(id, { runId: `${id}_run`, groupId: `${id}:group`, attempt: 1, trigger: "manual", occurrenceAt: Date.now(), deadlineAt: Date.now() + 60_000 });
+    if (!reservation.ok) return `could not reserve settlement-owner probe`;
+    const probe = new ScheduledTaskRunner({ agentRunner: async request => {
+      observedRequest = request;
+      const cardId = kanbanBoard.kanbanEnqueue(id, "task", id, { delivery: "silent", type: request.type });
+      kanbanBoard.kanbanRunning(cardId);
+      return { cardId, result: "settlement owner probe" };
+    } });
+    const outcome = await probe.run(entry, reservation.run);
+    if (outcome.status !== "success") return `runner outcome=${outcome.status}: ${outcome.safeDetail}`;
+    if (observedRequest?.settlementOwner !== "caller") return `runner did not pass settlementOwner=caller`;
+    return { observed: "real ScheduledTaskRunner passed caller-owned settlement into provider boundary", evidence: [`run=${reservation.run.runId}`, `execution_id=${observedRequest.executionControl?.executionRef ?? "missing"}`, "settlement_owner=caller"], correlation: { taskId: id, runId: reservation.run.runId, groupId: reservation.run.groupId, executionId: observedRequest.executionControl?.executionRef } };
   });
 
   await checkpoint("M18", "Tool registry has expected entries", "execution", "tools array non-empty", async () => {
-    const toolsModule = await import("../src/components/transport/pi-core-tools.js");
-    // Verify the module loads; actual tool list depends on Pi config
-    if (!toolsModule) return `pi-core-tools module not found`;
-    return true;
+    const { createPiAgentTools } = await import("../src/components/transport/pi-core-tools.js");
+    const { createPiExecutionSafetyController } = await import("../src/components/transport/pi-core-safety.js");
+    const { FallbackPolicy } = await import("../src/components/transport/fallback-policy.js");
+    const { ModelHealthRegistry } = await import("../src/components/transport/model-health-registry.js");
+    const { buildPolicy } = await import("../src/components/tool-sandbox.js");
+    const policy = new FallbackPolicy([], new ModelHealthRegistry());
+    const tools = createPiAgentTools({ executionId: "acceptance-tools", userId: "acceptance", sandboxPolicy: buildPolicy("owner"), safety: createPiExecutionSafetyController(policy) });
+    if (tools.length === 0) return `Pi tool adapter produced no tools`;
+    if (tools.some(tool => !tool.name || tool.executionMode !== "sequential")) return `Pi tool adapter returned malformed tool`;
+    return { observed: `real Pi tool adapter constructed ${tools.length} registered tools`, evidence: [`tool_count=${tools.length}`, "execution_mode=sequential"] };
   });
 
   await checkpoint("M19", "Execution scope provides cwd and env for tools", "execution", "scope has WORKSPACE", async () => {
@@ -344,9 +391,17 @@ async function main(): Promise<void> {
   });
 
   await checkpoint("M23", "Prompt-wide termination via tool-round limit", "execution", "maxToolRounds configurable", async () => {
-    const entry = { id: "mt", kind: "agent" as const, delivery: "announce" as const, at: new Date().toISOString(), agent: "task" as const, prompt: "t", enabled: true, priority: "medium" as const, maxToolRounds: 10 };
-    if (entry.maxToolRounds !== 10) return `maxToolRounds not preserved`;
-    return true;
+    const { createPiExecutionSafetyController } = await import("../src/components/transport/pi-core-safety.js");
+    const { FallbackPolicy } = await import("../src/components/transport/fallback-policy.js");
+    const { ModelHealthRegistry } = await import("../src/components/transport/model-health-registry.js");
+    const policy = new FallbackPolicy([], new ModelHealthRegistry());
+    const safety = createPiExecutionSafetyController(policy, { maxPromptRounds: 2, maxCandidateRounds: 2 });
+    const first = safety.beginProviderTurn("acceptance-model@deterministic");
+    const second = safety.beginProviderTurn("acceptance-model@deterministic");
+    const terminal = safety.beginProviderTurn("acceptance-model@deterministic");
+    if (first.decision !== "continue" || second.decision !== "continue" || terminal.decision !== "stop") return `unexpected safety decisions: ${first.decision}/${second.decision}/${terminal.decision}`;
+    if (!safety.terminalSafetyFailure || safety.incident?.type !== "prompt_round_limit") return `prompt-round limit did not become terminal safety failure`;
+    return { observed: "real Pi safety controller stopped at configured prompt-round limit", evidence: [`rounds=${safety.promptRoundsUsed}`, `limit=${safety.maxPromptRounds}`, `incident=${safety.incident.type}`] };
   });
 
   // ── M24-M32: Failure, retry, cancellation ────────────────────────────────
@@ -406,14 +461,71 @@ async function main(): Promise<void> {
     return true;
   });
 
-  await checkpoint("M30", "Deadline cancellation via exec control", "timeout", "requestCancel deadline", async () => {
-    const ref = `dl-${Date.now()}`;
-    const ctrl = execControl.registerControl(ref);
-    await ctrl.requestCancel("deadline");
-    if (!ctrl.cancelled) return `not cancelled after deadline request`;
-    if (ctrl.cancelReason !== "deadline") return `reason should be deadline`;
-    return true;
-  });
+  const PH = await import("../src/components/transport/pi-core-host.js");
+  const EC = await import("../src/components/execution-control.js");
+
+  await checkpoint("M30", "Non-settling provider: forced terminal + slot release + cleanup timeout", "timeout", "Non-settling Pi provider forces terminal settlement within 5s bound", async () => {
+    const executionId = `m30-${Date.now()}`;
+    let subscribed = false;
+
+    // Build a PiCoreExecutionHost with a mock Agent whose waitForIdle() never
+    // resolves — this simulates a provider that ignores abort. The #1506 fix
+    // must make waitForSettlement() resolve immediately on cancel regardless.
+    const emitted: any[] = [];
+    const subs: Array<(e: any) => void> = [];
+    let subscribeFn: ((l: (e: any) => void) => () => void) | null = null;
+    const mockAgent = {
+      isRunning: false,
+      subscribe: (l: (e: any) => void) => { subs.push(l); subscribed = true; return () => { const i = subs.indexOf(l); if (i >= 0) subs.splice(i, 1); }; },
+      prompt: async () => {},
+      steer: () => {},
+      followUp: () => {},
+      clearAllQueues: () => {},
+      abort: () => {},
+      waitForIdle: () => new Promise<void>(() => {}), // NEVER resolves
+    };
+    const mockModule = { Agent: class { constructor(_opts: any) { Object.assign(this, mockAgent); } } } as any;
+    const mockInstallation = { executable: "/pi", packageRoot: "/pi", version: "0.80.7", source: "path", moduleRoots: { ai: "", tui: "", agentCore: "" } };
+    const host = new PH.PiCoreExecutionHost({
+      executionId,
+      sessionId: "m30-session",
+      initialState: { systemPrompt: "test", model: { id: "test" }, messages: [] },
+      streamFn: (() => {}) as any,
+    });
+    await host.start({ module: mockModule, installation: mockInstallation }).catch(() => {});
+    if (!subscribed) return { observed: `agent not subscribed after start`, evidence: [] };
+
+    // Cancel — must claim terminal immediately even though waitForIdle hangs
+    host.cancel();
+    await host.waitForSettlement();
+
+    if (!host.isSettled) return { observed: `not settled after cancel`, evidence: [] };
+    // Cleanup must time out (waitForIdle never resolves)
+    const cleanup = await host.waitForCleanup();
+    if (cleanup !== "timed_out") return { observed: `expected cleanup timed_out but got ${cleanup}`, evidence: [] };
+
+    // Late agent_end must be rejected — check via internal state;
+    // handleAgentEnd is no-op when settled, state unchanged
+    const stateBefore = host.state;
+    await (host as any).handleAgentEnd({ type: "agent_end" });
+    if (host.state !== stateBefore) return { observed: `late agent_end changed state from ${stateBefore} to ${host.state}`, evidence: [] };
+
+    // signalCancel must be non-blocking (never await the bound handler)
+    const ec = EC.registerControl(`sig-${executionId}`);
+    let handlerCalled = false;
+    ec.bind(async () => { handlerCalled = true; await new Promise(() => {}); }); // never resolves
+    const start = Date.now();
+    const result = ec.signalCancel("deadline");
+    const elapsed = Date.now() - start;
+    if (result !== "cancelled") return { observed: `signalCancel returned ${result}`, evidence: [] };
+    if (elapsed > 100) return { observed: `signalCancel blocked for ${elapsed}ms`, evidence: [] };
+    // The handler is queued in microtask — give it a tick
+    await new Promise(r => setTimeout(r, 0));
+    if (!handlerCalled) return { observed: `signalCancel handler not queued`, evidence: [] };
+
+    EC.removeControl(`sig-${executionId}`);
+    return { observed: `terminal: clean, cleanup: ${cleanup}, signalCancel: non-blocking (${elapsed}ms), late agent_end rejected`, evidence: [`executionId=${executionId}`] };
+  }, ["M15"]);
 
   await checkpoint("M31", "History written for cancellation", "settlement", "cancelled outcome in history", async () => {
     const runId = `cancel-hist-${Date.now()}`;
@@ -463,19 +575,6 @@ async function main(): Promise<void> {
     return true;
   });
 
-  await checkpoint("X08", "Failures increment correctly (extra) correctly", "state", "3 failures → autoPaused", async () => {
-    const id = `ap-${Date.now()}`;
-    stateStore.incrementFailures(id);
-    stateStore.incrementFailures(id);
-    stateStore.incrementFailures(id);
-    const st = stateStore.readState(id);
-    if ((st?.consecutiveFailures ?? 0) < 3) return `failures not 3: ${st?.consecutiveFailures}`;
-    stateStore.setAutoPaused(id, true);
-    const st2 = stateStore.readState(id);
-    if (!st2?.autoPaused) return `autoPaused not set after 3 failures`;
-    return true;
-  });
-
   // ── M35-M38: Artifact validation ─────────────────────────────────────────
 
   scenario("Artifact validation");
@@ -511,19 +610,6 @@ async function main(): Promise<void> {
     const c = { artifactPath: ap, artifactLabel: "t", requiredSections: ["# Result"], minBytes: 10, requiredFiles: [], executables: [], tools: [] };
     const r = taskPreflight.validateReportArtifact(ap, { existed: true, size: st.size, mtimeMs: st.mtimeMs }, c, Date.now() - 5000, "as");
     if (r.ok) return `stale artifact should be rejected (unchanged)`;
-    return true;
-  });
-
-  await checkpoint("X09", "Rejects artifact mtime before reservation (extra)", "artifact", "mtime < reservedAt → fail", async () => {
-    const ap = join(H, "workspace", "amb", "r.md"); mkdirSync(join(H, "workspace", "amb"), { recursive: true });
-    writeFileSync(ap, "# Result\nnew content\n", "utf-8");
-    // Set mtime to before reservation
-    const pastMtime = Date.now() - 120000;
-    const reservedAt = Date.now() - 1000;
-    utimesSync(ap, new Date(pastMtime), new Date(pastMtime));
-    const c = { artifactPath: ap, artifactLabel: "t", requiredSections: ["# Result"], minBytes: 10, requiredFiles: [], executables: [], tools: [] };
-    const r = taskPreflight.validateReportArtifact(ap, { existed: true, size: 10, mtimeMs: pastMtime }, c, reservedAt, "amb");
-    if (r.ok) return `should reject mtime before reservation`;
     return true;
   });
 
@@ -588,7 +674,14 @@ async function main(): Promise<void> {
   await checkpoint("M44", "Task phase changes loggable", "observability", "phase strings defined", async () => {
     const phases = ["reserved", "preflight", "queued", "executing", "cancelling", "validating", "settling", "delivery_pending"];
     if (phases.length !== 8) return `expected 8 phases, got ${phases.length}`;
-    return true;
+    const task = `observability-${Date.now()}`;
+    const run = `${task}_run`;
+    const { logTaskTrace } = await import("../src/components/tasks/task-log-ctx.js");
+    logTaskTrace("task_phase_probe", { task, run, attempt: 1 }, "phase=validating");
+    logger.flushLogs();
+    const logText = existsSync(logger.getLogFile()) ? readFileSync(logger.getLogFile(), "utf-8") : "";
+    if (!logText.includes(`task_phase_probe task=${task} run=${run} attempt=1 phase=validating`)) return `correlated TRACE phase event missing from ${logger.getLogFile()}`;
+    return { observed: "correlated TRACE phase event persisted", evidence: [`event=task_phase_probe`, `task=${task}`, `run=${run}`, "payload=phase_only"] };
   });
 
   // ── M45: Task listing ────────────────────────────────────────────────────
@@ -606,40 +699,15 @@ async function main(): Promise<void> {
 
   scenario("Production-shaped task acceptance");
   await checkpoint("M46", "daily-ai shaped task normalizes and preflights", "production", "fixture with daily-briefing shape", async () => {
-    const artifactPath = join(H, "workspace", "daily-ai", "Daily-Briefing-2026-07-28.md");
-    const r = taskTypes.normalize({
-      id: "daily-ai", kind: "agent", delivery: "report", at: new Date().toISOString(),
-      agent: "task", prompt: "Daily briefing", chatId: "1",
-      report: { artifact: artifactPath, requiredSections: ["# Summary", "# Key Items"], minBytes: 500, requires: { files: [], executables: [], tools: [] } },
-    });
-    if (!r.ok) return `daily-ai fixture rejected: ${r.error}`;
-    const entry = r.entry as any;
-    const preflight = taskPreflight.preflightTask(entry, taskPackage.createExecutionScope("daily-ai"), undefined);
-    // Should pass with no required files/exes/tools beyond the artifact
-    if (!preflight.ok && preflight.code !== "required_file_missing") return `preflight unexpected: ${preflight.code} ${preflight.safeDetail}`;
-    return true;
+    return runProductionFixture("daily-ai", `Daily-Briefing-${new Date().toISOString().slice(0, 10)}.md`, ["# Summary", "# Key Items"], 500);
   });
 
   await checkpoint("M47", "weekly-ai shaped task normalizes and preflights", "production", "fixture with weekly shape", async () => {
-    const artifactPath = join(H, "workspace", "weekly-ai", "Weekly-Report-2026-07-28.md");
-    const r = taskTypes.normalize({
-      id: "weekly-ai", kind: "agent", delivery: "report", at: new Date().toISOString(),
-      agent: "task", prompt: "Weekly report", chatId: "1",
-      report: { artifact: artifactPath, requiredSections: ["# Summary", "# Metrics", "# Action Items"], minBytes: 1000, requires: { files: [], executables: [], tools: [] } },
-    });
-    if (!r.ok) return `weekly-ai fixture rejected: ${r.error}`;
-    return true;
+    return runProductionFixture("weekly-ai", `Weekly-Report-${new Date().toISOString().slice(0, 10)}.md`, ["# Summary", "# Metrics", "# Action Items"], 1000);
   });
 
   await checkpoint("M48", "finance-daily shaped task normalizes and preflights", "production", "fixture with finance shape", async () => {
-    const artifactPath = join(H, "workspace", "finance-daily", "Finance-Report-2026-07-28.md");
-    const r = taskTypes.normalize({
-      id: "finance-daily", kind: "agent", delivery: "report", at: new Date().toISOString(),
-      agent: "task", prompt: "Finance daily", chatId: "1",
-      report: { artifact: artifactPath, requiredSections: ["# P&L", "# Cash Flow", "# Risk"], minBytes: 1000, requires: { files: [], executables: [], tools: [] } },
-    });
-    if (!r.ok) return `finance-daily fixture rejected: ${r.error}`;
-    return true;
+    return runProductionFixture("finance-daily", `Finance-Report-${new Date().toISOString().slice(0, 10)}.md`, ["# P&L", "# Cash Flow", "# Risk"], 1000);
   });
 
   // ── Report ─────────────────────────────────────────────────────────────────

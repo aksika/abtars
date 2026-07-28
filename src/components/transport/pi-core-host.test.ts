@@ -198,4 +198,59 @@ describe("PiCoreExecutionHost", () => {
     const event: AgentEvent = { type: "text_delta", contentIndex: 0, delta: "test" };
     await expect((host as any).handleEvent(event)).resolves.not.toThrow();
   });
+
+  // ── #1506: Logical terminalisation vs cleanup ──────────────────────────
+
+  it("waitForSettlement resolves after cancel even when waitForIdle never resolves", async () => {
+    const { agent } = makeMockAgent();
+    // Simulate a provider that never acknowledges idle
+    agent.waitForIdle = vi.fn(() => new Promise<void>(() => {})); // never resolves
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    await host.start(loaded).catch(() => {});
+
+    host.cancel();
+    // waitForSettlement must resolve even though waitForIdle hangs
+    await expect(host.waitForSettlement()).resolves.toBeUndefined();
+    expect(host.isSettled).toBe(true);
+    // Cleanup promise should time out after 5s
+    const cleanupResult = await host.waitForCleanup();
+    expect(cleanupResult).toBe("timed_out");
+  }, 15000);
+
+  it("cleanup timeout does not affect terminal state", async () => {
+    const { agent } = makeMockAgent();
+    agent.waitForIdle = vi.fn(() => new Promise<void>(() => {})); // never resolves
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    await host.start(loaded).catch(() => {});
+
+    host.cancel();
+    await host.waitForSettlement();
+    expect(host.isSettled).toBe(true);
+
+    const cleanupResult = await host.waitForCleanup();
+    expect(cleanupResult).toBe("timed_out");
+    // Terminal state unchanged after cleanup timeout
+    expect(host.isSettled).toBe(true);
+  }, 15000);
+
+  it("late agent_end is rejected after settlement", async () => {
+    const { agent } = makeMockAgent();
+    agent.waitForIdle = vi.fn(() => new Promise<void>(() => {}));
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    await host.start(loaded).catch(() => {});
+
+    host.cancel();
+    await host.waitForSettlement();
+    expect(host.isSettled).toBe(true);
+
+    // Simulate a late agent_end arriving after the host is settled
+    const stateBefore = host.state;
+    (host as any).handleAgentEnd({ type: "agent_end" });
+    // State must remain settled (unchanged)
+    expect(host.state).toBe(stateBefore);
+    expect(host.isSettled).toBe(true);
+  });
 });

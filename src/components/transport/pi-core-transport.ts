@@ -314,15 +314,13 @@ export class PiCoreTransport implements IKiroTransport {
     });
 
     this.activeHost = host;
-    const timeout = this.timeoutOverrideMs;
-    const timeoutHandle = timeout && timeout > 0
-      ? setTimeout(() => host.cancel(), timeout)
-      : undefined;
 
     try {
       const { loadAndValidatePiAgentCore } = await import("./pi-core-types.js");
       const loaded = await loadAndValidatePiAgentCore();
       await host.start(loaded);
+      // #1506: waitForSettlement() awaits only logical terminal latch.
+      // Deadline enforcement belongs to the scheduled runner via signalCancel.
       await host.waitForSettlement();
 
       if (context?.executionTelemetry) {
@@ -354,7 +352,6 @@ export class PiCoreTransport implements IKiroTransport {
       logDebug(TAG, `sendPrompt: empty response with no tool failure — returning ""`);
       return "";
     } finally {
-      if (timeoutHandle) clearTimeout(timeoutHandle);
       if (this.activeHost === host) this.activeHost = null;
     }
   }

@@ -335,12 +335,16 @@ export class PiCoreExecutionHost {
     if (!this.agent) return "complete";
     const timeoutMs = 5000;
     try {
-      await Promise.race([
-        this.agent.waitForIdle(),
+      const result = await Promise.race([
+        this.agent.waitForIdle().then(() => "complete" as const),
         new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), timeoutMs)),
       ]);
-      logInfo(TAG, `Cleanup complete for execution ${this.executionId}`);
-      return "complete";
+      if (result === "timed_out") {
+        logWarn(TAG, `Cleanup timed out for execution ${this.executionId} gen=${this._generation} after ${timeoutMs}ms`);
+      } else {
+        logInfo(TAG, `Cleanup complete for execution ${this.executionId} gen=${this._generation}`);
+      }
+      return result;
     } catch (err) {
       logDebug(TAG, `Cleanup error for execution ${this.executionId}: ${err instanceof Error ? err.message : String(err)}`);
       return "complete";
@@ -405,6 +409,10 @@ export class PiCoreExecutionHost {
   }
 
   private handleAgentEnd(_event: Extract<AgentEvent, { type: "agent_end" }>): void {
+    if (this.settled) {
+      logWarn(TAG, `Late agent_end rejected for execution ${this.executionId} gen=${this._generation} — already terminal`);
+      return;
+    }
     this.terminalResolve("agent_end");
     logInfo(TAG, `Agent ended for execution ${this.executionId} gen=${this._generation}`);
     this.beginSettle("agent_end");
