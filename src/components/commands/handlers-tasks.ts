@@ -55,10 +55,8 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
       const activeRun = state?.activeRun;
       const isActive = activeRun && ["reserved", "queued", "executing", "cancelling", "validating", "settling"].includes(activeRun.phase);
       const tick = isPaused ? "p" : !runsToday ? "-" : succeeded ? "+" : running || isActive ? "~" : failed ? "x" : started ? "x" : "+";
-      const label = formatTaskLabel(e.id);
-      const name = label.length > 18 ? label.slice(0, 18) : label;
       const pauseMarker = autoPaused ? ` [auto-paused:${state?.consecutiveFailures ?? 0}f]` : isActive ? ` [${activeRun.phase}]` : state?.retrying ? " [retrying]" : "";
-      return `${tick}  ${name.padEnd(20)}${sched.padEnd(16)}${e.id.padEnd(22)}${label}${pauseMarker}`;
+      return `${tick}  ${sched.padEnd(16)}${e.id}${pauseMarker}`;
     });
     listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
   } catch (err) {
