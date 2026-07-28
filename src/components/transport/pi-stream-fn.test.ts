@@ -208,6 +208,69 @@ describe("createPiStreamFn", () => {
     expect((errorEv2?.error as Record<string, unknown> | undefined)?.stopReason).toBe("aborted");
   });
 
+  it("times out a provider iterator that never resolves next() and falls back before semantic output", async () => {
+    const first = makeCandidate({ model: "stuck", endpoint: "https://stuck/v1" });
+    const second = makeCandidate({ model: "fallback", endpoint: "https://fallback/v1" });
+    const fallbackPolicy = new FallbackPolicy([first, second], registry);
+    let firstSignal: AbortSignal | undefined;
+    const stuckStream = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => new Promise<IteratorResult<any>>(() => {}),
+        return: vi.fn(async () => ({ done: true, value: undefined })),
+      }),
+    };
+    const attemptFactory = vi.fn().mockImplementation(async (candidate: ModelCandidate, _model: unknown, _ctx: unknown, _opts: unknown, signal: AbortSignal) => {
+      if (candidate.model === "stuck") {
+        firstSignal = signal;
+        return stuckStream;
+      }
+      return makeFakeStream([{ type: "done", reason: "stop", message: { role: "assistant", content: "fallback", stopReason: "stop", usage: { input: 1, output: 1 } } }]);
+    });
+
+    const streamFn = createPiStreamFn({
+      policy: fallbackPolicy,
+      executionId: "stuck-provider",
+      createPiAiAttempt: attemptFactory,
+      providerInactivityTimeoutMs: 20,
+    });
+    const events: any[] = [];
+    for await (const event of streamFn({ id: "test" }, { messages: [] }, {})) events.push(event);
+
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(firstSignal?.aborted).toBe(true);
+    expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
+  });
+
+  it("does not fall back after a stalled provider has emitted semantic output", async () => {
+    const first = makeCandidate({ model: "partial", endpoint: "https://partial/v1" });
+    const second = makeCandidate({ model: "should-not-run", endpoint: "https://unused/v1" });
+    const fallbackPolicy = new FallbackPolicy([first, second], registry);
+    const partialStream = {
+      [Symbol.asyncIterator]: () => {
+        let firstEvent = true;
+        return {
+          next: () => firstEvent
+            ? (firstEvent = false, Promise.resolve({ done: false, value: { type: "text_delta", contentIndex: 0, delta: "partial" } }))
+            : new Promise<IteratorResult<any>>(() => {}),
+          return: vi.fn(async () => ({ done: true, value: undefined })),
+        };
+      },
+    };
+    const attemptFactory = vi.fn().mockResolvedValue(partialStream);
+    const streamFn = createPiStreamFn({
+      policy: fallbackPolicy,
+      executionId: "partial-provider",
+      createPiAiAttempt: attemptFactory,
+      providerInactivityTimeoutMs: 20,
+    });
+    const events: any[] = [];
+    for await (const event of streamFn({ id: "test" }, { messages: [] }, {})) events.push(event);
+
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === "text_delta" && event.delta === "partial")).toBe(true);
+    expect(events.at(-1)?.type).toBe("error");
+  });
+
   // ── Request-identity tests (#1472) ──────────────────────────────────────────
 
   it("replaces stale caller-provided x-client-request-id with a generated ID", async () => {

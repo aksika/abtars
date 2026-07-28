@@ -112,9 +112,10 @@ function isOpenAiCompatible(api: Api): boolean {
   return api === "openai-completions" || api === "openai-responses";
 }
 
-function buildAttemptOptions(fnOptions: SimpleStreamOptions, providerRequestId: string): SimpleStreamOptions {
+function buildAttemptOptions(fnOptions: SimpleStreamOptions, providerRequestId: string, signal: AbortSignal): SimpleStreamOptions {
   return {
     ...fnOptions,
+    signal,
     headers: {
       ...fnOptions.headers,
       "x-client-request-id": providerRequestId,
@@ -194,26 +195,46 @@ function wrapEventStream(source: AsyncGenerator<AssistantMessageEvent>, fallback
 async function* withInactivityTimeout(
   source: AsyncIterable<AssistantMessageEvent>,
   timeoutMs: number,
+  signal: AbortSignal,
   onTimeout: () => void,
 ): AsyncGenerator<AssistantMessageEvent> {
+  const iterator = source[Symbol.asyncIterator]();
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const resetTimer = (): void => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = null;
-      onTimeout();
-    }, timeoutMs);
-  };
+  let abortListener: (() => void) | null = null;
   try {
-    resetTimer();
-    for await (const event of source) {
+    while (true) {
+      const next = iterator.next().then((result) => ({ kind: "event" as const, result }));
+      const timeout = new Promise<{ kind: "timeout" }>((resolve) => {
+        timer = setTimeout(() => { timer = null; resolve({ kind: "timeout" }); }, timeoutMs);
+      });
+      const aborted = new Promise<{ kind: "aborted" }>((resolve) => {
+        if (signal.aborted) {
+          resolve({ kind: "aborted" });
+          return;
+        }
+        abortListener = () => resolve({ kind: "aborted" });
+        signal.addEventListener("abort", abortListener, { once: true });
+      });
+      const outcome = await Promise.race([next, timeout, aborted]);
       if (timer) clearTimeout(timer);
       timer = null;
-      yield event;
-      resetTimer();
+      if (abortListener) {
+        signal.removeEventListener("abort", abortListener);
+        abortListener = null;
+      }
+      if (outcome.kind !== "event") {
+        onTimeout();
+        return;
+      }
+      if (outcome.result.done) return;
+      yield outcome.result.value;
     }
   } finally {
     if (timer) clearTimeout(timer);
+    if (abortListener) signal.removeEventListener("abort", abortListener);
+    // The provider may ignore abort. Never await its return() here: logical
+    // stream timeout must not be coupled to unbounded provider cleanup.
+    try { void Promise.resolve(iterator.return?.()).catch(() => {}); } catch { /* best effort */ }
   }
 }
 
@@ -241,9 +262,14 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
 
         while (true) {
           const providerRequestId = (options.providerRequestIdFactory ?? randomUUID)();
+          const attemptController = new AbortController();
+          const abortFromOuter = (): void => attemptController.abort();
+          if (signal.aborted) attemptController.abort();
+          else signal.addEventListener("abort", abortFromOuter, { once: true });
+          const attemptSignal = attemptController.signal;
           const attemptOptions = isOpenAiCompatible(piModel.api)
-            ? buildAttemptOptions(fnOptions, providerRequestId)
-            : fnOptions;
+            ? buildAttemptOptions(fnOptions, providerRequestId, attemptSignal)
+            : { ...fnOptions, signal: attemptSignal };
 
           logDebug(TAG, `provider attempt execution=${options.executionId} request=${providerRequestId} candidate=${candidateKey(candidate.model, candidate.endpoint)}`);
 
@@ -274,17 +300,26 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
             }
           };
 
+          if (options.deadlineAt !== undefined && options.deadlineAt <= Date.now()) {
+            finishAttempt("aborted");
+            yield terminalError(model, "aborted", "Execution deadline reached before provider attempt");
+            return;
+          }
+
           let shouldRetry = false;
           try {
-            const inner = await attemptFactory(candidate, piModel, context, attemptOptions, signal);
+            const inner = await attemptFactory(candidate, piModel, context, attemptOptions, attemptSignal);
             // #1506: Inactivity timeout per candidate
             let inactivityTimedOut = false;
-            const inactivityMs = Math.min(
-              options.providerInactivityTimeoutMs ?? 180_000,
-              options.deadlineAt ? Math.max(10_000, options.deadlineAt - Date.now()) : 180_000,
-            );
+            const remainingMs = options.deadlineAt === undefined
+              ? Number.POSITIVE_INFINITY
+              : Math.max(0, options.deadlineAt - Date.now());
+            const inactivityMs = Math.min(options.providerInactivityTimeoutMs ?? 180_000, remainingMs);
             const inactivityWrapped = inactivityMs > 0
-              ? withInactivityTimeout(inner, inactivityMs, () => { inactivityTimedOut = true; })
+              ? withInactivityTimeout(inner, inactivityMs, attemptSignal, () => {
+                inactivityTimedOut = true;
+                attemptController.abort();
+              })
               : inner;
             const buffered: AssistantMessageEvent[] = [];
             let terminal: AssistantMessage | undefined;
@@ -331,6 +366,7 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
                 return;
               }
             }
+            if (inactivityTimedOut) inactivityAborted = true;
             if (inactivityAborted) {
               if (attemptCommitted) {
                 finishAttempt("aborted", terminal);
@@ -368,6 +404,9 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
               return;
             }
             break;
+          }
+          finally {
+            signal.removeEventListener("abort", abortFromOuter);
           }
           break;
         }

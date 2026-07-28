@@ -137,6 +137,7 @@ export class ScheduledTaskRunner {
           settlementOwner: "caller",
           executionControl: execControl,
           executionScope,
+          deadlineAt: reservation.deadlineAt,
         }),
         safeDeadline,
         execControl,
@@ -146,8 +147,8 @@ export class ScheduledTaskRunner {
 
       if (raceResult.kind === "timed_out") {
         logTaskTrace("task_run_deadline_fired", { task: entry.id, run: reservation.runId });
-        settleRunOnce({ entry, run: reservation, outcome: "timed_out", detail: raceResult.reason, executionRef: runId });
-        return { status: "timed_out", safeDetail: raceResult.reason };
+        settleRunOnce({ entry, run: reservation, outcome: "timed_out", detail: raceResult.reason, cardId: execControl.cardId, executionRef: runId });
+        return { status: "timed_out", safeDetail: raceResult.reason, ...(execControl.cardId !== undefined ? { cardId: execControl.cardId } : {}) };
       }
 
       if (execControl.cancelled) {
@@ -157,7 +158,18 @@ export class ScheduledTaskRunner {
       }
 
       if (raceResult.kind !== "completed") {
-        return { status: "failed", safeDetail: "execution did not complete" };
+        const error = raceResult.error;
+        const detail = error.message.slice(0, 1000);
+        const cardId = error.cardId ?? execControl.cardId;
+        settleRunOnce({
+          entry,
+          run: reservation,
+          outcome: "failed",
+          detail,
+          cardId,
+          executionRef: runId,
+        });
+        return { status: "failed", safeDetail: detail, ...(cardId !== undefined ? { cardId } : {}) };
       }
       const { cardId: boardId, result: response } = raceResult.value;
 
@@ -240,25 +252,41 @@ async function runWithDeadline(
 ): Promise<ExecutionRaceResult> {
   return new Promise<ExecutionRaceResult>((resolve) => {
     const CANCEL_GRACE_MS = 5000;
+    let finished = false;
+    let deadlineWon = false;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (result: ExecutionRaceResult): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      resolve(result);
+    };
     const timer = setTimeout(() => {
+      if (finished) return;
+      deadlineWon = true;
       logTaskTrace("task_run_deadline_fired", { task: taskId, run: runId }, `timeout_ms=${timeoutMs}`);
       updateActiveRun(taskId, runId, { phase: "cancelling" });
       // #1506: Non-blocking cancellation — signal without awaiting acknowledgement.
       // The grace timer fires independently so settlement always proceeds.
-      execControl.signalCancel("deadline");
-      setTimeout(() => {
-        resolve({ kind: "timed_out", reason: `deadline fired after ${timeoutMs}ms` });
+      const cancellation = execControl.signalCancel("deadline");
+      // Claim terminal ownership synchronously after signalling. This blocks a
+      // provider that eventually resolves from running finishSpin/failSpin
+      // against the already timed-out card and session.
+      if (cancellation === "cancelled") execControl.markTerminal("timed_out");
+      graceTimer = setTimeout(() => {
+        finish({ kind: "timed_out", reason: `deadline fired after ${timeoutMs}ms` });
       }, CANCEL_GRACE_MS);
     }, timeoutMs);
 
     promise
       .then((value) => {
-        clearTimeout(timer);
-        resolve({ kind: "completed", value });
+        // Once the deadline callback has run, the result is late even if the
+        // transport happens to resolve during the cancellation grace period.
+        if (!deadlineWon) finish({ kind: "completed", value });
       })
       .catch((error: Error & { cardId?: number }) => {
-        clearTimeout(timer);
-        resolve({ kind: "failed", error });
+        if (!deadlineWon) finish({ kind: "failed", error });
       });
   });
 }

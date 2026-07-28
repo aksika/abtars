@@ -520,6 +520,11 @@ export class Spin {
         sourcePeer: spec.sourcePeer,
       });
     }
+    // The scheduled runner may need to settle a timeout before dispatchAwait
+    // returns its card ID. Publish the allocated card to the shared execution
+    // control at the earliest point so forced settlement can fail it exactly
+    // once instead of leaving it running.
+    if (cardId !== undefined) spec.executionControl?.setCardId(cardId);
     if (cardId !== undefined && this.canDispatch(spec.type, cardId)) {
       this.markRunning(spec.type, cardId); kanbanRunning(cardId);
     }
@@ -589,6 +594,7 @@ export class Spin {
         beforeMessageId: spec.currentMessageId,
         directContextTurn: spec.directContextTurn,
         executionScope: spec.executionScope,
+        deadlineAt: spec.deadlineAt,
         executionTelemetry,
         orchestrator: (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator } | undefined)?.contextOrchestrator,
       };
@@ -1047,6 +1053,7 @@ export class Spin {
       executionControl: request.executionControl,
       settlementOwner: request.settlementOwner,
       executionScope: request.executionScope,
+      deadlineAt: request.deadlineAt,
     });
     return { cardId };
   }
@@ -1082,6 +1089,7 @@ export class Spin {
       settlementOwner: request.settlementOwner,
       executionControl: request.executionControl,
       executionScope: request.executionScope,
+      deadlineAt: request.deadlineAt,
     });
     return { cardId: cardId!, result: result! };
   }
@@ -1158,6 +1166,7 @@ export class Spin {
         attemptId: result.attemptId,
         executionControl: request.executionControl,
         executionScope: request.executionScope,
+        deadlineAt: request.deadlineAt,
         deliveryMode: request.deliveryMode,
         delivery: request.delivery,
         agent: request.agent,
@@ -1183,6 +1192,7 @@ export class Spin {
       attemptId: request.attemptId,
       executionControl: request.executionControl,
       executionScope: request.executionScope,
+      deadlineAt: request.deadlineAt,
       deliveryMode: request.deliveryMode,
       delivery: request.delivery,
       agent: request.agent,

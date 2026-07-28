@@ -171,6 +171,8 @@ export interface SpinRequest {
   priority?: string;
   tools?: SandboxPolicy;
   timeoutMs?: number;
+  /** #1506: absolute deadline owned by the scheduled caller. */
+  deadlineAt?: number;
   callbackPeer?: string; // #675: peer to notify on completion
   sourcePeer?: string;   // #949: which peer delegated this task
   chatId?: string;      // #1008: delivery target chat (fallback: masterChatId)
@@ -217,6 +219,8 @@ export interface SpinSessionSpec {
   // Execution
   agent?: import("./subagent-runtime.js").AgentName; // override the profile's agent
   timeoutMs?: number;
+  /** #1506: absolute deadline owned by the scheduled caller. */
+  deadlineAt?: number;
   maxToolRounds?: number; // #1283: per-task circuit breaker override
 
   // Delivery (continuation / pipeline)

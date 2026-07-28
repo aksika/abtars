@@ -16,6 +16,8 @@ export interface ExecutionControl {
   readonly terminalOutcome?: TerminalOutcome;
 
   bind(cancel: (reason: CancelReason) => Promise<void> | void): boolean;
+  /** Attach the card once Spin has allocated it, before execution can settle. */
+  setCardId(cardId: number): void;
   requestCancel(reason: CancelReason): Promise<"cancelled" | "already_terminal" | "not_found">;
   /** #1506: Non-blocking cancellation signal — sets state and fires provider interrupt
    *  without awaiting acknowledgement or cleanup. Use for deadlines and forced terminates. */
@@ -32,7 +34,7 @@ class ExecutionControlImpl implements ExecutionControl {
   readonly executionRef: string;
   readonly attemptId?: string;
   readonly generation?: number;
-  readonly cardId?: number;
+  private _cardId?: number;
   private _cancelled = false;
   private _cancelReason?: CancelReason;
   private _cancelFn: ((reason: CancelReason) => Promise<void> | void) | null = null;
@@ -42,15 +44,20 @@ class ExecutionControlImpl implements ExecutionControl {
 
   constructor(executionRef: string, opts?: { cardId?: number; attemptId?: string; generation?: number }) {
     this.executionRef = executionRef;
-    this.cardId = opts?.cardId;
+    this._cardId = opts?.cardId;
     this.attemptId = opts?.attemptId;
     this.generation = opts?.generation;
   }
 
   get cancelled(): boolean { return this._cancelled; }
   get cancelReason(): CancelReason | undefined { return this._cancelReason; }
+  get cardId(): number | undefined { return this._cardId; }
   get terminal(): boolean { return this._terminal; }
   get terminalOutcome(): TerminalOutcome | undefined { return this._terminalOutcome; }
+
+  setCardId(cardId: number): void {
+    if (this._cardId === undefined) this._cardId = cardId;
+  }
 
   bind(cancel: (reason: CancelReason) => Promise<void> | void): boolean {
     if (this._bound) return false;

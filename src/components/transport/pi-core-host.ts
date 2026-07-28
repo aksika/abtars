@@ -157,7 +157,7 @@ export class PiCoreExecutionHost {
     try {
       this.agent = new loaded.module.Agent(agentOptions);
     } catch (err) {
-      this.settle();
+      this.beginSettle("agent_construct_failure");
       throw err;
     }
 
@@ -287,6 +287,7 @@ export class PiCoreExecutionHost {
   private beginSettle(reason: string): void {
     if (this.state === "settling" || this.state === "settled") return;
     this.state = "settling";
+    this.terminalResolve(reason);
     logDebug(TAG, `Settling host for execution ${this.executionId}: ${reason}`);
     this.settle(reason);
   }
@@ -334,10 +335,13 @@ export class PiCoreExecutionHost {
   private async startBoundedCleanup(): Promise<"complete" | "timed_out"> {
     if (!this.agent) return "complete";
     const timeoutMs = 5000;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     try {
       const result = await Promise.race([
         this.agent.waitForIdle().then(() => "complete" as const),
-        new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), timeoutMs)),
+        new Promise<"timed_out">((resolve) => {
+          timeoutHandle = setTimeout(() => resolve("timed_out"), timeoutMs);
+        }),
       ]);
       if (result === "timed_out") {
         logWarn(TAG, `Cleanup timed out for execution ${this.executionId} gen=${this._generation} after ${timeoutMs}ms`);
@@ -348,6 +352,8 @@ export class PiCoreExecutionHost {
     } catch (err) {
       logDebug(TAG, `Cleanup error for execution ${this.executionId}: ${err instanceof Error ? err.message : String(err)}`);
       return "complete";
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     }
   }
 
@@ -358,7 +364,10 @@ export class PiCoreExecutionHost {
   }
 
   private async handleEvent(event: AgentEvent, _signal?: AbortSignal): Promise<void> {
-    if (this.settled) return;
+    if (this.settled) {
+      if (event.type === "agent_end") this.handleAgentEnd(event);
+      return;
+    }
 
     if (event.type === "message_end") {
       this.handleMessageEnd(event.message);
