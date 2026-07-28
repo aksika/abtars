@@ -111,6 +111,13 @@ export function checkCron(): ReservedTask[] {
   const dueTasks: ReservedTask[] = [];
 
   for (const entry of entries) {
+    const preState = readState(entry.id);
+    if (preState?.activeRun && preState.activeRun.deadlineAt < Date.now()) {
+      updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined, activeRun: undefined });
+      appendRun({ taskId: entry.id, kind: entry.kind, trigger: preState.activeRun.trigger, startedAt: preState.activeRun.reservedAt, finishedAt: Date.now(), outcome: "cancelled", detail: "deadline expired", groupId: preState.activeRun.groupId, runId: preState.activeRun.runId });
+      logWarn(TAG, `Stale active run cleared task=${entry.id} run=${preState.activeRun.runId} deadline=${new Date(preState.activeRun.deadlineAt).toISOString()}`);
+    }
+
     const decision = decideSchedule(entry);
     if (decision.run) {
       const now = Date.now();
