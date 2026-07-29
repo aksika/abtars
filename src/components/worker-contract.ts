@@ -54,10 +54,29 @@ export interface ContractProvenance {
   readonly created_at: string;
 }
 
+export interface RetryContext {
+  readonly directive_id: string;
+  readonly mode: string;
+  readonly instruction: string;
+  readonly do_not_repeat: readonly string[];
+  readonly prior_evidence_ids: readonly string[];
+  readonly failed_criterion_ids: readonly string[];
+  readonly unresolved_risks: readonly string[];
+}
+
+export interface WorkerContractRevisionV1 {
+  readonly revision: number;
+  readonly root_contract_id: string;
+  readonly parent_contract_id?: string;
+  readonly source_attempt_id?: string;
+  readonly retry_context?: RetryContext;
+}
+
 export interface WorkerAcceptanceContractV1 {
   readonly schema_version: 1;
   readonly id: string;
   readonly digest: string;
+  readonly revision_meta?: WorkerContractRevisionV1;
   readonly goal: string;
   readonly criteria: readonly ContractCriterion[];
   readonly expected_artifacts: readonly ExpectedArtifact[];
@@ -67,6 +86,7 @@ export interface WorkerAcceptanceContractV1 {
   readonly limits: {
     readonly max_duration_ms?: number;
     readonly max_tokens?: number;
+    readonly max_cost?: number;
   };
   readonly provenance: ContractProvenance;
 }
@@ -123,6 +143,7 @@ export interface WorkerResultEnvelopeV1 {
     readonly input_tokens?: number;
     readonly output_tokens?: number;
     readonly total_tokens?: number;
+    readonly cost?: number;
   };
   readonly error?: {
     readonly code: string;

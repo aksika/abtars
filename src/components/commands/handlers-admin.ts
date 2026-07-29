@@ -240,6 +240,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/whoami — Your user info & clearance",
     "/effort (alias /thinking) — Reasoning effort (off/low/medium/high/xhigh) + show/hide thinking",
     "/kanban — Kanban board",
+    "/tribe — Peer status (Orc + enrolled peers)",
   ];
   if (ctx.platform === "telegram") {
     cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");
@@ -249,27 +250,66 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
   return true;
 }
 
-export async function handlePeers(_text: string, ctx: CommandContext): Promise<boolean> {
-  const { loadPeerConfig } = await import("../peer-config.js");
-  const config = loadPeerConfig();
-  const peerNames = Object.keys(config.peers);
-  if (peerNames.length === 0) {
-    await ctx.reply("No peers configured.");
-    return true;
+export async function handleTribe(_text: string, ctx: CommandContext): Promise<boolean> {
+  const lines: string[] = [];
+
+  // Orc (internal orchestrator)
+  try {
+    const { spin } = await import("../spin.js");
+    const sessions = spin.listAllSessions();
+    const orcSessions = sessions.filter(s => s.id?.includes("_O_"));
+    const oc = orcSessions.length > 0 ? orcSessions[0] : null;
+    if (oc) {
+      const since = oc.lastActiveAt ? formatRelTime(Date.now() - oc.lastActiveAt) : "?";
+      lines.push(`Orc: running (${since})`);
+    } else {
+      lines.push("Orc: idle");
+    }
+  } catch {
+    lines.push("Orc: unknown");
   }
-  const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
-  const broker = getPeerWsBroker();
-  const connected = broker.getConnectedPeers();
-  const lines = peerNames.map(n => {
-    const entry = config.peers[n];
-    const isConnected = connected.includes(n);
-    const icon = isConnected ? "🟢" : "🔴";
-    const host = entry?.host ?? "?";
-    const port = entry?.port ?? 0;
-    return `${icon} **${n}** — ${host}:${port}${isConnected ? "" : " (disconnected)"}`;
-  });
-  const alive = connected.length;
-  lines.push(`\n${peerNames.length} peer(s) (${alive} connected, ${peerNames.length - alive} disconnected)`);
+
+  // Enrolled external peers
+  const { getPeerTransport } = await import("../peer-transport/index.js");
+  const transport = getPeerTransport();
+  const statuses = transport.getPeerStatuses();
+
+  if (statuses.length === 0) {
+    lines.push("", "Peers: (none configured)");
+  } else {
+    lines.push("");
+    for (const p of statuses) {
+      const stateLabel = p.hasRoute
+        ? `connected (${p.routeDirection})`
+        : p.state === "waiting"
+          ? `waiting (${
+            p.nextRetryAt ? formatRelTime(p.nextRetryAt - Date.now()) : "?"
+          })`
+          : p.state === "connecting"
+            ? "connecting"
+            : "disconnected";
+      const age = p.connectedAt ? formatRelTime(Date.now() - p.connectedAt) : "-";
+      const activity = p.lastActivityAt ? formatRelTime(Date.now() - p.lastActivityAt) : "unknown";
+      const error = p.lastError
+        ? ` error: ${p.lastError.slice(0, 60)}${p.lastErrorAt ? ` (${formatRelTime(Date.now() - p.lastErrorAt)} ago)` : ""}`
+        : "";
+      lines.push(
+        `${p.name} -- ${p.endpoint} (${p.transport})`,
+        `  state: ${stateLabel} | connected: ${age} | activity: ${activity}${error}`,
+      );
+    }
+    lines.push("", `${statuses.length} peer(s) configured`);
+  }
+
   await ctx.reply(lines.join("\n"));
   return true;
+}
+
+function formatRelTime(ms: number): string {
+  if (ms < 0) return "now";
+  const abs = Math.abs(ms);
+  if (abs < 60_000) return `${Math.round(abs / 1000)}s`;
+  if (abs < 3_600_000) return `${Math.round(abs / 60_000)}m`;
+  if (abs < 86_400_000) return `${Math.round(abs / 3_600_000)}h`;
+  return `${Math.round(abs / 86_400_000)}d`;
 }

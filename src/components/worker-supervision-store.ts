@@ -17,6 +17,10 @@ export type ExecutorKind = "agent" | "pi" | "remote";
 export interface ContractRow {
   id: string;
   card_id: number;
+  revision: number;
+  root_contract_id: string;
+  parent_contract_id: string | null;
+  source_attempt_id: string | null;
   schema_version: number;
   contract_json: string;
   contract_digest: string;
@@ -39,6 +43,21 @@ export interface AttemptRow {
   settled_at: string | null;
   hard_deadline_at: string | null;
   cancel_reason: string | null;
+  source_attempt_id: string | null;
+  retry_directive_id: string | null;
+  earliest_claim_at: string | null;
+}
+
+export interface ReservationRow {
+  source_attempt_id: string;
+  target_attempt_id: string;
+  reserved_attempts: number;
+  reserved_tokens: number;
+  reserved_cost: number;
+  reserved_switches: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ResultRow {
@@ -69,14 +88,34 @@ export class WorkerSupervisionStore {
 
   migrate(): void {
     const db = this.db;
+
+    // Migration: rename old single-contract-per-card table before creating new revisioned one.
+    const migrationDone = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='worker_contracts_old'`).get();
+    if (!migrationDone) {
+      const oldSchema = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_contracts'`).get() as { sql: string } | undefined;
+      const needsMigration = oldSchema && oldSchema.sql.includes("card_id INTEGER UNIQUE");
+      if (needsMigration) {
+        db.exec(`ALTER TABLE worker_contracts RENAME TO worker_contracts_old`);
+        // Drop the old UNIQUE index that conflicts with the new table
+        try { db.exec(`DROP INDEX IF EXISTS sqlite_autoindex_worker_contracts_1`); } catch {}
+      }
+    }
+
+    // Now create (or recreate) the revisioned table safely
     db.exec(`
       CREATE TABLE IF NOT EXISTS worker_contracts (
         id TEXT PRIMARY KEY,
-        card_id INTEGER UNIQUE NOT NULL,
+        card_id INTEGER NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        root_contract_id TEXT NOT NULL,
+        parent_contract_id TEXT,
+        source_attempt_id TEXT,
         schema_version INTEGER NOT NULL,
         contract_json TEXT NOT NULL,
         contract_digest TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        UNIQUE(card_id, revision),
+        UNIQUE(card_id, contract_digest)
       );
 
       CREATE TABLE IF NOT EXISTS worker_attempts (
@@ -95,6 +134,9 @@ export class WorkerSupervisionStore {
         settled_at TEXT,
         hard_deadline_at TEXT,
         cancel_reason TEXT,
+        source_attempt_id TEXT,
+        retry_directive_id TEXT,
+        earliest_claim_at TEXT,
         UNIQUE(card_id, ordinal)
       );
 
@@ -104,13 +146,54 @@ export class WorkerSupervisionStore {
         envelope_digest TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS retry_budget_reservations (
+        source_attempt_id TEXT PRIMARY KEY,
+        target_attempt_id TEXT UNIQUE NOT NULL,
+        reserved_attempts INTEGER NOT NULL CHECK(reserved_attempts = 1),
+        reserved_tokens INTEGER NOT NULL,
+        reserved_cost REAL NOT NULL,
+        reserved_switches INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('active','claimed','released','consumed')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
+
+    // Migrate old rows to revision 1 if worker_contracts_old exists and has data
+    try {
+      const oldExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='worker_contracts_old'`).get();
+      if (!oldExists) throw new Error("no old table");
+      const oldRows = db.prepare(`SELECT count(*) AS cnt FROM worker_contracts_old`).get() as { cnt: number };
+      if (oldRows && oldRows.cnt > 0) {
+        db.transaction(() => {
+          const rows = db.prepare(`SELECT * FROM worker_contracts_old`).all() as Array<{
+            id: string; card_id: number; schema_version: number;
+            contract_json: string; contract_digest: string; created_at: string;
+          }>;
+          for (const row of rows) {
+            const existing = db.prepare(`SELECT 1 FROM worker_contracts WHERE id = ?`).get(row.id);
+            if (existing) continue;
+            db.prepare(`
+              INSERT INTO worker_contracts (id, card_id, revision, root_contract_id, parent_contract_id, source_attempt_id, schema_version, contract_json, contract_digest, created_at)
+              VALUES (?, ?, 1, ?, NULL, NULL, ?, ?, ?, ?)
+            `).run(row.id, row.card_id, row.id, row.schema_version, row.contract_json, row.contract_digest, row.created_at);
+          }
+          const newCount = (db.prepare(`SELECT count(*) AS cnt FROM worker_contracts`).get() as { cnt: number }).cnt;
+          if (newCount !== oldRows.cnt) throw new Error(`migration count mismatch: old=${oldRows.cnt} new=${newCount}`);
+        });
+      }
+    } catch { /* worker_contracts_old does not exist or is empty — skip migration */ }
+
     // Safe migration: add columns if they don't exist
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN generation INTEGER DEFAULT 1`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'pending'`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN claimed_at TEXT`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN hard_deadline_at TEXT`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN cancel_reason TEXT`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN source_attempt_id TEXT`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN retry_directive_id TEXT`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN earliest_claim_at TEXT`); } catch {}
     // Backfill lifecycle for rows created before the #1364 state machine.
     db.exec(`
       UPDATE worker_attempts
@@ -127,14 +210,21 @@ export class WorkerSupervisionStore {
   }
 
   insertContract(contract: WorkerAcceptanceContractV1, cardId: number): void {
+    const rev = contract.revision_meta;
+    const revision = rev?.revision ?? 1;
+    const rootContractId = rev?.root_contract_id ?? contract.id;
     this.db.prepare(`
-      INSERT INTO worker_contracts (id, card_id, schema_version, contract_json, contract_digest, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(contract.id, cardId, contract.schema_version, JSON.stringify(contract), contract.digest, new Date().toISOString());
+      INSERT INTO worker_contracts (id, card_id, revision, root_contract_id, parent_contract_id, source_attempt_id, schema_version, contract_json, contract_digest, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(contract.id, cardId, revision, rootContractId, rev?.parent_contract_id ?? null, rev?.source_attempt_id ?? null, contract.schema_version, JSON.stringify(contract), contract.digest, new Date().toISOString());
   }
 
   getContract(contractId: string): ContractRow | undefined {
     return this.db.prepare(`SELECT * FROM worker_contracts WHERE id = ?`).get(contractId) as ContractRow | undefined;
+  }
+
+  getLatestContractForCard(cardId: number): ContractRow | undefined {
+    return this.db.prepare(`SELECT * FROM worker_contracts WHERE card_id = ? ORDER BY revision DESC LIMIT 1`).get(cardId) as ContractRow | undefined;
   }
 
   getContractByCardId(cardId: number): ContractRow | undefined {
@@ -142,8 +232,13 @@ export class WorkerSupervisionStore {
   }
 
   contractExists(cardId: number): boolean {
-    const row = this.db.prepare(`SELECT 1 FROM worker_contracts WHERE card_id = ?`).get(cardId);
+    const row = this.db.prepare(`SELECT 1 FROM worker_contracts WHERE card_id = ? LIMIT 1`).get(cardId);
     return row !== undefined;
+  }
+
+  getNextRevision(cardId: number): number {
+    const row = this.db.prepare(`SELECT COALESCE(MAX(revision), 0) + 1 AS next_rev FROM worker_contracts WHERE card_id = ?`).get(cardId) as { next_rev: number } | undefined;
+    return row?.next_rev ?? 1;
   }
 
   insertAttempt(attempt: {
@@ -350,6 +445,44 @@ export class WorkerSupervisionStore {
   cardHasSettledAttempts(cardId: number): boolean {
     const row = this.db.prepare(`SELECT 1 FROM worker_attempts WHERE card_id = ? AND status IN ('settled','failed') LIMIT 1`).get(cardId);
     return row !== undefined;
+  }
+
+  // ── Retry budget reservations ───────────────────────────────────────────
+
+  insertReservation(reservation: {
+    source_attempt_id: string;
+    target_attempt_id: string;
+    reserved_tokens: number;
+    reserved_cost: number;
+    reserved_switches: number;
+  }): boolean {
+    const now = new Date().toISOString();
+    try {
+      this.db.prepare(`
+        INSERT INTO retry_budget_reservations (source_attempt_id, target_attempt_id, reserved_attempts, reserved_tokens, reserved_cost, reserved_switches, status, created_at, updated_at)
+        VALUES (?, ?, 1, ?, ?, ?, 'active', ?, ?)
+      `).run(reservation.source_attempt_id, reservation.target_attempt_id, reservation.reserved_tokens, reservation.reserved_cost, reservation.reserved_switches, now, now);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  getReservation(sourceAttemptId: string): ReservationRow | undefined {
+    return this.db.prepare(`SELECT * FROM retry_budget_reservations WHERE source_attempt_id = ?`).get(sourceAttemptId) as ReservationRow | undefined;
+  }
+
+  updateReservationStatus(sourceAttemptId: string, status: string): boolean {
+    const result = this.db.prepare(`UPDATE retry_budget_reservations SET status = ?, updated_at = ? WHERE source_attempt_id = ?`).run(status, new Date().toISOString(), sourceAttemptId);
+    return result.changes > 0;
+  }
+
+  getActiveReservationsForCard(cardId: number): ReservationRow[] {
+    const attemptIds = this.db.prepare(`SELECT id FROM worker_attempts WHERE card_id = ?`).all(cardId) as Array<{ id: string }>;
+    if (attemptIds.length === 0) return [];
+    const ids = attemptIds.map(a => a.id);
+    const placeholders = ids.map(() => "?").join(",");
+    return this.db.prepare(`SELECT * FROM retry_budget_reservations WHERE source_attempt_id IN (${placeholders}) AND status IN ('active','claimed')`).all(...ids) as unknown as ReservationRow[];
   }
 
   private computeEnvelopeDigest(envelopeJson: string): string {

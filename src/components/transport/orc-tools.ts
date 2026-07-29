@@ -288,7 +288,20 @@ const reviewWorkerFailureTool: ToolDefinition = {
     if (action !== "retry" && action !== "stop" && action !== "needs_input") return "[err] action must be retry, stop, or needs_input";
     try {
       const { RetryService } = await import("../retry/retry-service.js");
-      const service = new RetryService();
+      const { LocalExecutorCatalog } = await import("../retry/local-executor-catalog.js");
+      const catalog = new LocalExecutorCatalog({
+        spinProvider: {
+          kind: "agent" as const,
+          id: "spin",
+          getCapabilities: () => ["*"],
+          isHealthy: () => true,
+          currentLoad: () => 0,
+          availableCapacity: () => 10,
+          supportsWorkspace: () => true,
+          respectsSandbox: () => true,
+        },
+      });
+      const service = new RetryService({ executorCatalog: catalog });
       const packet = service.getReviewPacket(attemptId, projectCardId);
       if ("error" in packet) return `[err] ${packet.error}`;
 
@@ -301,21 +314,17 @@ const reviewWorkerFailureTool: ToolDefinition = {
         rationale: args.rationale,
       };
 
+      const result = service.reviewFailure({ attemptId, cardId: projectCardId, response });
+
       if (action === "retry") {
-        const result = service.buildOrcDirective(attemptId, projectCardId, response);
-        if ("error" in result) return `[err] ${result.error}`;
-        if (result.directive) {
-          return `✓ Retry directive created for attempt ${attemptId}. Next attempt ordinal: ${result.directive.target_ordinal}. Mode: ${result.directive.mode}. Fingerprint: ${result.directive.semantic_change_fingerprint.slice(0, 16)}...`;
+        if (result.kind === "created") {
+          return `✓ Retry directive created for attempt ${attemptId}. Target attempt: ${result.targetAttemptId}.`;
         }
-        return `[err] No directive created`;
+        return `[err] ${result.kind}: ${"message" in result ? result.message : "retry allocation failed"}`;
       } else if (action === "stop") {
-        const result = service.buildOrcDirective(attemptId, projectCardId, response);
-        if ("error" in result) return `${result.error}`;
-        return `✓ Stop recorded for attempt ${attemptId}. Worker will not be retried.`;
+        return result.kind === "error" ? `✓ Stop recorded for attempt ${attemptId}.` : `[err] stop failed: ${result.kind}`;
       } else {
-        const result = service.buildOrcDirective(attemptId, projectCardId, response);
-        if ("error" in result) return `${result.error}`;
-        return `✓ Needs-input recorded for attempt ${attemptId}. Fresh operator input required before retry.`;
+        return result.kind === "error" ? `✓ Needs-input recorded for attempt ${attemptId}.` : `[err] needs_input failed: ${result.kind}`;
       }
     } catch (err) {
       logInfo(TAG, `review_worker_failure error: ${err}`);

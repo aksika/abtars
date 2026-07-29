@@ -6,6 +6,7 @@ import { PeerNonceStore } from "./peer-nonce-store.js";
 import { loadPeerConfig } from "../peer-config.js";
 import { WsOutboxStore } from "./ws-outbox-store.js";
 import { join } from "node:path";
+import type { PeerRouteInfo } from "./interface.js";
 import { abtarsHome } from "../../paths.js";
 
 // ── Exported bounds (#1390) ─────────────────────────────────────────────────
@@ -86,6 +87,7 @@ export class PeerWsBroker {
   private routeListeners: RouteListener[] = [];
   private nonceStore: PeerNonceStore | null = null;
   private nextGen = 1; // global monotonic — survives peer state cleanup
+  private peerActivity = new Map<string, number>(); // peer → lastActivityAt
 
   registerRequestHandler(handler: PeerRequestHandler): void {
     this.requestHandler = handler;
@@ -156,6 +158,8 @@ export class PeerWsBroker {
       this.detachSocket(peer, direction, generation);
     });
 
+    this.peerActivity.set(peer, Date.now());
+
     // #1459: pump pending outbox entries on every attach — resumes pending
     // entries retained across a zero-socket interval.
     this.pump(peer);
@@ -195,6 +199,21 @@ export class PeerWsBroker {
     const state = this.peers.get(peer);
     if (!state) return false;
     return state.sockets.some(s => s.socket.readyState === WebSocket.OPEN);
+  }
+
+  /** Read-only route info for the given peer. Returns null if peer has never been seen. */
+  getPeerRouteInfo(peer: string): PeerRouteInfo | null {
+    const state = this.peers.get(peer);
+    if (!state) return this.peerActivity.has(peer)
+      ? { hasRoute: false, direction: "none", connectedAt: null, lastActivityAt: this.peerActivity.get(peer)! }
+      : null;
+    const openSockets = state.sockets.filter(s => s.socket.readyState === WebSocket.OPEN);
+    if (openSockets.length === 0) {
+      return { hasRoute: false, direction: "none", connectedAt: null, lastActivityAt: this.peerActivity.get(peer) ?? null };
+    }
+    const direction = openSockets.some(s => s.direction === "accepted") ? "accepted" : "outbound";
+    const connectedAt = Math.min(...openSockets.map(s => s.connectedAt));
+    return { hasRoute: true, direction, connectedAt, lastActivityAt: this.peerActivity.get(peer) ?? null };
   }
 
   async sendRequest<T>(peer: string, method: string, payload: unknown): Promise<T> {
@@ -376,6 +395,7 @@ export class PeerWsBroker {
           }
           const claim = this.nonceStore.claim(peer, auth.nonce);
           if (!claim.ok) return;
+          this.peerActivity.set(peer, Date.now());
           try {
             this.pushHandler?.(peer, msg.method, JSON.parse(msg.body));
           } catch { /* malformed lifecycle payload */ }
@@ -495,6 +515,8 @@ export class PeerWsBroker {
       logWarn("peer-broker", `No request handler registered for ${peer}:${msg.method}`);
       return;
     }
+
+    this.peerActivity.set(peer, Date.now());
 
     // 8. Dispatch to handler
     try {

@@ -1,0 +1,648 @@
+{
+  "runId": "e2e-1785196889001-cea46390",
+  "timestamp": "2026-07-28T00:01:31.119Z",
+  "summary": {
+    "total": 48,
+    "passed": 48,
+    "failed": 0,
+    "blocked": 0,
+    "notRun": 0
+  },
+  "milestones": [
+    {
+      "id": "M01",
+      "name": "Build identity is present",
+      "status": "PASS",
+      "scenario": "deployment",
+      "expected": "build-info.json with hash+date",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M02",
+      "name": "checkCron runs without throwing",
+      "status": "PASS",
+      "scenario": "scheduler",
+      "expected": "no unhandled error",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M03",
+      "name": "checkCron returns reserved task for due entry",
+      "status": "PASS",
+      "scenario": "scheduler",
+      "expected": "reserved task with runId",
+      "observed": "pass",
+      "durationMs": 25,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M04",
+      "name": "reserveRun creates exclusive reservation",
+      "status": "PASS",
+      "scenario": "scheduler",
+      "expected": "first ok, duplicate rejects",
+      "observed": "pass",
+      "durationMs": 6,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M05",
+      "name": "settleActiveRun clears reservation",
+      "status": "PASS",
+      "scenario": "scheduler",
+      "expected": "activeRun cleared+state update",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M06",
+      "name": "Structured report contract parses successfully",
+      "status": "PASS",
+      "scenario": "normalize",
+      "expected": "valid contract accepted",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M07",
+      "name": "Invalid contract terminates before model execution",
+      "status": "PASS",
+      "scenario": "normalize",
+      "expected": "missing artifact path rejected",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M08",
+      "name": "Required file missing → preflight fails",
+      "status": "PASS",
+      "scenario": "preflight",
+      "expected": "definition_failed + code",
+      "observed": "pass",
+      "durationMs": 2,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M09",
+      "name": "Missing executable → preflight fails",
+      "status": "PASS",
+      "scenario": "preflight",
+      "expected": "required_executable_missing",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M10",
+      "name": "Task context directory exists",
+      "status": "PASS",
+      "scenario": "runner",
+      "expected": "CONTEXT.md can be stored",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M11",
+      "name": "Execution scope is scoped to task ID",
+      "status": "PASS",
+      "scenario": "runner",
+      "expected": "cwd env WORKSPACE",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M12",
+      "name": "Run identity allocated before execution",
+      "status": "PASS",
+      "scenario": "scheduler",
+      "expected": "runId is non-empty string",
+      "observed": "reservation allocated identity-1785196889232_run before execution",
+      "durationMs": 1,
+      "evidence": [
+        "run=identity-1785196889232_run",
+        "group=identity-1785196889232:group",
+        "attempt=1"
+      ],
+      "correlation": {
+        "taskId": "identity-1785196889232",
+        "runId": "identity-1785196889232_run",
+        "groupId": "identity-1785196889232:group",
+        "attempt": 1
+      }
+    },
+    {
+      "id": "M13",
+      "name": "Execution control can be registered and removed",
+      "status": "PASS",
+      "scenario": "runner",
+      "expected": "registerControl+removeControl",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M14",
+      "name": "Kanban card created and started",
+      "status": "PASS",
+      "scenario": "runner",
+      "expected": "kanbanEnqueue+kanbanRunning",
+      "observed": "pass",
+      "durationMs": 25,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M15",
+      "name": "Pi host can be imported and validates contract",
+      "status": "PASS",
+      "scenario": "execution",
+      "expected": "module loads, contract shape",
+      "observed": "real public Pi Agent constructed, started, cancelled, and settled",
+      "durationMs": 1585,
+      "evidence": [
+        "provider_calls=0",
+        "host_state=settled"
+      ]
+    },
+    {
+      "id": "M16",
+      "name": "Provider/model selection is interface-driven",
+      "status": "PASS",
+      "scenario": "execution",
+      "expected": "SessionProfile lookup works",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M17",
+      "name": "Spin dispatchAwait accepts caller-owned settlement",
+      "status": "PASS",
+      "scenario": "execution",
+      "expected": "settlementOwner param",
+      "observed": "real ScheduledTaskRunner passed caller-owned settlement into provider boundary",
+      "durationMs": 170,
+      "evidence": [
+        "run=settlement-owner-1785196890845_run",
+        "execution_id=settlement-owner-1785196890845_run",
+        "settlement_owner=caller"
+      ],
+      "correlation": {
+        "taskId": "settlement-owner-1785196890845",
+        "runId": "settlement-owner-1785196890845_run",
+        "groupId": "settlement-owner-1785196890845:group",
+        "executionId": "settlement-owner-1785196890845_run"
+      }
+    },
+    {
+      "id": "M18",
+      "name": "Tool registry has expected entries",
+      "status": "PASS",
+      "scenario": "execution",
+      "expected": "tools array non-empty",
+      "observed": "real Pi tool adapter constructed 30 registered tools",
+      "durationMs": 21,
+      "evidence": [
+        "tool_count=30",
+        "execution_mode=sequential"
+      ]
+    },
+    {
+      "id": "M19",
+      "name": "Execution scope provides cwd and env for tools",
+      "status": "PASS",
+      "scenario": "execution",
+      "expected": "scope has WORKSPACE",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M20",
+      "name": "State store tracks consecutive failures",
+      "status": "PASS",
+      "scenario": "execution",
+      "expected": "incrementFailures >0",
+      "observed": "pass",
+      "durationMs": 2,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M21",
+      "name": "Reset failures clears count",
+      "status": "PASS",
+      "scenario": "execution",
+      "expected": "consecutiveFailures = 0",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M22",
+      "name": "Auto-pause triggers at 3 consecutive failures",
+      "status": "PASS",
+      "scenario": "execution",
+      "expected": "autoPaused=true",
+      "observed": "pass",
+      "durationMs": 2,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M23",
+      "name": "Prompt-wide termination via tool-round limit",
+      "status": "PASS",
+      "scenario": "execution",
+      "expected": "maxToolRounds configurable",
+      "observed": "real Pi safety controller stopped at configured prompt-round limit",
+      "durationMs": 2,
+      "evidence": [
+        "rounds=2",
+        "limit=2",
+        "incident=prompt_round_limit"
+      ]
+    },
+    {
+      "id": "M24",
+      "name": "Kanban fail closes card",
+      "status": "PASS",
+      "scenario": "settlement",
+      "expected": "card becomes failed",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M25",
+      "name": "Failed execution writes one history event",
+      "status": "PASS",
+      "scenario": "settlement",
+      "expected": "run recorded in history",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M26",
+      "name": "appendRunOnce deduplicates by runId",
+      "status": "PASS",
+      "scenario": "settlement",
+      "expected": "duplicate returns null",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M27",
+      "name": "Retry scheduled via setRetrying",
+      "status": "PASS",
+      "scenario": "retry",
+      "expected": "retrying flag+retryAt set",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M28",
+      "name": "Prior failure context preserved for retry",
+      "status": "PASS",
+      "scenario": "retry",
+      "expected": "priorFailure stored",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M29",
+      "name": "Retry reaches terminal state",
+      "status": "PASS",
+      "scenario": "retry",
+      "expected": "retrying cleared on success",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M30",
+      "name": "Deadline cancellation via exec control",
+      "status": "PASS",
+      "scenario": "timeout",
+      "expected": "requestCancel deadline",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M31",
+      "name": "History written for cancellation",
+      "status": "PASS",
+      "scenario": "settlement",
+      "expected": "cancelled outcome in history",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M32",
+      "name": "Retry and active fields clear after terminal",
+      "status": "PASS",
+      "scenario": "settlement",
+      "expected": "activeRun+retrying cleared",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M33",
+      "name": "Timestamps coherent after run",
+      "status": "PASS",
+      "scenario": "state",
+      "expected": "lastStartedAt ≤ lastFinishedAt",
+      "observed": "pass",
+      "durationMs": 5,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M34",
+      "name": "reconcileActiveTaskRuns clears stale active runs",
+      "status": "PASS",
+      "scenario": "state",
+      "expected": "past-deadline run cleared",
+      "observed": "pass",
+      "durationMs": 3,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M35",
+      "name": "Rejects nonexistent artifact",
+      "status": "PASS",
+      "scenario": "artifact",
+      "expected": "not found → fail",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M36",
+      "name": "Accepts valid fresh artifact",
+      "status": "PASS",
+      "scenario": "artifact",
+      "expected": "size+heading check pass",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M37",
+      "name": "Rejects artifact with missing required heading",
+      "status": "PASS",
+      "scenario": "artifact",
+      "expected": "heading not found → fail",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M38",
+      "name": "Rejects unchanged stale artifact",
+      "status": "PASS",
+      "scenario": "artifact",
+      "expected": "same size+mtime → fail",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M39",
+      "name": "kanbanComplete marks card done",
+      "status": "PASS",
+      "scenario": "settlement",
+      "expected": "status=done",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M40",
+      "name": "Delivery claim succeeds on done card",
+      "status": "PASS",
+      "scenario": "delivery",
+      "expected": "delivery_attempts incremented",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M41",
+      "name": "Duplicate delivery claim rejected",
+      "status": "PASS",
+      "scenario": "delivery",
+      "expected": "second claim false",
+      "observed": "pass",
+      "durationMs": 0,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M42",
+      "name": "Delivery preserves result_path",
+      "status": "PASS",
+      "scenario": "delivery",
+      "expected": "path survives round-trip",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M43",
+      "name": "removeState clears all state for task",
+      "status": "PASS",
+      "scenario": "cleanup",
+      "expected": "readState returns null",
+      "observed": "pass",
+      "durationMs": 1,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M44",
+      "name": "Task phase changes loggable",
+      "status": "PASS",
+      "scenario": "observability",
+      "expected": "phase strings defined",
+      "observed": "correlated TRACE phase event persisted",
+      "durationMs": 1,
+      "evidence": [
+        "event=task_phase_probe",
+        "task=observability-1785196891066",
+        "run=observability-1785196891066_run",
+        "payload=phase_only"
+      ]
+    },
+    {
+      "id": "M45",
+      "name": "getTaskView has coherent definition+state+history",
+      "status": "PASS",
+      "scenario": "operators",
+      "expected": "definition+state+runs present",
+      "observed": "pass",
+      "durationMs": 2,
+      "evidence": [
+        "assertions passed"
+      ]
+    },
+    {
+      "id": "M46",
+      "name": "daily-ai shaped task normalizes and preflights",
+      "status": "PASS",
+      "scenario": "production",
+      "expected": "fixture with daily-briefing shape",
+      "observed": "daily-ai ran through queue → provider boundary → fresh artifact → settlement → delivery",
+      "durationMs": 19,
+      "evidence": [
+        "run=daily-ai_1785196891074",
+        "group=daily-ai:group:1785196891074",
+        "card=8",
+        "artifact_bytes=3784",
+        "delivery_result=sent",
+        "duplicate_send_count=0"
+      ],
+      "correlation": {
+        "taskId": "daily-ai",
+        "runId": "daily-ai_1785196891074",
+        "groupId": "daily-ai:group:1785196891074",
+        "attempt": 1,
+        "cardId": 8
+      }
+    },
+    {
+      "id": "M47",
+      "name": "weekly-ai shaped task normalizes and preflights",
+      "status": "PASS",
+      "scenario": "production",
+      "expected": "fixture with weekly shape",
+      "observed": "weekly-ai ran through queue → provider boundary → fresh artifact → settlement → delivery",
+      "durationMs": 15,
+      "evidence": [
+        "run=weekly-ai_1785196891090",
+        "group=weekly-ai:group:1785196891090",
+        "card=9",
+        "artifact_bytes=3878",
+        "delivery_result=sent",
+        "duplicate_send_count=0"
+      ],
+      "correlation": {
+        "taskId": "weekly-ai",
+        "runId": "weekly-ai_1785196891090",
+        "groupId": "weekly-ai:group:1785196891090",
+        "attempt": 1,
+        "cardId": 9
+      }
+    },
+    {
+      "id": "M48",
+      "name": "finance-daily shaped task normalizes and preflights",
+      "status": "PASS",
+      "scenario": "production",
+      "expected": "fixture with finance shape",
+      "observed": "finance-daily ran through queue → provider boundary → fresh artifact → settlement → delivery",
+      "durationMs": 16,
+      "evidence": [
+        "run=finance-daily_1785196891105",
+        "group=finance-daily:group:1785196891105",
+        "card=10",
+        "artifact_bytes=4188",
+        "delivery_result=sent",
+        "duplicate_send_count=0"
+      ],
+      "correlation": {
+        "taskId": "finance-daily",
+        "runId": "finance-daily_1785196891105",
+        "groupId": "finance-daily:group:1785196891105",
+        "attempt": 1,
+        "cardId": 10
+      }
+    }
+  ]
+}

@@ -58,7 +58,8 @@ export const FAILURE_CLASSES: readonly FailureClass[] = [
 
 export const CLASSIFIER_VERSION = "v1.0.0";
 
-interface ClassifyInput {
+export interface ClassifyInput {
+  attempt_id: string;
   envelope?: WorkerResultEnvelopeV1;
   leaseSnapshot?: AttemptLeaseSnapshot;
   lifecycle: string;
@@ -304,7 +305,7 @@ export function classify(input: ClassifyInput): ClassifyResult {
     recommendedActions.push("invalid contract — no retry");
   }
 
-  const attemptId = (input as any).attempt_id ?? (input as any).envelope?.attempt?.id ?? "";
+  const attemptId = input.attempt_id;
   const id = makeId(attemptId, inputDigest);
 
   const classification: FailureClassificationV1 = {

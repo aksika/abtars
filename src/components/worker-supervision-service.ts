@@ -4,8 +4,9 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { WorkerSupervisionStore, settleResult, SettlementResult } from "./worker-supervision-store.js";
 import { normalizeContract, createContractId, createAttemptId, validateEnvelope } from "./worker-contract.js";
 import { logWarn } from "./logger.js";
-import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation } from "./worker-contract.js";
+import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation, RetryContext } from "./worker-contract.js";
 import type { TaskDatabase } from "./tasks/kanban-board.js";
+import type { ContractRow } from "./worker-supervision-store.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
 import { validateCriterionMapping } from "./project-acceptance/project-contract.js";
@@ -146,7 +147,19 @@ export class WorkerSupervisionService {
   }
 
   getContractForCard(cardId: number): WorkerAcceptanceContractV1 | undefined {
-    const row = this.store.getContractByCardId(cardId);
+    const row = this.store.getLatestContractForCard(cardId);
+    if (!row) return undefined;
+    return JSON.parse(row.contract_json) as WorkerAcceptanceContractV1;
+  }
+
+  getContract(contractId: string): WorkerAcceptanceContractV1 | undefined {
+    const row = this.store.getContract(contractId);
+    if (!row) return undefined;
+    return JSON.parse(row.contract_json) as WorkerAcceptanceContractV1;
+  }
+
+  getContractByRevision(cardId: number, revision: number): WorkerAcceptanceContractV1 | undefined {
+    const row = this.store.db.prepare(`SELECT * FROM worker_contracts WHERE card_id = ? AND revision = ?`).get(cardId, revision) as ContractRow | undefined;
     if (!row) return undefined;
     return JSON.parse(row.contract_json) as WorkerAcceptanceContractV1;
   }
@@ -155,11 +168,39 @@ export class WorkerSupervisionService {
     return this.store.contractExists(cardId);
   }
 
-  renderContractForPrompt(contract: WorkerAcceptanceContractV1): string {
+  renderContractForPrompt(contract: WorkerAcceptanceContractV1, retryContext?: RetryContext): string {
     const lines: string[] = [];
 
-    lines.push(`<worker-contract id="${contract.id}" digest="${contract.digest}">`);
+    lines.push(`<worker-contract id="${contract.id}" digest="${contract.digest}"${contract.revision_meta ? ` revision="${contract.revision_meta.revision}" root-contract-id="${contract.revision_meta.root_contract_id}"` : ""}>`);
     lines.push(`  <goal>${contract.goal}</goal>`);
+
+    if (retryContext) {
+      lines.push("  <retry-instructions>");
+      lines.push(`    <mode>${retryContext.mode}</mode>`);
+      lines.push(`    <instruction>${retryContext.instruction}</instruction>`);
+      if (retryContext.do_not_repeat.length > 0) {
+        lines.push("    <do-not-repeat>");
+        for (const item of retryContext.do_not_repeat) {
+          lines.push(`      <item>${item}</item>`);
+        }
+        lines.push("    </do-not-repeat>");
+      }
+      if (retryContext.failed_criterion_ids.length > 0) {
+        lines.push("    <failed-criteria>");
+        for (const fc of retryContext.failed_criterion_ids) {
+          lines.push(`      <criterion id="${fc}"/>`);
+        }
+        lines.push("    </failed-criteria>");
+      }
+      if (retryContext.unresolved_risks.length > 0) {
+        lines.push("    <unresolved-risks>");
+        for (const risk of retryContext.unresolved_risks) {
+          lines.push(`      <risk>${risk}</risk>`);
+        }
+        lines.push("    </unresolved-risks>");
+      }
+      lines.push("  </retry-instructions>");
+    }
 
     if (contract.criteria.length > 0) {
       lines.push("  <criteria>");

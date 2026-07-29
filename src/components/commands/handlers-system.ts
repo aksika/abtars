@@ -12,6 +12,15 @@ import type { CommandContext } from "./types.js";
 const TAG = "cmd";
 
 export async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
+  // Trigger manual retry for disconnected peers before diagnostics
+  try {
+    const { getPeerTransport } = await import("../peer-transport/index.js");
+    const retried = getPeerTransport().manualRetryDisconnected();
+    if (retried.length > 0) {
+      logInfo(TAG, `Manual retry triggered for: ${retried.join(", ")}`);
+    }
+  } catch { /* peer transport not available — non-fatal */ }
+
   const arg = _text.replace(/^\/(doctor|health)\s*/i, "").trim().toLowerCase();
 
   if (arg === "fix") {
@@ -38,6 +47,15 @@ export async function handleDoctor(_text: string, ctx: CommandContext): Promise<
 }
 
 export async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean> {
+  // Trigger manual retry for disconnected peers before status collection
+  try {
+    const { getPeerTransport } = await import("../peer-transport/index.js");
+    const retried = getPeerTransport().manualRetryDisconnected();
+    if (retried.length > 0) {
+      logInfo(TAG, `Manual retry triggered for: ${retried.join(", ")}`);
+    }
+  } catch { /* peer transport not available — non-fatal */ }
+
   if (ctx.phaseHealth && ctx.registry) {
     const { getStatus, renderChatStatus } = await import("../status.js");
     const view = await getStatus({

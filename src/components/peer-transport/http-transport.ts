@@ -1,4 +1,4 @@
-import type { PeerTransport, PeerCard, PeerMessage } from "./interface.js";
+import type { PeerTransport, PeerCard, PeerMessage, PeerStatusEntry } from "./interface.js";
 import type { PeerHelpRequestV1, PeerHelpResponseV1, PeerHelpStatusRequestV1, PeerHelpStatusV1, PeerHelpWithdrawV1 } from "../peer-help/contract.js";
 import type { RemotePiEventsListRequestV1, RemotePiEventsListResponseV1, RemotePiEventsAckRequestV1, RemotePiEventsAckResponseV1, RemotePiControlRequestV1, RemotePiControlResponseV1 } from "./remote-pi-types.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
@@ -36,6 +36,15 @@ export class HttpTransport implements PeerTransport {
     this.routeUnsubscribe = broker.subscribeRoutes((event) => {
       if (event.type === "available") {
         this.onRouteAvailable(event.peer);
+        this.wsClients.get(event.peer)?.cancelRetry();
+      } else if (event.type === "unavailable") {
+        const client = this.wsClients.get(event.peer);
+        if (client) {
+          logInfo(TAG, `Route lost for ${event.peer} — resuming recovery`);
+          if (client.currentState === "idle" && !client.connected) {
+            client.requestConnect({ reason: "startup" });
+          }
+        }
       }
     });
 
@@ -137,6 +146,44 @@ export class HttpTransport implements PeerTransport {
 
   hasWsConnection(peer: string): boolean {
     return this.wsClients.get(peer)?.connected ?? false;
+  }
+
+  /**
+   * Force retry for every configured WSS peer that has no active route.
+   * Returns the list of peers that were triggered for retry.
+   */
+  manualRetryDisconnected(): string[] {
+    const retried: string[] = [];
+    for (const [name, client] of this.wsClients) {
+      if (client.forceRetry()) retried.push(name);
+    }
+    return retried;
+  }
+
+  /** Aggregate peer status for the /tribe command. Combines broker route info with client state. */
+  getPeerStatuses(): PeerStatusEntry[] {
+    const config = loadPeerConfig();
+    const broker = getPeerWsBroker();
+    const result: PeerStatusEntry[] = [];
+    for (const [name, entry] of Object.entries(config.peers)) {
+      const isWs = entry.transport === "ws-outbound";
+      const client = isWs ? this.wsClients.get(name) : null;
+      const routeInfo = broker.getPeerRouteInfo(name);
+      result.push({
+        name,
+        endpoint: `${entry.host}:${entry.port}`,
+        transport: entry.transport ?? "http",
+        state: isWs ? (client?.currentState ?? "idle") : "configured",
+        hasRoute: routeInfo?.hasRoute ?? false,
+        routeDirection: routeInfo?.direction ?? "none",
+        connectedAt: routeInfo?.connectedAt ?? null,
+        lastActivityAt: routeInfo?.lastActivityAt ?? null,
+        lastError: client?.lastError ?? null,
+        lastErrorAt: client?.lastErrorAt ?? null,
+        nextRetryAt: client?.nextRetryAt ?? null,
+      });
+    }
+    return result;
   }
 
   broadcastInventory(): void {

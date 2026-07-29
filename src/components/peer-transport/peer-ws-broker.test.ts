@@ -1002,4 +1002,105 @@ describe("PeerWsBroker", () => {
     s1.close();
     vi.useRealTimers();
   }, 10_000);
+
+  it("getPeerRouteInfo returns null for unknown peer", async () => {
+    const broker = await makeBroker();
+    expect(broker.getPeerRouteInfo("nonexistent")).toBeNull();
+  });
+
+  it("getPeerRouteInfo returns route info for connected peer", async () => {
+    const broker = await makeBroker();
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+
+    const info = broker.getPeerRouteInfo("kp");
+    expect(info).not.toBeNull();
+    expect(info!.hasRoute).toBe(true);
+    expect(info!.direction).toBe("outbound");
+    expect(info!.connectedAt).toBeGreaterThan(0);
+    expect(info!.lastActivityAt).toBeGreaterThan(0);
+
+    server.close();
+    client.close();
+  });
+
+  it("getPeerRouteInfo shows no route after socket detach", async () => {
+    const broker = await makeBroker();
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+
+    client.close();
+    server.close();
+    await new Promise(r => setTimeout(r, 200));
+
+    const info = broker.getPeerRouteInfo("kp");
+    expect(info).not.toBeNull();
+    expect(info!.hasRoute).toBe(false);
+    expect(info!.direction).toBe("none");
+    expect(info!.connectedAt).toBeNull();
+  });
+
+  it("getPeerRouteInfo reports accepted direction when socket is accepted", async () => {
+    const broker = await makeBroker();
+    const { server, client, serverConn } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "accepted", socket: serverConn });
+
+    const info = broker.getPeerRouteInfo("kp");
+    expect(info!.hasRoute).toBe(true);
+    expect(info!.direction).toBe("accepted");
+
+    server.close();
+    client.close();
+  });
+
+  it("peerActivity is set on attachSocket and persists after last socket closes", async () => {
+    const broker = await makeBroker();
+    const { server, client } = await connectedPair();
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+    const activityAfterAttach = broker.getPeerRouteInfo("kp")!.lastActivityAt;
+
+    client.close();
+    server.close();
+    await new Promise(r => setTimeout(r, 200));
+
+    const info = broker.getPeerRouteInfo("kp");
+    expect(info).not.toBeNull();
+    expect(info!.lastActivityAt).toBe(activityAfterAttach);
+  });
+
+  it("peerActivity advances on authenticated lifecycle push", async () => {
+    const broker = await makeBroker();
+    const { server, client } = await connectedPair();
+
+    broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
+
+    const beforeActivity = broker.getPeerRouteInfo("kp")!.lastActivityAt!;
+
+    const { signWsRequest } = await import("./peer-auth.js");
+    const body = JSON.stringify({ event: "test" });
+    const auth = signWsRequest(
+      "kp",
+      "push_test_id",
+      "pi.lifecycle.v1",
+      "/pi.lifecycle.v1",
+      body,
+      selfSigningKey,
+    );
+    const frame = {
+      type: "push",
+      version: 1,
+      method: "pi.lifecycle.v1",
+      id: "push_test_id",
+      body,
+      auth: { peerId: "kp", ...auth },
+    };
+    client.emit("message", Buffer.from(JSON.stringify(frame)));
+    await new Promise(r => setTimeout(r, 500));
+
+    const afterActivity = broker.getPeerRouteInfo("kp")!.lastActivityAt!;
+    expect(afterActivity).toBeGreaterThan(beforeActivity);
+
+    server.close();
+    client.close();
+  });
 });

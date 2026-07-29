@@ -10,7 +10,7 @@
 import { nerve } from "./nerve.js";
 import { spin } from "./spin.js";
 import {
-  kanbanFail, kanbanUpdate,
+  kanbanFail,
   kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds,
   isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
@@ -474,11 +474,15 @@ async function reconcileChildCard(card: KanbanCard): Promise<void> {
   if (card.status === "queued") {
     if (!isUnblocked(card)) return;
     if (latestAttempt && latestAttempt.lifecycle === "pending") {
-      logInfo(TAG, `Claiming supervised card ${card.id}`);
-      const contract = svc.getContractForCard(card.id);
-      if (contract) await startSupervisedWorker(card, latestAttempt, contract);
+      // #1365: Retry successor attempts have source_attempt_id / earliest_claim_at
+      if (latestAttempt.source_attempt_id) {
+        handleScheduledRetryClaim(card, latestAttempt);
+      } else {
+        logInfo(TAG, `Claiming supervised card ${card.id}`);
+        const contract = svc.getContractForCard(card.id);
+        if (contract) await startSupervisedWorker(card, latestAttempt, contract);
+      }
     }
-    // Fail closed: no pending attempt → leave card unchanged for supervision service recovery
     return;
   }
 
@@ -598,7 +602,6 @@ function evaluateLease(card: KanbanCard): void {
 }
 
 function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): void {
-  // Only retry failed/cancelled/timed_out lifecycles
   if (lifecycle !== "failed" && lifecycle !== "cancelled" && lifecycle !== "timed_out") return;
 
   try {
@@ -609,10 +612,9 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
       return;
     }
 
-    const { RetryService } = require("./retry/retry-service.js") as typeof import("./retry/retry-service.js");
-    const retryService = new RetryService();
+    const retryService = buildRetryService();
 
-    const result = retryService.handleTerminalAttempt(latestAttempt.id, card.id);
+    const result = retryService.reduceTerminalAttempt(latestAttempt.id, card.id);
     if ("error" in result) {
       logWarn(TAG, `retry classification failed for ${card.id}: ${result.error} — leaving card failed for Orc review`);
       return;
@@ -622,21 +624,22 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
 
     switch (decision.disposition) {
       case "automatic_retry": {
-        const directiveResult = retryService.buildAutomaticDirective(
-          latestAttempt.id, card.id, classification, decision,
-        );
-        if ("error" in directiveResult) {
-          logWarn(TAG, `auto directive failed for ${card.id}: ${directiveResult.error} — leaving card failed for Orc review`);
-          return;
+        const acceptResult = retryService.acceptAutomaticRetry(latestAttempt.id, card.id);
+        if (acceptResult.kind === "created") {
+          logInfo(TAG, `Auto-retry card ${card.id}: attempt ${latestAttempt.ordinal} -> ${acceptResult.targetAttemptId} (${classification.primary})`);
+          // Card transitions to queued via the transaction in acceptAutomaticRetry
+          wakeCard(card.id);
+        } else if (acceptResult.kind === "idempotent") {
+          logInfo(TAG, `Auto-retry already scheduled for card ${card.id}: target ${acceptResult.targetAttemptId}`);
+          wakeCard(card.id);
+        } else {
+          logWarn(TAG, `Auto-retry failed for card ${card.id}: ${acceptResult.kind} — leaving card failed`);
         }
-        logInfo(TAG, `Auto-retry card ${card.id}: attempt ${latestAttempt.ordinal} -> ${directiveResult.directive.target_ordinal} (${classification.primary})`);
-        kanbanUpdate(card.id, { status: "queued" });
-        spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: card.parent_id ?? undefined, settlementOwner: "spin" });
         break;
       }
       case "orc_review": {
         logInfo(TAG, `Orc review required for card ${card.id}: attempt ${latestAttempt.id} (${classification.primary})`);
-        // Card stays failed — Orc will see it in check_workers and call review_worker_failure
+        // Card stays failed — Orc sees it in check_workers and calls review_worker_failure
         break;
       }
       case "needs_input": {
@@ -652,6 +655,99 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
   } catch (err) {
     logWarn(TAG, `handleSupervisedRetry error for ${card.id}: ${err} — leaving card failed for Orc review`);
   }
+}
+
+function handleScheduledRetryClaim(card: KanbanCard, pendingAttempt: AttemptRow): void {
+  const store = new WorkerSupervisionStore();
+  const contractRow = store.getContract(pendingAttempt.contract_id);
+  if (!contractRow) {
+    logWarn(TAG, `Scheduled retry ${card.id}: no contract ${pendingAttempt.contract_id} — failing`);
+    kanbanFail(card.id, "retry contract not found");
+    return;
+  }
+  const contract = JSON.parse(contractRow.contract_json) as WorkerAcceptanceContractV1;
+
+  // Check earliest_claim_at
+  if (pendingAttempt.earliest_claim_at && new Date(pendingAttempt.earliest_claim_at).getTime() > Date.now()) {
+    const delay = new Date(pendingAttempt.earliest_claim_at).getTime() - Date.now();
+    setTimeout(() => wakeCard(card.id), Math.min(delay, 60_000));
+    return;
+  }
+
+  // Revalidate budget
+  const retryService = buildRetryService();
+  const budget = retryService["retryStore"].getFullLineageBudget(card.id);
+  if (budget.totalAttempts + budget.activeReservations > 5) {
+    logWarn(TAG, `Scheduled retry ${card.id}: budget exhausted — cancelling pending attempt`);
+    store.cancelPendingAttempt(pendingAttempt.id, "budget_exhausted");
+    kanbanFail(card.id, "retry budget exhausted");
+    return;
+  }
+
+  // Revalidate executor eligibility
+  const catalog = retryService["executorCatalog"] as import("./retry/local-executor-catalog.js").LocalExecutorCatalog;
+  const { eligible } = catalog.getCandidates({ requiredCapabilities: [...contract.required_capabilities ?? []] });
+  const matchingExecutor = eligible.find(e => e.id === pendingAttempt.executor_id && e.kind === pendingAttempt.executor_kind);
+  if (!matchingExecutor || !matchingExecutor.healthy) {
+    logWarn(TAG, `Scheduled retry ${card.id}: executor ${pendingAttempt.executor_kind}/${pendingAttempt.executor_id} not eligible — failing`);
+    store.cancelPendingAttempt(pendingAttempt.id, "executor_ineligible");
+    kanbanFail(card.id, "retry executor unavailable");
+    return;
+  }
+
+  // Update reservation to claimed
+  const reservation = store.getReservation(pendingAttempt.source_attempt_id ?? "");
+  if (reservation) {
+    store.updateReservationStatus(pendingAttempt.source_attempt_id ?? "", "claimed");
+  }
+
+  // Claim and start via adapter
+  const claim = store.claimAttempt(card.id, contract.id, pendingAttempt.executor_kind as import("./worker-supervision-store.js").ExecutorKind, pendingAttempt.executor_id, pendingAttempt.generation || 1);
+  if (!claim) return;
+
+  if (!store.markAttemptStartObservable(claim.attemptId)) {
+    store.failAttempt(claim.attemptId);
+    kanbanFail(card.id, "retry claim could not enter starting state");
+    return;
+  }
+
+  const adapter = workerAdapter();
+  adapter.start(claim).then(observation => {
+    if (observation.kind === "started" || observation.kind === "already_started") {
+      store.markAttemptRunning(claim.attemptId);
+    } else {
+      store.failAttempt(claim.attemptId);
+      kanbanFail(card.id, `retry start failed: ${observation.reason}`);
+    }
+  }).catch(err => {
+    store.failAttempt(claim.attemptId);
+    kanbanFail(card.id, `retry start error: ${err instanceof Error ? err.message : String(err)}`);
+  });
+}
+
+function buildRetryService(): import("./retry/retry-service.js").RetryService {
+  const { RetryService } = require("./retry/retry-service.js") as typeof import("./retry/retry-service.js");
+  const { LocalExecutorCatalog } = require("./retry/local-executor-catalog.js") as typeof import("./retry/local-executor-catalog.js");
+  const catalog = new LocalExecutorCatalog({
+    spinProvider: {
+      kind: "agent" as const,
+      id: "spin",
+      getCapabilities: () => ["*"],
+      isHealthy: () => true,
+      currentLoad: () => 0,
+      availableCapacity: () => 10,
+      supportsWorkspace: () => true,
+      respectsSandbox: () => true,
+    },
+    piEnabled: !!_piService,
+    workspaceAlias: undefined,
+  });
+  return new RetryService({ executorCatalog: catalog });
+}
+
+function getLatestAttemptInfo(cardId: number): AttemptRow | undefined {
+  const store = new WorkerSupervisionStore();
+  return store.getLatestAttempt(cardId);
 }
 
 async function abortProject(projectId: number, children: KanbanCard[], reason: string): Promise<void> {
@@ -716,15 +812,6 @@ async function cancelChild(card: KanbanCard, reason: string): Promise<void> {
     kanbanFail(card.id, `project aborted: ${reason}`);
   }
   logInfo(TAG, `Cancellation requested for card ${card.id} attempt=${attempt.id} via ${attempt.executor_kind} (reason: project_abort)`);
-}
-
-function getLatestAttemptInfo(cardId: number): AttemptRow | null {
-  try {
-    const store = new WorkerSupervisionStore();
-    const latest = store.getLatestAttempt(cardId);
-    if (!latest) return null;
-    return latest;
-  } catch { return null; }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
