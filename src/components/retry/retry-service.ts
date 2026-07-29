@@ -97,16 +97,19 @@ export class RetryService {
     const { classification } = classify(classifyInput);
 
     const insertResult = this.retryStore.insertClassification(classification);
-    if (insertResult === "conflict") {
+    if (insertResult === "idempotent") {
       const existing = this.retryStore.getClassification(attemptId);
-      if (existing) {
-        return { error: `classification conflict for ${attemptId}` };
+      const existingDecision = this.retryStore.getDecision(attemptId);
+      if (existing && existingDecision) {
+        return { classification: existing, decision: existingDecision.decision };
       }
     }
+    if (insertResult === "conflict") {
+      return { error: `classification conflict for ${attemptId}` };
+    }
 
-    // Store-backed budget
-    const budget = this.retryStore.getFullLineageBudget(cardId);
-    const sameClassAttempts = this.computeSameClassCount(cardId, classification.primary);
+    // Store-backed budget with same-class count from stored classifications
+    const budget = this.retryStore.getFullLineageBudget(cardId, classification.primary);
 
     const previousExecutors = this.getPreviousExecutors(cardId);
     const lastExecutor = previousExecutors[previousExecutors.length - 1];
@@ -116,7 +119,7 @@ export class RetryService {
 
     const budgetSnapshot: RetryBudgetSnapshot = computeBudget(
       budget.totalAttempts,
-      sameClassAttempts + budget.activeReservations,
+      budget.sameClassCount + budget.activeReservations,
       consecutiveSameExecutorFails,
       budget.executorSwitches,
       budget.elapsedMs,
@@ -370,18 +373,9 @@ export class RetryService {
     return this.retryStore.getLineage(sourceAttemptId);
   }
 
-  recoverPendingReviews(_now: string): Array<{ attemptId: string; status: string }> {
+  recoverPendingReviews(now: string): Array<{ attemptId: string; status: string }> {
+    this.retryStore.expireOverdueReviews(now);
     return this.retryStore.getPendingReviewDecisions();
-  }
-
-  private computeSameClassCount(cardId: number, primaryClass: string): number {
-    const attempts = this.supStore.getAttemptsForCard(cardId);
-    let count = 0;
-    for (const a of attempts) {
-      const c = this.retryStore.getClassification(a.id);
-      if (c?.primary === primaryClass) count++;
-    }
-    return count;
   }
 
   private getPreviousExecutors(cardId: number): string[] {

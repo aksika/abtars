@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { WorkerAcceptanceContractV1, RetryContext, WorkerContractRevisionV1 } from "../worker-contract.js";
+import { createContractId } from "../worker-contract.js";
 import type { FailureClassificationV1 } from "./failure-classifier.js";
 import type { RetryPolicyDecision } from "./retry-policy.js";
 import type { SelectionRationale } from "./executor-selector.js";
@@ -140,9 +141,10 @@ export function deriveContractRevision(
     retry_context: retryContext,
   };
 
+  const newId = createContractId();
   const revised: Record<string, unknown> = {
     schema_version: 1,
-    id: original.id,
+    id: newId,
     digest: "",
     revision_meta: revMeta,
     goal: original.goal,

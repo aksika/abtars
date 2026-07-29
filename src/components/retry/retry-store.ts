@@ -18,8 +18,11 @@ export interface DecisionRow {
   decision_json: string;
   status: string;
   proposal_digest: string;
+  review_deadline_at: string | null;
   updated_at: string;
 }
+
+const REVIEW_DEADLINE_MS = 30 * 60 * 1000;
 
 export interface DirectiveRow {
   id: string;
@@ -78,6 +81,7 @@ export class RetryStore {
         decision_json TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'review_required',
         proposal_digest TEXT NOT NULL DEFAULT '',
+        review_deadline_at TEXT,
         updated_at TEXT NOT NULL
       );
 
@@ -91,6 +95,7 @@ export class RetryStore {
       );
     `);
     try { this.db.exec(`ALTER TABLE retry_policy_decisions ADD COLUMN proposal_digest TEXT NOT NULL DEFAULT ''`); } catch {}
+    try { this.db.exec(`ALTER TABLE retry_policy_decisions ADD COLUMN review_deadline_at TEXT`); } catch {}
   }
 
   // ── Classifications ────────────────────────────────────────────────────
@@ -122,33 +127,35 @@ export class RetryStore {
 
   insertDecision(decision: RetryPolicyDecision, status: DecisionStatus, proposalDigest?: string): "created" | "idempotent" | "conflict" {
     try {
-      const existing = this.db.prepare(`SELECT status, proposal_digest FROM retry_policy_decisions WHERE source_attempt_id = ?`).get(decision.sourceAttemptId) as { status: string; proposal_digest: string } | undefined;
+      const existing = this.db.prepare(`SELECT status, proposal_digest, review_deadline_at FROM retry_policy_decisions WHERE source_attempt_id = ?`).get(decision.sourceAttemptId) as { status: string; proposal_digest: string; review_deadline_at: string | null } | undefined;
       if (existing) {
         if (existing.status === "consumed" || existing.status === "stopped") return "conflict";
         if (existing.proposal_digest && existing.proposal_digest === (proposalDigest ?? "")) return "idempotent";
         if (existing.proposal_digest && existing.proposal_digest !== (proposalDigest ?? "")) return "conflict";
       }
       const digest = proposalDigest ?? "";
+      const deadlineAt = status === "review_required" ? new Date(Date.now() + REVIEW_DEADLINE_MS).toISOString() : null;
       this.db.prepare(`
-        INSERT INTO retry_policy_decisions (id, source_attempt_id, decision_json, status, proposal_digest, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO retry_policy_decisions (id, source_attempt_id, decision_json, status, proposal_digest, review_deadline_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_attempt_id) DO UPDATE SET
           decision_json = excluded.decision_json,
           status = excluded.status,
           proposal_digest = CASE WHEN retry_policy_decisions.proposal_digest = '' THEN excluded.proposal_digest ELSE retry_policy_decisions.proposal_digest END,
+          review_deadline_at = excluded.review_deadline_at,
           updated_at = excluded.updated_at
         WHERE retry_policy_decisions.status NOT IN ('consumed', 'stopped')
-      `).run(decision.sourceAttemptId, decision.sourceAttemptId, JSON.stringify(decision), status, digest, decision.created_at);
+      `).run(decision.sourceAttemptId, decision.sourceAttemptId, JSON.stringify(decision), status, digest, deadlineAt, decision.created_at);
       return "created";
     } catch {
       return "conflict";
     }
   }
 
-  getDecision(sourceAttemptId: string): { decision: RetryPolicyDecision; status: string; proposalDigest: string } | undefined {
-    const row = this.db.prepare(`SELECT decision_json, status, proposal_digest FROM retry_policy_decisions WHERE source_attempt_id = ?`).get(sourceAttemptId) as { decision_json: string; status: string; proposal_digest: string } | undefined;
+  getDecision(sourceAttemptId: string): { decision: RetryPolicyDecision; status: string; proposalDigest: string; reviewDeadlineAt: string | null } | undefined {
+    const row = this.db.prepare(`SELECT decision_json, status, proposal_digest, review_deadline_at FROM retry_policy_decisions WHERE source_attempt_id = ?`).get(sourceAttemptId) as { decision_json: string; status: string; proposal_digest: string; review_deadline_at: string | null } | undefined;
     if (!row) return undefined;
-    return { decision: JSON.parse(row.decision_json) as RetryPolicyDecision, status: row.status, proposalDigest: row.proposal_digest };
+    return { decision: JSON.parse(row.decision_json) as RetryPolicyDecision, status: row.status, proposalDigest: row.proposal_digest, reviewDeadlineAt: row.review_deadline_at };
   }
 
   compareAndSetDecisionStatus(sourceAttemptId: string, fromStatus: DecisionStatus, toStatus: DecisionStatus): boolean {
@@ -299,16 +306,24 @@ export class RetryStore {
     return { classification, decision, directive };
   }
 
-  getPendingReviewDecisions(): Array<{ attemptId: string; status: string }> {
-    const rows = this.db.prepare(`SELECT source_attempt_id AS attemptId, status FROM retry_policy_decisions WHERE status IN ('review_required', 'needs_input')`).all() as Array<{ attemptId: string; status: string }>;
+  getPendingReviewDecisions(): Array<{ attemptId: string; status: string; reviewDeadlineAt: string | null }> {
+    const rows = this.db.prepare(`SELECT source_attempt_id AS attemptId, status, review_deadline_at AS reviewDeadlineAt FROM retry_policy_decisions WHERE status IN ('review_required', 'needs_input')`).all() as Array<{ attemptId: string; status: string; reviewDeadlineAt: string | null }>;
     return rows;
+  }
+
+  expireOverdueReviews(now: string): Array<{ attemptId: string }> {
+    const expired = this.db.prepare(`SELECT source_attempt_id AS attemptId FROM retry_policy_decisions WHERE status = 'review_required' AND review_deadline_at IS NOT NULL AND review_deadline_at < ?`).all(now) as Array<{ attemptId: string }>;
+    for (const row of expired) {
+      this.db.prepare(`UPDATE retry_policy_decisions SET status = 'stopped', updated_at = ? WHERE source_attempt_id = ? AND status = 'review_required'`).run(now, row.attemptId);
+    }
+    return expired;
   }
 
   getLatestTerminalAttemptForCard(cardId: number): { id: string; lifecycle: string; ordinal: number } | undefined {
     return this.db.prepare(`SELECT id, lifecycle, ordinal FROM worker_attempts WHERE card_id = ? AND lifecycle IN ('completed','failed','cancelled','timed_out') ORDER BY ordinal DESC LIMIT 1`).get(cardId) as { id: string; lifecycle: string; ordinal: number } | undefined;
   }
 
-  getFullLineageBudget(cardId: number): {
+  getFullLineageBudget(cardId: number, forClass?: string): {
     totalAttempts: number;
     sameClassCount: number;
     consecutiveSameExecutorFails: number;
@@ -339,6 +354,7 @@ export class RetryStore {
 
     let totalTokens = 0;
     let totalCost = 0;
+    let sameClassCount = 0;
     for (const a of terminalAttempts) {
       const result = this.db.prepare(`SELECT envelope_json FROM worker_results WHERE attempt_id = ?`).get(a.id) as { envelope_json: string } | undefined;
       if (result) {
@@ -346,12 +362,18 @@ export class RetryStore {
         totalTokens += env?.usage?.total_tokens ?? 0;
         totalCost += env?.usage?.cost ?? 0;
       }
+      if (forClass) {
+        const classRow = this.db.prepare(`SELECT classification_json FROM attempt_failure_classifications WHERE attempt_id = ?`).get(a.id) as { classification_json: string } | undefined;
+        if (classRow) {
+          const cf = JSON.parse(classRow.classification_json) as { primary: string };
+          if (cf.primary === forClass) sameClassCount++;
+        }
+      }
     }
 
     const activeReservations = this.db.prepare(`SELECT COALESCE(SUM(reserved_attempts), 0) AS cnt FROM retry_budget_reservations WHERE source_attempt_id IN (${lineageAttempts.map(() => "?").join(",")}) AND status IN ('active','claimed')`).all(...lineageAttempts.map(a => a.id)) as Array<{ cnt: number }>;
     const reservedAttempts = activeReservations.length > 0 ? activeReservations[0]!.cnt : 0;
 
-    let sameClassCount = 0;
     return { totalAttempts, sameClassCount, consecutiveSameExecutorFails, executorSwitches, elapsedMs, totalTokens, totalCost, activeReservations: reservedAttempts };
   }
 }

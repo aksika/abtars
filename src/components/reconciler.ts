@@ -701,7 +701,7 @@ function handleScheduledRetryClaim(card: KanbanCard, pendingAttempt: AttemptRow)
     store.updateReservationStatus(pendingAttempt.source_attempt_id ?? "", "claimed");
   }
 
-  // Claim and start via adapter
+  // Claim and start via matching executor adapter
   const claim = store.claimAttempt(card.id, contract.id, pendingAttempt.executor_kind as import("./worker-supervision-store.js").ExecutorKind, pendingAttempt.executor_id, pendingAttempt.generation || 1);
   if (!claim) return;
 
@@ -711,18 +711,32 @@ function handleScheduledRetryClaim(card: KanbanCard, pendingAttempt: AttemptRow)
     return;
   }
 
-  const adapter = workerAdapter();
-  adapter.start(claim).then(observation => {
-    if (observation.kind === "started" || observation.kind === "already_started") {
-      store.markAttemptRunning(claim.attemptId);
-    } else {
+  const executorKind = pendingAttempt.executor_kind;
+  if (executorKind === "pi") {
+    const svc = _piService;
+    if (!svc) {
       store.failAttempt(claim.attemptId);
-      kanbanFail(card.id, `retry start failed: ${observation.reason}`);
+      kanbanFail(card.id, "Pi service unavailable for retry");
+      return;
     }
-  }).catch(err => {
-    store.failAttempt(claim.attemptId);
-    kanbanFail(card.id, `retry start error: ${err instanceof Error ? err.message : String(err)}`);
-  });
+    svc.executor.startWithClaim(claim.attemptId, pendingAttempt.generation || 1, card.title).catch((err: unknown) => {
+      store.failAttempt(claim.attemptId);
+      kanbanFail(card.id, `Pi retry start error: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  } else {
+    const adapter = workerAdapter();
+    adapter.start(claim).then(observation => {
+      if (observation.kind === "started" || observation.kind === "already_started") {
+        store.markAttemptRunning(claim.attemptId);
+      } else {
+        store.failAttempt(claim.attemptId);
+        kanbanFail(card.id, `retry start failed: ${observation.reason}`);
+      }
+    }).catch(err => {
+      store.failAttempt(claim.attemptId);
+      kanbanFail(card.id, `retry start error: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
 }
 
 function buildRetryService(): import("./retry/retry-service.js").RetryService {

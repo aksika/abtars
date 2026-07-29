@@ -34,21 +34,33 @@ export class LocalExecutorCatalog {
   }
 
   getCandidates(constraints?: SelectionConstraints): { eligible: ExecutorCandidate[]; rejected: Array<{ id: string; kind: string; reason: string }> } {
-    const candidates: ExecutorCandidate[] = this.providers.map(p => ({
-      id: p.id,
-      kind: p.kind,
-      capabilities: [...p.getCapabilities()],
-      healthy: p.isHealthy(),
-      load: p.currentLoad(),
-    }));
+    const rejected: Array<{ id: string; kind: string; reason: string }> = [];
+    const candidates: ExecutorCandidate[] = [];
 
-    const { eligible, rejected } = filterCandidates(candidates, constraints ?? { requiredCapabilities: [] });
+    for (const p of this.providers) {
+      if (p.availableCapacity() <= 0) {
+        rejected.push({ id: p.id, kind: p.kind, reason: "no capacity" });
+        continue;
+      }
+      candidates.push({
+        id: p.id,
+        kind: p.kind,
+        capabilities: [...p.getCapabilities()],
+        healthy: p.isHealthy(),
+        load: p.currentLoad(),
+      });
+    }
+
+    const { eligible, rejected: filterRejected } = filterCandidates(candidates, constraints ?? { requiredCapabilities: [] });
     return {
       eligible: eligible.map(c => ({ ...c })),
-      rejected: rejected.map(r => {
-        const orig = candidates.find(c => c.id === r.id);
-        return { id: r.id, kind: orig?.kind ?? "unknown", reason: r.reason };
-      }),
+      rejected: [
+        ...rejected,
+        ...filterRejected.map(r => {
+          const orig = candidates.find(c => c.id === r.id);
+          return { id: r.id, kind: orig?.kind ?? "unknown", reason: r.reason };
+        }),
+      ],
     };
   }
 

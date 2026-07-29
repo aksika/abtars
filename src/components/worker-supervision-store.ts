@@ -115,7 +115,8 @@ export class WorkerSupervisionStore {
         contract_digest TEXT NOT NULL,
         created_at TEXT NOT NULL,
         UNIQUE(card_id, revision),
-        UNIQUE(card_id, contract_digest)
+        UNIQUE(card_id, contract_digest),
+        UNIQUE(source_attempt_id)
       );
 
       CREATE TABLE IF NOT EXISTS worker_attempts (
