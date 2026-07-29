@@ -348,6 +348,56 @@ export class WorkerSupervisionStore {
     return updated ? claim : null;
   }
 
+  /** Claim a scheduled retry and its budget reservation atomically. */
+  claimRetryAttempt(
+    cardId: number,
+    attemptId: string,
+    contractId: string,
+    executorKind: ExecutorKind,
+    executorId: string,
+    generation: number,
+    sourceAttemptId: string,
+    hardDeadlineAt?: string,
+  ): ExecutionClaim | null {
+    try {
+      return this.db.transaction(() => {
+        const attempt = this.db.prepare(`
+          SELECT id, contract_id, executor_kind, executor_id, lifecycle, source_attempt_id
+          FROM worker_attempts
+          WHERE id = ? AND card_id = ?
+            AND id = (SELECT id FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1)
+        `).get(attemptId, cardId, cardId) as {
+          id: string; contract_id: string; executor_kind: string; executor_id: string;
+          lifecycle: AttemptLifecycle; source_attempt_id: string | null;
+        } | undefined;
+        if (!attempt || attempt.lifecycle !== "pending" ||
+            attempt.contract_id !== contractId ||
+            attempt.executor_kind !== executorKind ||
+            attempt.executor_id !== executorId ||
+            attempt.source_attempt_id !== sourceAttemptId) return null;
+
+        const claimedAt = new Date().toISOString();
+        const updated = this.db.prepare(`
+          UPDATE worker_attempts
+          SET lifecycle = 'claimed', claimed_at = ?, generation = ?, hard_deadline_at = ?
+          WHERE id = ? AND lifecycle = 'pending'
+        `).run(claimedAt, generation, hardDeadlineAt ?? null, attemptId);
+        if (updated.changes !== 1) return null;
+
+        const reservation = this.db.prepare(`
+          UPDATE retry_budget_reservations
+          SET status = 'claimed', updated_at = ?
+          WHERE source_attempt_id = ? AND target_attempt_id = ? AND status = 'active'
+        `).run(claimedAt, sourceAttemptId, attemptId);
+        if (reservation.changes !== 1) throw new Error("retry reservation was not active");
+
+        return { attemptId, cardId, contractId, executorKind, executorId, generation, claimedAt, hardDeadlineAt };
+      });
+    } catch {
+      return null;
+    }
+  }
+
   markAttemptStartObservable(attemptId: string): boolean {
     return this.lifecycleTransition(attemptId, ["claimed"], "starting");
   }

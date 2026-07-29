@@ -211,6 +211,48 @@ describe("WorkerSupervisionStore", () => {
     expect(store.claimAttempt(101, "c_test_001", "agent", "spin-01", 1)).toBeNull();
   });
 
+  it("claims a retry and its reservation atomically", () => {
+    const store = new Store();
+    store.insertContract(TEST_CONTRACT, 101);
+    store.insertAttempt({
+      id: "a_source", card_id: 101, contract_id: "c_test_001",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin",
+      status: "failed", started_at: "2026-07-12T00:00:00.000Z",
+    });
+    store.db.prepare(`
+      INSERT INTO worker_attempts
+        (id, card_id, contract_id, ordinal, executor_kind, executor_id, status,
+         lifecycle, started_at, source_attempt_id, earliest_claim_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', 'pending', ?, ?, ?)
+    `).run("a_retry", 101, "c_test_001", 2, "agent", "spin", "2026-07-12T00:02:00.000Z", "a_source", "2026-07-12T00:02:00.000Z");
+    store.db.prepare(`
+      INSERT INTO retry_budget_reservations
+        (source_attempt_id, target_attempt_id, reserved_attempts, reserved_tokens,
+         reserved_cost, reserved_switches, status, created_at, updated_at)
+      VALUES (?, ?, 1, 1000, 0, 0, 'active', ?, ?)
+    `).run("a_source", "a_retry", "2026-07-12T00:02:00.000Z", "2026-07-12T00:02:00.000Z");
+
+    const claim = store.claimRetryAttempt(101, "a_retry", "c_test_001", "agent", "spin", 1, "a_source");
+    expect(claim?.attemptId).toBe("a_retry");
+    expect(store.getAttempt("a_retry")!.lifecycle).toBe("claimed");
+    expect(store.getReservation("a_source")!.status).toBe("claimed");
+    expect(store.claimRetryAttempt(101, "a_retry", "c_test_001", "agent", "spin", 1, "a_source")).toBeNull();
+  });
+
+  it("rolls back a retry claim when its reservation is missing", () => {
+    const store = new Store();
+    store.insertContract(TEST_CONTRACT, 101);
+    store.db.prepare(`
+      INSERT INTO worker_attempts
+        (id, card_id, contract_id, ordinal, executor_kind, executor_id, status,
+         lifecycle, started_at, source_attempt_id)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', 'pending', ?, ?)
+    `).run("a_retry", 101, "c_test_001", 1, "agent", "spin", "2026-07-12T00:02:00.000Z", "a_source");
+
+    expect(store.claimRetryAttempt(101, "a_retry", "c_test_001", "agent", "spin", 1, "a_source")).toBeNull();
+    expect(store.getAttempt("a_retry")!.lifecycle).toBe("pending");
+  });
+
   it("settleResult replays identical result", () => {
     const store = new Store();
     store.insertAttempt({

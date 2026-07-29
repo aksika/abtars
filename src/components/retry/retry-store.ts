@@ -222,16 +222,25 @@ export class RetryStore {
         if (!["completed", "failed", "cancelled", "timed_out"].includes(source.lifecycle)) return { kind: "stale_source" };
 
         // 2. Verify no existing directive/target/reservation for this source
-        const existingDirective = this.db.prepare(`SELECT 1 FROM retry_directives WHERE source_attempt_id = ?`).get(sourceAttemptId);
-        if (existingDirective) return { kind: "idempotent" };
+        const existingDirective = this.db.prepare(`SELECT target_attempt_id, directive_digest FROM retry_directives WHERE source_attempt_id = ?`).get(sourceAttemptId) as { target_attempt_id: string | null; directive_digest: string } | undefined;
+        if (existingDirective) {
+          return existingDirective.directive_digest === directive.semantic_change_fingerprint
+            ? { kind: "idempotent", targetAttemptId: existingDirective.target_attempt_id ?? "" } as AcceptRetryOutcome
+            : { kind: "conflict" };
+        }
 
-        const existingTarget = this.db.prepare(`SELECT 1 FROM worker_attempts WHERE source_attempt_id = ?`).get(sourceAttemptId);
-        if (existingTarget) return { kind: "idempotent" };
+        const existingTarget = this.db.prepare(`SELECT id FROM worker_attempts WHERE source_attempt_id = ?`).get(sourceAttemptId) as { id: string } | undefined;
+        if (existingTarget) return { kind: "idempotent", targetAttemptId: existingTarget.id } as AcceptRetryOutcome;
 
-        const existingReservation = this.db.prepare(`SELECT 1 FROM retry_budget_reservations WHERE source_attempt_id = ?`).get(sourceAttemptId);
-        if (existingReservation) return { kind: "idempotent" };
+        const existingReservation = this.db.prepare(`SELECT target_attempt_id FROM retry_budget_reservations WHERE source_attempt_id = ?`).get(sourceAttemptId) as { target_attempt_id: string } | undefined;
+        if (existingReservation) return { kind: "idempotent", targetAttemptId: existingReservation.target_attempt_id } as AcceptRetryOutcome;
 
-        // 3. Check decision status is unresolved
+        // 3. Check the request is for this source and the decision is unresolved
+        if (decision.sourceAttemptId !== sourceAttemptId ||
+            directive.source_attempt_id !== sourceAttemptId ||
+            revisedContract.revision_meta?.source_attempt_id !== sourceAttemptId) {
+          return { kind: "conflict" };
+        }
         const currentDecision = this.db.prepare(`SELECT status FROM retry_policy_decisions WHERE source_attempt_id = ?`).get(decision.sourceAttemptId) as { status: string } | undefined;
         if (!currentDecision) return { kind: "stale_source" };
         if (currentDecision.status !== "review_required" && currentDecision.status !== "scheduled") return { kind: "stale_source" };
@@ -338,13 +347,20 @@ export class RetryStore {
     const totalAttempts = terminalAttempts.length;
 
     const previousExecutors = lineageAttempts.map(a => a.executor_id);
-    const lastExecutor = previousExecutors[previousExecutors.length - 1];
-    const consecutiveSameExecutorFails = lastExecutor
-      ? terminalAttempts.filter(a => a.executor_id === lastExecutor).length
-      : 0;
-    const executorSwitches = previousExecutors.length > 1
-      ? new Set(previousExecutors.slice(0, -1)).size
-      : 0;
+    const lastTerminal = terminalAttempts[terminalAttempts.length - 1];
+    let consecutiveSameExecutorFails = 0;
+    if (lastTerminal) {
+      for (let i = terminalAttempts.length - 1; i >= 0; i--) {
+        const attempt = terminalAttempts[i]!;
+        if (attempt.executor_id !== lastTerminal.executor_id ||
+            !["failed", "cancelled", "timed_out"].includes(attempt.lifecycle)) break;
+        consecutiveSameExecutorFails++;
+      }
+    }
+    let executorSwitches = 0;
+    for (let i = 1; i < previousExecutors.length; i++) {
+      if (previousExecutors[i] !== previousExecutors[i - 1]) executorSwitches++;
+    }
 
     const firstStart = lineageAttempts[0]?.started_at;
     const lastSettle = [...terminalAttempts].reverse()[0]?.settled_at;

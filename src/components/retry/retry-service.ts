@@ -112,15 +112,11 @@ export class RetryService {
     const budget = this.retryStore.getFullLineageBudget(cardId, classification.primary);
 
     const previousExecutors = this.getPreviousExecutors(cardId);
-    const lastExecutor = previousExecutors[previousExecutors.length - 1];
-    const consecutiveSameExecutorFails = lastExecutor
-      ? previousExecutors.filter(e => e === lastExecutor).length
-      : 0;
 
     const budgetSnapshot: RetryBudgetSnapshot = computeBudget(
       budget.totalAttempts,
-      budget.sameClassCount + budget.activeReservations,
-      consecutiveSameExecutorFails,
+      budget.sameClassCount,
+      budget.consecutiveSameExecutorFails,
       budget.executorSwitches,
       budget.elapsedMs,
       budget.totalTokens,

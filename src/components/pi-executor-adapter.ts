@@ -13,11 +13,15 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
     this.executor = executor;
   }
 
-  async capacity(): Promise<ExecutorCapacity> {
+  capacitySnapshot(): ExecutorCapacity {
     return {
-      available: this.executor.maxConcurrent - this.executor.activeCount,
+      available: Math.max(0, this.executor.maxConcurrent - this.executor.activeCount),
       max: this.executor.maxConcurrent,
     };
+  }
+
+  async capacity(): Promise<ExecutorCapacity> {
+    return this.capacitySnapshot();
   }
 
   async start(claim: ExecutionClaim): Promise<StartObservation> {

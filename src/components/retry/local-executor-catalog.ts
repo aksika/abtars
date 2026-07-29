@@ -1,6 +1,24 @@
 import type { ExecutorCandidate, SelectionConstraints } from "./executor-selector.js";
 import { filterCandidates, selectExecutor } from "./executor-selector.js";
 import type { ExecutorKind } from "../worker-supervision-store.js";
+import type { SwarmExecutorAdapter } from "../swarm-executor-types.js";
+
+/** Build a catalog provider from the live adapter owned by the scheduler. */
+export function providerForAdapter(adapter: SwarmExecutorAdapter, id: string): ExecutorAdapterProvider {
+  return {
+    kind: adapter.kind,
+    id,
+    getCapabilities: () => ["*"],
+    isHealthy: () => !adapter.capacitySnapshot || adapter.capacitySnapshot().max > 0,
+    currentLoad: () => {
+      const snapshot = adapter.capacitySnapshot?.();
+      return snapshot ? snapshot.max - snapshot.available : 0;
+    },
+    availableCapacity: () => adapter.capacitySnapshot?.().available ?? 1,
+    supportsWorkspace: () => true,
+    respectsSandbox: () => true,
+  };
+}
 
 export interface ExecutorAdapterProvider {
   readonly kind: ExecutorKind;

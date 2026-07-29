@@ -289,17 +289,10 @@ const reviewWorkerFailureTool: ToolDefinition = {
     try {
       const { RetryService } = await import("../retry/retry-service.js");
       const { LocalExecutorCatalog } = await import("../retry/local-executor-catalog.js");
+      const { providerForAdapter } = await import("../retry/local-executor-catalog.js");
+      const { SpinWorkerAdapter } = await import("../spin-worker-adapter.js");
       const catalog = new LocalExecutorCatalog({
-        spinProvider: {
-          kind: "agent" as const,
-          id: "spin",
-          getCapabilities: () => ["*"],
-          isHealthy: () => true,
-          currentLoad: () => 0,
-          availableCapacity: () => 10,
-          supportsWorkspace: () => true,
-          respectsSandbox: () => true,
-        },
+        spinProvider: providerForAdapter(new SpinWorkerAdapter(), "spin"),
       });
       const service = new RetryService({ executorCatalog: catalog });
       const packet = service.getReviewPacket(attemptId, projectCardId);

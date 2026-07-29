@@ -575,7 +575,7 @@ export class Spin {
       if (spec.contractId && cardId !== undefined) {
         try {
           const sup = new WorkerSupervisionService();
-          const contract = sup.getContractForCard(cardId);
+          const contract = sup.getContract(spec.contractId);
           if (contract) {
             prompt = sup.renderContractForPrompt(contract) + "\n\n" + prompt;
           }

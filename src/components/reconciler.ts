@@ -695,14 +695,18 @@ function handleScheduledRetryClaim(card: KanbanCard, pendingAttempt: AttemptRow)
     return;
   }
 
-  // Update reservation to claimed
-  const reservation = store.getReservation(pendingAttempt.source_attempt_id ?? "");
-  if (reservation) {
-    store.updateReservationStatus(pendingAttempt.source_attempt_id ?? "", "claimed");
-  }
-
-  // Claim and start via matching executor adapter
-  const claim = store.claimAttempt(card.id, contract.id, pendingAttempt.executor_kind as import("./worker-supervision-store.js").ExecutorKind, pendingAttempt.executor_id, pendingAttempt.generation || 1);
+  // Claim the attempt and reservation in one compare-and-set transaction.
+  const sourceAttemptId = pendingAttempt.source_attempt_id;
+  if (!sourceAttemptId) return;
+  const claim = store.claimRetryAttempt(
+    card.id,
+    pendingAttempt.id,
+    contract.id,
+    pendingAttempt.executor_kind as import("./worker-supervision-store.js").ExecutorKind,
+    pendingAttempt.executor_id,
+    pendingAttempt.generation || 1,
+    sourceAttemptId,
+  );
   if (!claim) return;
 
   if (!store.markAttemptStartObservable(claim.attemptId)) {
@@ -742,19 +746,12 @@ function handleScheduledRetryClaim(card: KanbanCard, pendingAttempt: AttemptRow)
 function buildRetryService(): import("./retry/retry-service.js").RetryService {
   const { RetryService } = require("./retry/retry-service.js") as typeof import("./retry/retry-service.js");
   const { LocalExecutorCatalog } = require("./retry/local-executor-catalog.js") as typeof import("./retry/local-executor-catalog.js");
+  const { providerForAdapter } = require("./retry/local-executor-catalog.js") as typeof import("./retry/local-executor-catalog.js");
   const catalog = new LocalExecutorCatalog({
-    spinProvider: {
-      kind: "agent" as const,
-      id: "spin",
-      getCapabilities: () => ["*"],
-      isHealthy: () => true,
-      currentLoad: () => 0,
-      availableCapacity: () => 10,
-      supportsWorkspace: () => true,
-      respectsSandbox: () => true,
-    },
-    piEnabled: !!_piService,
-    workspaceAlias: undefined,
+    // Selection must reflect the adapter that Reconciler will actually start.
+    // Pi is intentionally not advertised here until a retry target has a
+    // durable Pi run record; selecting it without one cannot be started.
+    spinProvider: providerForAdapter(workerAdapter(), "spin"),
   });
   return new RetryService({ executorCatalog: catalog });
 }

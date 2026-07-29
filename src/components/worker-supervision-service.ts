@@ -241,9 +241,9 @@ export class WorkerSupervisionService {
     attemptId?: string,
     generation?: number,
   ): { settled: boolean; summary: string; envelope?: WorkerResultEnvelopeV1; stale?: boolean } {
-    const contract = this.getContractForCard(cardId);
-    if (!contract) return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
-
+    if (!attemptId && !this.getContractForCard(cardId)) {
+      return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
+    }
     const attempts = this.store.getAttemptsForCard(cardId);
     const latestAttempt = attempts[attempts.length - 1];
     let targetAttempt = attemptId ? this.store.getAttempt(attemptId) : latestAttempt;
@@ -253,6 +253,13 @@ export class WorkerSupervisionService {
     if (attemptId && (latestAttempt.id !== attemptId || (generation !== undefined && targetAttempt.generation !== generation))) {
       return { settled: false, summary: "stale execution result ignored", stale: true };
     }
+
+    // Settled evidence must use the exact contract named by the attempt. The
+    // card's latest revision is only valid for the legacy no-attempt path.
+    const contract = attemptId
+      ? this.getContract(targetAttempt.contract_id)
+      : this.getContractForCard(cardId);
+    if (!contract) return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
 
     // Keep the legacy direct service API usable for callers that have not yet
     // been migrated to Reconciler-issued claims. Production supervised Spin

@@ -38,6 +38,8 @@ export type ExecutionObservation =
 
 export interface SwarmExecutorAdapter {
   readonly kind: ExecutorKind;
+  /** Optional synchronous snapshot used by durable retry selection. */
+  capacitySnapshot?(): ExecutorCapacity;
   capacity(): Promise<ExecutorCapacity>;
   start(claim: ExecutionClaim): Promise<StartObservation>;
   cancel(claim: ExecutionClaim, reason: CancelReason): Promise<CancelObservation>;

@@ -11,10 +11,14 @@ const TAG = "spin-worker-adapter";
 export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   readonly kind = "agent" as const;
 
-  async capacity(): Promise<ExecutorCapacity> {
+  capacitySnapshot(): ExecutorCapacity {
     const max = 3;
     const running = typeof spin.getRunningCount === "function" ? spin.getRunningCount("W") : 0;
     return { available: Math.max(0, max - running), max };
+  }
+
+  async capacity(): Promise<ExecutorCapacity> {
+    return this.capacitySnapshot();
   }
 
   async start(claim: ExecutionClaim): Promise<StartObservation> {
@@ -25,7 +29,10 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     const ctrl = registerControl(`${claim.attemptId}:${claim.generation}`, { attemptId: claim.attemptId, generation: claim.generation, cardId: claim.cardId });
 
     const sup = new WorkerSupervisionService();
-    const contract = sup.getContractForCard(claim.cardId);
+    // The attempt owns the exact immutable revision to execute. Looking up
+    // the latest card contract could silently run a later retry revision.
+    const contract = sup.getContract(claim.contractId);
+    if (!contract) return { kind: "start_failed", reason: "attempt contract not found", retryable: false };
 
     logInfo(TAG, `Starting Worker ${claim.cardId} attempt=${claim.attemptId} gen=${claim.generation}`);
 
@@ -38,11 +45,11 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     try {
       spin.dispatch({
         type: "W",
-        goal: card.title || card.notes || "",
+        goal: contract.goal,
         source: "agent",
         cardId: claim.cardId,
         parentCardId: card.parent_id ?? undefined,
-        contract: contract ?? undefined,
+        contract,
         attemptId: claim.attemptId,
         executionControl: ctrl,
         settlementOwner: "spin",
