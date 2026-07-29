@@ -25,7 +25,7 @@ Transport config lives at `~/.abtars/config/transport.json`. It defines which AI
         "cody": { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" }
       },
       "fallbacks": [
-        { "model": "deepseek/deepseek-v4-flash", "provider": "openrouter" }
+        { "model": "google/gemini-2.5-flash", "provider": "openrouter" }
       ]
     },
     "acp": {

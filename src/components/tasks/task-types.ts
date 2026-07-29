@@ -164,10 +164,7 @@ export function normalize(raw: unknown): NormalizeResult {
       let report: ReportContract | undefined;
       if (base.delivery === "report") {
         if (typeof reportRaw !== "object" || reportRaw === null) {
-          // Legacy tasks without structured contract: pass through with a warning
-          // so existing production tasks (daily-ai, weekly-ai, finance-daily) are
-          // not silently quarantined. Preflight will reject at execution time.
-          report = undefined;
+          return { ok: false, error: `report contract is required for delivery=report`, id };
         } else {
           const r = reportRaw as Record<string, unknown>;
           const artifact = typeof r["artifact"] === "string" ? r["artifact"] : "";

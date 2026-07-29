@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
 import { updateActiveRun } from "./task-state-store.js";
@@ -14,13 +14,11 @@ import { incrementDeferrals, advanceNextRun } from "./task-state-store.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
 import type { ScheduledTask } from "./task-types.js";
 import { formatTaskLabel } from "./task-types.js";
-import { localDate } from "../../utils/date.js";
 import type { ActiveTaskRun } from "./task-state-store.js";
 import type { ResolvedReportContract, ArtifactBaseline } from "./task-preflight.js";
 
 const TAG = "scheduled-task-runner";
 const MAX_IDLE_DEFERRALS = 5;
-const REPORT_MIN_BYTES = 100;
 
 export interface ScheduledTaskRunOutcome {
   status: "success" | "definition_failed" | "failed" | "timed_out" | "cancelled" | "deferred";
@@ -81,7 +79,7 @@ export class ScheduledTaskRunner {
       const executionScope = createExecutionScope(entry.id);
       const toolRegistry = await getToolRegistry();
 
-      if (entry.delivery === "report" && entry.report) {
+      if (entry.delivery === "report") {
         updateActiveRun(entry.id, reservation.runId, { phase: "preflight" });
         logTaskTrace("task_preflight_started", { task: entry.id, run: reservation.runId });
         const preflight = preflightTask(entry, executionScope, toolRegistry);
@@ -93,8 +91,6 @@ export class ScheduledTaskRunner {
         logTaskTrace("task_preflight_passed", { task: entry.id, run: reservation.runId });
         resolvedContract = preflight.report;
         artifactBaseline = preflight.artifactBaseline;
-      } else if (entry.delivery === "report" && !entry.report) {
-        logWarn(TAG, `Legacy report task "${entry.id}" has no structured report contract — running with response-based validation. Migrate to structured contract via report field in tasks.json.`);
       }
 
       const contextFile = join(abtarsHome(), "workspace", entry.id, "CONTEXT.md");
@@ -206,21 +202,13 @@ export class ScheduledTaskRunner {
           return { status: "failed", safeDetail: settlementDetail, cardId: boardId };
         }
       } else if (isReport) {
-        // Legacy report task without structured contract — validate response
-        const cleaned = response?.trim();
-        if (cleaned && Buffer.byteLength(cleaned, "utf-8") >= REPORT_MIN_BYTES) {
-          const written = writeResultFile(entry.id, cleaned);
-          if (written) {
-            resultPath = written;
-            kanbanComplete(boardId, resultPath, "report artifact materialized");
-            settleRunOnce({ entry, run: reservation, outcome: "success", detail: "report artifact materialized", resultPath, cardId: boardId, executionRef: runId });
-            return { status: "success", safeDetail: "report artifact materialized", artifactPath: written, cardId: boardId };
-          }
-        }
-        settlementDetail = !cleaned ? "task produced no output" : `output too short (${Buffer.byteLength(cleaned, "utf-8")} bytes, minimum ${REPORT_MIN_BYTES})`;
+        // Normalized report tasks always carry a contract. Keep this defensive
+        // branch for direct queue callers so they fail before delivery rather
+        // than falling back to response-length validation.
+        settlementDetail = "report contract missing";
         kanbanFail(boardId, settlementDetail);
-        settleRunOnce({ entry, run: reservation, outcome: "failed", detail: settlementDetail, cardId: boardId, executionRef: runId });
-        return { status: "failed", safeDetail: settlementDetail, cardId: boardId };
+        settleRunOnce({ entry, run: reservation, outcome: "definition_failed", detail: settlementDetail, cardId: boardId, executionRef: runId });
+        return { status: "definition_failed", safeDetail: settlementDetail, cardId: boardId };
       } else {
         kanbanComplete(boardId, null, response?.slice(0, 4000) || "completed");
         settleRunOnce({ entry, run: reservation, outcome: "success", detail: response?.slice(0, 200), cardId: boardId, executionRef: runId });
@@ -289,22 +277,6 @@ async function runWithDeadline(
         if (!deadlineWon) finish({ kind: "failed", error });
       });
   });
-}
-
-function writeResultFile(entryId: string, content: string): string | null {
-  try {
-    const dir = join(abtarsHome(), "workspace", entryId);
-    mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${entryId}-${localDate()}.md`);
-    const temp = `${file}.${process.pid}.tmp`;
-    writeFileSync(temp, content, "utf-8");
-    renameSync(temp, file);
-    logTaskTrace("report_artifact_materialized", { task: entryId }, `path=${file}`);
-    return file;
-  } catch (err) {
-    logWarn(TAG, `writeResultFile error: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
 }
 
 async function getToolRegistry(): Promise<{ getToolDescriptor: (name: string) => { processDependency?: { executable: string; probeArgs: string[] } } | undefined } | undefined> {

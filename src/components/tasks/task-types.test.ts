@@ -102,6 +102,12 @@ describe("normalize + validation", () => {
       expect(r.ok).toBe(false);
     });
 
+    it("report delivery requires a structured report contract", () => {
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", agent: "task", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("report contract is required");
+    });
+
     it("agent rejects an unknown agent value", () => {
       const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", agent: "wizard", chatId: "1", delivery: "report" }, NOW);
       expect(r.ok).toBe(false);
