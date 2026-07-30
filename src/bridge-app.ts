@@ -79,8 +79,9 @@ export class Bridge {
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
     await     step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", async () => {
+      const { setMemoryRuntime } = await import("./components/transport/tool-registry.js");
+      setMemoryRuntime(null);
       await this.ctx.memoryRuntime.close().catch(() => {});
-      if (this.ctx.client) await this.ctx.client.close().catch(() => {});
     });
     await step("transport", () => this.ctx.transport?.destroy());
     await step("snapshot", () => { const { removeSnapshot } = require("./components/runtime-health-snapshot.js"); removeSnapshot(); });

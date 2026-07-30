@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createPiAgentTools } from "./pi-core-tools.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
 import { createPiExecutionSafetyController } from "./pi-core-safety.js";
@@ -7,6 +7,8 @@ import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { buildPolicy } from "../tool-sandbox.js";
 import { PiCoreToolExecutionError } from "./tool-failure-diagnostic.js";
+import { createClientRuntime } from "../memory-runtime.js";
+import { setMemoryRuntime } from "./tool-registry.js";
 
 function makeRegistry() {
   return new ModelHealthRegistry();
@@ -31,6 +33,10 @@ describe("createPiAgentTools", () => {
   beforeEach(() => {
     registry = makeRegistry();
     policy = new FallbackPolicy([makeCandidate()], registry);
+  });
+
+  afterEach(() => {
+    setMemoryRuntime(null);
   });
 
   function makeContext(overrides?: Partial<PiCoreToolContext>): PiCoreToolContext {
@@ -109,6 +115,39 @@ describe("createPiAgentTools", () => {
         expect.objectContaining({ reason: "unknown", tool: "irc_send" }),
       );
     }
+  });
+
+  it("treats repeated unavailable private writes as completed non-failures", async () => {
+    const instantStore = vi.fn();
+    const client = {
+      capabilities: {
+        version: 1,
+        methods: ["private.instantStore"],
+        domains: ["private"],
+        features: { private_write: "false" },
+      },
+      privateMemory: { instantStore },
+    } as unknown as import("abmind").AbmindClient;
+    setMemoryRuntime(createClientRuntime(client));
+
+    const onToolFailure = vi.fn();
+    const onToolSuccess = vi.fn();
+    const tools = createPiAgentTools(makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
+      onToolFailure,
+      onToolSuccess,
+    }));
+    const storeTool = tools.find(tool => tool.name === "memory_store");
+    expect(storeTool).toBeDefined();
+
+    for (const [index, translated] of ["one", "two", "three"].entries()) {
+      const result = await storeTool!.execute(`call_${index}`, { translated, type: "fact" });
+      expect(result.content[0]?.text).toContain('"retryable":false');
+    }
+
+    expect(instantStore).not.toHaveBeenCalled();
+    expect(onToolFailure).not.toHaveBeenCalled();
+    expect(onToolSuccess).toHaveBeenCalledTimes(3);
   });
 
   it("throws PiCoreToolExecutionError on exact_repeat from beforeTool", async () => {

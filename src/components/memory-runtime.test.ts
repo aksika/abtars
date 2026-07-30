@@ -99,6 +99,18 @@ describe("capability projection", () => {
     expect(rt.supports("instantStore")).toBe(false);
     expect(rt.supports("recordMessage")).toBe(false);
   });
+
+  it.each([
+    { version: 2, methods: ALL_METHODS, features: { private_write: "true" } },
+    { version: 1, methods: "private.instantStore", features: { private_write: "true" } },
+    { version: 1, methods: ALL_METHODS, features: "private_write=true" },
+    { version: 1, methods: [...ALL_METHODS, 42], features: { private_write: "true" } },
+  ])("malformed or unsupported snapshot fails closed: $version $methods", malformed => {
+    const client = mockClient(caps([]));
+    (client as any).capabilities = malformed;
+    const rt = createClientRuntime(client);
+    expect([...rt.capabilities]).toEqual([]);
+  });
 });
 
 describe("createClientRuntime", () => {
@@ -150,6 +162,17 @@ describe("createClientRuntime", () => {
     const client = mockClient(caps(ALL_METHODS, {}));
     const rt = createClientRuntime(client);
     expect(rt.supports("recall")).toBe(false);
+  });
+
+  it("does not dispatch an unadvertised FTS rebuild", async () => {
+    const client = mockClient(caps(["private.rebuildFts"], { private_write: "false" }));
+    const rt = createClientRuntime(client);
+    await expect(rt.rebuildFtsIndexes()).rejects.toThrow(/capability unavailable/);
+    await expect(rt.runMaintenance({ operation: "fts_rebuild" })).resolves.toEqual({
+      ok: false,
+      summary: "Memory capability unavailable: rebuildFts",
+    });
+    expect(client.privateMemory.rebuildFtsIndexes).not.toHaveBeenCalled();
   });
 });
 

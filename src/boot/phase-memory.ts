@@ -23,6 +23,11 @@ import { homedir } from "node:os";
 export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
   const home = process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars");
 
+  // The registry outlives an individual Bridge during an in-process restart.
+  // Clear the previous boot's runtime before any branch can skip or fail.
+  const { setMemoryRuntime } = await import("../components/transport/tool-registry.js");
+  setMemoryRuntime(null);
+
   const legacyAbmindPkgs = [
     join(home, "app", "bundle", "node_modules", "abmind", "package.json"),
     join(home, "app", "node_modules", "abmind", "package.json"),
@@ -63,7 +68,6 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
     ctx.memoryRuntime = runtime;
     logInfo("main", "🧠 Memory enabled via abmind daemon");
 
-    const { setMemoryRuntime } = await import("../components/transport/tool-registry.js");
     setMemoryRuntime(runtime);
     logInfo("main", "🧠 Daemon-backed memory wired to tool registry");
 

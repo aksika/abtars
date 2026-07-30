@@ -216,10 +216,23 @@ export interface AbtarsMemoryRuntime {
 // ── Capability projection ─────────────────────────────────────────────────
 
 function projectCapabilities(client: AbmindClient): Set<MemoryRuntimeCapability> {
-  const caps = client.capabilities;
-  if (!caps) return new Set();
-  const methods = new Set(caps.methods ?? []);
-  const features = caps.features ?? {};
+  const caps = client.capabilities as unknown;
+  if (!caps || typeof caps !== "object" || Array.isArray(caps)) return new Set();
+
+  const snapshot = caps as Record<string, unknown>;
+  if (
+    snapshot["version"] !== 1
+    || !Array.isArray(snapshot["methods"])
+    || snapshot["methods"].some(method => typeof method !== "string")
+    || !snapshot["features"]
+    || typeof snapshot["features"] !== "object"
+    || Array.isArray(snapshot["features"])
+  ) {
+    return new Set();
+  }
+
+  const methods = new Set(snapshot["methods"] as string[]);
+  const features = snapshot["features"] as Record<string, unknown>;
   const result = new Set<MemoryRuntimeCapability>();
 
   if (methods.has("private.recall") && features["private_read"] === "true") result.add("recall");
@@ -232,6 +245,12 @@ function projectCapabilities(client: AbmindClient): Set<MemoryRuntimeCapability>
   if (methods.has("private.getRuntimeStatus")) result.add("status");
 
   return result;
+}
+
+function requireClientCapability(capabilities: ReadonlySet<MemoryRuntimeCapability>, capability: MemoryRuntimeCapability): void {
+  if (!capabilities.has(capability)) {
+    throw new Error(`Memory capability unavailable: ${capability}`);
+  }
 }
 
 // ── Client-backed implementation ──────────────────────────────────────────
@@ -248,6 +267,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
     },
 
     async recordMessage(input: RecordMessageInput, _operationKey: string): Promise<RecordMessageResult> {
+      requireClientCapability(capabilities, "recordMessage");
       const result = await client.privateMemory.recordMessage({
         userId: input.userId,
         sessionId: input.sessionId,
@@ -264,6 +284,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
     },
 
     async recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult> {
+      requireClientCapability(capabilities, "recall");
       const result = await client.privateMemory.recall({
         translated: [input.query],
         original: input.original ?? input.query,
@@ -335,9 +356,11 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
     async runMaintenance(input: MaintenanceInput): Promise<MaintenanceResult> {
       try {
         switch (input.operation) {
-          case "fts_rebuild":
+          case "fts_rebuild": {
+            requireClientCapability(capabilities, "rebuildFts");
             const fts = await client.privateMemory.rebuildFtsIndexes();
             return { ok: true, summary: `FTS rebuilt: ${fts.rebuilt.join(", ")}` };
+          }
           default:
             return { ok: true, summary: `${input.operation} completed` };
         }
@@ -347,6 +370,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
     },
 
     async instantStore(input: InstantStoreInput): Promise<InstantStoreResult> {
+      requireClientCapability(capabilities, "instantStore");
       const result = await client.privateMemory.instantStore({
         userId: input.userId,
         contentEn: input.contentEn,
@@ -365,6 +389,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
     },
 
     async editMemory(input: EditMemoryInput): Promise<EditMemoryResult> {
+      requireClientCapability(capabilities, "editMemory");
       const result = await client.privateMemory.editMemory({
         memoryId: input.memoryId,
         contentEn: input.contentEn,
@@ -382,6 +407,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
     },
 
     async rebuildFtsIndexes(): Promise<{ rebuilt: string[] }> {
+      requireClientCapability(capabilities, "rebuildFts");
       return await client.privateMemory.rebuildFtsIndexes();
     },
 
