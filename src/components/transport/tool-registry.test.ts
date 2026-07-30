@@ -7,7 +7,7 @@ vi.mock("../guardrails.js", () => ({
   checkCommand: () => null,
   classifyCommand: () => "allow",
 }));
-import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, setMemoryBackend } from "./tool-registry.js";
+import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, setMemoryRuntime } from "./tool-registry.js";
 
 describe("isBridgeSpawnCommand", () => {
   it.each([
@@ -110,12 +110,11 @@ describe("executeToolCall", () => {
   });
 });
 
-// #1266: when no in-process memory backend is wired, the memory_* tools
-// must return a clear error rather than silently shelling out to a CLI
-// on PATH we don't trust.
-describe("memory tools with no backend wired (#1266)", () => {
+// #1266/#1507: when no memory runtime is wired, memory_* tools return
+// clear non-retryable results rather than shelling out to a CLI on PATH.
+describe("memory tools with no runtime wired (#1266 / #1507)", () => {
   beforeEach(() => {
-    setMemoryBackend(null);
+    setMemoryRuntime(null);
   });
 
   it("memory_recall returns backend-not-initialized error, no shell-out", async () => {
@@ -126,23 +125,26 @@ describe("memory tools with no backend wired (#1266)", () => {
     expect(parsed.error).toMatch(/memory backend not initialized/);
   });
 
-  it("memory_store returns backend-not-initialized error, no shell-out", async () => {
+  it("memory_store returns private_write_unavailable, no RPC", async () => {
     const tool = getToolDefinitions().find(t => t.name === "memory_store");
     expect(tool).toBeDefined();
     const result = await tool!.execute({ translated: "x", type: "fact" });
     const parsed = JSON.parse(result);
-    expect(parsed.error).toMatch(/memory backend not initialized/);
+    expect(parsed.code).toBe("private_write_unavailable");
+    expect(parsed.retryable).toBe(false);
+    expect(parsed.stored).toBe(false);
   });
 
-  it("memory_edit returns backend-not-initialized error, no shell-out", async () => {
+  it("memory_edit returns private_write_unavailable, no RPC", async () => {
     const tool = getToolDefinitions().find(t => t.name === "memory_edit");
     expect(tool).toBeDefined();
     const result = await tool!.execute({ memory_id: "1" });
     const parsed = JSON.parse(result);
-    expect(parsed.error).toMatch(/memory backend not initialized/);
+    expect(parsed.code).toBe("private_write_unavailable");
+    expect(parsed.retryable).toBe(false);
   });
 
-  it("executeToolCall routes to the same null-backend path", async () => {
+  it("executeToolCall routes to the same null-runtime path", async () => {
     const result = await executeToolCall("memory_recall", { query: "x" });
     const parsed = JSON.parse(result);
     expect(parsed.error).toMatch(/memory backend not initialized/);

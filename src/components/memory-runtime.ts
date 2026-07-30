@@ -8,6 +8,48 @@ import type { MemoryMutationFamily } from "./memory-operation-key.js";
 
 export type RuntimeState = "ready" | "disabled" | "unavailable";
 
+export type MemoryRuntimeCapability =
+  | "recall"
+  | "recordMessage"
+  | "instantStore"
+  | "editMemory"
+  | "rebuildFts"
+  | "feedback"
+  | "coreKnowledge"
+  | "status";
+
+export interface InstantStoreInput {
+  userId: string;
+  contentEn: string;
+  contentOriginal: string;
+  memoryType: string;
+  emotionScore: number;
+  confidence: number;
+  classification: number;
+}
+
+export interface InstantStoreResult {
+  stored: boolean;
+  memoriesCount?: number;
+  error?: string;
+}
+
+export interface EditMemoryInput {
+  memoryId: number;
+  contentEn?: string;
+  contentOriginal?: string;
+  memoryType?: string;
+  emotionScore?: number;
+  confidence?: number;
+  classification?: number;
+  caller?: string;
+}
+
+export interface EditMemoryResult {
+  ok: boolean;
+  error?: string;
+}
+
 export interface RecordMessageInput {
   userId: string;
   sessionId: string;
@@ -152,8 +194,9 @@ function normalizeRecordMessageResult(value: unknown): RecordMessageResult {
 
 export interface AbtarsMemoryRuntime {
   readonly state: RuntimeState;
-  readonly capabilities: ReadonlySet<string>;
+  readonly capabilities: ReadonlySet<MemoryRuntimeCapability>;
 
+  supports(capability: MemoryRuntimeCapability): boolean;
   recordMessage(input: RecordMessageInput, operationKey: string): Promise<RecordMessageResult>;
   recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult>;
   assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult>;
@@ -163,15 +206,45 @@ export interface AbtarsMemoryRuntime {
   recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult>;
   embed(input: EmbeddingInput): Promise<EmbeddingResult>;
   runMaintenance(input: MaintenanceInput): Promise<MaintenanceResult>;
+  instantStore(input: InstantStoreInput): Promise<InstantStoreResult>;
+  editMemory(input: EditMemoryInput): Promise<EditMemoryResult>;
+  rebuildFtsIndexes(): Promise<{ rebuilt: string[] }>;
   close(): Promise<void>;
+}
+
+// ── Capability projection ─────────────────────────────────────────────────
+
+function projectCapabilities(client: AbmindClient): Set<MemoryRuntimeCapability> {
+  const caps = client.capabilities;
+  if (!caps) return new Set();
+  const methods = new Set(caps.methods ?? []);
+  const features = caps.features ?? {};
+  const result = new Set<MemoryRuntimeCapability>();
+
+  if (methods.has("private.recall")) result.add("recall");
+  if (methods.has("private.recordMessage")) result.add("recordMessage");
+  if (methods.has("private.instantStore") && features["private_write"] === "true") result.add("instantStore");
+  if (methods.has("private.edit") && features["private_write"] === "true") result.add("editMemory");
+  if (methods.has("private.rebuildFts") && features["private_write"] === "true") result.add("rebuildFts");
+  if (methods.has("private.recordFeedback")) result.add("feedback");
+  if (methods.has("private.getCoreKnowledge")) result.add("coreKnowledge");
+  if (methods.has("private.getRuntimeStatus")) result.add("status");
+
+  return result;
 }
 
 // ── Client-backed implementation ──────────────────────────────────────────
 
 export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
-  return {
+  const capabilities = projectCapabilities(client);
+
+  const self: AbtarsMemoryRuntime = {
     state: "ready" as RuntimeState,
-    capabilities: new Set(["recall", "recordMessage", "feedback", "coreKnowledge", "status"]),
+    capabilities,
+
+    supports(capability: MemoryRuntimeCapability): boolean {
+      return capabilities.has(capability);
+    },
 
     async recordMessage(input: RecordMessageInput, _operationKey: string): Promise<RecordMessageResult> {
       const result = await client.privateMemory.recordMessage({
@@ -271,10 +344,50 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
       }
     },
 
+    async instantStore(input: InstantStoreInput): Promise<InstantStoreResult> {
+      const result = await client.privateMemory.instantStore({
+        userId: input.userId,
+        contentEn: input.contentEn,
+        contentOriginal: input.contentOriginal,
+        memoryType: input.memoryType as any,
+        emotionScore: input.emotionScore,
+        confidence: input.confidence,
+        classification: input.classification,
+        createdBy: "tool:memory_store",
+      });
+      return {
+        stored: result.stored,
+        memoriesCount: result.memoriesCount,
+        error: result.error,
+      };
+    },
+
+    async editMemory(input: EditMemoryInput): Promise<EditMemoryResult> {
+      const result = await client.privateMemory.editMemory({
+        memoryId: input.memoryId,
+        contentEn: input.contentEn,
+        contentOriginal: input.contentOriginal,
+        memoryType: input.memoryType as any,
+        emotionScore: input.emotionScore,
+        confidence: input.confidence,
+        classification: input.classification,
+        caller: input.caller ?? "kp",
+      });
+      return {
+        ok: result.ok,
+        error: result.error,
+      };
+    },
+
+    async rebuildFtsIndexes(): Promise<{ rebuilt: string[] }> {
+      return await client.privateMemory.rebuildFtsIndexes();
+    },
+
     async close(): Promise<void> {
       await client.close();
     },
   };
+  return self;
 }
 
 // ── Disabled implementation ───────────────────────────────────────────────
@@ -284,6 +397,7 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
   return {
     state: "disabled" as RuntimeState,
     capabilities: new Set(),
+    supports: () => false,
     recordMessage: async () => { unavailable("recordMessage"); return { id: null }; },
     recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
@@ -293,6 +407,9 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
+    instantStore: async () => { unavailable("instantStore"); return { stored: false }; },
+    editMemory: async () => { unavailable("editMemory"); return { ok: false }; },
+    rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
     close: async () => {},
   };
 }
@@ -304,6 +421,7 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
   return {
     state: "unavailable" as RuntimeState,
     capabilities: new Set(),
+    supports: () => false,
     recordMessage: async () => { unavailable("recordMessage"); return { id: null }; },
     recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
@@ -313,6 +431,9 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory unavailable" }; },
+    instantStore: async () => { unavailable("instantStore"); return { stored: false }; },
+    editMemory: async () => { unavailable("editMemory"); return { ok: false }; },
+    rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
     close: async () => {},
   };
 }

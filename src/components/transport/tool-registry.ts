@@ -7,8 +7,7 @@ import { execFile } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { MemoryBackend } from "abmind";
-import type { InstantStoreParams } from "../../types/index.js";
+import type { AbtarsMemoryRuntime } from "../memory-runtime.js";
 import { logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
@@ -229,11 +228,11 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal, executi
   });
 }
 
-let memoryBackend: MemoryBackend | null = null;
+let memoryRuntime: AbtarsMemoryRuntime | null = null;
 
-/** Wire in-process memory backend. Call once after memory init. */
-export function setMemoryBackend(backend: MemoryBackend | null): void {
-  memoryBackend = backend;
+/** Wire memory runtime. Call once after memory init. */
+export function setMemoryRuntime(runtime: AbtarsMemoryRuntime | null): void {
+  memoryRuntime = runtime;
 }
 
 let _actionGate: import("../action-gate.js").ActionGate | null = null;
@@ -269,6 +268,20 @@ const STORE_CAP = 20;
 /** Reset store counter (called on new subagent session). */
 export function resetStoreCounter(): void { _storeCount = 0; }
 
+const PRIVATE_WRITE_UNAVAILABLE = {
+  stored: false,
+  code: "private_write_unavailable",
+  retryable: false,
+  message: "Explicit memory storage is unavailable in this runtime. Do not retry this call.",
+};
+
+const EDIT_UNAVAILABLE = {
+  edited: false,
+  code: "private_write_unavailable",
+  retryable: false,
+  message: "Explicit memory editing is unavailable in this runtime. Do not retry this call.",
+};
+
 const memoryStoreTool: ToolDefinition = {
   name: "memory_store",
   description: "Store a memory. Use after learning something about the user, their preferences, decisions, or facts worth remembering.",
@@ -285,46 +298,44 @@ const memoryStoreTool: ToolDefinition = {
     required: ["translated", "type"],
   },
   async execute(args, context): Promise<string> {
+    if (!memoryRuntime || !memoryRuntime.supports("instantStore")) {
+      return JSON.stringify(PRIVATE_WRITE_UNAVAILABLE);
+    }
     if (++_storeCount > STORE_CAP) {
       return JSON.stringify({ stored: false, error: "Store limit reached for this session. Move to next task." });
     }
-    if (memoryBackend) {
-      try {
-        const params: InstantStoreParams = {
-          userId: context?.userId ?? getMasterUserId(),
-          contentEn: stringValue(args["translated"]),
-          contentOriginal: stringValue(args["original"] ?? args["translated"]),
-          memoryType: stringValue(args["type"] ?? "fact") as InstantStoreParams["memoryType"],
-          emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
-          confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
-          classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
-        };
-        const result = await memoryBackend.instantStore({ ...params, createdBy: "tool:memory_store" });
-        return JSON.stringify(result);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        // #706: FTS5 corruption self-heal — rebuild indexes and retry once
-        if (msg.includes("fts5") || msg.includes("corruption")) {
-          try {
-            await memoryBackend.rebuildFtsIndexes();
-            logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
-            const params: InstantStoreParams = {
-              userId: context?.userId ?? getMasterUserId(),
-              contentEn: stringValue(args["translated"]),
-              contentOriginal: stringValue(args["original"] ?? args["translated"]),
-              memoryType: stringValue(args["type"] ?? "fact") as InstantStoreParams["memoryType"],
-              emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
-              confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
-              classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
-            };
-            const result = await memoryBackend.instantStore({ ...params, createdBy: "tool:memory_store" });
-            return JSON.stringify(result);
-          } catch (retryErr) { /* fall through */ }
-        }
-        return JSON.stringify({ error: msg });
+    try {
+      const result = await memoryRuntime.instantStore({
+        userId: context?.userId ?? getMasterUserId(),
+        contentEn: stringValue(args["translated"]),
+        contentOriginal: stringValue(args["original"] ?? args["translated"]),
+        memoryType: stringValue(args["type"] ?? "fact"),
+        emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
+        confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
+        classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
+      });
+      return JSON.stringify(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // #706: FTS5 corruption self-heal — rebuild indexes and retry once
+      if (msg.includes("fts5") || msg.includes("corruption") && memoryRuntime.supports("rebuildFts")) {
+        try {
+          await memoryRuntime.rebuildFtsIndexes();
+          logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
+          const result = await memoryRuntime.instantStore({
+            userId: context?.userId ?? getMasterUserId(),
+            contentEn: stringValue(args["translated"]),
+            contentOriginal: stringValue(args["original"] ?? args["translated"]),
+            memoryType: stringValue(args["type"] ?? "fact"),
+            emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
+            confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
+            classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
+          });
+          return JSON.stringify(result);
+        } catch (retryErr) { /* fall through */ }
       }
+      return JSON.stringify({ error: msg });
     }
-    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
   },
 };
 
@@ -340,26 +351,22 @@ const memoryRecallTool: ToolDefinition = {
     required: ["query"],
   },
   async execute(args, context): Promise<string> {
-    if (memoryBackend) {
-      try {
-        const t0 = Date.now();
-        const userId = context?.userId ?? getMasterUserId();
-        const { loadUsers } = await import("../user-registry.js");
-        const userEntry = loadUsers().byUserId.get(userId);
-        const result = await memoryBackend.recall({
-          translated: [stringValue(args["query"])],
-          original: stringValue(args["query"]),
-          userId,
-          limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
-          maxClassification: userEntry?.maxClass ?? 1,
-        });
-        import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
-        return JSON.stringify(result);
-      } catch (err) {
-        return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
-      }
+    if (!memoryRuntime || !memoryRuntime.supports("recall")) {
+      return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
     }
-    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
+    try {
+      const t0 = Date.now();
+      const userId = context?.userId ?? getMasterUserId();
+      const result = await memoryRuntime.recall({
+        query: stringValue(args["query"]),
+        userId,
+        limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
+      });
+      import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
+      return JSON.stringify(result);
+    } catch (err) {
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+    }
   },
 };
 
@@ -381,24 +388,24 @@ const memoryEditTool: ToolDefinition = {
     required: ["memory_id"],
   },
   async execute(args): Promise<string> {
-    if (memoryBackend) {
-      try {
-        const result = await memoryBackend.editMemory({
-          memoryId: parseInt(stringValue(args["memory_id"] ?? "0"), 10),
-          contentEn: optionalStringValue(args["translated"]),
-          contentOriginal: optionalStringValue(args["original"]),
-          memoryType: optionalStringValue(args["type"]) as "fact" | "decision" | "preference" | "event" | undefined,
-          emotionScore: args["emotion"] ? parseInt(stringValue(args["emotion"]), 10) : undefined,
-          confidence: args["confidence"] ? parseInt(stringValue(args["confidence"]), 10) : undefined,
-          classification: args["classification"] ? parseInt(stringValue(args["classification"]), 10) : undefined,
-          caller: stringValue(args["caller"] ?? "kp") as "kp" | "dreamy",
-        });
-        return JSON.stringify(result);
-      } catch (err) {
-        return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
-      }
+    if (!memoryRuntime || !memoryRuntime.supports("editMemory")) {
+      return JSON.stringify(EDIT_UNAVAILABLE);
     }
-    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
+    try {
+      const result = await memoryRuntime.editMemory({
+        memoryId: parseInt(stringValue(args["memory_id"] ?? "0"), 10),
+        contentEn: optionalStringValue(args["translated"]),
+        contentOriginal: optionalStringValue(args["original"]),
+        memoryType: optionalStringValue(args["type"]),
+        emotionScore: args["emotion"] ? parseInt(stringValue(args["emotion"]), 10) : undefined,
+        confidence: args["confidence"] ? parseInt(stringValue(args["confidence"]), 10) : undefined,
+        classification: args["classification"] ? parseInt(stringValue(args["classification"]), 10) : undefined,
+        caller: stringValue(args["caller"] ?? "kp"),
+      });
+      return JSON.stringify(result);
+    } catch (err) {
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+    }
   },
 };
 

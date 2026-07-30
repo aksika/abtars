@@ -59,23 +59,12 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
 
     const client = mem as import("abmind").AbmindClient;
     ctx.client = client;
-    ctx.memoryRuntime = createClientRuntime(client);
+    const runtime = createClientRuntime(client);
+    ctx.memoryRuntime = runtime;
     logInfo("main", "🧠 Memory enabled via abmind daemon");
 
-    const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
-    const backend = {
-      initialize: async () => {},
-      close: () => client.close().catch(() => {}),
-      instantStore: (p: any) => client.privateMemory.instantStore(p),
-      editMemory: (p: any) => client.privateMemory.editMemory(p),
-      reclassifyMemory: (id: number, level: number, uo: boolean) => client.privateMemory.reclassifyMemory(id, level, uo),
-      adjustRelevance: (id: number, delta: number) => client.privateMemory.adjustRelevance(id, delta),
-      mergeMemories: (a: number, b: number) => client.privateMemory.mergeMemories(a, b),
-      cascadeDelete: (ids: number[], uid: string) => client.privateMemory.cascadeDelete(ids, uid),
-      recall: (p: any) => client.privateMemory.recall(p),
-      rebuildFtsIndexes: () => client.privateMemory.rebuildFtsIndexes(),
-    };
-    setMemoryBackend(backend as any);
+    const { setMemoryRuntime } = await import("../components/transport/tool-registry.js");
+    setMemoryRuntime(runtime);
     logInfo("main", "🧠 Daemon-backed memory wired to tool registry");
 
     return "ran";
