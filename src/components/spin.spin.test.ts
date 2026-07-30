@@ -32,6 +32,8 @@ vi.mock("./transport/bridge-lock-transport.js", () => ({
 
 vi.mock("./transport/orc-tools.js", () => ({
   setActiveOrcCard: (val: number | null) => activeOrcCardUpdates.push(val),
+  setActiveOrcContext: () => {},
+  getActiveOrcContext: () => null,
 }));
 
 vi.mock("./project-acceptance/project-review-store.js", () => ({
@@ -545,17 +547,16 @@ describe("spin(spec) — unified session API (#1271)", () => {
       activeOrcCardUpdates.length = 0;
     });
 
-    it("sets orc_active + setActiveOrcCard before, clears both after (success path)", async () => {
+    it("sets setActiveOrcCard before, clears after (success path)", async () => {
       spin.setRuntime(makeRuntime() as any);
       const r = await spin.spin({ type: "O", goal: "plan this", userId: "aksika", platform: "telegram", source: "user", await: true });
-      expect(orcLockUpdates).toEqual([expect.any(Number), null]);
       expect(activeOrcCardUpdates.length).toBe(2);
       expect(activeOrcCardUpdates[0]).toEqual(expect.any(Number));
       expect(activeOrcCardUpdates[1]).toBeNull();
       expect(r.cardId).toBeDefined();
     });
 
-    it("clears bridge-lock on failure path", async () => {
+    it("clears active card on failure path", async () => {
       const transport = mockTransport({
         sendPrompt: vi.fn().mockRejectedValue(new Error("transport died")),
       });
@@ -568,8 +569,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       orcSession.transport = transport;
 
       await expect(spin.spin({ type: "O", goal: "fail", userId: "aksika", platform: "telegram", source: "user", await: true })).rejects.toThrow("transport died");
-      // afterPrompt must have cleared orc_active even on failure
-      expect(orcLockUpdates[orcLockUpdates.length - 1]).toBeNull();
+      // afterPrompt must have cleared active card even on failure
       expect(activeOrcCardUpdates[activeOrcCardUpdates.length - 1]).toBeNull();
     });
 

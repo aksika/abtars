@@ -1,22 +1,41 @@
 /**
  * orc-tools.ts — Orc-specific tools for spawning/managing workers (#1005).
  *
- * Module-scoped activeOrcCardId — set by executeOrc before prompt, cleared in finally.
- * Tools always registered; return error if no active Orc project.
+ * #1480: Module-scoped activeOrcCardId + optional OrcInvocationContextV1.
+ * Context is set by the O profile before prompt, cleared in finally.
+ * Tools use the context when available for durable project ownership fencing.
+ * The legacy _activeOrcCardId fallback remains during migration.
  */
 
 import type { ToolDefinition } from "./tool-registry.js";
+import type { OrcInvocationContextV1 } from "../orc-project/orc-project-contracts.js";
 import { logInfo } from "../logger.js";
 
 const TAG = "orc-tools";
 
 let _activeOrcCardId: number | null = null;
+let _activeOrcContext: OrcInvocationContextV1 | null = null;
 
 export function setActiveOrcCard(id: number | null): void {
   _activeOrcCardId = id;
+  if (id === null) _activeOrcContext = null;
 }
 
 export function getActiveOrcCard(): number | null {
+  return _activeOrcCardId;
+}
+
+export function setActiveOrcContext(ctx: OrcInvocationContextV1 | null): void {
+  _activeOrcContext = ctx;
+}
+
+export function getActiveOrcContext(): OrcInvocationContextV1 | null {
+  return _activeOrcContext;
+}
+
+function resolveCardId(args: Record<string, string>): number | null {
+  if (args.project_card_id) return Number(args.project_card_id);
+  if (_activeOrcContext) return _activeOrcContext.projectCardId;
   return _activeOrcCardId;
 }
 
@@ -28,8 +47,11 @@ export function getActiveOrcCard(): number | null {
  * (relay/identity-confusion). Keys off the active card's `source` — not the
  * session — so it stays correct for the shared singleton Orc (owner-initiated
  * delegation on an owner card is still allowed).
+ *
+ * #1480: When orcContext is available, uses its immutable origin instead.
  */
 export async function isActiveCardPeerSourced(): Promise<boolean> {
+  if (_activeOrcContext) return _activeOrcContext.origin.kind === "peer";
   if (_activeOrcCardId == null) return false;
   try {
     const { kanbanGetCard } = await import("../tasks/kanban-board.js");
@@ -65,7 +87,7 @@ const spawnWorkerTool: ToolDefinition = {
     required: ["goal"],
   },
   async execute(args: Record<string, string>): Promise<string> {
-    const projectCardId = args.project_card_id ? Number(args.project_card_id) : _activeOrcCardId;
+    const projectCardId = resolveCardId(args);
     if (!projectCardId) return "[err] No active Orc project. spawn_worker only works during orchestration.";
 
     // #1363 Task 7: refuse spawn during review/repair/input turns
@@ -203,7 +225,7 @@ const checkWorkersTool: ToolDefinition = {
     required: [],
   },
   async execute(args: Record<string, string>): Promise<string> {
-    const cardId = args.project_card_id ? Number(args.project_card_id) : _activeOrcCardId;
+    const cardId = resolveCardId(args);
     if (!cardId) return "[err] No active Orc project and no project_card_id provided.";
     const { kanbanGetCard, kanbanGetChildren } = await import("../tasks/kanban-board.js");
     const projectCard = kanbanGetCard(cardId);
@@ -253,7 +275,7 @@ const cancelWorkerTool: ToolDefinition = {
     required: ["card_id"],
   },
   async execute(args: Record<string, string>): Promise<string> {
-    const projectCardId = args.project_card_id ? Number(args.project_card_id) : _activeOrcCardId;
+    const projectCardId = resolveCardId(args);
     if (!projectCardId) return "[err] No active Orc project and no project_card_id provided.";
     const cardId = parseInt(args.card_id ?? "", 10);
     if (isNaN(cardId)) return "[err] Invalid card_id.";

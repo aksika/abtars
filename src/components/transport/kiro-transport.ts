@@ -39,6 +39,8 @@ export interface PromptRequestContext {
   executionScope?: ToolExecutionScope;
   /** Durable context authority for Pi-core's exclusive before-message projection. */
   orchestrator?: PiContextOrchestrator;
+  /** #1480: Orc invocation context for durable project ownership fencing. */
+  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV1;
 }
 
 export interface RuntimeUsageSnapshot {

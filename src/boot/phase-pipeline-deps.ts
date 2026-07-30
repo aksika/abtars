@@ -19,7 +19,7 @@
 import { readEntry as cronReadEntry } from "../components/tasks/task-store.js";
 import { CronQueue } from "../components/tasks/task-queue.js";
 import { IdleSave } from "../components/idle-save.js";
-import { logWarn, logInfo } from "../components/logger.js";
+import { logWarn } from "../components/logger.js";
 import { loadTransport, resolveAgent } from "../components/transport-config.js";
 import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
@@ -149,14 +149,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   // #907: Register Nerve notification listeners for Orc
   await import("../components/spin-notifications.js");
-
-  // #540: Resume Orc if it was active before crash
-  const { readBridgeLockField } = await import("../components/transport/bridge-lock-transport.js");
-  const orcCard = readBridgeLockField<number>("orc_active");
-  if (orcCard) {
-    logInfo("boot", `Orc was active (card #${orcCard}) — resuming`);
-    spin.dispatch({ type: "O", goal: "Resume: reconcile kanban state for your active project", source: "agent", cardId: orcCard, settlementOwner: "spin" });
-  }
 
   // Build pipelineDeps. References ctx fields; later phases mutate ctx.sleepHandle /
   // pipelineDeps.loadedCapabilities / pipelineDeps.selfHealerTask in place.

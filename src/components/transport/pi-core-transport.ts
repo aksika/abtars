@@ -245,6 +245,7 @@ export class PiCoreTransport implements IKiroTransport {
         this._lastToolFailure = diag;
       },
       executionScope: context?.executionScope,
+      orcContext: context?.orcContext,
     };
     const tools = createPiAgentTools(toolContext);
 

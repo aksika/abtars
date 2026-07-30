@@ -54,6 +54,47 @@ export function requestShutdown(): void {
   _shutdownRequested = true;
 }
 
+import type { OrcProjectCoordinator } from "./orc-project/orc-project-coordinator.js";
+
+let _orcCoordinator: OrcProjectCoordinator | null = null;
+
+export function setOrcCoordinator(c: OrcProjectCoordinator | null): void {
+  _orcCoordinator = c;
+}
+
+export function getOrcCoordinator(): OrcProjectCoordinator | null {
+  return _orcCoordinator;
+}
+
+/** Dispatch an Orc turn through the coordinator if available, else fall back to legacy spin.dispatch. */
+function scheduleOrcReview(projectId: number, generation: number, caseId: string, requestId: string): void {
+  if (_orcCoordinator) {
+    const result = _orcCoordinator.scheduleReview(projectId, generation, caseId);
+    if (result.kind === "claimed" || result.kind === "idempotent") {
+      try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch {}
+    }
+  } else {
+    legacyOrcReviewDispatch(projectId, generation, caseId, requestId);
+  }
+}
+
+function legacyOrcDispatch(goal: string, cardId: number): void {
+  try {
+    spin.dispatch({ type: "O", goal, source: "agent", cardId, settlementOwner: "spin" });
+  } catch (err) {
+    logWarn(TAG, `Failed to dispatch Orc — ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function legacyOrcReviewDispatch(projectId: number, generation: number, caseId: string, requestId: string): void {
+  try {
+    spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${generation}, review_case_id=${caseId}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
+    try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch {}
+  } catch (err) {
+    logWarn(TAG, `Failed to dispatch Orc review — ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 // ── Keyed scheduler ──────────────────────────────────────────────────────────
 
 interface CardReconcilerState {
@@ -146,17 +187,19 @@ async function reconcileProject(projectId: number): Promise<void> {
       // No contract, no supervision — create awaiting_contract and wake Orc
       reviewStore.ensureAwaitingContract(projectId);
       logInfo(TAG, `Project ${projectId}: awaiting contract — dispatching Orc authoring turn`);
-      try {
-        spin.dispatch({ type: "O", goal: `Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
-      } catch (err) {
-        logWarn(TAG, `Project ${projectId}: failed to dispatch Orc for contract authoring — ${err instanceof Error ? err.message : String(err)}`);
+      if (_orcCoordinator) {
+        _orcCoordinator.scheduleContractAuthoring(projectId);
+      } else {
+        legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
       }
     } else if (supervision.state === "awaiting_contract") {
       // Orc should already have been dispatched — retry if not
       logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
-      try {
-        spin.dispatch({ type: "O", goal: `Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
-      } catch {}
+      if (_orcCoordinator) {
+        _orcCoordinator.scheduleContractAuthoring(projectId);
+      } else {
+        legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
+      }
     }
     return;
   }
@@ -228,20 +271,10 @@ async function reconcileProject(projectId: number): Promise<void> {
       if (!existingReq) {
         // No request — create one and dispatch (keep pending for retry)
         const { id: rrId } = reviewStore.insertReviewRequest(projectId, openCase.id, supervision.generation);
-        try {
-          spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${openCase.id}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
-          reviewStore.bumpReviewRequestAttempt(rrId);
-        } catch (err) {
-          logWarn(TAG, `Project ${projectId}: dispatch failed — ${err instanceof Error ? err.message : String(err)}`);
-        }
+        scheduleOrcReview(projectId, supervision.generation, openCase.id, rrId);
       } else if (existingReq.status === "pending") {
         // cooldown check in getPendingReviewRequests prevents rapid retry
-        try {
-          spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${openCase.id}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
-          reviewStore.bumpReviewRequestAttempt(existingReq.id);
-        } catch (err) {
-          logWarn(TAG, `Project ${projectId}: retry dispatch failed — ${err instanceof Error ? err.message : String(err)}`);
-        }
+        scheduleOrcReview(projectId, supervision.generation, openCase.id, existingReq.id);
       } else if (existingReq.status === "abandoned") {
         logWarn(TAG, `Project ${projectId}: review request abandoned — settling blocked`);
         reviewStore.settleBlocked(projectId, openCase.id, { action: "blocked", reason: "Review request abandoned (attempts/deadline)" }, "Review abandoned");
@@ -386,12 +419,7 @@ async function reconcileProject(projectId: number): Promise<void> {
   logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created, request ${reviewRequestId} (gen=${supervision.generation}, round=${supervision.review_round + 1})`);
 
   // Attempt to dispatch Orc — keep request pending so heartbeat retry can recover
-  try {
-    spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${supervision.generation}, review_case_id=${caseId}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
-    reviewStore.bumpReviewRequestAttempt(reviewRequestId);
-  } catch (err) {
-    logWarn(TAG, `Project ${projectId}: failed to dispatch Orc review — ${err instanceof Error ? err.message : String(err)} (request ${reviewRequestId} stays pending)`);
-  }
+  scheduleOrcReview(projectId, supervision.generation, caseId, reviewRequestId);
 }
 
 /** #1363 Task 6: Drive review dispatch from pending requests. Returns count dispatched. */
@@ -400,15 +428,15 @@ function dispatchPendingReviewRequests(): number {
   const pending = store.getPendingReviewRequests();
   let dispatched = 0;
   for (const req of pending) {
-    try {
-      spin.dispatch({ type: "O", goal: `Review project #${req.project_card_id}: project_card_id=${req.project_card_id}, project_generation=${req.generation}, review_case_id=${req.review_case_id}`, source: "agent", cardId: req.project_card_id, settlementOwner: "spin" });
-      // Keep the request pending. spin.dispatch() returns successfully even
-      // when the Orc concurrency gate leaves the card queued; marking it
-      // dispatched here would make that durable request unrecoverable.
-      store.bumpReviewRequestAttempt(req.id);
+    if (_orcCoordinator) {
+      const result = _orcCoordinator.scheduleReview(req.project_card_id, req.generation, req.review_case_id);
+      if (result.kind === "claimed" || result.kind === "idempotent") {
+        try { store.bumpReviewRequestAttempt(req.id); } catch {}
+        dispatched++;
+      }
+    } else {
+      legacyOrcReviewDispatch(req.project_card_id, req.generation, req.review_case_id, req.id);
       dispatched++;
-    } catch (err) {
-      logWarn(TAG, `Failed to dispatch pending review request ${req.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return dispatched;
@@ -867,6 +895,31 @@ function scheduleLeaseEvaluations(): void {
 }
 
 export function startReconciler(): void {
+  // Initialize Orc coordinator if not already set
+  if (!_orcCoordinator) {
+    try {
+      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+      const peerName = loadPeerConfig().self.name;
+      const { OrcProjectCoordinator } = require("./orc-project/orc-project-coordinator.js") as typeof import("./orc-project/orc-project-coordinator.js");
+      _orcCoordinator = new OrcProjectCoordinator({
+        ownerPeer: peerName,
+        startPort: async (context, goal) => {
+          await spin.spin({
+            type: "O",
+            goal,
+            sessionId: context.sessionId,
+            cardId: context.projectCardId,
+            settlementOwner: "spin",
+            source: "agent",
+            orcContext: context,
+          });
+        },
+      });
+      logInfo(TAG, "Orc coordinator initialized");
+    } catch (err) {
+      logWarn(TAG, `Failed to initialize Orc coordinator: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   // #1367: Wire lease deadline scheduler
   _leaseScheduler = new ExecutorLeaseScheduler(
     () => new ExecutorLeaseStore().getDueSnapshots(),

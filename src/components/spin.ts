@@ -530,6 +530,11 @@ export class Spin {
       this.markRunning(spec.type, cardId); kanbanRunning(cardId);
     }
 
+    // #1480: Carry Orc invocation context on the session
+    if (spec.type === "O" && spec.orcContext) {
+      session.orcContext = spec.orcContext;
+    }
+
     // #1319: Track card association and publish execution.started for Orc
     if (cardId !== undefined && spec.type === "O") {
       session.activeCardId = cardId;

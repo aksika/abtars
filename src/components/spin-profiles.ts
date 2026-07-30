@@ -90,15 +90,15 @@ export const SESSION_PROFILES: Record<SessionType, SessionProfile> = {
     resolution: "singleton",             // ← one Orc; reuse the visible O session
     terminateAfter: "external",
     decorators: [orcContext, soulBundle, orcNotifications, orcChannel],
-    beforePrompt: async (_session, cardId) => {
-      const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
-      const { setActiveOrcCard } = await import("./transport/orc-tools.js");
-      if (cardId !== undefined) { updateBridgeLockField("orc_active", cardId); setActiveOrcCard(cardId); }
+    beforePrompt: async (session, cardId) => {
+      const { setActiveOrcCard, setActiveOrcContext } = await import("./transport/orc-tools.js");
+      if (cardId !== undefined) setActiveOrcCard(cardId);
+      if (session.orcContext) setActiveOrcContext(session.orcContext);
     },
     afterPrompt: async () => {
-      const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
-      const { setActiveOrcCard } = await import("./transport/orc-tools.js");
-      updateBridgeLockField("orc_active", null); setActiveOrcCard(null);
+      const { setActiveOrcCard, setActiveOrcContext } = await import("./transport/orc-tools.js");
+      setActiveOrcCard(null);
+      setActiveOrcContext(null);
     },
   },
 };

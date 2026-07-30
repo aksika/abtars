@@ -23,6 +23,8 @@ export interface PiCoreToolContext {
   createUnsafeSchema?: (schema: Record<string, unknown>) => Record<string, unknown>;
   /** #1502 Task 10: task-local execution scope. */
   executionScope?: ToolExecutionScope;
+  /** #1480: Orc invocation context for durable project ownership fencing. */
+  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV1;
 }
 
 function adaptParameters(params: Record<string, unknown>): Record<string, unknown> {

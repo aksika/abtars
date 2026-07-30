@@ -155,6 +155,8 @@ export interface ManagedSession {
   // #1319: Orc activity correlation
   activeCardId?: number;
   activeRootCardId?: number;
+  // #1480: Orc invocation context for durable project ownership fencing.
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
 }
 
 export interface SpinRequest {
@@ -185,6 +187,8 @@ export interface SpinRequest {
   settlementOwner: "spin" | "caller";
   /** #1502 Task 10: explicit task-local cwd/env for tool execution. */
   executionScope?: import("./tasks/task-package.js").ToolExecutionScope;
+  /** #1480: Orc invocation context for durable project ownership fencing. */
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
 }
 
 // ── #1271: unified session API ──────────────────────────────────────────
@@ -257,6 +261,9 @@ export interface SpinSessionSpec {
   // Extension / future-proofing
   metadata?: Record<string, unknown>;  // session-scoped initial data, set ONCE at allocation
                                         // (not merged on sessionId-reuse — see design §2)
+
+  // #1480: Orc invocation context for durable project ownership fencing.
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
 
   // Result
   await?: boolean;
