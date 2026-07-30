@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const abtarsHome = process.env["ABTARS_HOME"];
@@ -19,16 +20,30 @@ const scenarioId = `swarm_${Date.now()}_${Math.random().toString(36).slice(2, 8)
 const logsDir = join(abtarsHome, "logs");
 mkdirSync(logsDir, { recursive: true });
 mkdirSync(join(abtarsHome, "kanban"), { recursive: true });
+mkdirSync(join(abtarsHome, "config"), { recursive: true });
+writeFileSync(join(abtarsHome, "config", "users.json"), JSON.stringify({
+  users: [{ userId: "test-master", role: "master", displayName: "Test Master" }],
+}));
 
 process.env["LOG_FORMAT"] = "json";
 process.env["ABTARS_LOG_LEVEL"] = "trace";
-
-import { setLogLevel, setFileLogging } from "../../components/logger.js";
-setLogLevel("trace");
-setFileLogging(true);
+// Production ESM modules still contain lazy CommonJS loads on infrequent
+// paths. Resolve relative requests from the module that issued them, matching
+// the per-module CommonJS wrapper used by the compiled/bundled runtime. The
+// child owns this compatibility boundary; production code remains unchanged
+// and the parent never shares its module cache or globals.
+globalThis.require = ((specifier: string): unknown => {
+  const caller = new Error().stack?.split("\n")
+    .slice(2)
+    .map(line => line.match(/\((.*:\d+:\d+)\)/)?.[1] ?? line.match(/at (.*:\d+:\d+)/)?.[1])
+    .find((path): path is string => Boolean(path && !path.includes("local-swarm-runner")))
+    ?.replace(/:\d+:\d+$/, "");
+  return createRequire(caller ?? import.meta.url)(specifier);
+}) as typeof globalThis.require;
 
 let resolveResult: (result: LocalSwarmE2EResult) => void;
 const resultPromise = new Promise<LocalSwarmE2EResult>(r => { resolveResult = r; });
+let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
 interface LocalSwarmE2EResult {
   schemaVersion: 1;
@@ -55,17 +70,11 @@ interface LocalSwarmE2EResult {
     code: string;
     message: string;
   };
+  duplicateWakeStable?: boolean;
 }
 
 function fail(stage: string, code: string, message: string): never {
-  resolveResult({
-    schemaVersion: 1, ok: false, scenarioId, childCardIds: [],
-    peakActiveWorkers: 0,
-    counts: { workerContracts: 0, workerAttempts: 0, workerResults: 0, reviewCases: 0, reviewDecisions: 0, outboundDeliveries: 0 },
-    terminal: {},
-    failure: { stage, code, message },
-  });
-  process.exit(1);
+  throw new Error(`[${stage}/${code}] ${message.slice(0, 1_000)}`);
 }
 
 async function eventually<T>(
@@ -109,14 +118,21 @@ const workerResponses = [
   `<summary>Worker C completed: validation of criterion 3.</summary><claim criterion_id="c3">Validation demonstrates criterion 3 compliance.</claim>`,
 ];
 
+let workerStoreCtor: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
+let reviewStoreCtor: typeof import("../../components/project-acceptance/project-review-store.js").ProjectReviewStore;
+
 async function main(): Promise<void> {
   const { spin } = await import("../../components/spin.js");
-  const { requestReconcile, setWorkerAdapter } = await import("../../components/reconciler.js");
-  const { kanbanEnqueue, kanbanGetCard, kanbanGetChildren } = await import("../../components/tasks/kanban-board.js");
+  const { requestReconcile, startReconciler } = await import("../../components/reconciler.js");
+  const { kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning } = await import("../../components/tasks/kanban-board.js");
   const { WorkerSupervisionStore } = await import("../../components/worker-supervision-store.js");
   const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
+  workerStoreCtor = WorkerSupervisionStore;
+  reviewStoreCtor = ProjectReviewStore;
   const { deliverCard } = await import("../../components/tasks/kanban-delivery.js");
-  const { WorkerSupervisionService } = await import("../../components/worker-supervision-service.js");
+  const { setLogLevel, setFileLogging } = await import("../../components/logger.js");
+  setLogLevel("trace");
+  setFileLogging(true);
 
   let nextResponseIndex = 0;
 
@@ -160,45 +176,14 @@ async function main(): Promise<void> {
 
   spin.setRuntime(mockRuntime as any);
 
-  class MockWorkerAdapter {
-    readonly kind = "agent";
-    capacitySnapshot() { return { available: 3, max: 3 }; }
-    async capacity() { return { available: 3, max: 3 }; }
-    async start(claim: any) {
-      const sup = new WorkerSupervisionService();
-      const contract = sup.getContract(claim.contractId);
-      if (!contract) return { kind: "start_failed" as const, reason: "contract not found", retryable: false };
-      spin.dispatch({
-        type: "W", goal: contract.goal, source: "agent",
-        cardId: claim.cardId, contract, attemptId: claim.attemptId,
-        settlementOwner: "spin",
-      });
-      return { kind: "started" as const, attemptId: claim.attemptId, generation: claim.generation, executorId: claim.executorId };
-    }
-    async cancel(claim: any) {
-      const store = new WorkerSupervisionStore();
-      store.requestCancel(claim.attemptId, "cancelled");
-      store.cancelAttempt(claim.attemptId);
-      return { kind: "cancelled" as const, attemptId: claim.attemptId };
-    }
-    async inspect(_claim: any) {
-      return { kind: "running" as const, lifecycle: "running" as const };
-    }
-  }
-  setWorkerAdapter(new MockWorkerAdapter() as any);
-
   const projectCardId = kanbanEnqueue("E2E test project", "test", undefined, {
     type: "O",
     priority: "MEDIUM",
     deliveryMode: "deliver",
   });
 
-  const card = kanbanGetCard(projectCardId);
-  if (card) card.status = "running";
-
-  const reviewStore = new ProjectReviewStore();
-  reviewStore.ensureAwaitingContract(projectCardId);
-  reviewStore.initializeSupervision(projectCardId, `root_${projectCardId}`, "awaiting_contract");
+  kanbanRunning(projectCardId);
+  startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
   const orcTools = getOrcTools();
@@ -237,8 +222,14 @@ async function main(): Promise<void> {
       title: `Worker ${String.fromCharCode(65 + i)}`,
       project_card_id: String(projectCardId),
       criteria: JSON.stringify([
-        { id: `w_c${i + 1}`, description: `Verify criterion ${i + 1}` },
+        { id: `c${i + 1}`, description: `Verify criterion ${i + 1}` },
       ]),
+      verification_commands: JSON.stringify([{
+        id: `check_c${i + 1}`,
+        argv: ["node"],
+        timeout_ms: 5_000,
+        criterion_ids: [`c${i + 1}`],
+      }]),
       supports_root_criteria: JSON.stringify([`c${i + 1}`]),
     }, { userId: "test", orcContext: orcContext as any });
 
@@ -261,20 +252,25 @@ async function main(): Promise<void> {
     requestReconcile(childId);
   }
 
-  const expectedPeak = _peakActiveWorkers;
-
   await eventually("workers-terminal", () => {
     const children = kanbanGetChildren(projectCardId);
     const terminal = children.filter(c => ["done", "delivered", "failed"].includes(c.status));
     return terminal.length >= 3 ? terminal : null;
   }, 30000);
 
-  const supervision = reviewStore.getSupervision(projectCardId)!;
-  const reviewCase = reviewStore.getLatestOpenCase(projectCardId)!;
+  const reviewStore = new ProjectReviewStore();
+  const supervision = await eventually("project-supervision", () => reviewStore.getSupervision(projectCardId) ?? null);
+  const reviewCase = await eventually("review-case", () => reviewStore.getLatestOpenCase(projectCardId) ?? null);
 
-  if (!reviewCase) {
-    fail("review_case", "NO_REVIEW_CASE", "No review case was created after workers completed");
-  }
+  if (!reviewCase) throw new Error("No review case was created after workers completed");
+
+  const snapshot = JSON.parse(reviewCase.case_json) as {
+    criterion_inputs: Array<{ criterion_id: string; observed_evidence_ids: string[]; worker_claim_ids: string[] }>;
+  };
+  const evidenceByCriterion = new Map(snapshot.criterion_inputs.map(input => [
+    input.criterion_id,
+    input.observed_evidence_ids.slice(0, 10),
+  ]));
 
   const reviewResult = await reviewProjectTool.execute({
     action: "accept",
@@ -282,12 +278,12 @@ async function main(): Promise<void> {
     project_generation: String(supervision.generation),
     review_case_id: reviewCase.id,
     criteria: JSON.stringify([
-      { criterion_id: "c1", verdict: "satisfied", evidence_ids: ["w1_evidence"], rationale: "Worker A confirmed criterion 1" },
-      { criterion_id: "c2", verdict: "satisfied", evidence_ids: ["w2_evidence"], rationale: "Worker B confirmed criterion 2" },
-      { criterion_id: "c3", verdict: "satisfied", evidence_ids: ["w3_evidence"], rationale: "Worker C confirmed criterion 3" },
+      { criterion_id: "c1", verdict: "satisfied", evidence_ids: evidenceByCriterion.get("c1") ?? [], rationale: "Worker A confirmed criterion 1" },
+      { criterion_id: "c2", verdict: "satisfied", evidence_ids: evidenceByCriterion.get("c2") ?? [], rationale: "Worker B confirmed criterion 2" },
+      { criterion_id: "c3", verdict: "satisfied", evidence_ids: evidenceByCriterion.get("c3") ?? [], rationale: "Worker C confirmed criterion 3" },
     ]),
     outputs: JSON.stringify([
-      { output_id: "o1", disposition: "delivered", evidence_ids: ["w1_evidence", "w2_evidence", "w3_evidence"] },
+      { output_id: "o1", disposition: "verified", evidence_ids: [...evidenceByCriterion.values()].flat().slice(0, 10) },
     ]),
     contradictions: JSON.stringify([]),
     residual_risks: JSON.stringify([]),
@@ -299,6 +295,7 @@ async function main(): Promise<void> {
   }
 
   await deliverCard(kanbanGetCard(projectCardId)!, testDeliverDeps);
+  const beforeDuplicate = readCounts();
 
   for (const childId of childCardIds) {
     requestReconcile(childId);
@@ -307,28 +304,35 @@ async function main(): Promise<void> {
   await new Promise(r => setTimeout(r, 500));
 
   await deliverCard(kanbanGetCard(projectCardId)!, testDeliverDeps);
+  const afterDuplicate = readCounts();
 
   const finalCard = kanbanGetCard(projectCardId)!;
-  const wss = new WorkerSupervisionStore();
-  const supStore = new ProjectReviewStore();
-
   resolveResult({
     schemaVersion: 1, ok: true, scenarioId, projectCardId, childCardIds,
-    peakActiveWorkers: expectedPeak,
-    counts: {
-      workerContracts: (wss.db.prepare("SELECT COUNT(*) as c FROM worker_contracts").get() as any)["c"] as number,
-      workerAttempts: (wss.db.prepare("SELECT COUNT(*) as c FROM worker_attempts").get() as any)["c"] as number,
-      workerResults: (wss.db.prepare("SELECT COUNT(*) as c FROM worker_results").get() as any)["c"] as number,
-      reviewCases: (supStore.db.prepare("SELECT COUNT(*) as c FROM project_review_cases").get() as any)["c"] as number,
-      reviewDecisions: (supStore.db.prepare("SELECT COUNT(*) as c FROM project_review_decisions").get() as any)["c"] as number,
-      outboundDeliveries: sentCaptureCount,
-    },
+    peakActiveWorkers: _peakActiveWorkers,
+    counts: afterDuplicate,
     terminal: {
-      projectState: supervision?.state ?? "unknown",
+      projectState: reviewStore.getSupervision(projectCardId)?.state ?? "unknown",
       cardStatus: finalCard?.status ?? "unknown",
       deliveryResult: finalCard?.delivery_result ?? "unknown",
     },
+    duplicateWakeStable: JSON.stringify(beforeDuplicate) === JSON.stringify(afterDuplicate),
   });
+}
+
+function readCounts(): LocalSwarmE2EResult["counts"] {
+  const wss = new workerStoreCtor();
+  const supStore = new reviewStoreCtor();
+  const count = (db: { prepare(sql: string): { get(): unknown } }, table: string): number =>
+    Number((db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get() as { c: number }).c);
+  return {
+    workerContracts: count(wss.db, "worker_contracts"),
+    workerAttempts: count(wss.db, "worker_attempts"),
+    workerResults: count(wss.db, "worker_results"),
+    reviewCases: count(supStore.db, "project_review_cases"),
+    reviewDecisions: count(supStore.db, "project_review_decisions"),
+    outboundDeliveries: sentCaptureCount,
+  };
 }
 
 let sentCaptureCount = 0;
@@ -354,11 +358,18 @@ process.on("unhandledRejection", (reason) => {
   console.error("UNHANDLED REJECTION:", reason);
 });
 
-setTimeout(() => {
-  fail("timeout", "TIMEOUT", "Runner exceeded 60s timeout");
+timeoutHandle = setTimeout(() => {
+  resolveResult({
+    schemaVersion: 1, ok: false, scenarioId, childCardIds: [],
+    peakActiveWorkers: _peakActiveWorkers,
+    counts: { workerContracts: 0, workerAttempts: 0, workerResults: 0, reviewCases: 0, reviewDecisions: 0, outboundDeliveries: 0 },
+    terminal: {},
+    failure: { stage: "timeout", code: "TIMEOUT", message: "Runner exceeded 60s timeout" },
+  });
 }, 60000);
 
 resultPromise.then(result => {
+  if (timeoutHandle) clearTimeout(timeoutHandle);
   process.stdout.write("LOCAL_SWARM_RESULT=" + JSON.stringify(result) + "\n");
   process.exit(result.ok ? 0 : 1);
 });

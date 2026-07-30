@@ -1231,29 +1231,11 @@ export class Spin {
         throw new Error(`Contract creation rejected: ${result.error}`);
       }
       request.attemptId = result.attemptId;
-      void this.spin({
-        type: "W",
-        goal: request.goal,
-        cardId,
-        parentCardId,
-        title: request.title,
-        priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
-        source: request.source,
-        contractId: result.contract.id,
-        attemptId: result.attemptId,
-        executionControl: request.executionControl,
-        executionScope: request.executionScope,
-        deadlineAt: request.deadlineAt,
-        deliveryMode: request.deliveryMode,
-        delivery: request.delivery,
-        agent: request.agent,
-        timeoutMs: request.timeoutMs,
-        callbackPeer: request.callbackPeer,
-        sourcePeer: request.sourcePeer,
-        chatId: request.chatId ? Number(request.chatId) : undefined,
-        settlementOwner: "spin",
-        await: false,
-      });
+      // Reconciler is the single scheduling authority for supervised Workers.
+      // kanbanEnqueue already emitted card:queued; because contract creation is
+      // synchronous, the queued wake observes a fully initialized attempt.
+      // Starting Spin here would race the claim and allow a Worker to execute
+      // without the durable ownership transition being the source of truth.
       return cardId;
     }
     // No contract — legacy unsupervised path.

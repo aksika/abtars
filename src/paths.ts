@@ -1,6 +1,7 @@
-import { resolve, join, relative } from "node:path";
+import { resolve, join, relative, dirname } from "node:path";
 import { homedir } from "node:os";
 import { mkdirSync, readFileSync, realpathSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { resolveReleasesDir } from "./cli/deploy-lib/paths.js";
 
 /** Base directory for all Abtars runtime data. Override with ABTARS_HOME env var. */
@@ -14,6 +15,7 @@ export function abmindHome(): string {
 }
 
 let _abtarsRootCache: string | null = null;
+const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
  * Root of the active release (code, prompts, scripts, templates).
@@ -29,7 +31,7 @@ export function abtarsRoot(): string {
   const legacyApp = join(abtarsHome(), "app");
   if (existsSync(legacyApp)) { _abtarsRootCache = legacyApp; return _abtarsRootCache; }
   // Ultimate fallback: relative to this file (npm package layout)
-  _abtarsRootCache = resolve(__dirname, "..");
+  _abtarsRootCache = SOURCE_ROOT;
   return _abtarsRootCache;
 }
 
@@ -68,5 +70,3 @@ export function ensureDir(absPath: string): void {
   }
   mkdirSync(absPath, { recursive: true });
 }
-
-

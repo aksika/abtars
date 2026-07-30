@@ -15,7 +15,7 @@ beforeEach(async () => {
   TEST_HOME = join(tmpdir(), `delivery-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(TEST_HOME, { recursive: true });
   vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
-  vi.doMock("../logger.js", () => ({ logInfo: vi.fn(), logWarn: vi.fn(), logError: vi.fn(), logDebug: vi.fn() }));
+  vi.doMock("../logger.js", () => ({ logInfo: vi.fn(), logWarn: vi.fn(), logError: vi.fn(), logDebug: vi.fn(), logTrace: vi.fn() }));
   board = await import("./kanban-board.js");
   ({ deliverCard } = await import("./kanban-delivery.js"));
 });
