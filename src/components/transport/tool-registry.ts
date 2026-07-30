@@ -375,38 +375,47 @@ const memoryRecallTool: ToolDefinition = {
 
 const memoryEditTool: ToolDefinition = {
   name: "memory_edit",
-  description: "Edit an existing memory by ID. Change content, type, emotion, confidence, or classification.",
+  description: "Edit an existing memory by ID. Requires the expected_revision from a prior recall call to avoid stale overwrites. Change content, type, emotion, confidence, or classification.",
   parameters: {
     type: "object",
     properties: {
       memory_id: { type: "integer", description: "Memory ID to edit" },
+      expected_revision: { type: "integer", description: "Semantic revision from the most recent recall read of this memory. Required for safe concurrent edits." },
       translated: { type: "string", description: "New English content" },
       original: { type: "string", description: "New original language content" },
       type: { type: "string", description: "New memory type" },
       emotion: { type: "integer", description: "New emotion score" },
       confidence: { type: "integer", description: "New confidence" },
       classification: { type: "integer", description: "New classification" },
-      caller: { type: "string", enum: ["kp", "dreamy"], description: "Who is making the edit" },
     },
-    required: ["memory_id"],
+    required: ["memory_id", "expected_revision"],
   },
-  async execute(args): Promise<string> {
+  async execute(args, context): Promise<string> {
     if (!memoryRuntime || !memoryRuntime.supports("editMemory")) {
       return JSON.stringify(EDIT_UNAVAILABLE);
     }
     try {
+      const expectedRevision = parseInt(stringValue(args["expected_revision"] ?? "0"), 10);
+      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+        return JSON.stringify({ ok: false, error: "expected_revision must be a positive integer" });
+      }
       const result = await memoryRuntime.editMemory({
         memoryId: parseInt(stringValue(args["memory_id"] ?? "0"), 10),
+        expectedRevision,
+        userId: context?.userId ?? getMasterUserId(),
         contentEn: optionalStringValue(args["translated"]),
         contentOriginal: optionalStringValue(args["original"]),
         memoryType: optionalStringValue(args["type"]),
         emotionScore: args["emotion"] ? parseInt(stringValue(args["emotion"]), 10) : undefined,
         confidence: args["confidence"] ? parseInt(stringValue(args["confidence"]), 10) : undefined,
         classification: args["classification"] ? parseInt(stringValue(args["classification"]), 10) : undefined,
-        caller: stringValue(args["caller"] ?? "kp"),
       });
       return JSON.stringify(result);
     } catch (err) {
+      const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
+      if (code === "conflict") {
+        return JSON.stringify({ ok: false, error: "Stale revision: memory was modified since you last read it. Please re-recall and retry.", retryable: false, code: "conflict" });
+      }
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
     }
   },

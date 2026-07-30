@@ -32,22 +32,26 @@ export interface InstantStoreResult {
   stored: boolean;
   memoriesCount?: number;
   error?: string;
+  memoryId?: number;
+  semanticRevision?: number;
 }
 
 export interface EditMemoryInput {
   memoryId: number;
+  expectedRevision: number;
+  userId: string;
   contentEn?: string;
   contentOriginal?: string;
   memoryType?: string;
   emotionScore?: number;
   confidence?: number;
   classification?: number;
-  caller?: string;
 }
 
 export interface EditMemoryResult {
   ok: boolean;
   error?: string;
+  semanticRevision?: number;
 }
 
 export interface RecordMessageInput {
@@ -92,6 +96,7 @@ export interface RuntimeRecallHit {
   classification?: number;
   emotionScore?: number;
   createdAt?: number;
+  semanticRevision?: number;
 }
 
 export interface RuntimeRecallResult {
@@ -233,12 +238,13 @@ function projectCapabilities(client: AbmindClient): Set<MemoryRuntimeCapability>
 
   const methods = new Set(snapshot["methods"] as string[]);
   const features = snapshot["features"] as Record<string, unknown>;
+  const revisionContract = features["private_mutation_contract"] === "revision-v1";
   const result = new Set<MemoryRuntimeCapability>();
 
   if (methods.has("private.recall") && features["private_read"] === "true") result.add("recall");
   if (methods.has("private.recordMessage")) result.add("recordMessage");
-  if (methods.has("private.instantStore") && features["private_write"] === "true") result.add("instantStore");
-  if (methods.has("private.edit") && features["private_write"] === "true") result.add("editMemory");
+  if (methods.has("private.instantStore") && features["private_write"] === "true" && revisionContract) result.add("instantStore");
+  if (methods.has("private.edit") && features["private_write"] === "true" && revisionContract) result.add("editMemory");
   if (methods.has("private.rebuildFts") && features["private_write"] === "true") result.add("rebuildFts");
   if (methods.has("private.recordFeedback")) result.add("feedback");
   if (methods.has("private.getCoreKnowledge")) result.add("coreKnowledge");
@@ -309,6 +315,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
         classification: r.classification,
         emotionScore: r.emotionScore,
         createdAt: r.createdAt,
+        semanticRevision: r.semanticRevision,
       }));
       const context = hits.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");
       return { hits, context };
@@ -385,6 +392,8 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
         stored: result.stored,
         memoriesCount: result.memoriesCount,
         error: result.error,
+        memoryId: (result as any).memoryId,
+        semanticRevision: (result as any).semanticRevision,
       };
     },
 
@@ -392,17 +401,21 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
       requireClientCapability(capabilities, "editMemory");
       const result = await client.privateMemory.editMemory({
         memoryId: input.memoryId,
+        userId: input.userId,
+        expectedRevision: input.expectedRevision,
         contentEn: input.contentEn,
         contentOriginal: input.contentOriginal,
         memoryType: input.memoryType as any,
         emotionScore: input.emotionScore,
         confidence: input.confidence,
         classification: input.classification,
-        caller: input.caller ?? "kp",
       });
+      if (!result.ok) {
+        return { ok: false, error: result.code === "validation_error" ? result.message : result.code };
+      }
       return {
-        ok: result.ok,
-        error: result.error,
+        ok: true,
+        semanticRevision: result.ref?.semanticRevision ?? (result as unknown as { semanticRevision?: number }).semanticRevision,
       };
     },
 

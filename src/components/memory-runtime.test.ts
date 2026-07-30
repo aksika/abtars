@@ -42,7 +42,7 @@ describe("capability projection", () => {
   it.each<{ methods: string[]; features: Record<string, string>; expected: MemoryRuntimeCapability[] }>([
     {
       methods: ALL_METHODS,
-      features: { private_read: "true", private_write: "true" },
+      features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
       expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status"],
     },
     {
@@ -67,7 +67,7 @@ describe("capability projection", () => {
     },
     {
       methods: ["private.instantStore", "private.edit", "private.rebuildFts"],
-      features: { private_write: "true" },
+      features: { private_write: "true", private_mutation_contract: "revision-v1" },
       expected: ["instantStore", "editMemory", "rebuildFts"],
     },
     {
@@ -137,7 +137,7 @@ describe("createClientRuntime", () => {
   });
 
   it("instantStore dispatches when supported", async () => {
-    const client = mockClient(caps(ALL_METHODS, { private_read: "true", private_write: "true" }));
+    const client = mockClient(caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" }));
     const rt = createClientRuntime(client);
     const result = await rt.instantStore({ userId: "u1", contentEn: "test", contentOriginal: "test", memoryType: "fact", emotionScore: 0, confidence: 3, classification: 1 });
     expect(result.stored).toBe(true);
@@ -145,9 +145,9 @@ describe("createClientRuntime", () => {
   });
 
   it("editMemory dispatches when supported", async () => {
-    const client = mockClient(caps(ALL_METHODS, { private_read: "true", private_write: "true" }));
+    const client = mockClient(caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" }));
     const rt = createClientRuntime(client);
-    const result = await rt.editMemory({ memoryId: 1, contentEn: "updated" });
+    const result = await rt.editMemory({ memoryId: 1, expectedRevision: 1, userId: "u1" });
     expect(result.ok).toBe(true);
     expect(client.privateMemory.editMemory).toHaveBeenCalled();
   });

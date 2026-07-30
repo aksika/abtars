@@ -252,7 +252,7 @@ describe("memory tools with runtime wired (#1507)", () => {
         "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
         "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
       ],
-      features: { private_read: "true", private_write: "true" },
+      features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
     });
 
     function makeTestUserRegistry() {
@@ -278,7 +278,7 @@ describe("memory tools with runtime wired (#1507)", () => {
     });
 
     it("memory_edit dispatches normally", async () => {
-      const result = await executeToolCall("memory_edit", { memory_id: "1", translated: "updated" });
+      const result = await executeToolCall("memory_edit", { memory_id: "1", expected_revision: "1", translated: "updated" });
       const parsed = JSON.parse(result);
       expect(parsed.ok).toBe(true);
       expect(client.privateMemory.editMemory).toHaveBeenCalledTimes(1);
@@ -293,7 +293,7 @@ describe("memory tools with runtime wired (#1507)", () => {
 
     it("genuine edit error still produces generic error result", async () => {
       client.privateMemory.editMemory = vi.fn().mockRejectedValue(new Error("not found"));
-      const result = await executeToolCall("memory_edit", { memory_id: "999" });
+      const result = await executeToolCall("memory_edit", { memory_id: "999", expected_revision: "1" });
       const parsed = JSON.parse(result);
       expect(parsed.error).toMatch(/not found/);
     });
