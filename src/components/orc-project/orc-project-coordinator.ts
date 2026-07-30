@@ -97,7 +97,7 @@ export class OrcProjectCoordinator {
   private scheduleInternal(input: OrcClaimInput, goal: string): OrcRunClaimResult {
     const result = this.store.claimIntent(input, this.ownerPeer, this.ownerInstanceId);
 
-    if (result.kind === "claimed" || result.kind === "idempotent") {
+    if (result.kind === "claimed") {
       const promoted = this.store.pump();
       if (promoted) {
         const promotedRun = this.store.getRun(promoted);

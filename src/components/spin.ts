@@ -530,9 +530,22 @@ export class Spin {
       this.markRunning(spec.type, cardId); kanbanRunning(cardId);
     }
 
-    // #1480: Carry Orc invocation context on the session
+    // #1480: Carry Orc invocation context on the session and bind execution
     if (spec.type === "O" && spec.orcContext) {
       session.orcContext = spec.orcContext;
+      if (session.activeExecutionId) {
+        import("./orc-project/orc-project-run-store.js").then(({ OrcProjectRunStore }) => {
+          const result = new OrcProjectRunStore().bindExecution(
+            spec.orcContext!.runId,
+            spec.orcContext!.ownershipGeneration,
+            session.id,
+            session.activeExecutionId!,
+          );
+          if (!result.ok) {
+            logWarn(TAG, `Orc bindExecution failed for run ${spec.orcContext!.runId}: ${result.reason}`);
+          }
+        }).catch((err) => logWarn(TAG, `Orc bindExecution error: ${err instanceof Error ? err.message : String(err)}`));
+      }
     }
 
     // #1319: Track card association and publish execution.started for Orc
@@ -913,6 +926,15 @@ export class Spin {
     session.activeRootCardId = undefined;
 
     await profile.afterPrompt?.(session, cardId);
+
+    // #1480: Release Orc run after successful turn
+    if (session.orcContext) {
+      try {
+        const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+        new OrcProjectRunStore().release(session.orcContext.runId, session.orcContext.ownershipGeneration, "completed");
+      } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
+    }
+
     const stepEvent: StepEvent = {
       sessionId: session.id, cardId, stepIndex, result,
       durationMs: Date.now() - started,
@@ -983,6 +1005,15 @@ export class Spin {
     session.activeRootCardId = undefined;
 
     await profile.afterPrompt?.(session, cardId);
+
+    // #1480: Release Orc run after failed turn
+    if (session.orcContext) {
+      try {
+        const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+        new OrcProjectRunStore().release(session.orcContext.runId, session.orcContext.ownershipGeneration, "failed");
+      } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
+    }
+
     const stepEvent: StepEvent = {
       sessionId: session.id, cardId, stepIndex,
       error: err instanceof Error ? err : new Error(msg),
