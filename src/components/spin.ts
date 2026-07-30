@@ -23,6 +23,7 @@ import type { OrcActivityFeed } from "./orc-activity-feed.js";
 import type { SessionOutputFeed } from "./session-output-feed.js";
 import { createOutputObserver, type OutputObserver } from "./session-output-feed.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
+import { normalizeContract } from "./worker-contract.js";
 
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
@@ -1176,7 +1177,6 @@ export class Spin {
 
     // Pre-validate contract structure before creating any state.
     if (request.contract) {
-      const { normalizeContract } = require("./worker-contract.js") as typeof import("./worker-contract.js");
       const preCheck = normalizeContract({
         schema_version: 1,
         id: request.contract.id || "",

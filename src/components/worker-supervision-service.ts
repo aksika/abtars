@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { WorkerSupervisionStore, settleResult, SettlementResult } from "./worker-supervision-store.js";
 import { normalizeContract, createContractId, createAttemptId, validateEnvelope } from "./worker-contract.js";
 import { logWarn } from "./logger.js";
+import { logSwarmTrace } from "./swarm-trace.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation, RetryContext } from "./worker-contract.js";
 import type { TaskDatabase } from "./tasks/kanban-board.js";
 import type { ContractRow } from "./worker-supervision-store.js";
@@ -321,6 +322,8 @@ export class WorkerSupervisionService {
     const summary = allPassed
       ? `✓ ${criteria.filter(c => c.status === "passed").length}/${criteria.length} criteria passed`
       : `✗ ${criteria.filter(c => c.status === "failed").length}/${criteria.length} criteria failed`;
+
+    logSwarmTrace({ event: "worker_settled", card: cardId, attempt: targetAttempt.id, generation: targetAttempt.generation, to: "settled" });
 
     return { settled: true, summary, envelope };
   }
