@@ -1,6 +1,7 @@
 import { requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "./worker-contract.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
+import { logSwarmTrace } from "./swarm-trace.js";
 
 export type AttemptLifecycle =
   | "pending"
@@ -346,6 +347,10 @@ export class WorkerSupervisionStore {
       hard_deadline_at: hardDeadlineAt ?? null,
     });
 
+    if (updated) {
+      logSwarmTrace({ event: "attempt_claimed", card: cardId, attempt: attemptId, generation, executor: executorId });
+    }
+
     return updated ? claim : null;
   }
 
@@ -404,7 +409,12 @@ export class WorkerSupervisionStore {
   }
 
   markAttemptRunning(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting"], "running");
+    const ok = this.lifecycleTransition(attemptId, ["claimed", "starting"], "running");
+    if (ok) {
+      const attempt = this.getAttempt(attemptId);
+      if (attempt) logSwarmTrace({ event: "attempt_running", card: attempt.card_id, attempt: attemptId, generation: attempt.generation, executor: attempt.executor_id });
+    }
+    return ok;
   }
 
   requestCancel(attemptId: string, reason: string): boolean {
@@ -423,17 +433,31 @@ export class WorkerSupervisionStore {
   }
 
   completeAttempt(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed", {
+    const ok = this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed", {
       status: "settled",
       settled_at: new Date().toISOString(),
     });
+    if (ok) {
+      const attempt = this.getAttempt(attemptId);
+      if (attempt) {
+        logSwarmTrace({ event: "attempt_completed", card: attempt.card_id, attempt: attemptId, generation: attempt.generation, to: "completed" });
+      }
+    }
+    return ok;
   }
 
   failAttempt(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "failed", {
+    const ok = this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "failed", {
       status: "failed",
       settled_at: new Date().toISOString(),
     });
+    if (ok) {
+      const attempt = this.getAttempt(attemptId);
+      if (attempt) {
+        logSwarmTrace({ event: "attempt_failed", card: attempt.card_id, attempt: attemptId, generation: attempt.generation, to: "failed" });
+      }
+    }
+    return ok;
   }
 
   cancelAttempt(attemptId: string): boolean {
@@ -561,7 +585,7 @@ export function settleResult(
   envelope: WorkerResultEnvelopeV1,
   status: string,
 ): SettlementResult {
-  return store.db.transaction(() => {
+  const result = store.db.transaction(() => {
     const existing = store.getResult(attemptId);
     if (existing) {
       const digest = envelopeDigest(envelope);
@@ -578,4 +602,9 @@ export function settleResult(
     store.insertResult(attemptId, envelope);
     return SettlementResult.Settled;
   });
+  const attempt = store.getAttempt(attemptId);
+  if (result === SettlementResult.Settled && attempt) {
+    logSwarmTrace({ event: "result_settled", card: attempt.card_id, attempt: attemptId, generation: attempt.generation, to: status });
+  }
+  return result;
 }

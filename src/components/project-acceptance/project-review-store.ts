@@ -1,5 +1,6 @@
 import { requireTaskDatabase, type TaskDatabase } from "../tasks/kanban-board.js";
 import type { ProjectAcceptanceContractV1 } from "./project-contract.js";
+import { logSwarmTrace } from "../swarm-trace.js";
 
 // ── Project supervision states ────────────────────────────────────────────────
 
@@ -554,6 +555,8 @@ export class ProjectReviewStore {
       }
     });
 
+    logSwarmTrace({ event: "project_accepted", project: cardId, reviewCase: reviewCaseId, decision: decisionId, reason: "settle_acceptance" });
+
     return { decisionId };
   }
 
@@ -593,6 +596,8 @@ export class ProjectReviewStore {
         WHERE review_case_id = ? AND status IN ('pending', 'dispatched')
       `).run(now, reviewCaseId);
     });
+
+    logSwarmTrace({ event: "project_blocked", project: cardId, reviewCase: reviewCaseId, decision: decisionId, reason: blockerClass });
 
     return { decisionId };
   }

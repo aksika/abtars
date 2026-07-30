@@ -1,6 +1,7 @@
 import type { KanbanCard } from "./kanban-board.js";
 import { kanbanMarkDelivered, kanbanClaimDelivery, kanbanGetCard, requireTaskDatabase } from "./kanban-board.js";
 import { logDebug, logWarn } from "../logger.js";
+import { logSwarmTrace } from "../swarm-trace.js";
 
 const TAG = "kanban-delivery";
 
@@ -34,11 +35,16 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     return;
   }
 
-  if (!kanbanClaimDelivery(card.id)) return;
+  if (!kanbanClaimDelivery(card.id)) {
+    logSwarmTrace({ event: "delivery_claim_lost", card: card.id, reason: "already_claimed_or_delivered" });
+    return;
+  }
+  logSwarmTrace({ event: "delivery_claim_won", card: card.id });
   const chatId = deps.chatIdFor(card);
 
   if (card.delivery_mode === "silent") {
     kanbanMarkDelivered(card.id);
+    logSwarmTrace({ event: "delivery_sent", card: card.id, reason: "silent_mode" });
     return;
   }
 
@@ -46,10 +52,12 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     try {
       await deps.sendDocument(chatId, card.result_path, card.title);
       markSent(card.id, "sent");
+      logSwarmTrace({ event: "delivery_sent", card: card.id, reason: "document" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `sendDocument failed for card ${card.id}: ${msg}`);
       markUnknown(card.id);
+      logSwarmTrace({ event: "delivery_failed", card: card.id, reason: "send_document_failed" });
     }
     return;
   }
@@ -61,8 +69,10 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     try {
       await deps.sendMessage(chatId, text);
       markSent(card.id, "sent");
+      logSwarmTrace({ event: "delivery_sent", card: card.id, reason: "announce" });
     } catch {
       markUnknown(card.id);
+      logSwarmTrace({ event: "delivery_failed", card: card.id, reason: "announce_failed" });
     }
     return;
   }
@@ -71,8 +81,10 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
   try {
     await deps.sendMessage(chatId, `${card.title} complete.${summary}`);
     markSent(card.id, "sent");
+    logSwarmTrace({ event: "delivery_sent", card: card.id, reason: "message" });
   } catch {
     markUnknown(card.id);
+    logSwarmTrace({ event: "delivery_failed", card: card.id, reason: "message_failed" });
   }
 }
 

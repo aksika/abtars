@@ -4,6 +4,7 @@ import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 import { registerControl, removeControl, getControl } from "./execution-control.js";
+import { logSwarmTrace } from "./swarm-trace.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
 
 const TAG = "spin-worker-adapter";
@@ -44,6 +45,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     if (!contract) return { kind: "start_failed", reason: "attempt contract not found", retryable: false };
 
     logInfo(TAG, `Starting Worker ${claim.cardId} attempt=${claim.attemptId} gen=${claim.generation}`);
+    logSwarmTrace({ event: "adapter_start", card: claim.cardId, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
 
     this._emitter().emitAlive(claim.attemptId, claim.generation, claim.executorId);
 

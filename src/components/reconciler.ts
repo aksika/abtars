@@ -15,6 +15,7 @@ import {
   isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn } from "./logger.js";
+import { logSwarmTrace } from "./swarm-trace.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { SpinWorkerAdapter } from "./spin-worker-adapter.js";
@@ -418,6 +419,8 @@ async function reconcileProject(projectId: number): Promise<void> {
 
   logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created, request ${reviewRequestId} (gen=${supervision.generation}, round=${supervision.review_round + 1})`);
 
+  logSwarmTrace({ event: "review_case_created", project: projectId, card: projectId, reviewCase: caseId, reason: "all_children_terminal", generation: supervision.generation });
+
   // Attempt to dispatch Orc — keep request pending so heartbeat retry can recover
   scheduleOrcReview(projectId, supervision.generation, caseId, reviewRequestId);
 }
@@ -576,6 +579,8 @@ async function startSupervisedWorker(
     return;
   }
 
+  logSwarmTrace({ event: "worker_claim", card: card.id, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
+
   let observation;
   try {
     observation = await workerAdapter().start(claim);
@@ -585,9 +590,11 @@ async function startSupervisedWorker(
 
   if (observation.kind === "started" || observation.kind === "already_started") {
     store.markAttemptRunning(claim.attemptId);
+    logSwarmTrace({ event: "worker_started", card: card.id, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
     return;
   }
 
+  logSwarmTrace({ event: "worker_start_failed", card: card.id, attempt: claim.attemptId, reason: "start_failed" });
   store.failAttempt(claim.attemptId);
   kanbanFail(card.id, `worker start failed: ${observation.reason}`);
 }
