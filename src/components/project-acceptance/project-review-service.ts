@@ -221,11 +221,8 @@ export class ProjectReviewService {
             context: inputReq.context,
           },
         );
-        // #1363 Task 8: Release Orc capacity — clear active card so Orc can serve other projects
-        try {
-          const { setActiveOrcCard } = require("../transport/orc-tools.js") as typeof import("../transport/orc-tools.js");
-          setActiveOrcCard(null);
-        } catch {}
+        // #1480: durable run release is owned by the bound Orc execution;
+        // no process-global active-card state is cleared here.
         return {
           kind: "needs_input",
           decisionId,

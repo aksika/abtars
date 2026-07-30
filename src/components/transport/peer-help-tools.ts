@@ -39,13 +39,13 @@ export const peerAskHelpTool: ToolDefinition = {
     },
     required: ["goal"],
   },
-  async execute(args: Record<string, string>): Promise<string> {
+  async execute(args: Record<string, string>, toolContext): Promise<string> {
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
-    if (await isActiveCardPeerSourced()) {
+    if (await isActiveCardPeerSourced(toolContext)) {
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
 
-    const { goal, priority, context, executor } = args;
+    const { goal, priority, context: requestContext, executor } = args;
     let peer = args.peer;
     let requires: string[];
     let rootCriteria: string[];
@@ -140,7 +140,7 @@ export const peerAskHelpTool: ToolDefinition = {
       created_at: new Date().toISOString(),
       expires_at: expiresAt,
       goal,
-      context,
+      context: requestContext,
       priority: (priority as any) ?? "MEDIUM",
       required_capabilities: deduped,
       target,
@@ -150,7 +150,7 @@ export const peerAskHelpTool: ToolDefinition = {
     let activeContributionPeer: string | undefined = peer;
     let activeContributionRequestId = requestId;
     try {
-      const activeOrc = await getActiveOrcProjectId();
+      const activeOrc = await getActiveOrcProjectId(toolContext);
       if (rootCriteria.length > 0) {
         if (!activeOrc) return JSON.stringify({ error: "root_criteria requires an active Orc project" });
         const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
@@ -384,14 +384,8 @@ function getContributionStore(): ContributionStore {
   return _contributionDb;
 }
 
-async function getActiveOrcProjectId(): Promise<number | null> {
-  try {
-    const { getActiveOrcCard } = await import("./orc-tools.js");
-    const cardId = getActiveOrcCard();
-    if (!cardId) return null;
-    const card = kanbanGetCard(cardId);
-    return card?.type === "O" ? cardId : null;
-  } catch { return null; }
+async function getActiveOrcProjectId(toolContext?: { orcContext?: { projectCardId: number } }): Promise<number | null> {
+  return toolContext?.orcContext?.projectCardId ?? null;
 }
 
 export function getPeerHelpTools(): ToolDefinition[] {

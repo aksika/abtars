@@ -1,8 +1,4 @@
-/**
- * relay-block.test.ts — #1301: peer-originated requests must not relay through
- * this host to a third peer. The relay tools (peer_session/peer_doorbell/
- * peer_ask_help) refuse when the active Orc card is peer-sourced.
- */
+/** #1301/#1480: peer-originated Orc work must not relay through this host. */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mkdirSync } from "node:fs";
@@ -21,60 +17,37 @@ beforeEach(() => {
   });
 });
 
-describe("#1301 isActiveCardPeerSourced", () => {
-  it("false when no active card", async () => {
+const peerContext = {
+  version: 1 as const,
+  runId: "missing",
+  intentKey: "review:1",
+  projectCardId: 1,
+  projectGeneration: 1,
+  ownershipGeneration: 1,
+  ownerPeer: "local",
+  ownerInstanceId: "instance",
+  origin: { kind: "peer" as const, peer: "remote" },
+};
+
+describe("#1301/#1480 context-bound relay protection", () => {
+  it("does not classify ordinary user tool calls as peer-originated Orc work", async () => {
     const orc = await import("./orc-tools.js");
-    orc.setActiveOrcCard(null);
     expect(await orc.isActiveCardPeerSourced()).toBe(false);
   });
 
-  it("false when the active card is owner-sourced", async () => {
-    const kanban = await import("../tasks/kanban-board.js");
+  it("fails closed for a stale or foreign peer context", async () => {
     const orc = await import("./orc-tools.js");
-    const id = kanban.kanbanEnqueue("owner task", "user");
-    orc.setActiveOrcCard(id);
-    expect(await orc.isActiveCardPeerSourced()).toBe(false);
-    orc.setActiveOrcCard(null);
+    expect(await orc.isActiveCardPeerSourced({ orcContext: peerContext })).toBe(true);
   });
 
-  it("true when the active card is peer-sourced", async () => {
-    const kanban = await import("../tasks/kanban-board.js");
-    const orc = await import("./orc-tools.js");
-    const id = kanban.kanbanEnqueue("peer task", "peer", undefined, { sourcePeer: "molty" });
-    orc.setActiveOrcCard(id);
-    expect(await orc.isActiveCardPeerSourced()).toBe(true);
-    orc.setActiveOrcCard(null);
-  });
-});
-
-describe("#1301 relay tools refuse on peer-sourced card", () => {
-  it("peer_session refuses", async () => {
-    const kanban = await import("../tasks/kanban-board.js");
-    const orc = await import("./orc-tools.js");
-    const { executeToolCall } = await import("./tool-registry.js");
-    orc.setActiveOrcCard(kanban.kanbanEnqueue("peer task", "peer"));
-    const out = JSON.parse(await executeToolCall("peer_session", { peer_name: "xxx", message: "hi" }, { userId: "peer" }));
-    expect(out.reason).toBe("peer_relay_blocked");
-    orc.setActiveOrcCard(null);
-  });
-
-  it("peer_ask_help refuses", async () => {
-    const kanban = await import("../tasks/kanban-board.js");
-    const orc = await import("./orc-tools.js");
-    const { executeToolCall } = await import("./tool-registry.js");
-    orc.setActiveOrcCard(kanban.kanbanEnqueue("peer task", "peer"));
-    const out = JSON.parse(await executeToolCall("peer_ask_help", { goal: "do x", peer: "xxx" }, { userId: "peer" }));
-    expect(out.reason).toBe("peer_relay_blocked");
-    orc.setActiveOrcCard(null);
-  });
-
-  it("peer_doorbell refuses", async () => {
-    const kanban = await import("../tasks/kanban-board.js");
-    const orc = await import("./orc-tools.js");
-    const { executeToolCall } = await import("./tool-registry.js");
-    orc.setActiveOrcCard(kanban.kanbanEnqueue("peer task", "peer"));
-    const out = JSON.parse(await executeToolCall("peer_doorbell", { peer_name: "xxx" }, { userId: "peer" }));
-    expect(out.reason).toBe("peer_relay_blocked");
-    orc.setActiveOrcCard(null);
-  });
+  for (const tool of ["peer_session", "peer_ask_help", "peer_doorbell"] as const) {
+    it(`${tool} refuses a stale peer-originated Orc context`, async () => {
+      const { executeToolCall } = await import("./tool-registry.js");
+      const args = tool === "peer_session"
+        ? { peer_name: "xxx", message: "hi" }
+        : tool === "peer_ask_help" ? { goal: "do x", peer: "xxx" } : { peer_name: "xxx" };
+      const out = JSON.parse(await executeToolCall(tool, args, { userId: "peer", orcContext: peerContext }));
+      expect(out.reason).toBe("peer_relay_blocked");
+    });
+  }
 });

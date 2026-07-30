@@ -58,6 +58,7 @@ export class OrcProjectCoordinator {
       originKind: "local",
       cardSource: this.getCardSource(projectCardId),
       sourcePeer: null,
+      expectedProjectGeneration: _projectGeneration,
     }, `Review project #${projectCardId}: project_card_id=${projectCardId}, project_generation=${_projectGeneration}, review_case_id=${reviewCaseId}`);
   }
 
@@ -69,6 +70,7 @@ export class OrcProjectCoordinator {
       originKind: "local",
       cardSource: this.getCardSource(projectCardId),
       sourcePeer: null,
+      expectedProjectGeneration: _projectGeneration,
     }, `Repair review for project #${projectCardId}`);
   }
 
@@ -80,6 +82,7 @@ export class OrcProjectCoordinator {
       originKind: "local",
       cardSource: this.getCardSource(projectCardId),
       sourcePeer: null,
+      expectedProjectGeneration: _projectGeneration,
     }, `Resume review for project #${projectCardId} after input (round ${round})`);
   }
 
@@ -105,7 +108,7 @@ export class OrcProjectCoordinator {
           const context = buildContextForRun(promotedRun);
           this.startPort(context, goal).catch((err) => {
             logWarn(TAG, `Orc start port failed for run ${promoted}: ${err instanceof Error ? err.message : String(err)}`);
-            this.store.release(promoted, promotedRun.ownership_generation, "failed");
+            this.store.release(buildContextForRun(promotedRun), "failed");
             this.store.pump();
           });
         }

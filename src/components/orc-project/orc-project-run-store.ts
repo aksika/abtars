@@ -81,6 +81,15 @@ export class OrcProjectRunStore {
       }
 
       const projectGeneration = sup.generation;
+      if (input.expectedProjectGeneration !== undefined && input.expectedProjectGeneration !== projectGeneration) {
+        return { kind: "conflict" as const, reason: "project_generation_mismatch" as const };
+      }
+
+      const admittedOrigin = input.cardSource === "peer" ? "peer" : "local";
+      const authenticatedPeer = input.originPeer ?? input.sourcePeer ?? null;
+      if (input.originKind !== admittedOrigin || (admittedOrigin === "peer" && (!authenticatedPeer || authenticatedPeer.length > 128))) {
+        return { kind: "conflict" as const, reason: "origin_invalid" as const };
+      }
 
       const existing = this.db.prepare(`
         SELECT id, state, ownership_generation FROM orc_project_runs
@@ -121,10 +130,7 @@ export class OrcProjectRunStore {
       const now = new Date().toISOString();
       const intentKey = deriveIntentKey(input.intentKind, input.projectCardId, projectGeneration, input.intentRef);
 
-      let originPeer: string | null = null;
-      if (input.originKind === "peer") {
-        originPeer = input.originPeer ?? input.sourcePeer ?? null;
-      }
+      const originPeer = admittedOrigin === "peer" ? authenticatedPeer : null;
 
       this.db.prepare(`
         INSERT INTO orc_project_runs
@@ -162,32 +168,38 @@ export class OrcProjectRunStore {
     });
   }
 
-  bindExecution(
-    runId: string,
-    expectedOwnershipGeneration: number,
-    sessionId: string,
-    executionId: string,
-  ): OrcContextValidation {
-    const now = new Date().toISOString();
-    const result = this.db.prepare(`
-      UPDATE orc_project_runs
-      SET state = 'running', session_id = ?, execution_id = ?, started_at = ?, updated_at = ?
-      WHERE id = ? AND state = 'dispatching' AND ownership_generation = ?
-    `).run(sessionId, executionId, now, now, runId, expectedOwnershipGeneration);
-
-    if (result.changes === 0) {
-      const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(runId) as unknown as OrcProjectRunRow | undefined;
+  bindExecution(context: OrcInvocationContextV1, sessionId: string, executionId: string): OrcContextValidation {
+    return this.db.transaction(() => {
+      const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(context.runId) as unknown as OrcProjectRunRow | undefined;
       if (!row) return { ok: false as const, reason: "run_unknown" as const };
       if (row.state === "running" && row.session_id === sessionId && row.execution_id === executionId) {
-        return { ok: true, row };
+        return { ok: true as const, row };
       }
       if (row.state === "running") return { ok: false as const, reason: "session_mismatch" as const };
       if (row.state === "released" || row.state === "superseded") return { ok: false as const, reason: "run_released" as const };
-      return { ok: false as const, reason: "ownership_generation_mismatch" as const };
-    }
-
-    const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(runId) as unknown as OrcProjectRunRow;
-    return { ok: true, row };
+      if (row.owner_instance_id !== context.ownerInstanceId) return { ok: false as const, reason: "foreign_instance" as const };
+      if (row.project_card_id !== context.projectCardId || row.project_generation !== context.projectGeneration) {
+        return { ok: false as const, reason: "project_generation_mismatch" as const };
+      }
+      if (row.ownership_generation !== context.ownershipGeneration) {
+        return { ok: false as const, reason: "ownership_generation_mismatch" as const };
+      }
+      const sup = this.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(row.project_card_id) as { generation: number } | undefined;
+      if (!sup || sup.generation !== row.project_generation) {
+        return { ok: false as const, reason: "project_generation_mismatch" as const };
+      }
+      const now = new Date().toISOString();
+      const result = this.db.prepare(`
+        UPDATE orc_project_runs
+        SET state = 'running', session_id = ?, execution_id = ?, started_at = ?, updated_at = ?
+        WHERE id = ? AND state = 'dispatching' AND ownership_generation = ?
+          AND owner_instance_id = ? AND project_card_id = ? AND project_generation = ?
+      `).run(sessionId, executionId, now, now, context.runId, context.ownershipGeneration,
+        context.ownerInstanceId, context.projectCardId, context.projectGeneration);
+      if (result.changes === 0) return { ok: false as const, reason: "ownership_generation_mismatch" as const };
+      const bound = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(context.runId) as unknown as OrcProjectRunRow;
+      return { ok: true as const, row: bound };
+    });
   }
 
   validateCurrentContext(context: OrcInvocationContextV1): OrcContextValidation {
@@ -203,6 +215,9 @@ export class OrcProjectRunStore {
     if (row.project_card_id !== context.projectCardId) {
       return { ok: false as const, reason: "project_mismatch" as const };
     }
+    if (row.project_generation !== context.projectGeneration) {
+      return { ok: false as const, reason: "project_generation_mismatch" as const };
+    }
     const currentSup = this.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(row.project_card_id) as { generation: number } | undefined;
     if (!currentSup || currentSup.generation !== row.project_generation) {
       return { ok: false as const, reason: "project_generation_mismatch" as const };
@@ -210,18 +225,36 @@ export class OrcProjectRunStore {
     if (row.ownership_generation !== context.ownershipGeneration) {
       return { ok: false as const, reason: "ownership_generation_mismatch" as const };
     }
+    if (context.sessionId !== undefined && row.session_id !== context.sessionId) {
+      return { ok: false as const, reason: "session_mismatch" as const };
+    }
+    if (context.executionId !== undefined && row.execution_id !== context.executionId) {
+      return { ok: false as const, reason: "execution_mismatch" as const };
+    }
 
     return { ok: true, row };
   }
 
-  release(runId: string, expectedOwnershipGeneration: number, outcome: OrcRunOutcome): boolean {
-    const now = new Date().toISOString();
-    const result = this.db.prepare(`
-      UPDATE orc_project_runs
-      SET state = 'released', outcome = ?, released_at = ?, updated_at = ?
-      WHERE id = ? AND ownership_generation = ? AND state IN ('scheduled','dispatching','running')
-    `).run(outcome, now, now, runId, expectedOwnershipGeneration);
-    return result.changes > 0;
+  release(context: OrcInvocationContextV1, outcome: OrcRunOutcome): boolean {
+    return this.db.transaction(() => {
+      const now = new Date().toISOString();
+      const result = this.db.prepare(`
+        UPDATE orc_project_runs
+        SET state = 'released', outcome = ?, released_at = ?, updated_at = ?
+        WHERE id = ? AND ownership_generation = ? AND owner_instance_id = ?
+          AND project_card_id = ? AND project_generation = ?
+          AND state IN ('scheduled','dispatching','running')
+          AND (session_id IS NULL OR session_id = ?)
+          AND (execution_id IS NULL OR execution_id = ?)
+          AND EXISTS (
+            SELECT 1 FROM project_supervision
+            WHERE project_card_id = orc_project_runs.project_card_id
+              AND generation = orc_project_runs.project_generation
+          )
+      `).run(outcome, now, now, context.runId, context.ownershipGeneration, context.ownerInstanceId,
+        context.projectCardId, context.projectGeneration, context.sessionId ?? null, context.executionId ?? null);
+      return result.changes > 0;
+    });
   }
 
   supersede(runId: string, outcome: OrcRunOutcome): boolean {
@@ -268,8 +301,20 @@ export class OrcProjectRunStore {
       if (!revalidated || revalidated.state === "released" || revalidated.state === "superseded") {
         return { ok: false as const, reason: "run_released" };
       }
+      if (revalidated.owner_instance_id !== context.ownerInstanceId) {
+        return { ok: false as const, reason: "foreign_instance" };
+      }
+      if (revalidated.project_card_id !== context.projectCardId || revalidated.project_generation !== context.projectGeneration) {
+        return { ok: false as const, reason: "project_generation_mismatch" };
+      }
       if (revalidated.ownership_generation !== context.ownershipGeneration) {
         return { ok: false as const, reason: "ownership_generation_mismatch" };
+      }
+      if (context.sessionId !== undefined && revalidated.session_id !== context.sessionId) {
+        return { ok: false as const, reason: "session_mismatch" };
+      }
+      if (context.executionId !== undefined && revalidated.execution_id !== context.executionId) {
+        return { ok: false as const, reason: "execution_mismatch" };
       }
       const sup = this.db.prepare(`SELECT state, generation FROM project_supervision WHERE project_card_id = ?`).get(revalidated.project_card_id) as { state: string; generation: number } | undefined;
       if (!sup || sup.generation !== revalidated.project_generation) {
@@ -289,7 +334,17 @@ export class OrcProjectRunStore {
       const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(context.runId) as unknown as OrcProjectRunRow | undefined;
       if (!row || row.state === "released" || row.state === "superseded") return false;
       if (row.ownership_generation !== context.ownershipGeneration) return false;
-      return this.release(context.runId, context.ownershipGeneration, outcome);
+      if (row.owner_instance_id !== context.ownerInstanceId || row.project_card_id !== context.projectCardId || row.project_generation !== context.projectGeneration) return false;
+      if (context.sessionId !== undefined && row.session_id !== context.sessionId) return false;
+      if (context.executionId !== undefined && row.execution_id !== context.executionId) return false;
+      const sup = this.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(row.project_card_id) as { generation: number } | undefined;
+      if (!sup || sup.generation !== row.project_generation) return false;
+      const now = new Date().toISOString();
+      const result = this.db.prepare(`
+        UPDATE orc_project_runs SET state = 'released', outcome = ?, released_at = ?, updated_at = ?
+        WHERE id = ? AND ownership_generation = ? AND owner_instance_id = ? AND state IN ('scheduled','dispatching','running')
+      `).run(outcome, now, now, context.runId, context.ownershipGeneration, context.ownerInstanceId);
+      return result.changes > 0;
     });
   }
 }

@@ -916,6 +916,7 @@ export function startReconciler(): void {
         },
       });
       logInfo(TAG, "Orc coordinator initialized");
+      _orcCoordinator.bootRecovery();
     } catch (err) {
       logWarn(TAG, `Failed to initialize Orc coordinator: ${err instanceof Error ? err.message : String(err)}`);
     }

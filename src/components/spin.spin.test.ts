@@ -234,7 +234,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(p.transportMode).toBe("persistent");
       expect(p.terminateAfter).toBe("external");
       expect(p.beforePrompt).toBeDefined();
-      expect(p.afterPrompt).toBeDefined();
+      expect(p.afterPrompt).toBeUndefined();
     });
 
     it("D profile is external (multi-step persistent)", () => {
@@ -550,9 +550,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
     it("sets setActiveOrcCard before, clears after (success path)", async () => {
       spin.setRuntime(makeRuntime() as any);
       const r = await spin.spin({ type: "O", goal: "plan this", userId: "aksika", platform: "telegram", source: "user", await: true });
-      expect(activeOrcCardUpdates.length).toBe(2);
-      expect(activeOrcCardUpdates[0]).toEqual(expect.any(Number));
-      expect(activeOrcCardUpdates[1]).toBeNull();
+      expect(activeOrcCardUpdates).toHaveLength(0);
       expect(r.cardId).toBeDefined();
     });
 
@@ -569,8 +567,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
       orcSession.transport = transport;
 
       await expect(spin.spin({ type: "O", goal: "fail", userId: "aksika", platform: "telegram", source: "user", await: true })).rejects.toThrow("transport died");
-      // afterPrompt must have cleared active card even on failure
-      expect(activeOrcCardUpdates[activeOrcCardUpdates.length - 1]).toBeNull();
+      // Project authority is no longer held in module-global active-card state.
+      expect(activeOrcCardUpdates).toHaveLength(0);
     });
 
     it("produces decorated prompt in the exact pre-refactor executeOrc order", async () => {

@@ -492,13 +492,19 @@ export class Spin {
     } else if (spec.active || profile.resolution === "active") {
       session = this.getActiveSession(userId, platform);
     } else if (profile.resolution === "singleton") {
-      session = this.getOrCreateVisibleSession(userId, spec.type)!;
+      session = spec.type === "O" && spec.orcContext
+        ? this.getOrCreateOrcProjectSession(userId, spec.orcContext.projectCardId)
+        : this.getOrCreateVisibleSession(userId, spec.type)!;
     } else {
       const r = Sessions.allocateSession(this.sessions, this.nextIndex, spec.type, userId, platform, chatId);
       this.nextIndex = r.nextIndex; session = r.session;
       if (spec.metadata) session.metadata = { ...spec.metadata };
     }
     const stepIndex = (session.messageCount >> 1) + 1;
+
+    // A legacy/user O turn has no project authority. Never inherit the prior
+    // project's context when a project-scoped session is reused.
+    if (spec.type === "O" && !spec.orcContext) session.orcContext = undefined;
 
     // #1332: Assign execution generation for steering continuity
     session.activeExecutionId = `${session.id}_${stepIndex}_${Date.now()}`;
@@ -530,24 +536,6 @@ export class Spin {
       this.markRunning(spec.type, cardId); kanbanRunning(cardId);
     }
 
-    // #1480: Carry Orc invocation context on the session and bind execution
-    if (spec.type === "O" && spec.orcContext) {
-      session.orcContext = spec.orcContext;
-      if (session.activeExecutionId) {
-        import("./orc-project/orc-project-run-store.js").then(({ OrcProjectRunStore }) => {
-          const result = new OrcProjectRunStore().bindExecution(
-            spec.orcContext!.runId,
-            spec.orcContext!.ownershipGeneration,
-            session.id,
-            session.activeExecutionId!,
-          );
-          if (!result.ok) {
-            logWarn(TAG, `Orc bindExecution failed for run ${spec.orcContext!.runId}: ${result.reason}`);
-          }
-        }).catch((err) => logWarn(TAG, `Orc bindExecution error: ${err instanceof Error ? err.message : String(err)}`));
-      }
-    }
-
     // #1319: Track card association and publish execution.started for Orc
     if (cardId !== undefined && spec.type === "O") {
       session.activeCardId = cardId;
@@ -569,6 +557,19 @@ export class Spin {
     //       (O/T/B/D/H) until bridge restart. (#1274)
     const started = Date.now();
     try {
+      // #1480: bind the durable run before any decorator, tool, or provider work.
+      // A failed/stale bind must never start a model turn under an unowned project.
+      if (spec.type === "O" && spec.orcContext) {
+        session.orcContext = spec.orcContext;
+        const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+        const bind = new OrcProjectRunStore().bindExecution(spec.orcContext, session.id, session.activeExecutionId!);
+        if (!bind.ok) throw new Error(`Orc bindExecution rejected: ${bind.reason}`);
+        session.orcContext = {
+          ...spec.orcContext,
+          sessionId: session.id,
+          executionId: session.activeExecutionId,
+        };
+      }
       // 4. before-hook
       await profile.beforePrompt?.(session, cardId);
 
@@ -614,6 +615,7 @@ export class Spin {
         directContextTurn: spec.directContextTurn,
         executionScope: spec.executionScope,
         deadlineAt: spec.deadlineAt,
+        orcContext: session.orcContext,
         executionTelemetry,
         orchestrator: (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator } | undefined)?.contextOrchestrator,
       };
@@ -753,7 +755,11 @@ export class Spin {
                 // ACP/tmux have no in-process agent queue; preserve their
                 // continuation behavior while Pi uses its active Agent.
                 markDelivered(batch);
-                result = (await driver.send(steeringPrompt, undefined, { userId: spec.userId ?? userId, executionTelemetry })) || "(no output)";
+                result = (await driver.send(steeringPrompt, undefined, {
+                  userId: spec.userId ?? userId,
+                  executionTelemetry,
+                  orcContext: session.orcContext,
+                })) || "(no output)";
                 markConsumed(batch, session);
               }
             } catch (steerErr) {
@@ -931,7 +937,7 @@ export class Spin {
     if (session.orcContext) {
       try {
         const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-        new OrcProjectRunStore().release(session.orcContext.runId, session.orcContext.ownershipGeneration, "completed");
+        new OrcProjectRunStore().release(session.orcContext, "completed");
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
     }
 
@@ -1010,7 +1016,7 @@ export class Spin {
     if (session.orcContext) {
       try {
         const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-        new OrcProjectRunStore().release(session.orcContext.runId, session.orcContext.ownershipGeneration, "failed");
+        new OrcProjectRunStore().release(session.orcContext, "failed");
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
     }
 
@@ -1067,6 +1073,15 @@ export class Spin {
     }
     const sub = this.createSubSession(userId, "telegram", type);
     return typeof sub === "string" ? undefined : sub;
+  }
+
+  private getOrCreateOrcProjectSession(userId: string, projectCardId: number): ManagedSession {
+    const existing = [...this.sessions.values()].find((s) =>
+      s.id.includes("_O_") && s.status !== "ended" && s.orcContext?.projectCardId === projectCardId);
+    if (existing) return existing;
+    const sub = this.createSubSession(userId, "background", "O");
+    if (typeof sub === "string") throw new Error(sub);
+    return sub;
   }
 
   /**

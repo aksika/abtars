@@ -32,6 +32,7 @@ export type OrcRunReason =
   | "ownership_generation_mismatch"
   | "session_mismatch"
   | "execution_mismatch"
+  | "origin_invalid"
   | "project_terminal"
   | "intent_not_actionable"
   | "peer_relay_blocked"
@@ -92,6 +93,7 @@ export interface OrcClaimInput {
   originPeer?: string;
   sourcePeer: string | null;
   cardSource: string;
+  expectedProjectGeneration?: number;
 }
 
 export type OrcContextValidation =
@@ -135,6 +137,7 @@ export function formatRunReason(reason: OrcRunReason): string {
     case "ownership_generation_mismatch": return "Ownership generation has been superseded";
     case "session_mismatch": return "Session ID does not match the bound run";
     case "execution_mismatch": return "Execution ID does not match the bound run";
+    case "origin_invalid": return "Project origin is missing or inconsistent with authenticated admission";
     case "project_terminal": return "Project is in a terminal state";
     case "intent_not_actionable": return "Underlying intent is no longer actionable";
     case "peer_relay_blocked": return "Peer-origin project may not relay to third peers";

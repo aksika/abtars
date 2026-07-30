@@ -112,6 +112,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
           signal: signal ?? context.signal,
           sandboxPolicy: context.sandboxPolicy,
           executionScope: context.executionScope,
+          orcContext: context.orcContext,
         });
 
         const diag = parseToolResultToDiagnostic(result, context.executionId, def.name);

@@ -14,6 +14,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { getMasterUserId } from "../master-user.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
+import type { OrcInvocationContextV1 } from "../orc-project/orc-project-contracts.js";
 import { checkCommand, classifyCommand } from "../guardrails.js";
 
 const TAG = "tool_registry";
@@ -26,13 +27,20 @@ function audit(entry: Record<string, unknown>): void {
   try { appendFileSync(AUDIT_PATH, JSON.stringify(entry) + "\n"); } catch (err) { logAndSwallow(TAG, "audit write", err); }
 }
 
+export interface ToolExecutionContext {
+  userId: string;
+  signal?: AbortSignal;
+  executionScope?: ToolExecutionScope;
+  orcContext?: OrcInvocationContextV1;
+}
+
 export type ToolDefinition = {
   readonly name: string;
   readonly description: string;
   readonly parameters: Record<string, unknown>;
   // Implementations receive the provider's JSON object unchanged. Legacy
   // command-backed tools normalize individual values at their own boundary.
-  execute(args: Record<string, unknown>, context?: { userId: string; signal?: AbortSignal; executionScope?: ToolExecutionScope }): Promise<string>;
+  execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<string>;
 };
 
 /** Tool implementations may still consume textual CLI-style values, but the
@@ -525,10 +533,10 @@ const peerSessionTool: ToolDefinition = {
     },
     required: ["peer_name", "message"],
   },
-  async execute(args) {
-    // #1301 — no relay: a peer-originated request must never make us call a third peer.
+  async execute(args, context) {
+    // #1301/#1480 — no relay for a currently authenticated peer-originated Orc run.
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
-    if (await isActiveCardPeerSourced()) {
+    if (await isActiveCardPeerSourced(context)) {
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
     const { callPeer } = await import("../peer-client.js");
@@ -582,10 +590,10 @@ const peerDoorbellTool: ToolDefinition = {
     },
     required: ["peer_name"],
   },
-  async execute(args) {
+  async execute(args, context) {
     // #1301 — no relay: a peer-originated request must never reach a third peer via us.
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
-    if (await isActiveCardPeerSourced()) {
+    if (await isActiveCardPeerSourced(context)) {
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
     const { loadPeerConfig } = await import("../peer-config.js");
@@ -688,7 +696,7 @@ function checkSkillRead(toolName: string, args: Record<string, unknown>): void {
   }
 }
 
-export async function executeToolCall(name: string, args: Record<string, unknown>, context?: { userId: string; signal?: AbortSignal; sandboxPolicy?: SandboxPolicy; executionScope?: ToolExecutionScope }): Promise<string> {
+export async function executeToolCall(name: string, args: Record<string, unknown>, context?: ToolExecutionContext & { sandboxPolicy?: SandboxPolicy }): Promise<string> {
   // Sandbox enforcement
   if (context?.sandboxPolicy) {
     const toolCheck = checkTool(name, context.sandboxPolicy);

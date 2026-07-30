@@ -87,19 +87,10 @@ export const SESSION_PROFILES: Record<SessionType, SessionProfile> = {
   O: {
     agent: "browsie",                    // ← preserves current Orc agent (NOT professor)
     transportMode: "persistent",
-    resolution: "singleton",             // ← one Orc; reuse the visible O session
+    resolution: "singleton",             // project-scoped session reuse; global O capacity remains one
     terminateAfter: "external",
     decorators: [orcContext, soulBundle, orcNotifications, orcChannel],
-    beforePrompt: async (session, cardId) => {
-      const { setActiveOrcCard, setActiveOrcContext } = await import("./transport/orc-tools.js");
-      if (cardId !== undefined) setActiveOrcCard(cardId);
-      if (session.orcContext) setActiveOrcContext(session.orcContext);
-    },
-    afterPrompt: async () => {
-      const { setActiveOrcCard, setActiveOrcContext } = await import("./transport/orc-tools.js");
-      setActiveOrcCard(null);
-      setActiveOrcContext(null);
-    },
+    beforePrompt: async () => {},
   },
 };
 

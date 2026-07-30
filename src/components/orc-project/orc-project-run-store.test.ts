@@ -116,7 +116,7 @@ describe("OrcProjectRunStore", () => {
     if (claim.kind !== "claimed") return;
     store.pump();
 
-    const bindResult = store.bindExecution(claim.context.runId, claim.context.ownershipGeneration, "sess_1", "exec_1");
+    const bindResult = store.bindExecution(claim.context, "sess_1", "exec_1");
     expect(bindResult.ok).toBe(true);
 
     const run = store.getRun(claim.context.runId);
@@ -130,7 +130,7 @@ describe("OrcProjectRunStore", () => {
     seedProject(store, 6);
     const claim = store.claimIntent(makeInput({ projectCardId: 6 }), "local_peer", "inst_1");
     if (claim.kind !== "claimed") return;
-    const released = store.release(claim.context.runId, claim.context.ownershipGeneration, "completed");
+    const released = store.release(claim.context, "completed");
     expect(released).toBe(true);
 
     const run = store.getRun(claim.context.runId);
@@ -142,7 +142,7 @@ describe("OrcProjectRunStore", () => {
     seedProject(store, 7);
     const claim = store.claimIntent(makeInput({ projectCardId: 7 }), "local_peer", "inst_1");
     if (claim.kind !== "claimed") return;
-    store.release(claim.context.runId, claim.context.ownershipGeneration, "completed");
+    store.release(claim.context, "completed");
 
     const validation = store.validateCurrentContext(claim.context);
     expect(validation.ok).toBe(false);
@@ -178,5 +178,28 @@ describe("OrcProjectRunStore", () => {
     store.claimIntent(makeInput({ projectCardId: 11 }), "local_peer", "inst_a");
     const claimB = store.claimIntent(makeInput({ projectCardId: 11 }), "local_peer", "inst_b");
     expect(claimB.kind).toBe("busy");
+  });
+
+  it("rejects peer origin without authenticated source provenance", () => {
+    seedProject(store, 12);
+    const result = store.claimIntent(makeInput({ projectCardId: 12, originKind: "peer", cardSource: "peer" }), "local_peer", "inst_1");
+    expect(result).toEqual({ kind: "conflict", reason: "origin_invalid" });
+  });
+
+  it("fences binding and release to the owning instance and current generation", () => {
+    seedProject(store, 13);
+    const claim = store.claimIntent(makeInput({ projectCardId: 13 }), "local_peer", "inst_1");
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    store.pump();
+
+    const foreign = store.bindExecution({ ...claim.context, ownerInstanceId: "inst_2" }, "sess_1", "exec_1");
+    expect(foreign).toEqual({ ok: false, reason: "foreign_instance" });
+
+    const bound = store.bindExecution(claim.context, "sess_1", "exec_1");
+    expect(bound.ok).toBe(true);
+    store.db.prepare("UPDATE project_supervision SET generation = 2 WHERE project_card_id = 13").run();
+    expect(store.release({ ...claim.context, sessionId: "sess_1", executionId: "exec_1" }, "completed")).toBe(false);
+    expect(store.getRun(claim.context.runId)?.state).toBe("running");
   });
 });
