@@ -71,6 +71,7 @@ export interface RuntimeRecallInput {
   query: string;
   userId: string;
   limit?: number;
+  maxClassification?: number;
   original?: string;
   timeStart?: number;
   timeEnd?: number;
@@ -221,7 +222,7 @@ function projectCapabilities(client: AbmindClient): Set<MemoryRuntimeCapability>
   const features = caps.features ?? {};
   const result = new Set<MemoryRuntimeCapability>();
 
-  if (methods.has("private.recall")) result.add("recall");
+  if (methods.has("private.recall") && features["private_read"] === "true") result.add("recall");
   if (methods.has("private.recordMessage")) result.add("recordMessage");
   if (methods.has("private.instantStore") && features["private_write"] === "true") result.add("instantStore");
   if (methods.has("private.edit") && features["private_write"] === "true") result.add("editMemory");
@@ -268,6 +269,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
         original: input.original ?? input.query,
         userId: input.userId,
         limit: input.limit ?? 10,
+        maxClassification: input.maxClassification,
         timeStart: input.timeStart,
         timeEnd: input.timeEnd,
         stages: input.stages,

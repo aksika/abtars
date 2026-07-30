@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,29 @@ vi.mock("../guardrails.js", () => ({
   classifyCommand: () => "allow",
 }));
 import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, setMemoryRuntime } from "./tool-registry.js";
+import { createClientRuntime } from "../memory-runtime.js";
+import { setUserRegistryOverride } from "../user-registry.js";
+
+function mockAbmindClient(caps: { methods: string[]; features: Record<string, string> }) {
+  const { AbmindClient } = {} as any;
+  const client = {
+    capabilities: { version: 1, methods: caps.methods, domains: ["system", "private"], features: caps.features },
+    privateMemory: {
+      recordMessage: vi.fn().mockResolvedValue({ id: 42 }),
+      recall: vi.fn().mockResolvedValue({ results: [] }),
+      instantStore: vi.fn().mockResolvedValue({ stored: true, memoriesCount: 1 }),
+      editMemory: vi.fn().mockResolvedValue({ ok: true }),
+      rebuildFtsIndexes: vi.fn().mockResolvedValue({ rebuilt: [] }),
+      assembleSessionContext: vi.fn().mockResolvedValue({ wakeUp: "", recall: "", coreKnowledge: "", soulBundle: { soul: "", profile: "", notes: "", memoryTools: "", coreFacts: "" } }),
+      getRecentConversation: vi.fn().mockResolvedValue([]),
+      getRuntimeStatus: vi.fn().mockResolvedValue(null),
+      getCoreKnowledge: vi.fn().mockResolvedValue(""),
+      recordFeedback: vi.fn().mockResolvedValue(undefined),
+      embed: vi.fn().mockResolvedValue({ vectors: [], model: "" }),
+    },
+  } as unknown as import("abmind").AbmindClient;
+  return client;
+}
 
 describe("isBridgeSpawnCommand", () => {
   it.each([
@@ -148,5 +171,145 @@ describe("memory tools with no runtime wired (#1266 / #1507)", () => {
     const result = await executeToolCall("memory_recall", { query: "x" });
     const parsed = JSON.parse(result);
     expect(parsed.error).toMatch(/memory backend not initialized/);
+  });
+});
+
+// #1507: production-boundary regression — capability-aware memory writes
+describe("memory tools with runtime wired (#1507)", () => {
+  afterEach(() => {
+    setMemoryRuntime(null);
+    setUserRegistryOverride(null);
+  });
+
+  describe("private_write=false", () => {
+    const client = mockAbmindClient({
+      methods: [
+        "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
+        "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
+      ],
+      features: { private_read: "true", private_write: "false" },
+    });
+
+    function makeTestUserRegistry() {
+      return {
+        users: [{ userId: "master-1", role: "master" as const, maxClass: 1, tools: [], platforms: {} }],
+        byPlatformId: new Map(),
+        byUserId: new Map([["master-1", { userId: "master-1", role: "master" as const, maxClass: 1, tools: [], platforms: {} }]]),
+      };
+    }
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      setUserRegistryOverride(makeTestUserRegistry());
+      const rt = createClientRuntime(client);
+      setMemoryRuntime(rt);
+    });
+
+    it("memory_store returns private_write_unavailable, no RPC", async () => {
+      const result = await executeToolCall("memory_store", { translated: "user likes apples", type: "preference", classification: "1" });
+      const parsed = JSON.parse(result);
+      expect(parsed.code).toBe("private_write_unavailable");
+      expect(parsed.retryable).toBe(false);
+      expect(parsed.stored).toBe(false);
+      expect(client.privateMemory.instantStore).not.toHaveBeenCalled();
+    });
+
+    it("three distinct memory_store calls all return unavailable and consume no cap", async () => {
+      for (const content of ["user likes apples", "user hates oranges", "user prefers tea"]) {
+        const result = await executeToolCall("memory_store", { translated: content, type: "fact" });
+        const parsed = JSON.parse(result);
+        expect(parsed.code).toBe("private_write_unavailable");
+      }
+      expect(client.privateMemory.instantStore).not.toHaveBeenCalled();
+    });
+
+    it("memory_edit returns private_write_unavailable, no RPC", async () => {
+      const result = await executeToolCall("memory_edit", { memory_id: "1", translated: "updated" });
+      const parsed = JSON.parse(result);
+      expect(parsed.code).toBe("private_write_unavailable");
+      expect(parsed.retryable).toBe(false);
+      expect(client.privateMemory.editMemory).not.toHaveBeenCalled();
+    });
+
+    it("memory_recall still dispatches", async () => {
+      const result = await executeToolCall("memory_recall", { query: "apples" });
+      const parsed = JSON.parse(result);
+      expect(parsed.hits).toBeDefined();
+      expect(client.privateMemory.recall).toHaveBeenCalledTimes(1);
+    });
+
+    it("recordMessage still works (automatic capture unaffected)", async () => {
+      const rt = createClientRuntime(client);
+      const result = await rt.recordMessage({ userId: "u1", sessionId: "s1", role: "user", content: "hi", timestamp: Date.now() }, "k");
+      expect(result.id).toBe(42);
+      expect(client.privateMemory.recordMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("private_write=true", () => {
+    const client = mockAbmindClient({
+      methods: [
+        "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
+        "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
+      ],
+      features: { private_read: "true", private_write: "true" },
+    });
+
+    function makeTestUserRegistry() {
+      return {
+        users: [{ userId: "master-1", role: "master" as const, maxClass: 1, tools: [], platforms: {} }],
+        byPlatformId: new Map(),
+        byUserId: new Map([["master-1", { userId: "master-1", role: "master" as const, maxClass: 1, tools: [], platforms: {} }]]),
+      };
+    }
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      setUserRegistryOverride(makeTestUserRegistry());
+      const rt = createClientRuntime(client);
+      setMemoryRuntime(rt);
+    });
+
+    it("memory_store dispatches normally", async () => {
+      const result = await executeToolCall("memory_store", { translated: "user likes apples", type: "preference" });
+      const parsed = JSON.parse(result);
+      expect(parsed.stored).toBe(true);
+      expect(client.privateMemory.instantStore).toHaveBeenCalledTimes(1);
+    });
+
+    it("memory_edit dispatches normally", async () => {
+      const result = await executeToolCall("memory_edit", { memory_id: "1", translated: "updated" });
+      const parsed = JSON.parse(result);
+      expect(parsed.ok).toBe(true);
+      expect(client.privateMemory.editMemory).toHaveBeenCalledTimes(1);
+    });
+
+    it("genuine store error still produces generic error result", async () => {
+      client.privateMemory.instantStore = vi.fn().mockRejectedValue(new Error("disk full"));
+      const result = await executeToolCall("memory_store", { translated: "test", type: "fact" });
+      const parsed = JSON.parse(result);
+      expect(parsed.error).toMatch(/disk full/);
+    });
+
+    it("genuine edit error still produces generic error result", async () => {
+      client.privateMemory.editMemory = vi.fn().mockRejectedValue(new Error("not found"));
+      const result = await executeToolCall("memory_edit", { memory_id: "999" });
+      const parsed = JSON.parse(result);
+      expect(parsed.error).toMatch(/not found/);
+    });
+
+    it("FTS corruption rebuild/retry occurs when rebuildFts is advertised", async () => {
+      const storeSpy = vi.fn()
+        .mockRejectedValueOnce(new Error("fts5: disk I/O error"))
+        .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
+      client.privateMemory.instantStore = storeSpy;
+      client.privateMemory.rebuildFtsIndexes = vi.fn().mockResolvedValue({ rebuilt: ["memories"] });
+
+      const result = await executeToolCall("memory_store", { translated: "test", type: "fact" });
+      const parsed = JSON.parse(result);
+      expect(parsed.stored).toBe(true);
+      expect(client.privateMemory.rebuildFtsIndexes).toHaveBeenCalledTimes(1);
+      expect(client.privateMemory.instantStore).toHaveBeenCalledTimes(2);
+    });
   });
 });

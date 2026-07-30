@@ -318,7 +318,7 @@ const memoryStoreTool: ToolDefinition = {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // #706: FTS5 corruption self-heal — rebuild indexes and retry once
-      if (msg.includes("fts5") || msg.includes("corruption") && memoryRuntime.supports("rebuildFts")) {
+      if ((msg.includes("fts5") || msg.includes("corruption")) && memoryRuntime.supports("rebuildFts")) {
         try {
           await memoryRuntime.rebuildFtsIndexes();
           logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
@@ -357,10 +357,13 @@ const memoryRecallTool: ToolDefinition = {
     try {
       const t0 = Date.now();
       const userId = context?.userId ?? getMasterUserId();
+      const { loadUsers } = await import("../user-registry.js");
+      const userEntry = loadUsers().byUserId.get(userId);
       const result = await memoryRuntime.recall({
         query: stringValue(args["query"]),
         userId,
         limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
+        maxClassification: userEntry?.maxClass ?? 1,
       });
       import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
       return JSON.stringify(result);
