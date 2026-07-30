@@ -28,6 +28,7 @@ export interface OutputObserver {
   onDelta?(event: { kind: SessionOutputStreamKind; text: string }): void;
   onToolStart?(event: { name: string }): void;
   end?(reason: SessionOutputEndReason): void;
+  invalidate?(): void;
 }
 
 export type SessionOutputEvent =

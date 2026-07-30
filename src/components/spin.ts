@@ -21,7 +21,8 @@ import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expi
 import { createExecutionTelemetryScope } from "./execution-telemetry.js";
 import type { OrcActivityFeed } from "./orc-activity-feed.js";
 import type { SessionOutputFeed } from "./session-output-feed.js";
-import { createOutputObserver } from "./session-output-feed.js";
+import { createOutputObserver, type OutputObserver } from "./session-output-feed.js";
+import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
@@ -598,6 +599,36 @@ export class Spin {
         executionTelemetry,
         orchestrator: (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator } | undefined)?.contextOrchestrator,
       };
+      const leaseEmitter = spec.attemptId && spec.executionControl?.generation !== undefined
+        ? new ExecutorProgressEmitter()
+        : undefined;
+      let leaseOutputUnits = 0;
+      let leaseToolOrdinal = 0;
+      const makeOutputObserver = (): OutputObserver => {
+        const base: OutputObserver = this.sessionOutputFeed
+          ? createOutputObserver(this.sessionOutputFeed, {
+            sessionId: session.id,
+            executionId: session.activeExecutionId!,
+          })
+          : {};
+        if (!leaseEmitter) return base;
+        return {
+          ...base,
+          onDelta: (event) => {
+            base.onDelta?.(event);
+            if (event.kind !== "text" || !event.text) return;
+            leaseOutputUnits += Math.max(1, Buffer.byteLength(event.text, "utf8"));
+            leaseEmitter.emitOutput(spec.attemptId!, spec.executionControl!.generation!, "spin-local", leaseOutputUnits, `output:${session.activeExecutionId}:${leaseOutputUnits}`);
+          },
+          onToolStart: (event) => {
+            base.onToolStart?.(event);
+            leaseToolOrdinal++;
+            leaseEmitter.emitToolStart(spec.attemptId!, spec.executionControl!.generation!, "spin-local", `tool:${session.activeExecutionId}:${leaseToolOrdinal}`, event.name);
+          },
+          end: (reason) => base.end?.(reason),
+          invalidate: () => base.invalidate?.(),
+        };
+      };
       // #1338: wrap each model call/round in a fresh call-local observer so the
       // output feed receives a unique stream per turn. The observer publishes
       // `start` on creation and `end`+invalidate on every exit path; the
@@ -609,23 +640,20 @@ export class Spin {
         image?: { mime: string; base64: string },
         ctx?: import("./transport/kiro-transport.js").PromptRequestContext,
       ): Promise<string> => {
-        if (!this.sessionOutputFeed || !session.activeExecutionId) {
+        if ((!this.sessionOutputFeed && !leaseEmitter) || !session.activeExecutionId) {
           return await transport.sendPrompt(key, msg, image, ctx);
         }
-        const obs = createOutputObserver(this.sessionOutputFeed, {
-          sessionId: session.id,
-          executionId: session.activeExecutionId,
-        });
+        const obs = makeOutputObserver();
         const enriched = { ...(ctx ?? {}), outputObserver: obs };
         let result: string;
         try {
           result = await transport.sendPrompt(key, msg, image, enriched);
-          obs.end("complete");
+          obs.end?.("complete");
         } catch (err) {
-          obs.end("error");
+          obs.end?.("error");
           throw err;
         } finally {
-          obs.invalidate();
+          obs.invalidate?.();
         }
         return result;
       };
@@ -665,22 +693,20 @@ export class Spin {
               ...(ctx ?? {}),
               orchestrator: ctx?.orchestrator ?? (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator }).contextOrchestrator,
             };
-            if (!this.sessionOutputFeed || !session.activeExecutionId) {
+            if ((!this.sessionOutputFeed && !leaseEmitter) || !session.activeExecutionId) {
               return (await executor.send(msg, img, enrichedContext)) || "(no output)";
             }
-            const obs = createOutputObserver(this.sessionOutputFeed, {
-              sessionId: session.id, executionId: session.activeExecutionId,
-            });
+            const obs = makeOutputObserver();
             const enriched = { ...(ctx ?? {}), outputObserver: obs };
             try {
               const r = (await executor.send(msg, img, { ...enrichedContext, ...enriched })) || "(no output)";
-              obs.end("complete");
+              obs.end?.("complete");
               return r;
             } catch (err) {
-              obs.end("error");
+              obs.end?.("error");
               throw err;
             } finally {
-              obs.invalidate();
+              obs.invalidate?.();
             }
           },
           steer: typeof sessionTransport.steer === "function"

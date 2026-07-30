@@ -7,7 +7,6 @@ import { logWarn } from "./logger.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation, RetryContext } from "./worker-contract.js";
 import type { TaskDatabase } from "./tasks/kanban-board.js";
 import type { ContractRow } from "./worker-supervision-store.js";
-import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
 import { validateCriterionMapping } from "./project-acceptance/project-contract.js";
 
@@ -318,12 +317,6 @@ export class WorkerSupervisionService {
     if (result === SettlementResult.Rejected) {
       return { settled: false, summary: "stale execution result ignored", stale: true };
     }
-
-    // #1367: Emit durable milestone progress on settlement
-    try {
-      const emitter = new ExecutorProgressEmitter();
-      emitter.emitMilestone(targetAttempt.id, contract.provenance.card_id, targetAttempt.executor_id, contract.id, allPassed ? "all criteria passed" : "criteria failed");
-    } catch { /* progress emission is best-effort */ }
 
     const summary = allPassed
       ? `✓ ${criteria.filter(c => c.status === "passed").length}/${criteria.length} criteria passed`

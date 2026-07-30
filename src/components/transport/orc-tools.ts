@@ -124,17 +124,24 @@ function supervisionSummary(cardId: number): string {
     const attempts = svc["store"].getAttemptsForCard(cardId) as Array<{ status: string; ordinal: number; lifecycle: string; id: string }>;
     const settledAttempts = attempts.filter(a => a.status === "settled" || a.status === "failed").length;
     const latestLifecycle = attempts.length > 0 ? attempts[attempts.length - 1]!.lifecycle : "";
-    // #1367: Lease state
+    // #1367: Lease state via view
     let leaseInfo = "";
     try {
       const { ExecutorLeaseStore } = require("../executor-lease-store.js") as typeof import("../executor-lease-store.js");
       const lstore = new ExecutorLeaseStore();
-      const snap = lstore.getSnapshot(String(attempts[attempts.length - 1]?.id ?? ""));
-      if (snap) {
-        const now = Date.now();
-        const livAge = Math.round((now - new Date(snap.lastLivenessAt).getTime()) / 1000);
-        const progAge = Math.round((now - new Date(snap.lastMeaningfulProgressAt).getTime()) / 1000);
-        leaseInfo = ` lease:${snap.semanticState} eval:${snap.evaluation} alive:${livAge}s prog:${progAge}s`;
+      const view = lstore.getView(String(attempts[attempts.length - 1]?.id ?? ""));
+      if (view) {
+        const parts: string[] = [];
+        parts.push(`${view.semanticState}`);
+        parts.push(`eval:${view.evaluationPhase}`);
+        parts.push(`alive:${view.livenessAgeSec}s`);
+        parts.push(`prog:${view.progressAgeSec}s`);
+        if (view.operationLabel) parts.push(`op:${view.operationLabel.slice(0, 30)}`);
+        if (view.awaitingInputSince) parts.push(`awaiting_input`);
+        if (view.evaluationReason) parts.push(`reason:${view.evaluationReason}`);
+        if (view.cancellationReason) parts.push(`cancel:${view.cancellationReason}`);
+        if (view.closedAt) parts.push(`closed`);
+        leaseInfo = ` lease:${parts.join(" ")}`;
       }
     } catch {}
     // #1365: Retry state

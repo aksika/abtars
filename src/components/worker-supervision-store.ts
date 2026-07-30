@@ -1,5 +1,6 @@
 import { requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "./worker-contract.js";
+import { ExecutorLeaseStore } from "./executor-lease-store.js";
 
 export type AttemptLifecycle =
   | "pending"
@@ -570,6 +571,10 @@ export function settleResult(
     }
     const settled = store.settleAttempt(attemptId, status);
     if (!settled) return SettlementResult.Rejected;
+    const attempt = store.getAttempt(attemptId);
+    if (!attempt) return SettlementResult.Rejected;
+    const leaseStore = new ExecutorLeaseStore(store.db);
+    if (!leaseStore.closeLease(attemptId, attempt.generation, `terminal:${status}`)) return SettlementResult.Rejected;
     store.insertResult(attemptId, envelope);
     return SettlementResult.Settled;
   });

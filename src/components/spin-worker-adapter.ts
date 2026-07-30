@@ -10,6 +10,18 @@ const TAG = "spin-worker-adapter";
 
 export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   readonly kind = "agent" as const;
+  private progressEmitter?: ExecutorProgressEmitter;
+
+  constructor(progressEmitter?: ExecutorProgressEmitter) {
+    this.progressEmitter = progressEmitter;
+  }
+
+  private _emitter(): ExecutorProgressEmitter {
+    if (!this.progressEmitter) {
+      this.progressEmitter = new ExecutorProgressEmitter();
+    }
+    return this.progressEmitter;
+  }
 
   capacitySnapshot(): ExecutorCapacity {
     const max = 3;
@@ -25,22 +37,15 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     const card = await import("./tasks/kanban-board.js").then(m => m.kanbanGetCard(claim.cardId));
     if (!card) return { kind: "start_failed", reason: "card not found", retryable: false };
 
-    // Register generation-bound control before async dispatch
     const ctrl = registerControl(`${claim.attemptId}:${claim.generation}`, { attemptId: claim.attemptId, generation: claim.generation, cardId: claim.cardId });
 
     const sup = new WorkerSupervisionService();
-    // The attempt owns the exact immutable revision to execute. Looking up
-    // the latest card contract could silently run a later retry revision.
     const contract = sup.getContract(claim.contractId);
     if (!contract) return { kind: "start_failed", reason: "attempt contract not found", retryable: false };
 
     logInfo(TAG, `Starting Worker ${claim.cardId} attempt=${claim.attemptId} gen=${claim.generation}`);
 
-    // #1367: Emit alive progress on start
-    try {
-      const emitter = new ExecutorProgressEmitter();
-      emitter.emitAlive(claim.attemptId, claim.generation, claim.executorId);
-    } catch { /* best-effort */ }
+    this._emitter().emitAlive(claim.attemptId, claim.generation, claim.executorId);
 
     try {
       spin.dispatch({
@@ -65,7 +70,6 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   async cancel(claim: ExecutionClaim, reason: CancelReason): Promise<CancelObservation> {
     const ctrl = getControl(`${claim.attemptId}:${claim.generation}`);
     if (!ctrl) {
-      // Check durable state — may already be terminal
       const store = new WorkerSupervisionStore();
       const attempt = store.getAttempt(claim.attemptId);
       if (!attempt) return { kind: "not_found" };
@@ -79,7 +83,6 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
       return { kind: "already_terminal", lifecycle: "failed" };
     }
 
-    // Persist cancel intent first, then invoke runtime
     const store = new WorkerSupervisionStore();
     store.requestCancel(claim.attemptId, reason);
 
@@ -91,12 +94,9 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
       return { kind: "already_terminal", lifecycle: attempt?.lifecycle ?? "cancelled" };
     }
 
-    // The executor has acknowledged cancellation. Persist terminal state before
-    // allowing any late finish/fail callback to touch the card.
     ctrl.markTerminal("cancelled");
     store.cancelAttempt(claim.attemptId);
 
-    // Keep control until terminal settlement — do not delete here
     return { kind: "cancelled", attemptId: claim.attemptId };
   }
 
@@ -115,5 +115,10 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
       return { kind: "terminal", lifecycle: ctrl.terminalOutcome === "cancelled" ? "cancelled" : "completed" };
     }
     return { kind: "running", lifecycle: ctrl.cancelled ? "cancel_requested" : "running" };
+  }
+
+  /** Expose for Reconciler adapter resolution. */
+  static forReconciler(): SpinWorkerAdapter {
+    return new SpinWorkerAdapter();
   }
 }

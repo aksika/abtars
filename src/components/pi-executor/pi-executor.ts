@@ -32,9 +32,10 @@ export class PiExecutor {
   private readonly live = new Map<string, OwnedProcess>();
   private _stopped = false;
   private _onCapacityReleased: (() => void) | null = null;
-  /** #1358 — Lifecycle transition hook for remote Pi event production. */
-  private _onTransition: ((runId: string, fromStatus: string | undefined, toStatus: string) => void) | null = null;
-  private _onProgress: ((runId: string, payload: string) => void) | null = null;
+  /** #1358 — Lifecycle transition subscribers (multi). */
+  private _transitionSubs = new Set<(runId: string, fromStatus: string | undefined, toStatus: string) => void>();
+  /** Progress event subscribers (multi). */
+  private _progressSubs = new Set<(runId: string, payload: string, progressType?: string) => void>();
 
   constructor(config: PiExecutorConfig, store: PiRunStore) {
     this.config = config;
@@ -51,20 +52,22 @@ export class PiExecutor {
     this._onCapacityReleased = cb;
   }
 
-  /** #1358 — Register a callback fired on run state transitions. */
-  onTransition(cb: (runId: string, fromStatus: string | undefined, toStatus: string) => void): void {
-    this._onTransition = cb;
+  /** #1358 — Subscribe to run state transitions. Returns unsubscribe function. */
+  onTransition(cb: (runId: string, fromStatus: string | undefined, toStatus: string) => void): () => void {
+    this._transitionSubs.add(cb);
+    return () => { this._transitionSubs.delete(cb); };
   }
 
-  /** Register a callback for bounded public progress emission. */
-  onProgress(cb: (runId: string, payload: string) => void): void {
-    this._onProgress = cb;
+  /** Subscribe to bounded public progress emission. Returns unsubscribe function. */
+  onProgress(cb: (runId: string, payload: string, progressType?: string) => void): () => void {
+    this._progressSubs.add(cb);
+    return () => { this._progressSubs.delete(cb); };
   }
 
   /** #1358 — Fire the transition hook for a run. */
   private _fireTransition(runId: string, fromStatus: string | undefined, toStatus: string): void {
-    if (this._onTransition) {
-      try { this._onTransition(runId, fromStatus, toStatus); } catch { /* best effort */ }
+    for (const cb of this._transitionSubs) {
+      try { cb(runId, fromStatus, toStatus); } catch { /* best effort */ }
     }
   }
 
@@ -446,7 +449,9 @@ export class PiExecutor {
     const proj = projectPiEvent(event);
     for (const p of proj.progress) {
       this.store.addProgress(runId, p.type, p.json);
-      this._onProgress?.(runId, p.json);
+      for (const cb of this._progressSubs) {
+          try { cb(runId, p.json, p.type); } catch { /* best effort */ }
+      }
     }
     if (proj.log?.level === "warn") logWarn(TAG, `${proj.log.message} [run=${runId}]`);
     else if (proj.log?.level === "debug") logDebug(TAG, `${proj.log.message} [run=${runId}]`);

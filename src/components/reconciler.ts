@@ -19,6 +19,8 @@ import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { SpinWorkerAdapter } from "./spin-worker-adapter.js";
 import type { SwarmExecutorAdapter, ExecutionClaim } from "./swarm-executor-types.js";
+import { LeaseReconciliationService } from "./executor-lease-reconciler.js";
+import { ExecutorLeaseScheduler } from "./executor-lease-scheduler.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { ProjectReviewStore, type ProjectState } from "./project-acceptance/project-review-store.js";
 import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js";
@@ -568,34 +570,24 @@ function isTerminal(lc: AttemptLifecycle): boolean {
 
 function evaluateLease(card: KanbanCard): void {
   try {
-    const svc = new WorkerSupervisionService();
-    const contract = svc.getContractForCard(card.id);
-    if (!contract) return;
-    const store = (svc as any)["store"] as import("./worker-supervision-store.js").WorkerSupervisionStore;
-    const latestAttempt = store.getLatestAttempt(card.id);
+    const supStore = new WorkerSupervisionStore();
+    const latestAttempt = supStore.getLatestAttempt(card.id);
     if (!latestAttempt) return;
 
-    const leaseStore = new ExecutorLeaseStore();
-    const snapshot = leaseStore.getSnapshot(latestAttempt.id);
-    if (!snapshot) return;
-
-    const now = Date.now();
-    const livenessDeadline = new Date(snapshot.livenessDeadlineAt).getTime();
-    const progressDeadline = new Date(snapshot.progressDeadlineAt).getTime();
-
-    if (now > livenessDeadline || now > progressDeadline) {
-      if (snapshot.evaluation === "healthy") {
-        leaseStore.updateEvaluation(latestAttempt.id, "warning");
-        logWarn(TAG, `Lease warning for card ${card.id}: attempt=${latestAttempt.id}`);
-      } else if (snapshot.evaluation === "warning") {
-        leaseStore.updateEvaluation(latestAttempt.id, "inspect_due");
-        logWarn(TAG, `Inspect due for card ${card.id}`);
-      } else if (snapshot.evaluation === "inspect_due") {
-        logWarn(TAG, `Cancelling stale card ${card.id} via lease policy`);
-        leaseStore.updateEvaluation(latestAttempt.id, "cancel_requested");
-        store.requestCancel(latestAttempt.id, "lease_expired");
+    const adapterResolver = (executorKind: string, _executorId: string) => {
+      if (executorKind === "agent") return workerAdapter();
+      if (executorKind === "pi") {
+        const svc = _piService;
+        if (!svc) return undefined;
+        const { PiExecutorAdapter } = require("./pi-executor-adapter.js") as typeof import("./pi-executor-adapter.js");
+        return new PiExecutorAdapter(svc.executor);
       }
-    }
+      return undefined;
+    };
+
+    const service = new LeaseReconciliationService(adapterResolver);
+    service.evaluateAndAct(latestAttempt.id, card.id);
+    scheduleLeaseEvaluations();
   } catch (err) {
     logWarn(TAG, `lease evaluation failed for card ${card.id}: ${err}`);
   }
@@ -864,10 +856,39 @@ export function answerInputRequest(requestId: string, response: string): boolean
   return answered;
 }
 
+let _leaseScheduler: ExecutorLeaseScheduler | null = null;
+
+export function getLeaseScheduler(): ExecutorLeaseScheduler | null {
+  return _leaseScheduler;
+}
+
+function scheduleLeaseEvaluations(): void {
+  if (_leaseScheduler) _leaseScheduler.reschedule();
+}
+
 export function startReconciler(): void {
+  // #1367: Wire lease deadline scheduler
+  _leaseScheduler = new ExecutorLeaseScheduler(
+    () => new ExecutorLeaseStore().getDueSnapshots(),
+    (cardId: number) => {
+      // Wake the project card which reconciles children
+      const card = require("./tasks/kanban-board.js").kanbanGetCard(cardId) as { parent_id?: number } | undefined;
+      if (card?.parent_id) wakeCard(card.parent_id);
+      requestReconcile(cardId);
+    },
+  );
+
   nerve.on("card:queued", (cardId: number) => requestReconcileForProject(cardId));
   nerve.on("card:done", (cardId: number) => requestReconcileForProject(cardId));
   nerve.on("card:failed", (cardId: number) => requestReconcileForProject(cardId));
   const count = scanActiveProjects();
-  logInfo(TAG, `Reconciler started — recovered ${count} running project(s)`);
+
+  // Boot lease recovery — wake overdue cards and set timer
+  _leaseScheduler.bootRecovery();
+
+  // Wire lease-change notification from store to scheduler reschedule
+  const { ExecutorLeaseStore: StoreWithHook } = require("./executor-lease-store.js") as typeof import("./executor-lease-store.js");
+  StoreWithHook.onLeaseChanged = () => _leaseScheduler?.reschedule();
+
+  logInfo(TAG, `Reconciler started — recovered ${count} running project(s), lease scheduler active`);
 }
