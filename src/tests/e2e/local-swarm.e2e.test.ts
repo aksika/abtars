@@ -69,12 +69,12 @@ async function runChild(root: string): Promise<{ result?: LocalSwarmResult; stdo
   child.stderr.on("data", chunk => { stderr = boundedAppend(stderr, chunk); });
 
   const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+    let exited = false;
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 2_000).unref();
-      resolve({ code: null, signal: "SIGTERM" });
+      setTimeout(() => { if (!exited) child.kill("SIGKILL"); }, 2_000).unref();
     }, CHILD_TIMEOUT_MS);
-    child.once("exit", (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
+    child.once("exit", (code, signal) => { exited = true; clearTimeout(timer); resolve({ code, signal }); });
   });
 
   const resultLine = stdout.split("\n").find(line => line.startsWith("LOCAL_SWARM_RESULT="));

@@ -120,6 +120,10 @@ const workerResponses = [
 
 let workerStoreCtor: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
 let reviewStoreCtor: typeof import("../../components/project-acceptance/project-review-store.js").ProjectReviewStore;
+let activeProjectCardId: number | undefined;
+const activeChildCardIds: number[] = [];
+let cardReader: ((cardId: number) => { status: string; delivery_result?: string | null } | undefined) | undefined;
+let supervisionReader: ((cardId: number) => { state: string } | undefined) | undefined;
 
 async function main(): Promise<void> {
   const { spin } = await import("../../components/spin.js");
@@ -129,6 +133,8 @@ async function main(): Promise<void> {
   const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
   workerStoreCtor = WorkerSupervisionStore;
   reviewStoreCtor = ProjectReviewStore;
+  cardReader = kanbanGetCard;
+  supervisionReader = cardId => new ProjectReviewStore().getSupervision(cardId);
   const { deliverCard } = await import("../../components/tasks/kanban-delivery.js");
   const { setLogLevel, setFileLogging } = await import("../../components/logger.js");
   setLogLevel("trace");
@@ -181,6 +187,7 @@ async function main(): Promise<void> {
     priority: "MEDIUM",
     deliveryMode: "deliver",
   });
+  activeProjectCardId = projectCardId;
 
   kanbanRunning(projectCardId);
   startReconciler();
@@ -235,11 +242,15 @@ async function main(): Promise<void> {
 
     const childIdMatch = spawnResult.match(/card (\d+)/);
     if (childIdMatch) {
-      childCardIds.push(Number(childIdMatch[1]));
+      const childId = Number(childIdMatch[1]);
+      childCardIds.push(childId);
+      activeChildCardIds.push(childId);
     } else {
       const children = kanbanGetChildren(projectCardId);
       if (children.length > 0) {
-        childCardIds.push(children[children.length - 1]!.id);
+        const childId = children[children.length - 1]!.id;
+        childCardIds.push(childId);
+        activeChildCardIds.push(childId);
       }
     }
   }
@@ -258,6 +269,8 @@ async function main(): Promise<void> {
     return terminal.length >= 3 ? terminal : null;
   }, 30000);
 
+  assertWorkerInvariants(new WorkerSupervisionStore(), childCardIds);
+
   const reviewStore = new ProjectReviewStore();
   const supervision = await eventually("project-supervision", () => reviewStore.getSupervision(projectCardId) ?? null);
   const reviewCase = await eventually("review-case", () => reviewStore.getLatestOpenCase(projectCardId) ?? null);
@@ -265,8 +278,14 @@ async function main(): Promise<void> {
   if (!reviewCase) throw new Error("No review case was created after workers completed");
 
   const snapshot = JSON.parse(reviewCase.case_json) as {
+    root_contract?: { criteria?: unknown[] };
     criterion_inputs: Array<{ criterion_id: string; observed_evidence_ids: string[]; worker_claim_ids: string[] }>;
+    child_summaries?: Array<{ result?: unknown }>;
   };
+  if (snapshot.root_contract?.criteria?.length !== 3 || snapshot.criterion_inputs.length !== 3 ||
+      snapshot.child_summaries?.length !== 3 || snapshot.child_summaries.some(child => !child.result)) {
+    fail("review_case", "INCOMPLETE_SNAPSHOT", "Review case did not contain all three root criteria and child results");
+  }
   const evidenceByCriterion = new Map(snapshot.criterion_inputs.map(input => [
     input.criterion_id,
     input.observed_evidence_ids.slice(0, 10),
@@ -335,6 +354,43 @@ function readCounts(): LocalSwarmE2EResult["counts"] {
   };
 }
 
+function assertWorkerInvariants(store: InstanceType<typeof workerStoreCtor>, childCardIds: number[]): void {
+  for (const cardId of childCardIds) {
+    const contracts = store.db.prepare("SELECT id FROM worker_contracts WHERE card_id = ?").all(cardId) as Array<{ id: string }>;
+    if (contracts.length !== 1) fail("worker_invariants", "CONTRACT_COUNT", `Worker ${cardId} has ${contracts.length} contracts`);
+    const attempts = store.getAttemptsForCard(cardId);
+    if (attempts.length !== 1) fail("worker_invariants", "ATTEMPT_COUNT", `Worker ${cardId} has ${attempts.length} attempts`);
+    const attempt = attempts[0]!;
+    if (attempt.contract_id !== contracts[0]!.id || !attempt.claimed_at || attempt.generation < 1 || attempt.lifecycle !== "completed") {
+      fail("worker_invariants", "ATTEMPT_OWNERSHIP", `Worker ${cardId} attempt did not complete through a claimed generation`);
+    }
+    if (!store.getResult(attempt.id)) fail("worker_invariants", "RESULT_COUNT", `Worker ${cardId} has no settled result`);
+  }
+}
+
+function failureResult(stage: string, code: string, message: string): LocalSwarmE2EResult {
+  let counts: LocalSwarmE2EResult["counts"] = {
+    workerContracts: 0, workerAttempts: 0, workerResults: 0,
+    reviewCases: 0, reviewDecisions: 0, outboundDeliveries: sentCaptureCount,
+  };
+  try { counts = readCounts(); } catch { /* failure occurred before stores initialized */ }
+  const card = activeProjectCardId !== undefined ? cardReader?.(activeProjectCardId) : undefined;
+  const supervision = activeProjectCardId !== undefined ? supervisionReader?.(activeProjectCardId) : undefined;
+  return {
+    schemaVersion: 1, ok: false, scenarioId,
+    projectCardId: activeProjectCardId,
+    childCardIds: [...activeChildCardIds],
+    peakActiveWorkers: _peakActiveWorkers,
+    counts,
+    terminal: {
+      projectState: supervision?.state,
+      cardStatus: card?.status,
+      deliveryResult: card?.delivery_result ?? undefined,
+    },
+    failure: { stage, code, message: message.slice(0, 1_000) },
+  };
+}
+
 let sentCaptureCount = 0;
 
 const testDeliverDeps = {
@@ -345,13 +401,7 @@ const testDeliverDeps = {
 };
 
 main().catch(err => {
-  resolveResult({
-    schemaVersion: 1, ok: false, scenarioId, childCardIds: [],
-    peakActiveWorkers: _peakActiveWorkers,
-    counts: { workerContracts: 0, workerAttempts: 0, workerResults: 0, reviewCases: 0, reviewDecisions: 0, outboundDeliveries: 0 },
-    terminal: {},
-    failure: { stage: "main", code: "UNCAUGHT", message: String(err) },
-  });
+  resolveResult(failureResult("main", "UNCAUGHT", String(err)));
 });
 
 process.on("unhandledRejection", (reason) => {
@@ -359,13 +409,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 timeoutHandle = setTimeout(() => {
-  resolveResult({
-    schemaVersion: 1, ok: false, scenarioId, childCardIds: [],
-    peakActiveWorkers: _peakActiveWorkers,
-    counts: { workerContracts: 0, workerAttempts: 0, workerResults: 0, reviewCases: 0, reviewDecisions: 0, outboundDeliveries: 0 },
-    terminal: {},
-    failure: { stage: "timeout", code: "TIMEOUT", message: "Runner exceeded 60s timeout" },
-  });
+  resolveResult(failureResult("timeout", "TIMEOUT", "Runner exceeded 60s timeout"));
 }, 60000);
 
 resultPromise.then(result => {
