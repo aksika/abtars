@@ -36,8 +36,14 @@ export type ExecutionObservation =
   | { kind: "terminal"; lifecycle: AttemptLifecycle }
   | { kind: "unknown"; message: string };
 
+export interface ExecutorSchedulingPolicy {
+  recovery: "process_bound" | "inspectable";
+  defaultMaxDurationMs?: number;
+}
+
 export interface SwarmExecutorAdapter {
   readonly kind: ExecutorKind;
+  readonly schedulingPolicy: ExecutorSchedulingPolicy;
   /** Optional synchronous snapshot used by durable retry selection. */
   capacitySnapshot?(): ExecutorCapacity;
   capacity(): Promise<ExecutorCapacity>;

@@ -21,13 +21,14 @@ let _rawDb: any = null;
 vi.mock("../../components/tasks/kanban-board.js", () => ({
   kanbanEnqueue: (title: string, source: string, opts?: any) => {
     const id = nextCardId++;
-    const card: any = { id, title, source, status: "queued", type: "W", parent_id: null, goal: null, notes: null, created_at: new Date().toISOString().replace(/Z$/, ""), result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null };
-    if (opts) { if (opts.type) card.type = opts.type; if (opts.parent_id) card.parent_id = opts.parent_id; if (opts.notes) card.notes = opts.notes; }
+    const card: any = { id, title, source, status: "queued", type: "W", parent_id: null, goal: null, notes: null, created_at: new Date().toISOString().replace(/Z$/, ""), result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null, priority: "MEDIUM" };
+    if (opts) { if (opts.type) card.type = opts.type; if (opts.parent_id) card.parent_id = opts.parent_id; if (opts.notes) card.notes = opts.notes; if (opts.priority) card.priority = opts.priority; }
     cards.set(id, card);
     return id;
   },
   kanbanGetCard: (id: number) => { const c = cards.get(id); return c ?? null; },
   kanbanGetChildren: (parentId: number) => Array.from(cards.values()).filter((c: any) => c.parent_id === parentId),
+  kanbanQueuedDispatchOrder: (now?: number) => Array.from(cards.values()).filter((c: any) => c.status === "queued"),
   kanbanRunning: (id: number) => { const c = cards.get(id); if (c) c.status = "running"; },
   kanbanComplete: (id: number) => { const c = cards.get(id); if (c) c.status = "done"; },
   kanbanFail: (id: number, reason?: string) => { const c = cards.get(id); if (c) { c.status = "failed"; c.error = reason ?? "failed"; } },
@@ -190,13 +191,18 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
     const childIds: number[] = [];
     for (let i = 0; i < 3; i++) {
       const cId = nextCardId++;
+      const createdAt = new Date().toISOString().replace(/Z$/, "");
       cards.set(cId, {
         id: cId, title: `worker ${i}`, source: "agent",
         status: "queued", type: "W", parent_id: projectId,
         goal: `summary ${i}`, notes: JSON.stringify({ supervised: true }),
-        created_at: new Date().toISOString().replace(/Z$/, ""),
+        created_at: createdAt, priority: "MEDIUM",
         result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
       });
+      const reviewStore = new ProjectReviewStore();
+      reviewStore.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, parent_id, goal, created_at, updated_at) VALUES (?, ?, ?, 'queued', 'W', ?, ?, ?, ?)`).run(
+        cId, `worker ${i}`, "agent", projectId, `summary ${i}`, createdAt, createdAt,
+      );
       childIds.push(cId);
     }
     return { projectId, childIds };

@@ -11,6 +11,7 @@ const TAG = "spin-worker-adapter";
 
 export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   readonly kind = "agent" as const;
+  readonly schedulingPolicy = { recovery: "process_bound" as const, defaultMaxDurationMs: 1_800_000 };
   private progressEmitter?: ExecutorProgressEmitter;
 
   constructor(progressEmitter?: ExecutorProgressEmitter) {
@@ -60,6 +61,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
         attemptId: claim.attemptId,
         executionControl: ctrl,
         settlementOwner: "spin",
+        deadlineAt: claim.hardDeadlineAt ? new Date(claim.hardDeadlineAt).getTime() : undefined,
       });
     } catch (err) {
       removeControl(`${claim.attemptId}:${claim.generation}`);

@@ -5,6 +5,7 @@ import type { LeasePolicy, AttemptLeaseSnapshotV1 } from "./executor-progress.js
 import { DEFAULT_LOCAL_POLICY } from "./executor-progress.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { logInfo, logWarn } from "./logger.js";
+import { logSwarmTrace } from "./swarm-trace.js";
 
 const TAG = "lease-reconciler";
 
@@ -156,6 +157,20 @@ export class LeaseReconciliationService {
 
     const committed = this.leaseStore.recordCancelIntent(attemptId, reason, attempt.generation, stateVersion);
     if (!committed) return;
+
+    if (reason === "hard_deadline") {
+      logSwarmTrace({ event: "deadline_expired", card: cardId, attempt: attemptId, reason: "hard_deadline" });
+      const settlement = this.supervisionStore.terminalSettlement({
+        attemptId,
+        expectedGeneration: attempt.generation || 1,
+        desiredState: "timed_out",
+        stableReason: "hard_deadline_expired",
+      });
+      if (settlement.kind === "settled" || settlement.kind === "replayed") {
+        logInfo(TAG, `Hard deadline settlement for attempt ${attemptId}: ${settlement.kind}`);
+      }
+      return;
+    }
 
     const adapter = this.resolveAdapter(attempt.executor_kind, attempt.executor_id);
     if (!adapter) {

@@ -81,6 +81,10 @@ vi.mock("./tasks/kanban-board.js", () => ({
     if (filter === "*") return cards;
     return cards.filter(c => c.status === (filter || "queued"));
   },
+  kanbanQueuedDispatchOrder: (now?: number) => {
+    const cards = Array.from(_cards.values()).filter(c => c.status === "queued" && (!c.next_retry_at || new Date(c.next_retry_at).getTime() <= (now ?? Date.now())));
+    return cards;
+  },
   kanbanGetCard: (id: number) => _cards.get(id) ?? null,
   isUnblocked: () => true,
   resolveRootId: (id: number) => id,

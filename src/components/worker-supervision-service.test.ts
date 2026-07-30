@@ -158,7 +158,7 @@ describe("WorkerSupervisionService", () => {
       expect(outcome.envelope!.worker_report.unresolved_risks).toHaveLength(1);
     });
 
-    it("settleResult returns conflict on duplicate call", () => {
+    it("terminalSettlement returns conflict on duplicate call", () => {
       const svc = new Service();
       svc.createChild("Build report", 101, 100, "orc", {
         criteria: [{ id: "c1", description: "Must work" }],

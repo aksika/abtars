@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 
-type LocalSwarmResult = {
-  schemaVersion: 1;
+type LocalSwarmResultV2 = {
+  schemaVersion: 2;
   ok: boolean;
+  scenario: string;
   scenarioId: string;
   projectCardId?: number;
   childCardIds: number[];
@@ -22,6 +23,7 @@ type LocalSwarmResult = {
   terminal: { projectState?: string; cardStatus?: string; deliveryResult?: string };
   duplicateWakeStable?: boolean;
   failure?: { stage: string; code: string; message: string };
+  scenarioSpecific?: Record<string, unknown>;
 };
 
 const MAX_OUTPUT = 16_000;
@@ -47,7 +49,7 @@ function readTrace(root: string): string[] {
   }
 }
 
-async function runChild(root: string): Promise<{ result?: LocalSwarmResult; stdout: string; stderr: string; trace: string[] }> {
+async function runChild(root: string, scenario: string): Promise<{ result?: LocalSwarmResultV2; stdout: string; stderr: string; trace: string[] }> {
   const home = join(root, "abtars-home");
   const runner = join(process.cwd(), "src/tests/e2e/local-swarm-runner.ts");
   const child = spawn(process.execPath, ["--import", "tsx", runner], {
@@ -58,6 +60,7 @@ async function runChild(root: string): Promise<{ result?: LocalSwarmResult; stdo
       ABTARS_HOME: home,
       LOG_FORMAT: "json",
       ABTARS_LOG_LEVEL: "trace",
+      SCENARIO: scenario,
       NODE_PATH: process.env["NODE_PATH"] ?? (process.env["HOME"] ? join(process.env["HOME"], ".local/lib/node_modules") : ""),
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -78,9 +81,9 @@ async function runChild(root: string): Promise<{ result?: LocalSwarmResult; stdo
   });
 
   const resultLine = stdout.split("\n").find(line => line.startsWith("LOCAL_SWARM_RESULT="));
-  let result: LocalSwarmResult | undefined;
+  let result: LocalSwarmResultV2 | undefined;
   if (resultLine) {
-    try { result = JSON.parse(resultLine.slice("LOCAL_SWARM_RESULT=".length)) as LocalSwarmResult; } catch { /* assertion below reports malformed protocol */ }
+    try { result = JSON.parse(resultLine.slice("LOCAL_SWARM_RESULT=".length)) as LocalSwarmResultV2; } catch {}
   }
   if (!result || exit.code !== 0) {
     const detail = [
@@ -94,12 +97,20 @@ async function runChild(root: string): Promise<{ result?: LocalSwarmResult; stdo
   return { result, stdout, stderr, trace: readTrace(root) };
 }
 
+async function runScenario(scenario: string, scenarioFn: (result: LocalSwarmResultV2) => void): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), `abtars-swarm-${scenario}-`));
+  try {
+    const run = await runChild(root, scenario);
+    const result = run.result!;
+    scenarioFn(result);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 describe("Local Swarm E2E", () => {
-  it("proves the real three-Worker production journey and exactly-once replay", async () => {
-    const root = mkdtempSync(join(tmpdir(), "abtars-swarm-e2e-"));
-    try {
-      const run = await runChild(root);
-      const result = run.result!;
+  it("happy_path: proves the real three-Worker production journey and exactly-once replay", async () => {
+    await runScenario("happy_path", (result) => {
       expect(result.ok).toBe(true);
       expect(result.childCardIds).toHaveLength(3);
       expect(result.peakActiveWorkers).toBe(3);
@@ -113,8 +124,47 @@ describe("Local Swarm E2E", () => {
       });
       expect(result.terminal).toEqual({ projectState: "accepted", cardStatus: "delivered", deliveryResult: "sent" });
       expect(result.duplicateWakeStable).toBe(true);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("restart_recovery: terminates predecessor after bridge restart, starts at most one successor", async () => {
+    await runScenario("restart_recovery", (result) => {
+      expect(result.ok).toBe(true);
+      expect(result.childCardIds).toHaveLength(1);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.finalLifecycle).toMatch(/completed|timed_out/);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("capacity_deadline: peak durable active <= 3, deadline expiration, late result rejection", async () => {
+    await runScenario("capacity_deadline", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(Number(ss.peakDurableActive)).toBeGreaterThan(0);
+      expect(Number(ss.peakDurableActive)).toBeLessThanOrEqual(3);
+      expect(Number(ss.attemptedDeadlines)).toBeGreaterThan(0);
+      expect(ss.lateResultRejected).toBe(true);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("priority_age: aged LOW card runs under sustained top-priority arrivals", async () => {
+    await runScenario("priority_age", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.agedCardStarted).toBe(true);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("token_budget: capped project enforces reservations and exhaustion", async () => {
+    await runScenario("token_budget", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(Number(ss.totalTokensUsed)).toBeLessThanOrEqual(Number(ss.projectMaxTokens ?? 20000));
+      expect(Number(ss.terminalChildren)).toBeGreaterThan(0);
+    });
   }, CHILD_TIMEOUT_MS + 10_000);
 });

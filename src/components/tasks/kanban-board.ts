@@ -490,6 +490,29 @@ export function kanbanRunningProjectIds(): number[] {
 }
 
 /**
+ * #1510: Return queued cards in effective dispatch order (priority/age promotion).
+ * Uses SQLite epoch arithmetic for deterministic ordering. Excludes cards whose
+ * next_retry_at is still in the future. Accepts explicit `now` for testing.
+ */
+export function kanbanQueuedDispatchOrder(now?: number): KanbanCard[] {
+  const d = dbOrNull();
+  if (!d) return [];
+  const nowVal = now ?? Date.now();
+  const rows = d.prepare(`
+    SELECT *, (
+      SELECT MIN(3, CASE k.priority
+        WHEN 'CRITICAL' THEN 3 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 1 ELSE 0
+        END + MAX(0, CAST((? - unixepoch(k.created_at)) * 1000 AS INTEGER)) / 60000)
+    ) AS effective_priority
+    FROM kanban_board k
+    WHERE k.status = 'queued'
+      AND (k.next_retry_at IS NULL OR k.next_retry_at <= datetime(?, 'unixepoch'))
+    ORDER BY effective_priority DESC, k.created_at ASC, k.id ASC
+  `).all(nowVal, nowVal / 1000) as KanbanCard[];
+  return rows;
+}
+
+/**
  * #1319: List active (queued/running) direct children of a card, up to `maxCount`.
  * Multi-level descendant resolution is not needed for v1 — Orc's project hierarchy
  * is one level deep (root → direct child cards).

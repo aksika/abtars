@@ -57,6 +57,8 @@ const spawnWorkerTool: ToolDefinition = {
       verification_commands: { type: "string", description: "JSON array of {id, argv, cwd, timeout_ms, criterion_ids} verification commands (supervised)" },
       required_capabilities: { type: "string", description: "JSON array of required capability strings (supervised)" },
       supports_root_criteria: { type: "string", description: "JSON array of root project criterion IDs this worker supports (#1363)" },
+      max_duration_ms: { type: "number", description: "Maximum execution duration in milliseconds (positive integer)" },
+      max_tokens: { type: "number", description: "Maximum token budget for this worker (positive integer, required when project is capped)" },
     },
     required: ["goal"],
   },
@@ -75,12 +77,18 @@ const spawnWorkerTool: ToolDefinition = {
     const goal = args.goal;
     if (!goal) return "[err] goal is required";
     const { spin } = await import("../spin.js");
+    const { kanbanGetCard } = await import("../tasks/kanban-board.js");
+    const projectCard = kanbanGetCard(projectCardId);
     const criteriaRaw = parseJsonArray(args.criteria);
     const artifactsRaw = parseJsonArray(args.expected_artifacts);
     const commandsRaw = parseJsonArray(args.verification_commands);
     const capsRaw = parseJsonArray(args.required_capabilities) as string[];
     const supportsRootCriteriaRaw = parseJsonArray(args.supports_root_criteria) as string[];
-    const hasStructuredData = criteriaRaw.length > 0 || artifactsRaw.length > 0 || commandsRaw.length > 0 || supportsRootCriteriaRaw.length > 0;
+    const hasStructuredData = criteriaRaw.length > 0 || artifactsRaw.length > 0 || commandsRaw.length > 0 || supportsRootCriteriaRaw.length > 0
+      || args.max_duration_ms !== undefined || args.max_tokens !== undefined;
+    if (projectCard?.max_tokens != null && args.max_tokens === undefined) {
+      return "[err] max_tokens is required when spawning a worker under a capped project";
+    }
     const contract = hasStructuredData ? {
       schema_version: 1 as const,
       id: "",
@@ -91,7 +99,10 @@ const spawnWorkerTool: ToolDefinition = {
       verification_commands: commandsRaw as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
       required_capabilities: capsRaw,
       supports_root_criteria: supportsRootCriteriaRaw.length > 0 ? supportsRootCriteriaRaw : undefined,
-      limits: {},
+      limits: {
+        ...(args.max_duration_ms !== undefined ? { max_duration_ms: Number(args.max_duration_ms) } : {}),
+        ...(args.max_tokens !== undefined ? { max_tokens: Number(args.max_tokens) } : {}),
+      },
       provenance: { root_card_id: 0, card_id: 0, authored_by: "orc", created_at: "" },
     } : undefined;
     const cardId = spin.spawnChild(projectCardId, {

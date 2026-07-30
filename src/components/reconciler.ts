@@ -1,17 +1,9 @@
-/**
- * reconciler.ts — K8s-inspired reconciliation loop for the Orc (#1364).
- *
- * Single scheduling authority: every supervised dispatch, retry, cancel, and
- * release decision originates here. Nerve/heartbeat events are only wakeups.
- * Reconciliation is keyed by card — independent cards run concurrently; one
- * card has at most one active pass (dirty-bit coalescing).
- */
-
 import { nerve } from "./nerve.js";
 import { spin } from "./spin.js";
 import {
   kanbanFail,
   kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds,
+  kanbanQueuedDispatchOrder,
   isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn } from "./logger.js";
@@ -20,6 +12,7 @@ import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { SpinWorkerAdapter } from "./spin-worker-adapter.js";
 import type { SwarmExecutorAdapter, ExecutionClaim } from "./swarm-executor-types.js";
+import { resolveSchedulingPolicy, deriveDeadline } from "./swarm-dispatch-policy.js";
 import { LeaseReconciliationService } from "./executor-lease-reconciler.js";
 import { ExecutorLeaseScheduler } from "./executor-lease-scheduler.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
@@ -30,8 +23,6 @@ import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
 
 const TAG = "reconciler";
-const MAX_WORKERS = 10;
-const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 
 let _shutdownRequested = false;
 
@@ -42,13 +33,25 @@ export function setPiService(service: PiRunService | null): void {
   _piService = service;
 }
 
-/** Dependency seam for tests and alternate local Worker executors. */
 export function setWorkerAdapter(adapter: SwarmExecutorAdapter | null): void {
   _workerAdapter = adapter;
 }
 
 function workerAdapter(): SwarmExecutorAdapter {
   return _workerAdapter ??= new SpinWorkerAdapter();
+}
+
+function dispatchExecutor(executorKind: string, executorId: string): { kind: "agent" | "pi"; id: string; adapter: SwarmExecutorAdapter } | undefined {
+  if (executorKind === "local_worker" || executorKind === "agent") {
+    // Older attempts were created as local_worker/spin. They are still Spin
+    // attempts, but all new claims use the durable executor identity below.
+    return { kind: "agent", id: "spin-local", adapter: workerAdapter() };
+  }
+  if (executorKind === "pi" && _piService) {
+    const { PiExecutorAdapter } = require("./pi-executor-adapter.js") as typeof import("./pi-executor-adapter.js");
+    return { kind: "pi", id: executorId, adapter: new PiExecutorAdapter(_piService.executor) };
+  }
+  return undefined;
 }
 
 export function requestShutdown(): void {
@@ -67,7 +70,6 @@ export function getOrcCoordinator(): OrcProjectCoordinator | null {
   return _orcCoordinator;
 }
 
-/** Dispatch an Orc turn through the coordinator if available, else fall back to legacy spin.dispatch. */
 function scheduleOrcReview(projectId: number, generation: number, caseId: string, requestId: string): void {
   if (_orcCoordinator) {
     const result = _orcCoordinator.scheduleReview(projectId, generation, caseId);
@@ -96,11 +98,11 @@ function legacyOrcReviewDispatch(projectId: number, generation: number, caseId: 
   }
 }
 
-// ── Keyed scheduler ──────────────────────────────────────────────────────────
+// ── Keyed scheduler (per-card reconciliation) ────────────────────────────────
 
 interface CardReconcilerState {
-  running: boolean;       // true while reconcileCard() is in flight
-  dirty: boolean;         // true if a wakeup arrived during the pass
+  running: boolean;
+  dirty: boolean;
 }
 
 const _states = new Map<number, CardReconcilerState>();
@@ -116,7 +118,6 @@ function wakeCard(cardId: number): void {
   if (s.running) { s.dirty = true; return; }
   s.running = true;
   s.dirty = false;
-  // Use microtask to avoid deep stacks
   queueMicrotask(() => reconcileCard(cardId));
 }
 
@@ -140,13 +141,11 @@ async function deriveAction(cardId: number): Promise<void> {
   const card = kanbanGetCard(cardId);
   if (!card) return;
 
-  // Project card (type "O") — reconcile children
   if (card.type === "O" && card.status === "running") {
     await reconcileProject(cardId);
     return;
   }
 
-  // Non-project card — check if supervised and reconcile individually
   await reconcileChildCard(card);
 }
 
@@ -160,32 +159,23 @@ async function reconcileProject(projectId: number): Promise<void> {
   const children = kanbanGetChildren(projectId);
 
   const now = Date.now();
-  const projectStart = new Date(project.created_at + "Z").getTime();
-  let deadlineMs = projectStart + MAX_WALL_CLOCK_MS;
+
   if (contractRow) {
     try {
       const contract = JSON.parse(contractRow.contract_json) as { limits?: { hard_deadline_at?: string } };
       const configuredDeadline = contract.limits?.hard_deadline_at ? Date.parse(contract.limits.hard_deadline_at) : NaN;
-      if (Number.isFinite(configuredDeadline)) deadlineMs = configuredDeadline;
-    } catch {
-      // The contract was normalized before insertion; retain the safety cap if
-      // an old/corrupt row cannot provide a usable deadline.
+      if (Number.isFinite(configuredDeadline) && now > configuredDeadline) {
+        await abortProject(projectId, children, "configured hard deadline exceeded");
+        return;
+      }
+    } catch (err) {
+      logWarn(TAG, `Project ${projectId}: invalid root contract deadline: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  // Circuit breaker: wall-clock — always first
-  if (now > deadlineMs) {
-    await abortProject(projectId, children, deadlineMs === projectStart + MAX_WALL_CLOCK_MS
-      ? "wall-clock exceeded (30min)"
-      : "configured hard deadline exceeded");
-    return;
-  }
-
-  // ── Contract admission gate (#1363 Task 1a) — before zero-child return ──
   if (!hasRootContract) {
     const supervision = reviewStore.getSupervision(projectId);
     if (!supervision) {
-      // No contract, no supervision — create awaiting_contract and wake Orc
       reviewStore.ensureAwaitingContract(projectId);
       logInfo(TAG, `Project ${projectId}: awaiting contract — dispatching Orc authoring turn`);
       if (_orcCoordinator) {
@@ -194,7 +184,6 @@ async function reconcileProject(projectId: number): Promise<void> {
         legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
       }
     } else if (supervision.state === "awaiting_contract") {
-      // Orc should already have been dispatched — retry if not
       logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
       if (_orcCoordinator) {
         _orcCoordinator.scheduleContractAuthoring(projectId);
@@ -205,7 +194,6 @@ async function reconcileProject(projectId: number): Promise<void> {
     return;
   }
 
-  // Supervised project — load supervision state
   const supervision = reviewStore.getSupervision(projectId);
   if (!supervision) {
     logWarn(TAG, `Project ${projectId}: root contract exists but no supervision state — initializing`);
@@ -215,66 +203,45 @@ async function reconcileProject(projectId: number): Promise<void> {
     return;
   }
 
-  // Skip if project is already in a terminal state
   if (supervision.state === "accepted" || supervision.state === "blocked") return;
-
-  // Handle awaiting_contract: Orc will use define_project_contract tool
   if (supervision.state === "awaiting_contract") return;
 
-  // Zero children before deadline — stay running, may still spawn work
   if (children.length === 0) return;
 
-  // Circuit breaker: token budget
-  if (project.max_tokens && (project.tokens_used ?? 0) >= project.max_tokens) {
+  if (project.max_tokens != null && (project.tokens_used ?? 0) >= project.max_tokens) {
     await abortProject(projectId, children, `budget exceeded (${project.tokens_used}/${project.max_tokens} tokens)`);
     return;
   }
 
-  // Circuit breaker: too many workers
-  if (children.length > MAX_WORKERS) {
-    await abortProject(projectId, children, `too many workers (${children.length})`);
-    return;
-  }
+  // #1510: Request dispatch pump instead of directly starting workers
+  requestWorkerDispatch();
 
-  for (const child of children) {
-    await reconcileChildCard(child);
-  }
-
-  // Handle needs_input: check for answered input requests
   if (supervision.state === "needs_input") {
     const answered = reviewStore.getAnsweredInputRequests(projectId);
     if (answered.length > 0) {
       logInfo(TAG, `Project ${projectId}: ${answered.length} input(s) answered — creating new review case`);
       reviewStore.clearInputNotice(projectId);
-      // Transition back to executing, then let the readiness check create a new case
       const nextRound = supervision.review_round + 1;
       reviewStore.stateTransition(projectId, ["needs_input"], "executing", { review_round: nextRound });
-      // Fall through to the normal readiness check below (new round creates a new case)
     } else {
       const pending = reviewStore.getPendingInputRequests().filter(r => r.project_card_id === projectId);
       if (pending.length === 0) {
         logWarn(TAG, `Project ${projectId}: needs_input state but no pending or answered requests — recovering`);
         reviewStore.setState(projectId, "executing", { review_round: supervision.review_round + 1 });
-        // Fall through to readiness check
       } else {
-        return; // still waiting — nothing to do
+        return;
       }
     }
   }
 
-  // Handle review_requested: retry dispatch if request is still pending, bound by attempts/deadline
-
-  // Handle review_requested: retry dispatch if request is still pending, bound by attempts/deadline
   if (supervision.state === "review_requested") {
     const openCase = reviewStore.getLatestOpenCase(projectId);
     if (openCase) {
       const existingReq = reviewStore.getReviewRequestByCaseId(openCase.id);
       if (!existingReq) {
-        // No request — create one and dispatch (keep pending for retry)
         const { id: rrId } = reviewStore.insertReviewRequest(projectId, openCase.id, supervision.generation);
         scheduleOrcReview(projectId, supervision.generation, openCase.id, rrId);
       } else if (existingReq.status === "pending") {
-        // cooldown check in getPendingReviewRequests prevents rapid retry
         scheduleOrcReview(projectId, supervision.generation, openCase.id, existingReq.id);
       } else if (existingReq.status === "abandoned") {
         logWarn(TAG, `Project ${projectId}: review request abandoned — settling blocked`);
@@ -285,7 +252,6 @@ async function reconcileProject(projectId: number): Promise<void> {
     return;
   }
 
-  // Handle repair_planned: create child cards for each repair item
   if (supervision.state === "repair_planned") {
     const decision = reviewStore.getLatestDecisionForProject(projectId);
     if (!decision) {
@@ -298,23 +264,17 @@ async function reconcileProject(projectId: number): Promise<void> {
       logWarn(TAG, `Project ${projectId}: repair_planned but no repair items`);
       return;
     }
-    // Load root contract for criterion mapping
-    const contractRow = reviewStore.getContractByProjectCardId(projectId);
-    const rootContract = contractRow ? JSON.parse(contractRow.contract_json) as { criteria: Array<{ id: string; description: string }> } : null;
-
+    const contractRow2 = reviewStore.getContractByProjectCardId(projectId);
+    const rootContract = contractRow2 ? JSON.parse(contractRow2.contract_json) as { criteria: Array<{ id: string; description: string }> } : null;
     const rootCardId = (() => {
       try { return require("./tasks/kanban-board.js").resolveRootId(projectId) ?? projectId; } catch { return projectId; }
     })();
-
     for (const item of items) {
       const goal = `Repair: ${item.strategy.slice(0, 200)}`;
       logInfo(TAG, `Project ${projectId}: creating repair worker for item ${item.id} (criteria: ${item.affected_criterion_ids.join(",")})`);
-
-      // Build #1366 contract with root criterion mapping
       const criteria = rootContract?.criteria
         .filter(c => item.affected_criterion_ids.includes(c.id))
         .map(c => ({ id: c.id, description: c.description })) ?? [];
-
       const contract: WorkerAcceptanceContractV1 = {
         schema_version: 1,
         id: `repair_${projectId}_${item.id}_${Date.now()}`,
@@ -328,7 +288,6 @@ async function reconcileProject(projectId: number): Promise<void> {
         limits: { max_tokens: item.budget?.max_tokens },
         provenance: { root_card_id: rootCardId, card_id: 0, authored_by: "orc", created_at: new Date().toISOString() },
       };
-
       try {
         spin.spawnChild(projectId, { goal, source: "agent", contract, settlementOwner: "spin" });
       } catch (err) {
@@ -339,7 +298,6 @@ async function reconcileProject(projectId: number): Promise<void> {
     return;
   }
 
-  // Check if repair workers have completed
   if (supervision.state === "repairing") {
     const allTerminal = children.length > 0 && children.every(c => {
       const terminalStatuses = ["done", "delivered", "failed"];
@@ -348,84 +306,55 @@ async function reconcileProject(projectId: number): Promise<void> {
     if (allTerminal) {
       logInfo(TAG, `Project ${projectId}: all repair children terminal — creating new review round`);
       reviewStore.setState(projectId, "executing", { repair_round: supervision.repair_round + 1 });
-      // Fall through to readiness check below
     } else {
       return;
     }
   }
 
-  // Re-read children after state transitions/reconciliation above (Fix 4: avoid stale snapshot)
   const finalChildren = kanbanGetChildren(projectId);
-
-  // Check review readiness: all children must be terminal
   const allChildrenTerminal = finalChildren.every(c => {
     const terminalStatuses = ["done", "delivered", "failed"];
     return terminalStatuses.includes(c.status);
   });
-
   if (!allChildrenTerminal) return;
 
-  // Prevent duplicate review cases: no open case should already exist
   const existingOpenCase = reviewStore.getLatestOpenCase(projectId);
   if (existingOpenCase) return;
 
-  // Transition to review_ready and create review case atomically
   const transitioned = reviewStore.stateTransition(
     projectId,
     ["executing", "review_ready"] as ProjectState[],
     "review_ready",
     { review_round: supervision.review_round + 1 },
   );
-
   if (!transitioned) {
     logWarn(TAG, `Project ${projectId}: failed to transition to review_ready`);
     return;
   }
 
-  // Assemble full review case
   const assembler = new ReviewCaseAssembler();
   const snapshot = await assembler.assembleCase(projectId, supervision.generation, supervision.review_round + 1);
-
   if ("error" in snapshot) {
     logWarn(TAG, `Project ${projectId}: review case assembly failed — ${snapshot.error}`);
     return;
   }
 
-  // Atomically insert case, transition state, and create durable review request
   const snapshotDigest = `rc_${projectId}_${supervision.generation}_${supervision.review_round + 1}`;
   let caseId = "";
   let reviewRequestId = "";
-
   reviewStore.db.transaction(() => {
-    const { id: cId } = reviewStore.insertReviewCase(
-      projectId,
-      supervision.generation,
-      supervision.review_round + 1,
-      snapshot,
-      snapshotDigest,
-    );
+    const { id: cId } = reviewStore.insertReviewCase(projectId, supervision.generation, supervision.review_round + 1, snapshot, snapshotDigest);
     caseId = cId;
-
-    const transitioned = reviewStore.stateTransition(
-      projectId,
-      ["review_ready"] as ProjectState[],
-      "review_requested",
-    );
-    if (!transitioned) throw new Error(`failed to transition project ${projectId} to review_requested`);
-
+    const transitioned2 = reviewStore.stateTransition(projectId, ["review_ready"] as ProjectState[], "review_requested");
+    if (!transitioned2) throw new Error(`failed to transition project ${projectId} to review_requested`);
     const { id: rrId } = reviewStore.insertReviewRequest(projectId, cId, supervision.generation);
     reviewRequestId = rrId;
   });
-
   logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created, request ${reviewRequestId} (gen=${supervision.generation}, round=${supervision.review_round + 1})`);
-
   logSwarmTrace({ event: "review_case_created", project: projectId, card: projectId, reviewCase: caseId, reason: "all_children_terminal", generation: supervision.generation });
-
-  // Attempt to dispatch Orc — keep request pending so heartbeat retry can recover
   scheduleOrcReview(projectId, supervision.generation, caseId, reviewRequestId);
 }
 
-/** #1363 Task 6: Drive review dispatch from pending requests. Returns count dispatched. */
 function dispatchPendingReviewRequests(): number {
   const store = new ProjectReviewStore();
   const pending = store.getPendingReviewRequests();
@@ -456,13 +385,11 @@ function reconcilePiCard(card: KanbanCard): void {
   if (card.status !== "queued") return;
   if (!isUnblocked(card)) return;
 
-  // Check capacity
   if (svc.executor.activeCount >= svc.executor.maxConcurrent) {
     logInfo(TAG, `Pi card ${card.id} queued but Pi capacity full (${svc.executor.activeCount}/${svc.executor.maxConcurrent})`);
     return;
   }
 
-  // Look up the Pi run by card ID
   const run = svc.store.getByCardId(card.id);
   if (!run) {
     logWarn(TAG, `Pi card ${card.id} has no associated Pi run`);
@@ -473,14 +400,12 @@ function reconcilePiCard(card: KanbanCard): void {
     return;
   }
 
-  // Atomic claim: run queued→starting + card queued→running
   const claim = svc.store.claimQueuedGeneration(card.id);
   if (!claim.claimed) {
     logWarn(TAG, `Failed to claim Pi card ${card.id}: ${claim.reason}`);
     return;
   }
 
-  // Start the Pi process with the claimed generation
   logInfo(TAG, `Starting Pi run ${claim.runId} (card ${card.id}, gen ${claim.generation})`);
   svc.executor.startWithClaim(claim.runId, claim.generation, run.currentSessionId ?? `${Date.now()}_C_pi_${claim.runId}`).catch((err) => {
     logWarn(TAG, `Pi start failed for ${claim.runId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -488,115 +413,205 @@ function reconcilePiCard(card: KanbanCard): void {
 }
 
 async function reconcileChildCard(card: KanbanCard): Promise<void> {
-  // #1405: Pi lane — route type='pi' cards through Pi executor, not Worker dispatch
   if (card.type === "pi") {
     reconcilePiCard(card);
     return;
   }
 
-  // #1411: Domain guard — only supervised or Pi cards enter Reconciler.
-  // Unsupervised legacy cards are owned entirely by Spin's bounded retry path
-  // (kanbanRetryOrFail + drainQueued). Reconciler must never touch them.
   const svc = new WorkerSupervisionService();
   const hasContract = svc.cardHasContract(card.id);
   if (!hasContract) return;
 
   const latestAttempt = getLatestAttemptInfo(card.id);
 
-  // #1364: Supervised queued card — claim if pending attempt exists
   if (card.status === "queued") {
     if (!isUnblocked(card)) return;
     if (latestAttempt && latestAttempt.lifecycle === "pending") {
-      // #1365: Retry successor attempts have source_attempt_id / earliest_claim_at
-      if (latestAttempt.source_attempt_id) {
-        handleScheduledRetryClaim(card, latestAttempt);
-      } else {
-        logInfo(TAG, `Claiming supervised card ${card.id}`);
-        const contract = svc.getContractForCard(card.id);
-        if (contract) await startSupervisedWorker(card, latestAttempt, contract);
-      }
+      requestWorkerDispatch();
     }
     return;
   }
 
-  // #1365: Adaptive retry for supervised cards
   if (card.status === "failed" && latestAttempt) {
     handleSupervisedRetry(card, latestAttempt.lifecycle);
     return;
   }
 
-  // #1367: Lease-based stale evaluation for supervised cards
   if (latestAttempt && !isTerminal(latestAttempt.lifecycle)) {
     evaluateLease(card);
     return;
   }
 
-  // #1364: Cancel-requested supervised attempts — do NOT fail the card here;
-  // the executor adapter will settle it. Reconciler only records policy intent.
   if (latestAttempt && latestAttempt.lifecycle === "cancel_requested") {
     return;
   }
 }
 
-async function startSupervisedWorker(
-  card: KanbanCard,
-  attempt: AttemptRow,
-  contract: WorkerAcceptanceContractV1,
-): Promise<void> {
-  // Check required capabilities before claiming.
-  if (contract.required_capabilities && contract.required_capabilities.length > 0) {
-    if (card.type === "pi") {
-      const svc = _piService;
-      if (!svc) {
-        kanbanFail(card.id, "Pi service unavailable for pi-type card with required capabilities");
-        return;
-      }
-      if (!contract.required_capabilities.every(c => c === "pi")) {
-        kanbanFail(card.id, `Pi executor only supports "pi" capability, requires: ${contract.required_capabilities.join(", ")}`);
-        return;
+export function requestWorkerDispatch(): void {
+  dispatchPumpState.dirty = true;
+  if (!dispatchPumpState.running) {
+    dispatchPumpState.running = true;
+    queueMicrotask(() => runWorkerDispatch());
+  }
+}
+
+interface DispatchPumpState {
+  running: boolean;
+  dirty: boolean;
+}
+
+const dispatchPumpState: DispatchPumpState = { running: false, dirty: false };
+
+async function runWorkerDispatch(): Promise<void> {
+  try {
+    do {
+      dispatchPumpState.dirty = false;
+      if (_shutdownRequested) return;
+      await dispatchOnePass();
+    } while (dispatchPumpState.dirty);
+  } finally {
+    dispatchPumpState.running = false;
+  }
+}
+
+async function dispatchOnePass(): Promise<void> {
+  const store = new WorkerSupervisionStore();
+  const capacities = new Map<string, { adapter: SwarmExecutorAdapter; max: number }>();
+  const rootDeadlines = new Map<number, string | undefined>();
+
+  const queued = kanbanQueuedDispatchOrder();
+  for (const card of queued) {
+    if (_shutdownRequested) return;
+
+    if (!isUnblocked(card)) continue;
+    if (card.parent_id == null) continue;
+    const projectId = card.parent_id;
+
+    const project = kanbanGetCard(projectId);
+    if (!project || project.status !== "running") continue;
+
+    const supSvc = new WorkerSupervisionService();
+    const hasContract = supSvc.cardHasContract(card.id);
+    if (!hasContract) continue;
+
+    const latestAttempt = store.getLatestAttempt(card.id);
+    if (!latestAttempt || latestAttempt.lifecycle !== "pending") continue;
+
+    const executor = dispatchExecutor(latestAttempt.executor_kind ?? "local_worker", latestAttempt.executor_id ?? "spin");
+    if (!executor) continue;
+    const capacityKey = `${executor.kind}:${executor.id}`;
+    let capacity = capacities.get(capacityKey);
+    if (!capacity) {
+      const snapshot = await executor.adapter.capacity();
+      capacity = { adapter: executor.adapter, max: snapshot.max };
+      capacities.set(capacityKey, capacity);
+    }
+    if (capacity.max <= 0) continue;
+    if (store.getActiveAttemptCountForExecutor(executor.kind, executor.id) >= capacity.max) continue;
+
+    if (latestAttempt.source_attempt_id) {
+      if (latestAttempt.earliest_claim_at && new Date(latestAttempt.earliest_claim_at).getTime() > Date.now()) {
+        continue;
       }
     }
-    // Agent (Spin) executor supports all standard capabilities — no explicit
-    // capability check needed beyond the concurrency gate.
+
+    const contract = supSvc.getContractForCard(card.id);
+    if (!contract) continue;
+
+    const rootHardDeadline = rootDeadlines.get(projectId) ?? (() => {
+      const row = new ProjectReviewStore().getContractByProjectCardId(projectId);
+      let deadline: string | undefined;
+      if (row) {
+        try {
+          const root = JSON.parse(row.contract_json) as { limits?: { hard_deadline_at?: string } };
+          deadline = root.limits?.hard_deadline_at;
+        } catch (err) {
+          logWarn(TAG, `Invalid root contract for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      rootDeadlines.set(projectId, deadline);
+      return deadline;
+    })();
+    const executorMax = capacity.max;
+    const policy = resolveSchedulingPolicy(executor.kind);
+    const workerMaxDurationMs = contract.limits?.max_duration_ms;
+    const claimedAt = new Date().toISOString();
+    const hardDeadlineAt = deriveDeadline(claimedAt, policy, rootHardDeadline, workerMaxDurationMs);
+
+    const reservedTokens = (project.max_tokens != null && contract.limits?.max_tokens != null)
+      ? Number(contract.limits.max_tokens)
+      : 0;
+
+    const result = store.claimAttemptWithinLimits({
+      cardId: card.id,
+      attemptId: latestAttempt.id,
+      contractId: contract.id,
+      executorKind: executor.kind,
+      executorId: executor.id,
+      generation: latestAttempt.generation || 1,
+      executorMax,
+      hardDeadlineAt,
+      reservedTokens,
+      projectId,
+      sourceAttemptId: latestAttempt.source_attempt_id ?? undefined,
+    });
+
+    logSwarmTrace({
+      event: "dispatch_selected",
+      card: card.id,
+      attempt: latestAttempt.id,
+      reason: result.kind,
+    });
+
+    if (result.kind === "budget_exhausted") {
+      store.terminalSettlement({
+        attemptId: latestAttempt.id,
+        expectedGeneration: latestAttempt.generation || 1,
+        desiredState: "cancelled",
+        stableReason: "budget_exhausted",
+      });
+      store.db.prepare(`UPDATE kanban_board SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ?`).run("budget_exhausted", card.id);
+      kanbanFail(card.id, "budget_exhausted");
+      continue;
+    }
+
+    if (result.kind !== "claimed") continue;
+    const claim = (result as { kind: "claimed"; claim: ExecutionClaim }).claim;
+    if (!store.markAttemptStartObservable(claim.attemptId)) {
+      store.terminalSettlement({
+        attemptId: claim.attemptId,
+        expectedGeneration: claim.generation,
+        desiredState: "failed",
+        stableReason: "could not enter starting state",
+      });
+      kanbanFail(card.id, "could not enter starting state");
+      continue;
+    }
+
+    logSwarmTrace({ event: "worker_claim", card: card.id, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
+
+    let observation;
+    try {
+      observation = await executor.adapter.start(claim);
+    } catch (err) {
+      observation = { kind: "start_failed" as const, reason: String(err), retryable: true };
+    }
+
+    if (observation.kind === "started" || observation.kind === "already_started") {
+      store.markAttemptRunning(claim.attemptId);
+      logSwarmTrace({ event: "worker_started", card: card.id, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
+    } else {
+      logSwarmTrace({ event: "worker_start_failed", card: card.id, attempt: claim.attemptId, reason: "start_failed" });
+      store.terminalSettlement({
+        attemptId: claim.attemptId,
+        expectedGeneration: claim.generation,
+        desiredState: "failed",
+        stableReason: `start_failed: ${observation.reason}`,
+      });
+      kanbanFail(card.id, `worker start failed: ${observation.reason}`);
+    }
+
   }
-
-  const capacity = await workerAdapter().capacity();
-  if (capacity.available <= 0) return;
-
-  const store = new WorkerSupervisionStore();
-  const claim = store.claimAttempt(
-    card.id,
-    contract.id,
-    "agent",
-    "spin-local",
-    attempt.generation || 1,
-  );
-  if (!claim) return;
-
-  if (!store.markAttemptStartObservable(claim.attemptId)) {
-    store.failAttempt(claim.attemptId);
-    kanbanFail(card.id, "worker claim could not enter starting state");
-    return;
-  }
-
-  logSwarmTrace({ event: "worker_claim", card: card.id, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
-
-  let observation;
-  try {
-    observation = await workerAdapter().start(claim);
-  } catch (err) {
-    observation = { kind: "start_failed" as const, reason: String(err), retryable: true };
-  }
-
-  if (observation.kind === "started" || observation.kind === "already_started") {
-    store.markAttemptRunning(claim.attemptId);
-    logSwarmTrace({ event: "worker_started", card: card.id, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
-    return;
-  }
-
-  logSwarmTrace({ event: "worker_start_failed", card: card.id, attempt: claim.attemptId, reason: "start_failed" });
-  store.failAttempt(claim.attemptId);
-  kanbanFail(card.id, `worker start failed: ${observation.reason}`);
 }
 
 function isTerminal(lc: AttemptLifecycle): boolean {
@@ -654,7 +669,6 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
         const acceptResult = retryService.acceptAutomaticRetry(latestAttempt.id, card.id);
         if (acceptResult.kind === "created") {
           logInfo(TAG, `Auto-retry card ${card.id}: attempt ${latestAttempt.ordinal} -> ${acceptResult.targetAttemptId} (${classification.primary})`);
-          // Card transitions to queued via the transaction in acceptAutomaticRetry
           wakeCard(card.id);
         } else if (acceptResult.kind === "idempotent") {
           logInfo(TAG, `Auto-retry already scheduled for card ${card.id}: target ${acceptResult.targetAttemptId}`);
@@ -666,7 +680,6 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
       }
       case "orc_review": {
         logInfo(TAG, `Orc review required for card ${card.id}: attempt ${latestAttempt.id} (${classification.primary})`);
-        // Card stays failed — Orc sees it in check_workers and calls review_worker_failure
         break;
       }
       case "needs_input": {
@@ -684,100 +697,11 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
   }
 }
 
-function handleScheduledRetryClaim(card: KanbanCard, pendingAttempt: AttemptRow): void {
-  const store = new WorkerSupervisionStore();
-  const contractRow = store.getContract(pendingAttempt.contract_id);
-  if (!contractRow) {
-    logWarn(TAG, `Scheduled retry ${card.id}: no contract ${pendingAttempt.contract_id} — failing`);
-    kanbanFail(card.id, "retry contract not found");
-    return;
-  }
-  const contract = JSON.parse(contractRow.contract_json) as WorkerAcceptanceContractV1;
-
-  // Check earliest_claim_at
-  if (pendingAttempt.earliest_claim_at && new Date(pendingAttempt.earliest_claim_at).getTime() > Date.now()) {
-    const delay = new Date(pendingAttempt.earliest_claim_at).getTime() - Date.now();
-    setTimeout(() => wakeCard(card.id), Math.min(delay, 60_000));
-    return;
-  }
-
-  // Revalidate budget
-  const retryService = buildRetryService();
-  const budget = retryService["retryStore"].getFullLineageBudget(card.id);
-  if (budget.totalAttempts + budget.activeReservations > 5) {
-    logWarn(TAG, `Scheduled retry ${card.id}: budget exhausted — cancelling pending attempt`);
-    store.cancelPendingAttempt(pendingAttempt.id, "budget_exhausted");
-    kanbanFail(card.id, "retry budget exhausted");
-    return;
-  }
-
-  // Revalidate executor eligibility
-  const catalog = retryService["executorCatalog"] as import("./retry/local-executor-catalog.js").LocalExecutorCatalog;
-  const { eligible } = catalog.getCandidates({ requiredCapabilities: [...contract.required_capabilities ?? []] });
-  const matchingExecutor = eligible.find(e => e.id === pendingAttempt.executor_id && e.kind === pendingAttempt.executor_kind);
-  if (!matchingExecutor || !matchingExecutor.healthy) {
-    logWarn(TAG, `Scheduled retry ${card.id}: executor ${pendingAttempt.executor_kind}/${pendingAttempt.executor_id} not eligible — failing`);
-    store.cancelPendingAttempt(pendingAttempt.id, "executor_ineligible");
-    kanbanFail(card.id, "retry executor unavailable");
-    return;
-  }
-
-  // Claim the attempt and reservation in one compare-and-set transaction.
-  const sourceAttemptId = pendingAttempt.source_attempt_id;
-  if (!sourceAttemptId) return;
-  const claim = store.claimRetryAttempt(
-    card.id,
-    pendingAttempt.id,
-    contract.id,
-    pendingAttempt.executor_kind as import("./worker-supervision-store.js").ExecutorKind,
-    pendingAttempt.executor_id,
-    pendingAttempt.generation || 1,
-    sourceAttemptId,
-  );
-  if (!claim) return;
-
-  if (!store.markAttemptStartObservable(claim.attemptId)) {
-    store.failAttempt(claim.attemptId);
-    kanbanFail(card.id, "retry claim could not enter starting state");
-    return;
-  }
-
-  const executorKind = pendingAttempt.executor_kind;
-  if (executorKind === "pi") {
-    const svc = _piService;
-    if (!svc) {
-      store.failAttempt(claim.attemptId);
-      kanbanFail(card.id, "Pi service unavailable for retry");
-      return;
-    }
-    svc.executor.startWithClaim(claim.attemptId, pendingAttempt.generation || 1, card.title).catch((err: unknown) => {
-      store.failAttempt(claim.attemptId);
-      kanbanFail(card.id, `Pi retry start error: ${err instanceof Error ? err.message : String(err)}`);
-    });
-  } else {
-    const adapter = workerAdapter();
-    adapter.start(claim).then(observation => {
-      if (observation.kind === "started" || observation.kind === "already_started") {
-        store.markAttemptRunning(claim.attemptId);
-      } else {
-        store.failAttempt(claim.attemptId);
-        kanbanFail(card.id, `retry start failed: ${observation.reason}`);
-      }
-    }).catch(err => {
-      store.failAttempt(claim.attemptId);
-      kanbanFail(card.id, `retry start error: ${err instanceof Error ? err.message : String(err)}`);
-    });
-  }
-}
-
 function buildRetryService(): import("./retry/retry-service.js").RetryService {
   const { RetryService } = require("./retry/retry-service.js") as typeof import("./retry/retry-service.js");
   const { LocalExecutorCatalog } = require("./retry/local-executor-catalog.js") as typeof import("./retry/local-executor-catalog.js");
   const { providerForAdapter } = require("./retry/local-executor-catalog.js") as typeof import("./retry/local-executor-catalog.js");
   const catalog = new LocalExecutorCatalog({
-    // Selection must reflect the adapter that Reconciler will actually start.
-    // Pi is intentionally not advertised here until a retry target has a
-    // durable Pi run record; selecting it without one cannot be started.
     spinProvider: providerForAdapter(workerAdapter(), "spin"),
   });
   return new RetryService({ executorCatalog: catalog });
@@ -790,66 +714,38 @@ function getLatestAttemptInfo(cardId: number): AttemptRow | undefined {
 
 async function abortProject(projectId: number, children: KanbanCard[], reason: string): Promise<void> {
   logWarn(TAG, `ABORT project ${projectId}: ${reason}`);
+  const store = new WorkerSupervisionStore();
   for (const card of children) {
     if (card.status !== "running" && card.status !== "queued") continue;
-    await cancelChild(card, reason);
-  }
-  kanbanFail(projectId, reason);
-}
-
-async function cancelChild(card: KanbanCard, reason: string): Promise<void> {
-  const store = new WorkerSupervisionStore();
-  const attempt = store.getLatestAttempt(card.id);
-  if (!attempt || store.isAttemptTerminal(attempt.lifecycle)) {
-    kanbanFail(card.id, `project aborted: ${reason}`);
-    return;
-  }
-
-  // A pending attempt has no process to interrupt. Cancel it durably before
-  // failing the card so a queued wakeup cannot dispatch it after the abort.
-  if (attempt.lifecycle === "pending") {
-    if (store.cancelPendingAttempt(attempt.id, `project_abort: ${reason}`)) {
+    const attempt = store.getLatestAttempt(card.id);
+    if (!attempt) {
       kanbanFail(card.id, `project aborted: ${reason}`);
+      continue;
     }
-    return;
-  }
-
-  if (!store.requestCancel(attempt.id, `project_abort: ${reason}`)) return;
-
-  const claim: ExecutionClaim = {
-    attemptId: attempt.id,
-    cardId: card.id,
-    contractId: attempt.contract_id,
-    executorKind: attempt.executor_kind === "pi" ? "pi" : attempt.executor_kind === "remote" ? "remote" : "agent",
-    executorId: attempt.executor_id,
-    generation: attempt.generation,
-    claimedAt: attempt.claimed_at ?? attempt.started_at,
-  };
-
-  let observation;
-  if (claim.executorKind === "agent") {
-    observation = await workerAdapter().cancel(claim, "project_abort");
-  } else if (attempt.executor_kind === "pi") {
-    const svc = _piService;
-    if (svc) {
-      const run = svc.store.getByCardId(card.id);
-      if (run) {
-        try {
-          await svc.executor.cancel(run.id);
-          store.cancelAttempt(attempt.id);
-          kanbanFail(card.id, `project aborted: ${reason}`);
-        } catch {
-          return;
-        }
+    const settlement = store.terminalSettlement({
+      attemptId: attempt.id,
+      expectedGeneration: attempt.generation || 1,
+      desiredState: "cancelled",
+      stableReason: `project_abort: ${reason}`,
+    });
+    if (settlement.kind === "settled" || settlement.kind === "replayed") {
+      const executor = dispatchExecutor(attempt.executor_kind, attempt.executor_id);
+      if (executor) {
+        await executor.adapter.cancel({
+          attemptId: attempt.id,
+          cardId: attempt.card_id,
+          contractId: attempt.contract_id,
+          executorKind: executor.kind,
+          executorId: executor.id,
+          generation: attempt.generation || 1,
+          claimedAt: attempt.claimed_at ?? attempt.started_at,
+          hardDeadlineAt: attempt.hard_deadline_at ?? undefined,
+        }, "project_abort");
       }
     }
-  }
-
-  if (observation?.kind === "cancelled" || observation?.kind === "already_terminal") {
-    store.cancelAttempt(attempt.id);
     kanbanFail(card.id, `project aborted: ${reason}`);
   }
-  logInfo(TAG, `Cancellation requested for card ${card.id} attempt=${attempt.id} via ${attempt.executor_kind} (reason: project_abort)`);
+  kanbanFail(projectId, reason);
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -859,7 +755,6 @@ export function requestReconcile(cardId: number): void {
 }
 
 export function requestReconcileForProject(cardId: number): void {
-  // Wake the project card — it will reconcile children
   const card = kanbanGetCard(cardId);
   if (card?.parent_id) {
     wakeCard(card.parent_id);
@@ -867,24 +762,20 @@ export function requestReconcileForProject(cardId: number): void {
   wakeCard(cardId);
 }
 
-/** #1363 Task 6: Retry pending review requests. Returns count dispatched. */
 export function retryPendingReviewRequests(): number {
   return dispatchPendingReviewRequests();
 }
 
-/** #1414: Scan all running O-type projects and schedule reconciliation. Returns candidate count. */
 export function scanActiveProjects(): number {
   const projectIds = kanbanRunningProjectIds();
   for (const projectId of projectIds) wakeCard(projectId);
   return projectIds.length;
 }
 
-/** Answer a pending input request. Returns true if the answer was accepted. */
 export function answerInputRequest(requestId: string, response: string): boolean {
   const store = new ProjectReviewStore();
   const answered = store.answerInputRequest(requestId, response);
   if (answered) {
-    // Wake the project
     const rows = store.db.prepare(`SELECT project_card_id FROM project_input_requests WHERE id = ?`).get(requestId) as { project_card_id: number } | undefined;
     if (rows) requestReconcile(rows.project_card_id);
   }
@@ -901,8 +792,15 @@ function scheduleLeaseEvaluations(): void {
   if (_leaseScheduler) _leaseScheduler.reschedule();
 }
 
+let _reconcilerStarted = false;
+
 export function startReconciler(): void {
-  // Initialize Orc coordinator if not already set
+  if (_reconcilerStarted) {
+    logInfo(TAG, "Reconciler already started — skipping duplicate init");
+    return;
+  }
+  _reconcilerStarted = true;
+
   if (!_orcCoordinator) {
     try {
       const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
@@ -928,11 +826,13 @@ export function startReconciler(): void {
       logWarn(TAG, `Failed to initialize Orc coordinator: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  // #1367: Wire lease deadline scheduler
+
+  // #1510: Boot recovery — terminalize process-bound attempts from dead bridge
+  runBootRecovery();
+
   _leaseScheduler = new ExecutorLeaseScheduler(
     () => new ExecutorLeaseStore().getDueSnapshots(),
     (cardId: number) => {
-      // Wake the project card which reconciles children
       const card = require("./tasks/kanban-board.js").kanbanGetCard(cardId) as { parent_id?: number } | undefined;
       if (card?.parent_id) wakeCard(card.parent_id);
       requestReconcile(cardId);
@@ -944,12 +844,83 @@ export function startReconciler(): void {
   nerve.on("card:failed", (cardId: number) => requestReconcileForProject(cardId));
   const count = scanActiveProjects();
 
-  // Boot lease recovery — wake overdue cards and set timer
   _leaseScheduler.bootRecovery();
 
-  // Wire lease-change notification from store to scheduler reschedule
   const { ExecutorLeaseStore: StoreWithHook } = require("./executor-lease-store.js") as typeof import("./executor-lease-store.js");
   StoreWithHook.onLeaseChanged = () => _leaseScheduler?.reschedule();
 
   logInfo(TAG, `Reconciler started — recovered ${count} running project(s), lease scheduler active`);
+}
+
+function runBootRecovery(): void {
+  try {
+    const store = new WorkerSupervisionStore();
+    const active = store.getActiveSupervisedAttempts();
+    if (active.length === 0) {
+      logInfo(TAG, "Boot recovery: no active attempts to recover");
+      return;
+    }
+
+    let recovered = 0;
+    for (const attempt of active) {
+      const policy = resolveSchedulingPolicy(attempt.executor_kind);
+      if (policy.recovery === "process_bound") {
+        const bootResult = store.terminalSettlement({
+          attemptId: attempt.id,
+          expectedGeneration: attempt.generation || 1,
+          desiredState: "timed_out",
+          stableReason: "bridge_restart",
+        });
+        if (bootResult.kind === "settled" || bootResult.kind === "budget_violation") {
+          logSwarmTrace({ event: "recovery_settled", card: attempt.card_id, attempt: attempt.id, generation: attempt.generation, reason: "bridge_restart" });
+          const card = kanbanGetCard(attempt.card_id);
+          if (card) kanbanFail(card.id, "bridge_restart");
+        }
+        recovered++;
+      } else if (policy.recovery === "inspectable") {
+        const adapter = resolveAdapterForRecovery(attempt.executor_kind, attempt.executor_id);
+        if (adapter) {
+          const claim: ExecutionClaim = {
+            attemptId: attempt.id,
+            cardId: attempt.card_id,
+            contractId: attempt.contract_id,
+            executorKind: attempt.executor_kind as "agent" | "pi",
+            executorId: attempt.executor_id,
+            generation: attempt.generation || 1,
+            claimedAt: attempt.claimed_at ?? attempt.started_at,
+            hardDeadlineAt: attempt.hard_deadline_at ?? undefined,
+          };
+          adapter.inspect(claim).then(observation => {
+            if (observation.kind === "terminal") {
+              store.terminalSettlement({
+                attemptId: attempt.id,
+                expectedGeneration: attempt.generation || 1,
+                desiredState: observation.lifecycle as "completed" | "failed" | "cancelled" | "timed_out",
+                stableReason: "recovery_inspection_terminal",
+              });
+            }
+          }).catch(err => {
+            logWarn(TAG, `Boot recovery inspection failed for ${attempt.id}: ${err instanceof Error ? err.message : String(err)}`);
+          });
+          logSwarmTrace({ event: "recovery_inspect", card: attempt.card_id, attempt: attempt.id, reason: "inspectable_attempt" });
+        }
+      }
+    }
+    if (recovered > 0) {
+      logInfo(TAG, `Boot recovery: settled ${recovered} process-bound attempt(s)`);
+    }
+  } catch (err) {
+    logWarn(TAG, `Boot recovery error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function resolveAdapterForRecovery(executorKind: string, _executorId: string): SwarmExecutorAdapter | undefined {
+  if (executorKind === "agent") return workerAdapter();
+  if (executorKind === "pi") {
+    const svc = _piService;
+    if (!svc) return undefined;
+    const { PiExecutorAdapter } = require("./pi-executor-adapter.js") as typeof import("./pi-executor-adapter.js");
+    return new PiExecutorAdapter(svc.executor);
+  }
+  return undefined;
 }

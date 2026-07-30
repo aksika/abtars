@@ -8,8 +8,6 @@ import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "./worke
 let TEST_HOME: string;
 let mod: typeof import("./worker-supervision-store.js");
 let Store: typeof import("./worker-supervision-store.js").WorkerSupervisionStore;
-let SettlementResult: typeof import("./worker-supervision-store.js").SettlementResult;
-let settleResult: typeof import("./worker-supervision-store.js").settleResult;
 
 const TEST_CONTRACT: WorkerAcceptanceContractV1 = {
   schema_version: 1,
@@ -60,8 +58,6 @@ beforeEach(async () => {
   vi.doMock("../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
   mod = await import("./worker-supervision-store.js");
   Store = mod.WorkerSupervisionStore;
-  SettlementResult = mod.SettlementResult;
-  settleResult = mod.settleResult;
 });
 
 afterEach(() => {
@@ -184,19 +180,59 @@ describe("WorkerSupervisionStore", () => {
     expect(row!.envelope_digest).toBeTruthy();
   });
 
-  it("settleResult settles a new attempt", () => {
+  it("terminalSettlement settles a new attempt", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
       ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
-    const result = settleResult(store, "a_test_001", TEST_ENVELOPE, "settled");
-    expect(result).toBe(SettlementResult.Settled);
+    const result = store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
+    expect(result.kind).toBe("settled");
     const attempt = store.getAttempt("a_test_001");
     expect(attempt!.status).toBe("settled");
     expect(attempt!.settled_at).not.toBeNull();
     expect(attempt!.lifecycle).toBe("completed");
+  });
+
+  it("terminalSettlement charges child and project exactly once", () => {
+    const store = new Store();
+    const now = new Date().toISOString();
+    store.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, parent_id, tokens_used, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', NULL, 0, ?, ?), (?, ?, ?, 'queued', 'W', ?, 0, ?, ?)`).run(
+      100, "project", "test", now, now, 101, "worker", "test", 100, now, now,
+    );
+    store.insertAttempt({
+      id: "a_test_001", card_id: 101, contract_id: "c_test_001", ordinal: 1,
+      executor_kind: "agent", executor_id: "spin-local", status: "running", started_at: now,
+    });
+    store.db.prepare("UPDATE worker_attempts SET reserved_tokens = 100 WHERE id = ?").run("a_test_001");
+    const settled = store.terminalSettlement({
+      attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test",
+      normalizedUsage: { input: 10, output: 5, trustworthy: true }, envelope: TEST_ENVELOPE,
+    });
+    expect(settled.kind).toBe("settled");
+    expect(store.db.prepare("SELECT tokens_used FROM kanban_board WHERE id = 100").get()).toEqual({ tokens_used: 15 });
+    expect(store.db.prepare("SELECT tokens_used FROM kanban_board WHERE id = 101").get()).toEqual({ tokens_used: 15 });
+    expect(store.getAttempt("a_test_001")!.usage_charged_at).not.toBeNull();
+    store.terminalSettlement({
+      attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "replay", envelope: TEST_ENVELOPE,
+      normalizedUsage: { input: 10, output: 5, trustworthy: true },
+    });
+    expect(store.db.prepare("SELECT tokens_used FROM kanban_board WHERE id = 100").get()).toEqual({ tokens_used: 15 });
+  });
+
+  it("terminalSettlement rejects a late result after timeout without stored evidence", () => {
+    const store = new Store();
+    store.insertAttempt({
+      id: "a_test_001", card_id: 101, contract_id: "c_test_001", ordinal: 1,
+      executor_kind: "agent", executor_id: "spin-local", status: "running", started_at: "2026-07-12T00:00:00.000Z",
+    });
+    expect(store.terminalSettlement({
+      attemptId: "a_test_001", expectedGeneration: 1, desiredState: "timed_out", stableReason: "deadline",
+    }).kind).toBe("settled");
+    expect(store.terminalSettlement({
+      attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "late", envelope: TEST_ENVELOPE,
+    }).kind).toBe("stale");
   });
 
   it("pending cancellation is terminal and cannot be claimed", () => {
@@ -253,29 +289,29 @@ describe("WorkerSupervisionStore", () => {
     expect(store.getAttempt("a_retry")!.lifecycle).toBe("pending");
   });
 
-  it("settleResult replays identical result", () => {
+  it("terminalSettlement replays identical result", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
       ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
-    settleResult(store, "a_test_001", TEST_ENVELOPE, "settled");
-    const result = settleResult(store, "a_test_001", TEST_ENVELOPE, "settled");
-    expect(result).toBe(SettlementResult.Replayed);
+    store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
+    const result = store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
+    expect(result.kind).toBe("replayed");
   });
 
-  it("settleResult returns conflict on envelope digest mismatch", () => {
+  it("terminalSettlement returns conflict on envelope digest mismatch", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
       ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
-    store.insertResult("a_test_001", TEST_ENVELOPE);
+    store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
     const conflictingEnvelope = { ...TEST_ENVELOPE, outcome: "failed" as const };
-    const result = settleResult(store, "a_test_001", conflictingEnvelope, "failed");
-    expect(result).toBe(SettlementResult.Conflict);
+    const result = store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: conflictingEnvelope });
+    expect(result.kind).toBe("conflict");
   });
 
   it("cardHasSettledAttempts after settlement", () => {
@@ -287,7 +323,7 @@ describe("WorkerSupervisionStore", () => {
       ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
-    settleResult(store, "a_test_001", TEST_ENVELOPE, "settled");
+    store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
     expect(store.cardHasSettledAttempts(101)).toBe(true);
   });
 
@@ -401,6 +437,244 @@ describe("WorkerSupervisionStore", () => {
       const claim2 = store.claimAttempt(101, "c_test_001", "agent", "spin-01", 2);
       expect(claim2).not.toBeNull();
       expect(store.getAttempt("a_lc_002")!.generation).toBe(2);
+    });
+  });
+
+  // ── #1510: claimAttemptWithinLimits ─────────────────────────────────────
+
+  describe("claimAttemptWithinLimits", () => {
+    function setupProjectAndChild(store: InstanceType<typeof Store>): { projectId: number; cardId: number; attemptId: string } {
+      const projectId = 200;
+      const cardId = 201;
+      const now = new Date().toISOString();
+      store.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+        projectId, "test project", "test", "running", "O", now, now,
+      );
+      store.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        cardId, "test child", "test", "queued", "W", projectId, now, now,
+      );
+      store.insertContract({ schema_version: 1, id: "c_201", digest: "d1", goal: "test", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits: {}, provenance: { root_card_id: projectId, card_id: cardId, authored_by: "test", created_at: now } }, cardId);
+      store.insertAttempt({ id: "a_201_1", card_id: cardId, contract_id: "c_201", ordinal: 1, executor_kind: "agent", executor_id: "spin-local", status: "pending", started_at: now });
+      return { projectId, cardId, attemptId: "a_201_1" };
+    }
+
+    it("claims when all conditions are met", () => {
+      const s = new Store();
+      const { projectId, cardId, attemptId } = setupProjectAndChild(s);
+      const result = s.claimAttemptWithinLimits({
+        cardId, attemptId, contractId: "c_201",
+        executorKind: "agent", executorId: "spin-local", generation: 1,
+        executorMax: 3, projectId, reservedTokens: 0,
+      });
+      expect(result.kind).toBe("claimed");
+      if (result.kind === "claimed") {
+        expect(result.claim.attemptId).toBe(attemptId);
+      }
+    });
+
+    it("refuses when attempt lifecycle is not pending", () => {
+      const s = new Store();
+      const { projectId, cardId, attemptId } = setupProjectAndChild(s);
+      s.lifecycleTransition(attemptId, ["pending"], "running");
+      const result = s.claimAttemptWithinLimits({
+        cardId, attemptId, contractId: "c_201",
+        executorKind: "agent", executorId: "spin-local", generation: 1,
+        executorMax: 3, projectId, reservedTokens: 0,
+      });
+      expect(result.kind).not.toBe("claimed");
+    });
+
+    it("refuses when card is not queued", () => {
+      const s = new Store();
+      const { projectId, cardId, attemptId } = setupProjectAndChild(s);
+      s.db.prepare("UPDATE kanban_board SET status = 'running' WHERE id = ?").run(cardId);
+      const result = s.claimAttemptWithinLimits({
+        cardId, attemptId, contractId: "c_201",
+        executorKind: "agent", executorId: "spin-local", generation: 1,
+        executorMax: 3, projectId, reservedTokens: 0,
+      });
+      expect(result.kind).not.toBe("claimed");
+    });
+
+    it("refuses capacity_full when active count >= max", () => {
+      const s = new Store();
+      const { projectId, cardId, attemptId } = setupProjectAndChild(s);
+      s.db.prepare("UPDATE worker_attempts SET lifecycle = 'running' WHERE id = ?").run(attemptId);
+      const cardId2 = 203;
+      const now = new Date().toISOString();
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        cardId2, "child2", "test", "queued", "W", projectId, now, now,
+      );
+      s.insertContract({ schema_version: 1, id: "c_203", digest: "d3", goal: "test", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits: {}, provenance: { root_card_id: projectId, card_id: cardId2, authored_by: "test", created_at: now } }, cardId2);
+      s.insertAttempt({ id: "a_203_1", card_id: cardId2, contract_id: "c_203", ordinal: 1, executor_kind: "agent", executor_id: "spin-local", status: "pending", started_at: now });
+      const result = s.claimAttemptWithinLimits({
+        cardId: cardId2, attemptId: "a_203_1", contractId: "c_203",
+        executorKind: "agent", executorId: "spin-local", generation: 1,
+        executorMax: 0, projectId, reservedTokens: 0,
+      });
+      expect(result.kind).toBe("capacity_full");
+    });
+
+    it("refuses budget_exhausted when committed >= max_tokens", () => {
+      const s = new Store();
+      const { projectId, cardId, attemptId } = setupProjectAndChild(s);
+      s.db.prepare("UPDATE kanban_board SET max_tokens = 100, tokens_used = 100 WHERE id = ?").run(projectId);
+      const result = s.claimAttemptWithinLimits({
+        cardId, attemptId, contractId: "c_201",
+        executorKind: "agent", executorId: "spin-local", generation: 1,
+        executorMax: 3, projectId, reservedTokens: 50,
+      });
+      expect(result.kind).toBe("budget_exhausted");
+    });
+
+    it("refuses budget_wait when committed + active + candidate > max_tokens", () => {
+      const s = new Store();
+      const { projectId, cardId, attemptId } = setupProjectAndChild(s);
+      s.db.prepare("UPDATE kanban_board SET max_tokens = 100, tokens_used = 60 WHERE id = ?").run(projectId);
+      const siblingId = 202;
+      const now = new Date().toISOString();
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        siblingId, "sibling", "test", "queued", "W", projectId, now, now,
+      );
+      s.insertContract({ schema_version: 1, id: "c_202", digest: "d2", goal: "test", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits: {}, provenance: { root_card_id: projectId, card_id: siblingId, authored_by: "test", created_at: now } }, siblingId);
+      s.insertAttempt({ id: "a_202_1", card_id: siblingId, contract_id: "c_202", ordinal: 1, executor_kind: "agent", executor_id: "spin-local", status: "pending", started_at: now });
+      s.db.prepare("UPDATE worker_attempts SET lifecycle = 'running', reserved_tokens = 30 WHERE id = ?").run("a_202_1");
+
+      const result = s.claimAttemptWithinLimits({
+        cardId, attemptId, contractId: "c_201",
+        executorKind: "agent", executorId: "spin-local", generation: 1,
+        executorMax: 3, projectId, reservedTokens: 20,
+      });
+      expect(result.kind).toBe("budget_wait");
+    });
+  });
+
+  // ── #1510: getActiveAttemptCountForExecutor ──────────────────────────────
+
+  describe("getActiveAttemptCountForExecutor", () => {
+    it("counts only nonterminal active lifecycles", () => {
+      const s = new Store();
+      const now = new Date().toISOString();
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(300, "p", "t", "running", "O", now, now);
+      s.insertContract({ schema_version: 1, id: "c_count", digest: "d", goal: "test", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits: {}, provenance: { root_card_id: 300, card_id: 301, authored_by: "test", created_at: now } }, 301);
+      for (let i = 0; i < 5; i++) {
+        s.insertAttempt({ id: `a_count_${i}`, card_id: 301 + i, contract_id: "c_count", ordinal: 1, executor_kind: "agent", executor_id: "spin-local", status: "pending", started_at: now });
+        if (i < 3) s.lifecycleTransition(`a_count_${i}`, ["pending"], "running");
+      }
+      expect(s.getActiveAttemptCountForExecutor("agent", "spin-local")).toBe(3);
+    });
+  });
+
+  // ── #1510: terminalSettlement ────────────────────────────────────────────
+
+  describe("terminalSettlement", () => {
+    function setupAttempt(s: InstanceType<typeof Store>, lifecycle: string, reservedTokens = 0, hardDeadlineAt?: string): string {
+      const cardId = 400 + Math.floor(Math.random() * 1000);
+      const now = new Date().toISOString();
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(399, "proj", "t", "running", "O", now, now);
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(cardId, "child", "t", "queued", "W", 399, now, now);
+      const aid = `a_ts_${cardId}`;
+      s.insertContract({ schema_version: 1, id: `c_ts_${cardId}`, digest: "d", goal: "test", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits: {}, provenance: { root_card_id: 399, card_id: cardId, authored_by: "test", created_at: now } }, cardId);
+      s.insertAttempt({ id: aid, card_id: cardId, contract_id: `c_ts_${cardId}`, ordinal: 1, executor_kind: "agent", executor_id: "spin-local", status: "pending", started_at: now });
+      if (lifecycle !== "pending") {
+        s.lifecycleTransition(aid, ["pending"], lifecycle as any);
+      }
+      if (reservedTokens > 0) {
+        s.db.prepare("UPDATE worker_attempts SET reserved_tokens = ? WHERE id = ?").run(reservedTokens, aid);
+      }
+      if (hardDeadlineAt) {
+        s.db.prepare("UPDATE worker_attempts SET hard_deadline_at = ? WHERE id = ?").run(hardDeadlineAt, aid);
+      }
+      return aid;
+    }
+
+    it("settles completed with usage charge", () => {
+      const s = new Store();
+      const aid = setupAttempt(s, "pending");
+      s.lifecycleTransition(aid, ["pending"], "running");
+      const result = s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "completed",
+        stableReason: "test",
+        normalizedUsage: { input: 100, output: 50, trustworthy: true },
+      });
+      expect(result.kind).toBe("settled");
+      if (result.kind === "settled") {
+        expect(result.chargedTokens).toBe(150);
+      }
+    });
+
+    it("converts late completion to timed_out", () => {
+      const s = new Store();
+      const past = new Date(Date.now() - 10_000).toISOString();
+      const aid = setupAttempt(s, "pending", 0, past);
+      s.lifecycleTransition(aid, ["pending"], "running");
+      const result = s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "completed",
+        stableReason: "test",
+      });
+      expect(result.kind).toBe("settled");
+      if (result.kind === "settled") {
+        expect(result.lifecycle).toBe("timed_out");
+      }
+    });
+
+    it("replays identical terminal state", () => {
+      const s = new Store();
+      const aid = setupAttempt(s, "pending");
+      s.lifecycleTransition(aid, ["pending"], "running");
+      s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "completed",
+        stableReason: "test",
+      });
+      const replay = s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "completed",
+        stableReason: "duplicate",
+      });
+      expect(replay.kind).toBe("replayed");
+    });
+
+    it("charges full reservation when usage is missing for capped attempt", () => {
+      const s = new Store();
+      const aid = setupAttempt(s, "pending", 5000);
+      s.lifecycleTransition(aid, ["pending"], "running");
+      const result = s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "failed",
+        stableReason: "test_error",
+      });
+      expect(result.kind).toBe("settled");
+      if (result.kind === "settled") {
+        expect(result.chargedTokens).toBe(5000);
+      }
+    });
+
+    it("returns stale for generation mismatch", () => {
+      const s = new Store();
+      const aid = setupAttempt(s, "pending");
+      const result = s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 999, desiredState: "cancelled",
+        stableReason: "test",
+      });
+      expect(result.kind).toBe("stale");
+    });
+
+    it("usage_charged_at prevents double charge", () => {
+      const s = new Store();
+      const aid = setupAttempt(s, "pending");
+      s.lifecycleTransition(aid, ["pending"], "running");
+      s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "completed",
+        stableReason: "first",
+        normalizedUsage: { input: 100, output: 50, trustworthy: true },
+      });
+      const chargedBefore = s.db.prepare("SELECT charged_tokens FROM worker_attempts WHERE id = ?").get(aid) as { charged_tokens: number };
+      s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "completed",
+        stableReason: "second",
+        normalizedUsage: { input: 500, output: 500, trustworthy: true },
+      });
+      const chargedAfter = s.db.prepare("SELECT charged_tokens FROM worker_attempts WHERE id = ?").get(aid) as { charged_tokens: number };
+      expect(chargedBefore.charged_tokens).toBe(150);
+      expect(chargedAfter.charged_tokens).toBe(150);
     });
   });
 });

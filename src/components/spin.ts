@@ -5,7 +5,7 @@
 
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, kanbanGetCard, isUnblocked, resolveRootId } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanQueuedDispatchOrder, kanbanGetCard, isUnblocked, resolveRootId } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
@@ -786,8 +786,9 @@ export class Spin {
           executionTelemetry.close();
           return this.finishSpin(spec, profile, session, cardId, stepIndex, started, r, terminate, telemetryUsage);
         }).catch(e => {
+          const telemetryUsage = executionTelemetry.snapshot();
           executionTelemetry.close();
-          this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate);
+          this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate, telemetryUsage);
         });
         return { sessionId: session.id, cardId };
       }
@@ -797,10 +798,11 @@ export class Spin {
       await this.finishSpin(spec, profile, session, cardId, stepIndex, started, result, terminate, telemetryUsage);
       return { sessionId: session.id, cardId, result };
     } catch (err) {
+      const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();
       // Covers: pre-exec throws (steps 4-6) AND awaited execution failures (step 7).
       // failSpin calls markDone + drainQueued — concurrency slot always released.
-      await this.failSpin(spec, profile, session, cardId, stepIndex, started, err, terminate);
+      await this.failSpin(spec, profile, session, cardId, stepIndex, started, err, terminate, telemetryUsage);
       if (spec.await) {
         // #1502: surface the cardId on rejection so caller-owned settlers (the
         // scheduled-task runner) can fail the Kanban card. Under caller ownership
@@ -869,7 +871,7 @@ export class Spin {
         try {
           const svc = new WorkerSupervisionService();
           const generation = spec.executionControl?.generation;
-          const outcome = svc.collectAndSettle(cardId, result, session.workingDir, spec.attemptId, generation);
+          const outcome = svc.collectAndSettle(cardId, result, session.workingDir, spec.attemptId, generation, usage ?? undefined);
           if (outcome.settled) {
             workerSummary = outcome.summary;
             if (spec.executionControl) {
@@ -877,7 +879,10 @@ export class Spin {
             }
           } else if (outcome.stale) {
             staleWorkerResult = true;
-            logWarn(TAG, `Card ${cardId}: stale Worker result ignored (attempt=${spec.attemptId ?? "unknown"})`);
+            if (outcome.budgetViolation && spec.settlementOwner !== "caller") {
+              kanbanRetryOrFail(cardId, outcome.summary);
+            }
+            logWarn(TAG, `Card ${cardId}: ${outcome.budgetViolation ? "budget-violating" : "stale"} Worker result ignored (attempt=${spec.attemptId ?? "unknown"})`);
           }
         } catch (err) {
           if (spec.contractId) {
@@ -957,6 +962,7 @@ export class Spin {
     spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession,
     cardId: number | undefined, stepIndex: number, started: number, err: unknown,
     terminate: "call" | "response" | "external",
+    telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
   ): Promise<void> {
     // #1332: Expire remaining queued instructions when execution fails
     if (session.instructionQueue.length > 0) expireInstructions(session, "execution_failed");
@@ -984,10 +990,20 @@ export class Spin {
             staleWorkerFailure = true;
             logWarn(TAG, `Card ${cardId}: stale Worker failure ignored (attempt=${spec.attemptId})`);
           } else {
-            store.failAttempt(spec.attemptId);
+            store.terminalSettlement({
+              attemptId: spec.attemptId,
+              expectedGeneration: attempt.generation || 1,
+              desiredState: "failed",
+              stableReason: "worker_execution_failed",
+              normalizedUsage: telemetryUsage
+                ? { input: telemetryUsage.input, output: telemetryUsage.output, trustworthy: true }
+                : undefined,
+            });
             spec.executionControl?.markTerminal("failed");
           }
-        } catch { /* best effort; Kanban failure remains the visible fallback */ }
+        } catch (settlementErr) {
+          logWarn(TAG, `Card ${cardId}: failure settlement failed: ${settlementErr instanceof Error ? settlementErr.message : String(settlementErr)}`);
+        }
       }
       if (!staleWorkerFailure && spec.settlementOwner !== "caller") {
         kanbanRetryOrFail(cardId, msg);
@@ -1175,6 +1191,14 @@ export class Spin {
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {
     if (request.type === "O") throw new Error("Cannot nest orchestrators");
 
+    const parentProject = kanbanGetCard(parentCardId);
+    if (parentProject && parentProject.max_tokens != null) {
+      const workerTokens = request.contract?.limits?.max_tokens;
+      if (!workerTokens || workerTokens <= 0) {
+        throw new Error("Worker must declare max_tokens under a capped project");
+      }
+    }
+
     // Pre-validate contract structure before creating any state.
     if (request.contract) {
       const preCheck = normalizeContract({
@@ -1204,6 +1228,7 @@ export class Spin {
         request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : [],
       );
       if (mappingError) throw new Error(mappingError);
+
     }
 
     // Create card (kanbanEnqueue is synchronous, no spin start)
@@ -1268,13 +1293,10 @@ export class Spin {
   // ── Internal ───────────────────────────────────────────────────────────
 
   private drainQueued(): void {
-    const queued = kanbanList("queued");
-    const now = new Date().toISOString();
+    const queued = kanbanQueuedDispatchOrder();
     for (const card of queued) {
       // #1364: Supervised cards go through Reconciler — skip them here
       if (cardHasSupervision(card.id)) continue;
-      // #897: respect retry backoff
-      if ((card as any).next_retry_at && (card as any).next_retry_at > now) continue;
       // #677: respect DAG dependencies
       if (!isUnblocked(card)) continue;
       // #1327: validate card.type is a real SessionType BEFORE dispatching.

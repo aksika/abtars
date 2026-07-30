@@ -24,6 +24,7 @@ const cascadeFailMock = vi.fn();
 const kanbanFailMock = vi.fn();
 const kanbanCompleteMock = vi.fn();
 const kanbanRunningProjectIdsMock = vi.fn().mockReturnValue([]);
+const kanbanQueuedDispatchOrderMock = vi.fn().mockReturnValue([]);
 vi.mock("./tasks/kanban-board.js", () => ({
   kanbanFail: kanbanFailMock,
   kanbanComplete: kanbanCompleteMock,
@@ -31,6 +32,7 @@ vi.mock("./tasks/kanban-board.js", () => ({
   kanbanGetCard: kanbanGetCardMock,
   kanbanGetChildren: kanbanGetChildrenMock,
   kanbanRunningProjectIds: kanbanRunningProjectIdsMock,
+  kanbanQueuedDispatchOrder: kanbanQueuedDispatchOrderMock,
   isUnblocked: isUnblockedMock,
   cascadeFail: cascadeFailMock,
 }));
@@ -56,6 +58,12 @@ const failAttemptMock = vi.fn().mockReturnValue(true);
 const cancelPendingAttemptMock = vi.fn().mockReturnValue(true);
 const requestCancelMock = vi.fn().mockReturnValue(true);
 const cancelAttemptMock = vi.fn().mockReturnValue(true);
+const getActiveAttemptCountForExecutorMock = vi.fn().mockReturnValue(0);
+const terminalSettlementMock = vi.fn().mockReturnValue({ kind: "settled", lifecycle: "completed", chargedTokens: 0 });
+const claimAttemptWithinLimitsMock = vi.fn().mockImplementation((input: { cardId: number; attemptId: string; contractId: string; executorKind: string; executorId: string; generation: number; executorMax: number; hardDeadlineAt?: string; reservedTokens: number; projectId: number; sourceAttemptId?: string }) => ({
+  kind: "claimed",
+  claim: { attemptId: input.attemptId, cardId: input.cardId, contractId: input.contractId, executorKind: input.executorKind, executorId: input.executorId, generation: input.generation, claimedAt: new Date().toISOString(), hardDeadlineAt: input.hardDeadlineAt },
+}));
 vi.mock("./worker-supervision-store.js", () => {
   return {
     WorkerSupervisionStore: class {
@@ -68,6 +76,9 @@ vi.mock("./worker-supervision-store.js", () => {
       requestCancel = requestCancelMock;
       cancelAttempt = cancelAttemptMock;
       isAttemptTerminal = (lifecycle: string) => ["completed", "failed", "cancelled", "timed_out"].includes(lifecycle);
+      getActiveAttemptCountForExecutor = getActiveAttemptCountForExecutorMock;
+      terminalSettlement = terminalSettlementMock;
+      claimAttemptWithinLimits = claimAttemptWithinLimitsMock;
     },
   };
 });
@@ -245,12 +256,27 @@ describe("Reconciler — #1411 domain guard", () => {
   });
 
   describe("supervised cards (has contract)", () => {
+    function setupDispatchPump(cardId: number) {
+      const card = {
+        id: cardId, parent_id: 100, status: "queued", type: "W",
+        title: "test", priority: "MEDIUM", created_at: new Date().toISOString(),
+      } as any;
+      kanbanQueuedDispatchOrderMock.mockReturnValue([card]);
+      kanbanGetCardMock.mockImplementation((id: number) => {
+        if (id === cardId) return card;
+        if (id === 100) return { id: 100, status: "running", max_tokens: null, tokens_used: 0, type: "O" } as any;
+        return null;
+      });
+    }
+
     it("queued card with pending attempt dispatches once", async () => {
       cardHasContractMock.mockReturnValue(true);
       getContractForCardMock.mockReturnValue({ id: "c_1" });
       getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending" });
-      kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued" }));
+      setupDispatchPump(1);
       mod.requestReconcile(1);
+      await flush();
+      await new Promise(r => setTimeout(r, 10));
       await flush();
       expect(dispatchMock).toHaveBeenCalledTimes(1);
       expect(dispatchMock).toHaveBeenCalledWith(
@@ -262,13 +288,13 @@ describe("Reconciler — #1411 domain guard", () => {
       cardHasContractMock.mockReturnValue(true);
       getContractForCardMock.mockReturnValue({ id: "c_1" });
       getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending" });
-      kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued" }));
+      setupDispatchPump(1);
       for (let i = 0; i < 10; i++) {
         mod.requestReconcile(1);
       }
       await flush();
-      // The keyed scheduler coalesces: first call sets dirty=false, subsequent
-      // calls set dirty=true but do not dispatch again until next reconcile pass
+      await new Promise(r => setTimeout(r, 10));
+      await flush();
       expect(dispatchMock).toHaveBeenCalledTimes(1);
     });
 
@@ -295,14 +321,20 @@ describe("Reconciler — #1411 domain guard", () => {
       getContractForCardMock.mockReturnValue({ id: "c_1" });
       getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending" });
 
+      const card1 = { id: 1, parent_id: 100, status: "queued", type: "W", title: "test", priority: "MEDIUM", created_at: new Date().toISOString() } as any;
+      const card2 = { id: 2, parent_id: 100, status: "queued", type: "W", title: "test", priority: "MEDIUM", created_at: new Date().toISOString() } as any;
+      kanbanQueuedDispatchOrderMock.mockReturnValue([card1, card2]);
       kanbanGetCardMock.mockImplementation((id: number) => {
-        if (id === 1) return makeCard({ id: 1, status: "queued" });
-        if (id === 2) return makeCard({ id: 2, status: "queued" });
+        if (id === 1) return card1;
+        if (id === 2) return card2;
+        if (id === 100) return { id: 100, status: "running", max_tokens: null, tokens_used: 0, type: "O" } as any;
         return null;
       });
 
       mod.requestReconcile(1);
       mod.requestReconcile(2);
+      await flush();
+      await new Promise(r => setTimeout(r, 10));
       await flush();
       expect(dispatchMock).toHaveBeenCalledTimes(2);
     });
@@ -385,8 +417,7 @@ describe("Reconciler — #1411 domain guard", () => {
       expect(kanbanFailMock).not.toHaveBeenCalled();
     });
 
-    it("zero-child project past wall-clock deadline is aborted", async () => {
-      // SQLite datetime('now') has no trailing Z; reconcileProject appends one.
+    it("zero-child project without hard deadline stays running (no generic wall-clock)", async () => {
       const past = new Date(Date.now() - 31 * 60 * 1000).toISOString().replace(/Z$/, "");
       const card = makeCard({
         id: 1, status: "running", type: "O",
@@ -398,7 +429,7 @@ describe("Reconciler — #1411 domain guard", () => {
       mod.requestReconcile(1);
       await flush();
 
-      expect(kanbanFailMock).toHaveBeenCalledWith(1, expect.stringContaining("wall-clock"));
+      expect(kanbanFailMock).not.toHaveBeenCalled();
     });
 
       it("supervised project with all-terminal children transitions to review_ready and dispatches Orc", async () => {

@@ -7,6 +7,7 @@ const TAG = "pi-adapter";
 
 export class PiExecutorAdapter implements SwarmExecutorAdapter {
   readonly kind = "pi" as const;
+  readonly schedulingPolicy = { recovery: "inspectable" as const };
   private executor: PiExecutor;
   private progressEmitter?: ExecutorProgressEmitter;
   private readonly leaseUnsubscribers = new Map<string, () => void>();

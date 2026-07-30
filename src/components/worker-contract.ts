@@ -493,11 +493,11 @@ export function validateContract(raw: unknown): ValidationResult {
       errors.push(error("type_error", "$.limits", "limits must be an object"));
     } else {
       const limits = obj["limits"] as Record<string, unknown>;
-      if (limits["max_duration_ms"] !== undefined && (typeof limits["max_duration_ms"] !== "number" || !Number.isFinite(limits["max_duration_ms"] as number))) {
-        errors.push(error("type_error", "$.limits.max_duration_ms", "must be a finite number"));
+      if (limits["max_duration_ms"] !== undefined && (typeof limits["max_duration_ms"] !== "number" || !Number.isInteger(limits["max_duration_ms"] as number) || (limits["max_duration_ms"] as number) <= 0)) {
+        errors.push(error("type_error", "$.limits.max_duration_ms", "must be a positive integer"));
       }
-      if (limits["max_tokens"] !== undefined && (typeof limits["max_tokens"] !== "number" || !Number.isFinite(limits["max_tokens"] as number))) {
-        errors.push(error("type_error", "$.limits.max_tokens", "must be a finite number"));
+      if (limits["max_tokens"] !== undefined && (typeof limits["max_tokens"] !== "number" || !Number.isInteger(limits["max_tokens"] as number) || (limits["max_tokens"] as number) <= 0)) {
+        errors.push(error("type_error", "$.limits.max_tokens", "must be a positive integer"));
       }
     }
   }

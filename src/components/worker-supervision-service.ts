@@ -1,7 +1,7 @@
 import { existsSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { WorkerSupervisionStore, settleResult, SettlementResult } from "./worker-supervision-store.js";
+import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { normalizeContract, createContractId, createAttemptId, validateEnvelope } from "./worker-contract.js";
 import { logWarn } from "./logger.js";
 import { logSwarmTrace } from "./swarm-trace.js";
@@ -240,7 +240,8 @@ export class WorkerSupervisionService {
     workingDir?: string,
     attemptId?: string,
     generation?: number,
-  ): { settled: boolean; summary: string; envelope?: WorkerResultEnvelopeV1; stale?: boolean } {
+    telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
+  ): { settled: boolean; summary: string; envelope?: WorkerResultEnvelopeV1; stale?: boolean; budgetViolation?: boolean } {
     if (!attemptId && !this.getContractForCard(cardId)) {
       return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
     }
@@ -302,6 +303,13 @@ export class WorkerSupervisionService {
         claims: workerReport.claims.slice(0, 30),
         unresolved_risks: workerReport.unresolved_risks.slice(0, 20),
       },
+      ...(telemetryUsage ? {
+        usage: {
+          input_tokens: telemetryUsage.input,
+          output_tokens: telemetryUsage.output,
+          total_tokens: telemetryUsage.input + telemetryUsage.output,
+        },
+      } : {}),
     };
 
     const envelopeValidation = validateEnvelope(envelope);
@@ -311,12 +319,26 @@ export class WorkerSupervisionService {
       throw new Error(msg);
     }
 
-    const result = settleResult(this.store, targetAttempt.id, envelope, "settled");
-    if (result === SettlementResult.Conflict) {
+    const normalizedUsage = telemetryUsage
+      ? { input: telemetryUsage.input, output: telemetryUsage.output, trustworthy: true }
+      : undefined;
+    const terminalInput = {
+      attemptId: targetAttempt.id,
+      expectedGeneration: targetAttempt.generation || 1,
+      desiredState: "completed" as const,
+      stableReason: "worker_completed",
+      normalizedUsage,
+      envelope,
+    };
+    const settlement = this.store.terminalSettlement(terminalInput);
+    if (settlement.kind === "stale") {
+      return { settled: false, summary: "stale execution result ignored", stale: true };
+    }
+    if (settlement.kind === "conflict") {
       return { settled: false, summary: "[conflict] duplicate attempt with different result" };
     }
-    if (result === SettlementResult.Rejected) {
-      return { settled: false, summary: "stale execution result ignored", stale: true };
+    if (settlement.kind === "budget_violation") {
+      return { settled: false, summary: "[budget_violation] worker exceeded its reserved token budget", stale: true, budgetViolation: true };
     }
 
     const summary = allPassed
