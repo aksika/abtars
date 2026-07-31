@@ -46,7 +46,7 @@ export const sessionSelectionMiddleware: Middleware = async (ctx, next) => {
 
   // #1432: exact K skill binding → the skill's own persistent session.
   const { skillSessionManager } = await import("../skill-session.js");
-  const route = skillSessionManager.resolveForInbound({
+  const route = await skillSessionManager.resolveForInbound({
     userId: ctx.userId,
     platform: ctx.msg.platform,
     chatId: ctx.msg.channelId,

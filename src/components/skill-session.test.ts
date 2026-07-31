@@ -207,8 +207,30 @@ describe("SkillSessionManager launch", () => {
     expect(r2.error.code).toBe("not_found");
     expect(mgr.list(TARGET)).toMatchObject({ skillName: "spanish-tutor" });
     expect(spin.finalized).toHaveLength(0);
-    const route = mgr.resolveForInbound(TARGET);
+    const route = await mgr.resolveForInbound(TARGET);
     expect(route.kind).toBe("active");
+  });
+
+  it("capacity failure during replacement keeps the old binding usable", async () => {
+    const spin = fakeSpin();
+    const originalCreate = spin.facade.createSubSession;
+    let creates = 0;
+    spin.facade.createSubSession = (...args) => {
+      creates++;
+      return creates === 1 ? originalCreate(...args) : "Max sessions reached";
+    };
+    const mgr = makeManager(spin);
+    const first = await mgr.launch({ skill: "spanish-tutor", agent: "professor", target: TARGET, message: "hola" });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const replacement = await mgr.launch({ skill: "french-tutor", agent: "task", target: TARGET, message: "bonjour" });
+    expect(replacement.ok).toBe(false);
+    if (replacement.ok) return;
+    expect(replacement.error.code).toBe("capacity_exhausted");
+    expect(mgr.list(TARGET)).toMatchObject({ skillName: "spanish-tutor", sessionId: first.sessionId });
+    expect(spin.finalized).toEqual([]);
+    expect((await mgr.resolveForInbound(TARGET)).kind).toBe("active");
   });
 });
 
@@ -217,11 +239,11 @@ describe("SkillSessionManager routing", () => {
     const spin = fakeSpin();
     const mgr = makeManager(spin);
     await mgr.launch({ skill: "spanish-tutor", agent: "professor", target: TARGET, message: "hola" });
-    expect(mgr.resolveForInbound(TARGET).kind).toBe("active");
-    expect(mgr.resolveForInbound({ ...TARGET, chatId: "43" }).kind).toBe("none");
-    expect(mgr.resolveForInbound({ ...TARGET, platform: "discord" }).kind).toBe("none");
-    expect(mgr.resolveForInbound({ ...TARGET, userId: "bob" }).kind).toBe("none");
-    expect(mgr.resolveForInbound({ ...TARGET, threadId: "7" }).kind).toBe("none");
+    expect((await mgr.resolveForInbound(TARGET)).kind).toBe("active");
+    expect((await mgr.resolveForInbound({ ...TARGET, chatId: "43" })).kind).toBe("none");
+    expect((await mgr.resolveForInbound({ ...TARGET, platform: "discord" })).kind).toBe("none");
+    expect((await mgr.resolveForInbound({ ...TARGET, userId: "bob" })).kind).toBe("none");
+    expect((await mgr.resolveForInbound({ ...TARGET, threadId: "7" })).kind).toBe("none");
   });
 
   it("stop is idempotent and ends only the K transport", async () => {
@@ -233,7 +255,7 @@ describe("SkillSessionManager routing", () => {
     expect(s1).toBe(true);
     expect(s2).toBe(false);
     expect(spin.finalized).toHaveLength(1);
-    expect(mgr.resolveForInbound(TARGET).kind).toBe("none");
+    expect((await mgr.resolveForInbound(TARGET)).kind).toBe("none");
   });
 
   it("inactivity timeout ends transport and clears binding; only accepted turns refresh", async () => {
@@ -280,7 +302,7 @@ describe("SkillSessionManager restart rehydration", () => {
     // Bridge restart: brand-new manager + store reading the same durable state.
     const spin2 = fakeSpin();
     const mgr2 = makeManager(spin2);
-    const route = mgr2.resolveForInbound(TARGET);
+    const route = await mgr2.resolveForInbound(TARGET);
     expect(route.kind).toBe("active");
     if (route.kind !== "active") return;
     expect(route.needsBootstrap).toBe(true);
@@ -292,7 +314,7 @@ describe("SkillSessionManager restart rehydration", () => {
     expect(spin2.prompts).toHaveLength(0);
 
     mgr2.completeInbound(TARGET);
-    const route2 = mgr2.resolveForInbound(TARGET);
+    const route2 = await mgr2.resolveForInbound(TARGET);
     expect(route2.kind).toBe("active");
     if (route2.kind === "active") expect(route2.needsBootstrap).toBe(false);
   });
@@ -305,7 +327,7 @@ describe("SkillSessionManager restart rehydration", () => {
     rmSync(join(home, "skills", "custom", "spanish-tutor"), { recursive: true, force: true });
 
     const mgr2 = makeManager(fakeSpin());
-    const route = mgr2.resolveForInbound(TARGET);
+    const route = await mgr2.resolveForInbound(TARGET);
     expect(route.kind).toBe("fallback_to_main");
     expect(mgr2.list(TARGET)).toBeUndefined();
   });

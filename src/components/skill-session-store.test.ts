@@ -180,4 +180,19 @@ describe("skill-loader path safety", () => {
     const p = resolveContextPath({ interactive: true, timeout: 1, contextPath: "workspace/spanish/${userId}/CONTEXT.md" }, "ada");
     expect(p).toBe(join(home, "workspace", "spanish", "ada", "CONTEXT.md"));
   });
+
+  it("rejects a skill directory symlink that escapes the skill root", async () => {
+    const { loadSkill } = await import("./skill-loader.js");
+    const outside = join(home, "outside-skill");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "skill.json"), JSON.stringify({ interactive: true, timeout: 60 }));
+    writeFileSync(join(outside, "SKILL.md"), "outside");
+    mkdirSync(join(home, "skills", "custom"), { recursive: true });
+    try {
+      symlinkSync(outside, join(home, "skills", "custom", "escape-tutor"));
+    } catch {
+      return;
+    }
+    expect(loadSkill("escape-tutor", "ada").ok).toBe(false);
+  });
 });

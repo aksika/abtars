@@ -201,15 +201,12 @@ export class SkillSessionManager {
     }
     const timeoutMs = loaded.skill.config.timeout * 1000;
 
-    // 3. Replacement rules: same skill + same agent reuses; otherwise the new
-    //    skill passed validation above, so terminate the old K and rebind.
+    // 3. Replacement rules: same skill + same agent reuses. A replacement is
+    //    staged separately so capacity, transport, and first-turn failures do
+    //    not destroy a working binding.
     const existing = this.active.get(key);
-    if (existing && (existing.skillName !== skill || existing.agent !== agent)) {
-      logInfo(TAG, `Replacing skill "${existing.skillName}" with "${skill}" for ${target.userId}`);
-      if (existing.sessionId) await this.endTransport(existing, "replaced");
-      this.active.delete(key);
-      this.store.remove(key);
-    }
+    const replacing = existing !== undefined && (existing.skillName !== skill || existing.agent !== agent);
+    if (replacing) logInfo(TAG, `Replacing skill "${existing!.skillName}" with "${skill}" for ${target.userId}`);
 
     const now = this.now();
     const record: SkillBindingRecordV1 = {
@@ -225,17 +222,17 @@ export class SkillSessionManager {
       lastActiveAt: now,
       expiresAt: now + timeoutMs,
     };
-    this.active.set(key, { ...record, needsBootstrap: true });
+    const candidate: ActiveBinding = { ...record, needsBootstrap: true };
+    if (!replacing) this.active.set(key, candidate);
     this.store.upsert(record);
 
     const spin = await this.spin();
-    let session = existing?.sessionId ? spin.getSessionById(existing.sessionId) : undefined;
-    let resumed = existing !== undefined;
+    let session = !replacing && existing?.sessionId ? spin.getSessionById(existing.sessionId) : undefined;
+    const resumed = existing !== undefined && !replacing;
     if (!session || session.status === "ended") {
       const created = spin.createSubSession(target.userId, target.platform, "K");
       if (typeof created === "string") {
-        this.active.delete(key);
-        this.store.remove(key);
+        await this.abortLaunch(key, undefined, replacing ? existing : undefined);
         return { ok: false, error: { code: "capacity_exhausted", message: created } };
       }
       session = created;
@@ -245,7 +242,7 @@ export class SkillSessionManager {
     try {
       if (!session.transport) await spin.ensureSessionTransport(session);
     } catch (err) {
-      await this.abortLaunch(key, session);
+      await this.abortLaunch(key, session, replacing ? existing : undefined);
       return {
         ok: false,
         error: { code: "transport_failed", message: err instanceof Error ? err.message : String(err) },
@@ -264,18 +261,28 @@ export class SkillSessionManager {
         await: true,
       });
       if (!result.result) throw new Error("empty model response");
-      const live = this.active.get(key);
-      if (live) {
-        live.sessionId = session.id;
-        live.needsBootstrap = false;
-        live.lastActiveAt = this.now();
-        live.expiresAt = this.now() + timeoutMs;
-        this.store.upsert(this.toRecord(live));
+      if (replacing && existing) {
+        if (existing.sessionId && existing.sessionId !== session.id) await this.endTransport(existing, "replaced");
+        candidate.sessionId = session.id;
+        candidate.needsBootstrap = false;
+        candidate.lastActiveAt = this.now();
+        candidate.expiresAt = this.now() + timeoutMs;
+        this.active.set(key, candidate);
+        this.store.upsert(this.toRecord(candidate));
+      } else {
+        const live = this.active.get(key);
+        if (live) {
+          live.sessionId = session.id;
+          live.needsBootstrap = false;
+          live.lastActiveAt = this.now();
+          live.expiresAt = this.now() + timeoutMs;
+          this.store.upsert(this.toRecord(live));
+        }
       }
       logInfo(TAG, `Skill "${skill}" ${resumed ? "resumed" : "launched"} for ${target.userId} (${target.platform}:${target.chatId}, session ${session.id})`);
       return { ok: true, kind: resumed ? "resumed" : "launched", sessionId: session.id, response: result.result, skillName: skill };
     } catch (err) {
-      await this.abortLaunch(key, session);
+      await this.abortLaunch(key, session, replacing ? existing : undefined);
       return {
         ok: false,
         error: { code: "transport_failed", message: err instanceof Error ? err.message : String(err) },
@@ -284,9 +291,15 @@ export class SkillSessionManager {
   }
 
   /** Remove the just-created binding + K transport after a definitive launch failure. */
-  private async abortLaunch(key: string, session: ManagedSession): Promise<void> {
-    this.active.delete(key);
-    this.store.remove(key);
+  private async abortLaunch(key: string, session: ManagedSession | undefined, restore?: ActiveBinding): Promise<void> {
+    if (restore) {
+      this.active.set(key, restore);
+      this.store.upsert(this.toRecord(restore));
+    } else {
+      this.active.delete(key);
+      this.store.remove(key);
+    }
+    if (!session) return;
     const spin = await this.spin();
     spin.finalizeExactSession(session.id, session.userId);
   }
@@ -327,7 +340,7 @@ export class SkillSessionManager {
    * prepended by the pipeline); invalid rehydration falls back to A so the
    * same message is processed exactly once there.
    */
-  resolveForInbound(target: ConversationAddress): SkillRouteResult {
+  async resolveForInbound(target: ConversationAddress): Promise<SkillRouteResult> {
     this.ensureLoaded();
     const key = scopeKeyOf(target);
     const binding = this.active.get(key);
@@ -350,7 +363,7 @@ export class SkillSessionManager {
         this.store.remove(key);
         return { kind: "fallback_to_main" };
       }
-      const created = this.allocateSuspendedK(binding, target.userId, target.platform);
+      const created = await this.allocateSuspendedK(binding, target.userId, target.platform);
       if (!created) return { kind: "fallback_to_main" };
       binding.sessionId = created.id;
       binding.needsBootstrap = true;
@@ -360,12 +373,9 @@ export class SkillSessionManager {
     return { kind: "active", sessionId: binding.sessionId, needsBootstrap: binding.needsBootstrap };
   }
 
-  /** Allocate a non-active K for a suspended binding (synchronous facade). */
-  private allocateSuspendedK(binding: ActiveBinding, userId: string, platform: string): ManagedSession | null {
-    // Synchronous allocation needs the real Spin singleton; the facade's
-    // createSubSession is synchronous, so resolve it lazily once.
-    const facade = this.spinFacadeSync();
-    if (!facade) return null;
+  /** Allocate a non-active K for a suspended binding through the real Spin facade. */
+  private async allocateSuspendedK(binding: ActiveBinding, userId: string, platform: string): Promise<ManagedSession | null> {
+    const facade = await this.spin();
     const created = facade.createSubSession(userId, platform, "K");
     if (typeof created === "string") {
       this.active.delete(scopeKeyOf({ userId: binding.userId, platform: binding.platform, chatId: binding.chatId, threadId: binding.threadId }));
@@ -374,15 +384,6 @@ export class SkillSessionManager {
     }
     created.executionAgent = binding.agent;
     return created;
-  }
-
-  private spinFacadeSync(): SkillSpinFacade | undefined {
-    if (this.spinOverride) return this.spinOverride;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const mod = require("./spin.js") as typeof import("./spin.js");
-      return mod.spin as unknown as SkillSpinFacade;
-    } catch { return undefined; }
   }
 
   /** Refresh inactivity only after an accepted matching K turn. */

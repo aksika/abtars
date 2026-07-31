@@ -261,7 +261,7 @@ describe("#1432 K interactive skill journey", () => {
     const r2 = await mgr2.launch({ skill: "tutor", agent: "professor", target: TARGET, message: "hola de nuevo" });
     expect(r2.ok).toBe(true);
     if (!r2.ok) return;
-    expect(mgr2.resolveForInbound(TARGET).kind).toBe("active");
+    expect((await mgr2.resolveForInbound(TARGET)).kind).toBe("active");
     fakeNow += 61_000;
     mgr2.checkExpiry();
     expect(mgr2.list(TARGET)).toBeUndefined();
@@ -280,7 +280,7 @@ describe("#1432 K interactive skill journey", () => {
     const StoreRestart = await import("../../components/skill-session-store.js");
     const restartStore = new StoreRestart.SkillSessionStore({ file: join(home, "state", "skill-sessions.json") });
     const restarted = new SkillSessionManager({ store: restartStore, scheduleTimer: () => undefined, spin: spin as never });
-    const route = restarted.resolveForInbound(TARGET);
+    const route = await restarted.resolveForInbound(TARGET);
     expect(route.kind).toBe("active");
     if (route.kind !== "active") return;
     expect(route.needsBootstrap).toBe(true);
@@ -300,10 +300,10 @@ describe("#1432 K interactive skill journey", () => {
     const StoreGone = await import("../../components/skill-session-store.js");
     const goneStore = new StoreGone.SkillSessionStore({ file: join(home, "state", "skill-sessions.json") });
     const gone = new SkillSessionManager({ store: goneStore, scheduleTimer: () => undefined, spin: spin as never });
-    const goneRoute = gone.resolveForInbound(TARGET);
+    const goneRoute = await gone.resolveForInbound(TARGET);
     expect(goneRoute.kind).toBe("fallback_to_main");
     expect(gone.list(TARGET)).toBeUndefined();
     // The same inbound message routes to A exactly once afterwards.
-    expect(gone.resolveForInbound(TARGET).kind).toBe("none");
+    expect((await gone.resolveForInbound(TARGET)).kind).toBe("none");
   });
 });

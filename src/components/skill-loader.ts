@@ -75,8 +75,15 @@ export function skillRoots(): string[] {
 export function resolveSkillDir(name: string): string | null {
   if (!SKILL_IDENTIFIER_RE.test(name)) return null;
   for (const root of skillRoots()) {
-    const dir = join(root, name);
-    if (existsSync(join(dir, "skill.json"))) return dir;
+    // Resolve both the directory and its manifest through the real filesystem
+    // path. A symlinked skill must not make the loader read code/configuration
+    // from outside the approved skill root.
+    const rootReal = safeRealpath(root);
+    if (!rootReal) continue;
+    const dir = normalizeUnderRoot(join(rootReal, name), rootReal);
+    if (!dir) continue;
+    const manifest = normalizeUnderRoot(join(dir, "skill.json"), rootReal);
+    if (manifest && existsSync(manifest)) return dir;
   }
   return null;
 }
@@ -204,17 +211,21 @@ export function loadSkill(skillName: string, userId: string): SkillLoadResult {
   if (!dir) {
     return { ok: false, error: { code: "not_found", message: `Skill "${skillName}" not found or has no skill.json` } };
   }
+  const configPath = normalizeUnderRoot(join(dir, "skill.json"), abtarsHome());
+  if (!configPath) {
+    return { ok: false, error: { code: "not_found", message: `Skill "${skillName}" has an unsafe skill.json path` } };
+  }
   let raw: string;
   try {
-    raw = readFileSync(join(dir, "skill.json"), "utf-8");
+    raw = readFileSync(configPath, "utf-8");
   } catch {
     return { ok: false, error: { code: "not_found", message: `Skill "${skillName}" has no readable skill.json` } };
   }
   const parsed = parseSkillConfig(raw);
   if (!parsed.ok) return parsed;
 
-  const skillMdPath = join(dir, "SKILL.md");
-  if (!existsSync(skillMdPath)) {
+  const skillMdPath = normalizeUnderRoot(join(dir, "SKILL.md"), abtarsHome());
+  if (!skillMdPath || !existsSync(skillMdPath)) {
     return { ok: false, error: { code: "missing_skill_md", message: `Skill "${skillName}" has no SKILL.md` } };
   }
   let skillMd: string;

@@ -183,10 +183,10 @@ export async function handleInboundMessage(
   // resumed turn exactly once. If revalidation fails, clear the binding and
   // route this same message through A once (no model call happened yet).
   let bootstrapPrefix: string | undefined;
+  const skillTarget = { userId: msg.userId, platform: msg.platform, chatId: msg.channelId, threadId: msg.threadId };
   if (isSkillSession) {
     const { skillSessionManager } = await import("./skill-session.js");
-    const target = { userId: msg.userId, platform: msg.platform, chatId: msg.channelId, threadId: msg.threadId };
-    const prep = skillSessionManager.prepareBootstrap(target, ctx.text);
+    const prep = skillSessionManager.prepareBootstrap(skillTarget, ctx.text);
     if (prep.kind === "bootstrap") {
       bootstrapPrefix = prep.bootstrap;
     } else if (prep.kind === "fallback_to_main") {
@@ -202,9 +202,31 @@ export async function handleInboundMessage(
     try {
       await spin.ensureSessionTransport(effectiveSession);
     } catch (err) {
-      logWarn(TAG, `ensureSessionTransport failed for ${effectiveSessionId}: ${err instanceof Error ? err.message : String(err)}`);
-      await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(() => {});
-      return;
+      // A K rehydration can fail after selection but before Spin starts a
+      // model call (for example, capacity or provider-session attach). That
+      // is still an unambiguous pre-send failure: discard the broken binding
+      // and process this message once through the unchanged A session.
+      if (isSkillSession) {
+        const { skillSessionManager } = await import("./skill-session.js");
+        await skillSessionManager.stop(skillTarget, "replaced");
+        effectiveSession = spin.getActiveSession(msg.userId, msg.platform);
+        effectiveSessionId = effectiveSession.id;
+        ctx.session = effectiveSession;
+        ctx.sessionId = effectiveSessionId;
+        isSkillSession = false;
+        bootstrapPrefix = undefined;
+        try {
+          if (!effectiveSession.transport) await spin.ensureSessionTransport(effectiveSession);
+        } catch (fallbackErr) {
+          logWarn(TAG, `A fallback transport attach failed for ${effectiveSessionId}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
+          await adapter.sendMessage(msg.channelId, `⚠️ ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, { threadId: msg.threadId }).catch(() => {});
+          return;
+        }
+      } else {
+        logWarn(TAG, `ensureSessionTransport failed for ${effectiveSessionId}: ${err instanceof Error ? err.message : String(err)}`);
+        await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(() => {});
+        return;
+      }
     }
   }
   ctx.transport = effectiveSession.transport!;
