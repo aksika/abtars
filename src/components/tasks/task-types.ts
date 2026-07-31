@@ -16,6 +16,14 @@ function parseMinutes(value: string): number {
 
 export type Delivery = "report" | "announce" | "silent";
 
+/** #1516: Upper bound on scheduled agent orchestration (1 Orc + up to 3 Workers). */
+export const MAX_SCHEDULED_AGENTS = 4;
+
+export interface TaskOrchestration {
+  /** Normalized total agent budget, 1..MAX_SCHEDULED_AGENTS — includes the Orc. */
+  maxAgents: number;
+}
+
 export interface SchedulePolicy {
   schedule?: string;
   at?: string;
@@ -60,6 +68,7 @@ export type ScheduledTask =
       maxToolRounds?: number;
       targetUserId?: string;
       report?: ReportContract;
+      orchestration: TaskOrchestration;
     })
   | (TaskBase & {
       kind: "script";
@@ -96,6 +105,22 @@ export type NormalizeResult =
 function parsePriority(raw: unknown): "high" | "medium" | "low" {
   if (raw === "high" || raw === "low") return raw;
   return "medium";
+}
+
+/** #1516: Normalize `orchestration` for agent tasks — hard default of one agent. */
+export function normalizeOrchestration(raw: unknown):
+  | { ok: true; value: TaskOrchestration }
+  | { ok: false; error: string } {
+  if (raw === undefined) return { ok: true, value: { maxAgents: 1 } };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, error: "agent orchestration must be an object" };
+  }
+  const maxAgents = (raw as Record<string, unknown>).maxAgents;
+  if (maxAgents === undefined) return { ok: true, value: { maxAgents: 1 } };
+  if (typeof maxAgents !== "number" || !Number.isInteger(maxAgents) || maxAgents < 1 || maxAgents > MAX_SCHEDULED_AGENTS) {
+    return { ok: false, error: `agent orchestration.maxAgents must be an integer from 1 to ${MAX_SCHEDULED_AGENTS}` };
+  }
+  return { ok: true, value: { maxAgents } };
 }
 
 export function normalize(raw: unknown): NormalizeResult {
@@ -158,6 +183,10 @@ export function normalize(raw: unknown): NormalizeResult {
         return { ok: false, error: `agent is required for agent kind and must be one of: task, professor, browsie, coding, dreamy`, id };
       }
       const agent = agentRaw as "task" | "professor" | "browsie" | "coding" | "dreamy";
+      const orchestrationResult = normalizeOrchestration(e["orchestration"]);
+      if (!orchestrationResult.ok) {
+        return { ok: false, error: orchestrationResult.error, id };
+      }
       const maxToolRounds = typeof e["maxToolRounds"] === "number" ? e["maxToolRounds"] as number : undefined;
       const targetUserId = typeof e["targetUserId"] === "string" ? e["targetUserId"] : undefined;
       const reportRaw = e["report"];
@@ -190,7 +219,7 @@ export function normalize(raw: unknown): NormalizeResult {
       }
       return {
         ok: true,
-        entry: { ...base, kind: "agent", prompt, taskFile, agent, maxToolRounds, targetUserId, report },
+        entry: { ...base, kind: "agent", prompt, taskFile, agent, maxToolRounds, targetUserId, report, orchestration: orchestrationResult.value },
       };
     }
     case "script": {

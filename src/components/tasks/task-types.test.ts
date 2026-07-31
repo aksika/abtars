@@ -167,6 +167,71 @@ describe("normalize + validation", () => {
     });
   });
 
+  describe("agent orchestration normalization (#1516)", () => {
+    it("defaults to maxAgents 1 when orchestration is absent", () => {
+      const r = normalize(baseAgent(), NOW);
+      if (!r.ok) throw new Error(`expected ok: ${r.error}`);
+      expect(r.entry.kind).toBe("agent");
+      expect(r.entry.orchestration).toEqual({ maxAgents: 1 });
+    });
+
+    it("defaults to maxAgents 1 for an empty orchestration object", () => {
+      const r = normalize(baseAgent({ orchestration: {} }), NOW);
+      if (!r.ok) throw new Error(`expected ok: ${r.error}`);
+      expect(r.entry.orchestration).toEqual({ maxAgents: 1 });
+    });
+
+    it("accepts explicit maxAgents 1 (behaviorally equivalent to omission)", () => {
+      const r = normalize(baseAgent({ orchestration: { maxAgents: 1 } }), NOW);
+      if (!r.ok) throw new Error(`expected ok: ${r.error}`);
+      expect(r.entry.orchestration).toEqual({ maxAgents: 1 });
+    });
+
+    it("accepts explicit maxAgents 4", () => {
+      const r = normalize(baseAgent({ orchestration: { maxAgents: 4 } }), NOW);
+      if (!r.ok) throw new Error(`expected ok: ${r.error}`);
+      expect(r.entry.orchestration).toEqual({ maxAgents: 4 });
+    });
+
+    it.each([
+      ["null", null],
+      ["array", [1]],
+      ["string", "4"],
+      ["boolean", true],
+      ["fraction", 2.5],
+      ["zero", 0],
+      ["negative", -1],
+      ["above cap", 5],
+      ["NaN", Number.NaN],
+    ])("rejects malformed orchestration %s", (_label, value) => {
+      const r = normalize(baseAgent({ orchestration: value }), NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("rejects maxAgents above the cap inside an object", () => {
+      const r = normalize(baseAgent({ orchestration: { maxAgents: 5 } }), NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("round-trips a normalized entry through normalize() unchanged", () => {
+      const first = normalize(baseAgent({ orchestration: { maxAgents: 4 } }), NOW);
+      if (!first.ok) throw new Error("expected ok");
+      const second = normalize(first.entry, NOW);
+      if (!second.ok) throw new Error("expected ok");
+      expect(second.entry.orchestration).toEqual({ maxAgents: 4 });
+    });
+
+    it("keeps a legacy production-shaped agent task runnable without orchestration", () => {
+      const legacy = baseAgent();
+      delete legacy.orchestration;
+      delete legacy.report;
+      legacy.delivery = "announce";
+      const r = normalize(legacy, NOW);
+      if (!r.ok) throw new Error(`legacy agent task must not be rejected: ${r.error}`);
+      expect(r.entry.orchestration).toEqual({ maxAgents: 1 });
+    });
+  });
+
   describe("isSystemEntry guard", () => {
     it("narrow for system entries", () => {
       const r = normalize(baseSystem(), NOW);

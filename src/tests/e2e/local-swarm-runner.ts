@@ -129,12 +129,13 @@ async function setupEnvironment(): Promise<{
   kanbanGetCard: any;
   kanbanGetChildren: any;
   kanbanRunning: any;
+  kanbanComplete: any;
   WorkerSupervisionStore: any;
   ProjectReviewStore: any;
 }> {
   const { spin } = await import("../../components/spin.js");
   const { requestReconcile, startReconciler, requestWorkerDispatch } = await import("../../components/reconciler.js");
-  const { kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning } = await import("../../components/tasks/kanban-board.js");
+  const { kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, kanbanComplete } = await import("../../components/tasks/kanban-board.js");
   const { WorkerSupervisionStore } = await import("../../components/worker-supervision-store.js");
   const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
   const { setLogLevel, setFileLogging } = await import("../../components/logger.js");
@@ -147,7 +148,7 @@ async function setupEnvironment(): Promise<{
   supervisionReader = cardId => new ProjectReviewStore().getSupervision(cardId);
   _dispatchPump = requestWorkerDispatch;
 
-  return { spin, requestReconcile, requestWorkerDispatch, startReconciler, kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, WorkerSupervisionStore, ProjectReviewStore };
+  return { spin, requestReconcile, requestWorkerDispatch, startReconciler, kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, kanbanComplete, WorkerSupervisionStore, ProjectReviewStore };
 }
 
 function createMockRuntime(durationMs = 30) {
@@ -771,6 +772,89 @@ function requestWorkerDispatchFrom(_requestReconcileFn: (id: number) => void): v
   }
 }
 
+/**
+ * #1516: scheduled project with a durable agent cap (maxAgents=4) through the
+ * real spawnChild admission boundary. Exactly three Workers are admitted; a
+ * fourth is refused with no card created; a terminal Worker releases capacity.
+ */
+async function runScheduledCap(): Promise<LocalSwarmResult> {
+  const { spin, kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, kanbanComplete } = await setupEnvironment();
+
+  const projectCardId = kanbanEnqueue("Capped scheduled project", "task", undefined, {
+    type: "O", priority: "MEDIUM", deliveryMode: "deliver", maxAgents: 4,
+  });
+  activeProjectCardId = projectCardId;
+  kanbanRunning(projectCardId);
+  if (kanbanGetCard(projectCardId)?.max_agents !== 4) fail("max_agents", "CAP_NOT_PERSISTED", "max_agents not durably stored");
+
+  const admitted: number[] = [];
+  let refusal: string | null = null;
+  let admittedAfterRelease: number | null = null;
+
+  const spawnLane = (i: number): number => {
+    const contract = {
+      schema_version: 1 as const,
+      id: `lane_${projectCardId}_${i}`,
+      digest: "",
+      goal: `Research lane ${i + 1}`,
+      criteria: [{ id: `c${i}`, description: `Lane ${i + 1} criterion` }],
+      expected_artifacts: [],
+      verification_commands: [],
+      required_capabilities: [],
+      limits: { max_duration_ms: 60_000 },
+      provenance: { root_card_id: projectCardId, card_id: 0, authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    return spin.spawnChild(projectCardId, {
+      goal: `Research lane ${i + 1}`,
+      title: `Lane ${i + 1}`,
+      source: "agent",
+      contract,
+      settlementOwner: "spin",
+    });
+  };
+
+  for (let i = 0; i < 4; i++) {
+    try {
+      const id = spawnLane(i);
+      admitted.push(id);
+      activeChildCardIds.push(id);
+    } catch (err) {
+      refusal = err instanceof Error ? err.message : String(err);
+      break;
+    }
+  }
+
+  if (admitted.length !== 3) fail("cap", "WRONG_ADMITTED", `admitted=${admitted.length} expected=3`);
+  if (!refusal || !refusal.includes("agent_cap_reached")) fail("cap", "REFUSAL_MISSING", `refusal=${refusal}`);
+
+  const childrenBefore = kanbanGetChildren(projectCardId);
+  if (childrenBefore.length !== 3) fail("cap", "WRONG_CHILDREN", `children=${childrenBefore.length} expected=3`);
+
+  // A terminal Worker releases capacity: the next admission succeeds.
+  const first = childrenBefore[0]!;
+  kanbanComplete(first.id, null, "lane done");
+  try {
+    admittedAfterRelease = spawnLane(4);
+    activeChildCardIds.push(admittedAfterRelease);
+  } catch (err) {
+    fail("cap", "RELEASE_FAILED", err instanceof Error ? err.message : String(err));
+  }
+
+  return {
+    schemaVersion: 2, ok: true, scenario, scenarioId,
+    projectCardId, childCardIds: admitted,
+    peakActiveWorkers: 0,
+    counts: readCounts(),
+    terminal: {},
+    scenarioSpecific: {
+      admitted: admitted.length,
+      childrenBeforeRelease: childrenBefore.length,
+      refusal: refusal ?? "",
+      admittedAfterRelease,
+    },
+  };
+}
+
 // ── Main dispatch ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -789,6 +873,9 @@ async function main(): Promise<void> {
         break;
       case "token_budget":
         result = await runTokenBudget();
+        break;
+      case "scheduled_cap":
+        result = await runScheduledCap();
         break;
       default:
         result = await runHappyPath();

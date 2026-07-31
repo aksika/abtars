@@ -158,6 +158,18 @@ describe("Local Swarm E2E", () => {
     });
   }, CHILD_TIMEOUT_MS + 10_000);
 
+  it("scheduled_cap: durable maxAgents cap admits three Workers, refuses the fourth, releases on terminal", async () => {
+    await runScenario("scheduled_cap", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.admitted).toBe(3);
+      expect(ss.childrenBeforeRelease).toBe(3);
+      expect(String(ss.refusal)).toContain("agent_cap_reached");
+      expect(Number(ss.admittedAfterRelease)).toBeGreaterThan(0);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
   it("token_budget: capped project enforces reservations and exhaustion", async () => {
     await runScenario("token_budget", (result) => {
       expect(result.ok).toBe(true);

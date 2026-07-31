@@ -50,6 +50,22 @@ export class OrcProjectCoordinator {
     }, `Define acceptance contract for project #${projectCardId}; call define_project_contract with project_card_id=${projectCardId}`);
   }
 
+  /**
+   * #1516: Goal-bearing contract-authoring start for scheduled projects.
+   * Keeps the `contract_authoring` intent kind (and its derived intent key) so
+   * the Reconciler's generic re-schedule is idempotent against this claim.
+   * The first claimant's goal wins the start port.
+   */
+  scheduleScheduledProject(projectCardId: number, goal: string): OrcRunClaimResult {
+    return this.scheduleInternal({
+      projectCardId,
+      intentKind: "contract_authoring",
+      originKind: "local",
+      cardSource: this.getCardSource(projectCardId),
+      sourcePeer: null,
+    }, goal);
+  }
+
   scheduleReview(projectCardId: number, _projectGeneration: number, reviewCaseId: string): OrcRunClaimResult {
     return this.scheduleInternal({
       projectCardId,

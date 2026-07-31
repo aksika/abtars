@@ -6,6 +6,8 @@ import { logInfo, logWarn, logTrace } from "../logger.js";
 import { readEntries as dbReadEntries } from "./task-store.js";
 import { advanceNextRun, updateState, readState, reserveRun, settleActiveRun } from "./task-state-store.js";
 import { todaySuccessCount, appendRun, hasRun } from "./task-history-store.js";
+import { kanbanGetCard } from "./kanban-board.js";
+import { abortProjectById } from "../reconciler.js";
 import type { ScheduledTask } from "./task-types.js";
 import type { ActiveTaskRun } from "./task-state-store.js";
 
@@ -174,9 +176,30 @@ export function reconcileActiveTaskRuns(): void {
       continue;
     }
 
+    // #1516: interrupted scheduled project — the durable root card identity
+    // survives restart. If the project reached a terminal state while the
+    // bridge was down, terminalize the scheduled run now (consistent with the
+    // deadline recovery path) instead of leaving it reserved until the
+    // deadline. A still-live project is left to the Reconciler, which resumes
+    // and re-supervises it from its durable state.
+    if (run.cardId !== undefined) {
+      const card = kanbanGetCard(run.cardId);
+      if (card && (card.status === "done" || card.status === "delivered" || card.status === "failed")) {
+        updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined, activeRun: undefined });
+        appendRun({ taskId: entry.id, kind: entry.kind, trigger: run.trigger, startedAt: run.reservedAt, finishedAt: Date.now(), outcome: "cancelled", detail: `restart_recovery: project terminal (${card.status})`, groupId: run.groupId, runId: run.runId });
+        logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=settled_project_terminal card=${run.cardId} status=${card.status}`);
+        continue;
+      }
+    }
+
     if (run.deadlineAt < Date.now()) {
       updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined, activeRun: undefined });
       appendRun({ taskId: entry.id, kind: entry.kind, trigger: run.trigger, startedAt: run.reservedAt, finishedAt: Date.now(), outcome: "cancelled", detail: "restart_recovery: deadline passed", groupId: run.groupId, runId: run.runId });
+      // #1516: terminalize the interrupted project so its Orc/Worker state
+      // cannot orphan after the scheduled run is settled.
+      if (run.cardId !== undefined) {
+        void abortProjectById(run.cardId, "restart_recovery: scheduled deadline passed");
+      }
       logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=settled_deadline_passed`);
     }
   }

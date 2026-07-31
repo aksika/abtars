@@ -5,7 +5,7 @@
 
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanQueuedDispatchOrder, kanbanGetCard, isUnblocked, resolveRootId } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanQueuedDispatchOrder, kanbanGetCard, isUnblocked, resolveRootId, checkWorkerSlotForProject } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
@@ -1190,6 +1190,16 @@ export class Spin {
 
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {
     if (request.type === "O") throw new Error("Cannot nest orchestrators");
+
+    // #1516: Central Worker admission authority — enforce the durable project
+    // agent cap before any card, contract, attempt, or reservation is created.
+    const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+    const slot = checkWorkerSlotForProject(rootCardId);
+    if (!slot.ok) {
+      const err = new Error(`agent_cap_reached: active=${slot.active} worker_limit=${slot.workerLimit} — wait for active workers to complete before spawning more`);
+      (err as Error & { code?: string }).code = "agent_cap_reached";
+      throw err;
+    }
 
     const parentProject = kanbanGetCard(parentCardId);
     if (parentProject && parentProject.max_tokens != null) {

@@ -81,10 +81,10 @@ export class CronQueue {
   private readonly failCounts = new Map<string, { date: string; count: number }>();
   private readonly taskRunner: ScheduledTaskRunner;
 
-  constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback, onTaskPaused?: TaskPausedCallback, agentRunner?: AgentTaskRunner) {
+  constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback, onTaskPaused?: TaskPausedCallback, agentRunner?: AgentTaskRunner, projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner) {
     this.onFailInject = onFailInject;
     this.onTaskPaused = onTaskPaused;
-    this.taskRunner = new ScheduledTaskRunner({ agentRunner, onTaskPaused, onFailInject });
+    this.taskRunner = new ScheduledTaskRunner({ agentRunner, onTaskPaused, onFailInject, projectRunner });
     const stale = loadStaleState();
     if (stale) {
       if (stale.currentJob) {
@@ -278,6 +278,7 @@ export class CronQueue {
             kind: "agent",
             prompt: agentPrompt,
             agent: followUpAgent,
+            orchestration: { maxAgents: 1 },
           };
           this.enqueue(agentEntry);
           return;

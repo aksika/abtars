@@ -357,3 +357,77 @@ describe("kanbanSearch (#1298)", () => {
     expect(Array.isArray(results)).toBe(true);
   });
 });
+
+describe("kanban-board #1516 bounded agent orchestration", () => {
+  it("rejects an invalid maxAgents at the write boundary", () => {
+    const id = mod.kanbanEnqueue("Capped", "task", undefined, { type: "O", maxAgents: 5 });
+    expect(id).toBe(0);
+    expect(mod.kanbanList("*")).toHaveLength(0);
+  });
+
+  it("admits up to maxAgents-1 concurrent workers and refuses the next", () => {
+    const root = mod.kanbanEnqueue("Capped project", "task", undefined, { type: "O", maxAgents: 4 });
+    expect(mod.kanbanGetCard(root)!.max_agents).toBe(4);
+    expect(mod.checkWorkerSlotForProject(root)).toEqual({ ok: true });
+    for (let i = 0; i < 3; i++) {
+      const w = mod.kanbanEnqueue(`worker-${i}`, "agent", undefined, { type: "W", parent_id: root });
+      expect(w).toBeGreaterThan(0);
+      const slot = mod.checkWorkerSlotForProject(root);
+      if (i < 2) {
+        expect(slot).toEqual({ ok: true });
+      } else {
+        expect(slot).toEqual({ ok: false, reason: "agent_cap_reached", active: 3, workerLimit: 3 });
+      }
+    }
+  });
+
+  it("refuses a fourth worker with no partial state", () => {
+    const root = mod.kanbanEnqueue("Capped project", "task", undefined, { type: "O", maxAgents: 4 });
+    const ids = [1, 2, 3].map(i => mod.kanbanEnqueue(`w-${i}`, "agent", undefined, { type: "W", parent_id: root }));
+    const refused = mod.checkWorkerSlotForProject(root);
+    expect(refused).toEqual({ ok: false, reason: "agent_cap_reached", active: 3, workerLimit: 3 });
+    const children = mod.kanbanGetChildren(root);
+    expect(children.map(c => c.id)).toEqual(ids);
+    expect(children).toHaveLength(3);
+  });
+
+  it("releases capacity when a worker reaches a terminal status", () => {
+    const root = mod.kanbanEnqueue("Capped project", "task", undefined, { type: "O", maxAgents: 4 });
+    const w1 = mod.kanbanEnqueue("w-1", "agent", undefined, { type: "W", parent_id: root });
+    const w2 = mod.kanbanEnqueue("w-2", "agent", undefined, { type: "W", parent_id: root });
+    const w3 = mod.kanbanEnqueue("w-3", "agent", undefined, { type: "W", parent_id: root });
+    expect(mod.checkWorkerSlotForProject(root).ok).toBe(false);
+    mod.kanbanComplete(w1, null, "done");
+    expect(mod.checkWorkerSlotForProject(root)).toEqual({ ok: true });
+    const w4 = mod.kanbanEnqueue("w-4", "agent", undefined, { type: "W", parent_id: root });
+    expect(w4).toBeGreaterThan(w3);
+  });
+
+  it("counts cancelled workers as terminal and releases capacity", () => {
+    const root = mod.kanbanEnqueue("Capped project", "task", undefined, { type: "O", maxAgents: 2 });
+    mod.kanbanEnqueue("w-1", "agent", undefined, { type: "W", parent_id: root });
+    mod.kanbanFail(root + 1, "cancelled by Orc");
+    expect(mod.checkWorkerSlotForProject(root)).toEqual({ ok: true });
+  });
+
+  it("leaves uncapped projects behaviorally unchanged", () => {
+    const root = mod.kanbanEnqueue("Uncapped project", "task", undefined, { type: "O" });
+    expect(mod.kanbanGetCard(root)!.max_agents).toBeNull();
+    for (let i = 0; i < 5; i++) {
+      expect(mod.checkWorkerSlotForProject(root)).toEqual({ ok: true });
+      mod.kanbanEnqueue(`w-${i}`, "agent", undefined, { type: "W", parent_id: root });
+    }
+  });
+
+  it("attaches a validated result to an accepted project card exactly once", () => {
+    const root = mod.kanbanEnqueue("Accepted project", "task", undefined, { type: "O" });
+    mod.kanbanRunning(root);
+    mod.kanbanComplete(root, null, "accepted");
+    mod.kanbanAttachResult(root, "/tmp/report.md", "artifact 1234 bytes");
+    mod.kanbanAttachResult(root, "/tmp/other.md", "late write");
+    const card = mod.kanbanGetCard(root)!;
+    expect(card.result_path).toBe("/tmp/report.md");
+    expect(card.result_summary).toBe("artifact 1234 bytes");
+    expect(card.status).toBe("done");
+  });
+});

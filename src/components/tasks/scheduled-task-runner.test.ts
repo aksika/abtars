@@ -9,6 +9,11 @@ vi.mock("./task-state-store.js", () => ({
   advanceNextRun: vi.fn(),
   readLastPromptAt: vi.fn(() => 0),
 }));
+vi.mock("./kanban-board.js", () => ({
+  kanbanComplete: vi.fn(),
+  kanbanFail: vi.fn(),
+  kanbanAttachResult: vi.fn(),
+}));
 vi.mock("./task-history-store.js", () => ({
   appendRunOnce: vi.fn(),
   hasRun: vi.fn(() => false),
@@ -32,6 +37,7 @@ function makeEntry(id: string): any {
     schedule: "* * * * *",
     enabled: true,
     priority: "medium",
+    orchestration: { maxAgents: 1 },
   };
 }
 
@@ -111,5 +117,102 @@ describe("ScheduledTaskRunner #1506 deadline ownership", () => {
     expect(outcome.status).toBe("timed_out");
     expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "timed_out", cardId: 43 }));
     expect(mockedSettle).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "success" }));
+  });
+});
+
+describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("routes maxAgents=1 through the direct agent runner exactly once", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
+    const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project result" }));
+    const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
+    const outcome = await runner.run(makeEntry("dispatch-direct"), makeReservation("dispatch-direct"));
+
+    expect(agentRunner).toHaveBeenCalledTimes(1);
+    expect(projectRunner).not.toHaveBeenCalled();
+    expect(agentRunner.mock.calls[0]![0]).toMatchObject({
+      type: "T",
+      source: "task",
+      settlementOwner: "caller",
+      delivery: "announce",
+    });
+    expect(outcome.status).toBe("success");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "success", cardId: 7 }));
+  });
+
+  it("runs an old production-shaped task without orchestration through the direct runner exactly once", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 9, result: "legacy result" }));
+    const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project result" }));
+    const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
+    const legacy = makeEntry("dispatch-legacy");
+    delete legacy.orchestration;
+    const outcome = await runner.run(legacy, makeReservation("dispatch-legacy"));
+
+    expect(outcome.status).toBe("success");
+    expect(agentRunner).toHaveBeenCalledTimes(1);
+    expect(projectRunner).not.toHaveBeenCalled();
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "success", cardId: 9 }));
+  });
+
+  it("routes maxAgents>1 through the project runner exactly once, never the direct runner", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
+    const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project synthesis" }));
+    const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
+    const entry = makeEntry("dispatch-project");
+    entry.orchestration = { maxAgents: 4 };
+    const outcome = await runner.run(entry, makeReservation("dispatch-project"));
+
+    expect(projectRunner).toHaveBeenCalledTimes(1);
+    expect(agentRunner).not.toHaveBeenCalled();
+    const request = projectRunner.mock.calls[0]![0];
+    expect(request).toMatchObject({
+      entryId: "dispatch-project",
+      runId: "dispatch-project-run",
+      maxAgents: 4,
+      priority: "medium",
+      delivery: "announce",
+      chatId: "1",
+    });
+    expect(request.executionControl).toBeDefined();
+    expect(request.executionScope).toBeDefined();
+    expect(request.deadlineAt).toBeGreaterThan(Date.now());
+    expect(outcome.status).toBe("success");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "success", cardId: 8 }));
+  });
+
+  it("passes the resolved report artifact path to the project runner for report tasks", async () => {
+    const projectRunner = vi.fn(async () => ({ cardId: 8, result: "synthesis" }));
+    const runner = new ScheduledTaskRunner({ agentRunner: undefined, projectRunner });
+    const entry = makeEntry("dispatch-report");
+    entry.orchestration = { maxAgents: 2 };
+    entry.delivery = "report";
+    entry.report = {
+      artifact: "/tmp/daily.md",
+      requiredSections: ["# Summary"],
+      minBytes: 100,
+      requires: { files: [], executables: [], tools: [] },
+    };
+    const preflightMod = await import("./task-preflight.js");
+    const preflight = vi.mocked(preflightMod.preflightTask);
+    preflight.mockReturnValue({
+      ok: true,
+      report: {
+        artifactPath: "/tmp/daily.md",
+        artifactLabel: "/tmp/daily.md",
+        requiredSections: ["# Summary"],
+        minBytes: 100,
+        requiredFiles: [],
+        executables: [],
+        tools: [],
+      },
+      artifactBaseline: { existed: false },
+    });
+    vi.mocked(preflightMod.validateReportArtifact).mockReturnValue({ ok: true, size: 1234 });
+    const outcome = await runner.run(entry, makeReservation("dispatch-report"));
+    expect(outcome.status).toBe("success");
+    expect(projectRunner.mock.calls[0]![0].reportArtifactPath).toBe("/tmp/daily.md");
   });
 });

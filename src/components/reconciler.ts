@@ -70,6 +70,55 @@ export function getOrcCoordinator(): OrcProjectCoordinator | null {
   return _orcCoordinator;
 }
 
+/**
+ * #1516: Get the shared Orc coordinator, initializing it (and its boot
+ * recovery) on first use. The scheduled-project runner calls this so its
+ * goal-bearing claim races ahead of the Reconciler's generic authoring goal.
+ */
+export function getOrCreateOrcCoordinator(): OrcProjectCoordinator | null {
+  if (_orcCoordinator) return _orcCoordinator;
+  try {
+    const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+    const peerName = loadPeerConfig().self.name;
+    const { OrcProjectCoordinator } = require("./orc-project/orc-project-coordinator.js") as typeof import("./orc-project/orc-project-coordinator.js");
+    _orcCoordinator = new OrcProjectCoordinator({
+      ownerPeer: peerName,
+      startPort: async (context, goal) => {
+        await spin.spin({
+          type: "O",
+          goal,
+          sessionId: context.sessionId,
+          cardId: context.projectCardId,
+          settlementOwner: "spin",
+          source: "agent",
+          orcContext: context,
+        });
+      },
+    });
+    logInfo(TAG, "Orc coordinator initialized");
+    _orcCoordinator.bootRecovery();
+  } catch (err) {
+    logWarn(TAG, `Failed to initialize Orc coordinator: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return _orcCoordinator;
+}
+
+/**
+ * #1516: Public project-abort boundary. Terminalizes all non-terminal Worker
+ * children and the root idempotently. A terminal root (accepted/delivered/
+ * failed) is never touched — late cancellation cannot clobber settled state.
+ */
+export async function abortProjectById(projectId: number, reason: string): Promise<void> {
+  const card = kanbanGetCard(projectId);
+  if (!card) return;
+  if (card.status === "done" || card.status === "delivered" || card.status === "failed") {
+    logInfo(TAG, `Project ${projectId}: already terminal (${card.status}) — abort skipped`);
+    return;
+  }
+  const children = kanbanGetChildren(projectId);
+  await abortProject(projectId, children, reason);
+}
+
 function scheduleOrcReview(projectId: number, generation: number, caseId: string, requestId: string): void {
   if (_orcCoordinator) {
     const result = _orcCoordinator.scheduleReview(projectId, generation, caseId);
@@ -801,31 +850,7 @@ export function startReconciler(): void {
   }
   _reconcilerStarted = true;
 
-  if (!_orcCoordinator) {
-    try {
-      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-      const peerName = loadPeerConfig().self.name;
-      const { OrcProjectCoordinator } = require("./orc-project/orc-project-coordinator.js") as typeof import("./orc-project/orc-project-coordinator.js");
-      _orcCoordinator = new OrcProjectCoordinator({
-        ownerPeer: peerName,
-        startPort: async (context, goal) => {
-          await spin.spin({
-            type: "O",
-            goal,
-            sessionId: context.sessionId,
-            cardId: context.projectCardId,
-            settlementOwner: "spin",
-            source: "agent",
-            orcContext: context,
-          });
-        },
-      });
-      logInfo(TAG, "Orc coordinator initialized");
-      _orcCoordinator.bootRecovery();
-    } catch (err) {
-      logWarn(TAG, `Failed to initialize Orc coordinator: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+  getOrCreateOrcCoordinator();
 
   // #1510: Boot recovery — terminalize process-bound attempts from dead bridge
   runBootRecovery();

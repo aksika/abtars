@@ -105,14 +105,24 @@ const spawnWorkerTool: ToolDefinition = {
       },
       provenance: { root_card_id: 0, card_id: 0, authored_by: "orc", created_at: "" },
     } : undefined;
-    const cardId = spin.spawnChild(projectCardId, {
-      goal,
-      title: args.title || goal.slice(0, 40),
-      source: "agent",
-      priority: args.priority as any,
-      contract,
-      settlementOwner: "spin",
-    });
+    let cardId: number;
+    try {
+      cardId = spin.spawnChild(projectCardId, {
+        goal,
+        title: args.title || goal.slice(0, 40),
+        source: "agent",
+        priority: args.priority as any,
+        contract,
+        settlementOwner: "spin",
+      });
+    } catch (err) {
+      if (err instanceof Error && (err as Error & { code?: string }).code === "agent_cap_reached") {
+        const active = /\bactive=(\d+)/.exec(err.message)?.[1];
+        const limit = /\bworker_limit=(\d+)/.exec(err.message)?.[1];
+        return `[err] Worker slot limit reached: ${active}/${limit} active workers on this project. Wait for workers to complete before spawning more.`;
+      }
+      throw err;
+    }
     logInfo(TAG, `spawn_worker card:${cardId} parent:${projectCardId} — ${(args.title || goal).slice(0, 60)}${hasStructuredData ? " [supervised]" : ""}`);
     return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"${hasStructuredData ? " [supervised]" : ""}`;
   },

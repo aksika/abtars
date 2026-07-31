@@ -77,6 +77,8 @@ export interface KanbanCard {
   delivery_claimed_at: string | null;
   delivery_result: string | null;
   delivery_receipt: string | null;
+  /** #1516: total agent budget (1 Orc + workers) for scheduled projects. */
+  max_agents: number | null;
 }
 
 let _db: SqliteDb | null = null;
@@ -129,6 +131,8 @@ function db(): SqliteDb | null {
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_claimed_at TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_result TEXT CHECK(delivery_result IS NULL OR delivery_result IN ('sent','definitely_not_sent','unknown'))`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_receipt TEXT`); } catch {}
+    // #1516: durable per-project agent cap (scheduled orchestration policy)
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_agents INTEGER`); } catch {}
   } catch {
     logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
     _db = null;
@@ -144,6 +148,7 @@ function dbOrNull(): SqliteDb | null {
 }
 
 import type { Delivery } from "./task-types.js";
+import { MAX_SCHEDULED_AGENTS } from "./task-types.js";
 
 export type KanbanPriority = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
 
@@ -155,17 +160,23 @@ export function normalizePriority(raw: string | undefined | null): KanbanPriorit
   return VALID_PRIORITIES.has(upper as KanbanPriority) ? upper as KanbanPriority : "MEDIUM";
 }
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string }): number {
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string; maxAgents?: number }): number {
   const d = dbOrNull();
   if (!d) return 0;
   const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
   const deliveryMode = raw === "report" ? "deliver" : raw;
   const priority = normalizePriority(opts?.priority);
+  // #1516: validate the durable agent cap at the write boundary.
+  const maxAgents = opts?.maxAgents;
+  if (maxAgents !== undefined && (!Number.isInteger(maxAgents) || maxAgents < 1 || maxAgents > MAX_SCHEDULED_AGENTS)) {
+    logWarn("kanban", `rejected invalid max_agents=${String(maxAgents)} (must be an integer 1..${MAX_SCHEDULED_AGENTS})`);
+    return 0;
+  }
   const stmt = d.prepare(
-    `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer, max_agents)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null);
+  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null, maxAgents ?? null);
   const id = Number(result.lastInsertRowid);
   nerve.fire("card:queued", id);
   return id;
@@ -399,6 +410,52 @@ export function kanbanGetChildren(parentId: number): KanbanCard[] {
   const d = dbOrNull();
   if (!d) return [];
   return d.prepare(`SELECT * FROM kanban_board WHERE parent_id = ? ORDER BY id`).all(parentId) as KanbanCard[];
+}
+
+// ── #1516: bounded agent orchestration ───────────────────────────────────────
+
+export type WorkerSlotResult =
+  | { ok: true }
+  | { ok: false; reason: "agent_cap_reached"; active: number; workerLimit: number };
+
+export const KANBAN_TERMINAL_STATUSES: readonly string[] = ["done", "delivered", "failed"];
+
+/**
+ * #1516: Central child-admission authority. For a project with a durable
+ * max_agents cap, refuse a new Worker when admitting it would push active
+ * non-terminal type-W children to or past `max_agents - 1`. Queued/admitted
+ * children count; terminal history does not. Uncapped projects always admit.
+ * The count runs on the same synchronous task-database connection as the
+ * subsequent child-card insert, so admission cannot interleave.
+ */
+export function checkWorkerSlotForProject(rootCardId: number): WorkerSlotResult {
+  const d = dbOrNull();
+  if (!d) return { ok: true };
+  const root = d.prepare(`SELECT max_agents FROM kanban_board WHERE id = ?`).get(rootCardId) as { max_agents: number | null } | undefined;
+  if (!root || root.max_agents == null) return { ok: true };
+  const workerLimit = root.max_agents - 1;
+  const placeholders = KANBAN_TERMINAL_STATUSES.map(() => "?").join(",");
+  const row = d.prepare(
+    `SELECT COUNT(*) AS active FROM kanban_board WHERE parent_id = ? AND type = 'W' AND status NOT IN (${placeholders})`
+  ).get(rootCardId, ...KANBAN_TERMINAL_STATUSES) as { active: number };
+  const active = Number(row.active);
+  if (active >= workerLimit) return { ok: false, reason: "agent_cap_reached", active, workerLimit };
+  return { ok: true };
+}
+
+/**
+ * #1516: Attach the validated report artifact to an accepted project card.
+ * Project acceptance already marks the root card done; this fills in the
+ * delivery payload without re-triggering settlement. Idempotent — only
+ * applies while result_path is still null.
+ */
+export function kanbanAttachResult(cardId: number, resultPath: string, summary: string): void {
+  const d = dbOrNull();
+  if (!d) return;
+  d.prepare(
+    `UPDATE kanban_board SET result_path = ?, result_summary = ?, updated_at = datetime('now')
+     WHERE id = ? AND status = 'done' AND result_path IS NULL`
+  ).run(resultPath, summary.slice(0, 4000), cardId);
 }
 
 export function kanbanAddTokens(id: number, tokens: number): void {

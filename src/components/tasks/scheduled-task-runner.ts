@@ -8,7 +8,7 @@ import { preflightTask, validateReportArtifact } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { createExecutionScope } from "./task-package.js";
 import { registerControl, removeControl } from "../execution-control.js";
-import { kanbanComplete, kanbanFail } from "./kanban-board.js";
+import { kanbanComplete, kanbanFail, kanbanAttachResult } from "./kanban-board.js";
 import { logTaskDebug, logTaskTrace } from "./task-log-ctx.js";
 import { incrementDeferrals, advanceNextRun } from "./task-state-store.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
@@ -30,12 +30,21 @@ export interface ScheduledTaskRunOutcome {
 export type AgentTaskRunner = (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string }>;
 export type TaskPausedCallback = (chatId: number, title: string, reason: string) => void;
 export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
+export type { ScheduledProjectRequest, ScheduledProjectRunner } from "./scheduled-project-runner.js";
 
 export class ScheduledTaskRunner {
   private readonly agentRunner?: AgentTaskRunner;
+  private readonly projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner;
 
-  constructor(opts?: { agentRunner?: AgentTaskRunner; onTaskPaused?: TaskPausedCallback; onFailInject?: FailInjectCallback }) {
+  constructor(opts?: { agentRunner?: AgentTaskRunner; onTaskPaused?: TaskPausedCallback; onFailInject?: FailInjectCallback; projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner }) {
     this.agentRunner = opts?.agentRunner;
+    this.projectRunner = opts?.projectRunner;
+  }
+
+  private resolveProjectRunner(): import("./scheduled-project-runner.js").ScheduledProjectRunner {
+    if (this.projectRunner) return this.projectRunner;
+    const { scheduledProjectRunner } = require("./scheduled-project-runner.js") as typeof import("./scheduled-project-runner.js");
+    return scheduledProjectRunner;
   }
 
   async run(entry: ScheduledTask & { kind: "agent" }, reservation: ActiveTaskRun): Promise<ScheduledTaskRunOutcome> {
@@ -119,22 +128,46 @@ export class ScheduledTaskRunner {
         runner = spin.dispatchAwait.bind(spin);
       }
 
-      const raceResult = await runWithDeadline(
-        runner({
-          timeoutMs: safeDeadline,
-          type: sessionType,
+      const commonRequest: import("../spin-types.js").SpinRequest = {
+        timeoutMs: safeDeadline,
+        type: sessionType,
+        title: formatTaskLabel(entry.id),
+        goal: prompt,
+        source: "task",
+        priority: entry.priority ?? "MEDIUM",
+        chatId: String(entry.chatId),
+        maxToolRounds: entry.maxToolRounds,
+        delivery: entry.delivery,
+        settlementOwner: "caller",
+        executionControl: execControl,
+        executionScope,
+        deadlineAt: reservation.deadlineAt,
+      };
+
+      // #1516: branch only dispatch — the scheduled lifecycle (preflight,
+      // deadline, validation, settlement, retry, delivery) stays shared.
+      // Raw callers may pass unnormalized entries; absent orchestration means
+      // the hard default of one agent (never fail an old-shaped task).
+      const maxAgents = entry.orchestration?.maxAgents ?? 1;
+      const executionPromise = maxAgents === 1
+        ? runner(commonRequest)
+        : this.resolveProjectRunner()({
+          entryId: entry.id,
+          runId,
           title: formatTaskLabel(entry.id),
           goal: prompt,
-          source: "task",
-          priority: entry.priority ?? "MEDIUM",
-          chatId: String(entry.chatId),
-          maxToolRounds: entry.maxToolRounds,
-          delivery: entry.delivery,
-          settlementOwner: "caller",
-          executionControl: execControl,
-          executionScope,
+          priority: entry.priority ?? "medium",
+          maxAgents,
           deadlineAt: reservation.deadlineAt,
-        }),
+          executionScope,
+          executionControl: execControl,
+          delivery: entry.delivery,
+          chatId: String(entry.chatId),
+          reportArtifactPath: resolvedContract?.artifactPath,
+        });
+
+      const raceResult = await runWithDeadline(
+        executionPromise,
         safeDeadline,
         execControl,
         entry.id,
@@ -193,7 +226,13 @@ export class ScheduledTaskRunner {
         if (artifactResult.ok) {
           resultPath = resolvedContract.artifactPath;
           settlementDetail = `artifact ${artifactResult.size} bytes`;
-          kanbanComplete(boardId, resultPath, `report artifact verified (${artifactResult.size}B)`);
+          if (maxAgents > 1) {
+            // Project acceptance already marked the root card done; attach the
+            // validated artifact without re-triggering settlement.
+            kanbanAttachResult(boardId, resultPath, settlementDetail);
+          } else {
+            kanbanComplete(boardId, resultPath, settlementDetail);
+          }
           settleRunOnce({ entry, run: reservation, outcome: "success", detail: settlementDetail, resultPath, cardId: boardId, executionRef: runId });
           return { status: "success", safeDetail: settlementDetail, artifactPath: resultPath ?? undefined, cardId: boardId };
         } else {
