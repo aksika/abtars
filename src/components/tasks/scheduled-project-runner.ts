@@ -69,10 +69,13 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
     executionControl.setCardId(rootCardId);
     logInfo(TAG, `Reattaching scheduled project card #${rootCardId} for task "${entryId}" run ${runId}`);
   } else {
-    rootCardId = kanbanEnqueue(request.title, "task", undefined, {
+    // #1516: the root card durably carries the scheduled run correlation
+    // (source_id) and the absolute deadline (due_at) alongside the agent cap.
+    rootCardId = kanbanEnqueue(request.title, "task", runId, {
       priority: request.priority.toUpperCase() as "HIGH" | "MEDIUM" | "LOW",
       type: "O",
       goal,
+      due_at: new Date(request.deadlineAt).toISOString(),
       delivery: request.delivery,
       chatId: request.chatId,
       maxAgents: request.maxAgents,

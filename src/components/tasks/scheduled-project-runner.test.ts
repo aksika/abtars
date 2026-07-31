@@ -112,6 +112,9 @@ describe("scheduled-project-runner #1516", () => {
     expect(root.type).toBe("O");
     expect(root.max_agents).toBe(4);
     expect(root.source).toBe("task");
+    expect(root.source_id).toBe("daily-ai_1");
+    expect(root.due_at).not.toBeNull();
+    expect(Date.parse(root.due_at!)).toBeGreaterThan(Date.now());
     expect(control.cardId).toBe(root.id);
     expect(stateStore.readState("daily-ai")?.activeRun?.cardId).toBe(root.id);
 
