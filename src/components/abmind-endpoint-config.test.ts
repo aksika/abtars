@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -46,6 +46,17 @@ describe("resolveAbmindEndpoint", () => {
   it("returns the local Unix default when the config file is absent", () => {
     const resolved = resolveAbmindEndpoint(ctx.configDir);
     expect(resolved).toEqual({ mode: "local", source: "default" });
+  });
+
+  it("returns the local Unix default when the config directory is absent", () => {
+    rmSync(ctx.configDir, { recursive: true, force: true });
+    expect(resolveAbmindEndpoint(ctx.configDir)).toEqual({ mode: "local", source: "default" });
+  });
+
+  it("does not treat a broken config symlink as an absent config", () => {
+    rmSync(join(ctx.configDir, "abmind.json"), { force: true });
+    symlinkSync(join(ctx.root, "missing-abmind.json"), join(ctx.configDir, "abmind.json"));
+    expect(() => resolveAbmindEndpoint(ctx.configDir)).toThrowError(AbmindEndpointConfigError);
   });
 
   it("parses an explicit local profile with an optional socket path", () => {

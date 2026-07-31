@@ -12,7 +12,7 @@
  *   pins fail closed with bounded typed reason codes.
  */
 
-import { readFileSync, statSync, realpathSync, existsSync } from "node:fs";
+import { readFileSync, statSync, realpathSync, lstatSync, existsSync } from "node:fs";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { createPrivateKey } from "node:crypto";
 
@@ -75,7 +75,15 @@ function strictConfigDir(configDir: string): string {
 
 function readConfigFile(configDir: string): unknown {
   const p = join(configDir, CONFIG_FILE);
-  const real = realpathSync(p);
+  let real: string;
+  try {
+    real = realpathSync(p);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new AbmindEndpointConfigError("credentials_unsafe", `${CONFIG_FILE} is a broken symlink`);
+    }
+    throw err;
+  }
   const stat = statSync(real);
   if (real !== resolve(p)) {
     throw new AbmindEndpointConfigError("credentials_unsafe", `${CONFIG_FILE} is a symlink`);
@@ -197,11 +205,30 @@ function parseWssProfile(configDir: string, profileName: string, rawProfile: unk
  * every other failure is a typed configuration error.
  */
 export function resolveAbmindEndpoint(configDir: string): ResolvedAbmindEndpoint {
-  const realDir = strictConfigDir(configDir);
+  let realDir: string;
+  try {
+    realDir = strictConfigDir(configDir);
+  } catch (err) {
+    // A fresh abtars installation has no config directory yet. Preserve the
+    // historical absent-config local default; only an actual missing path is
+    // treated as absent, while permission and other filesystem failures stay
+    // fail-closed.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { mode: "local", source: "default" };
+    }
+    throw err;
+  }
   const configFilePath = join(realDir, CONFIG_FILE);
 
-  if (!existsSync(configFilePath)) {
-    return { mode: "local", source: "default" };
+  try {
+    // lstat deliberately sees a broken symlink as present. Such a path must
+    // be rejected by readConfigFile rather than silently treated as absent.
+    lstatSync(configFilePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { mode: "local", source: "default" };
+    }
+    throw err;
   }
 
   const raw = readConfigFile(realDir);

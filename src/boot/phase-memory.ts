@@ -143,6 +143,11 @@ export async function phaseMemory(ctx: BootCtx, deps: PhaseMemoryDeps = {}): Pro
   const home = process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars");
   const configDir = join(home, "config");
 
+  // A BootCtx may be reused by an in-process restart. Clear prior ownership
+  // before disabled, invalid-config, or remote branches can return early.
+  ctx.client = null;
+  ctx.abmindModule = null;
+
   // The registry outlives an individual Bridge during an in-process restart.
   // Clear the previous boot's runtime before any branch can skip or fail.
   const { setMemoryRuntime } = await import("../components/transport/tool-registry.js");
