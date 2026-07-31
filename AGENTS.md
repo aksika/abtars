@@ -6,9 +6,11 @@
 npm install          # install deps
 npm run build        # tsc + copy dashboard public + git build-info
 npm run typecheck    # tsc --noEmit (fastest feedback)
-npm test             # vitest --run (all unit tests)
+npm test             # fast deterministic suite (unit/component + deploy logic)
 npm run test:watch   # vitest (watch mode)
 npm run test:integration  # integration tests (needs abmind)
+npm run test:extended     # integration/process/E2E tests
+npm run test:all          # every Vitest test
 npm run dev          # node --import tsx src/main.ts
 npm run bundle       # esbuild single ESM bundle → bundle/
 ```
@@ -55,6 +57,13 @@ adding a row, not a new method or branch.
 - Integration tests live in `src/tests/integration/` and use a harness (`src/tests/integration/harness.ts`) that creates a real `MemoryManager` in a tmpdir.
 - Smoke/e2e tests in `src/tests/` verify full bridge lifecycle with mock transport/adapter.
 - Tests use `vi.mock()` for transport, adapter, and soul-loader. Real memory when possible.
+
+The default `npm test` intentionally excludes tests under `src/tests/integration/`,
+`src/tests/e2e/`, files named `*integration.test.ts` or `*e2e.test.ts`, and the
+recovery redesign E2E test. Those tests are covered by `npm run test:extended`.
+Deterministic deploy/rollback tests outside those groups remain part of the fast
+suite. Use `npm run test:all` before a release when the complete local portfolio is
+required.
 
 ## Build artifacts
 
