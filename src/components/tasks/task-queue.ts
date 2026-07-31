@@ -5,7 +5,7 @@ import { existsSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
-import { reserveRun, readState } from "./task-state-store.js";
+import { createRunId, reserveRun, readState } from "./task-state-store.js";
 import { logTaskDebug } from "./task-log-ctx.js";
 import type { ScheduledTask } from "./task-types.js";
 import { isSystemEntry, formatTaskLabel } from "./task-types.js";
@@ -182,7 +182,7 @@ export class CronQueue {
     if (existing) return existing;
     const now = Date.now();
     const res = reserveRun(entry.id, {
-      runId: `${entry.id}_${now}`,
+      runId: createRunId(entry.id),
       groupId: `${entry.id}:group:${now}`,
       attempt: manual ? 1 : (readState(entry.id)?.retrying ? 2 : 1),
       trigger: manual ? "manual" : "schedule",

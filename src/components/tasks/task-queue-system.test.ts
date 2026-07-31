@@ -3,6 +3,7 @@ import { CronQueue } from "./task-queue.js";
 import type { ScheduledTask } from "./task-types.js";
 
 vi.mock("./task-state-store.js", () => ({
+  createRunId: vi.fn((taskId: string) => `${taskId}_test-run`),
   incrementFailures: vi.fn().mockReturnValue(0),
   resetFailures: vi.fn(),
   setAutoPaused: vi.fn(),

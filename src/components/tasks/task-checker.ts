@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn, logTrace } from "../logger.js";
 import { readEntries as dbReadEntries } from "./task-store.js";
-import { advanceNextRun, readState, reserveRun, settleActiveRun } from "./task-state-store.js";
-import { todaySuccessCount, hasRun } from "./task-history-store.js";
+import { advanceNextRun, createRunId, readState, reserveRun } from "./task-state-store.js";
+import { todaySuccessCount, getRun } from "./task-history-store.js";
 import { kanbanGetCard } from "./kanban-board.js";
-import { settleRunOnce } from "./task-run-settler.js";
+import { settleRunFromHistory, settleRunOnce } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
 import { abortProjectById } from "../reconciler.js";
 import type { ScheduledTask } from "./task-types.js";
@@ -92,7 +92,10 @@ function decideSchedule(entry: ScheduledTask): ScheduleDecision {
     }
   }
 
-  if (entry.schedule && state.nextRunAt) {
+  // A deferred admission is a durable occurrence with its own deadline. It
+  // must not be discarded by the generic missed-cron catch-up rule after a
+  // restart or a prolonged heartbeat outage.
+  if (!state.deferredAdmission && entry.schedule && state.nextRunAt) {
     const maxDelay = (entry.catchUpHours ?? 0) * 3600_000;
     const MIN_STALE_MS = 5 * 60_000;
     const staleThreshold = Math.max(maxDelay, MIN_STALE_MS);
@@ -137,7 +140,7 @@ export function checkCron(): ReservedTask[] {
       // group with attempt 2 — never a second fresh group.
       const retrying = state?.retrying === true && state.retryAttempt === 1;
       const reservation = reserveRun(entry.id, {
-        runId: `${entry.id}_${now}`,
+        runId: createRunId(entry.id),
         groupId: deferred?.groupId ?? (retrying ? state?.retryGroupId : undefined) ?? `${entry.id}:group:${now}`,
         attempt: retrying ? 2 : 1,
         trigger: retrying ? "retry" : "schedule",
@@ -194,10 +197,14 @@ export function reconcileActiveTaskRuns(reattachProject?: ScheduledProjectReatta
     if (!state?.activeRun) continue;
 
     const run = state.activeRun;
-    const hasTerminalHistory = hasRun(run.runId);
-    if (hasTerminalHistory) {
-      settleActiveRun(entry.id, run.runId, {});
-      logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=cleared_history_found`);
+    const terminalHistory = getRun(run.runId);
+    if (terminalHistory) {
+      // History is written before state. If the process died in that window,
+      // replay the recorded policy transition instead of merely dropping the
+      // reservation and leaving nextRun/retry/pause state stale.
+      if (settleRunFromHistory(entry, run, terminalHistory)) {
+        logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=repaired_from_history`);
+      }
       continue;
     }
 

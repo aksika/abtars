@@ -11,6 +11,7 @@ vi.mock("node:child_process", async () => {
 });
 
 vi.mock("./task-state-store.js", () => ({
+  createRunId: vi.fn((taskId: string) => `${taskId}_test-run`),
   incrementFailures: vi.fn().mockReturnValue(0),
   incrementDeferrals: vi.fn().mockReturnValue(0),
   resetFailures: vi.fn(),
@@ -135,5 +136,4 @@ describe("CronQueue", () => {
     expect(queue.enqueue(entry)).toBeNull();
   });
 });
-
 

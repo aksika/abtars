@@ -68,6 +68,7 @@ function makeReservation(id: string): any {
 describe("ScheduledTaskRunner #1506 deadline ownership", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
     mockedSettle.mockClear();
   });
 
@@ -151,6 +152,7 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
     });
     expect(outcome.status).toBe("success");
     expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "success", cardId: 7 }));
+    expect(vi.mocked((await import("./kanban-board.js")).kanbanComplete)).not.toHaveBeenCalled();
   });
 
   it("runs an old production-shaped task without orchestration through the direct runner exactly once", async () => {
@@ -224,6 +226,7 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
     const outcome = await runner.run(entry, makeReservation("dispatch-report"));
     expect(outcome.status).toBe("success");
     expect(projectRunner.mock.calls[0]![0].reportArtifactPath).toBe("/tmp/daily.md");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ attachResult: true }));
   });
 });
 

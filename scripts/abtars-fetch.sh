@@ -14,7 +14,7 @@ fi
 URL="$1"
 
 if ! command -v lightpanda &>/dev/null; then
-  echo "ERROR: lightpanda not installed. Use Level 2 browse (abtars-browse) instead." >&2
+  echo "ERROR: lightpanda not installed. Use the web-fetch Level 1/2 curl or Jina Reader path instead." >&2
   exit 1
 fi
 
@@ -28,7 +28,7 @@ OUTPUT=$(lightpanda fetch \
   "$URL" 2>/dev/null)
 
 if [[ -z "$OUTPUT" ]]; then
-  echo "ERROR: Empty response. Page may require JavaScript or login. Use Level 2 browse (abtars-browse) instead." >&2
+  echo "ERROR: Empty response. Page may require JavaScript or login; create a B-type Kanban task for interaction." >&2
   exit 1
 fi
 

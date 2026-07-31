@@ -5,6 +5,7 @@
  * message text.
  */
 import type { TaskRunPhase } from "./task-state-store.js";
+import { redactSecrets } from "../logger.js";
 
 export type TaskFailureCategory =
   | "definition"
@@ -69,7 +70,10 @@ export function makeTaskFailure(
   message: string,
   retryability: TaskFailureRetryability,
 ): TaskFailureDiagnosticV1 {
-  const bounded = message.slice(0, MAX_MESSAGE);
+  if (!KNOWN_CODES[category]?.has(code)) {
+    throw new Error(`Unknown task failure code: ${category}/${code}`);
+  }
+  const bounded = redactSecrets(message).slice(0, MAX_MESSAGE);
   return {
     version: 1,
     category,

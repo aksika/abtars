@@ -9,7 +9,7 @@ import { makeTaskFailure } from "./task-failure.js";
 import { createExecutionScope } from "./task-package.js";
 import { registerControl, removeControl } from "../execution-control.js";
 import { SpinDispatchAdmissionError } from "../spin-types.js";
-import { kanbanComplete, kanbanAttachResult, kanbanEnqueue } from "./kanban-board.js";
+import { kanbanEnqueue } from "./kanban-board.js";
 import { logTaskDebug, logTaskTrace } from "./task-log-ctx.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
 import type { ScheduledTask } from "./task-types.js";
@@ -154,7 +154,6 @@ export class ScheduledTaskRunner {
           delivery: "announce",
           chatId: entry.chatId ?? String(entry.interaction.target.chatId),
         });
-        kanbanComplete(boardId, null, launchResult.response.slice(0, 4000));
         const detail = launchResult.response.slice(0, 200);
         settleRunOnce({ entry, run: reservation, outcome: "success", detail, cardId: boardId, executionRef: reservation.runId, onPaused: this.onPaused });
         logTaskDebug("task_settled", { task: entry.id, run: reservation.runId }, `skill=${entry.interaction.skill} session=${launchResult.sessionId}`);
@@ -308,17 +307,10 @@ export class ScheduledTaskRunner {
         if (artifactResult.ok) {
           resultPath = resolvedContract.artifactPath;
           settlementDetail = `artifact ${artifactResult.size} bytes`;
-          if (maxAgents > 1) {
-            // Project acceptance already marked the root card done; attach the
-            // validated artifact without re-triggering settlement.
-            kanbanAttachResult(boardId, resultPath, settlementDetail);
-          } else {
-            kanbanComplete(boardId, resultPath, settlementDetail);
-          }
           // The shared settler is the exclusive delivery release point.
           settleRunOnce({
             entry, run: reservation, outcome: "success", detail: settlementDetail, resultPath, cardId: boardId,
-            executionRef: runId, releaseDelivery: true, onPaused: this.onPaused,
+            executionRef: runId, releaseDelivery: true, attachResult: maxAgents > 1, onPaused: this.onPaused,
           });
           return { status: "success", safeDetail: settlementDetail, artifactPath: resultPath ?? undefined, cardId: boardId };
         } else {
@@ -343,7 +335,6 @@ export class ScheduledTaskRunner {
         });
         return { status: "definition_failed", safeDetail: settlementDetail, cardId: boardId };
       } else {
-        kanbanComplete(boardId, null, response?.slice(0, 4000) || "completed");
         // The shared settler is the exclusive delivery release point.
         settleRunOnce({
           entry, run: reservation, outcome: "success", detail: response?.slice(0, 200), cardId: boardId,

@@ -50,6 +50,16 @@ describe("#1520 failure policy matrix", () => {
     expect(d.message.length).toBeLessThanOrEqual(500);
   });
 
+  it("redacts credential-shaped content before durable persistence", () => {
+    const d = makeTaskFailure("execution", "model_error", PHASE, "provider rejected sk-abc123def456ghi789jkl012mno", "none");
+    expect(d.message).not.toContain("sk-abc123def456ghi789jkl012mno");
+    expect(d.message).toContain("REDACTED");
+  });
+
+  it("rejects unknown failure codes at construction", () => {
+    expect(() => makeTaskFailure("execution", "made_up_code", PHASE, "x", "none")).toThrow("Unknown task failure code");
+  });
+
   it("parse round-trips durable diagnostics and rejects unknown codes", () => {
     const d = makeTaskFailure("admission", "session_capacity", "queued", "busy", "transient");
     const parsed = parseTaskFailure(JSON.parse(JSON.stringify(d)));

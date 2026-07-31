@@ -21,6 +21,7 @@ const kanbanMod = await import("./kanban-board.js");
 const reconcilerMod = await import("../reconciler.js");
 
 vi.mock("./task-state-store.js", () => ({
+  createRunId: vi.fn(() => "generated-run"),
   readState: vi.fn(() => ({ nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false })),
   updateState: vi.fn(),
   advanceNextRun: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock("./task-history-store.js", () => ({
   appendRun: vi.fn(),
   appendRunOnce: vi.fn().mockReturnValue("recon-run"),
   hasRun: vi.fn(() => false),
+  getRun: vi.fn(() => undefined),
 }));
 
 beforeEach(() => {
@@ -87,6 +89,28 @@ describe("checkCron", () => {
     expect(vi.mocked(stateStore.updateState)).not.toHaveBeenCalledWith("t1", expect.objectContaining({ activeRun: undefined }));
     expect(vi.mocked(historyStore.appendRun)).not.toHaveBeenCalled();
   });
+
+  it("does not stale-advance a deferred occurrence after a heartbeat outage", () => {
+    const now = Date.now();
+    vi.mocked(taskStore.readEntries).mockReturnValue([makeTask()]);
+    vi.mocked(stateStore.readState).mockReturnValue({
+      nextRunAt: now - 10 * 60_000,
+      consecutiveFailures: 0,
+      consecutiveDeferrals: 2,
+      autoPaused: false,
+      deferredAdmission: {
+        groupId: "t1:group",
+        occurrenceAt: now - 11 * 60_000,
+        deadlineAt: now + 20 * 60_000,
+        attempts: 2,
+        retryAt: now - 9 * 60_000,
+        diagnostic: { version: 1, category: "admission", code: "session_capacity", phase: "queued", message: "busy", retryability: "transient", occurredAt: now - 10 * 60_000 },
+      },
+    });
+
+    expect(checkCron()).toHaveLength(1);
+    expect(stateStore.advanceNextRun).not.toHaveBeenCalled();
+  });
 });
 
 describe("reconcileActiveTaskRuns #1516 restart identity", () => {
@@ -134,5 +158,18 @@ describe("reconcileActiveTaskRuns #1516 restart identity", () => {
     expect(reattach).toHaveBeenCalledWith(expect.objectContaining({ id: "t1" }), expect.objectContaining({ runId: "interrupted-run", cardId: 79 }));
     expect(vi.mocked(stateStore.updateState)).not.toHaveBeenCalledWith("t1", expect.objectContaining({ activeRun: undefined }));
     expect(vi.mocked(historyStore.appendRun)).not.toHaveBeenCalled();
+  });
+
+  it("repairs state from terminal history instead of only clearing the reservation", () => {
+    const finishedAt = Date.now() - 1000;
+    vi.mocked(historyStore.getRun).mockReturnValue({
+      runId: "interrupted-run", taskId: "t1", kind: "agent", trigger: "schedule",
+      startedAt: finishedAt - 1000, finishedAt, outcome: "success", groupId: "interrupted-group",
+    });
+    runWith(undefined, Date.now() + 60_000);
+    expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
+    expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith(
+      "t1", "interrupted-run", expect.objectContaining({ consecutiveFailures: 0, lastFinishedAt: finishedAt }),
+    );
   });
 });

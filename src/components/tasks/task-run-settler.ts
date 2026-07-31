@@ -1,7 +1,7 @@
-import { logDebug, logInfo, logWarn } from "../logger.js";
+import { logDebug, logInfo, logWarn, redactSecrets } from "../logger.js";
 import { nextRunFromSchedule, settleActiveRun, readState } from "./task-state-store.js";
-import { appendRunOnce } from "./task-history-store.js";
-import { kanbanComplete, kanbanFail, kanbanSetDeliveryReady } from "./kanban-board.js";
+import { appendRunOnce, type TaskRunEvent } from "./task-history-store.js";
+import { kanbanAttachResult, kanbanComplete, kanbanFail, kanbanSetDeliveryReady } from "./kanban-board.js";
 import { logTaskDebug } from "./task-log-ctx.js";
 import { makeTaskFailure, decideFailurePolicy, formatTaskFailure } from "./task-failure.js";
 import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
@@ -33,6 +33,8 @@ export interface SettleOptions {
   retryAt?: number;
   /** #1520: release delivery only after ownership is won (agent/O cards). */
   releaseDelivery?: boolean;
+  /** Accepted O projects are already done; attach a validated artifact instead of completing again. */
+  attachResult?: boolean;
   /** Pause notification, emitted once per false→true transition. */
   onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
 }
@@ -45,8 +47,9 @@ export interface SettleOptions {
  * completion whose run has already settled is ignored.
  */
 export function settleRunOnce(opts: SettleOptions): SettleResult {
-  const { entry, run, outcome, detail, resultPath, cardId, executionRef, releaseDelivery, onPaused } = opts;
+  const { entry, run, outcome, detail, resultPath, cardId, executionRef, releaseDelivery, attachResult, onPaused } = opts;
   const finishedAt = Date.now();
+  const safeDetail = detail === undefined ? undefined : redactSecrets(detail).slice(0, 500);
 
   if (executionRef) {
     logTaskDebug("task_settlement_processing", { task: entry.id, run: run.runId, exec: executionRef }, `outcome=${outcome}`);
@@ -72,7 +75,7 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
     startedAt: run.reservedAt,
     finishedAt,
     outcome: effectiveOutcome,
-    detail: detail?.slice(0, 500),
+    detail: safeDetail,
     resultPath,
     kanbanCardId: cardId,
     groupId: run.groupId,
@@ -101,16 +104,7 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
     return "late";
   }
 
-  // Post-ownership side effects.
-  if (cardId !== undefined) {
-    if (effectiveOutcome === "success" || effectiveOutcome === "noop" || effectiveOutcome === "skipped") {
-      const summary = detail || "completed";
-      kanbanComplete(cardId, resultPath ?? null, summary);
-      if (releaseDelivery && effectiveOutcome === "success") kanbanSetDeliveryReady(cardId);
-    } else if (effectiveOutcome !== "deferred") {
-      kanbanFail(cardId, formatTaskFailure(diagnostic).slice(0, 1000));
-    }
-  }
+  applyPostSettlementSideEffects({ cardId, outcome: effectiveOutcome, detail: safeDetail, resultPath, diagnostic, releaseDelivery, attachResult });
 
   const nowPaused = patch.autoPaused === true;
   if (nowPaused && !wasPaused) {
@@ -120,6 +114,52 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
 
   logInfo(TAG, `Run "${entry.id}" settled as ${effectiveOutcome}${nowPaused ? " (auto-paused)" : ""}`);
   return "settled";
+}
+
+/**
+ * Repair the state half of a history-first settlement after a crash. The
+ * history row is authoritative, so this does not append a second row. Card
+ * mutation remains downstream of winning the matching active reservation.
+ */
+export function settleRunFromHistory(entry: ScheduledTask, run: ActiveTaskRun, event: TaskRunEvent): boolean {
+  const state = readState(entry.id);
+  if (!state?.activeRun || state.activeRun.runId !== run.runId) return false;
+  const diagnostic = event.diagnostic ?? synthesizeDiagnostic(event.outcome, event.detail, run.phase ?? "settling");
+  const safeDetail = event.detail === undefined ? undefined : redactSecrets(event.detail).slice(0, 500);
+  const patch = computeStatePatch(entry, run, event.outcome, diagnostic, state, event.finishedAt);
+  if (!settleActiveRun(entry.id, run.runId, patch)) return false;
+
+  applyPostSettlementSideEffects({
+    cardId: event.kanbanCardId,
+    outcome: event.outcome,
+    detail: safeDetail,
+    resultPath: event.resultPath,
+    diagnostic,
+    releaseDelivery: event.outcome === "success",
+    attachResult: Boolean(event.resultPath && entry.kind === "agent" && (entry.orchestration?.maxAgents ?? 1) > 1),
+  });
+  return true;
+}
+
+function applyPostSettlementSideEffects(opts: {
+  cardId?: number;
+  outcome: TerminalOutcome;
+  detail?: string;
+  resultPath?: string;
+  diagnostic: TaskFailureDiagnosticV1;
+  releaseDelivery?: boolean;
+  attachResult?: boolean;
+}): void {
+  const { cardId, outcome, detail, resultPath, diagnostic, releaseDelivery, attachResult } = opts;
+  if (cardId === undefined) return;
+  if (outcome === "success" || outcome === "noop" || outcome === "skipped") {
+    const summary = detail || "completed";
+    if (attachResult && resultPath) kanbanAttachResult(cardId, resultPath, summary);
+    else kanbanComplete(cardId, resultPath ?? null, summary);
+    if (releaseDelivery && outcome === "success") kanbanSetDeliveryReady(cardId);
+  } else if (outcome !== "deferred") {
+    kanbanFail(cardId, formatTaskFailure(diagnostic).slice(0, 1000));
+  }
 }
 
 function admissionExhausted(state: TaskRuntimeState | null, finishedAt: number, retryAtHint?: number): boolean {

@@ -1,7 +1,8 @@
 import type { PeerTransport, PeerCard, PeerMessage, PeerStatusEntry } from "./interface.js";
 import type { PeerHelpRequestV1, PeerHelpResponseV1, PeerHelpStatusRequestV1, PeerHelpStatusV1, PeerHelpWithdrawV1 } from "../peer-help/contract.js";
 import type { RemotePiEventsListRequestV1, RemotePiEventsListResponseV1, RemotePiEventsAckRequestV1, RemotePiEventsAckResponseV1, RemotePiControlRequestV1, RemotePiControlResponseV1 } from "./remote-pi-types.js";
-import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
+import { loadPeerConfig, type PeerConfig, type PeerEntry } from "../peer-config.js";
+import { resolvePeerName } from "../transport/peer-resolver.js";
 import { logInfo, logDebug } from "../logger.js";
 import type { WsPeerClient } from "./ws-peer-client.js";
 import { createPinnedPeerHttpsAgent } from "./pinned-peer-tls.js";
@@ -221,7 +222,7 @@ export class HttpTransport implements PeerTransport {
     }
     if (message.type === "callback") {
       const config = loadPeerConfig();
-      const entry = resolvePeer(config.peers, peer);
+      const entry = resolvePeer(config, peer);
       logDebug(TAG, `→ callback ${peer}: task_id=${message.payload.task_id}`);
       const payload: Record<string, unknown> = { task_id: message.payload.task_id, status: message.payload.status, result_summary: message.payload.result_summary, error: message.payload.error };
       const ws = this.wsClients.get(peer);
@@ -253,7 +254,7 @@ export class HttpTransport implements PeerTransport {
 
   async askHelp(peer: string, request: PeerHelpRequestV1): Promise<PeerHelpResponseV1> {
     const config = loadPeerConfig();
-    const entry = resolvePeer(config.peers, peer);
+    const entry = resolvePeer(config, peer);
     const { parseHelpResponse } = await import("../peer-help/contract.js");
 
     const payload: Record<string, unknown> = { ...request as any };
@@ -275,7 +276,7 @@ export class HttpTransport implements PeerTransport {
 
   async getHelpStatus(peer: string, request: PeerHelpStatusRequestV1): Promise<PeerHelpStatusV1> {
     const config = loadPeerConfig();
-    const entry = resolvePeer(config.peers, peer);
+    const entry = resolvePeer(config, peer);
     const { parseHelpStatus } = await import("../peer-help/contract.js");
 
     const ws = this.wsClients.get(peer);
@@ -296,7 +297,7 @@ export class HttpTransport implements PeerTransport {
 
   async withdrawHelp(peer: string, request: PeerHelpWithdrawV1): Promise<{ acknowledged: boolean; owner_action?: string }> {
     const config = loadPeerConfig();
-    const entry = resolvePeer(config.peers, peer);
+    const entry = resolvePeer(config, peer);
 
     const ws = this.wsClients.get(peer);
     if (ws?.connected) {
@@ -310,7 +311,7 @@ export class HttpTransport implements PeerTransport {
 
   async pushChannelMessage(peer: string, cardId: number, from: string, message: string, createdAt: string): Promise<void> {
     const config = loadPeerConfig();
-    const entry = resolvePeer(config.peers, peer);
+    const entry = resolvePeer(config, peer);
     await this.httpCall(entry, peer, "POST", `/v1/tasks/${cardId}/messages`, JSON.stringify({ from_agent: from, message, created_at: createdAt }));
     return;
   }
@@ -332,7 +333,7 @@ export class HttpTransport implements PeerTransport {
       return;
     }
     const config = loadPeerConfig();
-    const entry = resolvePeer(config.peers, peer);
+    const entry = resolvePeer(config, peer);
     await this.httpCall(entry, peer, "POST", "/v1/pi-events/push", JSON.stringify(event));
   }
 
@@ -342,7 +343,7 @@ export class HttpTransport implements PeerTransport {
       return await ws.call("pi.events.list.v1", request);
     }
     const config = loadPeerConfig();
-    const entry = resolvePeer(config.peers, peer);
+    const entry = resolvePeer(config, peer);
     const req = request;
     const params = new URLSearchParams();
     params.set("after_sequence", String(req.after_sequence));
@@ -360,7 +361,7 @@ export class HttpTransport implements PeerTransport {
       return await ws.call("pi.events.ack.v1", request);
     }
     const config = loadPeerConfig();
-    const entry = resolvePeer(config.peers, peer);
+    const entry = resolvePeer(config, peer);
     const response = await this.httpCall(entry, peer, "POST", `/v1/pi-runs/${request.run_id}/events/acknowledge`, JSON.stringify(request));
     return JSON.parse(response) as RemotePiEventsAckResponseV1;
   }
@@ -371,7 +372,7 @@ export class HttpTransport implements PeerTransport {
       return await ws.call("pi.control.v1", request);
     }
     const config = loadPeerConfig();
-    const entry = resolvePeer(config.peers, peer);
+    const entry = resolvePeer(config, peer);
     const response = await this.httpCall(entry, peer, "POST", `/v1/pi-runs/${(request as any).run_id}/control`, JSON.stringify(request));
     return JSON.parse(response);
   }
@@ -426,8 +427,8 @@ export class HttpTransport implements PeerTransport {
   }
 }
 
-function resolvePeer(peers: Record<string, PeerEntry>, name: string): PeerEntry {
-  const key = Object.keys(peers).find(k => k.toLowerCase() === name.toLowerCase());
-  if (!key || !peers[key]) throw new Error(`Unknown peer '${name}'. Available: ${Object.keys(peers).join(", ")}`);
-  return peers[key];
+function resolvePeer(config: PeerConfig, name: string): PeerEntry {
+  const resolved = resolvePeerName(name, config);
+  if (!resolved.ok) throw new Error(`${resolved.code}: ${resolved.message}`);
+  return config.peers[resolved.peer]!;
 }

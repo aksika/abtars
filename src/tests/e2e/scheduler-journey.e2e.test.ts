@@ -131,15 +131,24 @@ function fakeAgentRunner(request: import("../../components/spin-types.js").SpinR
 
 async function fakeProjectRunner(request: import("../../components/tasks/scheduled-project-runner.js").ScheduledProjectRequest): Promise<{ cardId: number; result: string }> {
   doubles.projectRuns++;
-  const cardId = board.kanbanEnqueue(request.title, "task", request.runId, { type: "O", priority: "MEDIUM" });
-  // Drive the REAL supervision store to an accepted terminal — the O model
-  // boundary is the substitute; supervision/settlement semantics are real.
+  // Use the real scheduled O runner. The deterministic double is only the
+  // coordinator/model boundary that accepts the real project after admission.
+  const { scheduledProjectRunner } = await import("../../components/tasks/scheduled-project-runner.js");
+  const reconcilerModule = await import("../../components/reconciler.js");
   const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
-  const store = new ProjectReviewStore();
-  store.ensureAwaitingContract(cardId);
-  const reviewCase = store.insertReviewCase(cardId, 1, 1, { summary: "verified" }, "digest");
-  store.settleAcceptance(cardId, reviewCase.id, { accepted: true }, "project accepted");
-  return Promise.resolve({ cardId, result: "project accepted" });
+  const { nerve } = await import("../../components/nerve.js");
+  reconcilerModule.setOrcCoordinator({
+    scheduleScheduledProject(projectCardId: number) {
+      setImmediate(() => {
+        const store = new ProjectReviewStore();
+        const reviewCase = store.insertReviewCase(projectCardId, 1, 1, { summary: "verified" }, "digest");
+        store.settleAcceptance(projectCardId, reviewCase.id, { accepted: true }, "project accepted");
+        nerve.fire("card:done", projectCardId);
+      });
+      return { kind: "claimed", context: { runId: request.runId, projectCardId } } as never;
+    },
+  } as never);
+  return scheduledProjectRunner(request);
 }
 
 function makeDeliveryDeps() {

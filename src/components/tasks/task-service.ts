@@ -66,7 +66,7 @@ export function resumeAutoPaused(taskId: string, tasks: ScheduledTask[]): Resume
   if (state.activeRun) return "already_running";
 
   const next = stateStore.nextRunFromSchedule(entry);
-  stateStore.updateState(taskId, {
+  const patch: Partial<TaskRuntimeState> = {
     autoPaused: false,
     pausedAt: undefined,
     consecutiveFailures: 0,
@@ -79,8 +79,12 @@ export function resumeAutoPaused(taskId: string, tasks: ScheduledTask[]): Resume
     deferredAdmission: undefined,
     ...(next.nextRunAt !== undefined ? { nextRunAt: next.nextRunAt } : {}),
     ...(next.completed === true ? { completed: true } : {}),
-  });
-  return "resumed";
+  };
+  if (stateStore.updateStateIf(taskId, current => current.autoPaused === true && !current.activeRun, patch)) return "resumed";
+  const current = stateStore.readState(taskId);
+  if (current?.activeRun) return "already_running";
+  if (!current?.autoPaused) return "not_paused";
+  return "not_found";
 }
 
 export function triggerNow(taskId: string, tasks: ScheduledTask[]): boolean {

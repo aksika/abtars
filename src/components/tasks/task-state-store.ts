@@ -4,6 +4,7 @@ import { abtarsHome } from "../../paths.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { logInfo } from "../logger.js";
 import { CronExpressionParser } from "cron-parser";
+import { randomUUID } from "node:crypto";
 import type { ScheduledTask } from "./task-types.js";
 import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 
@@ -127,7 +128,11 @@ export function initializeState(entries: ScheduledTask[]): void {
       logInfo(TAG, `Self-repair: clearing incoherent autoPaused for "${id}" (zero failures)`);
       existing.autoPaused = false;
       existing.pausedAt = undefined;
-      existing.lastIncident = { version: 1, category: "definition", code: "state_repaired", phase: "settling", message: "auto-pause cleared: incoherent legacy state (zero failures)", retryability: "permanent", occurredAt: Date.now() };
+      if (!existing.lastIncident) {
+        existing.lastIncident = { version: 1, category: "definition", code: "state_repaired", phase: "settling", message: "auto-pause cleared: incoherent legacy state (zero failures)", retryability: "permanent", occurredAt: Date.now() };
+      } else {
+        logInfo(TAG, `Self-repair: preserving existing incident for "${id}"`);
+      }
       changed = true;
     }
     if (existing.autoPaused && existing.pausedAt === undefined) {
@@ -178,6 +183,23 @@ export function updateState(taskId: string, update: Partial<TaskRuntimeState>): 
     state[taskId] = { ...existing, ...update };
     return state;
   });
+}
+
+/** Apply a state patch only while the caller's durable predicate still holds. */
+export function updateStateIf(
+  taskId: string,
+  predicate: (state: TaskRuntimeState) => boolean,
+  update: Partial<TaskRuntimeState>,
+): boolean {
+  let changed = false;
+  writeAtomic(state => {
+    const existing = state[taskId];
+    if (!existing || !predicate(existing)) return state;
+    state[taskId] = { ...existing, ...update };
+    changed = true;
+    return state;
+  });
+  return changed;
 }
 
 export function advanceNextRun(taskId: string, schedule?: string): boolean {
@@ -273,6 +295,11 @@ export function setRetrying(taskId: string, retrying: boolean, retryAt?: number)
 export type ReserveRunResult =
   | { ok: true; run: ActiveTaskRun }
   | { ok: false; active: ActiveTaskRun };
+
+/** Run IDs must remain unique even when two occurrences are reserved in one millisecond. */
+export function createRunId(taskId: string): string {
+  return `${taskId}_${randomUUID().slice(0, 12)}`;
+}
 
 export function reserveRun(taskId: string, candidate: Omit<ActiveTaskRun, "reservedAt" | "phase" | "lastProgressAt">): ReserveRunResult {
   let result: ReserveRunResult = { ok: false, active: undefined! };

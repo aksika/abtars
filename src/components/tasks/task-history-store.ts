@@ -103,6 +103,12 @@ export function hasRun(runId: string): boolean {
   return events.some(e => e.runId === runId);
 }
 
+/** Return the durable terminal event for a run, when one exists. */
+export function getRun(runId: string): TaskRunEvent | undefined {
+  const lines = readAllLines();
+  return parseEvents(lines).find(e => e.runId === runId);
+}
+
 export function appendRunOnce(event: Omit<TaskRunEvent, "runId"> & { runId?: string }): string | null {
   const runId = event.runId ?? randomUUID().slice(0, 12);
   if (hasRun(runId)) return null;

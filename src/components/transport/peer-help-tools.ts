@@ -19,6 +19,16 @@ function parseStringArray(value: unknown, field: string): string[] {
   return [...new Set(parsed)].slice(0, 50);
 }
 
+async function resolveEnrolledPeers(names: string[]): Promise<string[]> {
+  const { resolvePeerName } = await import("./peer-resolver.js");
+  const resolved: string[] = [];
+  for (const name of names) {
+    const result = resolvePeerName(name);
+    if (result.ok) resolved.push(result.peer);
+  }
+  return [...new Set(resolved)];
+}
+
 export const peerAskHelpTool: ToolDefinition = {
   name: "peer_ask_help",
   description: "Ask a remote peer for help with a task. If peer is omitted, auto-selects an enrolled peer whose inventory matches required capabilities. The receiving peer independently decides whether to accept, decline, or defer.",
@@ -99,7 +109,7 @@ export const peerAskHelpTool: ToolDefinition = {
       const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
       const { hasAllCapabilities } = await import("../peer-transport/peer-inventory.js");
       const connected = getPeerWsBroker().getConnectedPeers();
-      const candidates = connected.filter(p => deduped.length === 0 || hasAllCapabilities(p, deduped));
+      const candidates = await resolveEnrolledPeers(connected.filter(p => deduped.length === 0 || hasAllCapabilities(p, deduped)));
       if (candidates.length === 0) {
         return JSON.stringify({ error: `No connected peer with capabilities: [${deduped.join(", ")}]` });
       }
@@ -111,12 +121,18 @@ export const peerAskHelpTool: ToolDefinition = {
     } else if (!peer) {
       const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
       const connected = getPeerWsBroker().getConnectedPeers();
-      if (connected.length === 0) {
+      const enrolled = await resolveEnrolledPeers(connected);
+      if (enrolled.length === 0) {
         return JSON.stringify({ error: "No connected peers available" });
       }
-      connected.sort((a, b) => a.localeCompare(b));
-      peer = connected[0]!;
+      enrolled.sort((a, b) => a.localeCompare(b));
+      peer = enrolled[0]!;
     }
+
+    const { resolvePeerName } = await import("./peer-resolver.js");
+    const resolvedPeer = resolvePeerName(peer);
+    if (!resolvedPeer.ok) return JSON.stringify({ error: resolvedPeer.message, code: resolvedPeer.code });
+    peer = resolvedPeer.peer;
 
     // #1433/#1357: An explicit peer with no inventory may still be asked over a
     // live route; receiver admission is authoritative. Contradictory inventory
@@ -233,7 +249,7 @@ export const peerAskHelpTool: ToolDefinition = {
         const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
         const { hasAllCapabilities } = await import("../peer-transport/peer-inventory.js");
         const connected = getPeerWsBroker().getConnectedPeers().filter(p => p !== peer);
-        const eligible = connected.filter(p => deduped.length === 0 || hasAllCapabilities(p, deduped));
+        const eligible = await resolveEnrolledPeers(connected.filter(p => deduped.length === 0 || hasAllCapabilities(p, deduped)));
         eligible.sort((a, b) => a.localeCompare(b));
         const nextCandidate = eligible[0];
         if (nextCandidate) {
@@ -324,8 +340,11 @@ export const peerHelpStatusTool: ToolDefinition = {
     if (!peer || !requestId || !contributionRef) return JSON.stringify({ error: "peer, request_id, and contribution_ref are required" });
 
     try {
+      const { resolvePeerName } = await import("./peer-resolver.js");
+      const resolved = resolvePeerName(peer);
+      if (!resolved.ok) return JSON.stringify({ error: resolved.message, code: resolved.code });
       const transport = getPeerTransport();
-      const result = await transport.getHelpStatus(peer, { version: 1, request_id: requestId, contribution_ref: contributionRef });
+      const result = await transport.getHelpStatus(resolved.peer, { version: 1, request_id: requestId, contribution_ref: contributionRef });
       return JSON.stringify({ ok: true, ...result });
     } catch (err) {
       logWarn(TAG, `peer_help_status failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -354,8 +373,11 @@ export const peerWithdrawHelpTool: ToolDefinition = {
     if (!peer || !requestId || !contributionRef) return JSON.stringify({ error: "peer, request_id, and contribution_ref are required" });
 
     try {
+      const { resolvePeerName } = await import("./peer-resolver.js");
+      const resolved = resolvePeerName(peer);
+      if (!resolved.ok) return JSON.stringify({ error: resolved.message, code: resolved.code });
       const transport = getPeerTransport();
-      const result = await transport.withdrawHelp(peer, {
+      const result = await transport.withdrawHelp(resolved.peer, {
         version: 1,
         request_id: requestId,
         contribution_ref: contributionRef,

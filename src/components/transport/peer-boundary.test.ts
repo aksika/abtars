@@ -85,4 +85,11 @@ describe("#1520 peer identity boundary", () => {
     expect(parsed.response).toBe("peer response");
     expect(callPeer).toHaveBeenCalledWith("molty", expect.any(String), 2);
   });
+
+  it("peer help egress rejects local identities before transport lookup", async () => {
+    const out = await executeToolCall("peer_ask_help", { peer: "O", goal: "help" }, {});
+    const parsed = JSON.parse(out) as { code?: string };
+    expect(parsed.code).toBe("local_session_not_peer");
+    expect(vi.mocked(getPeerTransport)).not.toHaveBeenCalled();
+  });
 });

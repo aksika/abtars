@@ -61,6 +61,10 @@ vi.mock("./orc-tools.js", () => ({
   isActiveCardPeerSourced: () => false,
 }));
 
+vi.mock("./peer-resolver.js", () => ({
+  resolvePeerName: (peer: string) => ({ ok: true, peer }),
+}));
+
 let mod: typeof import("./peer-help-tools.js");
 
 beforeEach(async () => {

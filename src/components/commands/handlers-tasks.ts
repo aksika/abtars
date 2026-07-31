@@ -120,9 +120,12 @@ export async function handleTasksLog(text: string, ctx: CommandContext): Promise
       else await ctx.reply(msg);
       return true;
     }
-    const runs = (data.runs as { ranAt: string; exitCode?: number }[]).slice(-5);
-    const lines = runs.map(r => `${r.ranAt}  exit=${r.exitCode ?? "?"}`);
-    const body = `📋 ${data.message}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``;
+    const runs = (data.runs as { ranAt: string; exitCode?: number; diagnostic?: { category: string; code: string; message?: string } }[]).slice(-5);
+    const lines = runs.map(r => {
+      const diagnostic = r.diagnostic ? `  ${r.diagnostic.category}/${r.diagnostic.code}${r.diagnostic.message ? `: ${r.diagnostic.message}` : ""}` : "";
+      return `${r.ranAt}  exit=${r.exitCode ?? "?"}${diagnostic}`;
+    });
+    const body = `📋 Task history: ${id}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``;
     if (placeholderId !== undefined && ctx.editReply) await ctx.editReply(placeholderId, body);
     else await ctx.reply(body, { parseMode: "Markdown" });
   } catch (err) {
