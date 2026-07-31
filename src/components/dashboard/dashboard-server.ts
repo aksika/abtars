@@ -396,7 +396,8 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
 // ── Cron Control ────────────────────────────────────────────────────────────
 
 import { readEntry as cronReadEntry } from "../tasks/task-store.js";
-import { setAutoPaused, updateState } from "../tasks/task-state-store.js";
+import { readEntries as cronReadEntries } from "../tasks/task-store.js";
+import { setAutoPaused } from "../tasks/task-state-store.js";
 
 function handleCronAction(id: string, action: string): { ok: boolean; error?: string } {
   const entry = cronReadEntry(id);
@@ -405,10 +406,14 @@ function handleCronAction(id: string, action: string): { ok: boolean; error?: st
   if (action === "pause") {
     setAutoPaused(id, true);
   } else if (action === "resume") {
-    setAutoPaused(id, false);
+    // #1520: one service operation for dashboard, chat, and CLI resume.
+    const { resumeAutoPaused } = require("../tasks/task-service.js") as typeof import("../tasks/task-service.js");
+    const result = resumeAutoPaused(id, cronReadEntries());
+    if (result === "already_running") return { ok: false, error: `Entry ${id} is currently running` };
   } else if (action === "trigger") {
-    setAutoPaused(id, false);
-    updateState(id, { nextRunAt: Date.now() - 1000 });
+    // #1520: one service run-now operation clears pause and counters.
+    const { triggerNow } = require("../tasks/task-service.js") as typeof import("../tasks/task-service.js");
+    triggerNow(id, cronReadEntries());
   }
 
   return { ok: true };

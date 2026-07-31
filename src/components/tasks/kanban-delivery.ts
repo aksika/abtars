@@ -2,9 +2,6 @@ import type { KanbanCard } from "./kanban-board.js";
 import { kanbanMarkDelivered, kanbanClaimDelivery, kanbanGetCard, kanbanPending, requireTaskDatabase } from "./kanban-board.js";
 import { logDebug, logWarn } from "../logger.js";
 import { logSwarmTrace } from "../swarm-trace.js";
-import { makeTaskFailure } from "./task-failure.js";
-import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
-
 const TAG = "kanban-delivery";
 
 /**
@@ -114,16 +111,6 @@ function recordOutcome(cardId: number, outcome: SendOutcome, kind: string): void
   }
   markUnknown(cardId);
   logSwarmTrace({ event: "delivery_failed", card: cardId, reason: kind });
-}
-
-export function deliveryDiagnostic(cardId: number, outcome: SendOutcome): TaskFailureDiagnosticV1 {
-  return makeTaskFailure(
-    "delivery",
-    outcome === "not_sent" ? "definitely_not_sent" : "send_unknown",
-    "delivery",
-    `card ${cardId} delivery ${outcome === "not_sent" ? "definitely not sent" : "state unknown"}`,
-    "none",
-  );
 }
 
 /** #1520: the delivery poll — bounded claim over all done cards (≤5 attempts). */

@@ -2,7 +2,7 @@
 
 **Meet the latest kid on the block.** An agentic framework designed to survive — and do the job.
 
-abTARS is an autonomous AI agent that runs 24/7 on your hardware. It talks to you via Telegram, Discord, or IRC. It remembers everything. It recovers from failures without intervention. It coordinates with peer instances across machines. Your hardware, your rules, zero cloud dependency.
+abTARS is an autonomous AI agent that runs 24/7 on your hardware. It talks to you via Telegram or Discord. It remembers everything. It recovers from failures without intervention. It coordinates with peer instances across machines. Your hardware, your rules, zero cloud dependency.
 
 ## Five Layers: Body → Heart → Brain → Soul → Tribe
 
@@ -24,7 +24,7 @@ Each layer builds on the one below it — lower layers work without the higher o
 │            Health monitoring                │
 ├─────────────────────────────────────────────┤
 │  Body      Platforms (Telegram, Discord,    │
-│            IRC), Dashboard, CLI,            │
+│            Dashboard, CLI,            │
 │            Security/Trust, ActionGate,      │
 │            Doctor, Watchdog, Boot, Config   │
 └─────────────────────────────────────────────┘
@@ -81,7 +81,7 @@ abTARS integrates [Pi](https://github.com/earendil-works/pi) as a **symbiotic pe
 ## Architecture
 
 ```
-You (Telegram / Discord / IRC / API client)
+You (Telegram / Discord / API client)
   │
   ▼
 abTARS (bridge)
@@ -108,7 +108,7 @@ abTARS (bridge)
 ## Requirements
 
 - Node.js 22+
-- A Telegram bot token (Discord/IRC optional)
+- A Telegram bot token (Discord optional)
 - At least one model provider
 
 Optional: ollama + `nomic-embed-text` for memory embeddings.

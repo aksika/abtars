@@ -9,7 +9,7 @@ import { makeTaskFailure } from "./task-failure.js";
 import { createExecutionScope } from "./task-package.js";
 import { registerControl, removeControl } from "../execution-control.js";
 import { SpinDispatchAdmissionError } from "../spin-types.js";
-import { kanbanComplete, kanbanFail, kanbanAttachResult, kanbanSetDeliveryReady, kanbanEnqueue } from "./kanban-board.js";
+import { kanbanComplete, kanbanAttachResult, kanbanEnqueue } from "./kanban-board.js";
 import { logTaskDebug, logTaskTrace } from "./task-log-ctx.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
 import type { ScheduledTask } from "./task-types.js";
@@ -315,11 +315,11 @@ export class ScheduledTaskRunner {
           } else {
             kanbanComplete(boardId, resultPath, settlementDetail);
           }
-          const settled = settleRunOnce({
+          // The shared settler is the exclusive delivery release point.
+          settleRunOnce({
             entry, run: reservation, outcome: "success", detail: settlementDetail, resultPath, cardId: boardId,
             executionRef: runId, releaseDelivery: true, onPaused: this.onPaused,
           });
-          if (maxAgents > 1 && settled === "settled") kanbanSetDeliveryReady(boardId);
           return { status: "success", safeDetail: settlementDetail, artifactPath: resultPath ?? undefined, cardId: boardId };
         } else {
           settlementDetail = artifactResult.reason;
@@ -335,7 +335,7 @@ export class ScheduledTaskRunner {
         // branch for direct queue callers so they fail before delivery rather
         // than falling back to response-length validation.
         settlementDetail = "report contract missing";
-        kanbanFail(boardId, settlementDetail);
+        // The shared settler owns card mutation; it fails the card exactly once.
         settleRunOnce({
           entry, run: reservation, outcome: "definition_failed",
           diagnostic: makeTaskFailure("definition", "report_contract_missing", "validating", settlementDetail, "permanent"),
@@ -344,11 +344,11 @@ export class ScheduledTaskRunner {
         return { status: "definition_failed", safeDetail: settlementDetail, cardId: boardId };
       } else {
         kanbanComplete(boardId, null, response?.slice(0, 4000) || "completed");
-        const settled = settleRunOnce({
+        // The shared settler is the exclusive delivery release point.
+        settleRunOnce({
           entry, run: reservation, outcome: "success", detail: response?.slice(0, 200), cardId: boardId,
           executionRef: runId, releaseDelivery: true, onPaused: this.onPaused,
         });
-        if (maxAgents > 1 && settled === "settled") kanbanSetDeliveryReady(boardId);
         return { status: "success", safeDetail: response?.slice(0, 200), cardId: boardId };
       }
     } catch (err) {

@@ -177,10 +177,11 @@ function computeStatePatch(
     };
   }
   if (outcome === "noop" || outcome === "skipped") {
-    // A noop is healthy but does not erase the latest incident or failures.
+    // A noop is healthy: it advances the schedule but does not erase the
+    // latest incident or reset failure counting. Omitting lastIncident from
+    // the patch preserves the existing incident untouched.
     return {
       lastFinishedAt: finishedAt,
-      lastIncident: diagnostic,
       ...nextRunFromSchedule(entry),
       retrying: false,
       retryGroupId: undefined,

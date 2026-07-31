@@ -55,12 +55,14 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
       const activeRun = state?.activeRun;
       const isActive = activeRun && ["reserved", "queued", "executing", "cancelling", "validating", "settling"].includes(activeRun.phase);
       const tick = isPaused ? "p" : !runsToday ? "-" : succeeded ? "+" : running || isActive ? "~" : failed ? "x" : started ? "x" : "+";
-      // #1520: show category/code plus failure count and the exact resume command.
+      // #1520: show category/code plus failure count, latest occurrence, and
+      // the exact resume command.
       let pauseMarker = "";
       if (autoPaused) {
         const inc = state?.lastIncident;
         const code = inc ? `${inc.category}/${inc.code}` : `${state?.consecutiveFailures ?? 0}f`;
-        pauseMarker = ` [auto-paused:${code} · ${state?.consecutiveFailures ?? 0}f — /task resume ${e.id}]`;
+        const at = state?.pausedAt ? ` @${new Date(state.pausedAt).toLocaleTimeString()}` : "";
+        pauseMarker = ` [auto-paused:${code} · ${state?.consecutiveFailures ?? 0}f${at} — /task resume ${e.id}]`;
       } else if (isActive) {
         pauseMarker = ` [${activeRun.phase}]`;
       } else if (state?.retrying) {
