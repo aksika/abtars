@@ -218,7 +218,14 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   // #1505: Reconcile any active runs from a prior process crash
   const { reconcileActiveTaskRuns } = await import("../components/tasks/task-checker.js");
-  await reconcileActiveTaskRuns();
+  await reconcileActiveTaskRuns((entry, run) => {
+    const enqueueResult = cronQueue.enqueue(entry, false, run);
+    if (enqueueResult) {
+      logWarn("boot", `Could not reattach scheduled project ${entry.id}: ${enqueueResult}`);
+      return false;
+    }
+    return true;
+  });
 
   // Register Tier 3 heartbeat tasks (cron, housekeeping, self-healer, etc.)
   const { registerTier3Tasks } = await import("./heartbeat-tier3.js");

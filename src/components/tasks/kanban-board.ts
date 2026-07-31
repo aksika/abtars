@@ -77,6 +77,8 @@ export interface KanbanCard {
   delivery_claimed_at: string | null;
   delivery_result: string | null;
   delivery_receipt: string | null;
+  /** #1516: scheduled project delivery stays blocked until shared validation settles. */
+  delivery_ready: number;
   /** #1516: total agent budget (1 Orc + workers) for scheduled projects. */
   max_agents: number | null;
 }
@@ -133,6 +135,8 @@ function db(): SqliteDb | null {
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_receipt TEXT`); } catch {}
     // #1516: durable per-project agent cap (scheduled orchestration policy)
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_agents INTEGER`); } catch {}
+    // #1516: project acceptance happens before scheduled artifact validation.
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_ready INTEGER NOT NULL DEFAULT 1`); } catch {}
   } catch {
     logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
     _db = null;
@@ -160,7 +164,7 @@ export function normalizePriority(raw: string | undefined | null): KanbanPriorit
   return VALID_PRIORITIES.has(upper as KanbanPriority) ? upper as KanbanPriority : "MEDIUM";
 }
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string; maxAgents?: number }): number {
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string; maxAgents?: number; deliveryReady?: boolean }): number {
   const d = dbOrNull();
   if (!d) return 0;
   const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
@@ -173,10 +177,10 @@ export function kanbanEnqueue(title: string, source: string, sourceId?: string, 
     return 0;
   }
   const stmt = d.prepare(
-    `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer, max_agents)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer, max_agents, delivery_ready)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null, maxAgents ?? null);
+  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null, maxAgents ?? null, opts?.deliveryReady === false ? 0 : 1);
   const id = Number(result.lastInsertRowid);
   nerve.fire("card:queued", id);
   return id;
@@ -456,6 +460,17 @@ export function kanbanAttachResult(cardId: number, resultPath: string, summary: 
     `UPDATE kanban_board SET result_path = ?, result_summary = ?, updated_at = datetime('now')
      WHERE id = ? AND status = 'done' AND result_path IS NULL`
   ).run(resultPath, summary.slice(0, 4000), cardId);
+}
+
+/** #1516: Release a scheduled project for delivery after shared settlement. */
+export function kanbanSetDeliveryReady(cardId: number): void {
+  const d = dbOrNull();
+  if (!d) return;
+  const result = d.prepare(
+    `UPDATE kanban_board SET delivery_ready = 1, updated_at = datetime('now')
+     WHERE id = ? AND status = 'done' AND delivery_ready = 0`
+  ).run(cardId) as { changes?: number };
+  if ((result.changes ?? 0) === 1) nerve.fire("card:done", cardId);
 }
 
 export function kanbanAddTokens(id: number, tokens: number): void {

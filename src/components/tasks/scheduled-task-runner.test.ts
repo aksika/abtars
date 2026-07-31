@@ -13,6 +13,7 @@ vi.mock("./kanban-board.js", () => ({
   kanbanComplete: vi.fn(),
   kanbanFail: vi.fn(),
   kanbanAttachResult: vi.fn(),
+  kanbanSetDeliveryReady: vi.fn(),
 }));
 vi.mock("./task-history-store.js", () => ({
   appendRunOnce: vi.fn(),

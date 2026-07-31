@@ -66,6 +66,9 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
     rootCardId = activeRun!.cardId!;
     const existing = kanbanGetCard(rootCardId);
     if (!existing) throw new Error(`scheduled project card #${rootCardId} not found`);
+    if (existing.type !== "O" || existing.source !== "task" || existing.source_id !== runId) {
+      throw new Error(`scheduled project card #${rootCardId} identity conflict for run ${runId}`);
+    }
     executionControl.setCardId(rootCardId);
     logInfo(TAG, `Reattaching scheduled project card #${rootCardId} for task "${entryId}" run ${runId}`);
   } else {
@@ -79,6 +82,7 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
       delivery: request.delivery,
       chatId: request.chatId,
       maxAgents: request.maxAgents,
+      deliveryReady: false,
     });
     if (rootCardId === 0) throw new Error("scheduled project admission failed: kanban database unavailable");
     executionControl.setCardId(rootCardId);
@@ -104,7 +108,8 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
   // The Reconciler only supervises running O cards; the Orc turn also marks
   // the card running, but this guarantees supervision regardless of dispatch
   // gate state.
-  kanbanRunning(rootCardId);
+  const currentCard = kanbanGetCard(rootCardId);
+  if (currentCard?.status === "queued") kanbanRunning(rootCardId);
 
   executionControl.bind(async (reason) => {
     logInfo(TAG, `Scheduled project #${rootCardId} cancelled: ${reason}`);

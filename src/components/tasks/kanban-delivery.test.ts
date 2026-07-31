@@ -39,6 +39,22 @@ function makeCard(overrides: Partial<import("./kanban-board.js").KanbanCard> = {
 }
 
 describe("deliverCard — deliver mode", () => {
+  it("defers a card until the scheduled owner releases delivery", async () => {
+    const id = board.kanbanEnqueue("Deferred task", "task", "run-1", { deliveryReady: false });
+    board.kanbanRunning(id);
+    board.kanbanComplete(id, null, "validated");
+    const deps = makeDeps();
+
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(board.kanbanGetCard(id)!.status).toBe("done");
+
+    board.kanbanSetDeliveryReady(id);
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    expect(deps.sendMessage).toHaveBeenCalledOnce();
+    expect(board.kanbanGetCard(id)!.status).toBe("delivered");
+  });
+
   it("sends plain confirmation via sendMessage, never touches announce/model", async () => {
     const card = makeCard({ delivery_mode: "deliver" });
     const deps = makeDeps();

@@ -8,7 +8,7 @@ import { preflightTask, validateReportArtifact } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { createExecutionScope } from "./task-package.js";
 import { registerControl, removeControl } from "../execution-control.js";
-import { kanbanComplete, kanbanFail, kanbanAttachResult } from "./kanban-board.js";
+import { kanbanComplete, kanbanFail, kanbanAttachResult, kanbanSetDeliveryReady } from "./kanban-board.js";
 import { logTaskDebug, logTaskTrace } from "./task-log-ctx.js";
 import { incrementDeferrals, advanceNextRun } from "./task-state-store.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
@@ -233,7 +233,8 @@ export class ScheduledTaskRunner {
           } else {
             kanbanComplete(boardId, resultPath, settlementDetail);
           }
-          settleRunOnce({ entry, run: reservation, outcome: "success", detail: settlementDetail, resultPath, cardId: boardId, executionRef: runId });
+          const settled = settleRunOnce({ entry, run: reservation, outcome: "success", detail: settlementDetail, resultPath, cardId: boardId, executionRef: runId });
+          if (maxAgents > 1 && settled === "settled") kanbanSetDeliveryReady(boardId);
           return { status: "success", safeDetail: settlementDetail, artifactPath: resultPath ?? undefined, cardId: boardId };
         } else {
           settlementDetail = artifactResult.reason;
@@ -250,7 +251,8 @@ export class ScheduledTaskRunner {
         return { status: "definition_failed", safeDetail: settlementDetail, cardId: boardId };
       } else {
         kanbanComplete(boardId, null, response?.slice(0, 4000) || "completed");
-        settleRunOnce({ entry, run: reservation, outcome: "success", detail: response?.slice(0, 200), cardId: boardId, executionRef: runId });
+        const settled = settleRunOnce({ entry, run: reservation, outcome: "success", detail: response?.slice(0, 200), cardId: boardId, executionRef: runId });
+        if (maxAgents > 1 && settled === "settled") kanbanSetDeliveryReady(boardId);
         return { status: "success", safeDetail: response?.slice(0, 200), cardId: boardId };
       }
     } catch (err) {

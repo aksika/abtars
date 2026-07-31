@@ -30,6 +30,10 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     logDebug(TAG, `Card ${card.id} already delivered — skipping`);
     return;
   }
+  if (fresh.delivery_ready === 0) {
+    logDebug(TAG, `Card ${card.id} is awaiting scheduled settlement — skipping`);
+    return;
+  }
   if (fresh.delivery_result === "unknown") {
     logDebug(TAG, `Card ${card.id} delivery_result=unknown — skipping auto-retry`);
     return;
@@ -123,4 +127,3 @@ export function markDefinitelyNotSent(cardId: number): void {
     logWarn(TAG, `markDefinitelyNotSent failed for card ${cardId}: ${err}`);
   }
 }
-

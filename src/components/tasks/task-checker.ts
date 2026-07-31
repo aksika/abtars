@@ -108,6 +108,12 @@ export interface ReservedTask {
   run: ActiveTaskRun;
 }
 
+/** Reattach a durable scheduled project to its scheduled lifecycle owner. */
+export type ScheduledProjectReattach = (
+  entry: ScheduledTask & { kind: "agent" },
+  run: ActiveTaskRun,
+) => boolean;
+
 export function checkCron(): ReservedTask[] {
   const entries = dbReadEntries();
   const dueTasks: ReservedTask[] = [];
@@ -162,7 +168,7 @@ export function checkCron(): ReservedTask[] {
 
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 
-export function reconcileActiveTaskRuns(): void {
+export function reconcileActiveTaskRuns(reattachProject?: ScheduledProjectReattach): void {
   const entries = dbReadEntries();
   for (const entry of entries) {
     const state = readState(entry.id);
@@ -176,22 +182,6 @@ export function reconcileActiveTaskRuns(): void {
       continue;
     }
 
-    // #1516: interrupted scheduled project — the durable root card identity
-    // survives restart. If the project reached a terminal state while the
-    // bridge was down, terminalize the scheduled run now (consistent with the
-    // deadline recovery path) instead of leaving it reserved until the
-    // deadline. A still-live project is left to the Reconciler, which resumes
-    // and re-supervises it from its durable state.
-    if (run.cardId !== undefined) {
-      const card = kanbanGetCard(run.cardId);
-      if (card && (card.status === "done" || card.status === "delivered" || card.status === "failed")) {
-        updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined, activeRun: undefined });
-        appendRun({ taskId: entry.id, kind: entry.kind, trigger: run.trigger, startedAt: run.reservedAt, finishedAt: Date.now(), outcome: "cancelled", detail: `restart_recovery: project terminal (${card.status})`, groupId: run.groupId, runId: run.runId });
-        logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=settled_project_terminal card=${run.cardId} status=${card.status}`);
-        continue;
-      }
-    }
-
     if (run.deadlineAt < Date.now()) {
       updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined, activeRun: undefined });
       appendRun({ taskId: entry.id, kind: entry.kind, trigger: run.trigger, startedAt: run.reservedAt, finishedAt: Date.now(), outcome: "cancelled", detail: "restart_recovery: deadline passed", groupId: run.groupId, runId: run.runId });
@@ -201,6 +191,29 @@ export function reconcileActiveTaskRuns(): void {
         void abortProjectById(run.cardId, "restart_recovery: scheduled deadline passed");
       }
       logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=settled_deadline_passed`);
+      continue;
     }
+
+    // #1516: an interrupted scheduled project must regain its scheduled
+    // lifecycle owner. The Reconciler can supervise the durable project, but
+    // it cannot validate the final artifact or settle scheduled history.
+    if (run.cardId !== undefined) {
+      const card = kanbanGetCard(run.cardId);
+      const maxAgents = entry.kind === "agent" ? (entry.orchestration?.maxAgents ?? 1) : 1;
+      if (card && entry.kind === "agent" && maxAgents > 1 && reattachProject) {
+        if (reattachProject(entry, run)) {
+          logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=reattached_project card=${run.cardId}`);
+          continue;
+        }
+        logWarn(TAG, `Unable to reattach scheduled project task=${entry.id} run=${run.runId} card=${run.cardId}`);
+      }
+      if (card && (card.status === "done" || card.status === "delivered" || card.status === "failed")) {
+        updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined, activeRun: undefined });
+        appendRun({ taskId: entry.id, kind: entry.kind, trigger: run.trigger, startedAt: run.reservedAt, finishedAt: Date.now(), outcome: "cancelled", detail: `restart_recovery: project terminal (${card.status})`, groupId: run.groupId, runId: run.runId });
+        logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=settled_project_terminal card=${run.cardId} status=${card.status}`);
+        continue;
+      }
+    }
+
   }
 }

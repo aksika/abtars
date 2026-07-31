@@ -522,10 +522,14 @@ export class ProjectReviewStore {
         VALUES (?, ?, ?, ?, ?)
       `).run(decisionId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
 
-      // Set supervision to accepted
-      this.db.prepare(`
-        UPDATE project_supervision SET state = 'accepted', accepted_decision_id = ?, updated_at = ? WHERE project_card_id = ?
+      // Set supervision to accepted only while the project is live. An abort
+      // freezes it in blocked state before cancelling executors, so a late Orc
+      // result cannot reverse a terminal scheduled outcome.
+      const state = this.db.prepare(`
+        UPDATE project_supervision SET state = 'accepted', accepted_decision_id = ?, updated_at = ?
+        WHERE project_card_id = ? AND state NOT IN ('accepted', 'blocked')
       `).run(decisionId, now, cardId);
+      if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
 
       // Update kanban card via projectStateToKanban mapping
       this.db.prepare(`
@@ -580,9 +584,11 @@ export class ProjectReviewStore {
         VALUES (?, ?, ?, ?, ?)
       `).run(decisionId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
 
-      this.db.prepare(`
-        UPDATE project_supervision SET state = 'blocked', blocked_reason = ?, accepted_decision_id = ?, updated_at = ? WHERE project_card_id = ?
+      const state = this.db.prepare(`
+        UPDATE project_supervision SET state = 'blocked', blocked_reason = ?, accepted_decision_id = ?, updated_at = ?
+        WHERE project_card_id = ? AND state NOT IN ('accepted', 'blocked')
       `).run(blockerClass, decisionId, now, cardId);
+      if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
 
       this.db.prepare(`
         UPDATE kanban_board SET status = ?, error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?

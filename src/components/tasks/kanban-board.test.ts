@@ -430,4 +430,14 @@ describe("kanban-board #1516 bounded agent orchestration", () => {
     expect(card.result_summary).toBe("artifact 1234 bytes");
     expect(card.status).toBe("done");
   });
+
+  it("releases deferred delivery exactly once", () => {
+    const root = mod.kanbanEnqueue("Deferred project", "task", "run-1", { type: "O", maxAgents: 2, deliveryReady: false });
+    mod.kanbanRunning(root);
+    mod.kanbanComplete(root, null, "accepted");
+    expect(mod.kanbanGetCard(root)!.delivery_ready).toBe(0);
+    mod.kanbanSetDeliveryReady(root);
+    mod.kanbanSetDeliveryReady(root);
+    expect(mod.kanbanGetCard(root)!.delivery_ready).toBe(1);
+  });
 });

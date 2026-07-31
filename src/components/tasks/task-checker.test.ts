@@ -90,8 +90,8 @@ describe("reconcileActiveTaskRuns #1516 restart identity", () => {
     vi.clearAllMocks();
   });
 
-  function runWith(cardId: number | undefined, deadlineAt: number, phase = "executing"): void {
-    vi.mocked(taskStore.readEntries).mockReturnValue([makeTask()]);
+  function runWith(cardId: number | undefined, deadlineAt: number, phase = "executing", reattach?: (entry: any, run: any) => boolean, taskOverrides: Partial<ScheduledTask> = {}): void {
+    vi.mocked(taskStore.readEntries).mockReturnValue([makeTask(taskOverrides)]);
     vi.mocked(stateStore.readState).mockReturnValue({
       nextRunAt: Date.now() - 1000,
       consecutiveFailures: 0,
@@ -104,7 +104,7 @@ describe("reconcileActiveTaskRuns #1516 restart identity", () => {
         cardId,
       },
     });
-    reconcileActiveTaskRuns();
+    reconcileActiveTaskRuns(reattach);
   }
 
   it("terminalizes an interrupted run whose project reached a terminal card", () => {
@@ -122,9 +122,11 @@ describe("reconcileActiveTaskRuns #1516 restart identity", () => {
     expect(reconcilerMod.abortProjectById).toHaveBeenCalledWith(78, "restart_recovery: scheduled deadline passed");
   });
 
-  it("leaves a live project within deadline untouched for the Reconciler", () => {
+  it("reattaches a live project within deadline to the scheduled lifecycle owner", () => {
     vi.mocked(kanbanMod.kanbanGetCard).mockReturnValue({ id: 79, status: "running" } as never);
-    runWith(79, Date.now() + 60_000);
+    const reattach = vi.fn(() => true);
+    runWith(79, Date.now() + 60_000, "executing", reattach, { orchestration: { maxAgents: 4 } });
+    expect(reattach).toHaveBeenCalledWith(expect.objectContaining({ id: "t1" }), expect.objectContaining({ runId: "interrupted-run", cardId: 79 }));
     expect(vi.mocked(stateStore.updateState)).not.toHaveBeenCalledWith("t1", expect.objectContaining({ activeRun: undefined }));
     expect(vi.mocked(historyStore.appendRun)).not.toHaveBeenCalled();
   });

@@ -159,6 +159,13 @@ describe("scheduled-project-runner #1516", () => {
     control.signalCancel("deadline");
     await expect(pending).rejects.toThrow(/cancelled/);
     expect(kanban.kanbanGetCard(root.id)?.status).toBe("failed");
+    expect(new reviewStoreMod.ProjectReviewStore().getSupervision(root.id)?.state).toBe("blocked");
+    expect(() => new reviewStoreMod.ProjectReviewStore().settleAcceptance(
+      root.id,
+      "late-case",
+      { synthesis: "late" },
+      "late",
+    )).toThrow(/already terminal/);
   });
 
   it("reattaches to the persisted card on duplicate admission and never creates a second project", async () => {
@@ -189,17 +196,27 @@ describe("scheduled-project-runner #1516", () => {
     expect(kanban.kanbanList("*")).toHaveLength(0);
   });
 
+  it("refuses a persisted card whose durable source identity belongs to another run", async () => {
+    fakeCoordinator();
+    await seedReservation();
+    const root = kanban.kanbanEnqueue("Daily Ai", "task", "other-run", { type: "O", maxAgents: 4 });
+    stateStore.updateActiveRun("daily-ai", "daily-ai_1", { cardId: root });
+
+    await expect(mod.scheduledProjectRunner(makeRequest())).rejects.toThrow(/identity conflict/);
+    expect(kanban.kanbanList("*")).toHaveLength(1);
+  });
+
   it("resolves immediately when the persisted card is already terminal", async () => {
     fakeCoordinator();
     await seedReservation();
     const store = new reviewStoreMod.ProjectReviewStore();
-    const root = kanban.kanbanEnqueue("Daily Ai", "task", undefined, { type: "O", maxAgents: 4 });
+    const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
     store.ensureAwaitingContract(root);
     store.settleAcceptance(root, "case-reattach", { synthesis: "already accepted" }, "already accepted", undefined, "rd_test_reattach");
-    kanban.kanbanRunning(root);
     stateStore.updateActiveRun("daily-ai", "daily-ai_1", { cardId: root });
 
     const result = await mod.scheduledProjectRunner(makeRequest());
     expect(result).toEqual({ cardId: root, result: "already accepted" });
+    expect(kanban.kanbanGetCard(root)?.status).toBe("done");
   });
 });

@@ -79,6 +79,7 @@ describe("scheduled project orchestration (#1516)", () => {
     expect(root.type).toBe("O");
     expect(root.max_agents).toBe(4);
     expect(root.source).toBe("task");
+    expect(root.delivery_ready).toBe(0);
 
     // Three independent lanes run to completion under the project root.
     const laneIds = [1, 2, 3].map(i => {
@@ -105,6 +106,7 @@ describe("scheduled project orchestration (#1516)", () => {
     expect(done[0]!.id).toBe(rootId);
     expect(done[0]!.result_path).toBe(artifactPath);
     expect(done[0]!.result_summary).toContain("artifact");
+    expect(done[0]!.delivery_ready).toBe(1);
     expect(existsSync(done[0]!.result_path!)).toBe(true);
 
     const history = readFileSync(join(home, "tasks", "task-history.jsonl"), "utf8");

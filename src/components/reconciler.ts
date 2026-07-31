@@ -763,6 +763,15 @@ function getLatestAttemptInfo(cardId: number): AttemptRow | undefined {
 
 async function abortProject(projectId: number, children: KanbanCard[], reason: string): Promise<void> {
   logWarn(TAG, `ABORT project ${projectId}: ${reason}`);
+  // Freeze supervision before cancelling child executors. Late Orc review
+  // results must not be able to move an aborted project back to accepted.
+  const reviewStore = new ProjectReviewStore();
+  reviewStore.stateTransition(
+    projectId,
+    ["awaiting_contract", "executing", "review_ready", "review_requested", "reviewing", "repair_planned", "repairing", "needs_input"],
+    "blocked",
+    { blocked_reason: `aborted: ${reason}`.slice(0, 500) },
+  );
   const store = new WorkerSupervisionStore();
   for (const card of children) {
     if (card.status !== "running" && card.status !== "queued") continue;
