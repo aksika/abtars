@@ -31,7 +31,6 @@ export type {
   SearchResult,
   VectorSearchResult,
   SearchOptions,
-  ForgetResult,
   ExtractedMemory,
   MemorySearchParams,
   MemorySearchResult,
