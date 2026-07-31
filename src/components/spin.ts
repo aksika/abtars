@@ -5,6 +5,7 @@
 
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
+import { SpinDispatchAdmissionError } from "./spin-types.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanQueuedDispatchOrder, kanbanGetCard, isUnblocked, resolveRootId, checkWorkerSlotForProject } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
@@ -548,6 +549,7 @@ export class Spin {
         deliveryMode: spec.deliveryMode, delivery: spec.delivery, chatId: chatId ? String(chatId) : undefined,
         notes: spec.callbackPeer ? JSON.stringify({ callback_peer: spec.callbackPeer }) : undefined,
         sourcePeer: spec.sourcePeer,
+        deliveryReady: spec.deliveryReady,
       });
     }
     // The scheduled runner may need to settle a timeout before dispatchAwait
@@ -1174,6 +1176,7 @@ export class Spin {
       settlementOwner: request.settlementOwner,
       executionScope: request.executionScope,
       deadlineAt: request.deadlineAt,
+      deliveryReady: request.deliveryReady,
     });
     return { cardId };
   }
@@ -1185,12 +1188,18 @@ export class Spin {
   async dispatchAwait(request: SpinRequest): Promise<{ cardId: number; result: string }> {
     // #987: enforce concurrency + cooldown gates
     // #1274: also enforce session cap (await:true — throw is safe, caller awaits)
+    // #1520: typed admission rejection so the scheduler can defer the same
+    // occurrence instead of counting a failure. Gate checks happen strictly
+    // before any model call starts.
     const aliveSessions = [...this.sessions.values()].filter(s => s.status !== "ended").length;
     if (aliveSessions >= MAX_TOTAL_SESSIONS) {
-      throw new Error("System busy — max sessions reached.");
+      throw new SpinDispatchAdmissionError("session_capacity", "System busy — max sessions reached.");
     }
     if (!this.canDispatch(request.type, 0)) {
-      throw new Error(`${request.type} session busy or in cooldown — skipping`);
+      if (request.type === "H" && Date.now() - this._lastHealerDoneAt < 120_000) {
+        throw new SpinDispatchAdmissionError("model_cooldown", "Healer session in cooldown — try again shortly.", this._lastHealerDoneAt + 120_000);
+      }
+      throw new SpinDispatchAdmissionError("type_busy", `${request.type} session busy — try again shortly.`);
     }
     const { cardId, result } = await this.spin({
       type: request.type,
@@ -1210,6 +1219,7 @@ export class Spin {
       executionControl: request.executionControl,
       executionScope: request.executionScope,
       deadlineAt: request.deadlineAt,
+      deliveryReady: request.deliveryReady,
     });
     return { cardId: cardId!, result: result! };
   }

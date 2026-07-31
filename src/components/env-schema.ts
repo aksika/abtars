@@ -120,7 +120,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "MAX_AGENT_CALL_PER_DAY", type: "int", required: true, description: "Agent API rate limit: max requests per caller per day" },
   { env: "TELEGRAM_ENABLED", type: "bool", default: "", description: "Enable Telegram platform (fallback: token presence)" },
   { env: "DISCORD_ENABLED", type: "bool", default: "", description: "Enable Discord platform (fallback: token presence)" },
-  { env: "IRC_ENABLED", type: "bool", default: "", description: "Enable IRC platform (fallback: irc.json presence)" },
   { env: "TUI_ENABLED", type: "bool", default: "true", description: "Enable TUI socket server at ~/.abtars/tui.sock (#1315)" },
   { env: "ENABLE_DASHBOARD", type: "bool", default: "false", description: "Enable web dashboard (exposes port)" },
   { env: "ENABLE_AGENT_API", type: "bool", default: "false", description: "Enable A2A agent API (exposes port)" },

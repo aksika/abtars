@@ -77,8 +77,8 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     expect(existsSync(done[0]!.result_path!)).toBe(true);
 
     const deps = {
-      sendMessage: vi.fn().mockResolvedValue(undefined),
-      sendDocument: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue("sent" as const),
+      sendDocument: vi.fn().mockResolvedValue("sent" as const),
       announce: vi.fn().mockResolvedValue(undefined),
       chatIdFor: vi.fn().mockReturnValue("42"),
     };

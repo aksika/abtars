@@ -3,20 +3,24 @@ import { addTaskFailure } from "./task-failure-buffer.js";
 import { spawn } from "node:child_process";
 import { existsSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
-import { incrementFailures, resetFailures, setAutoPaused, advanceNextRun, updateState, readState, reserveRun } from "./task-state-store.js";
-import { appendRun } from "./task-history-store.js";
+import { reserveRun, readState } from "./task-state-store.js";
 import { logTaskDebug } from "./task-log-ctx.js";
 import type { ScheduledTask } from "./task-types.js";
 import { isSystemEntry, formatTaskLabel } from "./task-types.js";
 import { getSystemTaskRegistry } from "./system-task-registry.js";
 import { ScheduledTaskRunner } from "./scheduled-task-runner.js";
+import { settleRunOnce } from "./task-run-settler.js";
+import { makeTaskFailure } from "./task-failure.js";
 import type { ActiveTaskRun } from "./task-state-store.js";
+import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 
 const TAG = "cron-queue";
 const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
-const STATE_FILE = join(homedir(), ".abtars", "state", "task-queue-state.json");
+// #1520: the queue snapshot lives under abtarsHome() and is diagnostic-only —
+// it never replays work and is never a second source of truth.
+const STATE_FILE = join(abtarsHome(), "state", "task-queue-state.json");
 
 interface PersistedState {
   pid: number;
@@ -76,21 +80,22 @@ export class CronQueue {
   private _current: RunningJob | null = null;
   private timeout: ReturnType<typeof setTimeout> | null = null;
   private readonly onFailInject?: FailInjectCallback;
-  private readonly onTaskPaused?: TaskPausedCallback;
   private readonly failCounts = new Map<string, { date: string; count: number }>();
   private readonly taskRunner: ScheduledTaskRunner;
 
   constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback, onTaskPaused?: TaskPausedCallback, agentRunner?: AgentTaskRunner, projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner) {
     this.onFailInject = onFailInject;
-    this.onTaskPaused = onTaskPaused;
-    this.taskRunner = new ScheduledTaskRunner({ agentRunner, onTaskPaused, onFailInject, projectRunner });
+    this.taskRunner = new ScheduledTaskRunner({ agentRunner, onTaskPaused, projectRunner });
+    // #1520: the stale snapshot is correlated against the authoritative
+    // restart reconciliation (task state + history) for logging only. It
+    // cannot create or replay work; both sides of the snapshot are cleared.
     const stale = loadStaleState();
     if (stale) {
       if (stale.currentJob) {
-        logWarn(TAG, `Stale in-flight job detected: "${stale.currentJob.entryId}" (PID ${stale.pid} dead) — marking failed`);
+        logWarn(TAG, `Stale in-flight job observed: "${stale.currentJob.entryId}" — recovery owned by task state reconciliation`);
       }
       if (stale.queue.length > 0) {
-        logWarn(TAG, `${stale.queue.length} stale queued job(s) from previous process — dropped`);
+        logWarn(TAG, `${stale.queue.length} queued job(s) observed across restart — reconciliation decides; snapshot is diagnostic only`);
       }
       persistState(null, []);
     }
@@ -129,9 +134,9 @@ export class CronQueue {
     const { entry, manual, reservation } = job;
 
     if (isSystemEntry(entry)) {
-      this.runSystem(entry, manual);
+      this.runSystem(entry, manual, reservation);
     } else if (entry.kind === "script") {
-      this.runScript(entry, manual);
+      this.runScript(entry, manual, reservation);
     } else if (entry.kind === "agent") {
       this.runAgent(entry, manual, reservation);
     } else if (entry.kind === "reminder") {
@@ -173,61 +178,72 @@ export class CronQueue {
     this.onFailInject(entry.id, getEntryMessage(entry), result);
   }
 
-  private checkAutoPause(entry: ScheduledTask, exitCode: number, lastError: string): boolean {
-    if (!entry.schedule) return false;
-    if (exitCode === 0) {
-      resetFailures(entry.id);
-      return false;
-    }
-    const count = incrementFailures(entry.id);
-    if (count >= 3) {
-      setAutoPaused(entry.id, true);
-      logWarn(TAG, `Auto-paused "${entry.id}" after ${count} consecutive failures`);
-      this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), `failed ${count}x: ${lastError.slice(0, 150)}`);
-      return true;
-    }
-    return false;
+  private reserveForEntry(entry: ScheduledTask, manual?: boolean, existing?: ActiveTaskRun): ActiveTaskRun | null {
+    if (existing) return existing;
+    const now = Date.now();
+    const res = reserveRun(entry.id, {
+      runId: `${entry.id}_${now}`,
+      groupId: `${entry.id}:group:${now}`,
+      attempt: manual ? 1 : (readState(entry.id)?.retrying ? 2 : 1),
+      trigger: manual ? "manual" : "schedule",
+      occurrenceAt: now,
+      deadlineAt: now + 30 * 60 * 1000,
+    });
+    if (res.ok) return res.run;
+    logWarn(TAG, `Cannot run "${entry.id}": active run in progress ${res.active.runId}`);
+    return null;
   }
 
-  private trigger(entryId: string, manual?: boolean): "schedule" | "manual" | "retry" {
-    if (manual) return "manual";
-    const state = readState(entryId);
-    if (state?.retrying) return "retry";
-    return "schedule";
-  }
-
-  private async runSystem(entry: ScheduledTask & { kind: "system" }, manual?: boolean): Promise<void> {
+  private runSystem(entry: ScheduledTask & { kind: "system" }, manual?: boolean, reservation?: ActiveTaskRun): Promise<void> {
+    const run = this.reserveForEntry(entry, manual, reservation);
+    if (!run) { this.processNext(); return Promise.resolve(); }
     logInfo(TAG, `System: "${entry.action}" (${entry.id})`);
     this.setCurrent(entry, 0, "system", manual);
-    try {
-      const result = await getSystemTaskRegistry().dispatch(entry);
-      const finishedAt = Date.now();
-      if (result.status === "deferred") {
-        appendRun({ taskId: entry.id, kind: entry.kind, trigger: this.trigger(entry.id, manual), startedAt: this._current?.startedAt ?? finishedAt, finishedAt, outcome: "deferred", detail: result.detail, groupId: `${entry.id}:sys:${finishedAt}` });
-        logInfo(TAG, `Deferred: "${entry.action}" (${entry.id}) — retry at ${new Date(result.retryAt).toISOString()}: ${result.detail}`);
-        updateState(entry.id, { nextRunAt: result.retryAt, retryAt: result.retryAt, retrying: true });
-      } else if (result.status === "noop") {
-        appendRun({ taskId: entry.id, kind: entry.kind, trigger: this.trigger(entry.id, manual), startedAt: this._current?.startedAt ?? finishedAt, finishedAt, outcome: "noop", detail: result.detail, groupId: `${entry.id}:sys:${finishedAt}` });
-        logInfo(TAG, `System noop: "${entry.action}" (${entry.id})${result.detail ? ` — ${result.detail}` : ""}`);
-      } else {
-        const ok = result.status === "accepted";
-        const detail = ok ? (result as { status: "accepted"; detail?: string }).detail : (result as { status: "failed"; error: string }).error;
-        appendRun({ taskId: entry.id, kind: entry.kind, trigger: this.trigger(entry.id, manual), startedAt: this._current?.startedAt ?? finishedAt, finishedAt, outcome: ok ? "success" : "failed", detail, groupId: `${entry.id}:sys:${finishedAt}` });
-        logInfo(TAG, `System ${ok ? "ok" : "fail"}: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
-        if (!ok) this.checkAutoPause(entry, 1, detail ?? "");
+    return (async () => {
+      try {
+        const result = await getSystemTaskRegistry().dispatch(entry);
+        if (result.status === "deferred") {
+          settleRunOnce({
+            entry, run, outcome: "deferred",
+            diagnostic: makeTaskFailure("admission", "executor_unavailable", "queued", result.detail, "transient"),
+            detail: result.detail,
+            retryAt: result.retryAt,
+          });
+          logInfo(TAG, `Deferred: "${entry.action}" (${entry.id}) — retry at ${new Date(result.retryAt).toISOString()}: ${result.detail}`);
+        } else if (result.status === "noop") {
+          settleRunOnce({ entry, run, outcome: "noop", detail: result.detail });
+          logInfo(TAG, `System noop: "${entry.action}" (${entry.id})${result.detail ? ` — ${result.detail}` : ""}`);
+        } else if (result.status === "accepted") {
+          settleRunOnce({ entry, run, outcome: "success", detail: result.detail });
+          logInfo(TAG, `System ok: "${entry.action}" (${entry.id})${result.detail ? ` — ${result.detail}` : ""}`);
+        } else {
+          settleRunOnce({
+            entry, run, outcome: "failed",
+            diagnostic: makeTaskFailure("execution", "process_exit", "executing", result.error, "none"),
+            detail: result.error,
+          });
+          logInfo(TAG, `System fail: "${entry.action}" (${entry.id}) — ${result.error}`);
+          this.tryInjectFailure(entry, result.error);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logWarn(TAG, `System dispatch error for "${entry.action}": ${msg}`);
+        settleRunOnce({
+          entry, run, outcome: "failed",
+          diagnostic: makeTaskFailure("execution", "process_exit", "executing", msg, "none"),
+          detail: msg,
+        });
+        this.tryInjectFailure(entry, msg);
+      } finally {
+        this.clearCurrent();
+        this.processNext();
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logWarn(TAG, `System dispatch error for "${entry.action}": ${msg}`);
-      appendRun({ taskId: entry.id, kind: entry.kind, trigger: this.trigger(entry.id, manual), startedAt: this._current?.startedAt ?? Date.now(), finishedAt: Date.now(), outcome: "failed", detail: msg, groupId: `${entry.id}:sys:${Date.now()}` });
-      this.checkAutoPause(entry, 1, msg);
-    } finally {
-      this.clearCurrent();
-      this.processNext();
-    }
+    })();
   }
 
-  private runScript(entry: ScheduledTask & { kind: "script" }, manual?: boolean): void {
+  private runScript(entry: ScheduledTask & { kind: "script" }, manual?: boolean, reservation?: ActiveTaskRun): void {
+    const run = this.reserveForEntry(entry, manual, reservation);
+    if (!run) { this.processNext(); return; }
     logTaskDebug("task_execution_started", { task: entry.id }, "kind=script");
     try {
       const child = spawn("bash", ["-c", entry.command], { stdio: ["ignore", "pipe", "pipe"] });
@@ -239,15 +255,13 @@ export class CronQueue {
 
       child.on("exit", (code) => {
         const finishedAt = Date.now();
-        const outcome = code === 0 ? "success" : "failed";
-        appendRun({ taskId: entry.id, kind: entry.kind, trigger: this.trigger(entry.id, manual) === "retry" ? "retry" : manual ? "manual" : "schedule", startedAt: this._current?.startedAt ?? finishedAt, finishedAt, outcome, detail: output.slice(0, 200), groupId: `${entry.id}:script:${finishedAt}` });
-        if (outcome === "success") {
-          advanceNextRun(entry.id, entry.schedule);
-          resetFailures(entry.id);
-        }
-        const paused = this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
+        const ok = code === 0;
+        const diagnostic: TaskFailureDiagnosticV1 = ok
+          ? makeTaskFailure("execution", "process_exit", "executing", "script exited 0", "none")
+          : makeTaskFailure("execution", "process_exit", "executing", `script exited ${code}`, "none");
+        settleRunOnce({ entry, run, outcome: ok ? "success" : "failed", diagnostic, detail: (output || `exit ${code}`).slice(0, 500) });
         const followUp = entry.followUp;
-        if (code === 0 && output.trim() && followUp) {
+        if (ok && output.trim() && followUp) {
           logInfo(TAG, `Gate triggered → enqueuing agent follow-up for "${entry.id}"`);
           this.clearCurrent();
           const agentPrompt = followUp.prompt.replace("{{GATE_OUTPUT}}", output.trim());
@@ -268,9 +282,9 @@ export class CronQueue {
           this.enqueue(agentEntry);
           return;
         }
-        if (code !== 0) {
-          if (!paused) this.tryInjectFailure(entry, `${code === 0 ? "ok" : `exit ${code}`}\n${(output || "(no output)").slice(0, 500)}`);
+        if (!ok) {
           addTaskFailure({ taskName: formatTaskLabel(entry.id), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: finishedAt, consecutiveFailures: 1 });
+          this.tryInjectFailure(entry, `${code === 0 ? "ok" : `exit ${code}`}\n${(output || "(no output)").slice(0, 500)}`);
         }
         this.clearCurrent();
         this.processNext();
@@ -278,49 +292,43 @@ export class CronQueue {
 
       child.on("error", (err) => {
         logWarn(TAG, `Script spawn failed for task=${entry.id} (error_chars=${err.message.length})`);
+        settleRunOnce({
+          entry, run, outcome: "failed",
+          diagnostic: makeTaskFailure("dependency", "executable_missing", "preflight", `spawn failed: ${err.message.slice(0, 200)}`, "permanent"),
+          detail: err.message.slice(0, 500),
+        });
         this.clearCurrent();
         this.processNext();
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `Script error for task=${entry.id} (error_chars=${message.length})`);
+      settleRunOnce({
+        entry, run, outcome: "failed",
+        diagnostic: makeTaskFailure("dependency", "executable_missing", "preflight", message.slice(0, 200), "permanent"),
+        detail: message.slice(0, 500),
+      });
       this.clearCurrent();
       this.processNext();
     }
   }
 
   private async runAgent(entry: ScheduledTask & { kind: "agent" }, manual?: boolean, reservation?: ActiveTaskRun): Promise<void> {
+    const run = this.reserveForEntry(entry, manual, reservation);
+    if (!run) { this.clearCurrent(); this.processNext(); return; }
     this.setCurrent(entry, 0, "agent", manual);
 
     try {
-      let runReservation = reservation;
-      if (!runReservation) {
-        const now = Date.now();
-        const res = reserveRun(entry.id, {
-          runId: `${entry.id}_${now}`,
-          groupId: `${entry.id}:group:${now}`,
-          attempt: manual ? 1 : (readState(entry.id)?.retrying ? 2 : 1),
-          trigger: manual ? "manual" : "schedule",
-          occurrenceAt: now,
-          deadlineAt: now + 30 * 60 * 1000,
-        });
-        if (res.ok) {
-          runReservation = res.run;
-        } else {
-          logWarn(TAG, `Cannot run "${entry.id}": active run in progress ${res.active.runId}`);
-          this.clearCurrent();
-          this.processNext();
-          return;
-        }
-      }
-
-      const outcome = await this.taskRunner.run(entry, runReservation);
-      logTaskDebug("task_settled", { task: entry.id, run: runReservation.runId }, `outcome=${outcome.status}`);
-      if (outcome.status === "failed" || outcome.status === "timed_out" || outcome.status === "cancelled") {
-        this.checkAutoPause(entry, 1, outcome.safeDetail ?? "failed");
-      }
+      const outcome = await this.taskRunner.run(entry, run);
+      logTaskDebug("task_settled", { task: entry.id, run: run.runId }, `outcome=${outcome.status}`);
     } catch (err) {
       logWarn(TAG, `runAgent error for "${entry.id}": ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      settleRunOnce({
+        entry, run, outcome: "failed",
+        diagnostic: makeTaskFailure("execution", "model_error", "executing", msg.slice(0, 500), "none"),
+        detail: msg.slice(0, 500),
+      });
     } finally {
       this.clearCurrent();
       this.processNext();

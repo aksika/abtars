@@ -208,50 +208,50 @@ export function validateReportArtifact(
   contract: ResolvedReportContract,
   reservedAt: number,
   _taskId: string,
-): { ok: true; size: number } | { ok: false; reason: string } {
+): { ok: true; size: number } | { ok: false; code: string; reason: string } {
   if (!existsSync(resolvedPath)) {
-    return { ok: false, reason: `artifact not found: ${resolvedPath}` };
+    return { ok: false, code: "artifact_not_found", reason: `artifact not found: ${resolvedPath}` };
   }
   let stat;
   try {
     stat = lstatSync(resolvedPath);
   } catch {
-    return { ok: false, reason: `cannot stat artifact: ${resolvedPath}` };
+    return { ok: false, code: "artifact_not_found", reason: `cannot stat artifact: ${resolvedPath}` };
   }
   if (!stat.isFile() || stat.isSymbolicLink()) {
-    return { ok: false, reason: `artifact is not a regular file` };
+    return { ok: false, code: "artifact_not_regular_file", reason: `artifact is not a regular file` };
   }
   try {
     accessSync(resolvedPath, fsConstants.R_OK);
   } catch {
-    return { ok: false, reason: `artifact not readable` };
+    return { ok: false, code: "artifact_unreadable", reason: `artifact not readable` };
   }
 
   if (stat.size < contract.minBytes) {
-    return { ok: false, reason: `artifact too small: ${stat.size} bytes (minimum ${contract.minBytes})` };
+    return { ok: false, code: "artifact_too_small", reason: `artifact too small: ${stat.size} bytes (minimum ${contract.minBytes})` };
   }
 
   const content = readFileSyncSafe(resolvedPath);
   if (content === undefined) {
-    return { ok: false, reason: `cannot read artifact content` };
+    return { ok: false, code: "artifact_unreadable", reason: `cannot read artifact content` };
   }
   for (const heading of contract.requiredSections) {
     if (!content.includes(heading)) {
-      return { ok: false, reason: `required heading not found: "${heading}"` };
+      return { ok: false, code: "required_heading_missing", reason: `required heading not found: "${heading}"` };
     }
   }
 
   if (baseline) {
     if (baseline.existed) {
       if (stat.size === baseline.size && stat.mtimeMs === baseline.mtimeMs) {
-        return { ok: false, reason: `artifact unchanged from baseline (same size and mtime)` };
+        return { ok: false, code: "artifact_unchanged_baseline", reason: `artifact unchanged from baseline (same size and mtime)` };
       }
     }
   }
 
   const fsTolerance = 2000;
   if (stat.mtimeMs < reservedAt - fsTolerance) {
-    return { ok: false, reason: `artifact mtime (${new Date(stat.mtimeMs).toISOString()}) is before reservation (${new Date(reservedAt).toISOString()})` };
+    return { ok: false, code: "artifact_stale_mtime", reason: `artifact mtime (${new Date(stat.mtimeMs).toISOString()}) is before reservation (${new Date(reservedAt).toISOString()})` };
   }
 
   return { ok: true, size: stat.size };

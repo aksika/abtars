@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { abtarsHome } from "../../paths.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { TaskKind } from "./task-types.js";
+import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 
 const TAG = "task_history_store";
 
@@ -23,6 +24,8 @@ export interface TaskRunEvent {
   kanbanCardId?: number;
   /** #1502 Task 9: groups attempts 1 and 2 without relying on retrying alone. */
   groupId?: string;
+  /** #1520: structured failure data. Legacy string-only records remain readable. */
+  diagnostic?: TaskFailureDiagnosticV1;
 }
 
 function historyPath(): string {

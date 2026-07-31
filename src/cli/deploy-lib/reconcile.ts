@@ -143,16 +143,6 @@ export function migrate(home: string): void {
     }
   }
 
-  // irc-secure-to-signed: rename "secure" → "signed" in irc.json
-  const ircPath = join(home, "config", "irc.json");
-  if (existsSync(ircPath)) {
-    const content = readFileSync(ircPath, "utf-8");
-    if (content.includes('"secure"')) {
-      writeFileSync(ircPath, content.replace(/"secure"/g, '"signed"'));
-      logInfo(TAG, "Migrated: irc-secure-to-signed");
-    }
-  }
-
   // #1420: remove legacy title keys from tasks.json entries
   const tasksPath = join(home, "tasks", "tasks.json");
   if (existsSync(tasksPath)) {

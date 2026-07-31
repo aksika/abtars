@@ -47,6 +47,5 @@ TTS_PROVIDER=openai    # or other supported provider
 |----------|-----|-----|
 | Telegram | ✓ | ✓ |
 | Discord | — | — |
-| IRC | — | — |
 
 Voice is Telegram-only — it's the only platform that sends voice note file IDs the bridge can download.

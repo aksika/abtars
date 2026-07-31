@@ -3,8 +3,6 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
 import { createUserSessionExpiryTask } from "../components/heartbeat-tasks.js";
 import { createHousekeepingTask } from "../components/heartbeat-housekeeping.js";
-import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
-import { loadUsers } from "../components/user-registry.js";
 import { logInfo } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
 import { runModelHealthCheck } from "./heartbeat-model-health.js";
@@ -12,50 +10,106 @@ import type { BootCtx } from "./context.js";
 
 const TAG = "heartbeat";
 
+export interface TaskTickResult {
+  state: "ran" | "idle";
+  detail?: string;
+}
+
+/**
+ * #1520: the tier-3 scheduled-task tick body, exposed as an injected callable
+ * used by both production (heartbeat) and the production-shaped E2E harness.
+ * Due discovery/reservation, queue execution, settlement, and delivery are
+ * all real; only external boundaries are doubled in the harness.
+ */
+export async function runTaskTick(ctx: Pick<BootCtx, "cronQueue" | "telegramAdapter">): Promise<TaskTickResult> {
+  const { checkCron, readPendingReminders, clearPendingReminders } = await import("../components/tasks/task-checker.js");
+  const { loadUsers } = await import("../components/user-registry.js");
+  if (!ctx.cronQueue) return { state: "idle" };
+  const dueTasks = checkCron();
+  let ran = false;
+  for (const reserved of dueTasks) {
+    ctx.cronQueue.enqueue(reserved.entry, false, reserved.run);
+    ran = true;
+  }
+
+  const reminders = readPendingReminders();
+  if (reminders.length > 0) {
+    clearPendingReminders();
+    for (const r of reminders) {
+      logInfo("main", `Injecting reminder for chat ${r.chatId}: "${r.message}"`);
+      if (ctx.telegramAdapter) {
+        ctx.telegramAdapter.injectMessage({
+          platform: "telegram",
+          channelId: String(r.chatId),
+          userId: loadUsers().byPlatformId.get("telegram:" + r.chatId)?.userId ?? "master",
+          senderId: String(r.chatId),
+          senderName: "task",
+          text: `[Scheduled reminder] ${r.message}`,
+          timestamp: Date.now(),
+          threadId: r.threadId ? String(r.threadId) : undefined,
+          isGroup: false,
+          isVoice: false,
+        });
+      }
+    }
+    ran = true;
+  }
+
+  return ran
+    ? { state: "ran" as const, detail: `${dueTasks.length} cron, ${reminders.length} reminder(s)` }
+    : { state: "idle" as const };
+}
+
 export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   const { heartbeat, transport, cronQueue, memoryRuntime, config, pipelineDeps, capabilities } = ctx;
   if (!heartbeat || !transport || !cronQueue || !pipelineDeps) return;
 
   heartbeat.registerTask({
     name: "tasks",
-    execute: async () => {
-      const dueTasks = checkCron();
-      let ran = false;
-      for (const reserved of dueTasks) {
-        cronQueue.enqueue(reserved.entry, false, reserved.run);
-        ran = true;
-      }
-
-      const reminders = readPendingReminders();
-      if (reminders.length > 0) {
-        clearPendingReminders();
-        for (const r of reminders) {
-          logInfo("main", `Injecting reminder for chat ${r.chatId}: "${r.message}"`);
-          if (ctx.telegramAdapter) {
-            ctx.telegramAdapter.injectMessage({
-              platform: "telegram",
-              channelId: String(r.chatId),
-              userId: loadUsers().byPlatformId.get("telegram:" + r.chatId)?.userId ?? "master",
-              senderId: String(r.chatId),
-              senderName: "task",
-              text: `[Scheduled reminder] ${r.message}`,
-              timestamp: Date.now(),
-              threadId: r.threadId ? String(r.threadId) : undefined,
-              isGroup: false,
-              isVoice: false,
-            });
-          }
-        }
-        ran = true;
-      }
-
-      return ran
-        ? { state: "ran" as const, detail: `${dueTasks.length} cron, ${reminders.length} reminder(s)` }
-        : { state: "idle" as const };
-    },
+    execute: () => runTaskTick(ctx),
   });
 
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;
+
+  const deliveryDeps = () => ({
+    sendMessage: async (chatId: string, text: string): Promise<import("../components/tasks/kanban-delivery.js").SendOutcome> => {
+      if (!ctx.telegramAdapter) return "not_sent";
+      try {
+        await ctx.telegramAdapter.sendMessage(chatId, text);
+        return "sent";
+      } catch (err) {
+        logAndSwallow(TAG, "delivery sendMessage", err);
+        return "unknown";
+      }
+    },
+    sendDocument: async (chatId: string, filePath: string, caption: string): Promise<import("../components/tasks/kanban-delivery.js").SendOutcome> => {
+      if (!ctx.telegramAdapter) return "not_sent";
+      try {
+        await ctx.telegramAdapter.sendDocument(chatId, filePath, caption);
+        return "sent";
+      } catch (err) {
+        logAndSwallow(TAG, "delivery sendDocument", err);
+        return "unknown";
+      }
+    },
+    announce: async (prompt: string) => {
+      if (ctx.sendSystemMessage) await ctx.sendSystemMessage(prompt);
+    },
+    chatIdFor: (card: import("../components/tasks/kanban-board.js").KanbanCard) => card.chat_id || String(masterChatId),
+  });
+
+  // #1520: the delivery poll — a periodic bounded claim over done cards.
+  // Delivery is strictly downstream of settlement; failures never rerun work.
+  heartbeat.registerTask({
+    name: "kanban-delivery-poll",
+    execute: async () => {
+      try {
+        const { pollPendingDeliveries } = await import("../components/tasks/kanban-delivery.js");
+        const attempted = await pollPendingDeliveries(deliveryDeps());
+        return attempted > 0 ? { state: "ran" as const, detail: `${attempted} delivery polled` } : { state: "idle" as const };
+      } catch (err) { logAndSwallow(TAG, "kanban-delivery-poll", err); return { state: "idle" as const }; }
+    },
+  });
 
   import("../components/nerve.js").then(({ nerve }) => {
     nerve.on("card:done", async (cardId: number) => {
@@ -65,20 +119,7 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
         const pending = kanbanPending();
         const card = pending.find((c: { id: number }) => c.id === cardId);
         if (!card) return;
-        await deliverCard(card, {
-          sendMessage: async (chatId, text) => {
-            if (!ctx.telegramAdapter) return;
-            await ctx.telegramAdapter.sendMessage(chatId, text);
-          },
-          sendDocument: async (chatId, filePath, caption) => {
-            if (!ctx.telegramAdapter) return;
-            await ctx.telegramAdapter.sendDocument(chatId, filePath, caption);
-          },
-          announce: async (prompt) => {
-            if (ctx.sendSystemMessage) await ctx.sendSystemMessage(prompt);
-          },
-          chatIdFor: (card) => card.chat_id || String(masterChatId),
-        });
+        await deliverCard(card, deliveryDeps());
       } catch (err) { logAndSwallow(TAG, "nerve:card:done delivery", err); }
     });
 

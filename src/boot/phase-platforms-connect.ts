@@ -141,36 +141,6 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
     else logError("main", `Discord connect failed: ${result.error}`);
   }
 
-  // --- IRC ---
-  registry.register("irc", {
-    configured: platforms.irc,
-    async create() {
-      const { loadIrcConfig } = await import("../platforms/irc/irc-config.js");
-      const { IrcAdapter } = await import("../platforms/irc/irc-adapter.js");
-      const ircConfig = loadIrcConfig();
-      if (!ircConfig) throw new Error("irc.json missing or empty");
-      const adapter = new IrcAdapter(ircConfig, { onMessage: (msg) => recovery.handle(msg, adapter) });
-      platformAdapters.set("irc", adapter);
-      // Retry path (#1306): wire full pipeline if phasePipelineDeps already ran.
-      if (ctx.pipelineDeps) {
-        const { wireIrc, drainRecoveryQueue } = await import("./wire-platform.js");
-        await wireIrc(ctx);
-        await drainRecoveryQueue(ctx);
-      }
-      return {
-        async start() { await adapter.start(); },
-        stop() { adapter.stop(); platformAdapters.delete("irc"); },
-      };
-    },
-  });
-
-  if (platforms.irc) {
-    const result = await registry.start("irc", { backgroundRetry: true });
-    if (result.ok) logInfo("main", "📡 IRC connected (recovery handler active)");
-    else if (result.error?.includes("not configured")) logWarn("main", "IRC flag set but irc.json missing — skipping");
-    else logError("main", `IRC connect failed: ${result.error}`);
-  }
-
   // --- TUI (#1315) ---
   // Bridge-side socket adapter for the abtars tui client. The daemon never
   // imports pi-tui — only the foreground client does. The adapter is a

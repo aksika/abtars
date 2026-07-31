@@ -281,13 +281,21 @@ export class DashboardServer implements IDashboardSlot {
         return;
       }
 
-      // GET /api/cron — list all cron entries
+      // GET /api/cron — list all cron entries with #1520 incident/pause data
       if (method === "GET" && pathname === "/api/cron") {
         if (!this.deps.authGate.guard(req, res)) return;
         try {
           const { readEntries } = await import("../tasks/task-store.js");
+          const { getAllViews } = await import("../tasks/task-service.js");
+          const views = getAllViews(readEntries());
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: true, entries: readEntries() }));
+          res.end(JSON.stringify({ ok: true, entries: views.map(v => ({
+            definition: v.definition,
+            state: v.state,
+            lastIncident: v.lastIncident,
+            pausedAt: v.pausedAt,
+            resume: v.resumeCommand,
+          })) }));
         } catch (err) {
           this.sendError(res, 500, err);
         }

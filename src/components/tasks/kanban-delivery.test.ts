@@ -24,8 +24,8 @@ afterEach(() => { rmSync(TEST_HOME, { recursive: true, force: true }); });
 
 function makeDeps() {
   return {
-    sendMessage: vi.fn().mockResolvedValue(undefined),
-    sendDocument: vi.fn().mockResolvedValue(undefined),
+    sendMessage: vi.fn().mockResolvedValue("sent" as const),
+    sendDocument: vi.fn().mockResolvedValue("sent" as const),
     announce: vi.fn().mockResolvedValue(undefined),
     chatIdFor: vi.fn().mockReturnValue("100"),
   };
@@ -105,6 +105,54 @@ describe("deliverCard — silent mode", () => {
     expect(deps.sendMessage).not.toHaveBeenCalled();
     expect(deps.sendDocument).not.toHaveBeenCalled();
     expect(deps.announce).not.toHaveBeenCalled();
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+  });
+});
+
+describe("#1520 delivery separation", () => {
+  it("definitely_not_sent returns the card to the bounded poll for a delivery-only retry", async () => {
+    const card = makeCard();
+    const deps = makeDeps();
+    deps.sendMessage.mockResolvedValue("not_sent" as const);
+    await deliverCard(card, deps);
+    expect(board.kanbanGetCard(card.id)!.delivery_result).toBe("definitely_not_sent");
+    expect(board.kanbanGetCard(card.id)!.status).toBe("done");
+    // A second poll retries delivery only — never re-executes anything.
+    deps.sendMessage.mockResolvedValue("sent" as const);
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    expect(deps.sendMessage).toHaveBeenCalledTimes(2);
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+  });
+
+  it("unknown send state blocks automatic resend and is visible for operator review", async () => {
+    const card = makeCard();
+    const deps = makeDeps();
+    deps.sendMessage.mockResolvedValue("unknown" as const);
+    await deliverCard(card, deps);
+    expect(board.kanbanGetCard(card.id)!.delivery_result).toBe("unknown");
+    // Repeated polls never resend a card in unknown state.
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    expect(deps.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("delivery failure never appends task history or reruns execution", async () => {
+    const card = makeCard();
+    const deps = makeDeps();
+    deps.sendMessage.mockResolvedValue("not_sent" as const);
+    const { deliverCard: dc } = await import("./kanban-delivery.js");
+    await dc(card, deps);
+    const { recentRuns } = await import("./task-history-store.js");
+    expect(recentRuns(card.source_id ?? "none", 5)).toHaveLength(0);
+  });
+
+  it("repeated delivery polls cannot duplicate a delivered card", async () => {
+    const card = makeCard();
+    const deps = makeDeps();
+    await deliverCard(card, deps);
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    expect(deps.sendMessage).toHaveBeenCalledTimes(1);
     expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
   });
 });

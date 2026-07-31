@@ -10,6 +10,27 @@ import { logError } from "./logger.js";
 
 export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H" | "K";
 
+/**
+ * #1520: typed scheduled-dispatch admission rejection. Thrown by dispatchAwait
+ * only for pre-execution gates (capacity/type-busy/model-cooldown); failures
+ * after a model call starts are execution failures and must never be converted
+ * to admission deferrals. Non-scheduler callers keep their queue/throw
+ * semantics — the error carries the same codes for everyone.
+ */
+export type SpinAdmissionCode = "session_capacity" | "type_busy" | "model_cooldown";
+
+export class SpinDispatchAdmissionError extends Error {
+  readonly code: SpinAdmissionCode;
+  readonly retryAt?: number;
+
+  constructor(code: SpinAdmissionCode, message: string, retryAt?: number) {
+    super(message);
+    this.name = "SpinDispatchAdmissionError";
+    this.code = code;
+    this.retryAt = retryAt;
+  }
+}
+
 // #1444: instruction kinds and delivery states
 export type ExecutionInstructionKind = "steer" | "followUp";
 export type ExecutionInstructionState =
@@ -173,6 +194,9 @@ export interface SpinRequest {
   parentCardId?: number;
   deliveryMode?: "silent" | "deliver" | "announce";
   delivery?: "report" | "announce" | "silent";
+  /** #1520: scheduled runs create cards locked (delivery_ready=0) until the
+   *  shared settler wins successful validation and releases delivery. */
+  deliveryReady?: boolean;
   priority?: string;
   tools?: SandboxPolicy;
   timeoutMs?: number;
@@ -207,7 +231,6 @@ export interface SpinSessionSpec {
   // Work
   goal?: string;            // user-facing → creates kanban card
   prompt?: string;          // background one-shot → no card
-
   // Reuse / continuation (multi-step sleep, pipeline main turn)
   sessionId?: string;       // reuse an existing session (send next prompt to it)
 
@@ -233,6 +256,8 @@ export interface SpinSessionSpec {
   // Delivery (continuation / pipeline)
   deliveryMode?: "deliver" | "silent" | "announce";
   delivery?: "report" | "announce" | "silent";
+  /** #1520: scheduled runs create cards delivery-locked until settlement. */
+  deliveryReady?: boolean;
   imageContent?: unknown;   // → sendPrompt arg 3 (image passthrough)
   callbackPeer?: string;
   sourcePeer?: string;

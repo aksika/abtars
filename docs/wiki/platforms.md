@@ -8,7 +8,6 @@ abTARS connects to messaging platforms and routes messages through the AI model 
 |----------|----------|-------|
 | **Telegram** | Voice, reactions, inline keyboards, streaming edits, threads | Bot token from @BotFather |
 | **Discord** | Reactions, slash commands, threads, streaming edits | Bot token + App ID |
-| **IRC** | Text-only, multi-channel | Server + channel config |
 
 ## Telegram
 
@@ -22,11 +21,8 @@ Supports @mention filtering, role-based mentions, slash commands, DMs, guild cha
 
 **Config:** `DISCORD_BOT_TOKEN`, `DISCORD_APP_ID`, `DISCORD_ALLOWED_USER_IDS` in `.env`. Optional: `DISCORD_ALLOWED_CHANNELS` for channels where the bot responds without @mention.
 
-## IRC
 
-Text-only adapter. Connects to any IRC server (tested with ngircd). No streaming (messages sent complete). Digital signatures for sender verification.
 
-**Config:** `~/.abtars/config/irc.json` with server, channels, nick, and optional TLS settings.
 
 ## Multi-platform
 

@@ -55,7 +55,19 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
       const activeRun = state?.activeRun;
       const isActive = activeRun && ["reserved", "queued", "executing", "cancelling", "validating", "settling"].includes(activeRun.phase);
       const tick = isPaused ? "p" : !runsToday ? "-" : succeeded ? "+" : running || isActive ? "~" : failed ? "x" : started ? "x" : "+";
-      const pauseMarker = autoPaused ? ` [auto-paused:${state?.consecutiveFailures ?? 0}f]` : isActive ? ` [${activeRun.phase}]` : state?.retrying ? " [retrying]" : "";
+      // #1520: show category/code plus failure count and the exact resume command.
+      let pauseMarker = "";
+      if (autoPaused) {
+        const inc = state?.lastIncident;
+        const code = inc ? `${inc.category}/${inc.code}` : `${state?.consecutiveFailures ?? 0}f`;
+        pauseMarker = ` [auto-paused:${code} · ${state?.consecutiveFailures ?? 0}f — /task resume ${e.id}]`;
+      } else if (isActive) {
+        pauseMarker = ` [${activeRun.phase}]`;
+      } else if (state?.retrying) {
+        pauseMarker = " [retrying]";
+      } else if (state?.deferredAdmission) {
+        pauseMarker = ` [deferred:${state.deferredAdmission.attempts}/5 → ${new Date(state.deferredAdmission.retryAt).toLocaleTimeString()}]`;
+      }
       return `${tick}  ${sched.padEnd(16)}${e.id}${pauseMarker}`;
     });
     listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
@@ -126,26 +138,36 @@ export async function handleTaskPause(text: string, ctx: CommandContext): Promis
   const action = match[2]!.toLowerCase();
   const id = match[3]!.trim();
   try {
-    const { setAutoPaused } = await import("../tasks/task-state-store.js");
     if (action === "pause") {
+      const { setAutoPaused } = await import("../tasks/task-state-store.js");
       setAutoPaused(id, true);
       await ctx.reply(`Paused: ${id}`);
-    } else {
-      const { readState } = await import("../tasks/task-state-store.js");
-      const { readEntry } = await import("../tasks/task-store.js");
-      const state = readState(id);
-      const entry = readEntry(id);
-      if (!state) {
-        await ctx.reply(`No state found for: ${id}`);
-        return true;
-      }
-      setAutoPaused(id, false);
-      const { resetFailures, advanceNextRun } = await import("../tasks/task-state-store.js");
-      resetFailures(id);
-      if (entry?.schedule) {
-        advanceNextRun(id, entry.schedule);
-      }
-      await ctx.reply(`Resumed: ${id}`);
+      return true;
+    }
+    // #1520: one service operation for chat and CLI resume.
+    const { readEntry } = await import("../tasks/task-store.js");
+    const { resumeAutoPaused } = await import("../tasks/task-service.js");
+    const entry = readEntry(id);
+    if (!entry) {
+      await ctx.reply(`No task found for: ${id}`);
+      return true;
+    }
+    const result = resumeAutoPaused(id, [entry]);
+    switch (result) {
+      case "resumed":
+        await ctx.reply(`Resumed: ${id} — next run scheduled.`);
+        break;
+      case "not_paused":
+        await ctx.reply(`${id} is not auto-paused.`);
+        break;
+      case "already_running":
+        await ctx.reply(`${id} is currently running — cannot resume while active.`);
+        break;
+      case "invalid":
+        await ctx.reply(`${id} definition is invalid — fix it before resuming.`);
+        break;
+      default:
+        await ctx.reply(`No task found for: ${id}`);
     }
   } catch (err) {
     await ctx.reply(`Failed: ${err instanceof Error ? err.message : String(err)}`);

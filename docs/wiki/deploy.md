@@ -174,7 +174,6 @@ watchdog.sh → doctor.sh --fix → node app/bundle/abtars.js
 ```bash
 TELEGRAM_ENABLED=true
 DISCORD_ENABLED=true
-IRC_ENABLED=false
 ENABLE_DASHBOARD=true
 ENABLE_AGENT_API=true
 ```

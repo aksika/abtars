@@ -43,7 +43,6 @@ type SleepUnavailable = import("../capabilities/sleep/index.js").SleepUnavailabl
 export interface PlatformFlags {
   telegram: boolean;
   discord: boolean;
-  irc: boolean;
   /** #1315: abtars-native TUI socket adapter (unix-domain socket at ~/.abtars/tui.sock). */
   tui: boolean;
   web: boolean;
@@ -145,7 +144,7 @@ export interface BootCtx {
 export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
   const defaults: BootCtx = {
     // Static — must be overridden in phase-config before use
-    platforms: { telegram: false, discord: false, irc: false, tui: false, web: false, agent: false },
+    platforms: { telegram: false, discord: false, tui: false, web: false, agent: false },
     config: null as unknown as Config,           // set in phase-config
     memoryConfig: null as unknown as MemoryConfig, // set in phase-config
     startedAt: Date.now(),

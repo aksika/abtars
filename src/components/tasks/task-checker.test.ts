@@ -21,9 +21,10 @@ const kanbanMod = await import("./kanban-board.js");
 const reconcilerMod = await import("../reconciler.js");
 
 vi.mock("./task-state-store.js", () => ({
-  readState: vi.fn(() => ({ nextRunAt: Date.now() - 1000, consecutiveFailures: 0, autoPaused: false })),
+  readState: vi.fn(() => ({ nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false })),
   updateState: vi.fn(),
   advanceNextRun: vi.fn(),
+  nextRunFromSchedule: vi.fn().mockReturnValue({ nextRunAt: Date.now() + 300000 }),
   reserveRun: vi.fn().mockReturnValue({ ok: true, run: { runId: "test-run", groupId: "test-group", attempt: 1, trigger: "schedule", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() } }),
   settleActiveRun: vi.fn(),
 }));
@@ -31,6 +32,7 @@ vi.mock("./task-state-store.js", () => ({
 vi.mock("./task-history-store.js", () => ({
   todaySuccessCount: vi.fn(() => 0),
   appendRun: vi.fn(),
+  appendRunOnce: vi.fn().mockReturnValue("recon-run"),
   hasRun: vi.fn(() => false),
 }));
 
@@ -112,15 +114,16 @@ describe("reconcileActiveTaskRuns #1516 restart identity", () => {
   it("terminalizes an interrupted run whose project reached a terminal card", () => {
     vi.mocked(kanbanMod.kanbanGetCard).mockReturnValue({ id: 77, status: "done" } as never);
     runWith(77, Date.now() + 60_000);
-    expect(vi.mocked(stateStore.updateState)).toHaveBeenCalledWith("t1", expect.objectContaining({ activeRun: undefined }));
-    expect(vi.mocked(historyStore.appendRun)).toHaveBeenCalledWith(expect.objectContaining({ outcome: "cancelled", detail: "restart_recovery: project terminal (done)", runId: "interrupted-run" }));
+    expect(vi.mocked(stateStore.updateState)).not.toHaveBeenCalledWith("t1", expect.objectContaining({ activeRun: undefined }));
+    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", detail: "restart_recovery: project terminal (done)", runId: "interrupted-run" }));
+    expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith("t1", "interrupted-run", expect.objectContaining({ consecutiveFailures: 1 }));
     expect(vi.mocked(kanbanMod.kanbanGetCard)).toHaveBeenCalledWith(77);
   });
 
   it("aborts a still-live project when the scheduled deadline passed during downtime", () => {
     vi.mocked(kanbanMod.kanbanGetCard).mockReturnValue({ id: 78, status: "queued" } as never);
     runWith(78, Date.now() - 1000);
-    expect(vi.mocked(historyStore.appendRun)).toHaveBeenCalledWith(expect.objectContaining({ outcome: "cancelled", detail: "restart_recovery: deadline passed" }));
+    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", detail: "restart_recovery: deadline passed", runId: "interrupted-run" }));
     expect(reconcilerMod.abortProjectById).toHaveBeenCalledWith(78, "restart_recovery: scheduled deadline passed");
   });
 

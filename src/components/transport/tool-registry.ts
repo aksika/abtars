@@ -421,25 +421,6 @@ const memoryEditTool: ToolDefinition = {
   },
 };
 
-const webBrowseTool: ToolDefinition = {
-  name: "web_browse",
-  description: "Browse a URL or perform a complex multi-step web task. For quick lookups use execute_bash with curl.",
-  parameters: {
-    type: "object",
-    properties: {
-      task: { type: "string", description: "What to do on the web" },
-      chat_id: { type: "string", description: "Chat ID for result delivery" },
-      engine: { type: "string", description: "Browser engine (optional)" },
-    },
-    required: ["task", "chat_id"],
-  },
-  execute: (args) => {
-    let cmd = `abtars-browse --task ${JSON.stringify(stringValue(args["task"]))} --chat-id ${stringValue(args["chat_id"] ?? "0")}`;
-    if (args["engine"]) cmd += ` --engine ${stringValue(args["engine"])}`;
-    return runBash(cmd, CLI_TIMEOUT_MS);
-  },
-};
-
 const todoTool: ToolDefinition = {
   name: "todo_manage",
   description: "Manage TODO items. Add, complete, or list tasks.",
@@ -465,11 +446,6 @@ let _enqueueCron: ((id: string, manual?: boolean) => string | null) | null = nul
 
 /** Inject enqueueCron from bridge for task_manage --run. */
 export function setEnqueueCron(fn: (id: string, manual?: boolean) => string | null): void { _enqueueCron = fn; }
-
-let _ircSend: ((channel: string, message: string) => void) | null = null;
-
-/** Inject IRC send from bridge for irc_send tool. */
-export function setIrcSend(fn: (channel: string, message: string) => void): void { _ircSend = fn; }
 
 /** @deprecated — secret_get now reads from file, not DB. Kept for backward compat (callers may still call this). */
 
@@ -558,17 +534,22 @@ const peerSessionTool: ToolDefinition = {
     if (await isActiveCardPeerSourced(context)) {
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
+    const { resolvePeerName } = await import("./peer-resolver.js");
     const { callPeer } = await import("../peer-client.js");
     const { loadPeerConfig } = await import("../peer-config.js");
     const { getOrCreateSession, addTurn, isEnded, destroySession } = await import("../peer-sessions.js");
 
-    const peerName = stringValue(args.peer_name).trim();
+    const peerNameRaw = stringValue(args.peer_name).trim();
     const message = stringValue(args.message).trim();
-    if (!peerName || !message) return JSON.stringify({ error: "peer_name and message required" });
+    if (!peerNameRaw || !message) return JSON.stringify({ error: "peer_name and message required" });
 
+    // #1520: reject local session identities before config lookup or transport.
+    const resolved = resolvePeerName(peerNameRaw);
+    if (!resolved.ok) {
+      return JSON.stringify({ error: resolved.message, code: resolved.code });
+    }
+    const peerName = resolved.peer;
     const config = loadPeerConfig();
-    if (peerName === config.self.name) return JSON.stringify({ error: "Cannot chat with yourself" });
-    if (!config.peers[peerName]) return JSON.stringify({ error: `Unknown peer: ${peerName}` });
 
     const session = getOrCreateSession(stringValue(args.session_id).trim() || undefined, peerName);
 
@@ -615,12 +596,15 @@ const peerDoorbellTool: ToolDefinition = {
     if (await isActiveCardPeerSourced(context)) {
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
-    const { loadPeerConfig } = await import("../peer-config.js");
-    const peerName = stringValue(args.peer_name).trim();
-    if (!peerName) return JSON.stringify({ error: "peer_name required" });
-    const config = loadPeerConfig();
-    const peer = config.peers[peerName];
-    if (!peer) return JSON.stringify({ error: `Unknown peer: ${peerName}` });
+    const { resolvePeerName } = await import("./peer-resolver.js");
+    const peerNameRaw = stringValue(args.peer_name).trim();
+    if (!peerNameRaw) return JSON.stringify({ error: "peer_name required" });
+    // #1520: reject local session identities before config lookup or transport.
+    const resolved = resolvePeerName(peerNameRaw);
+    if (!resolved.ok) {
+      return JSON.stringify({ error: resolved.message, code: resolved.code });
+    }
+    const peerName = resolved.peer;
     const { getPeerTransport } = await import("../peer-transport/index.js");
     const transport = getPeerTransport();
     if (typeof transport.ringDoorbell !== "function") {
@@ -628,23 +612,6 @@ const peerDoorbellTool: ToolDefinition = {
     }
     const result = await transport.ringDoorbell(peerName);
     return JSON.stringify({ ok: true, result: result.status, message: `Doorbell rang ${peerName}: ${result.status}` });
-  },
-};
-
-const ircSendTool: ToolDefinition = {
-  name: "irc_send",
-  description: "Send a message to an IRC channel (e.g. #bridges)",
-  parameters: {
-    channel: { type: "string", description: "IRC channel (e.g. #bridges)" },
-    message: { type: "string", description: "Message text to send" },
-  },
-  execute: async (args) => {
-    if (!_ircSend) return JSON.stringify({ error: "IRC adapter not connected" });
-    const channel = stringValue(args["channel"]);
-    const message = stringValue(args["message"]);
-    if (!channel || !message) return JSON.stringify({ error: "channel and message are required" });
-    _ircSend(channel, message);
-    return JSON.stringify({ ok: true, channel, sent: message.length + " chars" });
   },
 };
 
@@ -686,7 +653,7 @@ import { kanbanTool } from "./kanban-tool.js";
 import { channelPostTool, channelReadTool } from "./channel-tool.js";
 import { artifactPushTool, artifactPullTool, artifactAttachTool } from "./artifact-tools.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
 
 // Conditional: artifact store tools (#929)
 if (process.env["ARTIFACT_S3_ENDPOINT"]) {

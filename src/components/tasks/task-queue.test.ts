@@ -17,6 +17,7 @@ vi.mock("./task-state-store.js", () => ({
   resetDeferrals: vi.fn(),
   setAutoPaused: vi.fn(),
   advanceNextRun: vi.fn(),
+  nextRunFromSchedule: vi.fn().mockReturnValue({ nextRunAt: Date.now() + 300000 }),
   updateState: vi.fn(),
   readState: vi.fn(() => null),
   reserveRun: vi.fn().mockReturnValue({ ok: true, run: { runId: "test-run", groupId: "test-group", attempt: 1, trigger: "manual", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() } }),
@@ -30,6 +31,8 @@ vi.mock("./task-failure-buffer.js", () => ({
 
 vi.mock("./task-history-store.js", () => ({
   appendRun: vi.fn(),
+  appendRunOnce: vi.fn().mockReturnValue("test-run"),
+  hasRun: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("./task-store.js", () => ({

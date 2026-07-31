@@ -7,12 +7,18 @@ vi.mock("./task-state-store.js", () => ({
   resetFailures: vi.fn(),
   setAutoPaused: vi.fn(),
   advanceNextRun: vi.fn(),
+  nextRunFromSchedule: vi.fn().mockReturnValue({ nextRunAt: Date.now() + 300000 }),
   updateState: vi.fn(),
   readState: vi.fn(() => null),
+  reserveRun: vi.fn().mockReturnValue({ ok: true, run: { runId: "sys-run", groupId: "sys-group", attempt: 1, trigger: "schedule", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() } }),
+  updateActiveRun: vi.fn().mockReturnValue(true),
+  settleActiveRun: vi.fn().mockReturnValue(true),
 }));
 
 vi.mock("./task-history-store.js", () => ({
   appendRun: vi.fn(),
+  appendRunOnce: vi.fn().mockReturnValue("sys-run"),
+  hasRun: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("./task-store.js", () => ({

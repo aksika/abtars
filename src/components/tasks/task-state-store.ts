@@ -5,6 +5,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { logInfo } from "../logger.js";
 import { CronExpressionParser } from "cron-parser";
 import type { ScheduledTask } from "./task-types.js";
+import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 
 const TAG = "task_state_store";
 
@@ -50,6 +51,22 @@ export interface TaskRuntimeState {
   priorFailure?: string;
   /** #1505: Active run reservation — exclusive occurrence ownership. */
   activeRun?: ActiveTaskRun;
+  /** #1520: latest structured incident; preserved across resume. */
+  lastIncident?: TaskFailureDiagnosticV1;
+  /** #1520: when the task auto-paused (epoch ms). */
+  pausedAt?: number;
+  /** #1520: bounded admission deferral for the current occurrence. */
+  deferredAdmission?: DeferredAdmission;
+}
+
+/** #1520: durable bounded admission deferral — same occurrence across restarts. */
+export interface DeferredAdmission {
+  groupId: string;
+  occurrenceAt: number;
+  deadlineAt: number;
+  attempts: number;
+  retryAt: number;
+  diagnostic: TaskFailureDiagnosticV1;
 }
 
 type TaskStateFile = Record<string, TaskRuntimeState>;
@@ -103,9 +120,26 @@ export function initializeState(entries: ScheduledTask[]): void {
       changed = true;
     }
     const existing = state[id]!;
+    // #1520 Task 6: repair impossible legacy combinations. Auto-paused without
+    // a pausedAt marker or a failure reason is incoherent — clear it and
+    // record a synthesized incident; never silently erase a valid incident.
     if (existing.autoPaused && (existing.consecutiveFailures ?? 0) === 0) {
       logInfo(TAG, `Self-repair: clearing incoherent autoPaused for "${id}" (zero failures)`);
       existing.autoPaused = false;
+      existing.pausedAt = undefined;
+      existing.lastIncident = { version: 1, category: "definition", code: "state_repaired", phase: "settling", message: "auto-pause cleared: incoherent legacy state (zero failures)", retryability: "permanent", occurredAt: Date.now() };
+      changed = true;
+    }
+    if (existing.autoPaused && existing.pausedAt === undefined) {
+      existing.pausedAt = Date.now();
+      logInfo(TAG, `Self-repair: backfilled pausedAt for "${id}"`);
+      changed = true;
+    }
+    if (existing.retrying && !existing.retryGroupId) {
+      logInfo(TAG, `Self-repair: clearing legacy retrying without retryGroupId for "${id}"`);
+      existing.retrying = false;
+      existing.retryAt = undefined;
+      existing.retryAttempt = undefined;
       changed = true;
     }
     if (existing.consecutiveDeferrals === undefined) {
@@ -160,6 +194,16 @@ export function advanceNextRun(taskId: string, schedule?: string): boolean {
   }
 }
 
+/** #1520: pure next-run computation for the atomic settler patch. */
+export function nextRunFromSchedule(task: Pick<ScheduledTask, "schedule">): { nextRunAt?: number; completed?: boolean } {
+  if (!task.schedule) return { completed: true };
+  try {
+    return { nextRunAt: CronExpressionParser.parse(task.schedule).next().getTime() };
+  } catch {
+    return {};
+  }
+}
+
 export function incrementFailures(taskId: string): number {
   let count = 0;
   writeAtomic(state => {
@@ -201,7 +245,10 @@ export function resetDeferrals(taskId: string): void {
 
 export function setAutoPaused(taskId: string, paused: boolean): void {
   writeAtomic(state => {
-    if (state[taskId]) state[taskId].autoPaused = paused;
+    if (state[taskId]) {
+      state[taskId].autoPaused = paused;
+      state[taskId].pausedAt = paused ? (state[taskId].pausedAt ?? Date.now()) : undefined;
+    }
     return state;
   });
 }

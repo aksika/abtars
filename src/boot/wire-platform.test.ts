@@ -11,7 +11,6 @@ import type { PipelineDeps } from "../components/message-pipeline.js";
 
 vi.mock("../components/transport/tool-registry.js", () => ({
   setSendDocument: vi.fn(),
-  setIrcSend: vi.fn(),
 }));
 
 vi.mock("../components/message-pipeline.js", () => ({
@@ -38,16 +37,10 @@ function makeDiscordAdapter() {
   return { setMessageHandler: vi.fn() };
 }
 
-function makeIrcAdapter() {
-  return {
-    setMessageHandler: vi.fn(),
-    sendMessage: vi.fn(),
-  };
-}
-
 function makeTuiAdapter() {
   return {
     setMessageHandler: vi.fn(),
+    sendMessage: vi.fn(),
   };
 }
 
@@ -119,31 +112,6 @@ describe("wireDiscord (#1306)", () => {
 
     const { wireDiscord } = await import("./wire-platform.js");
     await wireDiscord(ctx);
-
-    expect(adapter.setMessageHandler).toHaveBeenCalledOnce();
-  });
-});
-
-// ── wireIrc ────────────────────────────────────────────────────────────────
-
-describe("wireIrc (#1306)", () => {
-  it("is a no-op when no IRC adapter is registered", async () => {
-    const ctx = createBootCtx();
-    ctx.pipelineDeps = makeMockPipelineDeps();
-    // no irc adapter in platformAdapters
-
-    const { wireIrc } = await import("./wire-platform.js");
-    await wireIrc(ctx); // should not throw
-  });
-
-  it("wires handler on retry path", async () => {
-    const ctx = createBootCtx();
-    const adapter = makeIrcAdapter();
-    ctx.platformAdapters.set("irc", adapter as unknown as import("../types/platform.js").PlatformAdapter);
-    ctx.pipelineDeps = makeMockPipelineDeps();
-
-    const { wireIrc } = await import("./wire-platform.js");
-    await wireIrc(ctx);
 
     expect(adapter.setMessageHandler).toHaveBeenCalledOnce();
   });

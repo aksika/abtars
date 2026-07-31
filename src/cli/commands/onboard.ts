@@ -444,7 +444,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
     'HEARTBEAT_INTERVAL_SEC', 'TRUST_MODE',
-    'TELEGRAM_ENABLED', 'DISCORD_ENABLED', 'IRC_ENABLED',
+    'TELEGRAM_ENABLED', 'DISCORD_ENABLED',
     'LOG_LEVEL', 'ACTIVE_MEMORY', 'ENABLE_AGENT_API', 'SELFHEAL_ENABLED',
   ]);
   const keptLines: string[] = [];
@@ -470,7 +470,6 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
   newBlock.push(`TELEGRAM_ENABLED=${answers.telegramToken ? 'true' : 'false'}`);
   newBlock.push(`DISCORD_ENABLED=${answers.discordBotToken ? 'true' : 'false'}`);
-  newBlock.push(`IRC_ENABLED=false`);
   newBlock.push(`LOG_LEVEL=debug`);
   newBlock.push(`ACTIVE_MEMORY=true`);
   newBlock.push(`ENABLE_AGENT_API=false`);

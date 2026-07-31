@@ -66,25 +66,6 @@ export async function wireDiscord(ctx: BootCtx): Promise<void> {
   logInfo(TAG, "Discord: full pipeline wired");
 }
 
-/** Wire the full IRC pipeline + send tool onto the IRC adapter. Idempotent. */
-export async function wireIrc(ctx: BootCtx): Promise<void> {
-  const adapter = ctx.platformAdapters.get("irc");
-  if (!adapter || !ctx.pipelineDeps) return;
-
-  const pipelineDeps = ctx.pipelineDeps;
-
-  if ("setMessageHandler" in adapter) {
-    const { handleInboundMessage } = await import("../components/message-pipeline.js");
-    (adapter as unknown as { setMessageHandler(cb: (msg: unknown) => void): void })
-      .setMessageHandler((msg) => { void handleInboundMessage(msg as never, adapter as never, pipelineDeps); });
-
-    const { setIrcSend } = await import("../components/transport/tool-registry.js");
-    setIrcSend((channel, message) => { adapter.sendMessage(channel, message); });
-
-    logInfo(TAG, "IRC: full pipeline wired");
-  }
-}
-
 /** Wire the full TUI pipeline onto the TUI socket adapter (#1315). Idempotent. */
 export async function wireTui(ctx: BootCtx): Promise<void> {
   const adapter = ctx.platformAdapters.get("tui");

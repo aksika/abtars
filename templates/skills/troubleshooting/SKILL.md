@@ -23,9 +23,6 @@ done
 
 ## Browser agent
 ```bash
-docker ps --filter name=abtars-browser --format "{{.ID}} {{.Status}}"
-docker logs abtars-browser --tail 30
-abtars-browser --action screenshot --session-id browse | jq -r '.screenshot' | base64 -d > /tmp/browser.png
 ```
 
 ## Memory DB

@@ -179,7 +179,7 @@ describe("renderChatStatus", () => {
     const out = renderChatStatus(makeOperatorView({ runtime: makeRuntimeView() }));
     expect(out).toContain("✓ Telegram");
     expect(out).toContain("✓ Discord");
-    expect(out).toContain("✗ Irc");
+    expect(out).not.toContain("Irc");
   });
 
   it("warns when runtime is not available (no ctx provided)", () => {

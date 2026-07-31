@@ -60,7 +60,6 @@ cloakbrowser --action <ACTION> [--url <URL>] [--...] --session-id main-emergency
 ## Architecture
 - **External CLI.** `cloakbrowser` is a separately installed executable found on PATH.
 - **No embedded browser.** Abtars does not manage browser processes, sessions, or IPC.
-- **Task dispatch only.** `abtars-browse` creates B-type Kanban cards for managed browsing; it does not interact with the browser directly.
 
 ## When NOT to use
 - Simple URL fetch → use web-fetch skill Level 1–3 first

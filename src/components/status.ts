@@ -116,7 +116,7 @@ export interface BridgeStatusCtx {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const PLATFORM_NAMES = ["telegram", "discord", "irc"] as const;
+const PLATFORM_NAMES = ["telegram", "discord"] as const;
 const SYSTEMCTL_TIMEOUT_MS = 3000;
 
 // ── getStatus (the one data function) ────────────────────────────────────────

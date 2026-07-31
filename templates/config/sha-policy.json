@@ -3,7 +3,6 @@
   "faults": {
     "missing-dep": { "action": "disable-capability", "cooldown": 604800, "maxRetries": 1 },
     "db-corruption": { "action": "rebuild", "cooldown": 86400, "maxRetries": 3 },
-    "irc-flap": { "action": "disable-capability", "cooldown": 604800, "maxRetries": 5 },
     "autofix-known": { "action": "spawn-command", "cooldown": 86400, "maxRetries": 3 },
     "autofix-unknown": { "action": "spawn-agent", "cooldown": 86400, "maxRetries": 1 }
   },

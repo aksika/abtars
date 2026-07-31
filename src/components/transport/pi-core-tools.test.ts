@@ -88,12 +88,12 @@ describe("createPiAgentTools", () => {
 
   it("tool execute returns an AgentToolResult", async () => {
     const ctx = makeContext({
-      sandboxPolicy: buildPolicy("owner", { allowedTools: ["irc_send"] }),
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
     });
     const tools = createPiAgentTools(ctx);
-    const ircTool = tools.find((t) => t.name === "irc_send");
-    if (ircTool) {
-      const result = await ircTool.execute("call_1", { channel: "#test", message: "hello" });
+    const tool = tools.find((t) => t.name === "secret_get");
+    if (tool) {
+      const result = await tool.execute("call_1", { name: "missing" });
       expect(typeof result).toBe("object");
       expect(Array.isArray(result.content)).toBe(true);
       expect(result.details).toBeDefined();
@@ -103,16 +103,16 @@ describe("createPiAgentTools", () => {
   it("calls onToolFailure when tool returns a failure result", async () => {
     const onToolFailure = vi.fn();
     const ctx = makeContext({
-      sandboxPolicy: buildPolicy("owner", { allowedTools: ["irc_send"] }),
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
       onToolFailure,
     });
     const tools = createPiAgentTools(ctx);
-    const ircTool = tools.find((t) => t.name === "irc_send");
-    if (ircTool) {
-      await ircTool.execute("call_1", { channel: "#test", message: "hello" });
+    const tool = tools.find((t) => t.name === "secret_get");
+    if (tool) {
+      await tool.execute("call_1", { name: "missing" });
       expect(onToolFailure).toHaveBeenCalledTimes(1);
       expect(onToolFailure).toHaveBeenCalledWith(
-        expect.objectContaining({ reason: "unknown", tool: "irc_send" }),
+        expect.objectContaining({ reason: "unknown", tool: "secret_get" }),
       );
     }
   });
@@ -153,15 +153,15 @@ describe("createPiAgentTools", () => {
   it("throws PiCoreToolExecutionError on exact_repeat from beforeTool", async () => {
     const onToolFailure = vi.fn();
     const ctx = makeContext({
-      sandboxPolicy: buildPolicy("owner", { allowedTools: ["irc_send"] }),
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
       onToolFailure,
     });
     const tools = createPiAgentTools(ctx);
-    const ircTool = tools.find((t) => t.name === "irc_send");
-    if (ircTool) {
-      await ircTool.execute("call_1", { channel: "#test", message: "dup" });
-      await ircTool.execute("call_2", { channel: "#test", message: "dup" });
-      await expect(ircTool.execute("call_3", { channel: "#test", message: "dup" }))
+    const tool = tools.find((t) => t.name === "secret_get");
+    if (tool) {
+      await tool.execute("call_1", { name: "dup" });
+      await tool.execute("call_2", { name: "dup" });
+      await expect(tool.execute("call_3", { name: "dup" }))
         .rejects.toThrow(PiCoreToolExecutionError);
       expect(onToolFailure).toHaveBeenCalledTimes(3);
     }
@@ -170,17 +170,17 @@ describe("createPiAgentTools", () => {
   it("throws PiCoreToolExecutionError after repeated tool failure", async () => {
     const onToolFailure = vi.fn();
     const ctx = makeContext({
-      sandboxPolicy: buildPolicy("owner", { allowedTools: ["irc_send"] }),
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["send_document"] }),
       onToolFailure,
     });
     const tools = createPiAgentTools(ctx);
-    const ircTool = tools.find((t) => t.name === "irc_send");
-    if (ircTool) {
+    const tool = tools.find((t) => t.name === "send_document");
+    if (tool) {
       // Use different args to avoid exact_repeat; afterTool failure detection
       // classifies each error response as a failure, triggering repeated_failure on the 3rd.
-      await ircTool.execute("call_1", { channel: "#test", message: "hello" });
-      await ircTool.execute("call_2", { channel: "#test", message: "world" });
-      await expect(ircTool.execute("call_3", { channel: "#test", message: "foo" }))
+      await tool.execute("call_1", { path: "/tmp/one.md" });
+      await tool.execute("call_2", { path: "/tmp/two.md" });
+      await expect(tool.execute("call_3", { path: "/tmp/three.md" }))
         .rejects.toThrow(PiCoreToolExecutionError);
       expect(onToolFailure).toHaveBeenCalledTimes(3);
     }
@@ -189,16 +189,16 @@ describe("createPiAgentTools", () => {
   it("skips tool on safety controller skip decision", async () => {
     const safety = createPiExecutionSafetyController(policy);
     const ctx = makeContext({
-      sandboxPolicy: buildPolicy("owner", { allowedTools: ["irc_send"] }),
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
       safety,
     });
 
     safety.requestStop("test stop");
 
     const tools = createPiAgentTools(ctx);
-    const ircTool = tools.find((t) => t.name === "irc_send");
-    if (ircTool) {
-      const result = await ircTool.execute("call_1", { channel: "#test", message: "hi" });
+    const tool = tools.find((t) => t.name === "secret_get");
+    if (tool) {
+      const result = await tool.execute("call_1", { name: "hi" });
       expect(result.details).toEqual({ skipped: true });
       expect(result.content[0]?.text).toContain("skipped");
     }

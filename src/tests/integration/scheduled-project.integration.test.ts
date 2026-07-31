@@ -114,8 +114,8 @@ describe("scheduled project orchestration (#1516)", () => {
     expect(history).toContain(`"kanbanCardId":${rootId}`);
 
     const deps = {
-      sendMessage: vi.fn().mockResolvedValue(undefined),
-      sendDocument: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue("sent" as const),
+      sendDocument: vi.fn().mockResolvedValue("sent" as const),
       announce: vi.fn().mockResolvedValue(undefined),
       chatIdFor: vi.fn().mockReturnValue("42"),
     };

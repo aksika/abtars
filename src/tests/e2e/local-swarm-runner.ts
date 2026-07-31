@@ -195,8 +195,8 @@ function createMockRuntime(durationMs = 30) {
 
 let sentCaptureCount = 0;
 const testDeliverDeps = {
-  sendMessage: async (_chatId: string, _text: string) => { sentCaptureCount++; },
-  sendDocument: async (_chatId: string, _filePath: string, _caption: string) => { sentCaptureCount++; },
+  sendMessage: async (_chatId: string, _text: string): Promise<"sent"> => { sentCaptureCount++; return "sent"; },
+  sendDocument: async (_chatId: string, _filePath: string, _caption: string): Promise<"sent"> => { sentCaptureCount++; return "sent"; },
   announce: async (_prompt: string) => { sentCaptureCount++; },
   chatIdFor: () => "test_chat",
 };

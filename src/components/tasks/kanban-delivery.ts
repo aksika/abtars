@@ -1,13 +1,23 @@
 import type { KanbanCard } from "./kanban-board.js";
-import { kanbanMarkDelivered, kanbanClaimDelivery, kanbanGetCard, requireTaskDatabase } from "./kanban-board.js";
+import { kanbanMarkDelivered, kanbanClaimDelivery, kanbanGetCard, kanbanPending, requireTaskDatabase } from "./kanban-board.js";
 import { logDebug, logWarn } from "../logger.js";
 import { logSwarmTrace } from "../swarm-trace.js";
+import { makeTaskFailure } from "./task-failure.js";
+import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 
 const TAG = "kanban-delivery";
 
+/**
+ * #1520: send outcome classification. `not_sent` means the boundary knows the
+ * message was definitely not sent (adapter unavailable, invalid target) and
+ * the card returns to the bounded poll retry. `unknown` means the send may
+ * have partially happened — no automatic resend, operator review only.
+ */
+export type SendOutcome = "sent" | "not_sent" | "unknown";
+
 export interface DeliverDeps {
-  sendMessage: (chatId: string, text: string) => Promise<void>;
-  sendDocument: (chatId: string, filePath: string, caption: string) => Promise<void>;
+  sendMessage: (chatId: string, text: string) => Promise<SendOutcome>;
+  sendDocument: (chatId: string, filePath: string, caption: string) => Promise<SendOutcome>;
   announce: (prompt: string) => Promise<void>;
   chatIdFor: (card: KanbanCard) => string;
 }
@@ -54,9 +64,8 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
 
   if (card.result_path) {
     try {
-      await deps.sendDocument(chatId, card.result_path, card.title);
-      markSent(card.id, "sent");
-      logSwarmTrace({ event: "delivery_sent", card: card.id, reason: "document" });
+      const outcome = await deps.sendDocument(chatId, card.result_path, card.title);
+      recordOutcome(card.id, outcome, "document");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `sendDocument failed for card ${card.id}: ${msg}`);
@@ -71,9 +80,8 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
       ? `${card.title} complete.\n\n${card.result_summary}`
       : `${card.title} complete.`;
     try {
-      await deps.sendMessage(chatId, text);
-      markSent(card.id, "sent");
-      logSwarmTrace({ event: "delivery_sent", card: card.id, reason: "announce" });
+      const outcome = await deps.sendMessage(chatId, text);
+      recordOutcome(card.id, outcome, "announce");
     } catch {
       markUnknown(card.id);
       logSwarmTrace({ event: "delivery_failed", card: card.id, reason: "announce_failed" });
@@ -83,13 +91,51 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
 
   const summary = card.result_summary ? `\n\n${card.result_summary}` : "";
   try {
-    await deps.sendMessage(chatId, `${card.title} complete.${summary}`);
-    markSent(card.id, "sent");
-    logSwarmTrace({ event: "delivery_sent", card: card.id, reason: "message" });
+    const outcome = await deps.sendMessage(chatId, `${card.title} complete.${summary}`);
+    recordOutcome(card.id, outcome, "message");
   } catch {
     markUnknown(card.id);
     logSwarmTrace({ event: "delivery_failed", card: card.id, reason: "message_failed" });
   }
+}
+
+/** #1520: record a delivery diagnostic on the card and route by outcome. */
+function recordOutcome(cardId: number, outcome: SendOutcome, kind: string): void {
+  if (outcome === "sent") {
+    markSent(cardId, "sent");
+    logSwarmTrace({ event: "delivery_sent", card: cardId, reason: kind });
+    return;
+  }
+  if (outcome === "not_sent") {
+    // Definitely not sent → back to the bounded poll for a delivery-only retry.
+    markDefinitelyNotSent(cardId);
+    logSwarmTrace({ event: "delivery_failed", card: cardId, reason: kind });
+    return;
+  }
+  markUnknown(cardId);
+  logSwarmTrace({ event: "delivery_failed", card: cardId, reason: kind });
+}
+
+export function deliveryDiagnostic(cardId: number, outcome: SendOutcome): TaskFailureDiagnosticV1 {
+  return makeTaskFailure(
+    "delivery",
+    outcome === "not_sent" ? "definitely_not_sent" : "send_unknown",
+    "delivery",
+    `card ${cardId} delivery ${outcome === "not_sent" ? "definitely not sent" : "state unknown"}`,
+    "none",
+  );
+}
+
+/** #1520: the delivery poll — bounded claim over all done cards (≤5 attempts). */
+export async function pollPendingDeliveries(deps: DeliverDeps): Promise<number> {
+  let attempted = 0;
+  for (const card of kanbanPending()) {
+    await deliverCard(card, deps).catch(err => {
+      logWarn(TAG, `deliverCard failed for card ${card.id}: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    attempted++;
+  }
+  return attempted;
 }
 
 function markSent(cardId: number, receipt: string): void {

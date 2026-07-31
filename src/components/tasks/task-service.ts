@@ -1,6 +1,7 @@
 import type { ScheduledTask } from "./task-types.js";
 import type { TaskRuntimeState } from "./task-state-store.js";
 import type { TaskRunEvent } from "./task-history-store.js";
+import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 import * as stateStore from "./task-state-store.js";
 import * as historyStore from "./task-history-store.js";
 
@@ -10,6 +11,10 @@ export interface TaskView {
   state: TaskRuntimeState;
   latestRuns: TaskRunEvent[];
   running: boolean;
+  /** #1520: structured incident, pause time, and exact resume command. */
+  lastIncident?: TaskFailureDiagnosticV1;
+  pausedAt?: number;
+  resumeCommand?: string;
 }
 
 export function getTaskView(task: ScheduledTask, runningTaskIds: Set<string> = new Set()): TaskView {
@@ -17,12 +22,18 @@ export function getTaskView(task: ScheduledTask, runningTaskIds: Set<string> = n
     nextRunAt: null, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false,
   };
   const runs = historyStore.recentRuns(task.id, 5);
-  return {
+  const view: TaskView = {
     definition: task,
     state: s,
     latestRuns: runs,
     running: runningTaskIds.has(task.id),
+    lastIncident: s.lastIncident,
+    pausedAt: s.pausedAt,
   };
+  if (s.autoPaused) {
+    view.resumeCommand = `/task resume ${task.id}`;
+  }
+  return view;
 }
 
 export function getAllViews(tasks: ScheduledTask[], runningTaskIds: Set<string> = new Set()): TaskView[] {
@@ -38,16 +49,38 @@ export function setEnabled(taskId: string, enabled: boolean): void {
   writeEntries(entries);
 }
 
-export function resumeAutoPaused(taskId: string, schedule?: string): boolean {
+export type ResumeResult = "resumed" | "already_running" | "not_paused" | "invalid" | "not_found";
+
+/**
+ * #1520: one atomic resume operation. In one state write it clears the pause,
+ * failure/deferral counters, retry and active-admission metadata, preserves
+ * the incident, and computes the next cron occurrence (never in the past).
+ * It never executes and never re-enables a disabled definition.
+ */
+export function resumeAutoPaused(taskId: string, tasks: ScheduledTask[]): ResumeResult {
+  const entry = tasks.find(t => t.id === taskId);
+  if (!entry) return "not_found";
   const state = stateStore.readState(taskId);
-  if (!state) return false;
-  const wasPaused = state.autoPaused;
-  stateStore.setAutoPaused(taskId, false);
-  stateStore.resetFailures(taskId);
-  if (schedule) {
-    stateStore.advanceNextRun(taskId, schedule);
-  }
-  return wasPaused;
+  if (!state) return "not_found";
+  if (!state.autoPaused) return "not_paused";
+  if (state.activeRun) return "already_running";
+
+  const next = stateStore.nextRunFromSchedule(entry);
+  stateStore.updateState(taskId, {
+    autoPaused: false,
+    pausedAt: undefined,
+    consecutiveFailures: 0,
+    consecutiveDeferrals: 0,
+    retrying: false,
+    retryAt: undefined,
+    retryGroupId: undefined,
+    retryAttempt: undefined,
+    priorFailure: undefined,
+    deferredAdmission: undefined,
+    ...(next.nextRunAt !== undefined ? { nextRunAt: next.nextRunAt } : {}),
+    ...(next.completed === true ? { completed: true } : {}),
+  });
+  return "resumed";
 }
 
 export function triggerNow(taskId: string, tasks: ScheduledTask[]): boolean {

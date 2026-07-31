@@ -6,7 +6,7 @@ Browsie is the built-in web browsing capability. When enabled, the agent can nav
 
 - Abtars does not ship or manage a browser binary.
 - The external `cloakbrowser` executable must be installed separately and available on PATH.
-- Abtars provides task dispatch: `abtars-browse` creates a B-type Kanban card for the Browsie agent.
+- Abtars provides task dispatch: a B-type Kanban card with a detailed goal (via `kanban_manage` or `abtars kanban create`) is created for the Browsie agent — see `templates/skills/browser/SKILL.md`.
 - The Browsie agent calls `cloakbrowser` directly via shell.
 
 ## Requirements

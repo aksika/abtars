@@ -8,7 +8,7 @@ Stability and compatibility information for deploying abTARS in production.
 
 **Telegram** is the primary and most extensively tested platform. All commands, session management, streaming, multi-user features, and edge cases are validated against Telegram. It is the recommended interface for production use.
 
-Discord and IRC adapters are functional but receive less continuous testing.
+Discord receives less continuous testing than Telegram.
 
 ### Transport (model providers)
 

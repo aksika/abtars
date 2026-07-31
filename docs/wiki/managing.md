@@ -64,7 +64,7 @@ abtars daemon uninstall                  # user scope
 
 ```bash
 rm -rf ~/.abtars
-rm -f ~/.local/bin/abtars ~/.local/bin/abtars-browser ~/.local/bin/abtars-restart
+rm -f ~/.local/bin/abtars ~/.local/bin/abtars-restart
 npm uninstall -g abtars
 ```
 

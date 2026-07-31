@@ -155,7 +155,7 @@ describe("parseToolResultToDiagnostic", () => {
   });
 
   it("returns null for non-JSON results", () => {
-    expect(parseToolResultToDiagnostic("plain text output", execId, "irc_send")).toBeNull();
+    expect(parseToolResultToDiagnostic("plain text output", execId, "send_document")).toBeNull();
   });
 
   it("redacts secrets from error field in non-bash tool results", () => {

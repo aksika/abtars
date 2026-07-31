@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn, logTrace } from "../logger.js";
 import { readEntries as dbReadEntries } from "./task-store.js";
-import { advanceNextRun, updateState, readState, reserveRun, settleActiveRun } from "./task-state-store.js";
-import { todaySuccessCount, appendRun, hasRun } from "./task-history-store.js";
+import { advanceNextRun, readState, reserveRun, settleActiveRun } from "./task-state-store.js";
+import { todaySuccessCount, hasRun } from "./task-history-store.js";
 import { kanbanGetCard } from "./kanban-board.js";
+import { settleRunOnce } from "./task-run-settler.js";
+import { makeTaskFailure } from "./task-failure.js";
 import { abortProjectById } from "../reconciler.js";
 import type { ScheduledTask } from "./task-types.js";
 import type { ActiveTaskRun } from "./task-state-store.js";
@@ -127,26 +129,31 @@ export function checkCron(): ReservedTask[] {
     const decision = decideSchedule(entry);
     if (decision.run) {
       const now = Date.now();
+      const state = readState(entry.id);
+      // #1520: a due admission deferral resumes the SAME occurrence with its
+      // retained group/occurrence/deadline — a fresh run ID, never a new group.
+      const deferred = state?.deferredAdmission;
+      // #1502/#1520: a scheduled execution retry stays in its original run
+      // group with attempt 2 — never a second fresh group.
+      const retrying = state?.retrying === true && state.retryAttempt === 1;
       const reservation = reserveRun(entry.id, {
         runId: `${entry.id}_${now}`,
-        groupId: `${entry.id}:group:${now}`,
-        attempt: 1,
-        trigger: "schedule",
-        occurrenceAt: now,
-        deadlineAt: now + AGENT_TIMEOUT_MS,
+        groupId: deferred?.groupId ?? (retrying ? state?.retryGroupId : undefined) ?? `${entry.id}:group:${now}`,
+        attempt: retrying ? 2 : 1,
+        trigger: retrying ? "retry" : "schedule",
+        occurrenceAt: deferred?.occurrenceAt ?? now,
+        deadlineAt: deferred?.deadlineAt ?? now + AGENT_TIMEOUT_MS,
         cardId: undefined,
       });
       if (!reservation.ok) {
         logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=active_run conflict run=${reservation.active.runId}`);
         continue;
       }
-      logTrace(TAG, `task_schedule_due task=${entry.id} run=${reservation.run.runId}`);
+      logTrace(TAG, `task_schedule_due task=${entry.id} run=${reservation.run.runId}${deferred ? ` deferred_attempt=${deferred.attempts + 1}` : ""}`);
 
       if (entry.kind === "reminder") {
         appendReminder({ chatId: parseInt(entry.chatId ?? "0", 10), message: entry.text, createdAt: now });
-        appendRun({ taskId: entry.id, kind: "reminder", trigger: "schedule", startedAt: now, finishedAt: now, outcome: "success" });
-        advanceNextRun(entry.id, entry.schedule);
-        settleActiveRun(entry.id, reservation.run.runId, {});
+        settleRunOnce({ entry, run: reservation.run, outcome: "success" });
         logInfo(TAG, `Reminder fired: "${entry.text}"`);
       } else {
         dueTasks.push({ entry, run: reservation.run });
@@ -168,6 +175,18 @@ export function checkCron(): ReservedTask[] {
 
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 
+/**
+ * #1520: authoritative restart recovery. Precedence:
+ * 1. matching terminal history: clear stale active state only;
+ * 2. durable O card + unexpired deadline: reattach its scheduled owner;
+ * 3. expired run: settle once as interruption/deadline_exceeded;
+ * 4. uncertain T/script/system execution that may have crossed its
+ *    side-effect boundary: settle once as interruption/restart_interrupted,
+ *    never replay;
+ * 5. an admission deferral has no active executor and is resumed from its
+ *    durable retryAt (the settler already cleared the reservation; the queue
+ *    snapshot is diagnostic only and cannot create work).
+ */
 export function reconcileActiveTaskRuns(reattachProject?: ScheduledProjectReattach): void {
   const entries = dbReadEntries();
   for (const entry of entries) {
@@ -183,8 +202,13 @@ export function reconcileActiveTaskRuns(reattachProject?: ScheduledProjectReatta
     }
 
     if (run.deadlineAt < Date.now()) {
-      updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined, activeRun: undefined });
-      appendRun({ taskId: entry.id, kind: entry.kind, trigger: run.trigger, startedAt: run.reservedAt, finishedAt: Date.now(), outcome: "cancelled", detail: "restart_recovery: deadline passed", groupId: run.groupId, runId: run.runId });
+      settleRunOnce({
+        entry, run,
+        outcome: "failed",
+        diagnostic: makeTaskFailure("interruption", "deadline_exceeded", "executing",
+          "restart recovery: run deadline passed", "none"),
+        detail: "restart_recovery: deadline passed",
+      });
       // #1516: terminalize the interrupted project so its Orc/Worker state
       // cannot orphan after the scheduled run is settled.
       if (run.cardId !== undefined) {
@@ -208,12 +232,28 @@ export function reconcileActiveTaskRuns(reattachProject?: ScheduledProjectReatta
         logWarn(TAG, `Unable to reattach scheduled project task=${entry.id} run=${run.runId} card=${run.cardId}`);
       }
       if (card && (card.status === "done" || card.status === "delivered" || card.status === "failed")) {
-        updateState(entry.id, { lastFinishedAt: Date.now(), retrying: false, retryGroupId: undefined, retryAttempt: undefined, priorFailure: undefined, activeRun: undefined });
-        appendRun({ taskId: entry.id, kind: entry.kind, trigger: run.trigger, startedAt: run.reservedAt, finishedAt: Date.now(), outcome: "cancelled", detail: `restart_recovery: project terminal (${card.status})`, groupId: run.groupId, runId: run.runId });
+        settleRunOnce({
+          entry, run,
+          outcome: "failed",
+          diagnostic: makeTaskFailure("interruption", "restart_interrupted", "executing",
+            `restart recovery: project terminal (${card.status})`, "none"),
+          detail: `restart_recovery: project terminal (${card.status})`,
+        });
         logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=settled_project_terminal card=${run.cardId} status=${card.status}`);
         continue;
       }
     }
 
+    // #1520: an uncertain T/script/system execution with no terminal history
+    // is settled as interrupted — never blindly replayed, because external
+    // side effects may already have occurred.
+    settleRunOnce({
+      entry, run,
+      outcome: "failed",
+      diagnostic: makeTaskFailure("interruption", "restart_interrupted", "executing",
+        "restart recovery: execution interrupted, not replayed", "none"),
+      detail: "restart_recovery: execution interrupted (no terminal history)",
+    });
+    logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=settled_interrupted`);
   }
 }
