@@ -27,6 +27,7 @@ import {
   listRunnableSkillsStrict,
   type SkillLoadErrorCode,
 } from "./skill-loader.js";
+import { loadUsers } from "./user-registry.js";
 
 const TAG = "skill-session";
 const FALLBACK_TIMEOUT_MS = 30 * 60 * 1000;
@@ -39,7 +40,11 @@ export interface SkillLaunchInput {
   message: string;
 }
 
-export type SkillLaunchErrorCode = SkillLoadErrorCode | "transport_failed" | "capacity_exhausted";
+export type SkillLaunchErrorCode =
+  | SkillLoadErrorCode
+  | "unknown_target"
+  | "transport_failed"
+  | "capacity_exhausted";
 
 export interface SkillLaunchError {
   code: SkillLaunchErrorCode;
@@ -184,14 +189,19 @@ export class SkillSessionManager {
     const { skill, agent, target, message } = input;
     const key = scopeKeyOf(target);
 
-    // 1. Strict skill load (also serves as replacement validation).
+    // 1. Structured failure: the target must be a known conversation owner.
+    if (!loadUsers().byUserId.has(target.userId)) {
+      return { ok: false, error: { code: "unknown_target", message: `Unknown target user "${target.userId}"` } };
+    }
+
+    // 2. Strict skill load (also serves as replacement validation).
     const loaded = loadSkill(skill, target.userId);
     if (!loaded.ok) {
       return { ok: false, error: { code: loaded.error.code, message: loaded.error.message } };
     }
     const timeoutMs = loaded.skill.config.timeout * 1000;
 
-    // 2. Replacement rules: same skill + same agent reuses; otherwise the new
+    // 3. Replacement rules: same skill + same agent reuses; otherwise the new
     //    skill passed validation above, so terminate the old K and rebind.
     const existing = this.active.get(key);
     if (existing && (existing.skillName !== skill || existing.agent !== agent)) {
@@ -329,10 +339,13 @@ export class SkillSessionManager {
       return { kind: "none" };
     }
     if (!binding.sessionId) {
-      // Suspended after restart — revalidate before a model turn.
-      const loaded = loadSkill(binding.skillName, target.userId);
-      if (!loaded.ok) {
-        logWarn(TAG, `Rehydration for "${binding.skillName}" failed: ${loaded.error.message} — clearing binding`);
+      // Suspended after restart — revalidate before a model turn (skill,
+      // target, configuration, or prerequisite invalid → safe A fallback).
+      const targetKnown = loadUsers().byUserId.has(target.userId);
+      const loaded = targetKnown ? loadSkill(binding.skillName, target.userId) : undefined;
+      if (!loaded?.ok) {
+        const reason = !targetKnown ? "unknown target" : (loaded?.error.message ?? "invalid");
+        logWarn(TAG, `Rehydration for "${binding.skillName}" failed (${reason}) — clearing binding`);
         this.active.delete(key);
         this.store.remove(key);
         return { kind: "fallback_to_main" };

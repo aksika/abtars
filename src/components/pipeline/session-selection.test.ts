@@ -133,14 +133,14 @@ describe("sessionSelectionMiddleware #1432 K routing", () => {
   afterEach(() => { vi.restoreAllMocks(); setUserRegistryOverride(null); });
 
   it("routes an exact matching K binding to the K session before A", async () => {
-    const ctx = makeCtx({ userId: "adrika", msg: { channelId: "8385860222", platform: "telegram", userId: "adrika" } });
-    const kSession = makeSession({ id: "1_K_01", userId: "adrika", platform: "telegram" });
+    const ctx = makeCtx({ userId: "maria", msg: { channelId: "42424242", platform: "telegram", userId: "maria" } });
+    const kSession = makeSession({ id: "1_K_01", userId: "maria", platform: "telegram" });
     skillMod.skillSessionManager.resolveForInbound.mockReturnValue({ kind: "active", sessionId: "1_K_01", needsBootstrap: false });
     vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(kSession);
     const next = vi.fn();
     await sessionSelectionMiddleware(ctx, next);
     expect(skillMod.skillSessionManager.resolveForInbound).toHaveBeenCalledWith({
-      userId: "adrika", platform: "telegram", chatId: "8385860222", threadId: undefined,
+      userId: "maria", platform: "telegram", chatId: "42424242", threadId: undefined,
     });
     expect(ctx.session).toBe(kSession);
     expect(ctx.sessionId).toBe("1_K_01");
@@ -148,7 +148,7 @@ describe("sessionSelectionMiddleware #1432 K routing", () => {
   });
 
   it("falls back to A when no binding matches (wrong address)", async () => {
-    const ctx = makeCtx({ userId: "adrika", msg: { channelId: "999", platform: "telegram", userId: "adrika" } });
+    const ctx = makeCtx({ userId: "maria", msg: { channelId: "999", platform: "telegram", userId: "maria" } });
     skillMod.skillSessionManager.resolveForInbound.mockReturnValue({ kind: "none" });
     const aSession = makeSession({ id: "1_A_01" });
     vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(aSession);
@@ -159,7 +159,7 @@ describe("sessionSelectionMiddleware #1432 K routing", () => {
   });
 
   it("falls back to A after rehydration failure clears the binding", async () => {
-    const ctx = makeCtx({ userId: "adrika", msg: { channelId: "8385860222", platform: "telegram", userId: "adrika" } });
+    const ctx = makeCtx({ userId: "maria", msg: { channelId: "42424242", platform: "telegram", userId: "maria" } });
     skillMod.skillSessionManager.resolveForInbound.mockReturnValue({ kind: "fallback_to_main" });
     const aSession = makeSession({ id: "1_A_01" });
     vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(aSession);
@@ -170,7 +170,7 @@ describe("sessionSelectionMiddleware #1432 K routing", () => {
   });
 
   it("drops a stale K session that died out-of-band and selects A", async () => {
-    const ctx = makeCtx({ userId: "adrika", msg: { channelId: "8385860222", platform: "telegram", userId: "adrika" } });
+    const ctx = makeCtx({ userId: "maria", msg: { channelId: "42424242", platform: "telegram", userId: "maria" } });
     skillMod.skillSessionManager.resolveForInbound.mockReturnValue({ kind: "active", sessionId: "1_K_01", needsBootstrap: false });
     vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(undefined);
     const aSession = makeSession({ id: "1_A_01" });

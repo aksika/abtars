@@ -19,6 +19,13 @@ let home: string;
 let storeFile: string;
 
 function makeSkills(): void {
+  mkdirSync(join(home, "config"), { recursive: true });
+  writeFileSync(join(home, "config", "users.json"), JSON.stringify({
+    users: [
+      { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } },
+      { userId: "ada", role: "user", maxClass: 1, tools: [], platforms: { telegram: 42 } },
+    ],
+  }));
   const dir = join(home, "skills", "custom", "spanish-tutor");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "skill.json"), JSON.stringify({
@@ -127,6 +134,17 @@ describe("SkillSessionManager launch", () => {
     const durable = JSON.parse(require("node:fs").readFileSync(storeFile, "utf-8"));
     expect(durable.bindings[0]).toMatchObject({ skillName: "spanish-tutor", chatId: "42", agent: "professor" });
     expect(JSON.stringify(durable)).not.toContain("sessionId");
+  });
+
+  it("rejects an unregistered target user with a structured error", async () => {
+    const spin = fakeSpin();
+    const mgr = makeManager(spin);
+    const result = await mgr.launch({ skill: "spanish-tutor", agent: "professor", target: { ...TARGET, userId: "nobody" }, message: "hola" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("unknown_target");
+    expect(spin.prompts).toHaveLength(0);
+    expect(mgr.list({ ...TARGET, userId: "nobody" })).toBeUndefined();
   });
 
   it("launch failure removes the binding and the K transport", async () => {

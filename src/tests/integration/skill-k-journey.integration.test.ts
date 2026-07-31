@@ -25,9 +25,9 @@ describe("#1432 K interactive skill journey", () => {
   let taskStore: typeof import("../../components/tasks/task-store.js");
   let record: { prompts: Array<{ sessionKey: string; prompt: string; agent: string }> };
 
-  const MASTER = "aksika";
-  const TARGET = { userId: "adrika", platform: "telegram", chatId: "8385860222" };
-  const WRONG = { userId: "adrika", platform: "telegram", chatId: "9999999999" };
+  const MASTER = "alex";
+  const TARGET = { userId: "maria", platform: "telegram", chatId: "42424242" };
+  const WRONG = { userId: "maria", platform: "telegram", chatId: "9999999999" };
 
   function makeFakeRuntime() {
     return {
@@ -139,7 +139,10 @@ describe("#1432 K interactive skill journey", () => {
     vi.doMock("../../paths.js", () => ({ abtarsHome: () => home }));
     mkdirSync(join(home, "config"), { recursive: true });
     writeFileSync(join(home, "config", "users.json"), JSON.stringify({
-      users: [{ userId: MASTER, role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 7773842843 } }],
+      users: [
+        { userId: MASTER, role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 1111111111 } },
+        { userId: TARGET.userId, role: "user", maxClass: 1, tools: [], platforms: { telegram: Number(TARGET.chatId) } },
+      ],
     }));
     record = { prompts: [] };
     board = await import("../../components/tasks/kanban-board.js");
