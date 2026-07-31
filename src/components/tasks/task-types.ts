@@ -54,6 +54,19 @@ export interface ReportContract {
   };
 }
 
+/** #1432: Exact conversation address a scheduled interactive skill binds to. */
+export interface ConversationTarget {
+  userId: string;
+  platform: string;
+  chatId: string;
+  threadId?: string;
+}
+
+/** #1432: Required interaction contract for scheduled agent definitions. */
+export type AgentInteraction =
+  | { mode: "oneshot" }
+  | { mode: "skill"; skill: string; target: ConversationTarget };
+
 export type ScheduledTask =
   | (TaskBase & {
       kind: "reminder";
@@ -65,8 +78,8 @@ export type ScheduledTask =
       prompt?: string;
       taskFile?: string;
       agent: "task" | "professor" | "browsie" | "coding" | "dreamy";
+      interaction: AgentInteraction;
       maxToolRounds?: number;
-      targetUserId?: string;
       report?: ReportContract;
       orchestration: TaskOrchestration;
     })
@@ -74,10 +87,6 @@ export type ScheduledTask =
       kind: "script";
       command: string;
       followUp?: { prompt: string; agent?: string };
-    })
-  | (TaskBase & {
-      kind: "orc";
-      goal: string;
     })
   | (TaskBase & {
       kind: "system";
@@ -187,9 +196,51 @@ export function normalize(raw: unknown): NormalizeResult {
       if (!orchestrationResult.ok) {
         return { ok: false, error: orchestrationResult.error, id };
       }
-      const maxToolRounds = typeof e["maxToolRounds"] === "number" ? e["maxToolRounds"] as number : undefined;
-      const targetUserId = typeof e["targetUserId"] === "string" ? e["targetUserId"] : undefined;
+      // #1432: interaction is required and selects the session lifecycle.
+      const interactionRaw = e["interaction"];
       const reportRaw = e["report"];
+      if (typeof interactionRaw !== "object" || interactionRaw === null) {
+        return { ok: false, error: `interaction is required for agent kind (mode: oneshot | skill)`, id };
+      }
+      const interactionEntry = interactionRaw as Record<string, unknown>;
+      const mode = interactionEntry["mode"];
+      let interaction: AgentInteraction;
+      if (mode === "oneshot") {
+        interaction = { mode: "oneshot" };
+      } else if (mode === "skill") {
+        if (base.delivery !== "announce") {
+          return { ok: false, error: `interaction.mode=skill requires delivery=announce`, id };
+        }
+        if (orchestrationResult.value.maxAgents !== 1) {
+          return { ok: false, error: `interaction.mode=skill requires orchestration.maxAgents=1`, id };
+        }
+        if (reportRaw !== undefined) {
+          return { ok: false, error: `interaction.mode=skill forbids a report contract`, id };
+        }
+        const skill = typeof interactionEntry["skill"] === "string" ? interactionEntry["skill"].trim() : "";
+        if (!skill || !SKILL_IDENTIFIER_RE.test(skill)) {
+          return { ok: false, error: `interaction.mode=skill requires a valid skill identifier`, id };
+        }
+        const targetRaw = interactionEntry["target"];
+        if (typeof targetRaw !== "object" || targetRaw === null) {
+          return { ok: false, error: `interaction.mode=skill requires an exact target`, id };
+        }
+        const t = targetRaw as Record<string, unknown>;
+        const userId = typeof t["userId"] === "string" ? t["userId"].trim() : "";
+        const platform = typeof t["platform"] === "string" ? t["platform"].trim() : "";
+        const chatId = typeof t["chatId"] === "string" ? t["chatId"].trim() : "";
+        const threadId = typeof t["threadId"] === "string" ? t["threadId"] : undefined;
+        if (!userId || !platform || !chatId) {
+          return { ok: false, error: `interaction.mode=skill target requires userId, platform, and chatId`, id };
+        }
+        if (prompt === undefined && taskFile === undefined) {
+          return { ok: false, error: `interaction.mode=skill requires at least one of prompt or taskFile`, id };
+        }
+        interaction = { mode: "skill", skill, target: { userId, platform, chatId, ...(threadId !== undefined ? { threadId } : {}) } };
+      } else {
+        return { ok: false, error: `interaction.mode must be "oneshot" or "skill"`, id };
+      }
+      const maxToolRounds = typeof e["maxToolRounds"] === "number" ? e["maxToolRounds"] as number : undefined;
       let report: ReportContract | undefined;
       if (base.delivery === "report") {
         if (typeof reportRaw !== "object" || reportRaw === null) {
@@ -219,7 +270,7 @@ export function normalize(raw: unknown): NormalizeResult {
       }
       return {
         ok: true,
-        entry: { ...base, kind: "agent", prompt, taskFile, agent, maxToolRounds, targetUserId, report, orchestration: orchestrationResult.value },
+        entry: { ...base, kind: "agent", prompt, taskFile, agent, interaction, maxToolRounds, report, orchestration: orchestrationResult.value },
       };
     }
     case "script": {
@@ -228,11 +279,6 @@ export function normalize(raw: unknown): NormalizeResult {
       const followUpRaw = e["followUp"];
       const followUp = followUpRaw && typeof followUpRaw === "object" ? followUpRaw as { prompt: string; agent?: string } : undefined;
       return { ok: true, entry: { ...base, kind: "script", command, followUp } };
-    }
-    case "orc": {
-      const goal = typeof e["goal"] === "string" ? e["goal"] : "";
-      if (!goal) return { ok: false, error: "goal is required for orc", id };
-      return { ok: true, entry: { ...base, kind: "orc", goal } };
     }
     case "system": {
       const action = e["action"];
@@ -297,6 +343,9 @@ export function formatTaskLabel(id: string): string {
 
 const TASK_ID_RE = /^[a-z][a-z0-9-]*[a-z0-9]$/;
 
+/** #1432: skill identifiers in scheduled definitions are validated identifiers, not paths. */
+const SKILL_IDENTIFIER_RE = /^[a-z][a-z0-9-]*[a-z0-9]$/;
+
 export function isValidTaskId(id: string): boolean {
   return TASK_ID_RE.test(id);
 }
@@ -320,7 +369,6 @@ export function getTaskKindLabel(kind: TaskKind): string {
     case "reminder": return "Reminder";
     case "agent": return "Agent Task";
     case "script": return "Script";
-    case "orc": return "Orc Project";
     case "system": return "System";
   }
 }

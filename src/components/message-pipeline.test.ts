@@ -320,18 +320,39 @@ describe("handleInboundMessage", () => {
   });
 
   it("different users get different session keys from SessionManager", async () => {
-    const sm = {
-      getActiveSessionId: vi.fn((userId: string) => `${userId}_A_01`),
-      getActiveSession: () => ({ id: "x", type: "A", shortIndex: 1, ended: false }),
-    };
-    const deps = mockDeps(transport, { sessionManager: sm } as any);
+    // #1432: session-selection middleware resolves the effective session per
+    // user/platform; buildPrompt uses that selected session (never recomputes).
+    const spinMod = await import("./spin.js");
+    const sessions = new Map<string, ManagedSession>();
+    const selectSpy = vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((userId: string, platform: string): ManagedSession => {
+      const id = `${userId}_A_01`;
+      let s = sessions.get(id);
+      if (!s) {
+        s = {
+          id, userId, platform, chatId: 100,
+          delivery: "streaming", active: true, status: "ready",
+          idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+          log: [], shortIndex: 1,
+          busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+          compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        };
+        sessions.set(id, s);
+      }
+      return s;
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => {
+      const s = sessions.get(id);
+      if (!s) throw new Error(`no session ${id}`);
+      return s;
+    });
     const adapter = mockAdapter();
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg({ userId: "aksika" }), adapter, deps);
     await handleInboundMessage(makeMsg({ userId: "adrika" }), adapter, deps);
 
-    expect(sm.getActiveSessionId).toHaveBeenCalledWith("aksika", "telegram");
-    expect(sm.getActiveSessionId).toHaveBeenCalledWith("adrika", "telegram");
+    expect(selectSpy).toHaveBeenCalledWith("aksika", "telegram");
+    expect(selectSpy).toHaveBeenCalledWith("adrika", "telegram");
   });
 
   it("userId flows to transport.sendPrompt for tool context", async () => {

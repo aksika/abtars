@@ -8,7 +8,7 @@ import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-tran
 import type { SandboxPolicy } from "./tool-sandbox.js";
 import { logError } from "./logger.js";
 
-export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H";
+export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H" | "K";
 
 // #1444: instruction kinds and delivery states
 export type ExecutionInstructionKind = "steer" | "followUp";
@@ -90,6 +90,9 @@ export interface ManagedSession {
   delivery: "streaming" | "simple";
   model?: string;
   provider?: string;
+  /** #1432: Agent selected at allocation (K). Transport creation and
+   *  reattachment use this; never derive a lifecycle type from an agent name. */
+  executionAgent?: AgentName;
   pid?: number;
   peer?: string;                 // remote host name (hollow session)
   remoteSessionId?: string;      // session ID on the peer
@@ -332,12 +335,13 @@ export function sessionCreatedAt(session: ManagedSession): number {
 
 const TYPE_LABELS: Record<SessionType, string> = {
   A: "Main", B: "Browse", C: "Code", T: "Task", P: "Peer",
-  S: "System", O: "Orc", W: "Worker", D: "Dreamy", H: "Healer",
+  S: "System", O: "Orc", W: "Worker", D: "Dreamy", H: "Healer", K: "Skill",
 };
 
 const TYPE_AGENT_MAP: Partial<Record<SessionType, AgentName>> = {
   A: "professor", C: "coding", B: "browsie", D: "dreamy",
   O: "professor", T: "professor", W: "browsie", H: "coding",
+  K: "professor",
 };
 
 export function typeLabel(t: SessionType): string { return TYPE_LABELS[t]; }

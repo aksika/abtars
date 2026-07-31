@@ -116,3 +116,80 @@ describe("sessionSelectionMiddleware", () => {
     expect(next).toHaveBeenCalled();
   });
 });
+
+describe("sessionSelectionMiddleware #1432 K routing", () => {
+  const skillMod = { skillSessionManager: { resolveForInbound: vi.fn(), stop: vi.fn().mockResolvedValue(true) } };
+  let spinMod: typeof import("../spin.js");
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.doMock("../skill-session.js", () => skillMod);
+    skillMod.skillSessionManager.resolveForInbound.mockClear();
+    skillMod.skillSessionManager.stop.mockClear();
+    setUserRegistryOverride({ users: [{ userId: "master", role: "master", maxClass: 5, tools: [], platforms: {} }], byPlatformId: new Map(), byUserId: new Map() });
+    spinMod = await import("../spin.js");
+  });
+
+  afterEach(() => { vi.restoreAllMocks(); setUserRegistryOverride(null); });
+
+  it("routes an exact matching K binding to the K session before A", async () => {
+    const ctx = makeCtx({ userId: "adrika", msg: { channelId: "8385860222", platform: "telegram", userId: "adrika" } });
+    const kSession = makeSession({ id: "1_K_01", userId: "adrika", platform: "telegram" });
+    skillMod.skillSessionManager.resolveForInbound.mockReturnValue({ kind: "active", sessionId: "1_K_01", needsBootstrap: false });
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(kSession);
+    const next = vi.fn();
+    await sessionSelectionMiddleware(ctx, next);
+    expect(skillMod.skillSessionManager.resolveForInbound).toHaveBeenCalledWith({
+      userId: "adrika", platform: "telegram", chatId: "8385860222", threadId: undefined,
+    });
+    expect(ctx.session).toBe(kSession);
+    expect(ctx.sessionId).toBe("1_K_01");
+    expect(next).toHaveBeenCalled();
+  });
+
+  it("falls back to A when no binding matches (wrong address)", async () => {
+    const ctx = makeCtx({ userId: "adrika", msg: { channelId: "999", platform: "telegram", userId: "adrika" } });
+    skillMod.skillSessionManager.resolveForInbound.mockReturnValue({ kind: "none" });
+    const aSession = makeSession({ id: "1_A_01" });
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(aSession);
+    const next = vi.fn();
+    await sessionSelectionMiddleware(ctx, next);
+    expect(ctx.session).toBe(aSession);
+    expect(next).toHaveBeenCalled();
+  });
+
+  it("falls back to A after rehydration failure clears the binding", async () => {
+    const ctx = makeCtx({ userId: "adrika", msg: { channelId: "8385860222", platform: "telegram", userId: "adrika" } });
+    skillMod.skillSessionManager.resolveForInbound.mockReturnValue({ kind: "fallback_to_main" });
+    const aSession = makeSession({ id: "1_A_01" });
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(aSession);
+    const next = vi.fn();
+    await sessionSelectionMiddleware(ctx, next);
+    expect(ctx.session).toBe(aSession);
+    expect(next).toHaveBeenCalled();
+  });
+
+  it("drops a stale K session that died out-of-band and selects A", async () => {
+    const ctx = makeCtx({ userId: "adrika", msg: { channelId: "8385860222", platform: "telegram", userId: "adrika" } });
+    skillMod.skillSessionManager.resolveForInbound.mockReturnValue({ kind: "active", sessionId: "1_K_01", needsBootstrap: false });
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(undefined);
+    const aSession = makeSession({ id: "1_A_01" });
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(aSession);
+    const next = vi.fn();
+    await sessionSelectionMiddleware(ctx, next);
+    expect(skillMod.skillSessionManager.stop).toHaveBeenCalled();
+    expect(ctx.session).toBe(aSession);
+    expect(next).toHaveBeenCalled();
+  });
+
+  it("keeps explicit TUI targeting precedence over K bindings", async () => {
+    const ctx = makeCtx({ adapter: { name: "tui" }, msg: { targetSessionId: "1_B_02", platform: "tui" } });
+    const session = makeSession({ id: "1_B_02", userId: "master", platform: "tg" });
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
+    const next = vi.fn();
+    await sessionSelectionMiddleware(ctx, next);
+    expect(skillMod.skillSessionManager.resolveForInbound).not.toHaveBeenCalled();
+    expect(ctx.session).toBe(session);
+    expect(next).toHaveBeenCalled();
+  });
+});

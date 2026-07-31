@@ -7,6 +7,10 @@
  * platform is "tui", user is the configured master, and the session
  * belongs to that master and is not ended.
  *
+ * #1432: an exact K skill binding outranks ordinary platform-local A for
+ * untargeted messages; an explicit TUI target keeps its authorization
+ * precedence. A cleared/expired binding falls through to A unchanged.
+ *
  * Selection is synchronous and transport-free — transport creation
  * happens later, after paused and busy guards.
  */
@@ -39,6 +43,28 @@ export const sessionSelectionMiddleware: Middleware = async (ctx, next) => {
     await next();
     return;
   }
+
+  // #1432: exact K skill binding → the skill's own persistent session.
+  const { skillSessionManager } = await import("../skill-session.js");
+  const route = skillSessionManager.resolveForInbound({
+    userId: ctx.userId,
+    platform: ctx.msg.platform,
+    chatId: ctx.msg.channelId,
+    threadId: ctx.msg.threadId,
+  });
+  if (route.kind === "active") {
+    const session = spin.getSessionById(route.sessionId);
+    if (session && session.status !== "ended") {
+      ctx.session = session;
+      ctx.sessionId = session.id;
+      await next();
+      return;
+    }
+    // The K session died out-of-band — drop the stale binding and fall
+    // through to the ordinary A selection below.
+    void skillSessionManager.stop({ userId: ctx.userId, platform: ctx.msg.platform, chatId: ctx.msg.channelId, threadId: ctx.msg.threadId }, "replaced");
+  }
+  // fallback_to_main / none → platform-local active session (existing behavior)
 
   // Normal (untargeted) — platform-local active session
   const session = spin.getActiveSession(ctx.userId, ctx.msg.platform);

@@ -14,6 +14,7 @@ vi.mock("./kanban-board.js", () => ({
   kanbanFail: vi.fn(),
   kanbanAttachResult: vi.fn(),
   kanbanSetDeliveryReady: vi.fn(),
+  kanbanEnqueue: vi.fn(() => 12345),
 }));
 vi.mock("./task-history-store.js", () => ({
   appendRunOnce: vi.fn(),
@@ -25,7 +26,14 @@ vi.mock("../transport/bridge-lock-transport.js", () => ({ readLastPromptAt: vi.f
 vi.mock("../transport/pi-core-host.js", () => ({ getToolDescriptor: vi.fn(() => undefined) }));
 vi.mock("./task-log-ctx.js", () => ({ logTaskDebug: vi.fn(), logTaskTrace: vi.fn() }));
 
+const { skillLaunch } = vi.hoisted(() => ({ skillLaunch: vi.fn() }));
+
 const mockedSettle = vi.mocked(settleRunOnce);
+
+vi.mock("../skill-session.js", () => ({
+  skillSessionManager: { launch: (...args: unknown[]) => skillLaunch(...args) },
+  listRunnableSkills: () => [],
+}));
 
 function makeEntry(id: string): any {
   return {
@@ -33,6 +41,7 @@ function makeEntry(id: string): any {
     kind: "agent",
     prompt: "run the task",
     agent: "task",
+    interaction: { mode: "oneshot" },
     delivery: "announce",
     chatId: "1",
     schedule: "* * * * *",
@@ -215,5 +224,53 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
     const outcome = await runner.run(entry, makeReservation("dispatch-report"));
     expect(outcome.status).toBe("success");
     expect(projectRunner.mock.calls[0]![0].reportArtifactPath).toBe("/tmp/daily.md");
+  });
+});
+
+describe("ScheduledTaskRunner #1432 scheduled skill launch", () => {
+  beforeEach(() => {
+    skillLaunch.mockReset();
+    mockedSettle.mockClear();
+    skillLaunch.mockResolvedValue({
+      ok: true,
+      kind: "launched",
+      sessionId: "1_K_01",
+      response: "Hola! Que quieres aprender hoy?",
+      skillName: "spanish-tutor",
+    });
+  });
+
+  it("launches K once, creates one announce card, settles once, and leaves K live", async () => {
+    const entry = makeEntry("skill-launch");
+    entry.interaction = {
+      mode: "skill",
+      skill: "spanish-tutor",
+      target: { userId: "ada", platform: "telegram", chatId: "42" },
+    };
+    const runner = new ScheduledTaskRunner({ agentRunner: undefined, projectRunner: undefined });
+    const outcome = await runner.run(entry, makeReservation("skill-launch"));
+
+    expect(skillLaunch).toHaveBeenCalledTimes(1);
+    expect(skillLaunch.mock.calls[0]![0]).toMatchObject({
+      skill: "spanish-tutor",
+      agent: "task",
+      target: { userId: "ada", platform: "telegram", chatId: "42" },
+    });
+    expect(outcome.status).toBe("success");
+    expect(mockedSettle).toHaveBeenCalledTimes(1);
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "success" }));
+    // Later user turns belong to K — the run history is untouched by follow-ups.
+    expect(mockedSettle).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed" }));
+  });
+
+  it("settles definition_failed when the skill launch rejects, with no card", async () => {
+    skillLaunch.mockResolvedValue({ ok: false, error: { code: "not_found", message: "Skill \"nope\" not found" } });
+    const entry = makeEntry("skill-missing");
+    entry.interaction = { mode: "skill", skill: "nope", target: { userId: "ada", platform: "telegram", chatId: "42" } };
+    const runner = new ScheduledTaskRunner({ agentRunner: undefined, projectRunner: undefined });
+    const outcome = await runner.run(entry, makeReservation("skill-missing"));
+    expect(outcome.status).toBe("definition_failed");
+    expect(outcome.safeDetail).toContain("not found");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "definition_failed" }));
   });
 });

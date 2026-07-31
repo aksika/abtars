@@ -15,6 +15,7 @@ import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import type { InboundMessage } from "../../types/platform.js";
 import type { UserRegistry } from "../user-registry.js";
+import { sessionTypeOf } from "../spin-types.js";
 
 const TAG = "pipeline";
 const ACTIVE_MEMORY_LIMIT = 5;
@@ -46,19 +47,29 @@ export interface BuildPromptResult {
   };
 }
 
+/**
+ * #1432: the effective session is passed in — never recomputed. For K
+ * (memoryMode "skill-isolated") session assembly, active recall, general
+ * conversation-buffer injection, and automatic general-memory writes are
+ * skipped; timestamp, media, injection scanning, and busy queueing remain.
+ */
 export async function buildPrompt(
   msg: InboundMessage,
   text: string,
   deps: BuildPromptDeps,
   registry: UserRegistry,
+  session?: import("../spin-types.js").ManagedSession,
 ): Promise<BuildPromptResult> {
   const { memoryRuntime, conversationBuffer, contextPercent } = deps;
   const { channelId, isGroup } = msg;
   const userId = msg.userId;
-  const sessionKey = deps.sessionManager.getActiveSessionId(userId, msg.platform);
-  const bufKey = `${msg.platform}:${channelId}`;
   const { spin } = await import("../spin.js");
-  const pSession = spin.getSessionById(sessionKey);
+  const pSession = session ?? spin.getSessionById(deps.sessionManager.getActiveSessionId(userId, msg.platform));
+  const sessionKey = pSession?.id ?? deps.sessionManager.getActiveSessionId(userId, msg.platform);
+  const bufKey = `${msg.platform}:${channelId}`;
+  const isSkillIsolated = pSession
+    && (await import("../spin-profiles.js")).profileFor(sessionTypeOf(pSession.id))?.memoryMode === "skill-isolated";
+  const memoryMode = isSkillIsolated ? "skill-isolated" : "standard";
 
   // #1335: collect volatile context blocks separately from raw user text
   const volatileContext: Array<{ kind: "timestamp" | "recall" | "session_start" | "runtime" | "other"; content: string }> = [];
@@ -99,8 +110,8 @@ export async function buildPrompt(
     }
   }
 
-  // --- Group buffer drain ---
-  if (isGroup) {
+  // --- Group buffer drain (skipped for K — skill context is manager-owned) ---
+  if (isGroup && memoryMode !== "skill-isolated") {
     const context = conversationBuffer.drain(bufKey);
     if (context) {
       volatileContext.push({ kind: "other", content: context });
@@ -109,11 +120,11 @@ export async function buildPrompt(
     }
   }
 
-  // --- Session-start injection ---
+  // --- Session-start injection (skipped for K — no A SOUL/session assembly) ---
   const entry = pSession;
   const isSessionStart = !entry || entry.pendingStart || !entry.seen;
-  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart}`);
-  if (isSessionStart && memoryRuntime?.state === "ready") {
+  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} memoryMode=${memoryMode}`);
+  if (isSessionStart && memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated") {
     try {
       const sessionCtx = await memoryRuntime.assembleSessionContext({
         identity: { principalId: userId, executionId: sessionKey },
@@ -133,11 +144,11 @@ export async function buildPrompt(
     entry.pendingStart = false;
   }
 
-  // Record user message to memory
+  // Record user message to memory (skipped for K — no general-memory writes)
   const userRole = registry.byUserId.get(userId)?.role;
-  logTrace(TAG, `recordMessage gate: memory=${memoryRuntime?.state === "ready"} userId=${userId} userRole=${userRole}`);
+  logTrace(TAG, `recordMessage gate: memory=${memoryRuntime?.state === "ready"} userId=${userId} userRole=${userRole} memoryMode=${memoryMode}`);
   let currentMessageId: number | undefined;
-  if (memoryRuntime?.state === "ready" && userRole !== "guest" && !text.startsWith("[SESSION START]")) {
+  if (memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated" && userRole !== "guest" && !text.startsWith("[SESSION START]")) {
     const messageIdStr = typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "";
     const messageTimestamp = msg.timestamp;
     const operationKey = messageIdStr
@@ -159,9 +170,9 @@ export async function buildPrompt(
     }
   }
 
-  // --- Active recall ---
+  // --- Active recall (skipped for K — skill-isolated memory boundary) ---
   let recalledHits: Array<{ id: number; contentEn: string }> | undefined;
-  if (getEnv().activeMemory && memoryRuntime?.state === "ready") {
+  if (memoryMode !== "skill-isolated" && getEnv().activeMemory && memoryRuntime?.state === "ready") {
     const userEntry = registry.byUserId.get(userId);
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
       try {

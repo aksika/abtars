@@ -8,7 +8,7 @@ import { preflightTask, validateReportArtifact } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { createExecutionScope } from "./task-package.js";
 import { registerControl, removeControl } from "../execution-control.js";
-import { kanbanComplete, kanbanFail, kanbanAttachResult, kanbanSetDeliveryReady } from "./kanban-board.js";
+import { kanbanComplete, kanbanFail, kanbanAttachResult, kanbanSetDeliveryReady, kanbanEnqueue } from "./kanban-board.js";
 import { logTaskDebug, logTaskTrace } from "./task-log-ctx.js";
 import { incrementDeferrals, advanceNextRun } from "./task-state-store.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
@@ -111,12 +111,47 @@ export class ScheduledTaskRunner {
         }
       }
 
+      // #1432: scheduled interactive skill launch. The skill manager launches
+      // or resumes K and returns the first model response; this runner stays
+      // the sole owner of the announcement card, initial delivery, and
+      // terminal scheduled settlement. Later user turns belong to K, never to
+      // this run's history, retry, deadline, or settlement lifecycle.
+      if (entry.interaction.mode === "skill") {
+        updateActiveRun(entry.id, reservation.runId, { phase: "executing" });
+        const { skillSessionManager } = await import("../skill-session.js");
+        const launchResult = await skillSessionManager.launch({
+          skill: entry.interaction.skill,
+          agent: entry.agent,
+          target: entry.interaction.target,
+          message: prompt,
+        });
+        if (!launchResult.ok) {
+          const detail = `skill ${entry.interaction.skill}: ${launchResult.error.message}`;
+          logWarn(TAG, `Skill launch failed for task=${entry.id}: ${detail}`);
+          settleRunOnce({ entry, run: reservation, outcome: "definition_failed", detail, cardId: undefined });
+          return { status: "definition_failed", safeDetail: detail };
+        }
+        const boardId = kanbanEnqueue(formatTaskLabel(entry.id), "task", entry.id, {
+          type: "K",
+          delivery: "announce",
+          chatId: entry.chatId ?? String(entry.interaction.target.chatId),
+        });
+        kanbanComplete(boardId, null, launchResult.response.slice(0, 4000));
+        const detail = launchResult.response.slice(0, 200);
+        settleRunOnce({ entry, run: reservation, outcome: "success", detail, cardId: boardId, executionRef: reservation.runId });
+        logTaskDebug("task_settled", { task: entry.id, run: reservation.runId }, `skill=${entry.interaction.skill} session=${launchResult.sessionId}`);
+        return { status: "success", safeDetail: detail, cardId: boardId };
+      }
+
       const runId = reservation.runId;
       const execControl = registerControl(runId, { cardId: undefined });
       updateActiveRun(entry.id, reservation.runId, { phase: "queued", executionId: runId });
 
-      const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
-      const sessionType = (AGENT_SESSION[entry.agent] ?? "T") as import("../spin-types.js").SessionType;
+      // #1432: every one-shot scheduled agent run is a T session. The `agent`
+      // field selects runtime agent/model configuration only — it never maps
+      // to A/B/C/D (the escaped regression where professor/browsie/coding/
+      // dreamy contaminated persistent user/system sessions).
+      const sessionType: import("../spin-types.js").SessionType = "T";
 
       const deadlineMs = reservation.deadlineAt - Date.now();
       const safeDeadline = Math.max(deadlineMs, 10_000);
@@ -131,6 +166,7 @@ export class ScheduledTaskRunner {
       const commonRequest: import("../spin-types.js").SpinRequest = {
         timeoutMs: safeDeadline,
         type: sessionType,
+        agent: entry.agent,
         title: formatTaskLabel(entry.id),
         goal: prompt,
         source: "task",

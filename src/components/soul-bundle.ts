@@ -31,6 +31,7 @@ const TYPE_IDENTITY: Record<SessionType, string | null> = {
   W: null, // Worker — dedicated prompt file (core/prompts/worker.md)
   D: null, // Dreamy — sleep prompt loaded separately
   H: "I am the Healer. I diagnose and fix system failures. If unfixable, state: Requires human intervention.",
+  K: null, // Skill — skill instructions define behavior; never loads A's SOUL
 };
 
 function buildModelInstructions(): string {

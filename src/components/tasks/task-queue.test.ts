@@ -115,7 +115,7 @@ describe("CronQueue", () => {
   });
 
   it("enqueues and runs an agent task", () => {
-    const entry = makeEntry({ kind: "agent", prompt: "do something", delivery: "report" });
+    const entry = makeEntry({ kind: "agent", prompt: "do something", agent: "task", interaction: { mode: "oneshot" }, delivery: "report" });
     const result = queue.enqueue(entry);
     expect(result).toBeNull();
   });

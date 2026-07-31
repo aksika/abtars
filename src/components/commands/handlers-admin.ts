@@ -61,28 +61,48 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
 }
 
 export async function handleSkills(text: string, ctx: CommandContext): Promise<boolean> {
-  // #1141: /skill run <name>, /skill stop, /skill list (runnable)
+  // #1432: /skill run <name>, /skill stop, /skill list route through the same
+  // SkillSessionManager and strict loader as scheduled skill launch.
   const args = text.replace(/^\/skills?\s*/, "").trim();
   if (args.startsWith("run ")) {
-    const skillName = args.slice(4).trim();
-    if (!skillName) { await ctx.reply("Usage: /skill run <name>"); return true; }
-    const { launchSkill } = await import("../skill-session.js");
-    const err = await launchSkill(skillName, ctx.userId, String(ctx.chatId));
-    await ctx.reply(err ?? `* Skill "${skillName}" started.`);
+    const rest = args.slice(4).trim();
+    const [skillName, ...messageParts] = rest.split(/\s+/);
+    if (!skillName) { await ctx.reply("Usage: /skill run <name> [message]"); return true; }
+    const { skillSessionManager } = await import("../skill-session.js");
+    const { loadSkill } = await import("../skill-loader.js");
+    const loaded = loadSkill(skillName, ctx.userId);
+    if (!loaded.ok) { await ctx.reply(`x ${loaded.error.message}`); return true; }
+    const target = { userId: ctx.userId, platform: ctx.platform, chatId: String(ctx.chatId) };
+    const result = await skillSessionManager.launch({
+      skill: skillName,
+      agent: loaded.skill.config.agent ?? "professor",
+      target,
+      message: messageParts.join(" ").trim() || "Start the session.",
+    });
+    if (result.ok) {
+      await ctx.reply(`* Skill "${skillName}" started.\n\n${result.response}`);
+    } else {
+      await ctx.reply(`x ${result.error.message}`);
+    }
     return true;
   }
   if (args === "stop") {
-    const { endSkillSession } = await import("../skill-session.js");
-    const ended = await endSkillSession(String(ctx.chatId));
-    await ctx.reply(ended ? "* Skill session ended." : "No active skill session.");
+    const { skillSessionManager } = await import("../skill-session.js");
+    const target = { userId: ctx.userId, platform: ctx.platform, chatId: String(ctx.chatId) };
+    const stopped = await skillSessionManager.stop(target, "explicit");
+    await ctx.reply(stopped ? "* Skill session ended." : "No active skill session.");
     return true;
   }
   if (args === "list") {
+    const { skillSessionManager } = await import("../skill-session.js");
+    const target = { userId: ctx.userId, platform: ctx.platform, chatId: String(ctx.chatId) };
+    const active = skillSessionManager.list(target);
     const { listRunnableSkills } = await import("../skill-session.js");
     const skills = listRunnableSkills();
-    if (skills.length === 0) { await ctx.reply("No runnable skills (no skill.json found)."); return true; }
+    if (skills.length === 0 && !active) { await ctx.reply("No runnable skills (no skill.json found)."); return true; }
     const lines = skills.map(s => `  ${s.interactive ? "~" : "*"} ${s.name}${s.description ? ` — ${s.description}` : ""}`);
-    await ctx.reply(`Runnable skills:\n${lines.join("\n")}\n\nUse: /skill run <name>`);
+    const activeLine = active ? `\nActive: ${active.skillName} (${active.agent})` : "";
+    await ctx.reply(`Runnable skills:\n${lines.join("\n")}${activeLine}\n\nUse: /skill run <name>`);
     return true;
   }
 

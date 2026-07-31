@@ -43,6 +43,8 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     id: "t1",
     kind: "agent",
     prompt: "test task",
+    interaction: { mode: "oneshot" },
+    agent: "task",
     chatId: "1",
     delivery: "report",
     schedule: "0 9 * * *",

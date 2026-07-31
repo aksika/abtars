@@ -207,7 +207,7 @@ export function createDispatchableCard(input: CreateCardInput): { cardId: number
   const titleBytes = Buffer.byteLength(title, "utf-8");
   if (titleBytes > 160) return { error: `title exceeds 160 bytes (${titleBytes})` };
   if (type && !isValidSessionType(type)) {
-    return { error: `invalid type "${type}": must be a SessionType (A/B/C/T/P/S/O/W/D/H)` };
+    return { error: `invalid type "${type}": must be a SessionType (A/B/C/T/P/S/O/W/D/H/K)` };
   }
   if (type === "B" && (!goal || !goal.trim())) {
     return { error: "goal is required for type B (Browsie) cards" };

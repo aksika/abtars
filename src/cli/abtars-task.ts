@@ -18,7 +18,6 @@ interface AddArgs {
   schedule?: string;
   taskFile?: string;
   agent?: string;
-  targetUserId?: string;
 }
 
 function parseAddArgs(args: string[]): AddArgs {
@@ -34,7 +33,6 @@ function parseAddArgs(args: string[]): AddArgs {
       case "--schedule": parsed.schedule = args[++i] ?? ""; break;
       case "--task-file": parsed.taskFile = args[++i] ?? ""; break;
       case "--agent": parsed.agent = args[++i] ?? ""; break;
-      case "--target-user": parsed.targetUserId = args[++i] ?? ""; break;
     }
   }
   return parsed;
@@ -64,7 +62,7 @@ function add(args: string[]): void {
   }
 
   const kind = parsed.kind ?? "agent";
-  const validKinds = ["reminder", "agent", "script", "orc", "system"];
+  const validKinds = ["reminder", "agent", "script", "system"];
   if (!validKinds.includes(kind)) { console.log(JSON.stringify({ ok: false, error: `--kind must be one of: ${validKinds.join(", ")}` })); process.exit(1); }
 
   const isSystem = kind === "system";
@@ -95,13 +93,10 @@ function add(args: string[]): void {
       entry = { ...base, kind: "reminder" as const, text: parsed.message ?? "", delivery: "announce" as const };
       break;
     case "agent":
-      entry = { ...base, kind: "agent" as const, prompt: parsed.message, taskFile: parsed.taskFile, agent: (parsed.agent as "task" | "professor" | "browsie" | "coding" | "dreamy") || "task", targetUserId: parsed.targetUserId, orchestration: { maxAgents: 1 } };
+      entry = { ...base, kind: "agent" as const, prompt: parsed.message, taskFile: parsed.taskFile, agent: (parsed.agent as "task" | "professor" | "browsie" | "coding" | "dreamy") || "task", interaction: { mode: "oneshot" }, orchestration: { maxAgents: 1 } };
       break;
     case "script":
       entry = { ...base, kind: "script" as const, command: parsed.message ?? "" };
-      break;
-    case "orc":
-      entry = { ...base, kind: "orc" as const, goal: parsed.message ?? "" };
       break;
     case "system":
       entry = { ...base, kind: "system" as const, action: action!, delivery: "silent" as const };

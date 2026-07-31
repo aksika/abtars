@@ -54,7 +54,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     const queue = new CronQueue("unused", home, undefined, undefined, modelBoundary);
     queue.enqueue({
       id: "report-task", kind: "agent", prompt: `${canary} produce report`,
-      agent: "task", delivery: "report", at: new Date().toISOString(),
+      agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium", chatId: "42",
       report: {
         artifact: artifactPath,
@@ -109,7 +109,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     const queue = new CronQueue("unused", home, undefined, undefined, modelBoundary);
     queue.enqueue({
       id: "short-task", kind: "agent", prompt: "produce report",
-      agent: "task", delivery: "report", at: new Date().toISOString(),
+      agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium",
       report: {
         artifact: join(home, "workspace", "short-task", "report.md"),
@@ -140,7 +140,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     const queue = new CronQueue("unused", home, undefined, undefined, modelBoundary);
     queue.enqueue({
       id: "dod-task", kind: "agent", prompt: "produce report",
-      agent: "task", delivery: "report", at: new Date().toISOString(), enabled: true, priority: "medium",
+      agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(), enabled: true, priority: "medium",
       report: {
         artifact,
         requiredSections: ["# Verified report"],

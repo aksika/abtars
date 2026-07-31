@@ -19,7 +19,7 @@ export function pushLog(session: ManagedSession, event: string): void {
  * not leave a Pi execution running or a transient transport cached. Both the
  * control's requestCancel and the transport release are idempotent / guarded.
  */
-function cancelSessionExecution(session: ManagedSession, reason: import("./swarm-executor-types.js").CancelReason): void {
+export function cancelSessionExecution(session: ManagedSession, reason: import("./swarm-executor-types.js").CancelReason): void {
   const ctrl = session.executionControl;
   if (ctrl && !ctrl.terminal) {
     void ctrl.requestCancel(reason).catch(() => {});

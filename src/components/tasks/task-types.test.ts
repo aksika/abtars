@@ -18,6 +18,7 @@ function baseAgent(overrides: Record<string, unknown> = {}): Record<string, unkn
     schedule: "0 2 * * *",
     prompt: "do the thing",
     agent: "task",
+    interaction: { mode: "oneshot" },
     chatId: "100",
     delivery: "report",
     report: SAMPLE_CONTRACT,
@@ -49,7 +50,7 @@ describe("normalize + validation", () => {
     });
 
     it("accepts a valid one-shot at", () => {
-      const r = normalize({ id: "s1", kind: "agent", at: "2026-07-12T08:00:00Z", prompt: "test", agent: "task", chatId: "1", delivery: "report", report: SAMPLE_CONTRACT }, NOW);
+      const r = normalize({ id: "s1", kind: "agent", at: "2026-07-12T08:00:00Z", prompt: "test", agent: "task", interaction: { mode: "oneshot" }, chatId: "1", delivery: "report", report: SAMPLE_CONTRACT }, NOW);
       expect(r.ok).toBe(true);
     });
 
@@ -92,7 +93,7 @@ describe("normalize + validation", () => {
     });
 
     it("agent validates", () => {
-      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", agent: "task", chatId: "1", delivery: "report", report: SAMPLE_CONTRACT }, NOW);
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", agent: "task", interaction: { mode: "oneshot" }, chatId: "1", delivery: "report", report: SAMPLE_CONTRACT }, NOW);
       expect(r.ok).toBe(true);
       if (r.ok) expect(r.entry.kind).toBe("agent");
     });
@@ -103,7 +104,7 @@ describe("normalize + validation", () => {
     });
 
     it("report delivery requires a structured report contract", () => {
-      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", agent: "task", chatId: "1", delivery: "report" }, NOW);
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "Run report", agent: "task", interaction: { mode: "oneshot" }, chatId: "1", delivery: "report" }, NOW);
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.error).toContain("report contract is required");
     });
@@ -114,7 +115,7 @@ describe("normalize + validation", () => {
     });
 
     it("agent with taskFile validates", () => {
-      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", taskFile: "~/tasks/TASK.md", agent: "task", chatId: "1", delivery: "announce" }, NOW);
+      const r = normalize({ id: "a", kind: "agent", schedule: "0 9 * * *", taskFile: "~/tasks/TASK.md", agent: "task", interaction: { mode: "oneshot" }, chatId: "1", delivery: "announce" }, NOW);
       expect(r.ok).toBe(true);
       if (r.ok) expect((r.entry as ScheduledTask & { kind: "agent" }).taskFile).toBe("~/tasks/TASK.md");
     });
@@ -129,15 +130,122 @@ describe("normalize + validation", () => {
       expect(r.ok).toBe(true);
       if (r.ok) expect(r.entry.kind).toBe("script");
     });
+  });
 
-    it("orc requires goal", () => {
-      const r = normalize({ id: "o", kind: "orc", schedule: "0 9 * * *", chatId: "1", delivery: "report" }, NOW);
+  describe("#1432 agent interaction contract", () => {
+    const TARGET = { userId: "ada", platform: "telegram", chatId: "42" };
+
+    function skillAgent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      return {
+        id: "sk",
+        kind: "agent",
+        schedule: "0 10 * * *",
+        prompt: "Start today's session",
+        agent: "professor",
+        chatId: "42",
+        delivery: "announce",
+        orchestration: { maxAgents: 1 },
+        interaction: { mode: "skill", skill: "spanish-tutor", target: TARGET },
+        ...overrides,
+      };
+    }
+
+    it("accepts a valid skill interaction", () => {
+      const r = normalize(skillAgent(), NOW);
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.entry.kind).toBe("agent");
+        expect((r.entry as ScheduledTask & { kind: "agent" }).interaction).toEqual({ mode: "skill", skill: "spanish-tutor", target: TARGET });
+      }
+    });
+
+    it.each([
+      ["missing interaction", { interaction: undefined }],
+      ["interaction null", { interaction: null }],
+      ["interaction array", { interaction: [] }],
+      ["unknown mode", { interaction: { mode: "interactive" } }],
+    ])("rejects %s", (_label, overrides) => {
+      const r = normalize(skillAgent(overrides), NOW);
       expect(r.ok).toBe(false);
     });
 
-    it("orc validates", () => {
-      const r = normalize({ id: "o", kind: "orc", schedule: "0 9 * * *", goal: "Build feature", chatId: "1", delivery: "report" }, NOW);
+    it("rejects skill interaction with non-announce delivery", () => {
+      const r = normalize(skillAgent({ delivery: "report", report: { artifact: "/tmp/r.md", requiredSections: ["# S"], minBytes: 100, requires: { files: [], executables: [], tools: [] } } }), NOW);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("delivery=announce");
+    });
+
+    it("rejects skill interaction with silent delivery", () => {
+      const r = normalize(skillAgent({ delivery: "silent" }), NOW);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("delivery=announce");
+    });
+
+    it("rejects skill interaction with maxAgents != 1", () => {
+      const r = normalize(skillAgent({ orchestration: { maxAgents: 2 } }), NOW);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("maxAgents=1");
+    });
+
+    it("rejects skill interaction carrying a report contract", () => {
+      const r = normalize(skillAgent({ report: { artifact: "/tmp/r.md", requiredSections: ["# S"], minBytes: 100, requires: { files: [], executables: [], tools: [] } } }), NOW);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("forbids a report contract");
+    });
+
+    it.each([
+      ["empty skill", { interaction: { mode: "skill", skill: "", target: TARGET } }],
+      ["path-like skill", { interaction: { mode: "skill", skill: "../evil", target: TARGET } }],
+      ["uppercase skill", { interaction: { mode: "skill", skill: "Spanish-Tutor", target: TARGET } }],
+      ["missing target", { interaction: { mode: "skill", skill: "spanish-tutor" } }],
+      ["target missing userId", { interaction: { mode: "skill", skill: "spanish-tutor", target: { platform: "telegram", chatId: "42" } } }],
+      ["target missing platform", { interaction: { mode: "skill", skill: "spanish-tutor", target: { userId: "ada", chatId: "42" } } }],
+      ["target missing chatId", { interaction: { mode: "skill", skill: "spanish-tutor", target: { userId: "ada", platform: "telegram" } } }],
+    ])("rejects malformed skill interaction: %s", (_label, overrides) => {
+      const r = normalize(skillAgent(overrides), NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it("rejects skill interaction with neither prompt nor taskFile", () => {
+      const r = normalize(skillAgent({ prompt: undefined, taskFile: undefined }), NOW);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("prompt or taskFile");
+    });
+
+    it("accepts a skill interaction with only a taskFile", () => {
+      const r = normalize(skillAgent({ prompt: undefined, taskFile: "~/tasks/tutor/TASK.md" }), NOW);
       expect(r.ok).toBe(true);
+    });
+
+    it("preserves optional threadId on the target", () => {
+      const r = normalize(skillAgent({ interaction: { mode: "skill", skill: "spanish-tutor", target: { ...TARGET, threadId: "7" } } }), NOW);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect((r.entry as ScheduledTask & { kind: "agent" }).interaction).toEqual({ mode: "skill", skill: "spanish-tutor", target: { ...TARGET, threadId: "7" } });
+    });
+
+    it("accepts oneshot interaction for every supported agent value", () => {
+      for (const agent of ["task", "professor", "browsie", "coding", "dreamy"]) {
+        const r = normalize(baseAgent({ interaction: { mode: "oneshot" }, delivery: "announce", report: undefined }), NOW);
+        expect(r.ok).toBe(true);
+        if (r.ok) expect((r.entry as ScheduledTask & { kind: "agent" }).interaction).toEqual({ mode: "oneshot" });
+      }
+    });
+
+    it("accepts oneshot with maxAgents > 1 (O-project path)", () => {
+      const r = normalize(baseAgent({ interaction: { mode: "oneshot" }, orchestration: { maxAgents: 4 } }), NOW);
+      expect(r.ok).toBe(true);
+    });
+
+    it("rejects public orc kind (removed)", () => {
+      const r = normalize({ id: "o", kind: "orc", schedule: "0 9 * * *", goal: "Build feature", chatId: "1", delivery: "report" }, NOW);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("unknown kind");
+    });
+
+    it("rejects top-level targetUserId (removed contract)", () => {
+      const r = normalize({ id: "t", kind: "agent", schedule: "0 9 * * *", prompt: "hi", agent: "task", targetUserId: "ada", chatId: "1", delivery: "announce" }, NOW);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("interaction is required");
     });
   });
 

@@ -173,9 +173,31 @@ export async function handleInboundMessage(
   }
 
   // --- #1336: Ensure transport for the already-selected effective session ---
-  const effectiveSessionId = ctx.sessionId!;
-  const effectiveSession = ctx.session!;
+  let effectiveSessionId = ctx.sessionId!;
+  let effectiveSession = ctx.session!;
   const { spin } = await import("./spin.js");
+  const { sessionType } = await import("./spin-types.js");
+  let isSkillSession = sessionType(effectiveSession) === "K";
+
+  // #1432: suspended K binding — prepend the skill bootstrap to the first
+  // resumed turn exactly once. If revalidation fails, clear the binding and
+  // route this same message through A once (no model call happened yet).
+  let bootstrapPrefix: string | undefined;
+  if (isSkillSession) {
+    const { skillSessionManager } = await import("./skill-session.js");
+    const target = { userId: msg.userId, platform: msg.platform, chatId: msg.channelId, threadId: msg.threadId };
+    const prep = skillSessionManager.prepareBootstrap(target, ctx.text);
+    if (prep.kind === "bootstrap") {
+      bootstrapPrefix = prep.bootstrap;
+    } else if (prep.kind === "fallback_to_main") {
+      effectiveSession = spin.getActiveSession(msg.userId, msg.platform);
+      effectiveSessionId = effectiveSession.id;
+      ctx.session = effectiveSession;
+      ctx.sessionId = effectiveSessionId;
+      isSkillSession = false;
+    }
+  }
+
   if (!effectiveSession.transport) {
     try {
       await spin.ensureSessionTransport(effectiveSession);
@@ -230,7 +252,7 @@ export async function handleInboundMessage(
     const { prompt: builtPrompt, imageContent, recalledHits, currentMessageId, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: transport.getRuntimeStatus?.().route === "acp",
-    }, registry);
+    }, registry, effectiveSession);
 
     if (builtPrompt === "__INJECTION_BLOCKED__") {
       await adapter.sendMessage(channelId, "⛔ Message blocked — suspicious content detected.", { threadId: msg.threadId });
@@ -238,6 +260,9 @@ export async function handleInboundMessage(
     }
 
     let prompt = builtPrompt;
+    if (bootstrapPrefix) {
+      prompt = `${bootstrapPrefix}\n\n${prompt}`;
+    }
 
     // --- Auto-notify: inject background session completions (#570) ---
     const { drainCompletions } = await import("./completion-buffer.js");
@@ -266,7 +291,6 @@ export async function handleInboundMessage(
     }
 
     // --- Send to transport ---
-    const { sessionType } = await import("./spin-types.js");
     const sessionTransport = effectiveSession.transport ?? transport;
     logDebug(TAG, `Route: session=${activeSessionId} type=${sessionType(effectiveSession)} transport=${effectiveSession.transport ? "session" : "main"}`);
 
@@ -402,6 +426,13 @@ export async function handleInboundMessage(
 
     const response = await responsePromise;
 
+    // #1432: a successful accepted K turn refreshes the skill inactivity
+    // deadline and clears the one-time bootstrap flag.
+    if (isSkillSession) {
+      const { skillSessionManager } = await import("./skill-session.js");
+      skillSessionManager.completeInbound({ userId: msg.userId, platform: msg.platform, chatId: msg.channelId, threadId: msg.threadId });
+    }
+
     clearTimeout(toolBatchTimer);
     transport.onIntermediateResponse = undefined;
     logDebug(TAG, `Response (${response.length} chars): "${response.trim().slice(0, 120)}"`);
@@ -440,8 +471,8 @@ export async function handleInboundMessage(
           if (clean) await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
         }
       }
-      // Record assistant response to memory
-      if (deps.memoryRuntime?.state === "ready" && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
+      // Record assistant response to memory (skipped for K — skill-isolated)
+      if (deps.memoryRuntime?.state === "ready" && !isSkillSession && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
         const timestamp = Date.now();
         const deliveryId = deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`;
         const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
@@ -522,9 +553,9 @@ export async function handleInboundMessage(
       pSession.primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
     }
 
-    // --- Record to memory (skip for guests and greeting injects) ---
+    // --- Record to memory (skipped for K — skill-isolated; guests and greeting injects) ---
     const isGuest = registry.byUserId.get(userId)?.role === "guest";
-    if (deps.memoryRuntime?.state === "ready" && !isGuest && !text.startsWith("[SESSION START]")) {
+    if (deps.memoryRuntime?.state === "ready" && !isSkillSession && !isGuest && !text.startsWith("[SESSION START]")) {
       const timestamp = Date.now();
       const deliveryId = lastSentMsgId != null ? String(lastSentMsgId) : (deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`);
       const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);

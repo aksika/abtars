@@ -48,7 +48,6 @@ function getEntryMessage(entry: ScheduledTask): string {
   if (entry.kind === "reminder") return entry.text;
   if (entry.kind === "agent") return entry.prompt ?? entry.taskFile ?? "";
   if (entry.kind === "script") return entry.command;
-  if (entry.kind === "orc") return entry.goal;
   if (entry.kind === "system") return entry.action;
   return "";
 }
@@ -133,8 +132,6 @@ export class CronQueue {
       this.runSystem(entry, manual);
     } else if (entry.kind === "script") {
       this.runScript(entry, manual);
-    } else if (entry.kind === "orc") {
-      this.runOrc(entry, manual);
     } else if (entry.kind === "agent") {
       this.runAgent(entry, manual, reservation);
     } else if (entry.kind === "reminder") {
@@ -230,19 +227,6 @@ export class CronQueue {
     }
   }
 
-  private runOrc(entry: ScheduledTask & { kind: "orc" }, _manual?: boolean): void {
-    logTaskDebug("task_execution_started", { task: entry.id }, "kind=orc");
-    import("../spin.js").then(({ spin }) => {
-      spin.dispatch({ type: "O", goal: entry.goal, source: "task", priority: entry.priority ?? "MEDIUM", settlementOwner: "spin" });
-      this.clearCurrent();
-      this.processNext();
-    }).catch((err) => {
-      logWarn(TAG, `Orc dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
-      this.clearCurrent();
-      this.processNext();
-    });
-  }
-
   private runScript(entry: ScheduledTask & { kind: "script" }, manual?: boolean): void {
     logTaskDebug("task_execution_started", { task: entry.id }, "kind=script");
     try {
@@ -278,6 +262,7 @@ export class CronQueue {
             kind: "agent",
             prompt: agentPrompt,
             agent: followUpAgent,
+            interaction: { mode: "oneshot" },
             orchestration: { maxAgents: 1 },
           };
           this.enqueue(agentEntry);

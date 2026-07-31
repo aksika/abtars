@@ -16,7 +16,7 @@ import { profileFor, isValidSessionType, type SessionProfile } from "./spin-prof
 import { WorkerSupervisionService, validateWorkerRootCriteria } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import * as Sessions from "./spin-sessions.js";
-import { pushLog, isHollow } from "./spin-sessions.js";
+import { pushLog, isHollow, cancelSessionExecution } from "./spin-sessions.js";
 import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expireInstructions } from "./session-instruction-queue.js";
 import { createExecutionTelemetryScope } from "./execution-telemetry.js";
 import type { OrcActivityFeed } from "./orc-activity-feed.js";
@@ -181,6 +181,22 @@ export class Spin {
     this.nextIndex = r.nextIndex;
     this.finalizeSession(r.killed, "killed");
     return r.killed;
+  }
+
+  /**
+   * #1432: End an exact session by ID with ownership check, without session
+   * switching or A reconciliation (the skill manager owns K transport
+   * lifecycle; A must never be deactivated or recreated by K cleanup).
+   * Returns false when the session is missing or owned by another user.
+   */
+  finalizeExactSession(sessionId: string, expectedUserId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.userId !== expectedUserId) return false;
+    if (session.status !== "ended") {
+      cancelSessionExecution(session, "session_end");
+      this.finalizeSession(session, "skill_ended");
+    }
+    return true;
   }
 
   pauseSession(userId: string, platform: string, index?: number): ManagedSession | string {
@@ -361,10 +377,15 @@ export class Spin {
   /** Shared — attach a runtime (SubagentRuntime) transport to a session with #1348 ownership metadata. */
   private async _attachRuntimeTransport(session: ManagedSession, userId: string): Promise<void> {
     session.status = "creating";
+    // #1432: transport creation/reattachment uses the session's selected agent
+    // (recorded for K at allocation), falling back to the type profile. Never
+    // hardcode professor and never derive a lifecycle type from an agent name.
+    const profile = profileFor(sessionType(session));
+    const attachAgent = session.executionAgent ?? profile?.agent ?? "professor";
     let agentSession: import("./subagent-runtime.js").AgentSession;
     try {
       agentSession = await Promise.race([
-        this.runtime!.session("professor", userId),
+        this.runtime!.session(attachAgent, userId),
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
       ]);
     } catch (err) {
@@ -374,6 +395,7 @@ export class Spin {
     session.transport = agentSession.transport!;
     session.transportOwner = "runtime";
     session.releaseTransport = () => agentSession.destroy();
+    session.executionAgent = attachAgent;
     session.status = "ready";
     session.lastActiveAt = Date.now();
     const t = session.transport as any;
@@ -579,11 +601,15 @@ export class Spin {
       //    create+attach for a NEW persistent session.
       let sessionTransport = session.transport as IKiroTransport | undefined;
       if (persistent && !sessionTransport) {
-        const agentSession = await this.runtime.session(agent, profile.resolution === "active" ? userId : undefined);
+        // #1432: reattachment honors the selected executionAgent recorded at
+        // allocation (K) so a resumed session keeps its model configuration.
+        const attachAgent = session.executionAgent ?? agent;
+        const agentSession = await this.runtime.session(attachAgent, profile.resolution === "active" ? userId : undefined);
         sessionTransport = agentSession.transport as IKiroTransport;
         session.transport = sessionTransport;
         session.transportOwner = "runtime";
         session.releaseTransport = () => agentSession.destroy();
+        session.executionAgent = attachAgent;
         session.status = "ready";
       }
 

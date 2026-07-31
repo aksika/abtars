@@ -55,7 +55,7 @@ describe("scheduled project orchestration (#1516)", () => {
     const queue = new CronQueue("unused", home, undefined, undefined, undefined, projectRunnerMod.scheduledProjectRunner);
     queue.enqueue({
       id: "brief-task", kind: "agent", prompt: "produce the briefing",
-      agent: "task", delivery: "report", at: new Date().toISOString(),
+      agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium", chatId: "42",
       orchestration: { maxAgents: 4 },
       report: {
@@ -138,7 +138,7 @@ describe("scheduled project orchestration (#1516)", () => {
     const queue = new CronQueue("unused", home, undefined, undefined, undefined, projectRunnerMod.scheduledProjectRunner);
     queue.enqueue({
       id: "stale-task", kind: "agent", prompt: "produce report",
-      agent: "task", delivery: "report", at: new Date().toISOString(),
+      agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium", chatId: "42",
       orchestration: { maxAgents: 2 },
       report: {
