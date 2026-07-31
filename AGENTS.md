@@ -9,6 +9,7 @@ npm run typecheck    # tsc --noEmit (fastest feedback)
 npm test             # fast deterministic suite (unit/component + deploy logic)
 npm run test:watch   # vitest (watch mode)
 npm run test:integration  # integration tests (needs abmind)
+npm run test:e2e         # critical end-to-end smoke/recovery tests
 npm run test:extended     # integration/process/E2E tests
 npm run test:all          # every Vitest test
 npm run dev          # node --import tsx src/main.ts
