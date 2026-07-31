@@ -160,7 +160,7 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
 
     this.privateMemory = {
       instantStore: (p, key) => this.call("private.instantStore", p, key),
-      editMemory: (p, key) => this.call("private.edit", p, key),
+      editMemory: (p, key) => this.callPrivateMutation("private.edit", p, key),
       recall: (p) => this.call("private.recall", p),
       rebuildFtsIndexes: () => this.call("private.rebuildFts", {}),
       embed: (p) => this.call("private.embed", p),
@@ -223,6 +223,29 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
   /** Raw method call with an explicit caller-supplied idempotency key. */
   async callRaw<T>(method: string, payload: unknown, idempotencyKey?: string): Promise<T> {
     return (await this.call(method, payload, idempotencyKey)) as T;
+  }
+
+  /**
+   * Semantic mutations expose their bounded failure contract as data, matching
+   * the abmind client contract consumed by the memory runtime: a rejected
+   * mutation returns { ok: false, code, ... } instead of throwing. Transport
+   * and protocol failures outside that contract still reject normally.
+   */
+  private async callPrivateMutation(
+    method: "private.edit",
+    payload: unknown,
+    idempotencyKey?: string,
+  ): Promise<Record<string, unknown>> {
+    try {
+      const result = await this.call(method, payload, idempotencyKey);
+      return (result && typeof result === "object" ? result : {}) as Record<string, unknown>;
+    } catch (err) {
+      const e = err as Error & { code?: string; current?: unknown };
+      if (e.code === "conflict" || e.code === "not_found" || e.code === "unauthorized" || e.code === "validation_error") {
+        return { ok: false, code: e.code, current: e.current, message: e.message };
+      }
+      throw err;
+    }
   }
 
   private async call(method: string, payload: unknown, idempotencyKey?: string): Promise<unknown> {
