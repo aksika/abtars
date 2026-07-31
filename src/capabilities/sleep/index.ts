@@ -1,4 +1,4 @@
-import type { AbmindClient } from "abmind";
+import type { AbmindClientLike } from "../../components/abmind-client-contract.js";
 import { getEnv } from "../../components/env-schema.js";
 import { logInfo, logWarn, logError } from "../../components/logger.js";
 import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
@@ -19,7 +19,7 @@ export interface SleepUnavailable {
 }
 
 export interface SleepOpts {
-  client: AbmindClient;
+  client: AbmindClientLike;
   memoryEnabled: boolean;
   onComplete: () => void;
   onCycleEnd?: () => void;

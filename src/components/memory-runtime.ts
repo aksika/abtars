@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AbmindClient } from "abmind";
+import type { AbmindClientLike, AbmindPrivateMemoryLike } from "./abmind-client-contract.js";
 
 import { logWarn } from "./logger.js";
 import type { MemoryMutationFamily } from "./memory-operation-key.js";
@@ -220,8 +220,8 @@ export interface AbtarsMemoryRuntime {
 
 // ── Capability projection ─────────────────────────────────────────────────
 
-function projectCapabilities(client: AbmindClient): Set<MemoryRuntimeCapability> {
-  const caps = client.capabilities as unknown;
+function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapability> {
+  const caps: unknown = client.capabilities;
   if (!caps || typeof caps !== "object" || Array.isArray(caps)) return new Set();
 
   const snapshot = caps as Record<string, unknown>;
@@ -261,8 +261,9 @@ function requireClientCapability(capabilities: ReadonlySet<MemoryRuntimeCapabili
 
 // ── Client-backed implementation ──────────────────────────────────────────
 
-export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
+export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRuntime {
   const capabilities = projectCapabilities(client);
+  const pm: AbmindPrivateMemoryLike = client.privateMemory;
 
   const self: AbtarsMemoryRuntime = {
     state: "ready" as RuntimeState,
@@ -274,7 +275,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
 
     async recordMessage(input: RecordMessageInput, _operationKey: string): Promise<RecordMessageResult> {
       requireClientCapability(capabilities, "recordMessage");
-      const result = await client.privateMemory.recordMessage({
+      const result = await pm.recordMessage({
         userId: input.userId,
         sessionId: input.sessionId,
         role: input.role,
@@ -291,7 +292,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
 
     async recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult> {
       requireClientCapability(capabilities, "recall");
-      const result = await client.privateMemory.recall({
+      const result = (await pm.recall({
         translated: [input.query],
         original: input.original ?? input.query,
         userId: input.userId,
@@ -300,64 +301,74 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
         timeStart: input.timeStart,
         timeEnd: input.timeEnd,
         stages: input.stages,
-      });
-      const hits: RuntimeRecallHit[] = result.results.map((r: any) => ({
-        content: r.content,
-        score: r.score,
-        date: r.date,
-        memoryId: r.id,
-        source: r.source,
-        contentOriginal: r.contentOriginal,
-        memoryType: r.memoryType,
-        trust: r.trust,
-        integrity: r.integrity,
-        credibility: r.credibility,
-        classification: r.classification,
-        emotionScore: r.emotionScore,
-        createdAt: r.createdAt,
-        semanticRevision: r.semanticRevision,
+      })) as { results: Array<Record<string, unknown>> };
+      const hits: RuntimeRecallHit[] = result.results.map((r) => ({
+        content: String(r["content"] ?? ""),
+        score: Number(r["score"] ?? 0),
+        date: String(r["date"] ?? ""),
+        memoryId: typeof r["id"] === "number" ? r["id"] : undefined,
+        source: typeof r["source"] === "string" ? r["source"] : undefined,
+        contentOriginal: typeof r["contentOriginal"] === "string" ? r["contentOriginal"] : undefined,
+        memoryType: typeof r["memoryType"] === "string" ? r["memoryType"] : undefined,
+        trust: typeof r["trust"] === "number" ? r["trust"] : undefined,
+        integrity: typeof r["integrity"] === "number" ? r["integrity"] : undefined,
+        credibility: typeof r["credibility"] === "number" ? r["credibility"] : undefined,
+        classification: typeof r["classification"] === "number" ? r["classification"] : undefined,
+        emotionScore: typeof r["emotionScore"] === "number" ? r["emotionScore"] : undefined,
+        createdAt: typeof r["createdAt"] === "number" ? r["createdAt"] : undefined,
+        semanticRevision: typeof r["semanticRevision"] === "number" ? r["semanticRevision"] : undefined,
       }));
       const context = hits.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");
       return { hits, context };
     },
 
     async assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult> {
-      const assembled = await client.privateMemory.assembleSessionContext({
+      const assembled = await pm.assembleSessionContext({
         userId: input.identity.principalId,
         maxChars: input.maxChars,
       });
-      return assembled;
+      return assembled as SessionContextResult;
     },
 
     async getRecentConversation(input: RecentConversationInput): Promise<RecentConversationResult> {
-      return await client.privateMemory.getRecentConversation(input);
+      return (await pm.getRecentConversation(input)) as RecentConversationResult;
     },
 
     async getStatus(input?: RuntimeStatusInput): Promise<RuntimeStatusResult> {
-      const stats = await client.privateMemory.getRuntimeStatus({ userId: input?.userId });
+      const rawStats = (await pm.getRuntimeStatus({ userId: input?.userId })) as unknown;
+      const stats = (rawStats && typeof rawStats === "object" ? rawStats : {}) as Record<string, unknown>;
+      const consolidation = (stats["consolidationFiles"] && typeof stats["consolidationFiles"] === "object"
+        ? stats["consolidationFiles"]
+        : {}) as Record<string, unknown>;
       return {
-        totalMessages: stats?.totalMessages ?? 0,
-        extractedMemories: stats?.extractedMemories ?? 0,
-        extractedByType: stats?.extractedByType ?? {},
-        consolidationFiles: stats?.consolidationFiles ?? { daily: 0, weekly: 0, quarterly: 0 },
-        ingestedDocuments: stats?.ingestedDocuments ?? 0,
-        preservedKeywords: stats?.preservedKeywords ?? 0,
-        dbSizeBytes: stats?.dbSizeBytes ?? 0,
-        rejectedByScanner: stats?.rejectedByScanner ?? 0,
+        totalMessages: typeof stats["totalMessages"] === "number" ? stats["totalMessages"] : 0,
+        extractedMemories: typeof stats["extractedMemories"] === "number" ? stats["extractedMemories"] : 0,
+        extractedByType: (typeof stats["extractedByType"] === "object" && stats["extractedByType"] !== null
+          ? stats["extractedByType"] as Record<string, number>
+          : {}),
+        consolidationFiles: {
+          daily: typeof consolidation["daily"] === "number" ? consolidation["daily"] : 0,
+          weekly: typeof consolidation["weekly"] === "number" ? consolidation["weekly"] : 0,
+          quarterly: typeof consolidation["quarterly"] === "number" ? consolidation["quarterly"] : 0,
+        },
+        ingestedDocuments: typeof stats["ingestedDocuments"] === "number" ? stats["ingestedDocuments"] : 0,
+        preservedKeywords: typeof stats["preservedKeywords"] === "number" ? stats["preservedKeywords"] : 0,
+        dbSizeBytes: typeof stats["dbSizeBytes"] === "number" ? stats["dbSizeBytes"] : 0,
+        rejectedByScanner: typeof stats["rejectedByScanner"] === "number" ? stats["rejectedByScanner"] : 0,
       };
     },
 
     async getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult> {
-      return await client.privateMemory.getCoreKnowledge(input);
+      return (await pm.getCoreKnowledge(input)) as CoreKnowledgeResult;
     },
 
     async recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult> {
-      await client.privateMemory.recordFeedback(input, operationKey);
+      await pm.recordFeedback(input, operationKey);
       return { ok: true };
     },
 
     async embed(input: EmbeddingInput): Promise<EmbeddingResult> {
-      return await client.privateMemory.embed(input);
+      return (await pm.embed(input)) as EmbeddingResult;
     },
 
     async runMaintenance(input: MaintenanceInput): Promise<MaintenanceResult> {
@@ -365,7 +376,7 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
         switch (input.operation) {
           case "fts_rebuild": {
             requireClientCapability(capabilities, "rebuildFts");
-            const fts = await client.privateMemory.rebuildFtsIndexes();
+            const fts = (await pm.rebuildFtsIndexes()) as { rebuilt: string[] };
             return { ok: true, summary: `FTS rebuilt: ${fts.rebuilt.join(", ")}` };
           }
           default:
@@ -378,50 +389,52 @@ export function createClientRuntime(client: AbmindClient): AbtarsMemoryRuntime {
 
     async instantStore(input: InstantStoreInput): Promise<InstantStoreResult> {
       requireClientCapability(capabilities, "instantStore");
-      const result = await client.privateMemory.instantStore({
+      const result = (await pm.instantStore({
         userId: input.userId,
         contentEn: input.contentEn,
         contentOriginal: input.contentOriginal,
-        memoryType: input.memoryType as any,
+        memoryType: input.memoryType as string,
         emotionScore: input.emotionScore,
         confidence: input.confidence,
         classification: input.classification,
         createdBy: "tool:memory_store",
-      });
+      })) as Record<string, unknown>;
       return {
-        stored: result.stored,
-        memoriesCount: result.memoriesCount,
-        error: result.error,
-        memoryId: (result as any).memoryId,
-        semanticRevision: (result as any).semanticRevision,
+        stored: result["stored"] === true,
+        memoriesCount: typeof result["memoriesCount"] === "number" ? result["memoriesCount"] : undefined,
+        error: typeof result["error"] === "string" ? result["error"] : undefined,
+        memoryId: typeof result["memoryId"] === "number" ? result["memoryId"] : undefined,
+        semanticRevision: typeof result["semanticRevision"] === "number" ? result["semanticRevision"] : undefined,
       };
     },
 
     async editMemory(input: EditMemoryInput): Promise<EditMemoryResult> {
       requireClientCapability(capabilities, "editMemory");
-      const result = await client.privateMemory.editMemory({
+      const result = (await pm.editMemory({
         memoryId: input.memoryId,
         userId: input.userId,
         expectedRevision: input.expectedRevision,
         contentEn: input.contentEn,
         contentOriginal: input.contentOriginal,
-        memoryType: input.memoryType as any,
+        memoryType: input.memoryType as string,
         emotionScore: input.emotionScore,
         confidence: input.confidence,
         classification: input.classification,
-      });
-      if (!result.ok) {
-        return { ok: false, error: result.code === "validation_error" ? result.message : result.code };
+      })) as Record<string, unknown>;
+      if (result["ok"] !== true) {
+        const code = typeof result["code"] === "string" ? result["code"] : "unknown";
+        return { ok: false, error: code === "validation_error" ? String(result["message"] ?? "") : code };
       }
+      const ref = (result["ref"] ?? result) as Record<string, unknown>;
       return {
         ok: true,
-        semanticRevision: result.ref?.semanticRevision ?? (result as unknown as { semanticRevision?: number }).semanticRevision,
+        semanticRevision: typeof ref["semanticRevision"] === "number" ? ref["semanticRevision"] : undefined,
       };
     },
 
     async rebuildFtsIndexes(): Promise<{ rebuilt: string[] }> {
       requireClientCapability(capabilities, "rebuildFts");
-      return await client.privateMemory.rebuildFtsIndexes();
+      return (await pm.rebuildFtsIndexes()) as { rebuilt: string[] };
     },
 
     async close(): Promise<void> {

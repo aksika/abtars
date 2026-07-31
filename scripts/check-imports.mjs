@@ -11,6 +11,9 @@ const EXEMPT_FILES = new Set([
   "src/utils/abmind-lazy.ts",
 ]);
 
+let failed = false;
+let violations = [];
+
 function isSourceFile(name) {
   return name.endsWith(".ts");
 }
@@ -59,8 +62,10 @@ const PATTERNS = [
   { re: /import\(["']abmind\//, label: "dynamic import from abmind/" },
 ];
 
-let failed = false;
-let violations = [];
+// #1508: the abtars-owned signed WSS client must never import the abmind
+// package at runtime — protocol constants are represented locally and
+// protected by cross-repository conformance acceptance.
+const RUNTIME_ABMIND_IMPORT_RE = /^import\s+[^t]/;
 
 for (const file of walk(scanDir)) {
   if (isExemptFile(file)) continue;
@@ -75,6 +80,12 @@ for (const file of walk(scanDir)) {
         violations.push(`${relative(scanDir, file)}:${i + 1}: ${label}`);
         failed = true;
       }
+    }
+
+    const rel = relative(ROOT_DIR, file);
+    if (rel === "src/components/abmind-signed-wss-client.ts" && RUNTIME_ABMIND_IMPORT_RE.test(line) && /from ["']abmind/.test(line)) {
+      violations.push(`${rel}:${i + 1}: runtime import from abmind (forbidden — remote client is self-contained)`);
+      failed = true;
     }
   }
 }

@@ -9,7 +9,7 @@
 export type PhaseResult = "ran" | "skipped";
 
 import type { Config } from "../types/index.js";
-import type { MemoryConfig, AbmindClient } from "abmind";
+import type { MemoryConfig } from "abmind";
 import { createDisabledRuntime } from "../components/memory-runtime.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { HeartbeatSystem } from "../components/heartbeat-system.js";
@@ -65,8 +65,8 @@ export interface BootCtx {
 
   // ── Slots (set by respective phases) ──────────────────────────────────
   runtime: SubagentRuntime;
-  /** #1380: daemon-backed memory client when available. */
-  client: AbmindClient | null;
+  /** #1380/#1508: memory client (local abmind or abtars signed WSS). */
+  client: import("../components/abmind-client-contract.js").AbmindClientLike | null;
   /** #1380: daemon-backed memory runtime facade. Set by phase-memory. */
   memoryRuntime: import("../components/memory-runtime.js").AbtarsMemoryRuntime;
   transport: IKiroTransport | null;
