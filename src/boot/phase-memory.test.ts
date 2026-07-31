@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 import { createBootCtx } from "./context.js";
 
 const mockLoadAbmind = vi.hoisted(() => vi.fn());
@@ -30,8 +31,9 @@ vi.mock("../components/null-memory.js", () => ({
   nullMemory: {},
 }));
 
-import { phaseMemory, createMemoryRuntimeFromEndpoint, AbmindModuleMissingError } from "./phase-memory.js";
+import { phaseMemory, createMemoryRuntimeFromEndpoint, AbmindModuleMissingError, MemoryEndpointUnavailableError } from "./phase-memory.js";
 import { createDisabledRuntime, createClientRuntime } from "../components/memory-runtime.js";
+import { AbtarsSignedWssClient } from "../components/abmind-signed-wss-client.js";
 import { executeToolCall, setMemoryRuntime } from "../components/transport/tool-registry.js";
 import type { BootCtx } from "./context.js";
 
@@ -151,24 +153,32 @@ describe("phaseMemory — endpoint selection (#1508)", () => {
     expect(ctx.memoryRuntime.state).toBe("ready");
   });
 
-  it("a failing wss endpoint degrades and closes the partial client", async () => {
-    const close = vi.fn().mockResolvedValue(undefined);
-    const client = fakeClient({ close });
+  it("a failing wss endpoint degrades, closes the partial client, and reports a bounded reason", async () => {
+    const keyPath = join(testHome, "config", "test-ed25519.pem");
+    execSync(`openssl genpkey -algorithm ed25519 -out ${keyPath}`, { stdio: "ignore" });
+    chmodSync(keyPath, 0o600);
+    const closeSpy = vi.spyOn(AbtarsSignedWssClient.prototype, "close").mockResolvedValue(undefined);
     const resolveEndpoint = vi.fn().mockReturnValue({
       mode: "wss",
       source: "explicit",
       profileName: "primary",
-      profile: { url: "wss://x.invalid/ws", peerId: "p", signingKeyFile: "/tmp/k.pem", serverCertSha256: "a".repeat(64) },
+      profile: {
+        url: "wss://127.0.0.1:1/ws",
+        peerId: "abtars-test",
+        signingKeyFile: keyPath,
+        serverCertSha256: "a".repeat(64),
+      },
     });
-    const createRuntime = vi.fn().mockRejectedValue(new Error("negotiation failed"));
     const ctx = ctxWithMemory(true);
 
-    await phaseMemory(ctx, { resolveEndpoint, createRuntime });
+    await phaseMemory(ctx, { resolveEndpoint });
 
     expect(ctx.memoryRuntime.state).toBe("unavailable");
     expect(ctx.client).toBeNull();
     expect(ctx.phaseHealth.get("phaseMemory")?.status).toBe("failed");
-    void client;
+    expect(ctx.phaseHealth.get("phaseMemory")?.error).toMatch(/endpoint_unavailable/);
+    expect(closeSpy).toHaveBeenCalled();
+    closeSpy.mockRestore();
   });
 
   it("invalid endpoint config degrades with the bounded reason code", async () => {
@@ -208,21 +218,30 @@ describe("phaseMemory — endpoint selection (#1508)", () => {
 });
 
 describe("createMemoryRuntimeFromEndpoint", () => {
+  let factoryHome: string;
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockLoadAbmind.mockReset();
+    factoryHome = mkdtempSync(join(tmpdir(), "abtars-phase-factory-"));
+    mkdirSync(join(factoryHome, "config"), { recursive: true });
+    chmodSync(join(factoryHome, "config"), 0o700);
+  });
+
+  afterEach(() => {
+    rmSync(factoryHome, { recursive: true, force: true });
   });
 
   it("local default without abmind throws AbmindModuleMissingError", async () => {
     mockLoadAbmind.mockResolvedValue(null);
-    await expect(createMemoryRuntimeFromEndpoint({ mode: "local", source: "default" }, "/tmp/home"))
+    await expect(createMemoryRuntimeFromEndpoint({ mode: "local", source: "default" }, factoryHome))
       .rejects.toBeInstanceOf(AbmindModuleMissingError);
   });
 
   it("local mode returns the abmind module for abmindModule", async () => {
     const fakeModule = { getMemoryClient: vi.fn().mockResolvedValue(fakeClient()) };
     mockLoadAbmind.mockResolvedValue(fakeModule);
-    const result = await createMemoryRuntimeFromEndpoint({ mode: "local", source: "default" }, "/tmp/home");
+    const result = await createMemoryRuntimeFromEndpoint({ mode: "local", source: "default" }, factoryHome);
     expect(result.mode).toBe("local");
     expect(result.abmindModule).toBe(fakeModule);
     expect(result.runtime.state).toBe("ready");
@@ -234,7 +253,32 @@ describe("createMemoryRuntimeFromEndpoint", () => {
         capabilities: { version: 1, methods: [], features: {} },
       })),
     });
-    await expect(createMemoryRuntimeFromEndpoint({ mode: "local", source: "default" }, "/tmp/home"))
+    await expect(createMemoryRuntimeFromEndpoint({ mode: "local", source: "default" }, factoryHome))
       .rejects.toThrow(/capabilities/i);
+  });
+
+  it("a wss endpoint that cannot connect fails with a bounded endpoint_unavailable code and closes the client", async () => {
+    const keyPath = join(factoryHome, "config", "k.pem");
+    execSync(`openssl genpkey -algorithm ed25519 -out ${keyPath}`, { stdio: "ignore" });
+    chmodSync(keyPath, 0o600);
+    const closeSpy = vi.spyOn(AbtarsSignedWssClient.prototype, "close").mockResolvedValue(undefined);
+
+    const endpoint = {
+      mode: "wss" as const,
+      source: "explicit" as const,
+      profileName: "primary",
+      profile: {
+        url: "wss://127.0.0.1:1/ws",
+        peerId: "abtars-test",
+        signingKeyFile: keyPath,
+        serverCertSha256: "a".repeat(64),
+      },
+    };
+
+    const err = await createMemoryRuntimeFromEndpoint(endpoint, factoryHome).catch(e => e);
+    expect(err).toBeInstanceOf(MemoryEndpointUnavailableError);
+    expect((err as MemoryEndpointUnavailableError).code).toBe("endpoint_unavailable");
+    expect(closeSpy).toHaveBeenCalled();
+    closeSpy.mockRestore();
   });
 });

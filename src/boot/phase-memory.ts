@@ -45,6 +45,33 @@ export class AbmindModuleMissingError extends Error {
   }
 }
 
+/** Bounded reason codes exposed to boot/status diagnostics for remote endpoints. */
+export type MemoryEndpointFailureCode =
+  | "endpoint_unavailable"
+  | "pin_mismatch"
+  | "authentication_failed"
+  | "negotiation_failed";
+
+/** WSS endpoint failure carrying a bounded, secret-free reason code. */
+export class MemoryEndpointUnavailableError extends Error {
+  readonly code: MemoryEndpointFailureCode;
+
+  constructor(code: MemoryEndpointFailureCode, message: string) {
+    super(message);
+    this.name = "MemoryEndpointUnavailableError";
+    this.code = code;
+  }
+}
+
+function wssFailureCode(err: unknown): MemoryEndpointFailureCode {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/pin/i.test(message)) return "pin_mismatch";
+  if (/auth/i.test(message)) return "authentication_failed";
+  if (/connection failed|econnrefused|closed before open|timed out/i.test(message)) return "endpoint_unavailable";
+  if (/negotiat/i.test(message)) return "negotiation_failed";
+  return "endpoint_unavailable";
+}
+
 /** Negotiate and build the memory runtime for a resolved endpoint. */
 export async function createMemoryRuntimeFromEndpoint(
   endpoint: ResolvedAbmindEndpoint,
@@ -60,7 +87,10 @@ export async function createMemoryRuntimeFromEndpoint(
       return { mode: "wss", client, runtime, abmindModule: null };
     } catch (err) {
       await client.close().catch(() => {});
-      throw err;
+      throw new MemoryEndpointUnavailableError(
+        wssFailureCode(err),
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
@@ -183,7 +213,9 @@ export async function phaseMemory(ctx: BootCtx, deps: PhaseMemoryDeps = {}): Pro
   } catch (err) {
     const reason = err instanceof AbmindModuleMissingError
       ? "abmind package not installed"
-      : `memory endpoint unavailable (${endpoint.mode})`;
+      : err instanceof MemoryEndpointUnavailableError
+        ? `memory endpoint unavailable (${endpoint.mode}, ${err.code})`
+        : `memory endpoint unavailable (${endpoint.mode})`;
     recordDegraded(ctx, reason, err instanceof Error ? err.message : undefined);
     return "skipped";
   }
