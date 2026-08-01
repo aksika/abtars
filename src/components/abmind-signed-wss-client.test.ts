@@ -15,6 +15,7 @@ let uid = 0;
 interface FakeServerOpts {
   respond?: (frameId: string, inner: { method?: string; requestId?: string }) => { id: string; body: string } | null;
   dropAfterHello?: boolean;
+  dropAfterNegotiate?: boolean;
   dropAfterRequest?: boolean;
   port?: number;
 }
@@ -67,6 +68,7 @@ async function startFakeServer(root: string, opts: FakeServerOpts = {}): Promise
           body: msg.body as string,
         });
         const inner = JSON.parse(msg.body as string) as { method?: string; requestId?: string };
+        if (opts.dropAfterNegotiate && inner.method === "system.negotiate") { socket.close(); return; }
         if (opts.dropAfterRequest && inner.method !== "system.negotiate") { socket.close(); return; }
         if (opts.dropAfterHello) return;
         const reply = opts.respond?.(msg.id as string, inner);
@@ -177,6 +179,44 @@ describe("AbtarsSignedWssClient", () => {
       expect(server.frames[0]!.auth.nonce).toMatch(/^[0-9a-f]{32}$/);
       expect(client.routeSnapshot.state).toBe("ready");
       expect(client.routeSnapshot.generation).toBeGreaterThan(0);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("settles negotiate when the route drops during authentication", async () => {
+    const server = await startFakeServer(root, { dropAfterHello: true });
+    const client = new AbtarsSignedWssClient(profile(root, server.port), join(root, "outbox.json"));
+    try {
+      const result = await Promise.race([
+        client.negotiate().then(
+          () => ({ state: "resolved" as const }),
+          (error: Error) => ({ state: "rejected" as const, message: error.message }),
+        ),
+        new Promise<{ state: "timeout" }>((resolve) => setTimeout(() => resolve({ state: "timeout" }), 500)),
+      ]);
+      expect(result.state).toBe("rejected");
+      if (result.state === "rejected") expect(result.message).toMatch(/route lost|closed/i);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("settles negotiate when the route drops during capability negotiation", async () => {
+    const server = await startFakeServer(root, { dropAfterNegotiate: true });
+    const client = new AbtarsSignedWssClient(profile(root, server.port), join(root, "outbox.json"));
+    try {
+      const result = await Promise.race([
+        client.negotiate().then(
+          () => ({ state: "resolved" as const }),
+          (error: Error) => ({ state: "rejected" as const, message: error.message }),
+        ),
+        new Promise<{ state: "timeout" }>((resolve) => setTimeout(() => resolve({ state: "timeout" }), 500)),
+      ]);
+      expect(result.state).toBe("rejected");
+      if (result.state === "rejected") expect(result.message).toMatch(/route lost|closed/i);
     } finally {
       await client.close();
       await server.close();
