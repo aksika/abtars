@@ -14,6 +14,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PiCoreExecutionHost } from "./pi-core-host.js";
+import { DurableContextUnavailableError } from "./pi-core-context.js";
 import type { LoadedPiAgentCore, PiAgent, AgentEvent, StreamFn, PiAgentCoreModule } from "./pi-core-types.js";
 import type { InstructionLease } from "../spin-types.js";
 
@@ -99,6 +100,32 @@ describe("PiCoreExecutionHost", () => {
     await startPromise;
 
     expect(agent.subscribe).toHaveBeenCalled();
+  });
+
+  it("propagates durable projection failure instead of settling as an empty response", async () => {
+    const { agent } = makeMockAgent();
+    const projectionError = new DurableContextUnavailableError("no_provider");
+    const projection = {
+      buildSystemPromptFromSeed: () => "system",
+      transform: vi.fn().mockRejectedValue(projectionError),
+    };
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      initialState: {
+        ...defaultOpts.initialState,
+        messages: [{ role: "user", content: "current turn" }],
+      },
+      contextProjection: projection as never,
+      transformOptions: { hostGeneration: 0 },
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+    agent.prompt = vi.fn(async () => {
+      await projection.transform([], { hostGeneration: 0 });
+    });
+
+    await expect(host.start(loaded)).rejects.toBe(projectionError);
+    expect(host.isSettled).toBe(true);
+    expect(agent.prompt).toHaveBeenCalledTimes(1);
   });
 
   it("constructs and settles with the installed public Pi Agent", async () => {

@@ -4,6 +4,7 @@ import { convertMessagesToLlm, createInstructionMessage, PI_AGENT_CORE_CONFIG } 
 import type { InstructionLease, QueuedSessionInstruction } from "../spin-types.js";
 import { markDelivered, markConsumed, failAfterDelivery } from "../session-instruction-queue.js";
 import type { InstructionQueueHolder } from "../session-instruction-queue.js";
+import { DurableContextUnavailableError } from "./pi-core-context.js";
 import type { PiCoreContextProjection, TransformOptions } from "./pi-core-context.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
 import type { OutputObserver } from "../session-output-feed.js";
@@ -177,6 +178,14 @@ export class PiCoreExecutionHost {
         if (this.state !== "running") {
           logDebug(TAG, `Prompt interrupted during startup (state=${this.state}): ${err instanceof Error ? err.message : String(err)}`);
           return;
+        }
+        // A durable projection failure is a pre-provider execution error. Keep
+        // the typed failure visible to PiCoreTransport and the pipeline instead
+        // of converting it into a settled empty response that looks like a
+        // model-side failure.
+        if (err instanceof DurableContextUnavailableError) {
+          this.beginSettle("context_projection_failure");
+          throw err;
         }
         logWarn(TAG, `Initial prompt failed: ${err instanceof Error ? err.message : String(err)}`);
         this.beginSettle("prompt_failure");
