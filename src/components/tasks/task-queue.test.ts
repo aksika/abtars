@@ -203,25 +203,32 @@ describe("CronQueue", () => {
   });
 
   it("cancels an owned script run by terminating its child through the process handle", () => {
-    const entry = makeEntry({ kind: "script", command: "sleep 100" });
-    queue.enqueue(entry);
-    const child = activeChildren[0]!;
-    (child as unknown as { exitCode: number | null }).exitCode = null;
-    const kill = vi.fn();
-    (child as unknown as { kill: typeof kill }).kill = kill;
+    vi.useFakeTimers();
+    try {
+      const entry = makeEntry({ kind: "script", command: "sleep 100" });
+      queue.enqueue(entry);
+      const child = activeChildren[0]!;
+      (child as unknown as { exitCode: number | null }).exitCode = null;
+      const kill = vi.fn();
+      (child as unknown as { kill: typeof kill }).kill = kill;
 
-    expect(queue.cancel("test-run", "live_recovery: deadline exceeded")).toBe("requested");
-    expect(kill).toHaveBeenCalledWith("SIGTERM");
+      expect(queue.cancel("test-run", "live_recovery: deadline exceeded")).toBe("requested");
+      expect(kill).toHaveBeenCalledWith("SIGTERM");
 
-    // The executor's own exit path settles the run exactly once.
-    child.emit("exit", 143);
-    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
-      runId: "test-run",
-      outcome: "failed",
-    }));
-    const settles = vi.mocked(historyStore.appendRunOnce).mock.calls.length;
-    child.emit("exit", 143);
-    expect(vi.mocked(historyStore.appendRunOnce).mock.calls.length).toBe(settles);
+      // The executor's own exit path settles the run exactly once and clears
+      // the cancellation fallback timer instead of leaving it behind.
+      child.emit("exit", 143);
+      expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+        runId: "test-run",
+        outcome: "failed",
+      }));
+      const settles = vi.mocked(historyStore.appendRunOnce).mock.calls.length;
+      child.emit("exit", 143);
+      expect(vi.mocked(historyStore.appendRunOnce).mock.calls.length).toBe(settles);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a late exit after spawn failure cannot clear a newer job's current state", () => {
@@ -288,4 +295,3 @@ describe("CronQueue", () => {
     }
   });
 });
-

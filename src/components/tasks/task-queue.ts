@@ -88,6 +88,8 @@ export class CronQueue {
   private readonly taskRunner: ScheduledTaskRunner;
   /** #1517: owned script children keyed by the exact run ID for live cancellation. */
   private readonly children = new Map<string, ChildProcess>();
+  /** #1517: cancellation fallback timers keyed by the exact run ID. */
+  private readonly childKillTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback, onTaskPaused?: TaskPausedCallback, agentRunner?: AgentTaskRunner, projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner) {
     this.onFailInject = onFailInject;
@@ -130,9 +132,14 @@ export class CronQueue {
       const child = this.children.get(runId);
       if (child && child.exitCode === null) {
         try { child.kill("SIGTERM"); } catch { /* best effort */ }
-        setTimeout(() => {
+        const previousTimer = this.childKillTimers.get(runId);
+        if (previousTimer) clearTimeout(previousTimer);
+        const killTimer = setTimeout(() => {
+          this.childKillTimers.delete(runId);
+          if (this.children.get(runId) !== child || child.exitCode !== null) return;
           try { child.kill("SIGKILL"); } catch { /* best effort */ }
         }, 5000);
+        this.childKillTimers.set(runId, killTimer);
       }
       return "requested";
     }
@@ -365,6 +372,11 @@ export class CronQueue {
         child.stdout?.removeAllListeners("data");
         child.stderr?.removeAllListeners("data");
         this.children.delete(run.runId);
+        const cancelKillTimer = this.childKillTimers.get(run.runId);
+        if (cancelKillTimer) {
+          clearTimeout(cancelKillTimer);
+          this.childKillTimers.delete(run.runId);
+        }
       };
       // #1517: absolute deadline on the reserved run. On expiry the owned
       // child is terminated through the safe process handle — never by an

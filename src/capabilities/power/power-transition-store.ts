@@ -13,7 +13,9 @@ export class PowerTransitionStore {
       if (!existsSync(this.filePath)) return null;
       const raw = JSON.parse(readFileSync(this.filePath, "utf-8")) as PowerTransitionState;
       if (raw.expiresAt && raw.expiresAt < Date.now()) {
-        this.clear();
+        // #1517: expiry cleanup must not erase a replacement marker written
+        // after this snapshot was read by another process.
+        this.clearIfUnchanged(raw);
         return null;
       }
       return raw;
@@ -43,6 +45,34 @@ export class PowerTransitionStore {
 
   isActive(): boolean {
     return this.read() !== null;
+  }
+
+  /** Remove an expired marker only if the same marker still owns the path. */
+  private clearIfUnchanged(expected: PowerTransitionState): boolean {
+    try {
+      if (!existsSync(this.filePath)) return false;
+      const held = this.filePath + ".expired-check";
+      renameSync(this.filePath, held);
+      let unchanged = false;
+      try {
+        const state = JSON.parse(readFileSync(held, "utf-8")) as PowerTransitionState;
+        unchanged = JSON.stringify(state) === JSON.stringify(expected);
+      } catch {
+        unchanged = false;
+      }
+      if (unchanged) {
+        rmSync(held, { force: true });
+        return true;
+      }
+      if (existsSync(this.filePath)) {
+        rmSync(held, { force: true });
+      } else {
+        renameSync(held, this.filePath);
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   /**
