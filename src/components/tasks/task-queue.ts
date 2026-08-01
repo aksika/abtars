@@ -1,6 +1,7 @@
 import { logAndSwallow } from "../log-and-swallow.js";
 import { addTaskFailure } from "./task-failure-buffer.js";
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { existsSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
@@ -85,6 +86,8 @@ export class CronQueue {
   private readonly onFailInject?: FailInjectCallback;
   private readonly failCounts = new Map<string, { date: string; count: number }>();
   private readonly taskRunner: ScheduledTaskRunner;
+  /** #1517: owned script children keyed by the exact run ID for live cancellation. */
+  private readonly children = new Map<string, ChildProcess>();
 
   constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback, onTaskPaused?: TaskPausedCallback, agentRunner?: AgentTaskRunner, projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner) {
     this.onFailInject = onFailInject;
@@ -119,6 +122,24 @@ export class CronQueue {
 
   cancel(runId: string, _reason: string): "requested" | "not_owned" {
     if (!this.owns(runId)) return "not_owned";
+    // #1517: owned script executors are terminated through the safe process
+    // handle — never by an unverified or recycled PID — with a bounded SIGKILL
+    // fallback for a child that ignores SIGTERM. The exit handler then settles
+    // the run with the executor's first terminal opportunity.
+    if (this._current?.type === "script") {
+      const child = this.children.get(runId);
+      if (child && child.exitCode === null) {
+        try { child.kill("SIGTERM"); } catch { /* best effort */ }
+        setTimeout(() => {
+          try { child.kill("SIGKILL"); } catch { /* best effort */ }
+        }, 5000);
+      }
+      return "requested";
+    }
+    // Agent runs signal the registered execution control (non-blocking) so
+    // the executor's own settlement path keeps the first terminal
+    // opportunity. System dispatches are prompt boundaries with no cancel
+    // handle; the reconciliation grace covers them before fallback settlement.
     const control = getControl(runId);
     if (control) {
       const status = control.signalCancel("deadline");
@@ -331,18 +352,30 @@ export class CronQueue {
     try {
       const child = spawn("bash", ["-c", entry.command], { stdio: ["ignore", "pipe", "pipe"] });
       this.setCurrent(entry, child.pid ?? 0, "script", manual, run.runId);
+      this.children.set(run.runId, child);
 
       let output = "";
       let settled = false;
       let killTimer: ReturnType<typeof setTimeout> | undefined;
+      // #1517: detach owned process listeners after terminal settlement so no
+      // late exit/error/data callback can touch the queue or the next job.
+      const detach = (): void => {
+        child.removeAllListeners("exit");
+        child.removeAllListeners("error");
+        child.stdout?.removeAllListeners("data");
+        child.stderr?.removeAllListeners("data");
+        this.children.delete(run.runId);
+      };
       // #1517: absolute deadline on the reserved run. On expiry the owned
       // child is terminated through the safe process handle — never by an
       // unverified or recycled PID — with a bounded SIGKILL fallback for a
       // child that ignores SIGTERM. The run settles timed_out exactly once;
       // a late exit cannot replace that outcome.
       const deadlineTimer = setTimeout(() => {
+        if (settled) return;
         settled = true;
         logWarn(TAG, `Script deadline fired for task=${entry.id} run=${run.runId}`);
+        detach();
         try {
           if (child.exitCode === null) child.kill("SIGTERM");
         } catch { /* best effort */ }
@@ -366,6 +399,7 @@ export class CronQueue {
         clearTimeout(deadlineTimer);
         if (killTimer) clearTimeout(killTimer);
         if (settled) return;
+        settled = true;
         const finishedAt = Date.now();
         const ok = code === 0;
         const diagnostic: TaskFailureDiagnosticV1 = ok
@@ -374,6 +408,7 @@ export class CronQueue {
         settleRunOnce({ entry, run, outcome: ok ? "success" : "failed", diagnostic, detail: (output || `exit ${code}`).slice(0, 500) });
         const followUp = entry.followUp;
         if (ok && output.trim() && followUp) {
+          detach();
           logInfo(TAG, `Gate triggered → enqueuing agent follow-up for "${entry.id}"`);
           this.clearCurrent();
           const agentPrompt = followUp.prompt.replace("{{GATE_OUTPUT}}", output.trim());
@@ -398,6 +433,7 @@ export class CronQueue {
           addTaskFailure({ taskName: formatTaskLabel(entry.id), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: finishedAt, consecutiveFailures: 1 });
           this.tryInjectFailure(entry, `${code === 0 ? "ok" : `exit ${code}`}\n${(output || "(no output)").slice(0, 500)}`);
         }
+        detach();
         this.clearCurrent();
         this.processNext();
       });
@@ -406,12 +442,14 @@ export class CronQueue {
         clearTimeout(deadlineTimer);
         if (killTimer) clearTimeout(killTimer);
         if (settled) return;
+        settled = true;
         logWarn(TAG, `Script spawn failed for task=${entry.id} (error_chars=${err.message.length})`);
         settleRunOnce({
           entry, run, outcome: "failed",
           diagnostic: makeTaskFailure("dependency", "executable_missing", "preflight", `spawn failed: ${err.message.slice(0, 200)}`, "permanent"),
           detail: err.message.slice(0, 500),
         });
+        detach();
         this.clearCurrent();
         this.processNext();
       });

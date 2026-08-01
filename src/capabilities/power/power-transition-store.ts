@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import type { PowerTransitionState } from "./types.js";
@@ -57,11 +57,39 @@ export class PowerTransitionStore {
     return true;
   }
 
-  /** #1517: clear the marker only when this attempt still owns it. */
+  /**
+   * #1517: clear the marker only when this attempt still owns it. The current
+   * file is moved aside with a single atomic rename before its ownership is
+   * verified, so a replacement marker written concurrently lands at the
+   * original path and is never erased; only the moved copy is deleted when it
+   * is the owned marker, and a foreign or unreadable copy is restored (unless
+   * a replacement already took its place).
+   */
   clearIfOwned(attemptId: string): boolean {
-    const state = this.read();
-    if (!state || state.attemptId !== attemptId) return false;
-    this.clear();
-    return true;
+    try {
+      if (!existsSync(this.filePath)) return false;
+      const held = this.filePath + ".owned-check";
+      renameSync(this.filePath, held);
+      let owned = false;
+      try {
+        const state = JSON.parse(readFileSync(held, "utf-8")) as PowerTransitionState | null;
+        owned = Boolean(state && state.attemptId === attemptId);
+      } catch {
+        owned = false;
+      }
+      if (owned) {
+        rmSync(held, { force: true });
+        return true;
+      }
+      if (existsSync(this.filePath)) {
+        // A concurrent attempt already wrote its replacement marker; keep it.
+        rmSync(held, { force: true });
+      } else {
+        renameSync(held, this.filePath);
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
 }

@@ -202,6 +202,54 @@ describe("CronQueue", () => {
     }));
   });
 
+  it("cancels an owned script run by terminating its child through the process handle", () => {
+    const entry = makeEntry({ kind: "script", command: "sleep 100" });
+    queue.enqueue(entry);
+    const child = activeChildren[0]!;
+    (child as unknown as { exitCode: number | null }).exitCode = null;
+    const kill = vi.fn();
+    (child as unknown as { kill: typeof kill }).kill = kill;
+
+    expect(queue.cancel("test-run", "live_recovery: deadline exceeded")).toBe("requested");
+    expect(kill).toHaveBeenCalledWith("SIGTERM");
+
+    // The executor's own exit path settles the run exactly once.
+    child.emit("exit", 143);
+    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "test-run",
+      outcome: "failed",
+    }));
+    const settles = vi.mocked(historyStore.appendRunOnce).mock.calls.length;
+    child.emit("exit", 143);
+    expect(vi.mocked(historyStore.appendRunOnce).mock.calls.length).toBe(settles);
+  });
+
+  it("a late exit after spawn failure cannot clear a newer job's current state", () => {
+    const entry = makeEntry({ id: "late-exit-1", kind: "script", command: "nope" });
+    queue.enqueue(entry);
+    const failedChild = activeChildren[0]!;
+    failedChild.emit("error", new Error("ENOENT"));
+
+    const second = makeEntry({ id: "late-exit-2", kind: "script", command: "echo second" });
+    queue.enqueue(second);
+    expect(queue.currentJob?.entryId).toBe("late-exit-2");
+    expect(activeChildren).toHaveLength(2);
+
+    failedChild.emit("exit", 1);
+    expect(queue.currentJob?.entryId).toBe("late-exit-2");
+    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledTimes(1);
+  });
+
+  it("detaches owned process listeners after terminal settlement", () => {
+    const entry = makeEntry({ id: "detach-1", kind: "script", command: "echo ok" });
+    queue.enqueue(entry);
+    const child = activeChildren[0]!;
+    child.emit("exit", 0);
+    expect((child as unknown as EventEmitter).listenerCount("exit")).toBe(0);
+    expect((child as unknown as EventEmitter).listenerCount("error")).toBe(0);
+    expect((child as unknown as EventEmitter).listenerCount("data")).toBe(0);
+  });
+
   it("settles a script exactly once when its deadline fires; a late exit cannot replace it", () => {
     vi.useFakeTimers();
     try {
