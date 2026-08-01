@@ -29,6 +29,12 @@ vi.mock("node:child_process", async (importOriginal) => {
       if (cmd === "pgrep" && args?.[0] === "-f" && typeof args[1] === "string" && args[1].includes("abtars.js")) {
         return { status: 0, stdout: pgrepRef.current, stderr: "", pid: 0, output: [pgrepRef.current], signal: null };
       }
+      // Hermetic: never spawn the real `pi` binary (slow launcher — #1476
+      // raised its probe timeout to 15s, which can stall this file's tests
+      // past vitest's 5s default under parallel load).
+      if (args?.[0] === "--version") {
+        return { status: 0, stdout: "0.83.0\n", stderr: "", pid: 0, output: ["0.83.0\n"], signal: null, error: null };
+      }
       return origSpawnRef.current(cmd, args);
     },
   };
