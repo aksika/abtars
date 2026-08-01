@@ -62,7 +62,7 @@ export interface ConversationTarget {
   threadId?: string;
 }
 
-/** #1432: Required interaction contract for scheduled agent definitions. */
+/** #1432: Session lifecycle contract for scheduled agent definitions — missing defaults to oneshot. */
 export type AgentInteraction =
   | { mode: "oneshot" }
   | { mode: "skill"; skill: string; target: ConversationTarget };
@@ -196,49 +196,51 @@ export function normalize(raw: unknown): NormalizeResult {
       if (!orchestrationResult.ok) {
         return { ok: false, error: orchestrationResult.error, id };
       }
-      // #1432: interaction is required and selects the session lifecycle.
+      // #1432: interaction selects the session lifecycle. Missing defaults to
+      // oneshot — a new optional field must never quarantine the whole task.
       const interactionRaw = e["interaction"];
       const reportRaw = e["report"];
-      if (typeof interactionRaw !== "object" || interactionRaw === null) {
-        return { ok: false, error: `interaction is required for agent kind (mode: oneshot | skill)`, id };
-      }
-      const interactionEntry = interactionRaw as Record<string, unknown>;
-      const mode = interactionEntry["mode"];
       let interaction: AgentInteraction;
-      if (mode === "oneshot") {
+      if (typeof interactionRaw !== "object" || interactionRaw === null) {
         interaction = { mode: "oneshot" };
-      } else if (mode === "skill") {
-        if (base.delivery !== "announce") {
-          return { ok: false, error: `interaction.mode=skill requires delivery=announce`, id };
-        }
-        if (orchestrationResult.value.maxAgents !== 1) {
-          return { ok: false, error: `interaction.mode=skill requires orchestration.maxAgents=1`, id };
-        }
-        if (reportRaw !== undefined) {
-          return { ok: false, error: `interaction.mode=skill forbids a report contract`, id };
-        }
-        const skill = typeof interactionEntry["skill"] === "string" ? interactionEntry["skill"].trim() : "";
-        if (!skill || !SKILL_IDENTIFIER_RE.test(skill)) {
-          return { ok: false, error: `interaction.mode=skill requires a valid skill identifier`, id };
-        }
-        const targetRaw = interactionEntry["target"];
-        if (typeof targetRaw !== "object" || targetRaw === null) {
-          return { ok: false, error: `interaction.mode=skill requires an exact target`, id };
-        }
-        const t = targetRaw as Record<string, unknown>;
-        const userId = typeof t["userId"] === "string" ? t["userId"].trim() : "";
-        const platform = typeof t["platform"] === "string" ? t["platform"].trim() : "";
-        const chatId = typeof t["chatId"] === "string" ? t["chatId"].trim() : "";
-        const threadId = typeof t["threadId"] === "string" ? t["threadId"] : undefined;
-        if (!userId || !platform || !chatId) {
-          return { ok: false, error: `interaction.mode=skill target requires userId, platform, and chatId`, id };
-        }
-        if (prompt === undefined && taskFile === undefined) {
-          return { ok: false, error: `interaction.mode=skill requires at least one of prompt or taskFile`, id };
-        }
-        interaction = { mode: "skill", skill, target: { userId, platform, chatId, ...(threadId !== undefined ? { threadId } : {}) } };
       } else {
-        return { ok: false, error: `interaction.mode must be "oneshot" or "skill"`, id };
+        const interactionEntry = interactionRaw as Record<string, unknown>;
+        const mode = interactionEntry["mode"];
+        if (mode === "oneshot") {
+          interaction = { mode: "oneshot" };
+        } else if (mode === "skill") {
+          if (base.delivery !== "announce") {
+            return { ok: false, error: `interaction.mode=skill requires delivery=announce`, id };
+          }
+          if (orchestrationResult.value.maxAgents !== 1) {
+            return { ok: false, error: `interaction.mode=skill requires orchestration.maxAgents=1`, id };
+          }
+          if (reportRaw !== undefined) {
+            return { ok: false, error: `interaction.mode=skill forbids a report contract`, id };
+          }
+          const skill = typeof interactionEntry["skill"] === "string" ? interactionEntry["skill"].trim() : "";
+          if (!skill || !SKILL_IDENTIFIER_RE.test(skill)) {
+            return { ok: false, error: `interaction.mode=skill requires a valid skill identifier`, id };
+          }
+          const targetRaw = interactionEntry["target"];
+          if (typeof targetRaw !== "object" || targetRaw === null) {
+            return { ok: false, error: `interaction.mode=skill requires an exact target`, id };
+          }
+          const t = targetRaw as Record<string, unknown>;
+          const userId = typeof t["userId"] === "string" ? t["userId"].trim() : "";
+          const platform = typeof t["platform"] === "string" ? t["platform"].trim() : "";
+          const chatId = typeof t["chatId"] === "string" ? t["chatId"].trim() : "";
+          const threadId = typeof t["threadId"] === "string" ? t["threadId"] : undefined;
+          if (!userId || !platform || !chatId) {
+            return { ok: false, error: `interaction.mode=skill target requires userId, platform, and chatId`, id };
+          }
+          if (prompt === undefined && taskFile === undefined) {
+            return { ok: false, error: `interaction.mode=skill requires at least one of prompt or taskFile`, id };
+          }
+          interaction = { mode: "skill", skill, target: { userId, platform, chatId, ...(threadId !== undefined ? { threadId } : {}) } };
+        } else {
+          return { ok: false, error: `interaction.mode must be "oneshot" or "skill"`, id };
+        }
       }
       const maxToolRounds = typeof e["maxToolRounds"] === "number" ? e["maxToolRounds"] as number : undefined;
       let report: ReportContract | undefined;

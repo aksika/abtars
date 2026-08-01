@@ -160,13 +160,26 @@ describe("normalize + validation", () => {
     });
 
     it.each([
-      ["missing interaction", { interaction: undefined }],
-      ["interaction null", { interaction: null }],
       ["interaction array", { interaction: [] }],
       ["unknown mode", { interaction: { mode: "interactive" } }],
     ])("rejects %s", (_label, overrides) => {
       const r = normalize(skillAgent(overrides), NOW);
       expect(r.ok).toBe(false);
+    });
+
+    it("defaults missing interaction to oneshot instead of rejecting", () => {
+      const r = normalize(skillAgent({ interaction: undefined }), NOW);
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.entry.kind).toBe("agent");
+        expect((r.entry as ScheduledTask & { kind: "agent" }).interaction).toEqual({ mode: "oneshot" });
+      }
+    });
+
+    it("defaults null interaction to oneshot instead of rejecting", () => {
+      const r = normalize(skillAgent({ interaction: null }), NOW);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect((r.entry as ScheduledTask & { kind: "agent" }).interaction).toEqual({ mode: "oneshot" });
     });
 
     it("rejects skill interaction with non-announce delivery", () => {
@@ -242,10 +255,10 @@ describe("normalize + validation", () => {
       if (!r.ok) expect(r.error).toContain("unknown kind");
     });
 
-    it("rejects top-level targetUserId (removed contract)", () => {
+    it("ignores top-level targetUserId (removed contract) and defaults interaction", () => {
       const r = normalize({ id: "t", kind: "agent", schedule: "0 9 * * *", prompt: "hi", agent: "task", targetUserId: "ada", chatId: "1", delivery: "announce" }, NOW);
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.error).toContain("interaction is required");
+      expect(r.ok).toBe(true);
+      if (r.ok) expect((r.entry as ScheduledTask & { kind: "agent" }).interaction).toEqual({ mode: "oneshot" });
     });
   });
 
