@@ -174,6 +174,39 @@ describe("createClientRuntime", () => {
     });
     expect(client.privateMemory.rebuildFtsIndexes).not.toHaveBeenCalled();
   });
+
+  it("tracks route loss: memory becomes unavailable immediately and clears stale capabilities (#1382)", async () => {
+    const readySnapshot = { version: 1 as const, state: "ready" as const, generation: 3, retryEligible: 0, terminalUnknown: 0 };
+    const lostSnapshot = { version: 1 as const, state: "reconnecting" as const, generation: 4, retryEligible: 1, terminalUnknown: 0 };
+    const restoredSnapshot = { version: 1 as const, state: "ready" as const, generation: 5, retryEligible: 0, terminalUnknown: 0 };
+    let currentCaps: AbmindCapabilitiesV1 | null = caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" });
+    let listener: ((snapshot: typeof readySnapshot) => void) | null = null;
+    const client = mockClient(currentCaps, {
+      routeSnapshot: readySnapshot,
+      onRouteChange: (fn: typeof listener) => {
+        listener = fn as typeof listener;
+        return () => { listener = null; };
+      },
+    } as never);
+    (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
+
+    const rt = createClientRuntime(client);
+    expect(rt.state).toBe("ready");
+    expect(rt.supports("recall")).toBe(true);
+
+    // Route loss: capabilities clear, runtime goes unavailable immediately.
+    (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = null;
+    listener?.(lostSnapshot);
+    expect(rt.state).toBe("unavailable");
+    expect(rt.supports("recall")).toBe(false);
+
+    // Recovery: capabilities re-project only after the route is ready again.
+    currentCaps = caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" });
+    (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
+    listener?.(restoredSnapshot);
+    expect(rt.state).toBe("ready");
+    expect(rt.supports("recall")).toBe(true);
+  });
 });
 
 describe("attemptMemoryMutation", () => {

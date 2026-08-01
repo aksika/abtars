@@ -50,7 +50,9 @@ export type MemoryEndpointFailureCode =
   | "endpoint_unavailable"
   | "pin_mismatch"
   | "authentication_failed"
-  | "negotiation_failed";
+  | "negotiation_failed"
+  | "policy_rejected"
+  | "retry_exhausted";
 
 /** WSS endpoint failure carrying a bounded, secret-free reason code. */
 export class MemoryEndpointUnavailableError extends Error {
@@ -67,8 +69,10 @@ function wssFailureCode(err: unknown): MemoryEndpointFailureCode {
   const message = err instanceof Error ? err.message : String(err);
   if (/pin/i.test(message)) return "pin_mismatch";
   if (/auth/i.test(message)) return "authentication_failed";
-  if (/connection failed|econnrefused|closed before open|timed out/i.test(message)) return "endpoint_unavailable";
-  if (/negotiat/i.test(message)) return "negotiation_failed";
+  if (/connection failed|econnrefused|closed before open|timed out|route not ready|outcome unknown/i.test(message)) return "endpoint_unavailable";
+  if (/negoti/i.test(message)) return "negotiation_failed";
+  if (/policy|grant/i.test(message)) return "policy_rejected";
+  if (/retry|budget|exhaust/i.test(message)) return "retry_exhausted";
   return "endpoint_unavailable";
 }
 

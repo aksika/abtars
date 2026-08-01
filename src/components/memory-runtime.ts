@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AbmindClientLike, AbmindPrivateMemoryLike } from "./abmind-client-contract.js";
+import type { AbmindClientLike, AbmindPrivateMemoryLike, AbmindRouteSnapshotV1Like } from "./abmind-client-contract.js";
 
 import { logWarn } from "./logger.js";
 import type { MemoryMutationFamily } from "./memory-operation-key.js";
@@ -201,6 +201,8 @@ function normalizeRecordMessageResult(value: unknown): RecordMessageResult {
 export interface AbtarsMemoryRuntime {
   readonly state: RuntimeState;
   readonly capabilities: ReadonlySet<MemoryRuntimeCapability>;
+  /** Bounded route projection for diagnostics (#1382). */
+  readonly routeSnapshot: AbmindRouteSnapshotV1Like;
 
   supports(capability: MemoryRuntimeCapability): boolean;
   recordMessage(input: RecordMessageInput, operationKey: string): Promise<RecordMessageResult>;
@@ -262,12 +264,33 @@ function requireClientCapability(capabilities: ReadonlySet<MemoryRuntimeCapabili
 // ── Client-backed implementation ──────────────────────────────────────────
 
 export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRuntime {
-  const capabilities = projectCapabilities(client);
+  let capabilities = projectCapabilities(client);
+  let state: RuntimeState = capabilities.size > 0 ? "ready" : "unavailable";
   const pm: AbmindPrivateMemoryLike = client.privateMemory;
 
+  // #1382: a dropped signed-WSS route makes memory unavailable immediately
+  // and clears stale capabilities; recovery re-projects them after the
+  // reconnect authenticates and renegotiates. Local transports have no
+  // background route and never notify, so state stays ready.
+  if (typeof client.onRouteChange === "function") {
+    try {
+      client.onRouteChange((snapshot) => {
+        if (snapshot.state === "ready") {
+          capabilities = projectCapabilities(client);
+          state = capabilities.size > 0 ? "ready" : "unavailable";
+        } else {
+          // Route loss clears stale capabilities immediately.
+          capabilities = new Set();
+          state = "unavailable";
+        }
+      });
+    } catch { /* diagnostics wiring must never break the runtime */ }
+  }
+
   const self: AbtarsMemoryRuntime = {
-    state: "ready" as RuntimeState,
-    capabilities,
+    get state() { return state; },
+    get capabilities() { return capabilities; },
+    routeSnapshot: client.routeSnapshot ?? { version: 1, state: "ready", generation: 0, retryEligible: 0, terminalUnknown: 0 },
 
     supports(capability: MemoryRuntimeCapability): boolean {
       return capabilities.has(capability);
@@ -451,6 +474,7 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
   return {
     state: "disabled" as RuntimeState,
     capabilities: new Set(),
+    routeSnapshot: { version: 1, state: "closed", generation: 0, retryEligible: 0, terminalUnknown: 0 },
     supports: () => false,
     recordMessage: async () => { unavailable("recordMessage"); return { id: null }; },
     recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
@@ -475,6 +499,7 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
   return {
     state: "unavailable" as RuntimeState,
     capabilities: new Set(),
+    routeSnapshot: { version: 1, state: "unavailable", generation: 0, reasonCode: "route_unavailable", retryEligible: 0, terminalUnknown: 0 },
     supports: () => false,
     recordMessage: async () => { unavailable("recordMessage"); return { id: null }; },
     recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },

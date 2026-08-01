@@ -5,6 +5,15 @@
  * any abmind package runtime import.
  */
 
+import type {
+  AbmindRouteSnapshotV1Like,
+} from "./abmind-route-contract.js";
+
+export type {
+  AbmindRouteSnapshotV1Like, AbmindRouteStateLike,
+  AbmindRouteReasonCodeLike,
+} from "./abmind-route-contract.js";
+
 export interface AbmindCapabilitiesLike {
   version: number;
   methods: string[];
@@ -69,11 +78,17 @@ export interface AbmindSleepLike {
 
 /**
  * The minimal structural client interface abtars consumes: capabilities,
- * private memory methods, sleep methods, and lifecycle. No runtime import
- * from the abmind package is required to satisfy it.
+ * route snapshot, private memory methods, sleep methods, and lifecycle. No
+ * runtime import from the abmind package is required to satisfy it.
  */
 export interface AbmindClientLike {
   readonly capabilities: AbmindCapabilitiesLike | null;
+  readonly routeSnapshot: AbmindRouteSnapshotV1Like;
+  /**
+   * Bounded push notifications of route changes (diagnostics). Absent on
+   * transports without a background route state machine (local Unix).
+   */
+  onRouteChange?(listener: (snapshot: AbmindRouteSnapshotV1Like) => void): () => void;
   readonly privateMemory: AbmindPrivateMemoryLike;
   readonly sleep: AbmindSleepLike;
   negotiate(): Promise<unknown>;

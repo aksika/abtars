@@ -103,10 +103,6 @@ function derPin(root: string): string {
   return createHash("sha256").update(der).digest("hex");
 }
 
-function keyPath(root: string): string {
-  return join(root, "tls-key.pem");
-}
-
 function profile(root: string, port: number): WssProfile {
   return {
     url: `wss://127.0.0.1:${port}`,
@@ -119,6 +115,41 @@ function profile(root: string, port: number): WssProfile {
 function genClientKey(root: string): void {
   execSync(`openssl genpkey -algorithm ed25519 -out ${join(root, "client-ed25519.pem")}`, { stdio: "ignore" });
   chmodSync(join(root, "client-ed25519.pem"), 0o600);
+}
+
+const FAST = {
+  requestTimeoutMs: 60,
+  retryBaseMs: 5,
+  retryMaxMs: 20,
+  retryMaxAttempts: 3,
+  reconnectBaseMs: 5,
+  reconnectMaxMs: 20,
+  reconnectMaxAttempts: 10,
+};
+
+function negotiateReply(frameId: string, inner: { method?: string; requestId?: string }) {
+  if (inner.method === "system.negotiate") {
+    return {
+      id: frameId,
+      body: JSON.stringify({
+        ok: true, requestId: inner.requestId,
+        result: { version: 1, methods: ["private.recall"], features: { private_read: "true" } },
+      }),
+    };
+  }
+  return {
+    id: frameId,
+    body: JSON.stringify({ ok: true, requestId: inner.requestId, result: { ok: true } }),
+  };
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error("waitFor timed out");
 }
 
 describe("AbtarsSignedWssClient", () => {
@@ -135,28 +166,17 @@ describe("AbtarsSignedWssClient", () => {
   });
 
   it("negotiates capabilities and routes responses by outer frame ID", async () => {
-    const server = await startFakeServer(root, {
-      respond: (frameId, inner) => {
-        if (inner.method === "system.negotiate") {
-          return {
-            id: frameId,
-            body: JSON.stringify({
-              ok: true, requestId: inner.requestId,
-              result: { version: 1, methods: ["private.recall"], features: { private_read: "true" } },
-            }),
-          };
-        }
-        return null;
-      },
-    });
+    const server = await startFakeServer(root, { respond: negotiateReply });
     const client = new AbtarsSignedWssClient(profile(root, server.port), join(root, "outbox.json"));
     try {
       const caps = await client.negotiate();
       expect(caps.version).toBe(1);
       expect(caps.methods).toContain("private.recall");
       expect(server.frames.length).toBe(1);
-      expect(server.frames[0]!.id).toMatch(/^f-/);
+      expect(server.frames[0]!.id).toMatch(/^f-ctrl-/);
       expect(server.frames[0]!.auth.nonce).toMatch(/^[0-9a-f]{32}$/);
+      expect(client.routeSnapshot.state).toBe("ready");
+      expect(client.routeSnapshot.generation).toBeGreaterThan(0);
     } finally {
       await client.close();
       await server.close();
@@ -166,15 +186,7 @@ describe("AbtarsSignedWssClient", () => {
   it("surfaces frame-level errors with the caller's request ID (unauthorized preserved)", async () => {
     const server = await startFakeServer(root, {
       respond: (frameId, inner) => {
-        if (inner.method === "system.negotiate") {
-          return {
-            id: frameId,
-            body: JSON.stringify({
-              ok: true, requestId: inner.requestId,
-              result: { version: 1, methods: [], features: {} },
-            }),
-          };
-        }
+        if (inner.method === "system.negotiate") return negotiateReply(frameId, inner);
         return {
           id: frameId,
           body: JSON.stringify({ ok: false, requestId: frameId, error: { code: "unauthorized", message: "Method not allowed" } }),
@@ -192,33 +204,28 @@ describe("AbtarsSignedWssClient", () => {
     }
   });
 
-  it("fails closed with validation_error on a genuine inner request-ID mismatch", async () => {
+  it("never settles a caller on an inner request-ID mismatch (outcome_unknown after budget)", async () => {
     const server = await startFakeServer(root, {
       respond: (frameId, inner) => {
-        if (inner.method === "system.negotiate") {
-          return {
-            id: frameId,
-            body: JSON.stringify({
-              ok: true, requestId: inner.requestId,
-              result: { version: 1, methods: [], features: {} },
-            }),
-          };
-        }
+        if (inner.method === "system.negotiate") return negotiateReply(frameId, inner);
         return {
           id: frameId,
           body: JSON.stringify({ ok: true, requestId: "different-inner-id", result: { ok: true } }),
         };
       },
     });
-    const client = new AbtarsSignedWssClient(profile(root, server.port), join(root, "outbox.json"));
+    const client = new AbtarsSignedWssClient(profile(root, server.port), join(root, "outbox.json"), {
+      ...FAST,
+      retryMaxAttempts: 1,
+    });
     try {
       await client.negotiate();
-      await expect(client.callRaw("system.status", {})).rejects.toMatchObject({ code: "validation_error" });
+      await expect(client.callRaw("system.status", {})).rejects.toMatchObject({ code: "outcome_unknown" });
     } finally {
       await client.close();
       await server.close();
     }
-  });
+  }, 20_000);
 
   it("rejects a server whose certificate does not match the pin", async () => {
     const server = await startFakeServer(root);
@@ -229,29 +236,38 @@ describe("AbtarsSignedWssClient", () => {
     const client = new AbtarsSignedWssClient(badProfile, join(root, "outbox.json"));
     try {
       await expect(client.negotiate()).rejects.toThrow(/pin/i);
+      expect(client.routeSnapshot.state).toBe("unavailable");
+      expect(client.routeSnapshot.reasonCode).toBe("pin_mismatch");
     } finally {
       await client.close();
       await server.close();
     }
   });
 
-  it("retains the outbox entry across a dropped connection and re-sends it on reconnect", async () => {
-    const negotiateReply = (frameId: string, inner: { method?: string; requestId?: string }) => {
-      if (inner.method === "system.negotiate") {
-        return {
-          id: frameId,
-          body: JSON.stringify({
-            ok: true, requestId: inner.requestId,
-            result: { version: 1, methods: [], features: {} },
-          }),
-        };
-      }
-      return {
-        id: frameId,
-        body: JSON.stringify({ ok: true, requestId: inner.requestId, result: { ok: true } }),
-      };
-    };
+  it("rejects every non-ready route state without durable work or connection attempts", async () => {
+    const server = await startFakeServer(root, { respond: negotiateReply });
+    const outboxPath = join(root, "outbox.json");
+    const client = new AbtarsSignedWssClient(profile(root, server.port), outboxPath);
+    try {
+      // disconnected (never negotiated): fail closed, no entry, no connect.
+      await expect(client.callRaw("system.status", {})).rejects.toMatchObject({ code: "unavailable" });
+      expect(existsSync(outboxPath)).toBe(false);
+      expect(server.frames.length).toBe(0);
 
+      // Ready route, then dropped: admission stays closed during reconnect.
+      await client.negotiate();
+      await server.close();
+      await waitFor(() => client.routeSnapshot.state !== "ready");
+      await expect(client.callRaw("system.status", {})).rejects.toMatchObject({ code: "unavailable" });
+      expect(existsSync(outboxPath)).toBe(false);
+      expect(client.capabilities).toBeNull();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }, 20_000);
+
+  it("retains the outbox entry across a dropped connection, renegotiates, and re-sends it", async () => {
     const server = await startFakeServer(root, { respond: negotiateReply, dropAfterRequest: true });
     const outboxPath = join(root, "outbox.json");
     const client = new AbtarsSignedWssClient(profile(root, server.port), outboxPath);
@@ -263,8 +279,9 @@ describe("AbtarsSignedWssClient", () => {
       expect(persisted.entries.length).toBe(1);
       expect(existsSync(outboxPath)).toBe(true);
 
-      // Restart the listener on the same address; the client's reconnect
-      // pumps the retained entry with a fresh nonce/timestamp/signature.
+      // Restart the listener on the same address; the client reconnects,
+      // renegotiates (new generation), then pumps the retained entry with a
+      // fresh nonce/timestamp/signature.
       const oldPort = server.port;
       await server.close();
       const server2 = await startFakeServer(root, { respond: negotiateReply, port: oldPort });
@@ -274,12 +291,89 @@ describe("AbtarsSignedWssClient", () => {
 
       const after = JSON.parse(readFileSync(outboxPath, "utf-8"));
       expect(after.entries.length).toBe(0);
-      expect(server2.frames.length).toBe(1);
+      // Connection 2 = negotiate (control) + status resend.
+      expect(server2.frames.length).toBe(2);
       const firstStatusFrame = server.frames.find(f => f.body.includes("system.status"));
       expect(firstStatusFrame).toBeDefined();
-      expect(server2.frames[0]!.id).toBe(firstStatusFrame!.id);
-      expect(server2.frames[0]!.auth.nonce).not.toBe(firstStatusFrame!.auth.nonce);
-      expect(server2.frames[0]!.auth.ts).not.toBe(firstStatusFrame!.auth.ts);
+      expect(server2.frames[1]!.id).toBe(firstStatusFrame!.id);
+      expect(server2.frames[1]!.auth.nonce).not.toBe(firstStatusFrame!.auth.nonce);
+      expect(client.routeSnapshot.state).toBe("ready");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }, 20_000);
+
+  it("never retries a terminal service error and preserves its code", async () => {
+    const server = await startFakeServer(root, {
+      respond: (frameId, inner) => {
+        if (inner.method === "system.negotiate") return negotiateReply(frameId, inner);
+        return {
+          id: frameId,
+          body: JSON.stringify({ ok: false, requestId: inner.requestId, error: { code: "conflict", message: "stale" } }),
+        };
+      },
+    });
+    const outboxPath = join(root, "outbox.json");
+    const client = new AbtarsSignedWssClient(profile(root, server.port), outboxPath);
+    try {
+      await client.negotiate();
+      await expect(client.callRaw("private.edit", { memoryId: 1, expectedRevision: 2, userId: "u" }, "k"))
+        .rejects.toMatchObject({ code: "conflict" });
+      expect(JSON.parse(readFileSync(outboxPath, "utf-8")).entries.length).toBe(0);
+      const statusFrames = server.frames.filter(f => f.body.includes("private.edit"));
+      expect(statusFrames.length).toBe(1);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }, 20_000);
+
+  it("exhausts ambiguous work to terminal_unknown and never auto-replays after reconnect", async () => {
+    const server = await startFakeServer(root, {
+      respond: (frameId, inner) => {
+        if (inner.method === "system.negotiate") return negotiateReply(frameId, inner);
+        return null; // never answer domain calls
+      },
+    });
+    const outboxPath = join(root, "outbox.json");
+    const client = new AbtarsSignedWssClient(profile(root, server.port), outboxPath, {
+      ...FAST,
+      retryMaxAttempts: 2,
+    });
+    try {
+      await client.negotiate();
+      await expect(client.callRaw("system.status", {})).rejects.toMatchObject({ code: "outcome_unknown" });
+      const persisted = JSON.parse(readFileSync(outboxPath, "utf-8"));
+      expect(persisted.entries.length).toBe(1);
+      expect(persisted.entries[0].state).toBe("terminal_unknown");
+      expect(client.routeSnapshot.terminalUnknown).toBe(1);
+      // Reconnect must not pump the terminal-unknown entry.
+      const port = server.port;
+      await server.close();
+      const server2 = await startFakeServer(root, { port });
+      await new Promise((r) => setTimeout(r, 200));
+      expect(server2.frames.filter(f => f.body.includes("system.status")).length).toBe(0);
+      await server2.close();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }, 20_000);
+
+  it("publishes bounded route snapshots through onRouteChange", async () => {
+    const server = await startFakeServer(root, { respond: negotiateReply });
+    const client = new AbtarsSignedWssClient(profile(root, server.port), join(root, "outbox.json"));
+    const seen: string[] = [];
+    const unsubscribe = client.onRouteChange((snapshot) => seen.push(snapshot.state));
+    try {
+      await client.negotiate();
+      expect(seen).toContain("ready");
+      await server.close();
+      await waitFor(() => client.routeSnapshot.state !== "ready");
+      expect(client.routeSnapshot.state).not.toBe("ready");
+      expect(seen.length).toBeGreaterThan(0);
+      unsubscribe();
     } finally {
       await client.close();
       await server.close();
@@ -289,15 +383,7 @@ describe("AbtarsSignedWssClient", () => {
   it("close resolves pending requests as unavailable", async () => {
     const server = await startFakeServer(root, {
       respond: (frameId, inner) => {
-        if (inner.method === "system.negotiate") {
-          return {
-            id: frameId,
-            body: JSON.stringify({
-              ok: true, requestId: inner.requestId,
-              result: { version: 1, methods: [], features: {} },
-            }),
-          };
-        }
+        if (inner.method === "system.negotiate") return negotiateReply(frameId, inner);
         return null;
       },
     });
@@ -308,6 +394,7 @@ describe("AbtarsSignedWssClient", () => {
     await client.close();
     const err = await pendingPromise;
     expect((err as Error & { code?: string }).code).toBe("unavailable");
+    expect(client.routeSnapshot.state).toBe("closed");
     await server.close();
   });
 });
@@ -332,26 +419,29 @@ describe("AbmindRequestOutbox", () => {
 
     const reloaded = new AbmindRequestOutbox("peer", path);
     expect(reloaded.length).toBe(1);
-    expect(reloaded.peek()?.id).toBe("f-1");
+    expect(reloaded.peekDue(Date.now())?.id).toBe("f-1");
 
     expect(reloaded.acknowledge("f-1")).toBe(true);
     expect(reloaded.length).toBe(0);
   });
 
-  it("ignores files belonging to another peer", () => {
+  it("quarantines files belonging to another peer (exact peer binding)", () => {
     const path = join(root, "peer.json");
     const outbox = new AbmindRequestOutbox("peer", path);
     outbox.append("f-1", "private.recall", "r-1", undefined, "{}", 1, {});
     const other = new AbmindRequestOutbox("other", path);
     expect(other.length).toBe(0);
+    expect(other.isQuarantined).toBe(true);
   });
 
   it("tracks attempts and stops at the bounded maximum", () => {
-    const outbox = new AbmindRequestOutbox("peer", join(root, "peer.json"));
+    const outbox = new AbmindRequestOutbox("peer", join(root, "peer.json"), { retryDeadlineMs: 60_000 });
     outbox.append("f-1", "private.recall", "r-1", undefined, "{}", 1, {});
-    expect(outbox.recordAttempt("f-1", "timeout")).toBe(1);
-    expect(outbox.peek()?.attempts).toBe(1);
-    expect(outbox.recordAttempt("f-1", "timeout")).toBe(2);
+    outbox.markInFlight("f-1");
+    for (let i = 1; i <= 5; i++) {
+      expect(outbox.markRetryWait("f-1", "timeout", Date.now() + i * 1_000)).toBe(true);
+    }
+    expect(outbox.isExhausted(outbox.get("f-1")!, Date.now())).toBe(true);
   });
 
   it("rejects appends beyond the entry limit", () => {
@@ -361,5 +451,24 @@ describe("AbmindRequestOutbox", () => {
     }
     expect(outbox.append("f-over", "private.recall", "r-over", undefined, "{}", 1, {})).toBe(false);
     expect(outbox.length).toBe(200);
+  });
+
+  it("migrates valid V1 files without refreshing the age-derived deadline", () => {
+    const path = join(root, "peer.json");
+    const createdAt = new Date(Date.now() - 60_000).toISOString();
+    writeFileSync(path, JSON.stringify({
+      version: 1, peer: "peer",
+      entries: [{
+        id: "f-old", method: "private.edit", requestId: "r-old", idempotencyKey: "k-old",
+        body: "{}", version: 1, payload: {}, createdAt, attempts: 2, lastError: "timeout",
+      }],
+    }));
+    const outbox = new AbmindRequestOutbox("peer", path);
+    const entry = outbox.get("f-old")!;
+    expect(entry.state).toBe("admitted");
+    expect(entry.attempts).toBe(2);
+    expect(Date.parse(entry.deadlineAt)).toBe(Date.parse(createdAt) + 15 * 60_000);
+    const saved = JSON.parse(readFileSync(path, "utf-8")) as { version: number };
+    expect(saved.version).toBe(2);
   });
 });
