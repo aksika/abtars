@@ -4,7 +4,9 @@ import { abtarsHome } from "../../paths.js";
 import { resolvePiFromPath } from "../../components/pi-installation.js";
 import { join } from "node:path";
 
-const TIMEOUT_MS = 3000;
+// #1476: Pi can take >3s to start under boot load (interpreted launcher) —
+// too low a timeout caused transient "failed" states in doctor.
+const TIMEOUT_MS = 15000;
 const MAX_OUTPUT_BYTES = 1024;
 
 export interface PiVersionResult {
@@ -39,6 +41,8 @@ export function getPiVersion(): PiVersionResult {
     if (result.error) {
       const code = (result.error as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return { found: false };
+      // #1476: timeout is transient (slow startup), not a hard failure.
+      if (code === "ETIMEDOUT") return { found: false, error: "timed out" };
       return { found: false, error: code ? `spawn error: ${code}` : result.error.message };
     }
 

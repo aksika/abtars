@@ -93,13 +93,20 @@ async function probePlatforms(): Promise<ProbeResult> {
 
 async function probeDashboard(): Promise<ProbeResult> {
   const env = readEnv();
-  if (env.get("ENABLE_DASHBOARD") !== "true") return { name: "dashboard", status: "skipped", evidence: "configuration", detail: "not enabled", ms: 0 };
-  const port = env.get("DASHBOARD_PORT") || env.get("WEB_PORT") || "3000";
+  const enabled = process.env["ENABLE_DASHBOARD"] ?? env.get("ENABLE_DASHBOARD");
+  if (enabled !== "true") return { name: "dashboard", status: "skipped", evidence: "configuration", detail: "not enabled", ms: 0 };
+  // Match the dashboard server's own resolution (dashboard-config via
+  // process.env after dotenv) — the port is configurable (WEB_PORT), never
+  // assume 3000, and operator-set env (launchd/shell) wins over .env.
+  const { loadDashboardConfig } = await import("../../components/dashboard/dashboard-config.js");
+  const cfg = loadDashboardConfig({ ...Object.fromEntries(env), ...process.env });
+  const port = cfg.webPort;
+  const host = cfg.webHost || "127.0.0.1";
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) });
-    return { name: "dashboard", status: res.ok ? "ok" : "failed", evidence: "reachable", detail: `:${port}`, ms: 0 };
+    const res = await fetch(`http://${host}:${port}/`, { signal: AbortSignal.timeout(10000) });
+    return { name: "dashboard", status: res.ok ? "ok" : "failed", evidence: "reachable", detail: `${host}:${port}`, ms: 0 };
   } catch {
-    return { name: "dashboard", status: "failed", evidence: "reachable", detail: `:${port} unreachable`, ms: 0 };
+    return { name: "dashboard", status: "failed", evidence: "reachable", detail: `${host}:${port} unreachable`, ms: 0 };
   }
 }
 
@@ -155,6 +162,9 @@ async function probeTui(): Promise<ProbeResult> {
     const { connect } = await import("node:net");
     await new Promise<void>((resolve, reject) => {
       const s = connect(sockPath, () => { s.end(); resolve(); });
+      // Without setTimeout the handler below never fires and a hung socket
+      // blocks doctor forever.
+      s.setTimeout(2000, () => { s.destroy(); reject(new Error("connect timeout")); });
       s.on("error", (e) => { s.destroy(); reject(e); });
       s.on("timeout", () => { s.destroy(); reject(new Error("connect timeout")); });
     });
@@ -298,6 +308,11 @@ async function probeSharedDeps(): Promise<ProbeResult> {
 async function probePi(): Promise<ProbeResult> {
   const result = getPiVersion();
   if (!result.found) {
+    // #1476: a timeout means Pi is present but slow to start (boot load) —
+    // transient, warn instead of failing. Hard errors still fail.
+    if (result.error?.includes("timed out")) {
+      return { name: "pi", status: "warning", evidence: "executable", detail: `Pi slow to start (${result.error})`, ms: 0 };
+    }
     if (result.error) return { name: "pi", status: "failed", evidence: "executable", detail: `Pi unavailable (${result.error})`, remediation: "Install Pi or check PATH", ms: 0 };
     return { name: "pi", status: "warning", evidence: "executable", detail: "Pi not installed (optional)", ms: 0 };
   }
@@ -315,7 +330,7 @@ async function probePeerApi(): Promise<ProbeResult> {
     await new Promise<void>((resolve, reject) => {
       const sock = createConnection({ port, host: "127.0.0.1" }, () => { sock.destroy(); resolve(); });
       sock.on("error", reject);
-      sock.setTimeout(2000, () => { sock.destroy(); reject(new Error("timeout")); });
+      sock.setTimeout(5000, () => { sock.destroy(); reject(new Error("timeout")); });
     });
     return { name: "peer-api", status: "ok", evidence: "reachable", detail: `:${port} listening`, ms: 0 };
   } catch (err) {
