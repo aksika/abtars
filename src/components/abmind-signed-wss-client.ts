@@ -209,6 +209,7 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
       getRuntimeStatus: (p) => this.call("private.getRuntimeStatus", p ?? {}),
       getCoreKnowledge: (p) => this.call("private.getCoreKnowledge", p),
       recordFeedback: (p, key) => this.call("private.recordFeedback", p, key),
+      projectConversationContext: (p) => this.call("private.projectConversationContext", p),
     };
 
     this.sleep = {

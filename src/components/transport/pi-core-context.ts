@@ -1,13 +1,49 @@
+import { createHash } from "node:crypto";
 import { logWarn, logError, logDebug } from "../logger.js";
 import type { AssistantMessage, ModelApi, PiExecutionContextSeed, AgentMessage, AbtarsCurrentTurnMessage } from "./pi-core-types.js";
+import type { DurableContextProjectionInput, DurableContextProjectionResult } from "../memory-runtime.js";
 
 const TAG = "pi-core-context";
 
-export interface PiContextOrchestrator {
-  getContext(sessionKey: string, maxContext: number, opts: { beforeMessageId?: number }): Promise<{
-    messages: Array<{ role: string; content: string; tool_call_id?: string; name?: string; is_error?: boolean }>;
-    compacted?: boolean;
-  }>;
+/**
+ * #1527: read-only durable context provider. Replaces the misleading
+ * orchestrator-shaped contract, which implied compaction maintenance that
+ * this read path never performed.
+ */
+export interface PiDurableContextProvider {
+  projectContext(input: DurableContextProjectionInput): Promise<DurableContextProjectionResult>;
+}
+
+export type DurableContextUnavailableReason =
+  | "no_provider"
+  | "provider_rejected"
+  | "malformed_response";
+
+/** #1527: durable projection failures are execution errors, never degraded success. */
+export class DurableContextUnavailableError extends Error {
+  readonly reason: DurableContextUnavailableReason;
+  constructor(reason: DurableContextUnavailableReason, cause?: unknown) {
+    super(`Durable context unavailable: ${reason}`, { cause });
+    this.name = "DurableContextUnavailableError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Late-bound shared provider reference. Transport construction and memory
+ * negotiation boot in parallel, so the transport captures the holder and the
+ * composition point (pipelineDeps) populates it once memory is ready.
+ */
+export interface DurableContextProviderHolder {
+  current: PiDurableContextProvider | null;
+}
+
+export function createDurableContextProvider(
+  runtime: import("../memory-runtime.js").AbtarsMemoryRuntime,
+): PiDurableContextProvider {
+  return {
+    projectContext: (input: DurableContextProjectionInput) => runtime.projectDurableContext(input),
+  };
 }
 
 export interface TransformOptions {
@@ -15,12 +51,17 @@ export interface TransformOptions {
   hostGeneration?: number;
   candidateKeyFn?: () => string;
   candidateModelFn?: (candidateKey: string) => ModelApi | undefined;
-  orchestrator?: PiContextOrchestrator;
+  contextProvider?: PiDurableContextProvider;
 }
 
 export interface TransformResult {
   messages: AgentMessage[];
   contextDegraded: boolean;
+}
+
+/** Bounded, content-free session fingerprint for diagnostics. */
+function sessionFingerprint(sessionKey: string): string {
+  return createHash("sha256").update(sessionKey, "utf-8").digest("hex").slice(0, 12);
 }
 
 export class PiCoreContextProjection {
@@ -67,14 +108,24 @@ export class PiCoreContextProjection {
         if (options.signal?.aborted) return this.fallback(agentMessages);
         if (generation !== this.instanceGeneration) return this.fallback(agentMessages);
 
-        if (!options.orchestrator) {
-          logWarn(TAG, "Durable mode requested but no orchestrator — returning degraded suffix");
-          durableMessages = [];
-          contextDegraded = true;
-        } else {
-          const projected = await this.projectDurable(options);
+        const provider = options.contextProvider;
+        if (!provider) {
+          // #1527 fail-closed: durable mode without a ready provider is an
+          // execution error, never a plausible suffix-only answer.
+          logWarn(TAG, "context_projection_failed mode=durable reason=no_provider");
+          throw new DurableContextUnavailableError("no_provider");
+        }
+
+        try {
+          const projected = await this.projectDurable(provider);
           durableMessages = projected.messages;
-          contextDegraded = projected.degraded;
+        } catch (err) {
+          if (err instanceof DurableContextUnavailableError) {
+            logWarn(TAG, `context_projection_failed mode=durable reason=${err.reason}`);
+            throw err;
+          }
+          logWarn(TAG, "context_projection_failed mode=durable reason=provider_rejected");
+          throw new DurableContextUnavailableError("provider_rejected", err);
         }
 
         if (options.signal?.aborted) return this.fallback(agentMessages);
@@ -87,11 +138,12 @@ export class PiCoreContextProjection {
         this.lastSafeBaseline = result;
       }
 
-      const marker = agentMessages[markerIndex] as unknown as AbtarsCurrentTurnMessage;
-      logDebug(TAG, `Transform complete: ${durableMessages.length} durable + ${suffix.length} suffix (marker: ${marker.executionId})`);
+      const mode = this.seed.source.mode;
+      logDebug(TAG, `context_projection session=${sessionFingerprint(this.seed.source.sessionKey)} mode=${mode} source=${durableMessages.length} suffix=${suffix.length}`);
 
       return { messages: result, contextDegraded };
     } catch (err) {
+      if (err instanceof DurableContextUnavailableError) throw err;
       logWarn(TAG, `Context projection failed for ${this.seed.executionId}: ${err instanceof Error ? err.message : String(err)}`);
       return this.fallback(agentMessages);
     }
@@ -114,70 +166,68 @@ export class PiCoreContextProjection {
     return { markers, markerIndex };
   }
 
-  private async projectDurable(options: TransformOptions): Promise<{ messages: AgentMessage[]; degraded: boolean }> {
+  private async projectDurable(provider: PiDurableContextProvider): Promise<{ messages: AgentMessage[] }> {
     const source = this.seed.source;
-    if (source.mode !== "durable") return { messages: [], degraded: false };
+    if (source.mode !== "durable") return { messages: [] };
 
-    try {
-      const orch = options.orchestrator as NonNullable<typeof options.orchestrator>;
-      const ctx = await orch.getContext(
-        source.sessionKey,
-        source.maxContext,
-        { beforeMessageId: source.beforeMessageId },
-      );
+    const ctx = await provider.projectContext({
+      userId: source.userId,
+      sessionId: source.sessionKey,
+      beforeMessageId: source.beforeMessageId,
+      maxContext: source.maxContext,
+    });
 
-      const rows = ctx.messages ?? [];
-
-      const messages = rows.map((row): AgentMessage => {
-        const role = String(row.role ?? "user");
-        const content = String(row.content ?? "");
-        const toolCallId = row.tool_call_id ? String(row.tool_call_id) : undefined;
-        const toolName = row.name ? String(row.name) : undefined;
-
-        if (role === "tool") {
-          if (toolCallId && toolName) {
-            // Valid tool result: preserve as toolResult for Pi
-            return {
-              role: "toolResult",
-              toolCallId,
-              toolName,
-              content: [{ type: "text", text: content }],
-              isError: Boolean(row.is_error),
-              timestamp: Date.now(),
-            };
-          }
-          // Historical tool row without valid call ID: render as context text
-          return { role: "user", content: `[Historical tool output]: ${content.slice(0, 500)}`, timestamp: Date.now() } as AgentMessage;
-        }
-
-        if (role === "assistant") {
-          return {
-            role: "assistant",
-            content: content ? [{ type: "text", text: content }] : [],
-            api: "openai-completions",
-            provider: "abmind",
-            model: "historical",
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
-            stopReason: "stop",
-            timestamp: Date.now(),
-          } satisfies AssistantMessage;
-        }
-        if (role === "user") return { role: "user", content, timestamp: Date.now() };
-        return { role: "user", content: `[Historical ${role} context]: ${content.slice(0, 500)}`, timestamp: Date.now() };
-      });
-      return { messages, degraded: false };
-    } catch (err) {
-      const errorClass = err instanceof Error ? err.name : "unknown";
-      logWarn(TAG, `Abmind projection failed (${errorClass}) for ${this.seed.executionId}`);
-      return { messages: [], degraded: true };
+    if (!ctx || typeof ctx !== "object" || !Array.isArray(ctx.messages)) {
+      throw new DurableContextUnavailableError("malformed_response");
     }
+
+    const messages = (ctx.messages ?? []).map((row): AgentMessage => {
+      const r = row as { role?: unknown; content?: unknown; tool_call_id?: unknown; name?: unknown; is_error?: unknown };
+      const role = typeof r.role === "string" ? r.role : "user";
+      const content = typeof r.content === "string" ? r.content : "";
+      const toolCallId = typeof r.tool_call_id === "string" ? r.tool_call_id : undefined;
+      const toolName = typeof r.name === "string" ? r.name : undefined;
+
+      if (role === "tool") {
+        if (toolCallId && toolName) {
+          // Valid tool result: preserve as toolResult for Pi
+          return {
+            role: "toolResult",
+            toolCallId,
+            toolName,
+            content: [{ type: "text", text: content }],
+            isError: r.is_error === true,
+            timestamp: Date.now(),
+          } as AgentMessage;
+        }
+        // Historical tool row without valid call ID: render as context text
+        return { role: "user", content: `[Historical tool output]: ${content.slice(0, 500)}`, timestamp: Date.now() } as AgentMessage;
+      }
+
+      if (role === "assistant") {
+        return {
+          role: "assistant",
+          content: content ? [{ type: "text", text: content }] : [],
+          api: "openai-completions",
+          provider: "abmind",
+          model: "historical",
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "stop",
+          timestamp: Date.now(),
+        } satisfies AssistantMessage;
+      }
+      if (role === "user") return { role: "user", content, timestamp: Date.now() };
+      return { role: "user", content: `[Historical ${role} context]: ${content.slice(0, 500)}`, timestamp: Date.now() };
+    });
+
+    return { messages };
   }
 
   private fallback(agentMessages: AgentMessage[]): TransformResult {

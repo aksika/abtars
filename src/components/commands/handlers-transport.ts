@@ -44,22 +44,10 @@ export async function handleCompact(_text: string, ctx: CommandContext): Promise
       await ctx.reply("Compaction not available for this session.");
       return true;
     }
-    // Context engine compaction — force compact via transport's orchestrator
-    const transport = ctx.transport as { contextOrchestrator?: { forceCompact(chatId: string, budget: number): Promise<import("abmind").CompactionResult> }; config?: { maxContext: number } };
-    if (transport.contextOrchestrator) {
-      const budget = (transport as any).config?.maxContext ?? 200000;
-      const result = await transport.contextOrchestrator.forceCompact(ctx.sessionKey, budget);
-      if (result.skipped) {
-        await ctx.reply("Compaction skipped (recent passes saved little — retry in ~30 min).");
-      } else if (result.ok) {
-        const pct = Math.round(result.savingsPct * 100);
-        await ctx.reply(`Compaction complete. ${result.tokensBefore}→${result.tokensAfter} tokens (${pct}% saved).`);
-      } else {
-        await ctx.reply("Nothing to compact.");
-      }
-    } else {
-      await ctx.reply("Context engine not active for this transport.");
-    }
+    // #1527: a read-only durable context provider is NOT a compaction
+    // orchestrator. Maintenance support is never inferred from it; until
+    // #1406 lands, compaction remains unavailable.
+    await ctx.reply("Compaction maintenance is unavailable on this transport (#1406).");
   } catch (err) {
     logError(TAG, "Manual compaction failed", err);
     await ctx.reply("Compaction failed.");

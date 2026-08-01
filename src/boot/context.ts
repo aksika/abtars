@@ -68,6 +68,12 @@ export interface BootCtx {
   client: import("../components/abmind-client-contract.js").AbmindClientLike | null;
   /** #1380: daemon-backed memory runtime facade. Set by phase-memory. */
   memoryRuntime: import("../components/memory-runtime.js").AbtarsMemoryRuntime;
+  /**
+   * #1527: late-bound durable context provider. Transport construction and
+   * memory negotiation boot in parallel, so phase-pipeline-deps populates
+   * this holder once memory is ready; Pi transports read it per call.
+   */
+  durableContextProvider: import("../components/transport/pi-core-context.js").DurableContextProviderHolder;
   transport: IKiroTransport | null;
   heartbeat: HeartbeatSystem | null;
   cronQueue: CronQueue | null;
@@ -158,6 +164,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     runtime: new SubagentRuntimeClass(),
     client: null,
     memoryRuntime: createDisabledRuntime(),
+    durableContextProvider: { current: null },
     transport: null,
     heartbeat: null,
     cronQueue: null,

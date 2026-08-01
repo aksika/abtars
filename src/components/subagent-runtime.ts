@@ -119,6 +119,16 @@ export class SubagentRuntime {
   /** Get session manager (may be null before boot completes). */
   get sessionManager(): import("./spin.js").Spin | null { return this._sessionManager; }
 
+  /**
+   * #1527: late-bound durable context provider holder. Set by the boot
+   * composition point once memory is ready; lazy transports created after
+   * that point receive the shared holder.
+   */
+  private _contextProvider: import("./transport/pi-core-context.js").DurableContextProviderHolder = { current: null };
+  setContextProvider(holder: import("./transport/pi-core-context.js").DurableContextProviderHolder): void {
+    this._contextProvider = holder;
+  }
+
   /** Enable Docker sandbox for W/B/C sessions (#478). */
   setSandboxEnabled(enabled: boolean): void { this._sandboxEnabled = enabled; }
 
@@ -343,7 +353,7 @@ export class SubagentRuntime {
     // #1418: pass the complete last-successful Main candidate (secret-free tuple)
     // into specialist construction so fallback ordering reuses the exact Main
     // candidate that last produced a non-empty response.
-    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain);
+    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain, this._contextProvider);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
     // External ACP keeps its own agent label; embedded Pi uses this label when

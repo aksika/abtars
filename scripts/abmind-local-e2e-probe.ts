@@ -10,6 +10,7 @@ import { parseArgs } from "node:util";
 import { existsSync } from "node:fs";
 import { AbmindClient, LocalTransport } from "../../abmind/dist/src/index.js";
 import { createClientRuntime } from "../src/components/memory-runtime.js";
+import { runProjectionJourney } from "./probe-projection-journey.js";
 
 interface ProbeResult {
   ok: boolean;
@@ -102,6 +103,10 @@ async function main(): Promise<ProbeResult> {
     if (!recallResult.hits || recallResult.hits.length === 0) {
       failures.push("recall returned no hits after store");
     }
+
+    // #1527: escaped-regression journey — durable projection through the real
+    // runtime + real Pi projection against the live daemon.
+    await runProjectionJourney(runtime, user, runId, failures);
 
     const result: ProbeResult = { ok: failures.length === 0, failures };
     return result;

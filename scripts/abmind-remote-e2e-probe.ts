@@ -14,6 +14,7 @@ import { existsSync } from "node:fs";
 import { resolveAbmindEndpoint } from "../src/components/abmind-endpoint-config.js";
 import { createMemoryRuntimeFromEndpoint } from "../src/boot/phase-memory.js";
 import { resolveAbmindPackageDir } from "../src/utils/abmind-lazy.js";
+import { runProjectionJourney } from "./probe-projection-journey.js";
 
 interface ProbeResult {
   ok: boolean;
@@ -130,6 +131,10 @@ async function main(): Promise<ProbeResult> {
     if (!recallResult.hits || recallResult.hits.length === 0) {
       failures.push("recall returned no hits after store");
     }
+
+    // #1527: escaped-regression journey — durable projection through the real
+    // WSS runtime + real Pi projection against the live daemon.
+    await runProjectionJourney(result.runtime, user, runId, failures);
 
     await result.runtime.close();
 

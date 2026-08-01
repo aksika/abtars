@@ -16,7 +16,8 @@ export type MemoryRuntimeCapability =
   | "rebuildFts"
   | "feedback"
   | "coreKnowledge"
-  | "status";
+  | "status"
+  | "durableContext";
 
 export interface InstantStoreInput {
   userId: string;
@@ -177,6 +178,56 @@ export interface MaintenanceResult {
 export interface EmbeddingInput { texts: string[] }
 export interface EmbeddingResult { vectors: Array<number[] | null>; model: string }
 
+// ── #1527: durable context projection ────────────────────────────────────────
+
+export interface DurableContextProjectionInput {
+  userId: string;
+  sessionId: string;
+  beforeMessageId: number;
+  maxContext: number;
+}
+
+export interface DurableContextProjectionResult {
+  messages: Array<{ role: "user" | "assistant" | "tool"; content: string }>;
+  estimatedTokens: number;
+  sourceMessageCount: number;
+}
+
+/**
+ * Read-only provider contract consumed by Pi durable projection. The runtime
+ * supplies an adapter; disabled/unavailable runtimes reject instead of
+ * returning an empty successful projection.
+ */
+export interface DurableContextProvider {
+  projectContext(input: DurableContextProjectionInput): Promise<DurableContextProjectionResult>;
+}
+
+const PROJECTION_ROLES: ReadonlySet<string> = new Set(["user", "assistant", "tool"]);
+
+function normalizeProjectionResult(value: unknown): DurableContextProjectionResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Durable context projection returned a non-object response");
+  }
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record["messages"])) {
+    throw new Error("Durable context projection response has no messages array");
+  }
+  const messages: Array<{ role: "user" | "assistant" | "tool"; content: string }> = [];
+  for (const raw of record["messages"] as unknown[]) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error("Durable context projection returned a malformed message");
+    }
+    const m = raw as Record<string, unknown>;
+    if (typeof m["role"] !== "string" || !PROJECTION_ROLES.has(m["role"]) || typeof m["content"] !== "string") {
+      throw new Error("Durable context projection returned a malformed message");
+    }
+    messages.push({ role: m["role"] as "user" | "assistant" | "tool", content: m["content"] });
+  }
+  const estimatedTokens = typeof record["estimatedTokens"] === "number" ? record["estimatedTokens"] : 0;
+  const sourceMessageCount = typeof record["sourceMessageCount"] === "number" ? record["sourceMessageCount"] : 0;
+  return { messages, estimatedTokens, sourceMessageCount };
+}
+
 /** Normalize an unknown recordMessage response to RecordMessageResult.
  *  Accepts canonical objects, legacy raw numbers, and null without throwing.
  *  Malformed values become { id: null } with a bounded warning. */
@@ -217,6 +268,8 @@ export interface AbtarsMemoryRuntime {
   instantStore(input: InstantStoreInput): Promise<InstantStoreResult>;
   editMemory(input: EditMemoryInput): Promise<EditMemoryResult>;
   rebuildFtsIndexes(): Promise<{ rebuilt: string[] }>;
+  /** #1527: daemon-owned durable context projection. Rejects when unavailable. */
+  projectDurableContext(input: DurableContextProjectionInput): Promise<DurableContextProjectionResult>;
   close(): Promise<void>;
 }
 
@@ -251,6 +304,7 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   if (methods.has("private.recordFeedback")) result.add("feedback");
   if (methods.has("private.getCoreKnowledge")) result.add("coreKnowledge");
   if (methods.has("private.getRuntimeStatus")) result.add("status");
+  if (methods.has("private.projectConversationContext") && features["private_read"] === "true") result.add("durableContext");
 
   return result;
 }
@@ -460,6 +514,14 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       return (await pm.rebuildFtsIndexes()) as { rebuilt: string[] };
     },
 
+    async projectDurableContext(input: DurableContextProjectionInput): Promise<DurableContextProjectionResult> {
+      // #1527: route loss clears capabilities immediately; recovery re-projects
+      // them after renegotiation. Every call checks the current route state.
+      requireClientCapability(capabilities, "durableContext");
+      const result = await pm.projectConversationContext(input);
+      return normalizeProjectionResult(result);
+    },
+
     async close(): Promise<void> {
       await client.close();
     },
@@ -488,6 +550,7 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     instantStore: async () => { unavailable("instantStore"); return { stored: false }; },
     editMemory: async () => { unavailable("editMemory"); return { ok: false }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
+    projectDurableContext: async () => { unavailable("projectDurableContext"); throw new Error("Memory is disabled: projectDurableContext not available"); },
     close: async () => {},
   };
 }
@@ -513,6 +576,7 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     instantStore: async () => { unavailable("instantStore"); return { stored: false }; },
     editMemory: async () => { unavailable("editMemory"); return { ok: false }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
+    projectDurableContext: async () => { unavailable("projectDurableContext"); throw new Error("Memory unavailable: projectDurableContext not available"); },
     close: async () => {},
   };
 }

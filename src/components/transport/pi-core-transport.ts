@@ -13,7 +13,7 @@ import type { SandboxPolicy } from "../tool-sandbox.js";
 import type { AgentMessage } from "./pi-core-types.js";
 import { createCurrentTurnMessage } from "./pi-core-types.js";
 import type { OutputObserver } from "../session-output-feed.js";
-import type { PiContextOrchestrator } from "./pi-core-context.js";
+import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import { buildPiModel, pickPiApi } from "./pi-ai-adapter.js";
 import { candidateKey } from "./model-candidates.js";
 import { PiCoreToolExecutionError, buildSafetyDiagnostic, mergeSafetyIncident } from "./tool-failure-diagnostic.js";
@@ -42,7 +42,8 @@ export interface PiCoreTransportOptions {
   healthRegistry: ModelHealthRegistry;
   sandboxPolicy: SandboxPolicy;
   session?: { instructionQueue: Array<import("../spin-types.js").QueuedSessionInstruction>; id: string };
-  contextOrchestrator?: PiContextOrchestrator;
+  /** #1527: late-bound durable context provider holder (parallel boot composition). */
+  contextProvider?: DurableContextProviderHolder;
   maxPromptRounds?: number;
   maxCandidateRounds?: number;
 }
@@ -63,11 +64,8 @@ export class PiCoreTransport implements IKiroTransport {
   private _isReady = false;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
 
-  /** Override the system prompt for subsequent calls. */
-  /** ContextOrchestrator for durable abmind projection. Set by boot composition. */
-  get contextOrchestrator(): PiContextOrchestrator | undefined { return this._contextOrchestrator; }
-  set contextOrchestrator(value: PiContextOrchestrator | undefined) { this._contextOrchestrator = value; }
-  private _contextOrchestrator?: PiContextOrchestrator;
+  /** #1527: late-bound durable context provider; populated once memory is ready. */
+  private _contextProvider: DurableContextProviderHolder;
   private _toolCallsSucceeded = 0;
   private _lastResponse = "";
   private _intermediateText = "";
@@ -88,7 +86,7 @@ export class PiCoreTransport implements IKiroTransport {
     this.healthRegistry = opts.healthRegistry;
     this.sandboxPolicy = opts.sandboxPolicy;
     this.session = opts.session;
-    this._contextOrchestrator = opts.contextOrchestrator;
+    this._contextProvider = opts.contextProvider ?? { current: null };
     this.maxPromptRounds = opts.maxPromptRounds;
     this.maxCandidateRounds = opts.maxCandidateRounds;
     this.policy = new FallbackPolicy(opts.candidates, opts.healthRegistry);
@@ -182,9 +180,10 @@ export class PiCoreTransport implements IKiroTransport {
       (currentTurn as { imageContent?: Array<{ mime: string; base64: string }> }).imageContent = [image];
     }
 
-    // Context seed: durable vs ephemeral
-    const source = context?.beforeMessageId !== undefined
-      ? { mode: "durable" as const, sessionKey, beforeMessageId: context.beforeMessageId, maxContext: this.config.candidates[0]?.maxContext ?? 128000 }
+    // Context seed: durable vs ephemeral. A durable seed requires both the
+    // just-persisted cursor and a non-empty caller identity (#1527).
+    const source = context?.beforeMessageId !== undefined && context?.userId
+      ? { mode: "durable" as const, sessionKey, beforeMessageId: context.beforeMessageId, maxContext: this.config.candidates[0]?.maxContext ?? 128000, userId: context.userId }
       : { mode: "ephemeral" as const, sessionKey };
 
     const volatileBlocks: Array<{ kind: string; content: string }> = [];
@@ -249,7 +248,7 @@ export class PiCoreTransport implements IKiroTransport {
     };
     const tools = createPiAgentTools(toolContext);
 
-    // Build context projection with orchestrator when available
+    // Build context projection with the shared durable provider when available
     const contextProjection = new PiCoreContextProjection(
       { source, executionId, currentTurn, volatileBlocks },
       systemPrompt,
@@ -281,7 +280,7 @@ export class PiCoreTransport implements IKiroTransport {
       transformOptions: {
         signal: undefined,
         hostGeneration: 0,
-        orchestrator: context?.orchestrator ?? this._contextOrchestrator,
+        contextProvider: context?.contextProvider ?? this._contextProvider.current ?? undefined,
         candidateKeyFn: () => {
           const candidate = this.policy.selectModel();
           return candidate ? candidateKey(candidate.model, candidate.endpoint) : executionId;

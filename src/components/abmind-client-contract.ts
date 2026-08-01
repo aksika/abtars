@@ -32,6 +32,8 @@ export interface AbmindPrivateMemoryLike {
   getRuntimeStatus(input?: unknown): Promise<unknown>;
   getCoreKnowledge(input: unknown): Promise<unknown>;
   recordFeedback(input: unknown, idempotencyKey?: string): Promise<unknown>;
+  /** #1527: daemon-owned durable context projection (private read). */
+  projectConversationContext(input: unknown): Promise<unknown>;
 }
 
 export interface SleepStartResultLike {

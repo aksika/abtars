@@ -62,8 +62,15 @@ export class Spin {
   private _housekeepCounter = 0;
   private orcActivityFeed?: OrcActivityFeed;
   private sessionOutputFeed?: SessionOutputFeed;
+  /**
+   * #1527: late-bound durable context provider holder. Spin forwards its
+   * current provider directly instead of scraping an optional transport
+   * property (which was never set and produced a circular no-op).
+   */
+  private contextProvider: import("./transport/pi-core-context.js").DurableContextProviderHolder = { current: null };
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
+  setContextProvider(holder: import("./transport/pi-core-context.js").DurableContextProviderHolder): void { this.contextProvider = holder; }
   setMemory(memory: Spin["memory"]): void { this.memory = memory; }
   setOrcActivityFeed(feed: OrcActivityFeed): void { this.orcActivityFeed = feed; }
   setSessionOutputFeed(feed: SessionOutputFeed): void { this.sessionOutputFeed = feed; }
@@ -646,7 +653,9 @@ export class Spin {
         deadlineAt: spec.deadlineAt,
         orcContext: session.orcContext,
         executionTelemetry,
-        orchestrator: (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator } | undefined)?.contextOrchestrator,
+        // #1527: Spin forwards its own provider reference (late-bound holder
+        // populated by boot composition), never a scraped transport property.
+        contextProvider: this.contextProvider.current ?? undefined,
       };
       const leaseEmitter = spec.attemptId && spec.executionControl?.generation !== undefined
         ? new ExecutorProgressEmitter()
@@ -714,7 +723,7 @@ export class Spin {
           return {
             send: (msg, img, ctx) => observe(sessionTransport!, session.id, msg, img, {
               ...(ctx ?? {}),
-              orchestrator: ctx?.orchestrator ?? (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator }).contextOrchestrator,
+              contextProvider: ctx?.contextProvider ?? this.contextProvider.current ?? undefined,
             }),
             steer: typeof sessionTransport.steer === "function"
               ? (content, lease) => sessionTransport!.steer!(content, lease)
@@ -740,7 +749,7 @@ export class Spin {
           send: async (msg, img, ctx) => {
             const enrichedContext = {
               ...(ctx ?? {}),
-              orchestrator: ctx?.orchestrator ?? (sessionTransport as { contextOrchestrator?: import("./transport/pi-core-context.js").PiContextOrchestrator }).contextOrchestrator,
+              contextProvider: ctx?.contextProvider ?? this.contextProvider.current ?? undefined,
             };
             if ((!this.sessionOutputFeed && !leaseEmitter) || !session.activeExecutionId) {
               return (await executor.send(msg, img, enrichedContext)) || "(no output)";

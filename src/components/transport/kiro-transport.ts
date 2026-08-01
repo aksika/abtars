@@ -3,7 +3,7 @@
  * Both ACP and tmux transports implement this contract.
  */
 
-import type { PiContextOrchestrator } from "./pi-core-context.js";
+import type { PiDurableContextProvider } from "./pi-core-context.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 
 /**
@@ -37,8 +37,8 @@ export interface PromptRequestContext {
   executionTelemetry?: import("../execution-telemetry.js").ExecutionTelemetryScope;
   /** #1502 Task 10: task-local cwd/env; never mutate process.env. */
   executionScope?: ToolExecutionScope;
-  /** Durable context authority for Pi-core's exclusive before-message projection. */
-  orchestrator?: PiContextOrchestrator;
+  /** #1527: durable context provider for Pi-core's exclusive before-message projection. */
+  contextProvider?: PiDurableContextProvider;
   /** #1480: Orc invocation context for durable project ownership fencing. */
   orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV1;
 }

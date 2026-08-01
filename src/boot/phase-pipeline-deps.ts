@@ -19,7 +19,7 @@
 import { readEntry as cronReadEntry } from "../components/tasks/task-store.js";
 import { CronQueue } from "../components/tasks/task-queue.js";
 import { IdleSave } from "../components/idle-save.js";
-import { logWarn } from "../components/logger.js";
+import { logInfo, logWarn } from "../components/logger.js";
 import { loadTransport, resolveAgent } from "../components/transport-config.js";
 import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
@@ -31,6 +31,21 @@ import { unavailable } from "../capabilities/sleep/index.js";
 export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, transport } = ctx;
   if (!transport) { ctx.phaseHealth.set(phasePipelineDeps.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePipelineDeps.name}: skipping — transport not available`); return "skipped"; }
+
+  // #1527: a memory-enabled Pi route without the negotiated durable-context
+  // capability is context-blind by construction. Refuse to serve rather than
+  // let durable requests degrade to suffix-only answers.
+  if (ctx.memoryRuntime.state === "ready" && !ctx.memoryRuntime.supports("durableContext")) {
+    const route = typeof transport.getRuntimeStatus === "function" ? transport.getRuntimeStatus().route : undefined;
+    if (route === "pi-ai") {
+      const { logError } = await import("../components/logger.js");
+      logError("boot", "memory-enabled Pi route negotiated no durable-context capability — refusing to boot context-blind");
+      try { await transport.destroy(); } catch (err) { logWarn("boot", `transport destroy during refusal failed: ${err instanceof Error ? err.message : String(err)}`); }
+      ctx.transport = null;
+      ctx.phaseHealth.set(phasePipelineDeps.name, { status: "failed", error: "pi route without durable context capability" });
+      return "skipped";
+    }
+  }
 
   ctx.idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
 
@@ -145,6 +160,19 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       : null;
     const bundle = buildSoulBundle("A", sessionContext?.soulBundle);
     if (bundle) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(bundle);
+  }
+
+  // #1527: compose the durable context provider once memory state is known.
+  // Transport and memory boot in parallel, so the holder (captured by every
+  // Pi transport at construction) is populated here, after both resolved.
+  const { createDurableContextProvider } = await import("../components/transport/pi-core-context.js");
+  if (ctx.memoryRuntime.state === "ready" && ctx.memoryRuntime.supports("durableContext")) {
+    ctx.durableContextProvider.current = createDurableContextProvider(ctx.memoryRuntime);
+    spin.setContextProvider(ctx.durableContextProvider);
+    ctx.runtime.setContextProvider(ctx.durableContextProvider);
+    logInfo("boot", "Durable context provider composed into Pi transports");
+  } else {
+    logWarn("boot", `Durable context provider not composed (memory=${ctx.memoryRuntime.state}) — durable Pi requests will fail closed`);
   }
 
   // #907: Register Nerve notification listeners for Orc

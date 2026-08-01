@@ -273,6 +273,9 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
       maxCandidateRounds: tc?.maxFallbackToolRounds,
+      // #1527: late-bound holder — memory negotiates in parallel; the
+      // composition point (phase-pipeline-deps) populates it afterwards.
+      contextProvider: ctx.durableContextProvider,
     });
     logInfo("main", `🔌 PiCore transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {

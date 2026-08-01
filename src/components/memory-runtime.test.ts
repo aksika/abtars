@@ -24,6 +24,13 @@ function mockClient(caps: AbmindCapabilitiesV1, overrides?: Partial<import("abmi
       rebuildFtsIndexes: vi.fn().mockResolvedValue({ rebuilt: [] }),
       instantStore: vi.fn().mockResolvedValue({ stored: true, memoriesCount: 1 }),
       editMemory: vi.fn().mockResolvedValue({ ok: true }),
+      projectConversationContext: vi.fn().mockResolvedValue({
+        version: 1,
+        messages: [{ role: "user", content: "prior" }],
+        estimatedTokens: 10,
+        prunedToolResults: 0,
+        sourceMessageCount: 1,
+      }),
     },
     ...overrides,
   } as unknown as import("abmind").AbmindClient;
@@ -36,6 +43,7 @@ function caps(methods: string[], features: Record<string, string> = {}): AbmindC
 const ALL_METHODS = [
   "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
   "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
+  "private.projectConversationContext",
 ];
 
 describe("capability projection", () => {
@@ -43,12 +51,12 @@ describe("capability projection", () => {
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
-      expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status"],
+      expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext"],
     },
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "false" },
-      expected: ["recall", "recordMessage", "feedback", "coreKnowledge", "status"],
+      expected: ["recall", "recordMessage", "feedback", "coreKnowledge", "status", "durableContext"],
     },
     {
       methods: ALL_METHODS,
@@ -81,7 +89,7 @@ describe("capability projection", () => {
     for (const cap of expected) {
       expect(rt.supports(cap)).toBe(true);
     }
-    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status"];
+    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext"];
     for (const cap of allCaps) {
       if (expected.includes(cap)) {
         expect(rt.supports(cap), `${cap} should be supported`).toBe(true);
@@ -175,8 +183,7 @@ describe("createClientRuntime", () => {
     expect(client.privateMemory.rebuildFtsIndexes).not.toHaveBeenCalled();
   });
 
-  it("tracks route loss: memory becomes unavailable immediately and clears stale capabilities (#1382)", async () => {
-    const readySnapshot = { version: 1 as const, state: "ready" as const, generation: 3, retryEligible: 0, terminalUnknown: 0 };
+  it("tracks route loss: memory becomes unavailable immediately and clears stale capabilities (#1382)", async () => {    const readySnapshot = { version: 1 as const, state: "ready" as const, generation: 3, retryEligible: 0, terminalUnknown: 0 };
     const lostSnapshot = { version: 1 as const, state: "reconnecting" as const, generation: 4, retryEligible: 1, terminalUnknown: 0 };
     const restoredSnapshot = { version: 1 as const, state: "ready" as const, generation: 5, retryEligible: 0, terminalUnknown: 0 };
     let currentCaps: AbmindCapabilitiesV1 | null = caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" });
@@ -206,6 +213,76 @@ describe("createClientRuntime", () => {
     listener?.(restoredSnapshot);
     expect(rt.state).toBe("ready");
     expect(rt.supports("recall")).toBe(true);
+  });
+
+  it("projects durable context when advertised and normalizes the result (#1527)", async () => {
+    const client = mockClient(caps(ALL_METHODS, { private_read: "true" }));
+    const rt = createClientRuntime(client);
+    expect(rt.supports("durableContext")).toBe(true);
+
+    const result = await rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 });
+    expect(result).toEqual({
+      messages: [{ role: "user", content: "prior" }],
+      estimatedTokens: 10,
+      sourceMessageCount: 1,
+    });
+    expect(client.privateMemory.projectConversationContext).toHaveBeenCalledWith({
+      userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000,
+    });
+  });
+
+  it("fails closed when durable context is not advertised — provider is never invoked", async () => {
+    const client = mockClient(caps(["private.recall", "private.recordMessage"], { private_read: "true" }));
+    const rt = createClientRuntime(client);
+    expect(rt.supports("durableContext")).toBe(false);
+    await expect(rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 }))
+      .rejects.toThrow(/capability unavailable: durableContext/);
+    expect(client.privateMemory.projectConversationContext).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed projection responses instead of returning empty context (#1527)", async () => {
+    const client = mockClient(caps(ALL_METHODS, { private_read: "true" }));
+    (client.privateMemory.projectConversationContext as ReturnType<typeof vi.fn>)
+      .mockResolvedValue({ version: 1, messages: [{ role: "robot", content: "x" }] });
+    const rt = createClientRuntime(client);
+    await expect(rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 }))
+      .rejects.toThrow(/malformed message/);
+
+    (client.privateMemory.projectConversationContext as ReturnType<typeof vi.fn>)
+      .mockResolvedValue({ messages: "nope" });
+    await expect(rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 }))
+      .rejects.toThrow(/no messages array/);
+  });
+
+  it("route loss makes durable projection reject until renegotiation recovers (#1527)", async () => {
+    const readySnapshot = { version: 1 as const, state: "ready" as const, generation: 3, retryEligible: 0, terminalUnknown: 0 };
+    const lostSnapshot = { version: 1 as const, state: "reconnecting" as const, generation: 4, retryEligible: 1, terminalUnknown: 0 };
+    let currentCaps: AbmindCapabilitiesV1 | null = caps(ALL_METHODS, { private_read: "true" });
+    let listener: ((snapshot: typeof readySnapshot) => void) | null = null;
+    const client = mockClient(currentCaps, {
+      routeSnapshot: readySnapshot,
+      onRouteChange: (fn: typeof listener) => {
+        listener = fn as typeof listener;
+        return () => { listener = null; };
+      },
+    } as never);
+    (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
+
+    const rt = createClientRuntime(client);
+    expect(rt.supports("durableContext")).toBe(true);
+
+    // Route loss clears capabilities → projection must reject without a call.
+    (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = null;
+    listener?.(lostSnapshot);
+    await expect(rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 }))
+      .rejects.toThrow(/capability unavailable/);
+
+    // Recovery re-projects capabilities → a new execution may project again.
+    currentCaps = caps(ALL_METHODS, { private_read: "true" });
+    (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
+    listener?.({ version: 1 as const, state: "ready" as const, generation: 5, retryEligible: 0, terminalUnknown: 0 });
+    const result = await rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 });
+    expect(result.messages.length).toBe(1);
   });
 });
 
@@ -292,5 +369,11 @@ describe("Disabled and Unavailable runtimes", () => {
     const rt = createUnavailableRuntime();
     await expect(rt.recordMessage({ userId: "u", sessionId: "s", role: "user", content: "hi", timestamp: 1 }, "k"))
       .rejects.toThrow("Memory unavailable");
+  });
+
+  it("disabled and unavailable runtimes reject durable projection rather than returning empty context (#1527)", async () => {
+    const input = { userId: "u", sessionId: "s", beforeMessageId: 1, maxContext: 8000 };
+    await expect(createDisabledRuntime().projectDurableContext(input)).rejects.toThrow("Memory is disabled");
+    await expect(createUnavailableRuntime().projectDurableContext(input)).rejects.toThrow("Memory unavailable");
   });
 });

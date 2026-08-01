@@ -4,7 +4,8 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PiCoreTransport, extractAssistantText } from "./pi-core-transport.js";
-import { PiCoreContextProjection } from "./pi-core-context.js";
+import { PiCoreContextProjection, DurableContextUnavailableError, createDurableContextProvider } from "./pi-core-context.js";
+import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage, AgentMessage } from "./pi-core-types.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
@@ -101,6 +102,48 @@ describe("PiCoreTransport", () => {
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
     });
     expect(t.config.role).toBe("specialist");
+  });
+
+  it("captures the late-bound provider holder for post-construction composition (#1527)", () => {
+    // Transport construction and memory negotiation boot in parallel, so the
+    // transport must observe a holder populated AFTER construction. This test
+    // fails if the production constructor drops the holder option.
+    const holder: DurableContextProviderHolder = { current: null };
+    const t = new PiCoreTransport({
+      role: "main",
+      systemPrompt: "",
+      candidates: makeCandidates(),
+      healthRegistry: new ModelHealthRegistry(),
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      contextProvider: holder,
+    });
+    const stored = (t as unknown as { _contextProvider: DurableContextProviderHolder })._contextProvider;
+    expect(stored).toBe(holder);
+
+    const provider = { projectContext: vi.fn() };
+    holder.current = provider;
+    expect(stored.current).toBe(provider);
+  });
+
+  it("defaults to an empty holder when no provider is composed (fail-closed baseline)", () => {
+    const t = makeTransport();
+    const stored = (t as unknown as { _contextProvider: DurableContextProviderHolder })._contextProvider;
+    expect(stored).toEqual({ current: null });
+  });
+
+  it("createDurableContextProvider adapts the memory runtime's fail-closed projection", async () => {
+    const provider = createDurableContextProvider({
+      state: "ready",
+      capabilities: new Set(["durableContext"]),
+      supports: (cap: string) => cap === "durableContext",
+      projectDurableContext: vi.fn().mockResolvedValue({
+        messages: [{ role: "user", content: "prior turn" }],
+        estimatedTokens: 7,
+        sourceMessageCount: 1,
+      }),
+    } as never);
+    const result = await provider.projectContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 });
+    expect(result.messages).toEqual([{ role: "user", content: "prior turn" }]);
   });
 
   it("sendPrompt with no context does not crash — returns text via onEvent", async () => {
@@ -222,51 +265,51 @@ function makeMarkerMessages(): AgentMessage[] {
 }
 
 describe("context projection at transport level", () => {
-  it("beforeMessageId: 0 selects durable projection", async () => {
+  it("durable seed carries the caller identity into the projection request", async () => {
     const seed = makeProjectionSeed({
-      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 0, maxContext: 8000 },
+      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 0, maxContext: 8000, userId: "user-1" },
     });
     const projection = new PiCoreContextProjection(seed, "system");
-    let capturedBeforeMessageId: number | undefined;
+    let capturedInput: unknown = null;
     const result = await projection.transform(makeMarkerMessages(), {
       hostGeneration: 0,
-      orchestrator: {
-        async getContext(_s: string, _m: number, opts: { beforeMessageId?: number }) {
-          capturedBeforeMessageId = opts.beforeMessageId;
-          return { messages: [{ role: "user", content: "prior" }] };
+      contextProvider: {
+        async projectContext(input: unknown) {
+          capturedInput = input;
+          return { messages: [{ role: "user", content: "prior" }], estimatedTokens: 4, sourceMessageCount: 1 };
         },
       },
     });
-    expect(capturedBeforeMessageId).toBe(0);
+    expect(capturedInput).toEqual({ userId: "user-1", sessionId: "test_session", beforeMessageId: 0, maxContext: 8000 });
     expect(result.messages.some((m) => m.content === "prior")).toBe(true);
   });
 
-  it("durable request without orchestrator reports degraded context", async () => {
+  it("durable request without a provider throws a typed error — no degraded suffix answer", async () => {
     const seed = makeProjectionSeed({
-      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 100, maxContext: 8000 },
+      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 100, maxContext: 8000, userId: "user-1" },
     });
     const projection = new PiCoreContextProjection(seed, "system");
-    const result = await projection.transform(makeMarkerMessages(), { hostGeneration: 0 });
-    expect(result.contextDegraded).toBe(true);
-    expect(result.messages.length).toBe(1);
-    expect(result.messages[0]?.role).toBe("abtars_current_turn");
+    await expect(projection.transform(makeMarkerMessages(), { hostGeneration: 0 }))
+      .rejects.toBeInstanceOf(DurableContextUnavailableError);
   });
 
-  it("production composition passes a real orchestrator and preserves historical messages", async () => {
+  it("durable seed without a user identity is impossible by construction; production supplies both", async () => {
     const seed = makeProjectionSeed({
-      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 42, maxContext: 8000 },
+      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 42, maxContext: 8000, userId: "user-1" },
     });
     const projection = new PiCoreContextProjection(seed, "system");
     const result = await projection.transform(makeMarkerMessages(), {
       hostGeneration: 0,
-      orchestrator: {
-        async getContext() {
+      contextProvider: {
+        async projectContext() {
           return {
             messages: [
               { role: "user", content: "first" },
               { role: "assistant", content: "second" },
               { role: "user", content: "third" },
             ],
+            estimatedTokens: 12,
+            sourceMessageCount: 3,
           };
         },
       },

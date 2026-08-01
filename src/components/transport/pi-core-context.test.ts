@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { PiCoreContextProjection } from "./pi-core-context.js";
+import { PiCoreContextProjection, DurableContextUnavailableError } from "./pi-core-context.js";
 import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage } from "./pi-core-types.js";
 
 function makeSeed(overrides?: Partial<PiExecutionContextSeed>): PiExecutionContextSeed {
@@ -18,6 +18,12 @@ function makeSeed(overrides?: Partial<PiExecutionContextSeed>): PiExecutionConte
   };
 }
 
+function durableSeed(beforeMessageId = 100): PiExecutionContextSeed {
+  return makeSeed({
+    source: { mode: "durable", sessionKey: "test_session", beforeMessageId, maxContext: 8000, userId: "user-1" },
+  });
+}
+
 function makeAgentMessages(withMarker = true): import("./pi-core-types.js").AgentMessage[] {
   const msgs: import("./pi-core-types.js").AgentMessage[] = [
     { role: "assistant", content: "How can I help?" },
@@ -32,6 +38,14 @@ function makeAgentMessages(withMarker = true): import("./pi-core-types.js").Agen
     } as AbtarsCurrentTurnMessage);
   }
   return msgs;
+}
+
+function providerReturning(messages: Array<{ role: string; content: string }>) {
+  return {
+    async projectContext() {
+      return { messages, estimatedTokens: 10, sourceMessageCount: messages.length };
+    },
+  };
 }
 
 describe("PiCoreContextProjection", () => {
@@ -85,65 +99,65 @@ describe("PiCoreContextProjection", () => {
     expect(result.contextDegraded).toBe(true);
   });
 
-  it("durable mode uses orchestrator rows", async () => {
-    const seed = makeSeed({
-      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 100, maxContext: 8000 },
-    });
-    const projection = new PiCoreContextProjection(seed, "system");
-    let rowsCalled = false;
-    const result = await projection.transform(makeAgentMessages(true), {
-      hostGeneration: 0,
-      orchestrator: {
-        async getContext(_sessionKey: string, _maxContext: number, _opts: { beforeMessageId?: number }) {
-          rowsCalled = true;
-          return { messages: [{ role: "user", content: "previous message" }] };
-        },
+  it("durable mode projects history through the provider and appends the suffix exactly once", async () => {
+    let captured: unknown = null;
+    const projection = new PiCoreContextProjection(durableSeed(100), "system");
+    const provider = {
+      async projectContext(input: unknown) {
+        captured = input;
+        return { messages: [
+          { role: "user", content: "first turn" },
+          { role: "assistant", content: "first answer" },
+        ], estimatedTokens: 10, sourceMessageCount: 2 };
       },
-    });
-    expect(rowsCalled).toBe(true);
-    // 1 durable row + 1 suffix message (from marker onward)
-    expect(result.messages.length).toBe(2);
+    };
+    const result = await projection.transform(makeAgentMessages(true), { hostGeneration: 0, contextProvider: provider });
+    expect(captured).toEqual({ userId: "user-1", sessionId: "test_session", beforeMessageId: 100, maxContext: 8000 });
+    // 2 durable rows + 1 suffix message (marker onward)
+    expect(result.messages.length).toBe(3);
+    expect(result.messages[0]?.content).toBe("first turn");
+    expect((result.messages[1]?.content as Array<{ text: string }>)[0]?.text).toBe("first answer");
     expect(result.messages.some((m) => m.content === "Hello!")).toBe(true);
+    expect(result.contextDegraded).toBe(false);
   });
 
-  it("durable mode without orchestrator returns empty projection", async () => {
-    const seed = makeSeed({
-      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 100, maxContext: 8000 },
-    });
-    const projection = new PiCoreContextProjection(seed, "system");
-    const result = await projection.transform(makeAgentMessages(true), { hostGeneration: 0 });
-    // No orchestrator → no durable rows, just suffix (marker onward), degraded.
-    expect(result.messages.length).toBe(1);
-    expect(result.messages[0]?.role).toBe("abtars_current_turn");
+  it("durable mode without a provider throws — never a suffix-only degraded success", async () => {
+    const projection = new PiCoreContextProjection(durableSeed(), "system");
+    await expect(projection.transform(makeAgentMessages(true), { hostGeneration: 0 }))
+      .rejects.toBeInstanceOf(DurableContextUnavailableError);
+    await expect(projection.transform(makeAgentMessages(true), { hostGeneration: 0 }))
+      .rejects.toMatchObject({ reason: "no_provider" });
+  });
+
+  it("provider rejection throws a typed durable error (no fallback)", async () => {
+    const projection = new PiCoreContextProjection(durableSeed(), "system");
+    const provider = {
+      async projectContext() { throw Object.assign(new Error("route lost"), { code: "unavailable" }); },
+    };
+    await expect(projection.transform(makeAgentMessages(true), { hostGeneration: 0, contextProvider: provider }))
+      .rejects.toMatchObject({ reason: "provider_rejected" });
+  });
+
+  it("malformed provider output throws a typed durable error", async () => {
+    const projection = new PiCoreContextProjection(durableSeed(), "system");
+    const provider = {
+      async projectContext() { return { messages: "nope" }; },
+    };
+    await expect(projection.transform(makeAgentMessages(true), { hostGeneration: 0, contextProvider: provider }))
+      .rejects.toMatchObject({ reason: "malformed_response" });
+  });
+
+  it("cancellation between projection and suffix retains non-provider fallback semantics", async () => {
+    const controller = new AbortController();
+    const projection = new PiCoreContextProjection(durableSeed(), "system");
+    const provider = {
+      async projectContext() {
+        return { messages: [{ role: "user", content: "history" }], estimatedTokens: 4, sourceMessageCount: 1 };
+      },
+    };
+    const promise = projection.transform(makeAgentMessages(true), { hostGeneration: 0, contextProvider: provider, signal: controller.signal });
+    controller.abort();
+    const result = await promise;
     expect(result.contextDegraded).toBe(true);
-  });
-
-  it("projection failure keeps the latest in-flight suffix", async () => {
-    const seed = makeSeed({
-      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 100, maxContext: 8000 },
-    });
-    const projection = new PiCoreContextProjection(seed, "system");
-    const first = await projection.transform(makeAgentMessages(true), {
-      orchestrator: {
-        async getContext() {
-          return { messages: [{ role: "user", content: "durable history" }] };
-        },
-      },
-    });
-    expect(first.contextDegraded).toBe(false);
-
-    const latest = [
-      ...makeAgentMessages(true),
-      { role: "assistant", content: [{ type: "text" as const, text: "in-flight" }] },
-    ] as import("./pi-core-types.js").AgentMessage[];
-    const failed = await projection.transform(latest, {
-      orchestrator: {
-        async getContext() {
-          throw new Error("abmind unavailable");
-        },
-      },
-    });
-    expect(failed.contextDegraded).toBe(true);
-    expect(failed.messages.at(-1)?.role).toBe("assistant");
   });
 });

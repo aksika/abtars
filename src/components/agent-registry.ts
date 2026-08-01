@@ -82,7 +82,7 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
 
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 /** @internal Used only by SubagentRuntime. Do not call directly. */
-export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, lastSuccessfulMain?: CandidateSpec | null): Promise<{ transport: IKiroTransport; model: string }> {
+export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, lastSuccessfulMain?: CandidateSpec | null, contextProvider?: import("./transport/pi-core-context.js").DurableContextProviderHolder): Promise<{ transport: IKiroTransport; model: string }> {
   const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
   const tc = loadTransport();
   const agentName = SUBAGENT_TO_AGENT[role];
@@ -153,6 +153,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
       maxCandidateRounds: tc?.maxFallbackToolRounds,
+      // #1527: late-bound shared provider holder from boot composition.
+      contextProvider: contextProvider ?? { current: null },
     });
     await transport.initialize();
     logInfo("subagent", `${role} transport: PiCore ${agent.providerName} (model=${agent.model}, ${candidates.length} candidates)`);

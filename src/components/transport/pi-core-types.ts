@@ -108,6 +108,8 @@ export type PiContextProjectionSource =
       sessionKey: string;
       beforeMessageId: number;
       maxContext: number;
+      /** #1527: caller identity threaded into the projection request. */
+      userId: string;
     }
   | {
       mode: "ephemeral";
