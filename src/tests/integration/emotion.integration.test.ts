@@ -2,7 +2,7 @@
  * Integration: emotion — #829 (no regex, agent/emoji tags only).
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createHarness, type IntegrationHarness } from "./harness.js";
+import { createHarness, memoryDb, type IntegrationHarness } from "./harness.js";
 
 describe("emotion integration (#829)", () => {
   let h: IntegrationHarness;
@@ -16,7 +16,7 @@ describe("emotion integration (#829)", () => {
       contentOriginal: "boldog vagyok", memoryType: "fact", emotionScore: 0, topic: "mood",
     });
 
-    const db = h.memory.getDatabase()!;
+    const db = memoryDb(h.memory);
     const row = db.prepare("SELECT emotion_tags, emotion_score FROM extracted_memories LIMIT 1").get() as { emotion_tags: string | null; emotion_score: number };
     expect(row.emotion_tags).toBeNull(); // NO regex detection
     expect(row.emotion_score).toBe(0);
@@ -29,7 +29,7 @@ describe("emotion integration (#829)", () => {
       emotionTags: "pride,excitement", topic: "work",
     });
 
-    const db = h.memory.getDatabase()!;
+    const db = memoryDb(h.memory);
     const row = db.prepare("SELECT emotion_tags, emotion_score FROM extracted_memories LIMIT 1").get() as { emotion_tags: string; emotion_score: number };
     expect(row.emotion_tags).toBe("pride,excitement");
     expect(row.emotion_score).toBe(4); // pride=4, excitement=4 → max abs = 4
@@ -52,7 +52,7 @@ describe("emotion integration (#829)", () => {
     const updated = h.memory.updateEmotionByPlatformId("u1", 555, -4, "anger");
     expect(updated).toBe(true);
 
-    const db = h.memory.getDatabase()!;
+    const db = memoryDb(h.memory);
     const msg = db.prepare("SELECT emotion_score FROM messages WHERE platform_message_id = 555").get() as { emotion_score: number };
     expect(msg.emotion_score).toBe(-4);
   });
