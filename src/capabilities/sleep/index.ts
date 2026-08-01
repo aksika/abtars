@@ -131,7 +131,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
         const remainingMs = req.deadline - Date.now();
         if (remainingMs <= 0) {
-          logWarn("sleep", `Completion ${req.completionId} already past its deadline — failing and closing provider pump`);
+          logWarn("sleep", `Completion ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) already past its deadline — failing and closing provider pump`);
           try {
             await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "completion_deadline_expired");
           } catch { /* best effort */ }
@@ -151,20 +151,20 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
             remainingMs,
           );
           if (spinResult.kind === "timed_out") {
-            logWarn("sleep", `Completion ${req.completionId} deadline reached while awaiting the model — closing provider pump`);
+            logWarn("sleep", `Completion ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) deadline reached while awaiting the model — closing provider pump`);
             try {
               await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "completion_deadline_expired");
             } catch { /* best effort */ }
             break;
           }
           if (spinResult.kind === "failed") {
-            logWarn("sleep", `Model completion failed: ${spinResult.error.message}`);
+            logWarn("sleep", `Model completion failed (run=${req.runId} step=${req.stepId}): ${spinResult.error.message}`);
             let failResult: { status: string } | undefined;
             try {
               failResult = await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "model_error");
             } catch { /* best effort */ }
             if (!failResult || failResult.status !== "ok") {
-              logWarn("sleep", `Provider fail rejected (${failResult?.status ?? "error"}) — closing provider pump`);
+              logWarn("sleep", `Provider fail rejected (${failResult?.status ?? "error"}) for completion ${req.completionId} — closing provider pump`);
               break;
             }
             continue;
@@ -173,17 +173,17 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
           const completeResult = await client.sleep.runtime.complete(ownedLeaseId, req.completionId, spinResult.value.result ?? "");
           if (completeResult.status !== "ok") {
-            logWarn("sleep", `Completion rejected (${completeResult.status}) — closing provider pump`);
+            logWarn("sleep", `Completion rejected (${completeResult.status}) for ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) — closing provider pump`);
             break;
           }
         } catch (err) {
-          logWarn("sleep", `Model completion failed: ${(err as Error).message}`);
+          logWarn("sleep", `Model completion failed (run=${req.runId} step=${req.stepId}): ${(err as Error).message}`);
           let failResult: { status: string } | undefined;
           try {
             failResult = await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "model_error");
           } catch { /* best effort */ }
           if (!failResult || failResult.status !== "ok") {
-            logWarn("sleep", `Provider fail rejected (${failResult?.status ?? "error"}) — closing provider pump`);
+            logWarn("sleep", `Provider fail rejected (${failResult?.status ?? "error"}) for completion ${req.completionId} — closing provider pump`);
             break;
           }
         }

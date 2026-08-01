@@ -183,7 +183,7 @@ export class CronQueue {
         `queue admission rejected: ${detail}`, "none"),
       detail: `queue_admission_rejected: ${detail}`,
     });
-    logWarn(TAG, `Reservation for "${entry.id}" rejected at queue admission (${detail}) — settled as cancelled`);
+    logWarn(TAG, `Reservation for "${entry.id}" run=${run.runId} rejected at queue admission (${detail}) — settled as cancelled`);
   }
 
   private processNext(): void {
@@ -202,7 +202,6 @@ export class CronQueue {
         return;
       }
     }
-
     if (isSystemEntry(entry)) {
       this.runSystem(entry, manual, reservation);
     } else if (entry.kind === "script") {
@@ -335,20 +334,21 @@ export class CronQueue {
 
       let output = "";
       let settled = false;
+      let killTimer: ReturnType<typeof setTimeout> | undefined;
       // #1517: absolute deadline on the reserved run. On expiry the owned
       // child is terminated through the safe process handle — never by an
-      // unverified or recycled PID — and the run settles timed_out exactly
-      // once; a late exit cannot replace that outcome.
+      // unverified or recycled PID — with a bounded SIGKILL fallback for a
+      // child that ignores SIGTERM. The run settles timed_out exactly once;
+      // a late exit cannot replace that outcome.
       const deadlineTimer = setTimeout(() => {
         settled = true;
         logWarn(TAG, `Script deadline fired for task=${entry.id} run=${run.runId}`);
         try {
           if (child.exitCode === null) child.kill("SIGTERM");
         } catch { /* best effort */ }
-        child.removeAllListeners("exit");
-        child.removeAllListeners("error");
-        child.stdout?.removeAllListeners("data");
-        child.stderr?.removeAllListeners("data");
+        killTimer = setTimeout(() => {
+          try { child.kill("SIGKILL"); } catch { /* best effort */ }
+        }, 5000);
         settleRunOnce({
           entry, run, outcome: "timed_out",
           diagnostic: makeTaskFailure("interruption", "timed_out", "executing",
@@ -364,6 +364,7 @@ export class CronQueue {
 
       child.on("exit", (code) => {
         clearTimeout(deadlineTimer);
+        if (killTimer) clearTimeout(killTimer);
         if (settled) return;
         const finishedAt = Date.now();
         const ok = code === 0;
@@ -403,6 +404,7 @@ export class CronQueue {
 
       child.on("error", (err) => {
         clearTimeout(deadlineTimer);
+        if (killTimer) clearTimeout(killTimer);
         if (settled) return;
         logWarn(TAG, `Script spawn failed for task=${entry.id} (error_chars=${err.message.length})`);
         settleRunOnce({

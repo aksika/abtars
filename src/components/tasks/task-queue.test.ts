@@ -189,5 +189,55 @@ describe("CronQueue", () => {
     queue.enqueue(entry);
     expect(vi.mocked(stateStore.reserveRun)).toHaveBeenCalledTimes(1);
   });
+
+  it("clears the reservation on script spawn failure", () => {
+    const entry = makeEntry({ kind: "script", command: "nope" });
+    queue.enqueue(entry);
+    const child = activeChildren[0]!;
+    child.emit("error", new Error("ENOENT"));
+    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      detail: "ENOENT",
+      diagnostic: expect.objectContaining({ category: "dependency", code: "executable_missing" }),
+    }));
+  });
+
+  it("settles a script exactly once when its deadline fires; a late exit cannot replace it", () => {
+    vi.useFakeTimers();
+    try {
+      const entry = makeEntry({ kind: "script", command: "sleep 100" });
+      const activeRun = {
+        runId: "deadline-run", groupId: "deadline-group", attempt: 1 as const, trigger: "manual" as const,
+        occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60_000,
+        phase: "reserved" as const, lastProgressAt: Date.now(),
+      };
+      vi.mocked(stateStore.reserveRun).mockReturnValue({ ok: true, run: activeRun });
+      vi.mocked(stateStore.readState).mockReturnValue({
+        nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false,
+        activeRun,
+      });
+
+      queue.enqueue(entry);
+      const child = activeChildren[0]!;
+      (child as unknown as { exitCode: number | null }).exitCode = null;
+      (child as unknown as { kill: ReturnType<typeof vi.fn> }).kill = vi.fn();
+
+      vi.advanceTimersByTime(60_001);
+      expect((child as unknown as { kill: ReturnType<typeof vi.fn> }).kill).toHaveBeenCalledWith("SIGTERM");
+      expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+        runId: "deadline-run",
+        outcome: "timed_out",
+        detail: "deadline: script timed out",
+      }));
+
+      // The owned exit listener is detached after the deadline settlement; a
+      // late exit produces no second terminal event.
+      const settlesBefore = vi.mocked(historyStore.appendRunOnce).mock.calls.length;
+      child.emit("exit", 1);
+      expect(vi.mocked(historyStore.appendRunOnce).mock.calls.length).toBe(settlesBefore);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
