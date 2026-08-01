@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
 import type { ManagedSession } from "./spin-types.js";
+import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
 
 const detectCitationsSpy = vi.fn().mockReturnValue([1]);
 let abmindReturn: any = { detectCitations: detectCitationsSpy };
@@ -241,6 +242,47 @@ describe("handleInboundMessage", () => {
     await handleInboundMessage(makeMsg(), adapter, deps);
 
     expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Error: boom"), expect.any(Object));
+    expect((deps as any)._session.busy).toBe(false);
+  });
+
+  // #1529: a configured durable turn whose inbound write rejects must fail
+  // closed at the Pi boundary — bounded response, no normal model response,
+  // busy state released.
+  it("fails closed with a bounded response when the inbound durable write rejects (#1529)", async () => {
+    const adapter = mockAdapter();
+    const recordMessage = vi.fn().mockRejectedValue(new Error("owner down"));
+    const deps = mockDeps(transport, {
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      memoryRuntime: {
+        state: "ready",
+        capabilities: new Set(["durableContext"]),
+        recordMessage,
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
+        getRecentConversation: vi.fn().mockResolvedValue({ results: [] }),
+        getStatus: vi.fn().mockResolvedValue({}),
+        getCoreKnowledge: vi.fn().mockResolvedValue({ core: [] }),
+        embed: vi.fn().mockResolvedValue({}),
+        runMaintenance: vi.fn().mockResolvedValue({}),
+        close: vi.fn().mockResolvedValue(undefined),
+      } as any,
+    } as any);
+    // Stub spin() forwards the intent to the transport boundary so the Pi
+    // preflight can fail closed before any provider work.
+    (deps.sessionManager as any).spin = async (spec: any) => {
+      const context = { userId: spec.userId, durableContextIntent: spec.durableContextIntent };
+      if (context.durableContextIntent?.mode === "required_unavailable") {
+        throw new DurableContextUnavailableError("cursor_unavailable");
+      }
+      const result = await transport.sendPrompt(spec.sessionId ?? "test_A_01", spec.prompt, spec.imageContent, context);
+      return { sessionId: spec.sessionId ?? "test_A_01", result: result ?? "" };
+    };
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Memory context is temporarily unavailable. Please retry.", expect.any(Object));
+    expect(transport.sendPrompt).not.toHaveBeenCalled();
     expect((deps as any)._session.busy).toBe(false);
   });
 

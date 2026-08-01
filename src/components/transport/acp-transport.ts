@@ -331,7 +331,7 @@ export class AcpTransport implements IKiroTransport {
 
   /**
    * ACP rebuilds context from its own internal history (CLI-owned
-   * window), so `beforeMessageId` is unused here. `userId` is
+   * window), so `durableContextIntent` is unused here. `userId` is
    * accepted for interface conformance with the chokepoint at
    * `IKiroTransport.sendPrompt` but the ACP transport doesn't yet
    * deliver it to tool execution.

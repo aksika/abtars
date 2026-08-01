@@ -11,6 +11,21 @@ import { logError } from "./logger.js";
 export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H" | "K";
 
 /**
+ * #1529: explicit durable-context intent carried from prompt construction
+ * through Spin to the transport. Replaces the ambiguous optional cursor:
+ * `not_required` means durable memory is not required (ephemeral execution is
+ * valid); `required_unavailable` means durable memory IS required but cannot
+ * be satisfied — the transport must fail closed before any provider request.
+ */
+export type DurableContextIntent =
+  | { mode: "not_required" }
+  | { mode: "durable"; beforeMessageId: number }
+  | {
+      mode: "required_unavailable";
+      reason: "runtime_unavailable" | "record_failed" | "cursor_missing";
+    };
+
+/**
  * #1520: typed scheduled-dispatch admission rejection. Thrown by dispatchAwait
  * only for pre-execution gates (capacity/type-busy/model-cooldown); failures
  * after a model call starts are execution failures and must never be converted
@@ -261,11 +276,11 @@ export interface SpinSessionSpec {
   imageContent?: unknown;   // → sendPrompt arg 3 (image passthrough)
   callbackPeer?: string;
   sourcePeer?: string;
-  // #1329: just-persisted raw user message ID (from BuildPromptResult.currentMessageId).
-  // Carried through to the transport.sendPrompt as the exclusive
-  // `beforeMessageId` cursor so the augmented current turn is appended
-  // exactly once. Undefined on no-write paths (memory disabled, etc.).
-  currentMessageId?: number;
+  // #1529: explicit durable-context intent for the inbound turn. An omitted
+  // field means the caller is outside the inbound durable pipeline and
+  // defaults to not-required at the transport boundary; inbound pipeline
+  // calls always provide the explicit intent.
+  durableContextIntent?: DurableContextIntent;
   /** #1335: structured current turn components for Direct API cache-stable assembly. */
   directContextTurn?: {
     rawUserText: string;

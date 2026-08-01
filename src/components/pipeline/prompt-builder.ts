@@ -15,7 +15,7 @@ import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import type { InboundMessage } from "../../types/platform.js";
 import type { UserRegistry } from "../user-registry.js";
-import { sessionTypeOf } from "../spin-types.js";
+import { sessionTypeOf, type DurableContextIntent } from "../spin-types.js";
 
 const TAG = "pipeline";
 const ACTIVE_MEMORY_LIMIT = 5;
@@ -35,8 +35,8 @@ export interface BuildPromptResult {
   isSessionStart: boolean;
   imageContent?: { mime: string; base64: string; path: string };
   recalledHits?: Array<{ id: number; contentEn: string }>;
-  /** #1329: the SQLite message ID assigned to the just-persisted raw user row. */
-  currentMessageId?: number;
+  /** #1529: explicit durable-context intent — never an ambiguous optional cursor. */
+  durableContextIntent: DurableContextIntent;
   /** #1335: structured current turn components for Pi cache-stable assembly. */
   currentTurn?: {
     rawText: string;
@@ -144,11 +144,20 @@ export async function buildPrompt(
     entry.pendingStart = false;
   }
 
-  // Record user message to memory (skipped for K — no general-memory writes)
+  // #1529: classify durable-context intent from configuration and message
+  // policy, independently of the memory runtime's instantaneous readiness.
+  // A required-but-unavailable intent must never degrade to ephemeral.
   const userRole = registry.byUserId.get(userId)?.role;
   logTrace(TAG, `recordMessage gate: memory=${memoryRuntime?.state === "ready"} userId=${userId} userRole=${userRole} memoryMode=${memoryMode}`);
-  let currentMessageId: number | undefined;
-  if (memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated" && userRole !== "guest" && !text.startsWith("[SESSION START]")) {
+  const durableRequired =
+    deps.memoryConfig.memoryEnabled
+    && memoryMode !== "skill-isolated"
+    && userRole !== "guest"
+    && !text.startsWith("[SESSION START]");
+  let durableContextIntent: DurableContextIntent = { mode: "not_required" };
+  if (durableRequired && memoryRuntime?.state !== "ready") {
+    durableContextIntent = { mode: "required_unavailable", reason: "runtime_unavailable" };
+  } else if (durableRequired) {
     const messageIdStr = typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "";
     const messageTimestamp = msg.timestamp;
     const operationKey = messageIdStr
@@ -166,7 +175,12 @@ export async function buildPrompt(
     });
     if (result.ok) {
       const r = result as { ok: true; value: { id: number | null } };
-      currentMessageId = r.value.id ?? undefined;
+      const id = r.value.id;
+      durableContextIntent = typeof id === "number"
+        ? { mode: "durable", beforeMessageId: id }
+        : { mode: "required_unavailable", reason: "cursor_missing" };
+    } else {
+      durableContextIntent = { mode: "required_unavailable", reason: "record_failed" };
     }
   }
 
@@ -220,7 +234,7 @@ export async function buildPrompt(
       const scan = scanFn(text);
       if (!scan.safe) {
         logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map((f: { category: string }) => f.category).join(", ")}`);
-      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined, currentMessageId: undefined };
+      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined, durableContextIntent };
     }
     }
   }
@@ -231,5 +245,5 @@ export async function buildPrompt(
     volatileContext,
   };
 
-  return { prompt, isSessionStart, imageContent, recalledHits, currentMessageId, currentTurn };
+  return { prompt, isSessionStart, imageContent, recalledHits, durableContextIntent, currentTurn };
 }

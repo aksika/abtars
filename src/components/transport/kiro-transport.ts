@@ -5,19 +5,22 @@
 
 import type { PiDurableContextProvider } from "./pi-core-context.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
+import type { DurableContextIntent } from "../spin-types.js";
 
 /**
  * Per-call request metadata threaded from the pipeline through to the
- * transport. #1329: `beforeMessageId` is the exclusive upper bound for
- * DB-backed context assembly; the transport appends the augmented
- * current turn on top of the bounded historical context exactly once.
+ * transport. #1529: `durableContextIntent` is the explicit discriminated
+ * durable-context intent computed in prompt construction. An omitted intent
+ * means the caller is outside the inbound durable pipeline and defaults to
+ * not-required — it never implies a failed durable cursor.
  *
  * `userId` replaces the previous positional 4th argument so call-site
  * readability and tool-execution delivery are preserved.
  */
 export interface PromptRequestContext {
   userId?: string;
-  beforeMessageId?: number;
+  /** #1529: explicit durable-context intent for Pi transport enforcement. */
+  durableContextIntent?: DurableContextIntent;
   /** #1445: execution ID for Pi-core host correlation. */
   executionId?: string;
   /** #1506: caller-owned absolute execution deadline. */
@@ -69,9 +72,9 @@ export interface IKiroTransport {
    * Send a prompt to Kiro and return the complete response text.
    * For ACP: sends session/prompt and collects streaming chunks.
    * For tmux: sends via send-keys and polls capture-pane for output.
-   * For Pi-core: rebuilds context from abmind (bounded by
-   * `context.beforeMessageId` when set) and appends the current
-   * augmented turn on top exactly once (#1329).
+   * For Pi-core: rebuilds context from abmind (bounded by the durable
+   * intent's before-message cursor when durable) and appends the current
+   * augmented turn on top exactly once (#1529).
    */
   sendPrompt(
     sessionKey: string,

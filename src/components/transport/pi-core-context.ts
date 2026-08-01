@@ -17,7 +17,9 @@ export interface PiDurableContextProvider {
 export type DurableContextUnavailableReason =
   | "no_provider"
   | "provider_rejected"
-  | "malformed_response";
+  | "malformed_response"
+  | "cursor_unavailable"
+  | "identity_unavailable";
 
 /** #1527: durable projection failures are execution errors, never degraded success. */
 export class DurableContextUnavailableError extends Error {

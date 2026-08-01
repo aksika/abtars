@@ -378,6 +378,20 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(runtime.complete).not.toHaveBeenCalled();
     });
 
+    it("threads durableContextIntent through to the session transport unchanged (#1529)", async () => {
+      const transport = mockTransport();
+      const runtime = makeRuntime();
+      const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
+      dSession.transport = transport;
+      spin.setRuntime(runtime as any);
+
+      const intent = { mode: "required_unavailable" as const, reason: "record_failed" as const };
+      const r = await spin.spin({ type: "D", sessionId: dSession.id, prompt: "step1", durableContextIntent: intent, await: true });
+      expect(r.sessionId).toBe(dSession.id);
+      const context = (transport.sendPrompt as any).mock.calls[0]?.[3];
+      expect(context.durableContextIntent).toEqual(intent);
+    });
+
     it("A continuation does NOT overwrite existing session transport", async () => {
       const userKeyedTransport = mockTransport();
       const runtime = makeRuntime();

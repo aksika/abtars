@@ -4,7 +4,7 @@ import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
 import type { ModelHealthRegistry } from "./model-health-registry.js";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { PiCoreExecutionHost } from "./pi-core-host.js";
-import { PiCoreContextProjection } from "./pi-core-context.js";
+import { PiCoreContextProjection, DurableContextUnavailableError } from "./pi-core-context.js";
 import { createPiStreamFn } from "./pi-stream-fn.js";
 import { createPiAgentTools } from "./pi-core-tools.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
@@ -147,6 +147,22 @@ export class PiCoreTransport implements IKiroTransport {
     this._toolCallsSucceeded = 0;
     this._lastToolFailure = null;
 
+    // #1529: fail closed when durable context is required but unavailable.
+    // The intent is computed in prompt construction; an omitted intent means
+    // the caller is outside the inbound durable pipeline (not-required). The
+    // rejection happens before model selection, stream construction, Pi
+    // loading, host construction, fallback, or any provider request.
+    const durableIntent = context?.durableContextIntent ?? { mode: "not_required" as const };
+    const callerUserId = context?.userId;
+    if (durableIntent.mode === "required_unavailable") {
+      logDebug(TAG, "durable intent required_unavailable — rejecting before provider boundary");
+      throw new DurableContextUnavailableError("cursor_unavailable");
+    }
+    if (durableIntent.mode === "durable" && !callerUserId) {
+      logDebug(TAG, "durable intent without caller identity — rejecting before provider boundary");
+      throw new DurableContextUnavailableError("identity_unavailable");
+    }
+
     // Use provided executionId or allocate a new one
     const executionId = context?.executionId ?? `${sessionKey}_${Date.now()}_${++executionSeq}`;
 
@@ -174,16 +190,17 @@ export class PiCoreTransport implements IKiroTransport {
       message,
       executionId,
       sessionKey,
-      context?.beforeMessageId,
+      durableIntent.mode === "durable" ? durableIntent.beforeMessageId : undefined,
     );
     if (image) {
       (currentTurn as { imageContent?: Array<{ mime: string; base64: string }> }).imageContent = [image];
     }
 
-    // Context seed: durable vs ephemeral. A durable seed requires both the
-    // just-persisted cursor and a non-empty caller identity (#1527).
-    const source = context?.beforeMessageId !== undefined && context?.userId
-      ? { mode: "durable" as const, sessionKey, beforeMessageId: context.beforeMessageId, maxContext: this.config.candidates[0]?.maxContext ?? 128000, userId: context.userId }
+    // Context seed: durable vs ephemeral. A durable seed requires the
+    // just-persisted cursor and a non-empty caller identity, both enforced by
+    // the #1529 preflight above.
+    const source = durableIntent.mode === "durable"
+      ? { mode: "durable" as const, sessionKey, beforeMessageId: durableIntent.beforeMessageId, maxContext: this.config.candidates[0]?.maxContext ?? 128000, userId: callerUserId! }
       : { mode: "ephemeral" as const, sessionKey };
 
     const volatileBlocks: Array<{ kind: string; content: string }> = [];

@@ -9,6 +9,7 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
+import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
@@ -267,11 +268,12 @@ export async function handleInboundMessage(
     // No queueing needed
 
     // --- Build prompt ---
-    // #1329: currentMessageId is the just-persisted raw user row ID (or
-    // undefined on a no-write path). We forward it to spin as part of
-    // the spec, and the chokepoint at spin.ts#sendPrompt carries it
-    // through to the transport.sendPrompt as `beforeMessageId`.
-    const { prompt: builtPrompt, imageContent, recalledHits, currentMessageId, currentTurn } = await buildPrompt(msg, text, {
+    // #1529: buildPrompt classifies the turn's durable-context intent (durable,
+    // not-required, or required-unavailable). We forward it to spin as part of
+    // the spec; the chokepoint at spin.ts#sendPrompt carries it through to the
+    // transport, which fails closed when durable context is required but
+    // unavailable.
+    const { prompt: builtPrompt, imageContent, recalledHits, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: transport.getRuntimeStatus?.().route === "acp",
     }, registry, effectiveSession);
@@ -338,7 +340,7 @@ export async function handleInboundMessage(
       prompt,
       imageContent,
       userId,
-      currentMessageId,
+      durableContextIntent,
       directContextTurn,
       settlementOwner: "spin",
       await: true,
@@ -698,6 +700,11 @@ export async function handleInboundMessage(
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
       if (notifyUser) await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+    } else if (err instanceof DurableContextUnavailableError) {
+      // #1529: required durable context is unavailable — fail closed with a
+      // bounded, stable response. No session reset, no candidate-health impact.
+      logWarn(TAG, `Durable context unavailable for ${activeSessionId} (${err.reason}) — failing closed`);
+      if (notifyUser) await adapter.sendMessage(channelId, "Memory context is temporarily unavailable. Please retry.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else {
       logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
       const reason = errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"

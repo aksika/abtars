@@ -190,6 +190,48 @@ describe("PiCoreTransport", () => {
     }
     expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
   });
+
+  it("rejects required_unavailable intent before any host/provider work (#1529)", async () => {
+    const t = makeTransport();
+    await t.initialize();
+    const promise = t.sendPrompt("sess_1", "hello", undefined, {
+      userId: "user-1",
+      durableContextIntent: { mode: "required_unavailable", reason: "record_failed" },
+    });
+    await expect(promise).rejects.toBeInstanceOf(DurableContextUnavailableError);
+    await expect(promise).rejects.toMatchObject({ reason: "cursor_unavailable" });
+    expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
+  });
+
+  it("rejects durable intent without caller identity before any host/provider work (#1529)", async () => {
+    const t = makeTransport();
+    await t.initialize();
+    const promise = t.sendPrompt("sess_1", "hello", undefined, {
+      durableContextIntent: { mode: "durable", beforeMessageId: 42 },
+    });
+    await expect(promise).rejects.toBeInstanceOf(DurableContextUnavailableError);
+    await expect(promise).rejects.toMatchObject({ reason: "identity_unavailable" });
+    expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
+  });
+
+  it("lets a valid durable intent past preflight — failure comes from Pi loading, not the intent (#1529)", async () => {
+    const t = makeTransport();
+    await t.initialize();
+    const err = await t.sendPrompt("sess_1", "hello", undefined, {
+      userId: "user-1",
+      durableContextIntent: { mode: "durable", beforeMessageId: 42 },
+    }).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(DurableContextUnavailableError);
+  });
+
+  it("lets omitted intent (not-required) past preflight — intentional ephemeral stays operable (#1529)", async () => {
+    const t = makeTransport();
+    await t.initialize();
+    const err = await t.sendPrompt("sess_1", "hello", undefined, {
+      userId: "user-1",
+    }).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(DurableContextUnavailableError);
+  });
 });
 
 // ── extractAssistantText (pure function) ─────────────────────────────────────
