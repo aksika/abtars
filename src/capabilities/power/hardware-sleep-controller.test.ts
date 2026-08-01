@@ -162,4 +162,89 @@ describe("HardwareSleepController", () => {
     expect(r.status).toBe("failed");
     expect(r).toEqual({ status: "failed", error: "hardware suspend disabled under test runtime" });
   });
+
+  describe("#1517 attempt-aware second check", () => {
+    function attemptAwareProbe(store: PowerTransitionStore, beforeSecondCheck?: () => void): PowerSafetyProbe {
+      let secondCheck = false;
+      return createPowerSafetyProbe({
+        lastPromptAt: () => Date.now() - 30 * 60 * 1000,
+        isAnyExecutionActive: () => false,
+        isSleepCycleActive: () => false,
+        isTaskQueueEmpty: () => true,
+        isMaintenanceActive: () => false,
+        isTransitionActive: (excludeAttemptId?: string) => {
+          if (secondCheck) {
+            beforeSecondCheck?.();
+            secondCheck = false;
+          } else {
+            secondCheck = true;
+          }
+          return store.isActiveExcept(excludeAttemptId);
+        },
+        isPlatformSupported: () => true,
+      });
+    }
+
+    it("passes its own second check and suspends, retaining the marker", async () => {
+      const store = new PowerTransitionStore();
+      store.clear();
+      let suspended = false;
+      const ctrl = new HardwareSleepController(attemptAwareProbe(store), makeAdapter(async (cmd, args) => {
+        if (args[0] === "sleepnow") { suspended = true; return { stdout: "", stderr: "", exitCode: 0 }; }
+        return { stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 };
+      }), store, NO_TEST_RUNTIME);
+      const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
+      const r = await ctrl.attempt(entry);
+      expect(r.status).toBe("accepted");
+      expect(suspended).toBe(true);
+      // An accepted suspend retains the transition marker for wake/expiry recovery.
+      const retained = store.read();
+      expect(retained).not.toBeNull();
+      expect(retained!.attemptId).toBeDefined();
+    });
+
+    it("blocks on a pre-existing foreign marker without touching it", async () => {
+      const store = new PowerTransitionStore();
+      store.clear();
+      store.write({
+        state: "suspending", taskId: "hardware-sleep", requestedAt: Date.now(),
+        expiresAt: Date.now() + 3600_000, expectedWakeAt: Date.now() + 8 * 3600_000,
+        attemptId: "foreign-attempt",
+      });
+      const ctrl = new HardwareSleepController(attemptAwareProbe(store), makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), store, NO_TEST_RUNTIME);
+      const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
+      const r = await ctrl.attempt(entry);
+      expect(r.status).toBe("deferred");
+      expect(store.read()?.attemptId).toBe("foreign-attempt");
+    });
+
+    it("blocks when a replacement marker appears before the second check and keeps the newer marker", async () => {
+      const store = new PowerTransitionStore();
+      store.clear();
+      const ctrl = new HardwareSleepController(attemptAwareProbe(store, () => {
+        store.write({
+          state: "suspending", taskId: "hardware-sleep", requestedAt: Date.now(),
+          expiresAt: Date.now() + 3600_000, expectedWakeAt: Date.now() + 8 * 3600_000,
+          attemptId: "replacement-attempt",
+        });
+      }), makeAdapter(async () => ({ stdout: MOLTY_FIXTURE, stderr: "", exitCode: 0 })), store, NO_TEST_RUNTIME);
+      const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
+      const r = await ctrl.attempt(entry);
+      expect(r.status).toBe("deferred");
+      // The failing attempt's cleanup must not erase the newer marker.
+      expect(store.read()?.attemptId).toBe("replacement-attempt");
+    });
+
+    it("treats a legacy marker without an attempt ID as active and does not exclude it", async () => {
+      const store = new PowerTransitionStore();
+      store.clear();
+      store.write({
+        state: "suspending", taskId: "hardware-sleep", requestedAt: Date.now(),
+        expiresAt: Date.now() + 3600_000, expectedWakeAt: Date.now() + 8 * 3600_000,
+      });
+      expect(store.isActiveExcept("any-attempt-id")).toBe(true);
+      expect(store.clearIfOwned("any-attempt-id")).toBe(false);
+      expect(store.read()).not.toBeNull();
+    });
+  });
 });

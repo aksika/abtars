@@ -20,7 +20,13 @@ vi.mock("./task-state-store.js", () => ({
   advanceNextRun: vi.fn(),
   nextRunFromSchedule: vi.fn().mockReturnValue({ nextRunAt: Date.now() + 300000 }),
   updateState: vi.fn(),
-  readState: vi.fn(() => null),
+  readState: vi.fn(() => ({
+    nextRunAt: Date.now() - 1000,
+    consecutiveFailures: 0,
+    consecutiveDeferrals: 0,
+    autoPaused: false,
+    activeRun: { runId: "test-run", groupId: "test-group", attempt: 1, trigger: "manual", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() },
+  })),
   reserveRun: vi.fn().mockReturnValue({ ok: true, run: { runId: "test-run", groupId: "test-group", attempt: 1, trigger: "manual", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() } }),
   updateActiveRun: vi.fn().mockReturnValue(true),
   settleActiveRun: vi.fn().mockReturnValue(true),
@@ -40,6 +46,8 @@ vi.mock("./task-store.js", () => ({
   readEntry: vi.fn(),
   writeEntry: vi.fn(),
 }));
+
+const historyStore = await import("./task-history-store.js");
 
 vi.mock("../transport/bridge-lock-transport.js", () => ({
   readLastPromptAt: vi.fn().mockReturnValue(0),
@@ -134,6 +142,52 @@ describe("CronQueue", () => {
   it("enqueue returns null on success", () => {
     const entry = makeEntry({ kind: "script", command: "echo ok" });
     expect(queue.enqueue(entry)).toBeNull();
+  });
+
+  it("terminalizes a supplied reservation rejected as duplicate-current", () => {
+    const entry = makeEntry({ id: "dup2", kind: "script", command: "echo hi" });
+    queue.enqueue(entry);
+    const reservation = {
+      runId: "supplied-run", groupId: "g", attempt: 1 as const, trigger: "schedule" as const,
+      occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000,
+      phase: "reserved", lastProgressAt: Date.now(),
+    };
+    const result = queue.enqueue(entry, false, reservation);
+    expect(result).toContain("Already running");
+    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "supplied-run",
+      outcome: "cancelled",
+      detail: "queue_admission_rejected: duplicate-current",
+    }));
+  });
+
+  it("terminalizes a supplied reservation rejected as duplicate-queued", () => {
+    const a = makeEntry({ id: "dup3a", kind: "script", command: "echo a" });
+    const b = makeEntry({ id: "dup3b", kind: "script", command: "echo b" });
+    queue.enqueue(a);
+    queue.enqueue(b);
+    // A finishes; B becomes current, leaving the queue empty.
+    activeChildren[0]!.emit("exit", 0);
+
+    const reservation = (runId: string) => ({
+      runId, groupId: "g", attempt: 1 as const, trigger: "schedule" as const,
+      occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000,
+      phase: "reserved", lastProgressAt: Date.now(),
+    });
+    expect(queue.enqueue(a, false, reservation("supplied-queued"))).toBeNull();
+    const result = queue.enqueue(a, false, reservation("supplied-queued-2"));
+    expect(result).toContain("Already queued");
+    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "supplied-queued-2",
+      outcome: "cancelled",
+      detail: "queue_admission_rejected: duplicate-queued",
+    }));
+  });
+
+  it("reserves manual executions at admission so queued jobs own a run ID", () => {
+    const entry = makeEntry({ kind: "script", command: "echo test" });
+    queue.enqueue(entry);
+    expect(vi.mocked(stateStore.reserveRun)).toHaveBeenCalledTimes(1);
   });
 });
 

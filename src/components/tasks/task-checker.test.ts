@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { checkCron, readPendingReminders, clearPendingReminders, reconcileActiveTaskRuns } from "./task-checker.js";
+import { checkCron, readPendingReminders, clearPendingReminders, reconcileActiveTaskRuns, reconcileActiveTaskRunsLive } from "./task-checker.js";
 import * as taskStore from "./task-store.js";
 import * as stateStore from "./task-state-store.js";
 import * as historyStore from "./task-history-store.js";
@@ -27,6 +27,7 @@ vi.mock("./task-state-store.js", () => ({
   advanceNextRun: vi.fn(),
   nextRunFromSchedule: vi.fn().mockReturnValue({ nextRunAt: Date.now() + 300000 }),
   reserveRun: vi.fn().mockReturnValue({ ok: true, run: { runId: "test-run", groupId: "test-group", attempt: 1, trigger: "schedule", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() } }),
+  updateActiveRun: vi.fn().mockReturnValue(true),
   settleActiveRun: vi.fn(),
 }));
 
@@ -170,6 +171,90 @@ describe("reconcileActiveTaskRuns #1516 restart identity", () => {
     expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
     expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith(
       "t1", "interrupted-run", expect.objectContaining({ consecutiveFailures: 0, lastFinishedAt: finishedAt }),
+    );
+  });
+});
+
+describe("reconcileActiveTaskRunsLive #1517 live recovery", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Later mockReturnValue calls leak across tests; restore the no-history default.
+    vi.mocked(historyStore.getRun).mockReturnValue(undefined);
+    vi.mocked(historyStore.appendRunOnce).mockReturnValue("recon-run");
+  });
+
+  const ownsNone: Parameters<typeof reconcileActiveTaskRunsLive>[0] = {
+    owns: () => false,
+    cancel: () => "not_owned",
+  };
+
+  function liveRunWith(activeRun: Partial<NonNullable<Awaited<ReturnType<typeof stateStore.readState>>>["activeRun"]>): void {
+    vi.mocked(taskStore.readEntries).mockReturnValue([makeTask()]);
+    vi.mocked(stateStore.readState).mockReturnValue({
+      nextRunAt: Date.now() - 1000,
+      consecutiveFailures: 0,
+      consecutiveDeferrals: 0,
+      autoPaused: false,
+      activeRun: {
+        runId: "live-run", groupId: "live-group", attempt: 1, trigger: "schedule",
+        occurrenceAt: Date.now() - 120_000, reservedAt: Date.now() - 120_000,
+        deadlineAt: Date.now() - 1000, phase: "executing", lastProgressAt: Date.now() - 1_000,
+        ...activeRun,
+      },
+    });
+  }
+
+  it("leaves unexpired owned runs untouched", () => {
+    liveRunWith({ deadlineAt: Date.now() + 60_000, phase: "executing" });
+    const supervisor = { owns: () => true, cancel: vi.fn(() => "requested" as const) };
+    reconcileActiveTaskRunsLive(supervisor);
+    expect(supervisor.cancel).not.toHaveBeenCalled();
+    expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
+  });
+
+  it("settles an expired unowned run immediately as deadline_exceeded", () => {
+    liveRunWith({});
+    reconcileActiveTaskRunsLive(ownsNone);
+    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "live-run",
+      outcome: "failed",
+      detail: "live_recovery: deadline exceeded",
+    }));
+    expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith("t1", "live-run", expect.anything());
+  });
+
+  it("requests cancellation once for an owned expired run and waits for the grace period", () => {
+    liveRunWith({});
+    const supervisor = { owns: () => true, cancel: vi.fn(() => "requested" as const) };
+    reconcileActiveTaskRunsLive(supervisor);
+    expect(supervisor.cancel).toHaveBeenCalledWith("live-run", "live_recovery: deadline exceeded");
+    expect(vi.mocked(stateStore.updateActiveRun)).toHaveBeenCalledWith("t1", "live-run", expect.objectContaining({ phase: "cancelling" }));
+    // Still within the 30s grace: no fallback settlement.
+    expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
+  });
+
+  it("settles an owned run past its cancellation grace", () => {
+    liveRunWith({ phase: "cancelling", lastProgressAt: Date.now() - 60_000 });
+    const supervisor = { owns: () => true, cancel: vi.fn(() => "requested" as const) };
+    reconcileActiveTaskRunsLive(supervisor);
+    expect(supervisor.cancel).not.toHaveBeenCalled();
+    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "live-run",
+      outcome: "failed",
+      detail: "live_recovery: cancellation grace elapsed",
+    }));
+  });
+
+  it("replays terminal history before any deadline decision", () => {
+    liveRunWith({});
+    vi.mocked(historyStore.getRun).mockReturnValue({
+      runId: "live-run", taskId: "t1", kind: "agent", trigger: "schedule",
+      startedAt: Date.now() - 1000, finishedAt: Date.now(), outcome: "success", groupId: "live-group",
+    });
+    reconcileActiveTaskRunsLive(ownsNone);
+    expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
+    expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith(
+      "t1", "live-run", expect.objectContaining({ consecutiveFailures: 0 }),
     );
   });
 });

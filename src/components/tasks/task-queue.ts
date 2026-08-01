@@ -13,6 +13,7 @@ import { getSystemTaskRegistry } from "./system-task-registry.js";
 import { ScheduledTaskRunner } from "./scheduled-task-runner.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
+import { getControl } from "../execution-control.js";
 import type { ActiveTaskRun } from "./task-state-store.js";
 import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 
@@ -24,16 +25,16 @@ const STATE_FILE = join(abtarsHome(), "state", "task-queue-state.json");
 
 interface PersistedState {
   pid: number;
-  currentJob: { entryId: string; message: string; startedAt: number; type: string } | null;
-  queue: Array<{ entryId: string; message: string; priority: string; manual: boolean }>;
+  currentJob: { entryId: string; message: string; startedAt: number; type: string; runId?: string } | null;
+  queue: Array<{ entryId: string; message: string; priority: string; manual: boolean; runId?: string }>;
 }
 
 function persistState(current: RunningJob | null, queue: QueuedJob[]): void {
   try {
     const state: PersistedState = {
       pid: process.pid,
-      currentJob: current ? { entryId: current.entryId, message: current.message, startedAt: current.startedAt, type: current.type } : null,
-      queue: queue.map(j => ({ entryId: j.entry.id, message: getEntryMessage(j.entry), priority: j.entry.priority ?? "medium", manual: j.manual ?? false })),
+      currentJob: current ? { entryId: current.entryId, message: current.message, startedAt: current.startedAt, type: current.type, runId: current.runId } : null,
+      queue: queue.map(j => ({ entryId: j.entry.id, message: getEntryMessage(j.entry), priority: j.entry.priority ?? "medium", manual: j.manual ?? false, runId: j.reservation?.runId })),
     };
     writeFileSync(STATE_FILE, JSON.stringify(state), "utf-8");
   } catch (err) { logAndSwallow("cron_queue", "op", err); }
@@ -73,6 +74,8 @@ export interface RunningJob {
   startedAt: number;
   type: "script" | "agent" | "system";
   manual?: boolean;
+  /** #1517: the exact reserved run identity; ownership never infers from task ID. */
+  runId: string;
 }
 
 export class CronQueue {
@@ -104,34 +107,101 @@ export class CronQueue {
   get currentJob(): RunningJob | null { return this._current; }
   get pending(): number { return this.queue.length; }
 
+  /**
+   * #1517: live stale-run ownership port consumed by reconciliation. Only the
+   * exact run ID currently executing is owned; cancellation is signalled
+   * through the registered execution control (non-blocking) so the executor's
+   * own settlement path keeps the first terminal opportunity.
+   */
+  owns(runId: string): boolean {
+    return this._current?.runId === runId;
+  }
+
+  cancel(runId: string, _reason: string): "requested" | "not_owned" {
+    if (!this.owns(runId)) return "not_owned";
+    const control = getControl(runId);
+    if (control) {
+      const status = control.signalCancel("deadline");
+      if (status === "already_terminal") return "not_owned";
+    }
+    return "requested";
+  }
+
   enqueue(entry: ScheduledTask, manual?: boolean, reservation?: ActiveTaskRun): string | null {
+    // #1517: a supplied reservation rejected before queue ownership transfers
+    // must never remain active_run — terminalize it exactly once.
     if (this._current?.entryId === entry.id) {
+      if (reservation) this.rejectReservation(entry, reservation, "duplicate-current");
       return `Already running: "${getEntryMessage(entry).slice(0, 60)}"`;
     }
     if (this.queue.some(j => j.entry.id === entry.id)) {
+      if (reservation) this.rejectReservation(entry, reservation, "duplicate-queued");
       return `Already queued: "${getEntryMessage(entry).slice(0, 60)}"`;
+    }
+
+    // #1517: manual callers acquire the reservation at admission so every
+    // executable queued/current job owns an exact run ID before transfer.
+    // A scheduled caller's supplied reservation is authoritative and is never
+    // replaced or re-allocated by executor branches.
+    const owned = reservation ?? this.reserveForEntry(entry, manual);
+    if (!owned) {
+      return `Cannot run: "${getEntryMessage(entry).slice(0, 60)}" — active run in progress`;
     }
 
     const rank = PRIO_RANK[entry.priority ?? "medium"] ?? 1;
     let i = 0;
-    while (i < this.queue.length) {
-      const qRank = PRIO_RANK[this.queue[i]!.entry.priority ?? "medium"] ?? 1;
-      if (rank < qRank) break;
-      i++;
+    try {
+      while (i < this.queue.length) {
+        const qRank = PRIO_RANK[this.queue[i]!.entry.priority ?? "medium"] ?? 1;
+        if (rank < qRank) break;
+        i++;
+      }
+      this.queue.splice(i, 0, { entry, manual, reservation: owned });
+    } catch (err) {
+      logAndSwallow(TAG, "enqueue insert", err);
+      this.rejectReservation(entry, owned, "queue-insertion-failed");
+      return "Queue error: task could not be admitted";
     }
-    this.queue.splice(i, 0, { entry, manual, reservation });
     logInfo(TAG, `Enqueued "${entry.id}" (${entry.kind}, ${entry.priority ?? "medium"}${manual ? ", manual" : ""}) — ${this.queue.length} pending`);
-    logTaskDebug("task_queue_state", { task: entry.id }, `pending=${this.queue.length} manual=${manual === true}`);
+    logTaskDebug("task_queue_state", { task: entry.id, run: owned.runId }, `pending=${this.queue.length} manual=${manual === true}`);
     persistState(this._current, this.queue);
 
     if (!this._current) this.processNext();
     return null;
   }
 
+  /**
+   * #1517: a reservation that never gained queue ownership is terminalized
+   * with a bounded queue-admission detail under its own run ID. The
+   * interruption/cancelled policy clears without retry or failure counting,
+   * so the occurrence ends cleanly and future runs are not blocked.
+   */
+  private rejectReservation(entry: ScheduledTask, run: ActiveTaskRun, detail: string): void {
+    settleRunOnce({
+      entry, run, outcome: "cancelled",
+      diagnostic: makeTaskFailure("interruption", "cancelled", "queued",
+        `queue admission rejected: ${detail}`, "none"),
+      detail: `queue_admission_rejected: ${detail}`,
+    });
+    logWarn(TAG, `Reservation for "${entry.id}" rejected at queue admission (${detail}) — settled as cancelled`);
+  }
+
   private processNext(): void {
     if (this.queue.length === 0) return;
     const job = this.queue.shift()!;
     const { entry, manual, reservation } = job;
+
+    // #1517: a queued job may outlive its reservation (live reconciliation
+    // settles expired unowned runs). Never execute side effects for a run
+    // that no longer owns the active reservation.
+    if (reservation) {
+      const state = readState(entry.id);
+      if (!state?.activeRun || state.activeRun.runId !== reservation.runId) {
+        logWarn(TAG, `Job "${entry.id}" run=${reservation.runId} no longer owns the active reservation — skipping execution`);
+        this.processNext();
+        return;
+      }
+    }
 
     if (isSystemEntry(entry)) {
       this.runSystem(entry, manual, reservation);
@@ -140,12 +210,17 @@ export class CronQueue {
     } else if (entry.kind === "agent") {
       this.runAgent(entry, manual, reservation);
     } else if (entry.kind === "reminder") {
+      // Reminders are settled immediately by checkCron(); a stray queued copy
+      // must not strand its reservation.
+      if (reservation) {
+        settleRunOnce({ entry, run: reservation, outcome: "success", detail: "reminder already delivered" });
+      }
       logInfo(TAG, `Reminder "${entry.id}" already delivered — skipping`);
       this.processNext();
     }
   }
 
-  private setCurrent(entry: ScheduledTask, pid: number, type: "script" | "agent" | "system", manual?: boolean): void {
+  private setCurrent(entry: ScheduledTask, pid: number, type: "script" | "agent" | "system", manual: boolean | undefined, runId: string): void {
     this._current = {
       entryId: entry.id,
       message: getEntryMessage(entry).slice(0, 80),
@@ -153,6 +228,7 @@ export class CronQueue {
       startedAt: Date.now(),
       type,
       manual,
+      runId,
     };
     persistState(this._current, this.queue);
   }
@@ -195,10 +271,14 @@ export class CronQueue {
   }
 
   private runSystem(entry: ScheduledTask & { kind: "system" }, manual?: boolean, reservation?: ActiveTaskRun): Promise<void> {
-    const run = this.reserveForEntry(entry, manual, reservation);
-    if (!run) { this.processNext(); return Promise.resolve(); }
+    if (!reservation) {
+      logWarn(TAG, `System task "${entry.id}" reached execution without a reservation — skipping`);
+      this.processNext();
+      return Promise.resolve();
+    }
+    const run = reservation;
     logInfo(TAG, `System: "${entry.action}" (${entry.id})`);
-    this.setCurrent(entry, 0, "system", manual);
+    this.setCurrent(entry, 0, "system", manual, run.runId);
     return (async () => {
       try {
         const result = await getSystemTaskRegistry().dispatch(entry);
@@ -242,18 +322,49 @@ export class CronQueue {
   }
 
   private runScript(entry: ScheduledTask & { kind: "script" }, manual?: boolean, reservation?: ActiveTaskRun): void {
-    const run = this.reserveForEntry(entry, manual, reservation);
-    if (!run) { this.processNext(); return; }
+    if (!reservation) {
+      logWarn(TAG, `Script task "${entry.id}" reached execution without a reservation — skipping`);
+      this.processNext();
+      return;
+    }
+    const run = reservation;
     logTaskDebug("task_execution_started", { task: entry.id }, "kind=script");
     try {
       const child = spawn("bash", ["-c", entry.command], { stdio: ["ignore", "pipe", "pipe"] });
-      this.setCurrent(entry, child.pid ?? 0, "script", manual);
+      this.setCurrent(entry, child.pid ?? 0, "script", manual, run.runId);
 
       let output = "";
+      let settled = false;
+      // #1517: absolute deadline on the reserved run. On expiry the owned
+      // child is terminated through the safe process handle — never by an
+      // unverified or recycled PID — and the run settles timed_out exactly
+      // once; a late exit cannot replace that outcome.
+      const deadlineTimer = setTimeout(() => {
+        settled = true;
+        logWarn(TAG, `Script deadline fired for task=${entry.id} run=${run.runId}`);
+        try {
+          if (child.exitCode === null) child.kill("SIGTERM");
+        } catch { /* best effort */ }
+        child.removeAllListeners("exit");
+        child.removeAllListeners("error");
+        child.stdout?.removeAllListeners("data");
+        child.stderr?.removeAllListeners("data");
+        settleRunOnce({
+          entry, run, outcome: "timed_out",
+          diagnostic: makeTaskFailure("interruption", "timed_out", "executing",
+            "script exceeded its deadline", "none"),
+          detail: "deadline: script timed out",
+        });
+        this.clearCurrent();
+        this.processNext();
+      }, Math.max(1, run.deadlineAt - Date.now()));
+
       child.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
       child.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
 
       child.on("exit", (code) => {
+        clearTimeout(deadlineTimer);
+        if (settled) return;
         const finishedAt = Date.now();
         const ok = code === 0;
         const diagnostic: TaskFailureDiagnosticV1 = ok
@@ -291,6 +402,8 @@ export class CronQueue {
       });
 
       child.on("error", (err) => {
+        clearTimeout(deadlineTimer);
+        if (settled) return;
         logWarn(TAG, `Script spawn failed for task=${entry.id} (error_chars=${err.message.length})`);
         settleRunOnce({
           entry, run, outcome: "failed",
@@ -314,9 +427,14 @@ export class CronQueue {
   }
 
   private async runAgent(entry: ScheduledTask & { kind: "agent" }, manual?: boolean, reservation?: ActiveTaskRun): Promise<void> {
-    const run = this.reserveForEntry(entry, manual, reservation);
-    if (!run) { this.clearCurrent(); this.processNext(); return; }
-    this.setCurrent(entry, 0, "agent", manual);
+    if (!reservation) {
+      logWarn(TAG, `Agent task "${entry.id}" reached execution without a reservation — skipping`);
+      this.clearCurrent();
+      this.processNext();
+      return;
+    }
+    const run = reservation;
+    this.setCurrent(entry, 0, "agent", manual, run.runId);
 
     try {
       const outcome = await this.taskRunner.run(entry, run);

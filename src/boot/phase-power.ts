@@ -35,7 +35,7 @@ export async function phasePower(ctx: BootCtx): Promise<PhaseResult> {
     isSleepCycleActive: () => ctx.sleepHandle?.isActive === true,
     isTaskQueueEmpty: () => (ctx.cronQueue?.pending ?? 0) === 0,
     isMaintenanceActive: () => false,
-    isTransitionActive: () => transitionStore.isActive(),
+    isTransitionActive: (excludeAttemptId?: string) => transitionStore.isActiveExcept(excludeAttemptId),
     isPlatformSupported: () => isDarwin || isLinux,
   });
 

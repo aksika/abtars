@@ -44,4 +44,24 @@ export class PowerTransitionStore {
   isActive(): boolean {
     return this.read() !== null;
   }
+
+  /**
+   * #1517: active-transition check that ignores only the exact attempt ID
+   * passed in. A marker with no ID, a different ID, or any readable legacy
+   * state is never excluded.
+   */
+  isActiveExcept(attemptId?: string): boolean {
+    const state = this.read();
+    if (!state) return false;
+    if (attemptId !== undefined && state.attemptId === attemptId) return false;
+    return true;
+  }
+
+  /** #1517: clear the marker only when this attempt still owns it. */
+  clearIfOwned(attemptId: string): boolean {
+    const state = this.read();
+    if (!state || state.attemptId !== attemptId) return false;
+    this.clear();
+    return true;
+  }
 }

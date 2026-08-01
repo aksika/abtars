@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn, logTrace } from "../logger.js";
 import { readEntries as dbReadEntries } from "./task-store.js";
-import { advanceNextRun, createRunId, readState, reserveRun } from "./task-state-store.js";
+import { advanceNextRun, createRunId, readState, reserveRun, updateActiveRun } from "./task-state-store.js";
 import { todaySuccessCount, getRun } from "./task-history-store.js";
 import { kanbanGetCard } from "./kanban-board.js";
 import { settleRunFromHistory, settleRunOnce } from "./task-run-settler.js";
@@ -177,6 +177,88 @@ export function checkCron(): ReservedTask[] {
 }
 
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
+/** #1517: bounded grace after an owned cancellation request before fallback settlement. */
+const CANCELLATION_GRACE_MS = 30_000;
+
+/**
+ * #1517: the CronQueue-owned port for live stale-run reconciliation. The
+ * reconciler never guesses ownership from the task ID — only the queue knows
+ * which exact run this process is executing.
+ */
+export interface ActiveRunSupervisor {
+  owns(runId: string): boolean;
+  cancel(runId: string, reason: string): "requested" | "not_owned";
+}
+
+/** Exactly-once deadline settlement shared by boot and live reconciliation. */
+function settleExpiredRun(entry: ScheduledTask, run: ActiveTaskRun, detail: string, abortReason: string): void {
+  settleRunOnce({
+    entry, run,
+    outcome: "failed",
+    diagnostic: makeTaskFailure("interruption", "deadline_exceeded", "executing",
+      detail, "none"),
+    detail,
+  });
+  // #1516: terminalize the interrupted project so its Orc/Worker state
+  // cannot orphan after the scheduled run is settled.
+  if (run.cardId !== undefined) {
+    void abortProjectById(run.cardId, abortReason);
+  }
+}
+
+/**
+ * #1517: live owner-aware reconciliation, run before heartbeat schedule
+ * admission. Identical exactly-once primitives as boot recovery, but it must
+ * never steal a terminal claim from an in-process owner: unexpired runs are
+ * untouched, owned expired runs get a cancellation request and a bounded
+ * grace, and only then (or immediately for unowned runs) does the fallback
+ * deadline settlement win. A late executor completion cannot overwrite the
+ * reconciler's terminal outcome because history is append-once.
+ */
+export function reconcileActiveTaskRunsLive(supervisor: ActiveRunSupervisor): void {
+  const entries = dbReadEntries();
+  for (const entry of entries) {
+    const state = readState(entry.id);
+    if (!state?.activeRun) continue;
+    const run = state.activeRun;
+
+    const terminalHistory = getRun(run.runId);
+    if (terminalHistory) {
+      if (settleRunFromHistory(entry, run, terminalHistory)) {
+        logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=repaired_from_history`);
+      }
+      continue;
+    }
+
+    if (run.deadlineAt >= Date.now()) continue;
+
+    if (supervisor.owns(run.runId)) {
+      if (run.phase === "cancelling") {
+        const graceEnd = (run.lastProgressAt ?? run.reservedAt) + CANCELLATION_GRACE_MS;
+        if (Date.now() >= graceEnd) {
+          if (shouldWarnSkip(entry.id)) {
+            logWarn(TAG, `Stale run for "${entry.id}" run=${run.runId} owned, cancellation requested — grace elapsed, settling as deadline_exceeded`);
+          }
+          settleExpiredRun(entry, run, "live_recovery: cancellation grace elapsed", "live_recovery: scheduled deadline passed");
+        }
+        continue;
+      }
+      const status = supervisor.cancel(run.runId, "live_recovery: deadline exceeded");
+      if (status === "requested") {
+        updateActiveRun(entry.id, run.runId, { phase: "cancelling", lastProgressAt: Date.now() });
+        if (shouldWarnSkip(entry.id)) {
+          logWarn(TAG, `Stale run for "${entry.id}" run=${run.runId} owned, deadline exceeded — cancellation requested`);
+        }
+      }
+      continue;
+    }
+
+    if (shouldWarnSkip(entry.id)) {
+      logWarn(TAG, `Stale run for "${entry.id}" run=${run.runId} unowned, deadline exceeded — fallback settlement`);
+    }
+    settleExpiredRun(entry, run, "live_recovery: deadline exceeded", "live_recovery: scheduled deadline passed");
+  }
+}
 
 /**
  * #1520: authoritative restart recovery. Precedence:
@@ -209,18 +291,7 @@ export function reconcileActiveTaskRuns(reattachProject?: ScheduledProjectReatta
     }
 
     if (run.deadlineAt < Date.now()) {
-      settleRunOnce({
-        entry, run,
-        outcome: "failed",
-        diagnostic: makeTaskFailure("interruption", "deadline_exceeded", "executing",
-          "restart recovery: run deadline passed", "none"),
-        detail: "restart_recovery: deadline passed",
-      });
-      // #1516: terminalize the interrupted project so its Orc/Worker state
-      // cannot orphan after the scheduled run is settled.
-      if (run.cardId !== undefined) {
-        void abortProjectById(run.cardId, "restart_recovery: scheduled deadline passed");
-      }
+      settleExpiredRun(entry, run, "restart_recovery: deadline passed", "restart_recovery: scheduled deadline passed");
       logTrace(TAG, `task_run_reconciled task=${entry.id} run=${run.runId} action=settled_deadline_passed`);
       continue;
     }

@@ -22,9 +22,13 @@ export interface TaskTickResult {
  * all real; only external boundaries are doubled in the harness.
  */
 export async function runTaskTick(ctx: Pick<BootCtx, "cronQueue" | "telegramAdapter">): Promise<TaskTickResult> {
-  const { checkCron, readPendingReminders, clearPendingReminders } = await import("../components/tasks/task-checker.js");
+  const { checkCron, readPendingReminders, clearPendingReminders, reconcileActiveTaskRunsLive } = await import("../components/tasks/task-checker.js");
   const { loadUsers } = await import("../components/user-registry.js");
   if (!ctx.cronQueue) return { state: "idle" };
+  // #1517: live owner-aware stale-run reconciliation runs before schedule
+  // admission so an expired orphan never blocks its task forever; it never
+  // clears an unexpired owned run.
+  reconcileActiveTaskRunsLive(ctx.cronQueue);
   const dueTasks = checkCron();
   let ran = false;
   for (const reserved of dueTasks) {

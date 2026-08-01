@@ -60,6 +60,41 @@ const POLL_INTERVAL_MS = 3000;
 const EVENTS_LIMIT = 50;
 const RUNTIME_NEXT_WAIT_MS = 30000;
 
+/**
+ * #1517: bounds the provider pump's await on the model transport by the
+ * broker's absolute completion deadline. The transport receives the remaining
+ * bound and should abort at it; when it ignores cancellation, this race still
+ * terminates the pump so the sleep handle can clean up and a later cycle can
+ * open a fresh lease. The broker remains authoritative: a stale completion is
+ * rejected there regardless of this race.
+ */
+type DeadlineRaceResult<T> =
+  | { kind: "settled"; value: T }
+  | { kind: "timed_out" }
+  | { kind: "failed"; error: Error };
+
+async function runWithAbsoluteDeadline<T>(spin: Promise<T>, remainingMs: number): Promise<DeadlineRaceResult<T>> {
+  return new Promise((resolve) => {
+    let finished = false;
+    const timer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      resolve({ kind: "timed_out" });
+    }, Math.max(1, remainingMs));
+    spin.then((value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({ kind: "settled", value });
+    }).catch((err: unknown) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({ kind: "failed", error: err instanceof Error ? err : new Error(String(err)) });
+    });
+  });
+}
+
 export function createSleepHandle(opts: SleepOpts): SleepHandle {
   const { client } = opts;
   let running = false;
@@ -67,7 +102,6 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
   let currentRunId: string | null = null;
   let abortController = new AbortController();
   let nightSessionId: string | undefined;
-  let leaseId: string | undefined;
 
   function cleanup(): void {
     running = false;
@@ -77,16 +111,17 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
   }
 
   async function providerPump(): Promise<void> {
+    let ownedLeaseId: string | undefined;
     try {
       const openResult = await client.sleep.runtime.open("abtars");
       if (openResult.status !== "ok" || !openResult.leaseId) {
         logWarn("sleep", `Runtime provider open failed: ${openResult.status}`);
         return;
       }
-      leaseId = openResult.leaseId;
+      ownedLeaseId = openResult.leaseId;
 
-      while (!abortController.signal.aborted && leaseId) {
-        const nextResult = await client.sleep.runtime.next(leaseId, RUNTIME_NEXT_WAIT_MS);
+      while (!abortController.signal.aborted && ownedLeaseId) {
+        const nextResult = await client.sleep.runtime.next(ownedLeaseId, RUNTIME_NEXT_WAIT_MS);
         if (nextResult.status === "closed" || nextResult.status === "lease_expired") break;
         if (nextResult.heartbeat) continue;
         if (nextResult.status === "no_request") continue;
@@ -94,34 +129,71 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         const req = nextResult.completionRequest;
         if (!req) continue;
 
-        try {
-          const spinResult = await opts.sessionManager.spin({
-            type: "D",
-            prompt: req.prompt,
-            sessionId: nightSessionId,
-            timeoutMs: Math.max(5000, req.deadline - Date.now()),
-            settlementOwner: "spin",
-            await: true,
-          });
-          if (spinResult.sessionId && !nightSessionId) nightSessionId = spinResult.sessionId;
-
-          const completeResult = await client.sleep.runtime.complete(leaseId, req.completionId, spinResult.result ?? "");
-          if (completeResult.status !== "ok") {
-            logWarn("sleep", `Completion rejected: ${completeResult.status}`);
-          }
-        } catch (spinErr) {
-          logWarn("sleep", `Model completion failed: ${(spinErr as Error).message}`);
+        const remainingMs = req.deadline - Date.now();
+        if (remainingMs <= 0) {
+          logWarn("sleep", `Completion ${req.completionId} already past its deadline — failing and closing provider pump`);
           try {
-            await client.sleep.runtime.fail(leaseId, req.completionId, "model_error");
+            await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "completion_deadline_expired");
           } catch { /* best effort */ }
+          break;
+        }
+
+        try {
+          const spinResult = await runWithAbsoluteDeadline(
+            opts.sessionManager.spin({
+              type: "D",
+              prompt: req.prompt,
+              sessionId: nightSessionId,
+              timeoutMs: remainingMs,
+              settlementOwner: "spin",
+              await: true,
+            }),
+            remainingMs,
+          );
+          if (spinResult.kind === "timed_out") {
+            logWarn("sleep", `Completion ${req.completionId} deadline reached while awaiting the model — closing provider pump`);
+            try {
+              await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "completion_deadline_expired");
+            } catch { /* best effort */ }
+            break;
+          }
+          if (spinResult.kind === "failed") {
+            logWarn("sleep", `Model completion failed: ${spinResult.error.message}`);
+            let failResult: { status: string } | undefined;
+            try {
+              failResult = await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "model_error");
+            } catch { /* best effort */ }
+            if (!failResult || failResult.status !== "ok") {
+              logWarn("sleep", `Provider fail rejected (${failResult?.status ?? "error"}) — closing provider pump`);
+              break;
+            }
+            continue;
+          }
+          if (spinResult.value.sessionId && !nightSessionId) nightSessionId = spinResult.value.sessionId;
+
+          const completeResult = await client.sleep.runtime.complete(ownedLeaseId, req.completionId, spinResult.value.result ?? "");
+          if (completeResult.status !== "ok") {
+            logWarn("sleep", `Completion rejected (${completeResult.status}) — closing provider pump`);
+            break;
+          }
+        } catch (err) {
+          logWarn("sleep", `Model completion failed: ${(err as Error).message}`);
+          let failResult: { status: string } | undefined;
+          try {
+            failResult = await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "model_error");
+          } catch { /* best effort */ }
+          if (!failResult || failResult.status !== "ok") {
+            logWarn("sleep", `Provider fail rejected (${failResult?.status ?? "error"}) — closing provider pump`);
+            break;
+          }
         }
       }
     } catch (err) {
       logError("sleep", "Runtime provider pump error", err);
     } finally {
-      if (leaseId) {
-        try { await client.sleep.runtime.close(leaseId); } catch { /* best effort */ }
-        leaseId = undefined;
+      if (ownedLeaseId) {
+        try { await client.sleep.runtime.close(ownedLeaseId); } catch { /* best effort */ }
+        ownedLeaseId = undefined;
       }
     }
   }

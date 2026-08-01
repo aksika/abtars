@@ -6,13 +6,15 @@ export interface PowerSafetyReaders {
   isSleepCycleActive: () => boolean;
   isTaskQueueEmpty: () => boolean;
   isMaintenanceActive: () => boolean;
-  isTransitionActive: () => boolean;
+  isTransitionActive: (excludeAttemptId?: string) => boolean;
   isPlatformSupported: () => boolean;
 }
 
 export function createPowerSafetyProbe(readers: PowerSafetyReaders): PowerSafetyProbe {
   return {
-    inspect(entry): PowerSafetyResult {
+    // #1517: the second safety check of a suspend attempt may ignore only its
+    // own exact attempt marker; any foreign or replacement marker still blocks.
+    inspect(entry, excludeAttemptId?: string): PowerSafetyResult {
       const reasons: PowerBlockReason[] = [];
       const now = Date.now();
 
@@ -40,7 +42,7 @@ export function createPowerSafetyProbe(readers: PowerSafetyReaders): PowerSafety
         reasons.push("maintenance_active");
       }
 
-      if (readers.isTransitionActive()) {
+      if (readers.isTransitionActive(excludeAttemptId)) {
         reasons.push("transition_active");
       }
 
