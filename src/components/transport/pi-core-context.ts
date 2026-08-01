@@ -120,6 +120,9 @@ export class PiCoreContextProjection {
           const projected = await this.projectDurable(provider);
           durableMessages = projected.messages;
         } catch (err) {
+          // #1527: cancellation of an in-flight provider call retains the
+          // non-provider fallback semantics (it starts no new provider call).
+          if (options.signal?.aborted) return this.fallback(agentMessages);
           if (err instanceof DurableContextUnavailableError) {
             logWarn(TAG, `context_projection_failed mode=durable reason=${err.reason}`);
             throw err;

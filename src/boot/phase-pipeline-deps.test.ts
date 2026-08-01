@@ -36,11 +36,22 @@ describe("phasePipelineDeps #1527", () => {
       transport: fakePiTransport(),
       memoryRuntime: memoryState("ready", false),
     });
-    const result = await phasePipelineDeps(ctx);
-
-    expect(result).toBe("skipped");
+    // The refusal must THROW: bootGraph marks any non-throwing phase "ok" and
+    // replaces phaseHealth with its report, so a skipped return would let
+    // downstream nodes boot against a null pipelineDeps.
+    await expect(phasePipelineDeps(ctx)).rejects.toThrow(/durable context capability/);
     expect(ctx.transport).toBeNull();
-    expect(ctx.phaseHealth.get("phasePipelineDeps")).toMatchObject({ status: "failed" });
+    expect((ctx.transport as unknown as { destroy: ReturnType<typeof vi.fn> } | null)).toBeNull();
+  });
+
+  it("destroys the refused transport", async () => {
+    const transport = fakePiTransport();
+    const ctx = createBootCtx({
+      transport,
+      memoryRuntime: memoryState("ready", false),
+    });
+    await expect(phasePipelineDeps(ctx)).rejects.toThrow();
+    expect(transport.destroy).toHaveBeenCalledTimes(1);
   });
 
   it("does not refuse when the Pi route negotiated the durable-context capability", async () => {

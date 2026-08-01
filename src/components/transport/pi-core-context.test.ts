@@ -160,4 +160,22 @@ describe("PiCoreContextProjection", () => {
     const result = await promise;
     expect(result.contextDegraded).toBe(true);
   });
+
+  it("abort of an in-flight provider call falls back instead of throwing (#1527)", async () => {
+    const controller = new AbortController();
+    const projection = new PiCoreContextProjection(durableSeed(), "system");
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const provider = {
+      async projectContext() {
+        await gate;
+        throw Object.assign(new Error("aborted"), { code: "aborted" });
+      },
+    };
+    const promise = projection.transform(makeAgentMessages(true), { hostGeneration: 0, contextProvider: provider, signal: controller.signal });
+    controller.abort();
+    release();
+    const result = await promise;
+    expect(result.contextDegraded).toBe(true);
+  });
 });

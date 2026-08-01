@@ -34,7 +34,10 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   // #1527: a memory-enabled Pi route without the negotiated durable-context
   // capability is context-blind by construction. Refuse to serve rather than
-  // let durable requests degrade to suffix-only answers.
+  // let durable requests degrade to suffix-only answers. Throwing is required:
+  // bootGraph marks any non-throwing phase "ok" and replaces phaseHealth with
+  // its report, so a "skipped" return would let downstream nodes boot against
+  // a null pipelineDeps and hide the refusal from the degraded-boot report.
   if (ctx.memoryRuntime.state === "ready" && !ctx.memoryRuntime.supports("durableContext")) {
     const route = typeof transport.getRuntimeStatus === "function" ? transport.getRuntimeStatus().route : undefined;
     if (route === "pi-ai") {
@@ -42,8 +45,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       logError("boot", "memory-enabled Pi route negotiated no durable-context capability — refusing to boot context-blind");
       try { await transport.destroy(); } catch (err) { logWarn("boot", `transport destroy during refusal failed: ${err instanceof Error ? err.message : String(err)}`); }
       ctx.transport = null;
-      ctx.phaseHealth.set(phasePipelineDeps.name, { status: "failed", error: "pi route without durable context capability" });
-      return "skipped";
+      throw new Error("memory-enabled Pi route without durable context capability");
     }
   }
 

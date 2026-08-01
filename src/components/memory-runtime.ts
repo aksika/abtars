@@ -518,8 +518,18 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       // #1527: route loss clears capabilities immediately; recovery re-projects
       // them after renegotiation. Every call checks the current route state.
       requireClientCapability(capabilities, "durableContext");
-      const result = await pm.projectConversationContext(input);
-      return normalizeProjectionResult(result);
+      try {
+        const result = await pm.projectConversationContext(input);
+        return normalizeProjectionResult(result);
+      } catch (err) {
+        // Bounded, content-free diagnostic: route state + protocol reason code.
+        const code = err && typeof err === "object" && "code" in err
+          ? String((err as { code: unknown }).code)
+          : "unknown";
+        const route = client.routeSnapshot?.state ?? "unknown";
+        logWarn("memory-runtime", `durable_projection_failed route=${route} reason=${code}`);
+        throw err;
+      }
     },
 
     async close(): Promise<void> {
