@@ -71,6 +71,7 @@ export class AbtarsRouteController {
   private reasonCode_: AbmindRouteReasonCodeLike | undefined;
   private capabilities_: AbmindCapabilitiesLikeV1 | null = null;
   private socket: WebSocket | null = null;
+  private connectingSocket: WebSocket | null = null;
   private establishing: Promise<AbmindCapabilitiesLikeV1> | null = null;
   private pendingControl: PendingControl | null = null;
   private reconnectAttempts = 0;
@@ -164,6 +165,10 @@ export class AbtarsRouteController {
       this.pendingControl.reject(new Error("Transport closed"));
       this.pendingControl = null;
     }
+    if (this.connectingSocket) {
+      try { this.connectingSocket.terminate(); } catch { /* best effort */ }
+      this.connectingSocket = null;
+    }
     if (this.socket) {
       try { this.socket.close(); } catch { /* best effort */ }
       this.socket = null;
@@ -183,6 +188,7 @@ export class AbtarsRouteController {
       let connected = false;
       let established = false;
       let settled = false;
+      this.connectingSocket = socket;
 
       const fail = (err: Error, reason: AbmindRouteReasonCodeLike, transient: boolean): void => {
         if (settled) return;
@@ -220,6 +226,7 @@ export class AbtarsRouteController {
           try { this.socket.close(); } catch { /* best effort */ }
         }
         this.socket = socket;
+        if (this.connectingSocket === socket) this.connectingSocket = null;
         connected = true;
         this.state_ = "authenticating";
         this.authenticate(socket, gen).then(() => {
@@ -255,7 +262,12 @@ export class AbtarsRouteController {
       });
 
       socket.on("close", () => {
-        if (this.closed_ || gen !== this.generation_) return;
+        if (this.closed_) {
+          // close() during establishment must settle the negotiate promise.
+          if (!settled) { settled = true; reject(new Error("Transport closed")); }
+          return;
+        }
+        if (gen !== this.generation_) return;
         if (connected || established) {
           this.loseRoute(gen);
           return;
@@ -269,7 +281,11 @@ export class AbtarsRouteController {
       });
 
       socket.on("error", (err) => {
-        if (this.closed_ || gen !== this.generation_) return;
+        if (this.closed_) {
+          if (!settled) { settled = true; reject(new Error("Transport closed")); }
+          return;
+        }
+        if (gen !== this.generation_) return;
         if (!connected) {
           fail(err instanceof Error ? err : new Error(String(err)), "connection_failed", true);
         }
@@ -292,6 +308,7 @@ export class AbtarsRouteController {
 
   private detachSocket(socket: WebSocket, gen: number): void {
     if (this.socket === socket) this.socket = null;
+    if (this.connectingSocket === socket) this.connectingSocket = null;
     if (this.pendingControl && gen === this.generation_) {
       clearTimeout(this.pendingControl.timer);
       this.pendingControl = null;

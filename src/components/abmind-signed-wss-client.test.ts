@@ -380,6 +380,34 @@ describe("AbtarsSignedWssClient", () => {
     }
   }, 20_000);
 
+  it("close settles a pending negotiate with a rejection (no hang)", async () => {
+    // A TCP server that accepts but never completes the TLS handshake keeps
+    // negotiate in flight until close() rejects it.
+    const net = await import("node:net");
+    const sink = net.createServer(() => { /* accept and stay silent */ });
+    await new Promise<void>((resolve) => sink.listen(0, "127.0.0.1", resolve));
+    const sinkPort = (sink.address() as { port: number }).port;
+    const client = new AbtarsSignedWssClient({
+      url: `wss://127.0.0.1:${sinkPort}`,
+      peerId: "abtars-test",
+      signingKeyFile: join(root, "client-ed25519.pem"),
+      serverCertSha256: "a".repeat(64),
+    }, join(root, "outbox.json"));
+    try {
+      const negotiated = client.negotiate().catch((e) => e);
+      await new Promise((r) => setTimeout(r, 20));
+      await client.close();
+      await expect(negotiated).resolves.toMatchObject({ message: /closed/i });
+    } finally {
+      await client.close();
+      sink.closeAllConnections?.();
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 3_000);
+        sink.close(() => { clearTimeout(timer); resolve(); });
+      });
+    }
+  }, 20_000);
+
   it("close resolves pending requests as unavailable", async () => {
     const server = await startFakeServer(root, {
       respond: (frameId, inner) => {

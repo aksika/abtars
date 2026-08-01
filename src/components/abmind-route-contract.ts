@@ -55,6 +55,7 @@ export const ROUTE_RETRY_MAX_MS = 60_000;
 export const ROUTE_RETRY_JITTER_MS = 250;
 export const ROUTE_TERMINAL_UNKNOWN_MAX_ENTRIES = 50;
 export const ROUTE_TERMINAL_UNKNOWN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+export const ROUTE_METHOD_MAX_BYTES = 128;
 
 export const TERMINAL_SERVICE_ERROR_CODES = [
   "validation_error",
@@ -95,5 +96,6 @@ export const ABMIND_ROUTE_CONFORMANCE_V1 = {
     jitterMs: ROUTE_RETRY_JITTER_MS,
     terminalUnknownMaxEntries: ROUTE_TERMINAL_UNKNOWN_MAX_ENTRIES,
     terminalUnknownRetentionMs: ROUTE_TERMINAL_UNKNOWN_RETENTION_MS,
+    methodMaxBytes: ROUTE_METHOD_MAX_BYTES,
   },
 } as const;

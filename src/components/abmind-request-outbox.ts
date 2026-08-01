@@ -14,6 +14,7 @@ import { dirname } from "node:path";
 import {
   ROUTE_RETRY_DEADLINE_MS,
   ROUTE_TERMINAL_UNKNOWN_MAX_ENTRIES, ROUTE_TERMINAL_UNKNOWN_RETENTION_MS,
+  ROUTE_METHOD_MAX_BYTES,
   type AbmindDeliveryStateLike, type RetryFailureClassLike,
 } from "./abmind-route-contract.js";
 
@@ -81,7 +82,7 @@ function isValidV1Entry(value: unknown): value is OutboxEntryV1 {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const e = value as Record<string, unknown>;
   return typeof e.id === "string" && e.id.length > 0
-    && typeof e.method === "string" && e.method.length > 0
+    && typeof e.method === "string" && e.method.length > 0 && e.method.length <= ROUTE_METHOD_MAX_BYTES
     && typeof e.requestId === "string" && e.requestId.length > 0
     && typeof e.body === "string"
     && typeof e.version === "number"
