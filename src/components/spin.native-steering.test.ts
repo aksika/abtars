@@ -328,6 +328,32 @@ describe("spin() — #1531 native steering pump", () => {
     unsub();
   });
 
+  it("closes acceptance synchronously at the native-handoff round limit", async () => {
+    const send = makeDeferredSend();
+    const { transport, steer } = makeNativeTransport(send, async (_content, lease, session) => {
+      markConsumed(lease, session);
+    });
+    const { spinPromise, session } = startNativeTurn(transport);
+    await waitAccepting(session);
+
+    // MAX_STEER_ROUNDS (10) batches — one instruction per round, acked.
+    for (let i = 1; i <= 10; i++) {
+      const q = queueInstruction(session, { text: `steer round ${i}`, source: "tui" });
+      expect(q.ok).toBe(true);
+      await vi.waitFor(() => expect(steer).toHaveBeenCalledTimes(i));
+    }
+    // Acceptance is closed synchronously once the limit is reached: the 11th
+    // instruction is rejected instead of queued-then-expired.
+    expect(session.steeringAccepting).toBe(false);
+    const eleventh = queueInstruction(session, { text: "over the limit", source: "tui" });
+    expect(eleventh.ok).toBe(false);
+    if (!eleventh.ok) expect(["not_steerable", "stale_execution", "not_active"]).toContain(eleventh.reason);
+
+    send.resolve("round limited");
+    expect((await spinPromise).result).toBe("round limited");
+    expect(session.instructionQueue.length).toBe(0);
+  });
+
   it("keeps the sequential post-send continuation path for drivers without native steering", async () => {
     const firstSend = makeDeferredSend();
     const sendCalls: string[] = [];
