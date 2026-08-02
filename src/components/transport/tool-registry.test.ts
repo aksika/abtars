@@ -7,7 +7,7 @@ vi.mock("../guardrails.js", () => ({
   checkCommand: () => null,
   classifyCommand: () => "allow",
 }));
-import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, setMemoryRuntime } from "./tool-registry.js";
+import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, setMemoryRuntime, getToolDescriptor } from "./tool-registry.js";
 import { createClientRuntime } from "../memory-runtime.js";
 import { setUserRegistryOverride } from "../user-registry.js";
 
@@ -83,6 +83,19 @@ describe("getToolDefinitions", () => {
     expect(names).toContain("execute_bash");
     expect(names).toContain("memory_store");
     expect(names).toContain("memory_recall");
+  });
+});
+
+describe("getToolDescriptor (#1535 preflight registry boundary)", () => {
+  it("returns a descriptor for every registered tool", () => {
+    for (const tool of getToolDefinitions()) {
+      expect(getToolDescriptor(tool.name)).toEqual({});
+    }
+  });
+
+  it("returns undefined for an unregistered tool", () => {
+    expect(getToolDescriptor("web_browse")).toBeUndefined();
+    expect(getToolDescriptor("does_not_exist")).toBeUndefined();
   });
 });
 

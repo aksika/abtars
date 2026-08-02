@@ -23,7 +23,7 @@ vi.mock("./task-history-store.js", () => ({
 vi.mock("./task-run-settler.js", () => ({ settleRunOnce: vi.fn() }));
 vi.mock("./task-preflight.js", () => ({ preflightTask: vi.fn(), validateReportArtifact: vi.fn() }));
 vi.mock("../transport/bridge-lock-transport.js", () => ({ readLastPromptAt: vi.fn(() => 0) }));
-vi.mock("../transport/pi-core-host.js", () => ({ getToolDescriptor: vi.fn(() => undefined) }));
+vi.mock("../transport/tool-registry.js", () => ({ getToolDescriptor: vi.fn(() => undefined) }));
 vi.mock("./task-log-ctx.js", () => ({ logTaskDebug: vi.fn(), logTaskTrace: vi.fn() }));
 
 const { skillLaunch } = vi.hoisted(() => ({ skillLaunch: vi.fn() }));

@@ -430,16 +430,13 @@ async function runWithDeadline(
 }
 
 async function getToolRegistry(): Promise<{ getToolDescriptor: (name: string) => { processDependency?: { executable: string; probeArgs: string[] } } | undefined } | undefined> {
+  // #1535: preflight verifies against the real tool registry. The earlier
+  // pi-core-host/pi-core-tools branches looked for a getToolDescriptor export
+  // that never existed, so any report task with requires.tools failed
+  // preflight with "tool registry unavailable".
   try {
-    const piHost = await import("../transport/pi-core-host.js");
-    if (piHost && typeof (piHost as any).getToolDescriptor === "function") {
-      return piHost as any;
-    }
-    const tools = await import("../transport/pi-core-tools.js");
-    if (tools && typeof (tools as any).getToolDescriptor === "function") {
-      return tools as any;
-    }
-    return undefined;
+    const { getToolDescriptor } = await import("../transport/tool-registry.js");
+    return { getToolDescriptor };
   } catch {
     return undefined;
   }

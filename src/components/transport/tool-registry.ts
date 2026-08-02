@@ -662,6 +662,13 @@ if (process.env["ARTIFACT_S3_ENDPOINT"]) {
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 
+/** #1535: preflight tool verification. Returns {} for registered tools,
+ *  undefined otherwise. processDependency is not declared by any current
+ *  tool; the probe path stays dormant until a tool declares one. */
+export function getToolDescriptor(name: string): { processDependency?: { executable: string; probeArgs: string[] } } | undefined {
+  return ALL_TOOLS.some(t => t.name === name) ? {} : undefined;
+}
+
 export function getToolSchemas(policy?: SandboxPolicy): Array<{ type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }> {
   const tools = policy ? ALL_TOOLS.filter(t => checkTool(t.name, policy).allowed) : ALL_TOOLS;
   return tools.map(t => ({
