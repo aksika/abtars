@@ -109,6 +109,15 @@ describe("classifyResume — bridge-owned power transition (#1532)", () => {
     expect(execSyncMock).toHaveBeenCalledTimes(1);
   });
 
+  it("falls through when the classifier clock is past marker expiry", () => {
+    const now = Date.now();
+    const expiresAt = now + HOUR;
+    store.write(ownedMarker({ requestedAt: now - HOUR, expectedWakeAt: now + 30 * 60_000, expiresAt }));
+    mockMacOS("2026-08-02 03:15:00 +0000 DarkWake  [CDN] assertion: system-wake\n");
+    expect(classifyResume({ transitionStore: store, now: expiresAt + 1 })).toBe("dark");
+    expect(execSyncMock).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the default runtime store contract without a marker (no options)", () => {
     const result = classifyResume();
     expect(["dark", "full", "unknown"]).toContain(result);

@@ -80,7 +80,10 @@ function isOwnedTransition(state: PowerTransitionState, now: number): boolean {
   }
   if (!(requestedAt <= expectedWakeAt && expectedWakeAt <= expiresAt)) return false;
   // Reject future requestedAt: the suspend was not issued yet.
-  return requestedAt <= now;
+  // Also validate expiry against the classifier clock. PowerTransitionStore
+  // performs the same check with Date.now(), but keeping the predicate here
+  // makes injected boundary clocks and the production path obey one contract.
+  return requestedAt <= now && now <= expiresAt;
 }
 
 function classifyMacOS(): ResumeKind {
