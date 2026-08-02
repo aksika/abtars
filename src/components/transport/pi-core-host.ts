@@ -33,10 +33,15 @@ export interface PiCoreExecutionHostOptions {
   onEvent?: (event: AgentEvent) => Promise<void> | void;
 }
 
+/**
+ * #1531: Outstanding lease with a deferred per-lease completion. `resolve`
+ * fires only on the matching instruction `message_end`; `reject` fires exactly
+ * once on host settlement, cancellation, or post-delivery handoff failure.
+ */
 interface OutstandingLease {
-  leaseId: string;
-  instructions: readonly QueuedSessionInstruction[];
-  kind: "steer" | "followUp";
+  lease: InstructionLease;
+  resolve: () => void;
+  reject: (error: Error) => void;
 }
 
 export class PiCoreExecutionHost {
@@ -54,8 +59,19 @@ export class PiCoreExecutionHost {
   private outputObserver?: OutputObserver;
   private _generation: number;
   private static _hostCounter = 0;
+  /**
+   * #1531: Native-steering readiness. Resolved synchronously when the host
+   * transitions to "running"; rejected when the host settles without ever
+   * running. PiCoreTransport.steer() awaits it so an instruction accepted
+   * while the host is still opening waits for handoff readiness instead of
+   * being handed to a dead execution.
+   */
+  private _readyResolve: (() => void) | null = null;
+  private _readyReject: ((error: Error) => void) | null = null;
+  private readonly _readyPromise: Promise<void>;
 
   get generation(): number { return this._generation; }
+  get ready(): Promise<void> { return this._readyPromise; }
 
   constructor(opts: PiCoreExecutionHostOptions) {
     this.executionId = opts.executionId;
@@ -64,6 +80,13 @@ export class PiCoreExecutionHost {
     this.outputObserver = opts.outputObserver;
     this._generation = ++PiCoreExecutionHost._hostCounter;
     this.terminalPromise = new Promise((resolve) => { this._terminalResolve = resolve; });
+    this._readyPromise = new Promise<void>((resolve, reject) => {
+      this._readyResolve = resolve;
+      this._readyReject = reject;
+    });
+    // Pre-attach a handler so a settlement-before-running rejection nobody
+    // awaited is never an unhandled rejection.
+    void this._readyPromise.catch(() => {});
     logDebug(TAG, `Host created for execution ${this.executionId} (session ${this.sessionId}) gen=${this._generation}`);
   }
 
@@ -168,6 +191,11 @@ export class PiCoreExecutionHost {
     });
 
     this.state = "running";
+    if (this._readyResolve) {
+      this._readyResolve();
+      this._readyResolve = null;
+      this._readyReject = null;
+    }
 
     // Send the actual user/current-turn messages via prompt(), not via state.
     const userMessages = [...this.opts.initialState.messages];
@@ -201,14 +229,28 @@ export class PiCoreExecutionHost {
     return s;
   }
 
-  steer(content: string, lease: InstructionLease): void {
-    if (this.state !== "running" && this.state !== "created") {
-      logDebug(TAG, `Cannot steer in state ${this.state}`);
-      return;
+  /**
+   * #1531: Per-lease steering acknowledgement. Validates before delivery,
+   * registers a deferred lease, marks the batch delivered immediately before
+   * `agent.steer()`, and resolves only when the matching instruction
+   * `message_end` arrives. Never silently returns: an invalid state, a
+   * missing agent, a lease for another session, or an outstanding lease all
+   * produce an explicit pre-handoff error.
+   */
+  async steer(content: string, lease: InstructionLease): Promise<void> {
+    const agent = this.agent;
+    if (this.state !== "running") {
+      throw new Error(`Cannot steer in state ${this.state}`);
+    }
+    if (!agent) {
+      throw new Error("Cannot steer before Agent construction");
+    }
+    if (lease.sessionId !== this.sessionId) {
+      throw new Error(`Steering lease belongs to session ${lease.sessionId}, host is ${this.sessionId}`);
     }
     if (this.outstandingLeases.size > 0) {
-      logWarn(TAG, `Cannot steer — outstanding lease ${this.outstandingLeases.keys().next().value} not yet consumed`);
-      return;
+      const pending = this.outstandingLeases.keys().next().value as string;
+      throw new Error(`Cannot steer — outstanding lease ${pending} not yet consumed`);
     }
     const msg = createInstructionMessage(
       content,
@@ -217,32 +259,44 @@ export class PiCoreExecutionHost {
       this.executionId,
       "steer",
     );
-    this.outstandingLeases.set(lease.leaseId, {
-      leaseId: lease.leaseId,
-      instructions: lease.instructions,
-      kind: "steer",
-    });
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const deferred = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    this.outstandingLeases.set(lease.leaseId, { lease, resolve, reject });
     const session = this.ensureSession();
     if (session) markDelivered(lease);
     try {
-      if (!this.agent) throw new Error("Cannot steer before Agent construction");
-      this.agent.steer(msg);
+      agent.steer(msg);
     } catch (err) {
       logWarn(TAG, `steer() threw before queue insertion: ${err instanceof Error ? err.message : String(err)}`);
       this.outstandingLeases.delete(lease.leaseId);
       if (session) failAfterDelivery(lease, session, "steer_handoff_failed");
-      throw err;
+      const e = err instanceof Error ? err : new Error(String(err));
+      reject(e);
+      throw e;
     }
+    await deferred;
   }
 
-  followUp(content: string, lease: InstructionLease): void {
-    if (this.state !== "running" && this.state !== "created") {
-      logDebug(TAG, `Cannot followUp in state ${this.state}`);
-      return;
+  /**
+   * #1531: Same per-lease deferred acknowledgement as `steer`, for follow-ups.
+   * No Spin or TUI follow-up producer exists; the method stays for the Pi
+   * contract and uses the same explicit rejection rules.
+   */
+  async followUp(content: string, lease: InstructionLease): Promise<void> {
+    const agent = this.agent;
+    if (this.state !== "running") {
+      throw new Error(`Cannot followUp in state ${this.state}`);
+    }
+    if (!agent) {
+      throw new Error("Cannot followUp before Agent construction");
+    }
+    if (lease.sessionId !== this.sessionId) {
+      throw new Error(`Follow-up lease belongs to session ${lease.sessionId}, host is ${this.sessionId}`);
     }
     if (this.outstandingLeases.size > 0) {
-      logWarn(TAG, `Cannot followUp — outstanding lease ${this.outstandingLeases.keys().next().value} not yet consumed`);
-      return;
+      const pending = this.outstandingLeases.keys().next().value as string;
+      throw new Error(`Cannot followUp — outstanding lease ${pending} not yet consumed`);
     }
     const msg = createInstructionMessage(
       content,
@@ -251,22 +305,23 @@ export class PiCoreExecutionHost {
       this.executionId,
       "followUp",
     );
-    this.outstandingLeases.set(lease.leaseId, {
-      leaseId: lease.leaseId,
-      instructions: lease.instructions,
-      kind: "followUp",
-    });
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const deferred = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    this.outstandingLeases.set(lease.leaseId, { lease, resolve, reject });
     const session = this.ensureSession();
     if (session) markDelivered(lease);
     try {
-      if (!this.agent) throw new Error("Cannot followUp before Agent construction");
-      this.agent.followUp(msg);
+      agent.followUp(msg);
     } catch (err) {
       logWarn(TAG, `followUp() threw before queue insertion: ${err instanceof Error ? err.message : String(err)}`);
       this.outstandingLeases.delete(lease.leaseId);
       if (session) failAfterDelivery(lease, session, "followup_handoff_failed");
-      throw err;
+      const e = err instanceof Error ? err : new Error(String(err));
+      reject(e);
+      throw e;
     }
+    await deferred;
   }
 
   /** #1506: Signal cancellation without awaiting provider/agent cleanup.
@@ -306,13 +361,23 @@ export class PiCoreExecutionHost {
     this.settled = true;
     this.state = "settled";
 
+    // #1531: a host that settles before ever running must reject the
+    // native-steering readiness promise so waiting steer() calls fail
+    // terminally instead of hanging.
+    if (this._readyReject) {
+      this._readyReject(new Error(`Host settled before running (${reason ?? "unknown"})`));
+      this._readyResolve = null;
+      this._readyReject = null;
+    }
+
     this.unsub?.();
     this.unsub = null;
 
     this.agent?.clearAllQueues();
 
     const session = this.ensureSession();
-    for (const [, lease] of this.outstandingLeases) {
+    for (const [, outstanding] of this.outstandingLeases) {
+      const lease = outstanding.lease;
       const fakeLease: InstructionLease = {
         leaseId: lease.leaseId,
         sessionId: this.sessionId,
@@ -321,6 +386,7 @@ export class PiCoreExecutionHost {
         instructions: lease.instructions as InstructionLease["instructions"],
       };
       if (session) failAfterDelivery(fakeLease, session, "host_settled");
+      outstanding.reject(new Error(`Host settled before lease ${lease.leaseId} completed`));
     }
     this.outstandingLeases.clear();
 
@@ -408,22 +474,14 @@ export class PiCoreExecutionHost {
     if (message.role !== "abtars_instruction") return;
     const instruction = message;
     const outstanding = this.outstandingLeases.get(instruction.leaseId);
-    if (!outstanding || instruction.executionId !== this.executionId || instruction.kind !== outstanding.kind) return;
-    const expectedIds = outstanding.instructions.map((item) => item.id);
+    if (!outstanding || instruction.executionId !== this.executionId || instruction.kind !== outstanding.lease.kind) return;
+    const expectedIds = outstanding.lease.instructions.map((item) => item.id);
     if (expectedIds.length !== instruction.instructionIds.length || expectedIds.some((id) => !instruction.instructionIds.includes(id))) return;
 
     const session = this.ensureSession();
-    if (session) {
-      const lease: InstructionLease = {
-        leaseId: outstanding.leaseId,
-        sessionId: this.sessionId,
-        executionId: this.executionId,
-        kind: outstanding.kind,
-        instructions: outstanding.instructions as InstructionLease["instructions"],
-      };
-      markConsumed(lease, session);
-    }
-    this.outstandingLeases.delete(outstanding.leaseId);
+    if (session) markConsumed(outstanding.lease, session);
+    this.outstandingLeases.delete(instruction.leaseId);
+    outstanding.resolve();
   }
 
   private handleAgentEnd(_event: Extract<AgentEvent, { type: "agent_end" }>): void {

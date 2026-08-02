@@ -89,11 +89,16 @@ export interface IKiroTransport {
   /** Send Ctrl+C interrupt to the running Kiro CLI process. */
   sendInterrupt(reason?: string): Promise<void>;
 
-  /** Queue an instruction on the active Pi execution, when supported. */
-  steer?(content: string, lease: import("../spin-types.js").InstructionLease): Promise<string>;
+  /**
+   * Queue an instruction on the active Pi execution, when supported. #1531:
+   * per-lease acknowledgement — resolves only when the supplied lease reaches
+   * a terminal backend acknowledgement, never the execution-wide latch, and
+   * never returns response text.
+   */
+  steer?(content: string, lease: import("../spin-types.js").InstructionLease): Promise<void>;
 
-  /** Queue a follow-up on the active Pi execution, when supported. */
-  followUp?(content: string, lease: import("../spin-types.js").InstructionLease): Promise<string>;
+  /** Queue a follow-up on the active Pi execution, when supported. Same per-lease acknowledgement contract. */
+  followUp?(content: string, lease: import("../spin-types.js").InstructionLease): Promise<void>;
 
   /** Clean up resources (kill processes, etc.) */
   destroy(): void;

@@ -332,10 +332,15 @@ export interface SpinResult {
   result?: string;          // present when await: true
 }
 
-/** #1361: Per-execution continuation-capable driver for Spin's execution loop. */
+/** #1361: Per-execution continuation-capable driver for Spin's execution loop.
+ *  #1531: `steer` is a per-lease acknowledgement operation (`Promise<void>`).
+ *  It acknowledges only the supplied lease; it never produces the execution's
+ *  final response — the initial `send` promise remains the sole source of the
+ *  final text. Drivers without native steering simply omit `steer` and use the
+ *  sequential post-send continuation path. */
 export interface SpinExecutionDriver {
   send(prompt: string, image?: { mime: string; base64: string }, context?: import("./transport/kiro-transport.js").PromptRequestContext): Promise<string>;
-  steer?(content: string, lease: import("./spin-types.js").InstructionLease): Promise<string>;
+  steer?(content: string, lease: import("./spin-types.js").InstructionLease): Promise<void>;
   close(): Promise<void>;
   readonly ephemeral: boolean;
 }

@@ -438,9 +438,12 @@ async function steerFollowUp(ctx: PiAcceptanceContext): Promise<void> {
   hold1.release();
 
   const hold2 = releaseHold();
+  // The steered generation's current turn IS the steering instruction (the
+  // instruction is the latest user input in the active run); s1 remains in
+  // the context and is asserted via orderedContains.
   ctx.provider.enqueue({
     candidate: FIXTURE_MODEL_A,
-    expectation: { candidate: FIXTURE_MODEL_A, currentTurn: s1, orderedContains: [s1, steer1] },
+    expectation: { candidate: FIXTURE_MODEL_A, currentTurn: steer1, orderedContains: [s1, steer1] },
     action: { kind: "hold", release: hold2.promise },
   });
   await waitForProviderMarker(ctx.provider, FIXTURE_MODEL_A, steer1);
@@ -452,7 +455,7 @@ async function steerFollowUp(ctx: PiAcceptanceContext): Promise<void> {
 
   ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
     candidate: FIXTURE_MODEL_A,
-    currentTurn: s1,
+    currentTurn: steer2,
     orderedContains: [s1, steer1, steer2],
   }, a1));
   const steered = await ctx.tui.awaitMessage(TIMEOUTS.turnMs);

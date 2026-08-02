@@ -18,7 +18,7 @@ import { WorkerSupervisionService, validateWorkerRootCriteria } from "./worker-s
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow, cancelSessionExecution } from "./spin-sessions.js";
-import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expireInstructions } from "./session-instruction-queue.js";
+import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expireInstructions, restoreBeforeDelivery, subscribeSteerEvents } from "./session-instruction-queue.js";
 import { createExecutionTelemetryScope } from "./execution-telemetry.js";
 import type { OrcActivityFeed } from "./orc-activity-feed.js";
 import type { SessionOutputFeed } from "./session-output-feed.js";
@@ -779,27 +779,41 @@ export class Spin {
       };
       const executeWithSteering = async (): Promise<string> => {
         const driver = await resolveDriver();
-        session.steeringAccepting = true;
+        // #1531: for a native-steering driver, subscribe BEFORE opening
+        // steering acceptance so a same-tick steer.queued is never missed.
+        const pump = driver.steer ? this.createNativeSteeringPump(session, driver) : null;
+        if (!pump) session.steeringAccepting = true;
         try {
+          if (pump) {
+            // Native path (#1531): the initial send stays active through all
+            // Pi-generated turns and owns the final response. The event-driven
+            // pump leases instructions and hands them to the active execution
+            // while the send is in flight; its result never replaces the send
+            // result and a steering-only failure never replaces the send error.
+            try {
+              const result = (await driver.send(prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
+              await pump.settle();
+              return result;
+            } catch (sendErr) {
+              await pump.settle();
+              throw sendErr;
+            }
+          }
+          // Sequential path (ACP/tmux): no in-process agent queue; instructions
+          // queued during the send are drained as post-send continuations.
           let result = (await driver.send(prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
           for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
             const batch = leaseInstructions(session, "steer");
             if (!batch) { session.steeringAccepting = false; break; }
             try {
               const steeringPrompt = renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]);
-              if (driver.steer) {
-                result = (await driver.steer(steeringPrompt, batch)) || "(no output)";
-              } else {
-                // ACP/tmux have no in-process agent queue; preserve their
-                // continuation behavior while Pi uses its active Agent.
-                markDelivered(batch);
-                result = (await driver.send(steeringPrompt, undefined, {
-                  userId: spec.userId ?? userId,
-                  executionTelemetry,
-                  orcContext: session.orcContext,
-                })) || "(no output)";
-                markConsumed(batch, session);
-              }
+              markDelivered(batch);
+              result = (await driver.send(steeringPrompt, undefined, {
+                userId: spec.userId ?? userId,
+                executionTelemetry,
+                orcContext: session.orcContext,
+              })) || "(no output)";
+              markConsumed(batch, session);
             } catch (steerErr) {
               if (batch.instructions.some((instruction) => instruction.state === "delivered")) {
                 failAfterDelivery(batch, session, "steer_failed");
@@ -852,6 +866,86 @@ export class Spin {
       }
       return { sessionId: session.id, cardId };     // fire-and-forget: recorded, no unhandled rejection
     }
+  }
+
+  /**
+   * #1531: Event-driven, serialized native steering pump.
+   *
+   * Owns a scoped `subscribeSteerEvents` subscription for the current
+   * execution generation, FIFO leasing, the native-handoff round counter, and
+   * idempotent closing. It runs concurrently with the initial `driver.send()`
+   * promise; the send remains the sole source of the final response and the
+   * pump only acknowledges leases. No timers or polling — every kick is the
+   * synchronous `steer.queued` event, and async functions execute through
+   * their first await during the callback so the transport claims the active
+   * host before the queue operation returns.
+   */
+  private createNativeSteeringPump(session: ManagedSession, driver: SpinExecutionDriver): { settle: () => Promise<void> } {
+    const executionId = session.activeExecutionId ?? "";
+    let activeLease: import("./spin-types.js").InstructionLease | null = null;
+    let closing = false;
+    let rounds = 0;
+    let pumpPromise: Promise<void> | null = null;
+
+    const drain = async (): Promise<void> => {
+      while (!closing) {
+        if (activeLease) return;          // one native handoff at a time
+        if (rounds >= MAX_STEER_ROUNDS) { // round limit reached
+          session.steeringAccepting = false;
+          if (session.instructionQueue.length > 0) expireInstructions(session, "round_limit");
+          return;
+        }
+        const batch = leaseInstructions(session, "steer");
+        if (!batch) return;
+        rounds++;
+        if (rounds >= MAX_STEER_ROUNDS) session.steeringAccepting = false;
+        activeLease = batch;
+        try {
+          const steeringPrompt = renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]);
+          await driver.steer!(steeringPrompt, batch);
+        } catch (steerErr) {
+          // A steering-only failure publishes its acknowledgement and stays
+          // logged, but must never replace the send result/error. The lease is
+          // terminal once delivered; before delivery it is restored so closing
+          // or round-limit cleanup can expire it exactly once.
+          if (batch.instructions.some((i) => i.state === "delivered")) {
+            failAfterDelivery(batch, session, "steer_failed");
+          } else {
+            restoreBeforeDelivery(batch);
+          }
+          logWarn(TAG, `Native steering round ${rounds} failed: ${steerErr instanceof Error ? steerErr.message : String(steerErr)}`);
+        } finally {
+          activeLease = null;
+        }
+      }
+    };
+
+    const run = (): void => {
+      if (pumpPromise) return;
+      pumpPromise = drain().finally(() => { pumpPromise = null; });
+    };
+
+    // Subscribe BEFORE opening acceptance: an instruction accepted while the
+    // driver is still opening must be visible to this pump, never dropped.
+    const unsub = subscribeSteerEvents({ sessionId: session.id, executionId }, (event) => {
+      if (event.type !== "steer.queued" || closing) return;
+      if (activeLease) return;            // the running drain loop picks up successors
+      run();
+    });
+    session.steeringAccepting = true;
+
+    return {
+      settle: async () => {
+        if (closing) return;              // idempotent — exactly one cleanup
+        closing = true;
+        session.steeringAccepting = false;
+        if (pumpPromise) {
+          try { await pumpPromise; } catch { /* drain never rejects */ }
+        }
+        if (session.instructionQueue.length > 0) expireInstructions(session, "execution_ended");
+        unsub();
+      },
+    };
   }
 
   private async finishSpin(

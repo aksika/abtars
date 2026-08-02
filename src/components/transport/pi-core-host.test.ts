@@ -280,4 +280,119 @@ describe("PiCoreExecutionHost", () => {
     expect(host.state).toBe(stateBefore);
     expect(host.isSettled).toBe(true);
   });
+
+  // ── #1531: per-lease deferred steering acknowledgement ──────────────────
+
+  it("steer delivers per-lease and resolves on the matching instruction message_end", async () => {
+    const { agent } = makeMockAgent();
+    // The queue must be the SAME array the lease references: in production the
+    // instructions live in the session queue and markDelivered/markConsumed
+    // mutate them in place.
+    const lease = makeFakeLease({ sessionId: "session_1" });
+    const sessionRef = { instructionQueue: lease.instructions as never, id: "session_1" };
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      session: sessionRef,
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+    await host.start(loaded).catch(() => {});
+    let steered = false;
+    const steerP = host.steer("focus on memory", lease).then(() => { steered = true; });
+
+    // Delivered immediately before agent.steer.
+    expect((lease.instructions as unknown as Array<{ state: string }>)[0]?.state).toBe("delivered");
+    expect(agent.steer).toHaveBeenCalledTimes(1);
+    let resolved = false;
+    steerP.then(() => { resolved = true; });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolved).toBe(false);
+
+    // The matching instruction message_end resolves the lease.
+    const instructionMsg = (agent.steer as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    await (host as any).handleEvent({ type: "message_end", message: instructionMsg });
+    await steerP;
+    expect(steered).toBe(true);
+    expect((sessionRef.instructionQueue as unknown[]).length).toBe(0);
+    expect(host.isSettled).toBe(false);
+  });
+
+  it("steer rejects explicitly when the host is not running", async () => {
+    const host = new PiCoreExecutionHost(defaultOpts);
+    await expect(host.steer("x", makeFakeLease())).rejects.toThrow(/Cannot steer in state created/);
+  });
+
+  it("steer rejects a lease belonging to another session (generation isolation)", async () => {
+    const { agent } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    await host.start(loaded).catch(() => {});
+    await expect(host.steer("x", makeFakeLease({ sessionId: "other_session" })))
+      .rejects.toThrow(/belongs to session other_session/);
+    expect(agent.steer).not.toHaveBeenCalled();
+  });
+
+  it("steer rejects when another lease is outstanding — no silent acceptance", async () => {
+    const { agent } = makeMockAgent();
+    const firstLease = makeFakeLease({ sessionId: "session_1", leaseId: "lease_1" });
+    const sessionRef = { instructionQueue: firstLease.instructions as never, id: "session_1" };
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      session: sessionRef,
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+    await host.start(loaded).catch(() => {});
+
+    const first = host.steer("first", firstLease);
+    expect(agent.steer).toHaveBeenCalledTimes(1);
+    await expect(host.steer("second", makeFakeLease({ sessionId: "session_1", leaseId: "lease_2" })))
+      .rejects.toThrow(/outstanding lease lease_1/);
+    expect(agent.steer).toHaveBeenCalledTimes(1);
+
+    // The first lease still completes on its message_end.
+    const instructionMsg = (agent.steer as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    await (host as any).handleEvent({ type: "message_end", message: instructionMsg });
+    await first;
+  });
+
+  it("settlement fails and rejects every outstanding lease exactly once", async () => {
+    const { agent } = makeMockAgent();
+    const doomedLease = makeFakeLease({ sessionId: "session_1" });
+    const sessionRef = { instructionQueue: doomedLease.instructions as never, id: "session_1" };
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      session: sessionRef,
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+    await host.start(loaded).catch(() => {});
+
+    const steerP = host.steer("doomed", doomedLease);
+    host.cancel();
+    await expect(steerP).rejects.toThrow(/Host settled before lease/);
+    expect((doomedLease.instructions as unknown as Array<{ state: string }>)[0]?.state).toBe("failed");
+    expect((sessionRef.instructionQueue as unknown[]).length).toBe(0);
+
+    // Subsequent steers reject explicitly — nothing silently accepted.
+    await expect(host.steer("after", makeFakeLease({ sessionId: "session_1" })))
+      .rejects.toThrow(/Cannot steer in state settled/);
+  });
+
+  it("followUp uses the same per-lease deferred machinery", async () => {
+    const { agent } = makeMockAgent();
+    const followLease = makeFakeLease({ sessionId: "session_1", kind: "followUp" });
+    const sessionRef = { instructionQueue: followLease.instructions as never, id: "session_1" };
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      session: sessionRef,
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+    await host.start(loaded).catch(() => {});
+
+    const followP = host.followUp("continue", followLease);
+    expect((followLease.instructions as unknown as Array<{ state: string }>)[0]?.state).toBe("delivered");
+    expect(agent.followUp).toHaveBeenCalledTimes(1);
+    const instructionMsg = (agent.followUp as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    await (host as any).handleEvent({ type: "message_end", message: instructionMsg });
+    await followP;
+    expect((sessionRef.instructionQueue as unknown[]).length).toBe(0);
+  });
 });
