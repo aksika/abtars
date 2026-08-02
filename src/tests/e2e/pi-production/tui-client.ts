@@ -105,6 +105,12 @@ export class TuiAcceptanceClient {
 
   private receivedFrames: string[] = [];
 
+  /** Send one inbound user message or command without awaiting a reply. */
+  sendInput(text: string): void {
+    if (!this.socket) throw new Error("TUI client not connected");
+    this.send({ t: "input", text });
+  }
+
   /** Send one inbound user message or command; await the bounded final reply. */
   async sendAndAwaitReply(text: string, timeoutMs: number = TIMEOUTS.turnMs): Promise<TuiMessage> {
     if (!this.socket) throw new Error("TUI client not connected");
@@ -142,7 +148,10 @@ export class TuiAcceptanceClient {
             streamText += frame.delta;
             return undefined;
           case "chunk-end": {
-            if (frame.reason === "error" || frame.reason === "cancelled") {
+            // Steering aborts intermediate generations by design — a
+            // "cancelled" end is expected mid-turn and is not a failure of
+            // the awaited final reply. Real stream errors still fail.
+            if (frame.reason === "error") {
               throw new Error(`TUI stream ended with reason ${frame.reason}`);
             }
             if (frame.reason === "truncated") {
@@ -193,9 +202,12 @@ export class TuiAcceptanceClient {
   async steer(text: string): Promise<Extract<TuiServerFrame, { t: "steer-ack" }>> {
     if (!this.socket || !this.attachedSessionId) throw new Error("TUI client not attached");
     const instructionId = `pi-e2e-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    // The adapter acks with the SERVER-generated instruction id (queueInstruction),
+    // not the client-sent one — match the next steer-ack frame; steers are
+    // awaited serially per scenario so the first ack is this steer's.
     const ackPromise = waitFor(
       async () => {
-        const f = this.nextFrame((x) => x.t === "steer-ack" && x.instructionId === instructionId);
+        const f = this.nextFrame((x) => x.t === "steer-ack");
         return f as Extract<TuiServerFrame, { t: "steer-ack" }> | undefined;
       },
       TIMEOUTS.holdSettleMs,

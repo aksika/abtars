@@ -128,4 +128,6 @@ export interface ProviderSummary {
   roleCounts: Record<string, number>;
   toolCalls: string[];
   markerHashes: string[];
+  /** Bounded synthetic user-message texts for substring marker matching. */
+  markerTexts: string[];
 }

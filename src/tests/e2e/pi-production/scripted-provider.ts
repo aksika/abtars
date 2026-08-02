@@ -131,6 +131,9 @@ export class ScriptedProvider {
       roleCounts: request.roleCounts,
       toolCalls: request.toolCalls,
       markerHashes: request.markerHashes,
+      // Bounded synthetic user-message texts (markers only — the fixture
+      // never receives real content) so scenarios can substring-match.
+      markerTexts: request.userTexts.map((t) => t.slice(0, 300)),
     };
 
     const queue = this.scripts.get(request.model);
@@ -189,12 +192,30 @@ export class ScriptedProvider {
         await this.streamToolCall(res, script.action.name, script.action.arguments);
         break;
       case "hold": {
+        // Establish an active STREAMING generation first: Pi's steering only
+        // interrupts a generation that is already streaming (the agent must
+        // have seen a first delta). A held connection with no data never
+        // enters streaming, so a steer instruction is silently dropped and
+        // the turn hangs. The initial delta is a synthetic marker-free
+        // placeholder the host immediately replaces on steer.
+        this.sseStart(res);
+        this.sseChunk(res, request.model, "…");
         await script.action.release;
         if (res.writableEnded) {
           summary.aborted = true;
           return;
         }
-        // Released while still open — send the scripted text if provided.
+        // Released while still open — close the generation cleanly so the
+        // host can settle and a steering/follow-up continuation can proceed.
+        res.write(`data: ${JSON.stringify({
+          id: `chatcmpl-fixture-${this.seq}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: request.model,
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        })}\n\n`);
+        res.write("data: [DONE]\n\n");
+        res.end();
         break;
       }
     }
@@ -208,10 +229,16 @@ export class ScriptedProvider {
 
   private popScript(queue: ProviderScript[] | undefined, request: ReturnType<ScriptedProvider["normalize"]>): ProviderScript | undefined {
     if (!queue || queue.length === 0) return undefined;
-    // Prefer the first queued script whose expectation fully matches the
-    // request (interleaved generations from concurrent sessions on the same
-    // candidate). Fall back to FIFO so a mismatch surfaces loudly as an
-    // expectation failure rather than a silent reorder.
+    // Unconstrained scripts (no expectation) are consumed FIFO by the next
+    // request on this candidate — the smoke one-shot pattern.
+    const unconstrainedIndex = queue.findIndex((s) => !s.expectation);
+    if (unconstrainedIndex >= 0) return queue.splice(unconstrainedIndex, 1)[0];
+    // Constrained scripts are consumed only by a request whose semantic
+    // expectation fully matches. A request that matches nothing (a boot
+    // greeting, a fail-closed turn that never reached the provider, or any
+    // other unexpected turn) is unscripted and MUST NOT consume queued
+    // scripts — otherwise one stray turn mis-pops a later scenario's script
+    // and the expectation failure poisons the candidate health registry.
     for (let i = 0; i < queue.length; i++) {
       const script = queue[i]!;
       if (!script.expectation) continue;
@@ -222,7 +249,7 @@ export class ScriptedProvider {
         // not this script — keep looking
       }
     }
-    return queue.shift();
+    return undefined;
   }
 
   // ── Request normalization (semantic, content-safe) ────────────────────────
@@ -233,6 +260,7 @@ export class ScriptedProvider {
     roleCounts: Record<string, number>;
     toolCalls: string[];
     markerHashes: string[];
+    userTexts: string[];
   } {
     const rec = payload as Record<string, unknown>;
     const model = typeof rec["model"] === "string" ? rec["model"] : "unknown";
@@ -273,11 +301,17 @@ export class ScriptedProvider {
       messages.push({ role: "user", text: extractText(m["content"]) });
     }
 
-    const markerHashes = messages
+    // Marker hashes normalize away the bridge's prompt decorations (leading
+    // `[timestamp]` prefix) so scenarios can wait for their synthetic markers
+    // on the augmented current turn. History rows are stored raw and match
+    // unchanged. Substring validation below is unaffected.
+    const normalizedText = (text: string): string => text.replace(/^\[[^\]]*\]\s*/, "");
+    const userTexts = messages
       .filter((m) => m.role === "user")
-      .map((m) => createHash("sha256").update(m.text).digest("hex").slice(0, 16));
+      .map((m) => normalizedText(m.text));
+    const markerHashes = userTexts.map((t) => createHash("sha256").update(t).digest("hex").slice(0, 16));
 
-    return { model, messages, roleCounts, toolCalls, markerHashes };
+    return { model, messages, roleCounts, toolCalls, markerHashes, userTexts };
   }
 
   // ── Semantic expectation validation ───────────────────────────────────────

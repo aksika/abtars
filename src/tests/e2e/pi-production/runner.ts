@@ -171,7 +171,7 @@ async function runLane(
     bridgeEnv = config.bridgeEnv;
 
     // 4. Spawn the built bridge entry point.
-    bridge = await spawnBridge(opts.abtarsRoot, logDir, bridgeEnv, lane);
+    bridge = await spawnBridge(opts.abtarsRoot, logDir, bridgeEnv, lane, provider!);
 
     // 5. TUI readiness + one smoke exchange through the real Pi/SSE path.
     tui = new TuiAcceptanceClient(config.abtarsHome);
@@ -185,9 +185,10 @@ async function runLane(
     }
 
     // 6. Scenarios serially against the isolated state.
+    const laneProvider = provider!;
     const restartBridge = async (): Promise<SpawnedChild> => {
       if (bridge && !bridge.exited) await bridge.terminate();
-      bridge = await spawnBridge(opts.abtarsRoot, logDir, bridgeEnv, lane);
+      bridge = await spawnBridge(opts.abtarsRoot, logDir, bridgeEnv, lane, laneProvider);
       return bridge;
     };
 
@@ -334,7 +335,9 @@ async function spawnBridge(
   logDir: string,
   env: NodeJS.ProcessEnv,
   lane: PiAcceptanceLane,
+  provider: ScriptedProvider,
 ): Promise<SpawnedChild> {
+  const preBootRequests = provider.summaries.length;
   const bridge = new SpawnedChild({
     execPath: process.execPath,
     args: [resolve(abtarsRoot, "dist/main.js")],
@@ -355,6 +358,15 @@ async function spawnBridge(
     },
     TIMEOUTS.bridgeReadinessMs,
     "bridge TUI socket",
+    () => `${bridge.stdoutTail}\n${bridge.stderrTail}`,
+  );
+  // The fresh bridge fires its autonomous boot greeting turn ([SESSION START])
+  // against the provider. Wait until that request has been observed so the
+  // greeting can never consume a scenario script enqueued right after boot.
+  await waitFor(
+    async () => (provider.summaries.length > preBootRequests ? true : undefined),
+    TIMEOUTS.bridgeReadinessMs,
+    "bridge boot greeting provider request",
     () => `${bridge.stdoutTail}\n${bridge.stderrTail}`,
   );
   return bridge;
