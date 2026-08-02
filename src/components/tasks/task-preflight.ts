@@ -25,6 +25,10 @@ export interface ArtifactBaseline {
   sha256?: string;
 }
 
+export interface TaskToolRegistry {
+  getToolDescriptor(name: string): { processDependency?: { executable: string; probeArgs: string[] } } | undefined;
+}
+
 export type TaskPreflightResult =
   | { ok: true; report?: ResolvedReportContract; artifactBaseline?: ArtifactBaseline }
   | { ok: false; category: "definition_failed"; code: string; safeDetail: string };
@@ -53,7 +57,7 @@ function isBeneathApprovedRoot(resolved: string): boolean {
 export function preflightTask(
   entry: ScheduledTask & { kind: "agent" },
   executionScope: ToolExecutionScope,
-  toolRegistry?: { getToolDescriptor: (name: string) => { processDependency?: { executable: string; probeArgs: string[] } } | undefined },
+  toolRegistry?: TaskToolRegistry,
 ): TaskPreflightResult {
   const taskId = entry.id;
   const contract = entry.report;

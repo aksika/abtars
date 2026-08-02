@@ -89,7 +89,7 @@ describe("getToolDefinitions", () => {
 describe("getToolDescriptor (#1535 preflight registry boundary)", () => {
   it("returns a descriptor for every registered tool", () => {
     for (const tool of getToolDefinitions()) {
-      expect(getToolDescriptor(tool.name)).toEqual({});
+      expect(getToolDescriptor(tool.name)).toBe(tool);
     }
   });
 

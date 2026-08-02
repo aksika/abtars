@@ -200,7 +200,7 @@ function writeFixtureTasks(): void {
       artifact: join(TEST_HOME, "workspace", "report-task", "report.md"),
       requiredSections: ["## Summary"],
       minBytes: 100,
-      requires: { files: [], executables: ["curl"], tools: [] },
+      requires: { files: [], executables: ["curl"], tools: ["execute_bash"] },
     } : undefined };
     return f;
   });
@@ -562,9 +562,20 @@ describe("#1520 scheduler E2E — journey 9: removed surfaces, canonical probes,
     const ok = preflight.preflightTask({
       id: "probe-task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
       schedule: "* * * * *", enabled: true, priority: "medium", delivery: "report", chatId: "1",
-      report: { artifact: join(TEST_HOME, "workspace", "probe-task", "r.md"), requiredSections: ["## X"], minBytes: 100, requires: { files: [], executables: ["curl"], tools: [] } },
-    }, scope, undefined);
+      report: { artifact: join(TEST_HOME, "workspace", "probe-task", "r.md"), requiredSections: ["## X"], minBytes: 100, requires: { files: [], executables: ["curl"], tools: ["execute_bash"] } },
+    }, scope, { getToolDescriptor: toolRegistry.getToolDescriptor });
     expect(ok.ok).toBe(true);
+
+    const removedTool = preflight.preflightTask({
+      id: "removed-tool-task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
+      schedule: "* * * * *", enabled: true, priority: "medium", delivery: "report", chatId: "1",
+      report: { artifact: join(TEST_HOME, "workspace", "removed-tool-task", "r.md"), requiredSections: ["## X"], minBytes: 100, requires: { files: [], executables: [], tools: ["web_browse"] } },
+    }, scope, { getToolDescriptor: toolRegistry.getToolDescriptor });
+    expect(removedTool.ok).toBe(false);
+    if (!removedTool.ok) {
+      expect(removedTool.code).toBe("required_tool_unregistered");
+      expect(removedTool.safeDetail).toBe("required tool not registered: web_browse");
+    }
 
     const missing = preflight.preflightTask({
       id: "probe-task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },

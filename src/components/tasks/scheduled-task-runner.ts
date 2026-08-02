@@ -4,6 +4,7 @@ import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
 import { updateActiveRun } from "./task-state-store.js";
 import { preflightTask, validateReportArtifact } from "./task-preflight.js";
+import type { TaskToolRegistry } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
 import { createExecutionScope } from "./task-package.js";
@@ -429,7 +430,7 @@ async function runWithDeadline(
   });
 }
 
-async function getToolRegistry(): Promise<{ getToolDescriptor: (name: string) => { processDependency?: { executable: string; probeArgs: string[] } } | undefined } | undefined> {
+async function getToolRegistry(): Promise<TaskToolRegistry | undefined> {
   // #1535: preflight verifies against the real tool registry. The earlier
   // pi-core-host/pi-core-tools branches looked for a getToolDescriptor export
   // that never existed, so any report task with requires.tools failed

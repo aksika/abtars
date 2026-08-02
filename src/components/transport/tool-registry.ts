@@ -37,6 +37,8 @@ export type ToolDefinition = {
   readonly name: string;
   readonly description: string;
   readonly parameters: Record<string, unknown>;
+  /** Optional side-effect-free process probe consumed by scheduled preflight. */
+  readonly processDependency?: { executable: string; probeArgs: string[] };
   // Implementations receive the provider's JSON object unchanged. Legacy
   // command-backed tools normalize individual values at their own boundary.
   execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<string>;
@@ -662,11 +664,9 @@ if (process.env["ARTIFACT_S3_ENDPOINT"]) {
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 
-/** #1535: preflight tool verification. Returns {} for registered tools,
- *  undefined otherwise. processDependency is not declared by any current
- *  tool; the probe path stays dormant until a tool declares one. */
-export function getToolDescriptor(name: string): { processDependency?: { executable: string; probeArgs: string[] } } | undefined {
-  return ALL_TOOLS.some(t => t.name === name) ? {} : undefined;
+/** #1535: preflight tool verification against the canonical definitions. */
+export function getToolDescriptor(name: string): ToolDefinition | undefined {
+  return ALL_TOOLS.find(t => t.name === name);
 }
 
 export function getToolSchemas(policy?: SandboxPolicy): Array<{ type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }> {
