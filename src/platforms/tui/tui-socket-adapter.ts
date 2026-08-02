@@ -802,8 +802,45 @@ export class TuiSocketAdapter implements PlatformAdapter {
     });
   }
 
+  /**
+   * #1533: When the attached pipeline session has ended (e.g. /reset ended it
+   * and Spin reconciled a replacement Main), rebind this attachment to the
+   * replacement through commitAttachment() before the triggering input is
+   * routed. The rebind emits the normal ready/status frames and advances the
+   * attachment generation so feed subscriptions change atomically.
+   *
+   * Returns "ok" when the caller may continue routing the input (possibly
+   * against the rebound session), or "dropped" when the input was consumed by
+   * a deterministic system error because the ended session cannot be resolved
+   * to a replacement owner/platform. Live pipeline attachments, Orc
+   * attachments, and attachments owned by another user are never moved.
+   */
+  private reconcileEndedPipelineAttachment(): "ok" | "dropped" {
+    if (this.mode !== "pipeline" || !this.attachedSessionId) return "ok";
+    const spin = this.deps.spin;
+    const session = spin.getSessionById(this.attachedSessionId);
+    if (!session) {
+      this._push({ t: "message", role: "system", markdown: "⚠️ Attached session is gone — reattach with /session N." });
+      return "dropped";
+    }
+    if (session.status !== "ended") return "ok";
+    // #1533: the replacement is the ended session's owner + home platform's
+    // active session (never the inbound TUI platform, never a guess).
+    const replacement = spin.getActiveSession(session.userId, session.platform);
+    if (!replacement || replacement.status === "ended" || replacement.id === session.id) {
+      this._push({ t: "message", role: "system", markdown: "⚠️ Attached session ended and no replacement is available — reattach with /session N." });
+      return "dropped";
+    }
+    logInfo(TAG, `Reconcile ended attachment ${session.id} → ${replacement.id}`);
+    this.commitAttachment(replacement.id, "pipeline", spin);
+    return "ok";
+  }
+
   private async _handleInput(text: string): Promise<void> {
     if (!this.attachedSessionId) return;
+    // #1533: rebind a stale pipeline attachment before any input is routed —
+    // exactly once (subsequent inputs target the live replacement).
+    if (this.reconcileEndedPipelineAttachment() === "dropped") return;
     if (this.mode === "orc") {
       if (text.startsWith("/steer ")) {
         const body = text.slice("/steer ".length).trim();

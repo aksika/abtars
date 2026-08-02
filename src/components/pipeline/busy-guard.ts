@@ -30,11 +30,11 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
       return;
     }
 
-    // /stop or /ctrlc — hard interrupt
+    // /stop or /ctrlc — hard interrupt (alternate compositions without the
+    // command middleware; #1534: session-aware, boot transport as fallback)
     if (lower === "/stop" || lower === "/ctrlc") {
       logInfo("busy-guard", `STOP interrupt for ${activeId}`);
-      await ctx.deps.transport.sendInterrupt();
-      entry.busy = false;
+      await spin.interruptSession(activeId!, ctx.deps.transport, "operator");
       try { await adapter.sendMessage(msg.channelId, "🛑 Stopped.", { threadId: msg.threadId }); } catch { /* */ }
       ctx.handled = true;
       return;
@@ -92,8 +92,7 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
     // Legacy: bare "wait" — treat as /stop for backward compat
     if (lower === "wait") {
       logInfo("busy-guard", `Legacy WAIT interrupt for ${activeId}`);
-      await ctx.deps.transport.sendInterrupt();
-      entry.busy = false;
+      await spin.interruptSession(activeId!, ctx.deps.transport, "operator");
       try { await adapter.sendMessage(msg.channelId, "🛑 Stopped.", { threadId: msg.threadId }); } catch { /* */ }
       ctx.handled = true;
       return;

@@ -9,6 +9,7 @@ import { SpinDispatchAdmissionError } from "./spin-types.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanQueuedDispatchOrder, kanbanGetCard, isUnblocked, resolveRootId, checkWorkerSlotForProject } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
+import type { CancelReason } from "./swarm-executor-types.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
 import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver, QueuedSessionInstruction } from "./spin-types.js";
@@ -227,6 +228,27 @@ export class Spin {
 
   getSessionById(sessionId: string): ManagedSession | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  /**
+   * #1534: Interrupt the execution owned by the selected session, resolving
+   * the session's own transport first. The supplied fallback (boot/pipeline
+   * transport) is used only when the session is absent or transportless, so
+   * interactive turns are cancelled on the transport that actually owns
+   * them. The session busy flag is cleared only after the interrupt resolves
+   * successfully — an interrupt failure must not falsely report idle. This
+   * deliberately does NOT call cancelSessionExecution(): that is a terminal
+   * lifecycle operation that also releases the session's transport.
+   */
+  async interruptSession(
+    sessionId: string,
+    fallback: IKiroTransport,
+    reason: CancelReason = "operator",
+  ): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    const target = session?.transport ?? fallback;
+    await target.sendInterrupt(reason);
+    if (session) session.busy = false;
   }
 
   /** #1336: Look up a session by global shortIndex across all platforms. Returns undefined if not found or ended. */

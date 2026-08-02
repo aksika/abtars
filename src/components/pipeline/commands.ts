@@ -16,6 +16,10 @@ const BANG_PREFIX = /^[!！ǃ❗❕‼⁉]+/u;
 
 const INTERRUPT_COMMANDS = new Set(["/stop", "/ctrlc", "/reset", "/restart"]);
 const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/reset", "/restart", "/compact", "/coding", "/default"]);
+// #1534: /stop and /ctrlc are interrupt-owned by their handler (handleStop),
+// which performs exactly one session-aware interrupt. Only /reset and
+// /restart pre-interrupt the busy effective session before their handler.
+const PRE_HANDLER_INTERRUPT_COMMANDS = new Set(["/reset", "/restart"]);
 
 export const commandMiddleware: Middleware = async (ctx, next) => {
   const { msg, deps } = ctx;
@@ -46,11 +50,13 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
   // interrupt/busy checks so TUI targeting a cross-platform session stops
   // the correct conversation.
   const effectiveId = ctx.sessionId ?? sessionManager.getActiveSessionId(msg.userId, msg.platform);
-  if (INTERRUPT_COMMANDS.has(cmd) && spin.getSessionById(effectiveId)?.busy) {
+  // #1534: /stop and /ctrlc interrupt inside their handler (handleStop);
+  // the busy effective session is pre-interrupted here only for /reset and
+  // /restart, through the session-aware Spin operation (session transport
+  // first, boot transport only as fallback).
+  if (PRE_HANDLER_INTERRUPT_COMMANDS.has(cmd) && spin.getSessionById(effectiveId)?.busy) {
     logInfo("commands", `Interrupt command ${cmd} while busy — stopping current response`);
-    await transport.sendInterrupt();
-    const s = spin.getSessionById(effectiveId);
-    if (s) s.busy = false;
+    await spin.interruptSession(effectiveId, transport, "operator");
   }
 
   // Non-interrupt destructive commands while busy: defer to busy guard (will be queued)

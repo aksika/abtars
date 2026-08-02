@@ -33,6 +33,12 @@ async function mockSpin(session: ManagedSession) {
   vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
 }
 
+async function mockSpinInterrupt() {
+  const spinMod = await import("../spin.js");
+  const spy = vi.spyOn(spinMod.spin, "interruptSession").mockResolvedValue(undefined);
+  return { spy, spinMod };
+}
+
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe("busyGuardMiddleware", () => {
@@ -64,13 +70,28 @@ describe("busyGuardMiddleware", () => {
     expect(ctx.adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("coffee"), expect.any(Object));
   });
 
-  it("bare wait interrupts and stops (legacy compat)", async () => {
+  it("bare wait interrupts through the session-aware Spin operation (legacy compat)", async () => {
     const ctx = makeCtx({ busy: true }, { text: "wait" });
     ctx.text = "wait";
     await mockSpin(ctx._session);
+    const { spy } = await mockSpinInterrupt();
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
-    expect(ctx.deps.transport.sendInterrupt).toHaveBeenCalled();
+    expect(spy).toHaveBeenCalledWith("1_A_01", ctx.deps.transport, "operator");
+    expect(ctx.deps.transport.sendInterrupt).not.toHaveBeenCalled();
+    expect(ctx.handled).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("/stop interrupts the busy session through the session-aware Spin operation (#1534)", async () => {
+    const ctx = makeCtx({ busy: true }, { text: "/stop" });
+    ctx.text = "/stop";
+    await mockSpin(ctx._session);
+    const { spy } = await mockSpinInterrupt();
+    const next = vi.fn();
+    await busyGuardMiddleware(ctx, next);
+    expect(spy).toHaveBeenCalledWith("1_A_01", ctx.deps.transport, "operator");
+    expect(ctx.deps.transport.sendInterrupt).not.toHaveBeenCalled();
     expect(ctx.handled).toBe(true);
     expect(next).not.toHaveBeenCalled();
   });

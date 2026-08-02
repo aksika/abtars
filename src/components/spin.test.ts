@@ -263,4 +263,66 @@ describe("Spin — unified session router (#943)", () => {
       expect(result).toContain("not found on telegram");
     });
   });
+
+  describe("interruptSession (#1534)", () => {
+    it("interrupts the session's own transport, not the fallback, and clears busy", async () => {
+      const session = spin.getActiveSession("aksika", "tui");
+      const sessionTransport = mockTransport();
+      session.transport = sessionTransport;
+      session.busy = true;
+      const fallback = mockTransport();
+
+      await spin.interruptSession(session.id, fallback, "operator");
+
+      expect(sessionTransport.sendInterrupt).toHaveBeenCalledOnce();
+      expect(sessionTransport.sendInterrupt).toHaveBeenCalledWith("operator");
+      expect(fallback.sendInterrupt).not.toHaveBeenCalled();
+      expect(session.busy).toBe(false);
+    });
+
+    it("uses the fallback transport for a transportless session and clears busy", async () => {
+      const session = spin.getActiveSession("aksika", "tui");
+      session.transport = undefined;
+      session.busy = true;
+      const fallback = mockTransport();
+
+      await spin.interruptSession(session.id, fallback);
+
+      expect(fallback.sendInterrupt).toHaveBeenCalledOnce();
+      expect(fallback.sendInterrupt).toHaveBeenCalledWith("operator");
+      expect(session.busy).toBe(false);
+    });
+
+    it("uses the fallback transport when the session is absent", async () => {
+      const fallback = mockTransport();
+      await spin.interruptSession("missing_session", fallback);
+      expect(fallback.sendInterrupt).toHaveBeenCalledOnce();
+    });
+
+    it("does not clear busy when the interrupt rejects", async () => {
+      const session = spin.getActiveSession("aksika", "tui");
+      const sessionTransport = mockTransport();
+      sessionTransport.sendInterrupt = vi.fn().mockRejectedValue(new Error("interrupt failed"));
+      session.transport = sessionTransport;
+      session.busy = true;
+
+      await expect(spin.interruptSession(session.id, mockTransport())).rejects.toThrow("interrupt failed");
+      expect(session.busy).toBe(true);
+    });
+
+    it("preserves the session, its transport, and its queue", async () => {
+      const session = spin.getActiveSession("aksika", "tui");
+      const sessionTransport = mockTransport();
+      session.transport = sessionTransport;
+      session.busy = true;
+      session.queue.push({ msg: {}, adapter: {} } as never);
+
+      await spin.interruptSession(session.id, mockTransport());
+
+      expect(spin.getSessionById(session.id)).toBe(session);
+      expect(session.transport).toBe(sessionTransport);
+      expect(session.queue.length).toBe(1);
+      expect(session.status).not.toBe("ended");
+    });
+  });
 });

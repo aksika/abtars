@@ -8,7 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { TIMEOUTS, type PiAcceptanceLane, type ProviderScript, type RequestExpectation } from "./contracts.js";
+import { TIMEOUTS, type PiAcceptanceLane, type ProviderScript, type RequestExpectation, type ProviderSummary } from "./contracts.js";
 import { ScriptedProvider } from "./scripted-provider.js";
 import { TuiAcceptanceClient } from "./tui-client.js";
 import { OwnerControllerClient } from "./controller-client.js";
@@ -112,6 +112,30 @@ async function waitForProviderMarker(provider: ScriptedProvider, candidate: stri
     // wraps markers in decorations (timestamp prefix, steering instructions)
     // that break exact-hash equality.
     async () => provider.summariesFor(candidate).some((s) => s.markerTexts.some((t) => t.includes(marker))),
+    timeoutMs,
+    `provider request carrying marker ${marker.slice(0, 40)}`,
+  );
+}
+
+/**
+ * Wait until the provider has observed a request carrying the marker on
+ * either fixture candidate and return that request's summary. The lane's
+ * session model is not static: after the serial model-switch scenario the
+ * config remains on fixture-model-b, otherwise the lane is on
+ * fixture-model-a. The request lands on exactly one of them.
+ */
+async function waitForHeldMarkerSummary(provider: ScriptedProvider, marker: string, timeoutMs: number = TIMEOUTS.turnMs): Promise<ProviderSummary> {
+  return waitFor(
+    async () => {
+      for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B]) {
+        const summaries = provider.summariesFor(candidate);
+        for (let i = summaries.length - 1; i >= 0; i--) {
+          const s = summaries[i]!;
+          if (s.markerTexts.some((t) => t.includes(marker))) return s;
+        }
+      }
+      return undefined;
+    },
     timeoutMs,
     `provider request carrying marker ${marker.slice(0, 40)}`,
   );
@@ -527,14 +551,20 @@ async function cancellation(ctx: PiAcceptanceContext): Promise<void> {
   const c2 = ctx.markers.next("C2");
   const a2 = ctx.markers.next("C2A");
 
+  // The lane's session model depends on prior serial scenarios: after
+  // model-switch the config remains on fixture-model-b, otherwise the lane
+  // is on fixture-model-a. Script the hold on both — the request lands on
+  // exactly one — so C1 always reaches the provider and the abort bound
+  // stays meaningful regardless of which model the session currently uses.
   const hold = releaseHold();
-  ctx.provider.enqueue({ candidate: FIXTURE_MODEL_A, expectation: { candidate: FIXTURE_MODEL_A, currentTurn: c1 }, action: { kind: "hold", release: hold.promise } });
+  for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B]) {
+    ctx.provider.enqueue({ candidate, expectation: { candidate, currentTurn: c1 }, action: { kind: "hold", release: hold.promise } });
+  }
 
   // Fire the held turn without awaiting; /stop interrupts it.
   ctx.tui.sendInput(c1);
-  await waitForProviderMarker(ctx.provider, FIXTURE_MODEL_A, c1);
-  const held = ctx.provider.summariesFor(FIXTURE_MODEL_A).at(-1);
-  if (!held) throw new Error("held request summary missing");
+  const held = await waitForHeldMarkerSummary(ctx.provider, c1);
+  const servedCandidate = held.candidate;
 
   ctx.tui.sendInput("/stop");
 
@@ -545,17 +575,21 @@ async function cancellation(ctx: PiAcceptanceContext): Promise<void> {
     "held provider request abort",
   );
 
-  // Consume the bounded abort/error message the cancelled turn may surface
-  // (chunk-end "cancelled" frames and error messages both count), so it can
-  // never be misattributed to the continuation turn.
-  try {
-    await ctx.tui.awaitMessage(3_000);
-  } catch {
-    // no user-visible abort message — fine
+  // Consume the bounded abort/error messages the cancelled turn may surface —
+  // the /stop acknowledgement ("🛑 Ctrl+C sent."), chunk-end "cancelled"
+  // frames, and the cancelled turn's empty settle reply all count — so none
+  // can ever be misattributed to the continuation turn. Drain until a
+  // bounded window passes without a frame.
+  for (let i = 0; i < 4; i++) {
+    try {
+      await ctx.tui.awaitMessage(1_000);
+    } catch {
+      break;
+    }
   }
 
-  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
-    candidate: FIXTURE_MODEL_A,
+  ctx.provider.enqueue(textScript(servedCandidate, {
+    candidate: servedCandidate,
     currentTurn: c2,
     orderedContains: [c1],
     exactlyOnce: [c2],

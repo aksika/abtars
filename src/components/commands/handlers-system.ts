@@ -91,10 +91,11 @@ export async function handleWait(text: string, ctx: CommandContext): Promise<boo
 }
 
 export async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> {
-  await ctx.transport.sendInterrupt();
   const { spin } = await import("../spin.js");
-  const s = spin.getSessionById(ctx.sessionKey);
-  if (s) s.busy = false;
+  // #1534: interrupt the selected session's own transport — the boot/pipeline
+  // transport is only a fallback when the session has none. Busy clears after
+  // the interrupt resolves successfully; a rejected interrupt surfaces.
+  await spin.interruptSession(ctx.sessionKey, ctx.transport, "operator");
   await ctx.reply("🛑 Ctrl+C sent.");
   logInfo(TAG, "Ctrl+C interrupt sent");
   return true;

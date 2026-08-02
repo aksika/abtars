@@ -281,6 +281,18 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           });
 
           let telemetryEnded = false;
+          // #1534: an aborted attempt (operator /stop, execution deadline, or
+          // signal cut) is not a candidate failure. Recording a transient
+          // error and excluding the candidate there would poison the health
+          // registry and leave the session transport with an excluded
+          // candidate, so a post-cancel continuation turn would fail with
+          // "no candidates" instead of reaching the provider. Genuine
+          // failures — and inactivity stalls, which the fallback chain needs
+          // to skip — still poison via poisonCandidate().
+          const poisonCandidate = (): void => {
+            options.policy.recordError(candidate, "transient");
+            options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
+          };
           const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage): void => {
             if (telemetryEnded) return;
             telemetryEnded = true;
@@ -294,9 +306,8 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
             });
             if (result === "success") {
               options.policy.recordSuccess(candidate);
-            } else {
-              options.policy.recordError(candidate, "transient");
-              options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
+            } else if (result !== "aborted") {
+              poisonCandidate();
             }
           };
 
@@ -373,6 +384,10 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
                 yield terminalError(model, "aborted", `provider_stream_timeout after ${inactivityMs}ms inactivity (semantic output was emitted)`);
                 return;
               }
+              // #1534: exclude only genuine inactivity stalls (the signal
+              // was NOT aborted) so the fallback chain skips them; an
+              // operator/execution abort must never poison the candidate.
+              if (!signal.aborted) poisonCandidate();
               finishAttempt("aborted", terminal);
               break;
             }
@@ -383,7 +398,7 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
               return;
             }
             if (!telemetryEnded) {
-              finishAttempt("failure", terminal);
+              finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
               break;
             }
           } catch (err) {

@@ -236,6 +236,13 @@ export class TuiAcceptanceClient {
     if (process.env["PI_E2E_DEBUG_FRAMES"] === "1") {
       console.error(`[tui-client] frame: ${JSON.stringify(frame).slice(0, 200)} waiters=${this.waiters.length}`);
     }
+    // #1533: every ready frame is authoritative for attachment identity. The
+    // adapter rebinds after /reset ends the attached session, so a later ready
+    // replaces the current session ID before any frame is consumed — steering
+    // and control frames then carry the replacement ID.
+    if (frame.t === "ready") {
+      this.attachedSessionId = frame.sessionId;
+    }
     const waiter = this.waiters.shift();
     if (waiter) {
       if (process.env["PI_E2E_DEBUG_FRAMES"] === "1") console.error(`[tui-client] -> waiter consumed`);

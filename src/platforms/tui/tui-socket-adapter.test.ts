@@ -24,7 +24,7 @@ import {
   type TuiClientFrame,
   type TuiAttachMode,
 } from "./tui-protocol.js";
-import type { Spin, ManagedSession, SessionType } from "../../components/spin.js";
+import { Spin, type ManagedSession, type SessionType } from "../../components/spin.js";
 import type { QueuedSessionInstruction } from "../../components/spin-types.js";
 import type { AgentSession } from "../../components/subagent-runtime.js";
 import type { InboundMessage } from "../../types/platform.js";
@@ -44,6 +44,8 @@ interface MockSpinOpts {
   createResult?: ManagedSession | string;
   orcSession?: AgentSession | null;
   orcBusy?: boolean;
+  /** #1533: mark the orc ManagedSession entry as ended. */
+  orcEnded?: boolean;
   spinResult?: { sessionId: string; cardId?: number; result?: string };
   /** #1336: sessions returned by listAllSessions for cross-platform attach. */
   allSessions?: ManagedSession[];
@@ -74,8 +76,14 @@ function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActive
     }),
     getOrcSession: vi.fn(() => opts.orcSession ?? null),
     getSessionById: vi.fn((id: string) => {
-      if (!opts.orcSession || id !== opts.orcSession.id) return undefined;
-      return { id, busy: opts.orcBusy ?? false, instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined, steeringAccepting: opts.orcBusy ?? false } as unknown as ManagedSession;
+      if (opts.orcSession && id === opts.orcSession.id) {
+        return { id, busy: opts.orcBusy ?? false, instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined, steeringAccepting: opts.orcBusy ?? false, status: opts.orcEnded ? "ended" : "ready" } as unknown as ManagedSession;
+      }
+      const found = allEntries.find(s => s.id === id);
+      if (found) return found;
+      // #1533: mock sessions stay resolvable while attached, like production —
+      // an attached id is never an "unknown session".
+      return { id, userId: "aksika", platform: "tui", status: "ready", busy: false, instructionQueue: [], steeringAccepting: false } as unknown as ManagedSession;
     }),
     getSessionByGlobalIndex: vi.fn((index: number) => {
       calls.getSessionByGlobalIndex.push([index]);
@@ -1624,6 +1632,113 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
     expect(terminalAcks.length).toBe(2);
     const terminalIds = terminalAcks.map((a: any) => a.instructionId as string).sort();
     expect(terminalIds).toEqual([...ids].sort());
+    conn.destroy();
+  });
+});
+
+// ── #1533: Ended-attachment reconciliation ─────────────────────────────
+
+describe("TuiSocketAdapter — ended pipeline attachment reconciliation (#1533)", () => {
+  let sockPath: string;
+  let adapter: TuiSocketAdapter;
+  let onMessage: ReturnType<typeof vi.fn>;
+  let spin: Spin;
+
+  beforeEach(() => {
+    sockPath = tmpSocketPath();
+    spin = new Spin();
+    onMessage = makeRecoveryHandler();
+  });
+
+  afterEach(() => {
+    try { adapter.stop(); } catch { /* already stopped */ }
+  });
+
+  async function attachNew(): Promise<{ conn: net.Socket; frames: TuiServerFrame[]; attached: string }> {
+    adapter = new TuiSocketAdapter({ spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "new", sessionType: "A" });
+    const ready = frames.find((f) => f.t === "ready");
+    const attached = ready && ready.t === "ready" ? ready.sessionId : "";
+    expect(attached).toBeTruthy();
+    return { conn, frames, attached };
+  }
+
+  it("rebinds to the replacement session on the first input after the attached session ends", async () => {
+    const { conn, frames, attached } = await attachNew();
+
+    // /reset semantics: end the attached session; Spin reconciles a replacement.
+    const result = spin.endSession("aksika", "tui");
+    expect(typeof result).not.toBe("string");
+    expect(spin.getSessionById(attached)?.status).toBe("ended");
+    const replacement = spin.getActiveSession("aksika", "tui");
+    expect(replacement.id).not.toBe(attached);
+    frames.length = 0;
+
+    // First input after the end must rebind and route exactly once.
+    conn.write(encodeFrame({ t: "input", text: "hello" }));
+    await waitFor(() => onMessage.mock.calls.length > 0, 2000);
+
+    const readyFrames = frames.filter((f): f is Extract<TuiServerFrame, { t: "ready" }> => f.t === "ready");
+    expect(readyFrames).toHaveLength(1);
+    expect(readyFrames[0]!.sessionId).toBe(replacement.id);
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const routed = onMessage.mock.calls[0]![0] as InboundMessage;
+    expect(routed.targetSessionId).toBe(replacement.id);
+    expect(routed.targetSessionId).not.toBe(attached);
+    expect(routed.text).toBe("hello");
+
+    // Subsequent inputs target the live replacement with no further rebinds.
+    frames.length = 0;
+    conn.write(encodeFrame({ t: "input", text: "again" }));
+    await waitFor(() => onMessage.mock.calls.length > 1, 2000);
+    expect(frames.filter((f) => f.t === "ready")).toHaveLength(0);
+    expect((onMessage.mock.calls[1]![0] as InboundMessage).targetSessionId).toBe(replacement.id);
+    conn.destroy();
+  });
+
+  it("does not rebind a live pipeline attachment", async () => {
+    const { conn, frames, attached } = await attachNew();
+    frames.length = 0;
+
+    conn.write(encodeFrame({ t: "input", text: "hi" }));
+    await waitFor(() => onMessage.mock.calls.length > 0, 2000);
+
+    expect(frames.filter((f) => f.t === "ready")).toHaveLength(0);
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect((onMessage.mock.calls[0]![0] as InboundMessage).targetSessionId).toBe(attached);
+    conn.destroy();
+  });
+
+  it("drops the input with a bounded system error when the attached session object is gone", async () => {
+    const { conn, frames, attached } = await attachNew();
+    spin.getSessions().delete(attached);
+    frames.length = 0;
+
+    conn.write(encodeFrame({ t: "input", text: "hello" }));
+    await waitFor(() => frames.some((f) => f.t === "message"), 2000);
+
+    const sysMsg = frames.find((f) => f.t === "message" && (f as { role: string }).role === "system");
+    expect(sysMsg && sysMsg.t === "message" ? sysMsg.markdown : "").toMatch(/gone/i);
+    expect(onMessage).not.toHaveBeenCalled();
+    conn.destroy();
+  });
+
+  it("does not rebind an Orc attachment even when its session is ended", async () => {
+    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const mock = makeMockSpin({ orcSession: orc, orcBusy: true, orcEnded: true });
+    adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    expect(frames.find((f) => f.t === "ready")).toBeDefined();
+    frames.length = 0;
+
+    conn.write(encodeFrame({ t: "input", text: "hello" }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(frames.filter((f) => f.t === "ready")).toHaveLength(0);
+    expect(mock.calls.spin).toHaveLength(0);
+    expect(onMessage).not.toHaveBeenCalled();
     conn.destroy();
   });
 });

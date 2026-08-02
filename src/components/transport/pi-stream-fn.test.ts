@@ -208,6 +208,28 @@ describe("createPiStreamFn", () => {
     expect((errorEv2?.error as Record<string, unknown> | undefined)?.stopReason).toBe("aborted");
   });
 
+  it("does not poison candidate health when the attempt is aborted (#1534)", async () => {
+    const controller = new AbortController();
+    const attemptFactory = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      return makeFakeStream([
+        { type: "text_delta", contentIndex: 0, delta: "x" },
+        { type: "done", reason: "stop", message: { role: "assistant", content: "x", stopReason: "stop", usage: { input: 1, output: 1 } } },
+      ]);
+    });
+
+    const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
+    const events: any[] = [];
+    for await (const event of streamFn({ id: "test" }, { messages: [] }, { signal: controller.signal })) events.push(event);
+
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    expect((events.find((e) => e.type === "error")?.error as { stopReason?: string } | undefined)?.stopReason).toBe("aborted");
+    // #1534: an operator abort must not exclude the candidate or fill its
+    // health bucket — a post-cancel continuation must still reach the provider.
+    expect(policy.excludedKeys.size).toBe(0);
+    expect(policy.selectModel()).not.toBeNull();
+  });
+
   it("times out a provider iterator that never resolves next() and falls back before semantic output", async () => {
     const first = makeCandidate({ model: "stuck", endpoint: "https://stuck/v1" });
     const second = makeCandidate({ model: "fallback", endpoint: "https://fallback/v1" });

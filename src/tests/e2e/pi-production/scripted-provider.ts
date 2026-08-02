@@ -173,9 +173,11 @@ export class ScriptedProvider {
 
     // Observe abort for any action: a request that dies mid-flight is
     // recorded as aborted so the harness can assert network cancellation.
-    let aborted = false;
+    // The close handler writes the summary directly — the hold action may
+    // wait forever on its release, so the post-release finalizer below must
+    // not be the only place that records the abort.
     res.on("close", () => {
-      if (!res.writableEnded) aborted = true;
+      if (!res.writableEnded) summary.aborted = true;
     });
 
     this.summaries.push(summary);
@@ -221,8 +223,7 @@ export class ScriptedProvider {
     }
 
     // Finalize abort state for held connections that died during the wait.
-    if (script.action.kind === "hold" && aborted && !res.writableEnded) {
-      summary.aborted = true;
+    if (script.action.kind === "hold" && summary.aborted && !res.writableEnded) {
       res.destroy();
     }
   }
