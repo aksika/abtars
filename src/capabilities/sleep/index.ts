@@ -23,7 +23,12 @@ export interface SleepOpts {
   memoryEnabled: boolean;
   onComplete: () => void;
   onCycleEnd?: () => void;
-  allocateSleepSession?: (name: string) => void;
+  /**
+   * #1538: allocate the one named D session that owns the whole cycle and
+   * return its id. The cycle requires the identity — a discarded id makes the
+   * first provider generation allocate a second, unnamed sibling session.
+   */
+  allocateSleepSession?: (name: string) => string | undefined;
   sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; settlementOwner: "spin" | "caller"; await: boolean }) => Promise<{ result?: string; sessionId?: string }> };
   bufferSystemEvent: (report: string) => void | Promise<void>;
 }
@@ -107,6 +112,10 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     running = false;
     progress = null;
     currentRunId = null;
+    // #1538: the cycle's D identity does not outlive the cycle. A retained id
+    // would make the next cycle pump into a reaped session while its own
+    // freshly named session sat idle.
+    nightSessionId = undefined;
     writeSleepStatus("awake");
   }
 
@@ -248,7 +257,9 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
     if (opts.allocateSleepSession) {
       const dateStr = new Date().toISOString().slice(0, 10);
-      opts.allocateSleepSession(`Sleep ${dateStr}`);
+      // #1538: hold the allocated identity — every provider generation in this
+      // cycle pumps into it instead of allocating an unnamed sibling.
+      nightSessionId = opts.allocateSleepSession(`Sleep ${dateStr}`);
     }
 
     const startPromise = mode === "resume"

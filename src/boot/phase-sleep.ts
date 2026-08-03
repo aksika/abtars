@@ -50,7 +50,7 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
     onCycleEnd: () => {
     },
     allocateSleepSession: (name: string) => {
-      sessionManager.allocateDreamySession(name);
+      return sessionManager.allocateDreamySession(name).id;
     },
     sessionManager: {
       spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; await: boolean }) => {
