@@ -233,6 +233,18 @@ function computeStatePatch(
 
   const policy = decideFailurePolicy(diagnostic);
 
+  // #1525: a manual run reports only its own outcome. The schedule belongs to
+  // the scheduled trigger, so a user-initiated failure must not auto-pause the
+  // definition, advance the next occurrence, consume the failure streak, or
+  // discard a pending scheduled retry group. Deferral is excluded: it is the
+  // same occurrence's bounded re-admission, not a failure verdict.
+  if (run.trigger === "manual" && policy.action !== "defer") {
+    return {
+      lastFinishedAt: finishedAt,
+      lastIncident: diagnostic,
+    };
+  }
+
   if (policy.action === "defer") {
     // The occurrence's bounded deferral was already exhausted: the settler
     // flipped the event to failed/executor_unavailable before appending, so
