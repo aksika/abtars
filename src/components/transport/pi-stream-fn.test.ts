@@ -291,6 +291,8 @@ describe("createPiStreamFn", () => {
     expect(attemptFactory).toHaveBeenCalledTimes(1);
     expect(events.some((event) => event.type === "text_delta" && event.delta === "partial")).toBe(true);
     expect(events.at(-1)?.type).toBe("error");
+    expect(fallbackPolicy.excludedKeys.has("partial@https://partial/v1")).toBe(true);
+    expect(fallbackPolicy.excludedKeys.has("should-not-run@https://unused/v1")).toBe(false);
   });
 
   // ── Request-identity tests (#1472) ──────────────────────────────────────────

@@ -380,6 +380,12 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
             if (inactivityTimedOut) inactivityAborted = true;
             if (inactivityAborted) {
               if (attemptCommitted) {
+                // A provider inactivity stall remains a genuine candidate
+                // failure even after semantic output. We cannot fall back
+                // after committing partial output, but the candidate must be
+                // excluded for later calls. Operator/deadline cancellation
+                // has signal.aborted=true and must not poison health.
+                if (!signal.aborted) poisonCandidate();
                 finishAttempt("aborted", terminal);
                 yield terminalError(model, "aborted", `provider_stream_timeout after ${inactivityMs}ms inactivity (semantic output was emitted)`);
                 return;

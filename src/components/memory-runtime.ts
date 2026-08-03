@@ -620,14 +620,13 @@ export async function attemptMemoryMutation<T>(input: {
       err && typeof err === "object" && "code" in err
         ? String((err as { code: unknown }).code)
         : "unknown";
-    const message = err instanceof Error ? err.message.slice(0, 200) : String(err);
     const keyFingerprint = createHash("sha256")
       .update(input.operationKey, "utf-8")
       .digest("hex")
       .slice(0, 12);
     logWarn(
       "memory-mutation",
-      `phase=${input.phase} family=${input.family} error=${code} key=${keyFingerprint}.. msg=${message}`,
+      `phase=${input.phase} family=${input.family} error=${code} key=${keyFingerprint}..`,
     );
     return { ok: false };
   }
