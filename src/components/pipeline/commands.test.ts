@@ -71,6 +71,20 @@ describe("commandMiddleware interrupt routing (#1534)", () => {
     expect(ctx.deps.transport.sendInterrupt).not.toHaveBeenCalled();
   });
 
+  it("does not pre-interrupt /ctrlc on a busy session — the same handler owns it", async () => {
+    const spinMod = await import("../spin.js");
+    const interrupt = vi.spyOn(spinMod.spin, "interruptSession").mockResolvedValue(undefined);
+    const session = makeSession({ busy: true });
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
+    const ctx = makeCtx(session, "/ctrlc");
+
+    await commandMiddleware(ctx, vi.fn());
+
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(handleCommand).toHaveBeenCalledWith("/ctrlc", expect.objectContaining({ sessionKey: "1_A_01" }));
+    expect(ctx.deps.transport.sendInterrupt).not.toHaveBeenCalled();
+  });
+
   it("pre-interrupts a busy effective session for /reset via the session-aware Spin operation", async () => {
     const spinMod = await import("../spin.js");
     const interrupt = vi.spyOn(spinMod.spin, "interruptSession").mockResolvedValue(undefined);

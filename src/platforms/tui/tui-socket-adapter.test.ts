@@ -1697,6 +1697,38 @@ describe("TuiSocketAdapter — ended pipeline attachment reconciliation (#1533)"
     conn.destroy();
   });
 
+  it("routes a subsequent steer frame to the replacement session after the rebind (Task 4)", async () => {
+    const { conn, frames, attached } = await attachNew();
+    const result = spin.endSession("aksika", "tui");
+    expect(typeof result).not.toBe("string");
+    const replacement = spin.getActiveSession("aksika", "tui");
+    frames.length = 0;
+
+    // First input rebinds the attachment and emits ready for the replacement.
+    conn.write(encodeFrame({ t: "input", text: "hello" }));
+    await waitFor(() => onMessage.mock.calls.length > 0, 2000);
+    expect(frames.filter((f) => f.t === "ready")).toHaveLength(1);
+
+    // A steer carrying the replacement ID passes the attachment gate (the
+    // session has no active execution, so it is rejected at queue time with
+    // the stale-execution reason — NOT the attachment-mismatch reason); the
+    // ended ID is rejected at the attachment gate.
+    frames.length = 0;
+    conn.write(encodeFrame({ t: "steer", sessionId: replacement.id, instructionId: "cid-new", text: "focus" }));
+    await waitFor(() => frames.some((f) => f.t === "steer-ack"), 2000);
+    const newAck = frames.find((f) => f.t === "steer-ack") as Extract<TuiServerFrame, { t: "steer-ack" }> | undefined;
+    expect(newAck?.status).toBe("rejected");
+    expect(newAck?.message).not.toMatch(/does not match the current attachment/);
+
+    frames.length = 0;
+    conn.write(encodeFrame({ t: "steer", sessionId: attached, instructionId: "cid-old", text: "stale" }));
+    await waitFor(() => frames.some((f) => f.t === "steer-ack"), 2000);
+    const staleAck = frames.find((f) => f.t === "steer-ack") as Extract<TuiServerFrame, { t: "steer-ack" }> | undefined;
+    expect(staleAck?.status).toBe("rejected");
+    expect(staleAck?.message).toMatch(/does not match the current attachment/);
+    conn.destroy();
+  });
+
   it("does not rebind a live pipeline attachment", async () => {
     const { conn, frames, attached } = await attachNew();
     frames.length = 0;
