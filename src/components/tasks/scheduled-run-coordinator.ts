@@ -12,17 +12,17 @@ import type { ChildProcess } from "node:child_process";
 import { nerve } from "../nerve.js";
 import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { logTaskDebug } from "./task-log-ctx.js";
+import { logTaskDebug, logTaskTrace } from "./task-log-ctx.js";
 import { getSystemTaskRegistry } from "./system-task-registry.js";
 import { ScheduledTaskRunner, type AgentTaskRunner, type FailInjectCallback, type TaskPausedCallback } from "./scheduled-task-runner.js";
 import { settleRunFromHistory, settleRunOnce, onRunTerminal } from "./task-run-settler.js";
+import { settleExpiredRun } from "./due-sources.js";
 import { makeTaskFailure } from "./task-failure.js";
 import { addTaskFailure } from "./task-failure-buffer.js";
 import { advanceRun, readState, requestRunTerminal } from "./task-state-store.js";
 import { getRun } from "./task-history-store.js";
-import { kanbanGetCard } from "./kanban-board.js";
+import { kanbanGetCard, resolveRootId } from "./kanban-board.js";
 import { getControl } from "../execution-control.js";
-import { abortProjectById } from "../reconciler.js";
 import { isSystemEntry, formatTaskLabel } from "./task-types.js";
 import type { ScheduledTask } from "./task-types.js";
 import type { ActiveTaskRun } from "./task-state-store.js";
@@ -110,22 +110,30 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
    * Start exactly one adapter for the reserved occurrence. Returns "stale"
    * when the reservation no longer belongs to this run. Never awaited by the
    * queue: lane release is driven by the durable terminal event.
+   *
+   * #1539 R4: script/system runs advance queued -> executing here (the agent
+   * runner owns its own preparation -> queued -> executing ordering).
    */
   start(entry: ScheduledTask, run: ActiveTaskRun, lane: RunLane): "started" | "stale" {
     const state = readState(entry.id);
     if (!state?.activeRun || state.activeRun.runId !== run.runId) return "stale";
 
     if (isSystemEntry(entry)) {
+      advanceRun(entry.id, run.runId, { phase: "queued" });
       const handle = this.makeHandle(entry, run, lane, "system");
+      logTaskDebug("run_started", { task: entry.id, run: run.runId }, `lane=${lane} kind=system`);
       this.dispatchSystem(handle);
       return "started";
     }
     if (entry.kind === "script") {
+      advanceRun(entry.id, run.runId, { phase: "queued" });
       const handle = this.makeHandle(entry, run, lane, "script");
+      logTaskDebug("run_started", { task: entry.id, run: run.runId }, `lane=${lane} kind=script`);
       this.runScript(handle);
       return "started";
     }
     const handle = this.makeHandle(entry, run, lane, "agent");
+    logTaskDebug("run_started", { task: entry.id, run: run.runId }, `lane=${lane} kind=agent`);
     void this.runAgent(handle);
     return "started";
   }
@@ -146,6 +154,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
     const handle = this.handles.get(runId);
     if (!handle) return "not_owned";
     requestRunTerminal(handle.taskId, runId, { kind: "cancelled", requestedAt: Date.now(), reason });
+    logTaskDebug("run_terminal_requested", { task: handle.taskId, run: runId }, `kind=cancelled reason=${reason.slice(0, 60)}`);
     this.signalTerminal(handle, reason);
     return "requested";
   }
@@ -157,9 +166,10 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
    */
   deadlineExpired(taskId: string, runId: string, reason: string): void {
     requestRunTerminal(taskId, runId, { kind: "deadline_exceeded", requestedAt: Date.now(), reason });
+    logTaskDebug("run_terminal_requested", { task: taskId, run: runId }, `kind=deadline_exceeded reason=${reason.slice(0, 60)}`);
     const handle = this.handles.get(runId);
     if (handle) {
-      advanceRun(taskId, runId, { progressAt: Date.now() });
+      this.progress(handle);
       this.signalTerminal(handle, reason);
     }
   }
@@ -217,7 +227,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
       }
 
       if (run.deadlineAt < Date.now()) {
-        this.settleExpiredRun(entry, run, "restart_recovery: deadline passed", "restart_recovery: scheduled deadline passed");
+        settleExpiredRun(entry, run, "restart_recovery: deadline passed", "restart_recovery: scheduled deadline passed");
         logInfo(TAG, `recovery: task=${entry.id} run=${run.runId} settled_deadline_passed`);
         continue;
       }
@@ -266,14 +276,26 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
     return views;
   }
 
-  /** #1539: meaningful card/attempt transitions project into run progress. */
+  /**
+   * #1539: meaningful card/attempt transitions project into run progress.
+   * Worker cards (source "agent") resolve to their root O card, which carries
+   * the scheduled run identity (source_id = runId). Progress is bounded by
+   * card-transition volume; liveness-only events never rewrite task state.
+   */
   projectCardProgress(cardId: number): void {
-    const card = kanbanGetCard(cardId);
-    if (!card || card.source !== "task" || !card.source_id) return;
-    const handle = this.handles.get(card.source_id);
+    let runCard = kanbanGetCard(cardId);
+    if (!runCard) return;
+    const rootId = resolveRootId(cardId);
+    if (rootId !== undefined && rootId !== cardId) {
+      const root = kanbanGetCard(rootId);
+      if (root) runCard = root;
+    }
+    if (runCard.source !== "task" || !runCard.source_id) return;
+    const handle = this.handles.get(runCard.source_id);
     if (!handle) return;
     const now = Date.now();
     advanceRun(handle.taskId, handle.run.runId, { progressAt: now });
+    logTaskTrace("run_progress", { task: handle.taskId, run: handle.run.runId }, `card=${cardId} root=${runCard.id}`);
   }
 
   private makeHandle(entry: ScheduledTask, run: ActiveTaskRun, lane: RunLane, kind: CoordinatorHandle["kind"]): CoordinatorHandle {
@@ -332,25 +354,11 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
     // grace item settles it if the dispatcher never returns.
   }
 
-  private settleExpiredRun(entry: ScheduledTask, run: ActiveTaskRun, detail: string, abortReason: string): void {
-    settleRunOnce({
-      entry, run,
-      outcome: "failed",
-      diagnostic: makeTaskFailure("interruption", "deadline_exceeded", "executing", detail, "none"),
-      detail,
-    });
-    // #1516: terminalize the interrupted project so its Orc/Worker state
-    // cannot orphan after the scheduled run is settled.
-    if (run.cardId !== undefined) {
-      void abortProjectById(run.cardId, abortReason);
-    }
-  }
-
   private dispatchSystem(handle: CoordinatorHandle): void {
     const entry = handle.entry as ScheduledTask & { kind: "system" };
     const run = handle.run;
     const startedAt = Date.now();
-    advanceRun(handle.taskId, run.runId, { progressAt: startedAt });
+    advanceRun(handle.taskId, run.runId, { phase: "executing", progressAt: startedAt });
     void (async () => {
       try {
         const result = await getSystemTaskRegistry().dispatch(entry);
@@ -402,6 +410,8 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
     try {
       const child = spawn("bash", ["-c", entry.command], { stdio: ["ignore", "pipe", "pipe"] });
       handle.child = child;
+      // #1539 R4: successful spawn changes queued -> executing.
+      advanceRun(handle.taskId, runId, { phase: "executing", progressAt: Date.now() });
       this.progress(handle);
 
       let output = "";
@@ -522,7 +532,10 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
   private progress(handle: CoordinatorHandle): void {
     const now = Date.now();
     handle.lastProgressAt = now;
-    advanceRun(handle.taskId, handle.run.runId, { progressAt: now });
+    const result = advanceRun(handle.taskId, handle.run.runId, { progressAt: now });
+    if (result !== "regression") {
+      logTaskTrace("run_progress", { task: handle.taskId, run: handle.run.runId }, `kind=${handle.kind}`);
+    }
   }
 
   private throttledProgress(handle: CoordinatorHandle): void {

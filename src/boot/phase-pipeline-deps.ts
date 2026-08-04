@@ -131,10 +131,17 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   wakeScheduler.register(createRunDeadlineSource(coordinator));
 
   const { setTaskDueChangedHook } = await import("../components/tasks/task-state-store.js");
-  setTaskDueChangedHook(() => wakeScheduler.sourceChanged("task-admission"));
+  // #1539: any durable task-state mutation can change admission due times AND
+  // active-run deadline arming — both sources re-scan and re-arm.
+  setTaskDueChangedHook(() => {
+    wakeScheduler.sourceChanged("task-admission");
+    wakeScheduler.sourceChanged("run-deadline");
+  });
   const { setKanbanDueChangedHook } = await import("../components/tasks/kanban-board.js");
   setKanbanDueChangedHook(() => wakeScheduler.sourceChanged("kanban-retry"));
   wireCardProgressProjection(coordinator);
+  const { setRunProgressBridge } = await import("../components/reconciler.js");
+  setRunProgressBridge((cardId: number) => coordinator.projectCardProgress(cardId));
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
   const { setEnqueueCron } = await import("../components/transport/tool-registry.js");

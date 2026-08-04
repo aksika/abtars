@@ -15,6 +15,7 @@ vi.mock("./kanban-board.js", () => ({
   kanbanGetCard: vi.fn(),
   kanbanDueRetryItems: vi.fn(() => []),
   setKanbanDueChangedHook: vi.fn(),
+  resolveRootId: vi.fn(() => undefined),
 }));
 
 vi.mock("../reconciler.js", () => ({
@@ -328,5 +329,31 @@ describe("run-deadline due source #1539", () => {
     const items = source.listDueItems();
     expect(items.some(i => i.key === "run:live-run" && i.dueAt > Date.now())).toBe(true);
     expect(items.some(i => i.key === "grace:live-run")).toBe(true);
+  });
+
+  it("#1539 projects worker-card milestones into the owning root run's progress", () => {
+    const coordinator = new ScheduledRunCoordinator();
+    const run = {
+      runId: "proj-run", groupId: "g", attempt: 1 as const, trigger: "schedule" as const,
+      occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60_000,
+      phase: "executing" as const, lastProgressAt: Date.now(), cardId: 7,
+    };
+    vi.mocked(stateStore.readState).mockReturnValue({
+      nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false,
+      activeRun: run,
+    });
+    coordinator.start(makeTask({ orchestration: { maxAgents: 2 } }), run, "scheduled");
+    // A worker card (source "agent") resolves to the root O card carrying the
+    // scheduled run identity (source_id = runId).
+    vi.mocked(kanbanMod.kanbanGetCard).mockImplementation((id: number) => {
+      if (id === 7) return { id: 7, source: "task", source_id: "proj-run" } as never;
+      if (id === 12) return { id: 12, source: "agent", source_id: "whatever", parent_id: 7 } as never;
+      return undefined as never;
+    });
+    vi.mocked(kanbanMod.resolveRootId).mockReturnValue(7);
+    coordinator.projectCardProgress(12);
+    expect(vi.mocked(stateStore.advanceRun)).toHaveBeenCalledWith(
+      "t1", "proj-run", expect.objectContaining({ progressAt: expect.any(Number) }),
+    );
   });
 });

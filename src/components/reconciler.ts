@@ -894,6 +894,8 @@ function registerExecutorLeaseSource(): void {
   });
   StoreWithHook.onLeaseChanged = () => {
     scheduler.sourceChanged("executor-lease");
+    const cardId = StoreWithHook.lastChangedCardId;
+    if (cardId !== undefined) projectRunProgress(cardId);
   };
   // Registration is a source mutation: immediate scan + re-arm.
   scheduler.sourceChanged("executor-lease");
@@ -907,6 +909,19 @@ export function setWakeScheduler(scheduler: LifecycleWakeScheduler | null): void
 
 export function getWakeScheduler(): LifecycleWakeScheduler | null {
   return _wakeScheduler;
+}
+
+/** #1539: project lease milestones into the owning scheduled run's progress. */
+let _runProgressBridge: ((cardId: number) => void) | null = null;
+export function setRunProgressBridge(bridge: ((cardId: number) => void) | null): void {
+  _runProgressBridge = bridge;
+}
+function projectRunProgress(cardId: number): void {
+  try {
+    _runProgressBridge?.(cardId);
+  } catch (err) {
+    logWarn(TAG, `run progress bridge failed for card ${cardId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function runBootRecovery(): void {

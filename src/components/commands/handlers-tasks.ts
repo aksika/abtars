@@ -80,16 +80,23 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   let running = "";
   // #1539: show every lane currently executing with its durable run identity.
   const jobs = ctx.cronCurrentJobs ?? (ctx.cronCurrentJob ? [ctx.cronCurrentJob] : []);
+  const queueView = ctx.cronQueueView?.();
+  const runViews = new Map((queueView ?? []).flatMap(l => l.current ? [[l.current.runId, l.current] as const] : []));
   if (jobs.length > 0) {
     const lines = jobs.map(j => {
       const ago = Math.round((Date.now() - j.startedAt) / 1000);
       const name = (j.message.split("\n")[0] ?? "").slice(0, 30);
-      return `~ [${j.lane}] ${name} (${ago}s, run ${j.runId.slice(0, 16)})`;
+      const view = runViews.get(j.runId);
+      const phase = view?.phase ? ` phase=${view.phase}` : "";
+      const deadline = view?.deadlineAt ? ` dl=${new Date(view.deadlineAt).toLocaleTimeString()}` : "";
+      const card = view?.cardId !== undefined ? ` card=${view.cardId}` : "";
+      const progress = view?.lastProgressAt !== undefined ? ` prog=${Math.max(0, Math.round((Date.now() - view.lastProgressAt) / 1000))}s` : "";
+      const request = view?.terminalRequest ? ` req=${view.terminalRequest.kind}` : "";
+      return `~ [${j.lane}] ${name} (${ago}s, run ${j.runId.slice(0, 16)}${phase}${progress}${deadline}${request}${card})`;
     });
     running = `\n${lines.join("\n")}`;
   }
   // #1539: durable pending state stays visible before a model session exists.
-  const queueView = ctx.cronQueueView?.();
   if (queueView) {
     const pendingLines: string[] = [];
     for (const lane of queueView) {

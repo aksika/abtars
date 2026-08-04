@@ -168,17 +168,43 @@ export class CronQueue {
   }
 
   /** Per-lane durable view: current + pending jobs with identity and trigger. */
-  describe(): Array<{ lane: RunLane; current: RunningJob | null; pending: Array<{ entryId: string; runId?: string; manual?: boolean; priority?: string }> }> {
-    return LANES.map(lane => ({
-      lane,
-      current: this.lanes[lane].current,
-      pending: this.lanes[lane].pending.map(j => ({
-        entryId: j.entry.id,
-        runId: j.reservation?.runId,
-        manual: j.manual ?? false,
-        priority: j.entry.priority ?? "medium",
-      })),
-    }));
+  describe(): Array<{
+    lane: RunLane;
+    current: (RunningJob & {
+      phase?: string;
+      lastProgressAt?: number;
+      deadlineAt?: number;
+      terminalRequest?: { kind: "cancelled" | "deadline_exceeded"; requestedAt: number; reason: string };
+      cardId?: number;
+      sessionId?: string;
+      executionId?: string;
+    }) | null;
+    pending: Array<{ entryId: string; runId?: string; manual?: boolean; priority?: string }>;
+  }> {
+    const runViews = new Map(this.coordinator.describe().map(v => [v.runId, v]));
+    return LANES.map(lane => {
+      const current = this.lanes[lane].current;
+      const view = current ? runViews.get(current.runId) : undefined;
+      return {
+        lane,
+        current: current ? {
+          ...current,
+          phase: view?.phase,
+          lastProgressAt: view?.lastProgressAt,
+          deadlineAt: view?.deadlineAt,
+          terminalRequest: view?.terminalRequest,
+          cardId: view?.cardId,
+          sessionId: view?.sessionId,
+          executionId: view?.executionId,
+        } : null,
+        pending: this.lanes[lane].pending.map(j => ({
+          entryId: j.entry.id,
+          runId: j.reservation?.runId,
+          manual: j.manual ?? false,
+          priority: j.entry.priority ?? "medium",
+        })),
+      };
+    });
   }
 
   /** #1517: live stale-run ownership port — delegates to the coordinator. */
@@ -310,13 +336,33 @@ export class CronQueue {
     };
     persistState(this.lanes);
 
-    const started = this.coordinator.start(entry, reservation, lane);
+    // #1539: a start exception settles the owned reservation once and
+    // continues with the next job — the lane must never wedge on a throw.
+    let started: "started" | "stale";
+    try {
+      started = this.coordinator.start(entry, reservation, lane);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `Start failed for "${entry.id}" run=${reservation.runId}: ${msg}`);
+      settleRunOnce({
+        entry, run: reservation, outcome: "failed",
+        diagnostic: makeTaskFailure("execution", "model_error", "executing", msg.slice(0, 500), "none"),
+        detail: msg.slice(0, 500),
+        factAt: Date.now(),
+      });
+      laneState.current = null;
+      persistState(this.lanes);
+      this.processLane(lane);
+      return;
+    }
     if (started === "stale") {
       logWarn(TAG, `Job "${entry.id}" run=${reservation.runId} lost its reservation before start — lane released`);
       laneState.current = null;
       persistState(this.lanes);
       this.processLane(lane);
+      return;
     }
+    logTaskDebug("run_admitted", { task: entry.id, run: reservation.runId }, `lane=${lane} kind=${kind}`);
   }
 
   /** #1539: lane release on the durable terminal event — run ID must match. */

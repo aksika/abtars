@@ -130,7 +130,19 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   /** #1539: every lane currently executing (manual + scheduled). */
   cronCurrentJobs?: () => RunningJob[];
   /** #1539: per-lane durable pending/current view. */
-  cronQueueView?: () => Array<{ lane: string; pending: Array<{ entryId: string; runId?: string; manual?: boolean; priority?: string }> }>;
+  cronQueueView?: () => Array<{
+    lane: string;
+    current: (RunningJob & {
+      phase?: string;
+      lastProgressAt?: number;
+      deadlineAt?: number;
+      terminalRequest?: { kind: "cancelled" | "deadline_exceeded"; requestedAt: number; reason: string };
+      cardId?: number;
+      sessionId?: string;
+      executionId?: string;
+    }) | null;
+    pending: Array<{ entryId: string; runId?: string; manual?: boolean; priority?: string }>;
+  }>;
   enqueueCron?: (entryId: string, manual?: boolean) => string | null;
   requestShutdown?: (code?: number) => void;
   sleepProgress?: () => { percent: number; step: string } | null;

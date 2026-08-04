@@ -145,6 +145,24 @@ describe("CronQueue #1539 two-lane admission", () => {
     expect(activeChildren.length).toBe(1);
   });
 
+  it("#1539 advances a script run queued -> executing (never stuck in reserved)", () => {
+    const entry = makeEntry({ kind: "script", command: "echo hello" });
+    queue.enqueue(entry);
+    const phases = vi.mocked(stateStore.advanceRun).mock.calls
+      .filter(call => (call[2] as { phase?: string }).phase !== undefined)
+      .map(call => (call[2] as { phase: string }).phase);
+    expect(phases).toEqual(["queued", "executing"]);
+  });
+
+  it("#1539 advances a system run queued -> executing", () => {
+    const entry = makeEntry({ kind: "system", action: "sleep-cycle", delivery: "silent" });
+    queue.enqueue(entry);
+    const phases = vi.mocked(stateStore.advanceRun).mock.calls
+      .filter(call => (call[2] as { phase?: string }).phase !== undefined)
+      .map(call => (call[2] as { phase: string }).phase);
+    expect(phases).toEqual(["queued", "executing"]);
+  });
+
   it("enqueues a system task", () => {
     const entry = makeEntry({ kind: "system", action: "sleep-cycle", delivery: "silent" });
     const result = queue.enqueue(entry);

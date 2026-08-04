@@ -44,6 +44,9 @@ export interface LeaseView {
 export class ExecutorLeaseStore {
   private db: TaskDatabase;
   static onLeaseChanged?: () => void;
+  /** #1539: the card of the most recently mutated lease — projected into the
+   * owning scheduled run's progress by the lifecycle wiring. */
+  static lastChangedCardId?: number;
 
   constructor(db?: TaskDatabase) {
     this.db = db ?? requireTaskDatabase();
@@ -215,6 +218,7 @@ export class ExecutorLeaseStore {
 
       this._pruneEvents(fact.attempt_id, fact.claim_generation);
 
+      ExecutorLeaseStore.lastChangedCardId = snapshot.cardId;
       ExecutorLeaseStore.onLeaseChanged?.();
       return { kind: "accepted", snapshot } as AppendFactResult;
     }) as AppendFactResult;
@@ -290,6 +294,7 @@ export class ExecutorLeaseStore {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(attemptId, generation, nextSequence, `close:${attemptId}`, "stalled", `closed:${reason}`, "none", now, JSON.stringify({ reason, closedAt: now, sequence: nextSequence }));
 
+      ExecutorLeaseStore.lastChangedCardId = attempt.card_id;
       ExecutorLeaseStore.onLeaseChanged?.();
       return true;
     }) as boolean;
@@ -318,7 +323,10 @@ export class ExecutorLeaseStore {
       SET snapshot_json = ?, state_version = state_version + 1, next_evaluation_at = ?, updated_at = ?
       WHERE attempt_id = ? AND state_version = ?
     `).run(JSON.stringify(snapshot), snapshot.nextEvaluationAt ?? null, snapshot.updatedAt, attemptId, row.state_version);
-    if (result.changes > 0) ExecutorLeaseStore.onLeaseChanged?.();
+    if (result.changes > 0) {
+      ExecutorLeaseStore.lastChangedCardId = snapshot.cardId;
+      ExecutorLeaseStore.onLeaseChanged?.();
+    }
     return result.changes > 0;
   }
 

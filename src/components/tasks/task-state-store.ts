@@ -186,7 +186,10 @@ export function initializeState(entries: ScheduledTask[]): void {
     }
   }
 
-  if (changed) writeAll(state);
+  if (changed) {
+    writeAll(state);
+    notifyTaskDueChanged();
+  }
 }
 
 function deriveNextRun(task: ScheduledTask): number | null {
@@ -241,9 +244,7 @@ export function advanceNextRun(taskId: string, schedule?: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** #1520: pure next-run computation for the atomic settler patch. */
+}/** #1520: pure next-run computation for the atomic settler patch. */
 export function nextRunFromSchedule(task: Pick<ScheduledTask, "schedule">): { nextRunAt?: number; completed?: boolean } {
   if (!task.schedule) return { completed: true };
   try {
@@ -300,6 +301,7 @@ export function setAutoPaused(taskId: string, paused: boolean): void {
     }
     return state;
   });
+  notifyTaskDueChanged();
 }
 
 export function removeState(taskId: string): void {
@@ -307,6 +309,7 @@ export function removeState(taskId: string): void {
     delete state[taskId];
     return state;
   });
+  notifyTaskDueChanged();
 }
 
 export function setRetrying(taskId: string, retrying: boolean, retryAt?: number): void {
@@ -317,6 +320,7 @@ export function setRetrying(taskId: string, retrying: boolean, retryAt?: number)
     }
     return state;
   });
+  notifyTaskDueChanged();
 }
 
 export type ReserveRunResult =

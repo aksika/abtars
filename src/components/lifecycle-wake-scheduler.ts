@@ -1,4 +1,5 @@
 import { logAndSwallow } from "./log-and-swallow.js";
+import { logTrace } from "./logger.js";
 
 const TAG = "lifecycle-wake";
 
@@ -146,6 +147,7 @@ export class LifecycleWakeScheduler {
       this.waking.add(source.id);
       try {
         // Wakes are level-triggered: the source rescans durable state itself.
+        logTrace(TAG, `due_source_woken source=${source.id} items=${due.length}`);
         await source.wakeDue(now);
       } catch (err) {
         logAndSwallow(TAG, `wakeDue:${source.id}`, err);

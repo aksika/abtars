@@ -24,7 +24,19 @@ export interface CommandContext {
   /** #1539: every lane currently executing (manual + scheduled). */
   cronCurrentJobs?: RunningJob[];
   /** #1539: per-lane durable pending/current view. */
-  cronQueueView?: () => Array<{ lane: string; pending: Array<{ entryId: string; runId?: string; manual?: boolean; priority?: string }> }>;
+  cronQueueView?: () => Array<{
+    lane: string;
+    current: (RunningJob & {
+      phase?: string;
+      lastProgressAt?: number;
+      deadlineAt?: number;
+      terminalRequest?: { kind: "cancelled" | "deadline_exceeded"; requestedAt: number; reason: string };
+      cardId?: number;
+      sessionId?: string;
+      executionId?: string;
+    }) | null;
+    pending: Array<{ entryId: string; runId?: string; manual?: boolean; priority?: string }>;
+  }>;
   enqueueCron?: PipelineDeps["enqueueCron"];
   requestShutdown?: PipelineDeps["requestShutdown"];
   sleepProgress?: PipelineDeps["sleepProgress"];
