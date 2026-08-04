@@ -98,4 +98,44 @@ describe("spin(spec) is the canonical model-call entry point (#1271)", () => {
     }
     expect(violations).toEqual([]);
   });
+
+  it("no mutable session Map or allocation counter outside the session registry (#1540)", () => {
+    const violations: string[] = [];
+    for (const file of walkTsFiles(SRC_DIR)) {
+      const rel = relative(process.cwd(), file);
+      if (rel === "src/components/spin-sessions.ts") continue;  // the registry owner
+      const content = readFileSync(file, "utf-8");
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      if (/new\s+Map<string,\s*ManagedSession>/.test(stripped)) {
+        violations.push(`${rel}: mutable session Map must live only inside spin-sessions.ts`);
+      }
+      if (/\bnextIndex\b/.test(stripped)) {
+        violations.push(`${rel}: session allocation counter must live only inside spin-sessions.ts`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it("no module-global execution-control registry or removed global helpers (#1540)", () => {
+    const violations: string[] = [];
+    for (const file of walkTsFiles(SRC_DIR)) {
+      const rel = relative(process.cwd(), file);
+      if (rel === "src/components/execution-control.ts") continue;  // the supervisor owner
+      const content = readFileSync(file, "utf-8");
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      if (/\b_controls\s*=\s*new\s+Map/.test(stripped)) {
+        violations.push(`${rel}: module-global execution-control registry must live only inside execution-control.ts`);
+      }
+      // Removed global control registration/lookup/removal helpers — importing
+      // them from elsewhere means the single supervisor is being bypassed.
+      if (/import\s*\{[^}]*\b(?:registerControl|getControl|removeControl|registerWorkerControl|removeControlByAttempt|hasLiveControl)\b/.test(stripped)) {
+        violations.push(`${rel}: import of removed module-global execution-control helper`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
 });
