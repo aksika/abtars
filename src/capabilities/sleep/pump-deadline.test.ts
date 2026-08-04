@@ -212,4 +212,47 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
 
     vi.useRealTimers();
   });
+
+  it("pumps every provider generation into the cycle's allocated session (#1538)", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
+    client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
+    const spin = vi.fn().mockResolvedValue({ result: "done", sessionId: "s1" });
+    const allocateSleepSession = vi.fn().mockReturnValue("d-night-1");
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+      allocateSleepSession,
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    // Regression: before #1538 the allocated id was discarded, so the first
+    // generation carried undefined and spin() allocated an unnamed sibling.
+    expect(spin).toHaveBeenCalledTimes(2);
+    for (const call of spin.mock.calls) {
+      expect((call[0] as { sessionId?: string }).sessionId).toBe("d-night-1");
+    }
+
+    // Second cycle, same handle: the identity must not outlive the cycle — a
+    // retained id would pump into a session the idle reaper had already ended.
+    allocateSleepSession.mockReturnValue("d-night-2");
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-2" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
+    handle.startScheduled();
+    await settleTicks();
+
+    const secondCycleCalls = spin.mock.calls.slice(2);
+    expect(secondCycleCalls).toHaveLength(2);
+    for (const call of secondCycleCalls) {
+      expect((call[0] as { sessionId?: string }).sessionId).toBe("d-night-2");
+    }
+  });
 });
