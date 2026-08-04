@@ -25,6 +25,7 @@ import {
   type TuiAttachMode,
 } from "./tui-protocol.js";
 import { Spin, type ManagedSession, type SessionType } from "../../components/spin.js";
+import { createSpinSessionRegistry, type SpinSessionRegistry } from "../../components/spin-sessions.js";
 import type { QueuedSessionInstruction } from "../../components/spin-types.js";
 import type { AgentSession } from "../../components/subagent-runtime.js";
 import type { InboundMessage } from "../../types/platform.js";
@@ -1643,10 +1644,12 @@ describe("TuiSocketAdapter — ended pipeline attachment reconciliation (#1533)"
   let adapter: TuiSocketAdapter;
   let onMessage: ReturnType<typeof vi.fn>;
   let spin: Spin;
+  let registry: SpinSessionRegistry;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
-    spin = new Spin();
+    registry = createSpinSessionRegistry({ maxTotalSessions: 12 });
+    spin = new Spin(registry);
     onMessage = makeRecoveryHandler();
   });
 
@@ -1744,7 +1747,7 @@ describe("TuiSocketAdapter — ended pipeline attachment reconciliation (#1533)"
 
   it("drops the input with a bounded system error when the attached session object is gone", async () => {
     const { conn, frames, attached } = await attachNew();
-    spin.getSessions().delete(attached);
+    registry.remove(attached);
     frames.length = 0;
 
     conn.write(encodeFrame({ t: "input", text: "hello" }));

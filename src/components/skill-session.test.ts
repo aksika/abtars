@@ -11,9 +11,40 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SkillSessionManager } from "./skill-session.js";
 import { SkillSessionStore, scopeKeyOf } from "./skill-session-store.js";
-import { allocateSession } from "./spin-sessions.js";
-import type { ManagedSession } from "./spin-types.js";
+import type { ManagedSession, SessionType } from "./spin-types.js";
 import type { SkillSpinFacade } from "./skill-session.js";
+
+/**
+ * #1540: spin-sessions no longer exposes raw allocation over a caller-owned
+ * Map. This test-local helper builds the same ManagedSession shape the old
+ * allocateSession produced, so the fake facade keeps its observable contract.
+ */
+function allocateSession(
+  sessions: Map<string, ManagedSession>, idx: number,
+  type: SessionType, userId: string, platform: string, chatId: number,
+): { session: ManagedSession; nextIndex: number } {
+  const ts = Math.floor(Date.now() / 1000);
+  const session: ManagedSession = {
+    id: `${ts}_${type}_${String(idx + 1).padStart(2, "0")}`,
+    userId, platform, chatId,
+    delivery: "simple",
+    active: false,
+    status: "ready",
+    idleTimeoutMs: 7200000,
+    lastActiveAt: Date.now(),
+    messageCount: 0, tokenCount: 0, toolCallCount: 0,
+    log: [],
+    shortIndex: idx + 1,
+    busy: false, queue: [], fullMode: false, pendingStart: false,
+    seen: false, compacting: false, ctxWarned: false, compactFailures: 0,
+    primingTerms: [], completions: [],
+    pendingWait: [],
+    instructionQueue: [],
+    steeringAccepting: false,
+  };
+  sessions.set(session.id, session);
+  return { session, nextIndex: idx + 1 };
+}
 
 let home: string;
 let storeFile: string;

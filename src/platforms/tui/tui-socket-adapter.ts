@@ -623,7 +623,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     // Send the initial snapshot.
     const orcSession = spin.getSessionById(sessionId);
     if (orcSession) {
-      const snapshot = buildOrcActivitySnapshot(orcSession, spin.getSessions?.() ?? new Map(), this._activitySequence);
+      const snapshot = buildOrcActivitySnapshot(orcSession, new Map(), this._activitySequence);
       this._push({ t: "activity-snapshot", sequence: this._activitySequence, snapshot });
     }
   }
@@ -713,8 +713,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this._writer.dropActivity();
 
     const seq = feed.currentSequence;
-    const sessions = this.deps.spin.getSessions?.() ?? new Map();
-    const snapshot = buildOrcActivitySnapshot(orcEntry, sessions, seq);
+    const snapshot = buildOrcActivitySnapshot(orcEntry, new Map(), seq);
     const res = this._writer.enqueue({ t: "activity-snapshot", sequence: seq, snapshot });
     if (res === "dropped") {
       return false;

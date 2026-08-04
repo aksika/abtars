@@ -17,8 +17,7 @@ import { sessionType } from "./spin-types.js";
 import { profileFor, isValidSessionType, type SessionProfile } from "./spin-profiles.js";
 import { WorkerSupervisionService, validateWorkerRootCriteria } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
-import * as Sessions from "./spin-sessions.js";
-import { pushLog, isHollow, cancelSessionExecution } from "./spin-sessions.js";
+import { pushLog, isHollow, cancelSessionExecution, createSpinSessionRegistry, type SpinSessionRegistry } from "./spin-sessions.js";
 import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expireInstructions, restoreBeforeDelivery, subscribeSteerEvents } from "./session-instruction-queue.js";
 import { createExecutionTelemetryScope } from "./execution-telemetry.js";
 import type { OrcActivityFeed } from "./orc-activity-feed.js";
@@ -53,8 +52,7 @@ const MAX_CONCURRENT: Partial<Record<SessionType, number>> = {
 };
 
 export class Spin {
-  private sessions = new Map<string, ManagedSession>();
-  private nextIndex = 0;
+  private readonly sessions: SpinSessionRegistry;
   private running = new Map<SessionType, Set<number>>();
   private runtime: SubagentRuntime | null = null;
   private memory: { recordMessage(opts: { role: string; content: string; timestamp: number; userId: string; sessionId: string }): void } | null = null;
@@ -70,6 +68,11 @@ export class Spin {
    */
   private contextProvider: import("./transport/pi-core-context.js").DurableContextProviderHolder = { current: null };
 
+  /** #1540: compose the closure-backed session registry. */
+  constructor(sessions?: SpinSessionRegistry) {
+    this.sessions = sessions ?? createSpinSessionRegistry({ maxTotalSessions: MAX_TOTAL_SESSIONS });
+  }
+
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
   setContextProvider(holder: import("./transport/pi-core-context.js").DurableContextProviderHolder): void { this.contextProvider = holder; }
   setMemory(memory: Spin["memory"]): void { this.memory = memory; }
@@ -79,14 +82,7 @@ export class Spin {
   // ── Session CRUD ───────────────────────────────────────────────────────
 
   getActiveSession(userId: string, platform: string): ManagedSession {
-    let s = Sessions.getActiveSession(this.sessions, userId, platform);
-    if (!s) {
-      // Auto-create initial Main session
-      const r = Sessions.allocateSession(this.sessions, this.nextIndex, "A", userId, platform, 0, { active: true });
-      this.nextIndex = r.nextIndex;
-      s = r.session;
-    }
-    return s;
+    return this.sessions.getOrCreateActive(userId, platform);
   }
 
   getActiveSessionId(userId: string, platform: string): string {
@@ -96,24 +92,15 @@ export class Spin {
   createSession(userId: string, platform: string, type: SessionType): ManagedSession | string {
     // Ensure a Main session exists before creating additional ones
     this.getActiveSession(userId, platform);
-    const r = Sessions.createSession(this.sessions, this.nextIndex, userId, platform, type, 0, MAX_TOTAL_SESSIONS);
-    if (typeof r === "string") return r;
-    this.nextIndex = r.nextIndex;
-    return r.session;
+    return this.sessions.create(userId, platform, type);
   }
 
   createSubSession(userId: string, platform: string, type: SessionType): ManagedSession | string {
-    const r = Sessions.createSubSession(this.sessions, this.nextIndex, userId, platform, type, 0, MAX_TOTAL_SESSIONS);
-    if (typeof r === "string") return r;
-    this.nextIndex = r.nextIndex;
-    return r.session;
+    return this.sessions.createSub(userId, platform, type);
   }
 
   createHollowSession(userId: string, platform: string, type: SessionType, peer: string, remoteSessionId: string): ManagedSession | string {
-    const r = Sessions.createHollowSession(this.sessions, this.nextIndex, userId, platform, type, 0, peer, remoteSessionId, MAX_TOTAL_SESSIONS);
-    if (typeof r === "string") return r;
-    this.nextIndex = r.nextIndex;
-    return r.session;
+    return this.sessions.createHollow(userId, platform, type, 0, peer, remoteSessionId);
   }
 
   /** Allocate a named Dreamy (D) session upfront for the duration of a sleep cycle (#1280).
@@ -122,10 +109,9 @@ export class Spin {
    *  and passes it as sessionId to subsequent spin({ type:"D", sessionId }) calls. */
   allocateDreamySession(name: string): ManagedSession {
     const userId = getMasterUserId();
-    const r = Sessions.allocateSession(this.sessions, this.nextIndex, "D", userId, "background", 0, { active: false });
-    this.nextIndex = r.nextIndex;
-    r.session.name = name;
-    return r.session;
+    const session = this.sessions.allocate({ type: "D", userId, platform: "background", chatId: 0, active: false });
+    session.name = name;
+    return session;
   }
 
   /**
@@ -141,12 +127,11 @@ export class Spin {
     workingDir: string;
     metadata: { runId: string; generation: number; executor: string };
   }): ManagedSession {
-    const r = Sessions.allocateSession(this.sessions, this.nextIndex, spec.type, spec.userId, spec.platform, 0, { active: false });
-    this.nextIndex = r.nextIndex;
-    r.session.name = spec.name;
-    r.session.workingDir = spec.workingDir;
-    (r.session as unknown as Record<string, unknown>).externalMetadata = spec.metadata;
-    return r.session;
+    const session = this.sessions.allocate({ type: spec.type, userId: spec.userId, platform: spec.platform, chatId: 0, active: false });
+    session.name = spec.name;
+    session.workingDir = spec.workingDir;
+    (session as unknown as Record<string, unknown>).externalMetadata = spec.metadata;
+    return session;
   }
 
   /**
@@ -154,42 +139,39 @@ export class Spin {
    * metadata to ensure the caller owns this exact generation.
    */
   endExternalSession(sessionId: string, expected: { runId: string; generation: number }): boolean {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.getById(sessionId);
     if (!session) return false;
     const meta = (session as unknown as Record<string, unknown>).externalMetadata as { runId?: string; generation?: number } | undefined;
     if (!meta || meta.runId !== expected.runId || meta.generation !== expected.generation) return false;
-    const r = Sessions.endSession(this.sessions, this.nextIndex, session.userId, session.platform, session.shortIndex);
+    const r = this.sessions.end(session.userId, session.platform, session.shortIndex);
     if (typeof r === "string") return false;
-    this.nextIndex = r.nextIndex;
-    this.finalizeSession(r.ended, "external_ended");
+    this.finalizeSession(r, "external_ended");
     return true;
   }
 
   switchSession(userId: string, platform: string, index: number): ManagedSession | string {
-    return Sessions.switchSession(this.sessions, userId, platform, index);
+    return this.sessions.switch(userId, platform, index);
   }
 
   endSession(userId: string, platform: string, index?: number): ManagedSession | string {
-    const r = Sessions.endSession(this.sessions, this.nextIndex, userId, platform, index);
+    const r = this.sessions.end(userId, platform, index);
     if (typeof r === "string") return r;
-    this.nextIndex = r.nextIndex;
-    this.finalizeSession(r.ended, "ended");
-    return r.ended;
+    this.finalizeSession(r, "ended");
+    return r;
   }
 
   killSession(userId: string, platform: string, index: number): ManagedSession | string {
-    const r = Sessions.killSession(this.sessions, this.nextIndex, userId, platform, index);
+    const r = this.sessions.kill(userId, platform, index);
     if (typeof r === "string") {
-      const bg = this.getSessionByGlobalIndex(index);
+      const bg = this.sessions.getByGlobalIndex(index);
       if (bg && bg.userId === userId && bg.platform === "background") {
         this.finalizeSession(bg, "killed");
         return bg;
       }
       return r;
     }
-    this.nextIndex = r.nextIndex;
-    this.finalizeSession(r.killed, "killed");
-    return r.killed;
+    this.finalizeSession(r, "killed");
+    return r;
   }
 
   /**
@@ -199,7 +181,7 @@ export class Spin {
    * Returns false when the session is missing or owned by another user.
    */
   finalizeExactSession(sessionId: string, expectedUserId: string): boolean {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.getById(sessionId);
     if (!session || session.userId !== expectedUserId) return false;
     if (session.status !== "ended") {
       cancelSessionExecution(session, "session_end");
@@ -209,25 +191,25 @@ export class Spin {
   }
 
   pauseSession(userId: string, platform: string, index?: number): ManagedSession | string {
-    return Sessions.pauseSession(this.sessions, userId, platform, index);
+    return this.sessions.pause(userId, platform, index);
   }
 
   resumeSession(userId: string, platform: string, index?: number): ManagedSession | string {
-    return Sessions.resumeSession(this.sessions, userId, platform, index);
+    return this.sessions.resume(userId, platform, index);
   }
 
   listSessions(userId: string, platform: string): { sessions: ManagedSession[]; activeIndex: number } {
-    const list = Sessions.listSessions(this.sessions, userId, platform);
+    const list = this.sessions.list(userId, platform);
     const active = list.find(s => s.active);
-    return { sessions: list, activeIndex: active?.shortIndex ?? 0 };
+    return { sessions: [...list], activeIndex: active?.shortIndex ?? 0 };
   }
 
   listAllSessions(): ManagedSession[] {
-    return Sessions.listAllSessions(this.sessions);
+    return [...this.sessions.listAll()];
   }
 
   getSessionById(sessionId: string): ManagedSession | undefined {
-    return this.sessions.get(sessionId);
+    return this.sessions.getById(sessionId);
   }
 
   /**
@@ -245,7 +227,7 @@ export class Spin {
     fallback: IKiroTransport,
     reason: CancelReason = "operator",
   ): Promise<void> {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.getById(sessionId);
     const target = session?.transport ?? fallback;
     await target.sendInterrupt(reason);
     if (session) session.busy = false;
@@ -253,22 +235,14 @@ export class Spin {
 
   /** #1336: Look up a session by global shortIndex across all platforms. Returns undefined if not found or ended. */
   getSessionByGlobalIndex(index: number): ManagedSession | undefined {
-    for (const s of this.sessions.values()) {
-      if (s.shortIndex === index && s.status !== "ended") return s;
-    }
-    return undefined;
-  }
-
-  /** #1319: Expose session map for snapshot builder. */
-  getSessions(): Map<string, ManagedSession> {
-    return this.sessions;
+    return this.sessions.getByGlobalIndex(index);
   }
 
   formatList(userId: string, platform: string, showAll = false): string {
-    return Sessions.formatList(this.sessions, userId, platform, showAll);
+    return this.sessions.format(userId, platform, showAll);
   }
 
-  clearAll(): void { this.sessions.clear(); this.nextIndex = 0; }
+  clearAll(): void { this.sessions.clear(); }
 
   // ── Interactive session lifecycle ──────────────────────────────────────
 
@@ -435,7 +409,7 @@ export class Spin {
   }
 
   destroySession(userId: string, sessionId?: string): void {
-    for (const s of this.sessions.values()) {
+    for (const s of this.sessions.listAll()) {
       if (s.userId !== userId) continue;
       if (sessionId && s.id !== sessionId) continue;
       if (s.idleTimeoutMs === Infinity) continue;
@@ -445,12 +419,11 @@ export class Spin {
   }
 
   destroyAll(): void {
-    for (const s of this.sessions.values()) {
+    for (const s of this.sessions.listAll()) {
       this.finalizeSession(s, "shutdown");
     }
     if (this.orcSession) { try { this.orcSession.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } this.orcSession = null; }
     this.sessions.clear();
-    this.nextIndex = 0;
     logInfo(TAG, "All sessions destroyed (shutdown)");
   }
 
@@ -489,7 +462,7 @@ export class Spin {
 
   /** @deprecated Use `spin({ type:"O", sessionId, prompt:"[USER] "+msg, await:true })`. */
   async sendUserToOrc(message: string): Promise<string | null> {
-    const orcSession = [...this.sessions.values()].find(s => s.id.includes("_O_") && s.status !== "ended");
+    const orcSession = this.sessions.listAll().find(s => s.id.includes("_O_"));
     if (!orcSession) return null;
     const { result } = await this.spin({ type: "O", sessionId: orcSession.id, prompt: `[USER] ${message}`, settlementOwner: "spin", await: true });
     return result ?? null;
@@ -538,7 +511,7 @@ export class Spin {
     // 2. Resolve session (reuse | active | singleton | transient) — driven by profile, no type branches
     let session: ManagedSession;
     if (spec.sessionId) {
-      const found = this.sessions.get(spec.sessionId);
+      const found = this.sessions.getById(spec.sessionId);
       if (!found) throw new Error(`Spin: sessionId ${spec.sessionId} not found`);
       if (found.status === "ended") throw new Error(`Spin: sessionId ${spec.sessionId} is ended`);
       session = found;
@@ -549,8 +522,7 @@ export class Spin {
         ? this.getOrCreateOrcProjectSession(userId, spec.orcContext.projectCardId)
         : this.getOrCreateVisibleSession(userId, spec.type)!;
     } else {
-      const r = Sessions.allocateSession(this.sessions, this.nextIndex, spec.type, userId, platform, chatId);
-      this.nextIndex = r.nextIndex; session = r.session;
+      session = this.sessions.allocate({ type: spec.type, userId, platform, chatId });
       if (spec.metadata) session.metadata = { ...spec.metadata };
     }
     const stepIndex = (session.messageCount >> 1) + 1;
@@ -1211,7 +1183,7 @@ export class Spin {
   }
 
   private applyTerminate(session: ManagedSession, terminate: "call" | "response" | "external"): void {
-    if (terminate === "call") { this.finalizeSession(session, "call_terminated"); this.sessions.delete(session.id); }
+    if (terminate === "call") { this.finalizeSession(session, "call_terminated"); this.sessions.remove(session.id); }
     else if (terminate === "response") { this.finalizeSession(session, "response_terminated"); }
     // "external" → stays alive (Orc, persistent D); 1hr housekeeping prunes ended ones
   }
@@ -1237,17 +1209,16 @@ export class Spin {
   /** #1010: O-type reuses existing session (one Orc). All others create new. */
   private getOrCreateVisibleSession(userId: string, type: SessionType): ManagedSession | undefined {
     if (type === "O") {
-      for (const s of this.sessions.values()) {
-        if (s.id.includes("_O_") && s.status !== "ended") return s;
-      }
+      const existing = this.sessions.listAll().find(s => s.id.includes("_O_"));
+      if (existing) return existing;
     }
     const sub = this.createSubSession(userId, "telegram", type);
     return typeof sub === "string" ? undefined : sub;
   }
 
   private getOrCreateOrcProjectSession(userId: string, projectCardId: number): ManagedSession {
-    const existing = [...this.sessions.values()].find((s) =>
-      s.id.includes("_O_") && s.status !== "ended" && s.orcContext?.projectCardId === projectCardId);
+    const existing = this.sessions.listAll().find((s) =>
+      s.id.includes("_O_") && s.orcContext?.projectCardId === projectCardId);
     if (existing) return existing;
     const sub = this.createSubSession(userId, "background", "O");
     if (typeof sub === "string") throw new Error(sub);
@@ -1272,7 +1243,7 @@ export class Spin {
     // Concurrency gate: blocked cards stay queued for drainQueued() to pick up.
     // Session cap: also gate here so a full Map never generates a void-spin
     // unhandled rejection (step-2 throws in spin() are outside the try/catch). (#1274)
-    const aliveSessions = [...this.sessions.values()].filter(s => s.status !== "ended").length;
+    const aliveSessions = this.sessions.listAll().length;
     if (aliveSessions >= MAX_TOTAL_SESSIONS || !this.canDispatch(request.type, cardId)) {
       const reason = aliveSessions >= MAX_TOTAL_SESSIONS ? "session cap" : "concurrency gate";
       logInfo(TAG, `${request.type} card:${cardId} queued (${reason})`);
@@ -1316,7 +1287,7 @@ export class Spin {
     // #1520: typed admission rejection so the scheduler can defer the same
     // occurrence instead of counting a failure. Gate checks happen strictly
     // before any model call starts.
-    const aliveSessions = [...this.sessions.values()].filter(s => s.status !== "ended").length;
+    const aliveSessions = this.sessions.listAll().length;
     if (aliveSessions >= MAX_TOTAL_SESSIONS) {
       throw new SpinDispatchAdmissionError("session_capacity", "System busy — max sessions reached.");
     }
@@ -1506,7 +1477,7 @@ export class Spin {
     this._housekeepCounter++;
     if (this._housekeepCounter % 72 === 0) {
       this.pruneSkillTrash();      this.rotateAuditLog();
-      this.pruneEndedSessions();
+      this.sessions.pruneEnded(Date.now(), 60 * 60 * 1000);
     }
   }
 
@@ -1572,19 +1543,6 @@ export class Spin {
     session.status = "ended";
     pushLog(session, `finalized: ${reason}`);
     logDebug(TAG, `Session finalized: ${session.userId} id=${session.id} reason=${reason}`);
-  }
-
-  /** #1248: Prune ended sessions older than 1 hour (~hourly). Prevents unbounded Map growth. */
-  private pruneEndedSessions(): void {
-    const ONE_HOUR_MS = 60 * 60 * 1000;
-    const now = Date.now();
-    for (const [id, s] of this.sessions) {
-      const endedAt = ((s as unknown as Record<string, unknown>)["endedAt"] as number | undefined) ?? s.lastActiveAt;
-      if (s.status === "ended" && now - endedAt > ONE_HOUR_MS) {
-        this.sessions.delete(id);
-        logDebug(TAG, `Pruned ended session: ${s.userId} id=${id}`);
-      }
-    }
   }
 
   private canDispatch(type: SessionType, _cardId: number): boolean {

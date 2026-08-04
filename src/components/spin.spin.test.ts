@@ -783,10 +783,12 @@ describe("spin(spec) — unified session API (#1271)", () => {
   describe("#1274 — session cap gate at dispatch/dispatchAwait layer", () => {
     const MAX = parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10);
 
+    // #1540: the registry hides the backing map; fill the cap through the
+    // facade so the gate observes the same live-session count as production.
     function fillSessions(s: Spin, count: number): void {
-      const sessions: Map<string, { status: string }> = (s as any).sessions;
       for (let i = 0; i < count; i++) {
-        sessions.set(`fake_X_${String(i).padStart(2, "0")}`, { status: "ready" });
+        const r = s.createSubSession("aksika", "telegram", "S");
+        if (typeof r === "string") throw new Error(`fillSessions: ${r}`);
       }
     }
 
