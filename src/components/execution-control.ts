@@ -333,6 +333,10 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
     close(executionRef, outcome) {
       const ctrl = controls.get(executionRef);
       if (!ctrl) return false;
+      // #1540: cleanup of a stale generation must never mutate its successor —
+      // only a still-bound control may change occupancy. An unbound control
+      // (binding dropped by remove()) resolves to a no-op.
+      if (refSessions.get(executionRef) === undefined) return false;
       const transitioned = ctrl.markTerminal(outcome);
       if (transitioned && ctrl.cardId !== undefined) {
         for (const [type, set] of running) {

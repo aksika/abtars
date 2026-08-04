@@ -250,7 +250,7 @@ export class Spin {
     return this.sessions.format(userId, platform, showAll);
   }
 
-  clearAll(): void { this.sessions.clear(); }
+  clearAll(): void { this.sessions.clear(); this.executions.clear(); }
 
   // ── Interactive session lifecycle ──────────────────────────────────────
 
@@ -432,6 +432,9 @@ export class Spin {
     }
     if (this.orcSession) { try { this.orcSession.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } this.orcSession = null; }
     this.sessions.clear();
+    // #1540: shutdown clears the execution supervisor with the registry — no
+    // stale live handle, occupancy, or session binding survives a destroy.
+    this.executions.clear();
     logInfo(TAG, "All sessions destroyed (shutdown)");
   }
 

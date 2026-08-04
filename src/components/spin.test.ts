@@ -176,9 +176,13 @@ describe("Spin — unified session router (#943)", () => {
       const transport = mockTransport();
       spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport });
       await spin.resolveSession("adrika", "telegram", 222);
+      // #1540: live occupancy and controls belong to the facade too — shutdown
+      // must clear the supervisor along with the session registry.
+      spin.executionSupervisor.admit("T", 777);
 
       spin.destroyAll();
       expect(spin.listAllSessions()).toHaveLength(0);
+      expect(spin.executionSupervisor.runningCardIds()).toEqual([]);
     });
 
     it("createHollowSession creates a session with peer and no transport", () => {
