@@ -36,10 +36,30 @@ const ENTRY: ScheduledTask = {
   delivery: "silent",
 };
 
-const SEED_NEXT_RUN = 1_752_000_000_000;
+const NOW = Date.now();
+const SEED_NEXT_RUN = NOW + 3_600_000;
 const SEED_GROUP = "sched-g-42";
-const OCCURRENCE_AT = 1_752_000_000_000;
-const DEADLINE_AT = OCCURRENCE_AT + 10 * 60 * 1000;
+const OCCURRENCE_AT = NOW + 60_000;
+const DEADLINE_AT = NOW + 10 * 60_000;
+
+// A deferred occurrence already mid-re-admission: a manual run must continue
+// the bounded deferral, not start over from attempt 1.
+const SEED_DEFERRAL: TaskRuntimeState["deferredAdmission"] = {
+  groupId: "g-manual-defer",
+  occurrenceAt: OCCURRENCE_AT,
+  deadlineAt: DEADLINE_AT,
+  attempts: 2,
+  retryAt: NOW + 120_000,
+  diagnostic: {
+    version: 1,
+    category: "admission",
+    code: "executor_unavailable",
+    phase: "queued",
+    message: "earlier deferral",
+    retryability: "transient",
+    occurredAt: NOW,
+  },
+};
 
 interface SettleCase {
   name: string;
@@ -94,12 +114,12 @@ const CASES: SettleCase[] = [
     name: "a manual admission deferral still defers the same occurrence",
     trigger: "manual",
     runId: "run-manual-defer",
-    seed: {},
+    seed: { deferredAdmission: SEED_DEFERRAL },
     outcome: "deferred",
     makeDiagnostic: () => failure.makeTaskFailure("admission", "executor_unavailable", "queued", "executor unavailable", "transient"),
     expectState: (s) => {
       expect(s.activeRun).toBeUndefined();
-      expect(s.deferredAdmission?.attempts).toBe(1);
+      expect(s.deferredAdmission?.attempts).toBe(3);
       expect(s.deferredAdmission?.groupId).toBe("g-manual-defer");
       expect(s.nextRunAt).toBe(s.deferredAdmission?.retryAt);
       expect(s.autoPaused).toBe(false);

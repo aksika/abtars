@@ -255,4 +255,43 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       expect((call[0] as { sessionId?: string }).sessionId).toBe("d-night-2");
     }
   });
+
+  it("does not retain a provider-allocated session id across cycles (#1538)", async () => {
+    // No allocator: the identity comes from the provider's spin result. The
+    // first generation of each cycle carries no id and captures the returned
+    // one for the rest of the cycle — a retained id from the ended cycle
+    // would leak into the next cycle's first generation instead.
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
+    client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
+    const spin = vi.fn()
+      .mockResolvedValueOnce({ result: "done", sessionId: "d-night-1" })
+      .mockResolvedValueOnce({ result: "done", sessionId: "d-night-1" })
+      .mockResolvedValueOnce({ result: "done", sessionId: "d-night-2" })
+      .mockResolvedValueOnce({ result: "done", sessionId: "d-night-2" });
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect((spin.mock.calls[0]![0] as { sessionId?: string }).sessionId).toBeUndefined();
+    expect((spin.mock.calls[1]![0] as { sessionId?: string }).sessionId).toBe("d-night-1");
+
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-2" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
+    handle.startScheduled();
+    await settleTicks();
+
+    expect((spin.mock.calls[2]![0] as { sessionId?: string }).sessionId).toBeUndefined();
+    expect((spin.mock.calls[3]![0] as { sessionId?: string }).sessionId).toBe("d-night-2");
+  });
 });
