@@ -127,6 +127,10 @@ export interface VoiceDeps {
 export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   sessionManager: import("./spin.js").Spin;
   cronCurrentJob?: () => RunningJob | null;
+  /** #1539: every lane currently executing (manual + scheduled). */
+  cronCurrentJobs?: () => RunningJob[];
+  /** #1539: per-lane durable pending/current view. */
+  cronQueueView?: () => Array<{ lane: string; pending: Array<{ entryId: string; runId?: string; manual?: boolean; priority?: string }> }>;
   enqueueCron?: (entryId: string, manual?: boolean) => string | null;
   requestShutdown?: (code?: number) => void;
   sleepProgress?: () => { percent: number; step: string } | null;

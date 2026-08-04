@@ -51,56 +51,90 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   ctx.idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
 
-  // CronQueue first — pipelineDeps references it
+  // #1539: construct the lifecycle wake scheduler and the scheduled-run
+  // coordinator before the queue. The coordinator owns execution, deadlines,
+  // cancellation, and recovery; the queue only orders admission.
+  const { LifecycleWakeScheduler } = await import("../components/lifecycle-wake-scheduler.js");
+  const wakeScheduler = new LifecycleWakeScheduler();
+  const { ScheduledRunCoordinator, wireCardProgressProjection } = await import("../components/tasks/scheduled-run-coordinator.js");
+
   let shaState: "idle" | "running" | "cooldown" = "idle";
   const shaPending: string[] = [];
+  const onFailInject = (entryId: string, command: string, result: string): void => {
+    // Three-state SHA guard (#719)
+    if (shaState === "running") return; // drop entirely — SHA might be fixing it
+    if (ctx.telegramAdapter) {
+      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `⚠️ ${entryId} failed`);
+    }
+    if (!getEnv().selfhealEnabled) return;
+    if (shaState === "cooldown") {
+      shaPending.push(entryId);
+      return;
+    }
+    // SHA idle → fire
+    shaState = "running";
+    const pending = shaPending.length > 0 ? `\nAlso failed recently: ${shaPending.join(", ")}` : "";
+    shaPending.length = 0;
+    if (ctx.telegramAdapter) {
+      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `🔧 Calling SHA, reason: "${entryId}" failed`);
+    }
+    const msg = `[System] You ARE the self-healing agent. A scheduled task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}${pending}\n\nDiagnose the root cause. If you can fix it programmatically (script fix, token refresh, pause task), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.\n\nFORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:\n- transport.json\n- .env / .env.skills\n- peers.json\n- users.json\nException: fixing JSON structural corruption (invalid syntax, parse errors) is always allowed.\n\nA single task failure is NOT grounds for config changes. Investigate root cause, report findings.`;
+    void (async () => {
+      try {
+        // #1271: SHA goes through the unified spin() chokepoint (S profile =
+        // coding agent, call-terminate — session is created and deleted).
+        await ctx.sessionManager.spin({
+          type: "S",
+          prompt: msg,
+          settlementOwner: "spin",
+          await: true,
+        });
+      } catch (err) {
+        logWarn("main", `SHA session failed: ${err}`);
+      } finally {
+        shaState = "cooldown";
+        setTimeout(() => { shaState = "idle"; }, 60_000);
+      }
+    })();
+  };
+  const onTaskPaused = (chatId: number, title: string, _reason: string): void => {
+    if (!ctx.telegramAdapter) return;
+    const msg = `"${title}" auto-paused.\nResume with: /task resume <id>`;
+    ctx.telegramAdapter.sendNotification(String(chatId), msg);
+  };
+  const coordinator = new ScheduledRunCoordinator({ onFailInject, onTaskPaused });
+
   const cronQueue = new CronQueue(
     config.transport.agentCliPath,
     config.transport.workingDir,
-    (entryId, command, result) => {
-      // Three-state SHA guard (#719)
-      if (shaState === "running") return; // drop entirely — SHA might be fixing it
-      if (ctx.telegramAdapter) {
-        ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `⚠️ ${entryId} failed`);
-      }
-      if (!getEnv().selfhealEnabled) return;
-      if (shaState === "cooldown") {
-        shaPending.push(entryId);
-        return;
-      }
-      // SHA idle → fire
-      shaState = "running";
-      const pending = shaPending.length > 0 ? `\nAlso failed recently: ${shaPending.join(", ")}` : "";
-      shaPending.length = 0;
-      if (ctx.telegramAdapter) {
-        ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `🔧 Calling SHA, reason: "${entryId}" failed`);
-      }
-      const msg = `[System] You ARE the self-healing agent. A scheduled task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}${pending}\n\nDiagnose the root cause. If you can fix it programmatically (script fix, token refresh, pause task), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.\n\nFORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:\n- transport.json\n- .env / .env.skills\n- peers.json\n- users.json\nException: fixing JSON structural corruption (invalid syntax, parse errors) is always allowed.\n\nA single task failure is NOT grounds for config changes. Investigate root cause, report findings.`;
-      void (async () => {
-        try {
-          // #1271: SHA goes through the unified spin() chokepoint (S profile =
-          // coding agent, call-terminate — session is created and deleted).
-          await ctx.sessionManager.spin({
-            type: "S",
-            prompt: msg,
-            settlementOwner: "spin",
-            await: true,
-          });
-        } catch (err) {
-          logWarn("main", `SHA session failed: ${err}`);
-        } finally {
-          shaState = "cooldown";
-          setTimeout(() => { shaState = "idle"; }, 60_000);
-        }
-      })();
-    },
-    (chatId, title, _reason) => {
-      if (!ctx.telegramAdapter) return;
-      const msg = `"${title}" auto-paused.\nResume with: /task resume <id>`;
-      ctx.telegramAdapter.sendNotification(String(chatId), msg);
-    },
+    coordinator,
   );
   ctx.cronQueue = cronQueue;
+
+  // #1539: wire the wake scheduler into the reconciler (executor-lease source
+  // registers on startReconciler) and register the remaining due sources.
+  const { setWakeScheduler } = await import("../components/reconciler.js");
+  setWakeScheduler(wakeScheduler);
+
+  const { createRunDeadlineSource, createTaskAdmissionSource, createKanbanRetrySource } = await import("../components/tasks/due-sources.js");
+  wakeScheduler.register(createKanbanRetrySource((cardId: number) => {
+    const { requestReconcileForProject } = require("../components/reconciler.js") as typeof import("../components/reconciler.js");
+    requestReconcileForProject(cardId);
+  }, () => {
+    const { spin } = require("../components/spin.js") as typeof import("../components/spin.js");
+    spin.drainQueuedCards();
+  }));
+  wakeScheduler.register(createTaskAdmissionSource(async () => {
+    const { runTaskTick } = await import("./heartbeat-tier3.js");
+    await runTaskTick(ctx);
+  }));
+  wakeScheduler.register(createRunDeadlineSource(coordinator));
+
+  const { setTaskDueChangedHook } = await import("../components/tasks/task-state-store.js");
+  setTaskDueChangedHook(() => wakeScheduler.sourceChanged("task-admission"));
+  const { setKanbanDueChangedHook } = await import("../components/tasks/kanban-board.js");
+  setKanbanDueChangedHook(() => wakeScheduler.sourceChanged("kanban-retry"));
+  wireCardProgressProjection(coordinator);
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
   const { setEnqueueCron } = await import("../components/transport/tool-registry.js");
@@ -198,6 +232,8 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     sessionManager: ctx.sessionManager,
     updateCtxStart,
     cronCurrentJob: () => cronQueue.currentJob,
+    cronCurrentJobs: () => cronQueue.currentJobs,
+    cronQueueView: () => cronQueue.describe(),
     enqueueCron,
     requestShutdown: (code?: number) => ctx.requestShutdownWithCode(code ?? 0),
     sleepProgress: () => ctx.sleepHandle?.progress ?? null,
@@ -245,9 +281,12 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { initChannelSync } = await import("../components/tasks/kanban-channel.js");
   initChannelSync();
 
-  // #1505: Reconcile any active runs from a prior process crash
-  const { reconcileActiveTaskRuns } = await import("../components/tasks/task-checker.js");
-  await reconcileActiveTaskRuns((entry, run) => {
+  // #1505/#1539: recover any active runs from a prior process crash BEFORE
+  // the wake scheduler starts, so new due occurrences are never admitted
+  // ahead of recovery.
+  const taskStoreModule = await import("../components/tasks/task-store.js");
+  const entries = taskStoreModule.readEntries();
+  await coordinator.recover(entries, (entry, run) => {
     const enqueueResult = cronQueue.enqueue(entry, false, run);
     if (enqueueResult) {
       logWarn("boot", `Could not reattach scheduled project ${entry.id}: ${enqueueResult}`);
@@ -255,6 +294,10 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     }
     return true;
   });
+
+  // #1539: the initial scan is boot recovery — wake every overdue item, then
+  // arm the earliest future due item.
+  await wakeScheduler.start();
 
   // Register Tier 3 heartbeat tasks (cron, housekeeping, self-healer, etc.)
   const { registerTier3Tasks } = await import("./heartbeat-tier3.js");

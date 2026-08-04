@@ -29,8 +29,9 @@ export async function phasePower(ctx: BootCtx): Promise<PhaseResult> {
   const probe = createPowerSafetyProbe({
     lastPromptAt: () => readLastPromptAt(),
     isAnyExecutionActive: (excludeEntryId?: string) => {
-      const job = ctx.cronQueue?.currentJob ?? null;
-      return job !== null && job.entryId !== excludeEntryId;
+      // #1539: either lane blocks a power transition.
+      const jobs = ctx.cronQueue?.currentJobs ?? [];
+      return jobs.some(j => j.entryId !== excludeEntryId);
     },
     isSleepCycleActive: () => ctx.sleepHandle?.isActive === true,
     isTaskQueueEmpty: () => (ctx.cronQueue?.pending ?? 0) === 0,

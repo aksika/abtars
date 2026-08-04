@@ -6,7 +6,7 @@ import { logTaskDebug } from "./task-log-ctx.js";
 import { makeTaskFailure, decideFailurePolicy, formatTaskFailure } from "./task-failure.js";
 import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 import type { ScheduledTask } from "./task-types.js";
-import type { ActiveTaskRun, DeferredAdmission, TaskRunPhase, TaskRuntimeState } from "./task-state-store.js";
+import type { ActiveTaskRun, DeferredAdmission, RunTerminalRequest, TaskRunPhase, TaskRuntimeState } from "./task-state-store.js";
 import type { TaskOutcome } from "./task-history-store.js";
 
 const TAG = "task-run-settler";
@@ -37,6 +37,72 @@ export interface SettleOptions {
   attachResult?: boolean;
   /** Pause notification, emitted once per false→true transition. */
   onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+  /**
+   * #1539: the terminal fact's own occurrence time — card updated_at /
+   * acceptance decision time, process exit time, or provider completion time.
+   * `factAt < deadlineAt` is accepted on its merits even when observed after
+   * the deadline; without it, a deadline request wins by settlement time.
+   */
+  factAt?: number;
+}
+
+/** #1539: one in-process terminal notification after winning settlement or
+ * history-led repair. The coordinator removes handles idempotently and notifies
+ * the queue; late/duplicate settlement may clean a matching local handle only. */
+export type RunTerminalListener = (taskId: string, runId: string) => void;
+const terminalListeners = new Set<RunTerminalListener>();
+export function onRunTerminal(listener: RunTerminalListener): () => void {
+  terminalListeners.add(listener);
+  return () => {
+    terminalListeners.delete(listener);
+  };
+}
+export function clearRunTerminalListeners(): void {
+  terminalListeners.clear();
+}
+
+function emitTerminal(taskId: string, runId: string): void {
+  for (const listener of [...terminalListeners]) {
+    try {
+      listener(taskId, runId);
+    } catch (err) {
+      logDebug(TAG, `terminal listener error for ${taskId}/${runId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
+/**
+ * #1539: normalize a proposed outcome against the DURABLE terminal request
+ * (read from task state, never the caller's possibly-stale run object) before
+ * the history append. A durable cancellation always wins; a deadline request
+ * wins only when no child terminal fact occurred before `deadlineAt` (facts
+ * with a known earlier `factAt` settle on their own merits); otherwise the
+ * first child terminal fact wins.
+ */
+function normalizeTerminal(
+  outcome: TerminalOutcome,
+  diagnostic: TaskFailureDiagnosticV1,
+  run: ActiveTaskRun,
+  durableRequest: RunTerminalRequest | undefined,
+  detail: string | undefined,
+  factAt: number | undefined,
+): { outcome: TerminalOutcome; diagnostic: TaskFailureDiagnosticV1 } {
+  if (!durableRequest) return { outcome, diagnostic };
+  if (durableRequest.kind === "cancelled") {
+    return {
+      outcome: "cancelled",
+      diagnostic: makeTaskFailure("interruption", "cancelled", run.phase ?? "settling", durableRequest.reason || "cancelled", "none"),
+    };
+  }
+  if (factAt !== undefined && Number.isFinite(factAt) && factAt < run.deadlineAt) {
+    logInfo(TAG, `Run ${run.runId}: child terminal fact at ${factAt} preceded deadline ${run.deadlineAt} — settling on its merits (deadline request set aside)`);
+    return { outcome, diagnostic };
+  }
+  logInfo(TAG, `Run ${run.runId}: deadline request present and no pre-deadline terminal fact (factAt=${factAt === undefined ? "unavailable" : factAt}) — deadline verdict wins`);
+  return {
+    outcome: "failed",
+    diagnostic: makeTaskFailure("interruption", "deadline_exceeded", run.phase ?? "executing", detail ?? "deadline exceeded", "none"),
+  };
 }
 
 /**
@@ -47,7 +113,7 @@ export interface SettleOptions {
  * completion whose run has already settled is ignored.
  */
 export function settleRunOnce(opts: SettleOptions): SettleResult {
-  const { entry, run, outcome, detail, resultPath, cardId, executionRef, releaseDelivery, attachResult, onPaused } = opts;
+  const { entry, run, outcome, detail, resultPath, cardId, executionRef, releaseDelivery, attachResult, onPaused, factAt } = opts;
   const finishedAt = Date.now();
   const safeDetail = detail === undefined ? undefined : redactSecrets(detail).slice(0, 500);
 
@@ -61,11 +127,17 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
   const exhausted = outcome === "deferred" && opts.diagnostic?.category === "admission"
     ? admissionExhausted(preState, finishedAt, opts.retryAt)
     : false;
-  const effectiveOutcome: TerminalOutcome = exhausted ? "failed" : outcome;
-  const diagnostic: TaskFailureDiagnosticV1 = exhausted
+  const baseOutcome: TerminalOutcome = exhausted ? "failed" : outcome;
+  const baseDiagnostic: TaskFailureDiagnosticV1 = exhausted
     ? makeTaskFailure("admission", "executor_unavailable", "queued",
       `executor unavailable after ${(preState?.deferredAdmission?.attempts ?? 0) + 1} deferral(s)`, "none")
     : (opts.diagnostic ?? synthesizeDiagnostic(outcome, detail, run.phase ?? "settling"));
+
+  // #1539: terminal-request normalization — a durable cancellation or a
+  // deadline verdict (when no child fact predates the deadline) overrides the
+  // proposed outcome before the append-once write. The request is read from
+  // durable state so precedence never depends on the caller's object.
+  const { outcome: effectiveOutcome, diagnostic } = normalizeTerminal(baseOutcome, baseDiagnostic, run, preState?.activeRun?.terminalRequest, safeDetail, factAt);
 
   const historyRunId = appendRunOnce({
     runId: run.runId,
@@ -93,6 +165,7 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
   const state = readState(entry.id);
   if (!state?.activeRun || state.activeRun.runId !== run.runId) {
     logDebug(TAG, `Late settlement for "${entry.id}" run=${run.runId} — reservation already cleared`);
+    emitTerminal(entry.id, run.runId);
     return "late";
   }
   const wasPaused = state.autoPaused === true;
@@ -101,6 +174,7 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
   const cleared = settleActiveRun(entry.id, run.runId, patch);
   if (!cleared) {
     logDebug(TAG, `Late settlement for "${entry.id}" run=${run.runId} — reservation lost during settle`);
+    emitTerminal(entry.id, run.runId);
     return "late";
   }
 
@@ -113,6 +187,7 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
   }
 
   logInfo(TAG, `Run "${entry.id}" settled as ${effectiveOutcome}${nowPaused ? " (auto-paused)" : ""}`);
+  emitTerminal(entry.id, run.runId);
   return "settled";
 }
 
@@ -138,6 +213,7 @@ export function settleRunFromHistory(entry: ScheduledTask, run: ActiveTaskRun, e
     releaseDelivery: event.outcome === "success",
     attachResult: Boolean(event.resultPath && entry.kind === "agent" && (entry.orchestration?.maxAgents ?? 1) > 1),
   });
+  emitTerminal(entry.id, run.runId);
   return true;
 }
 

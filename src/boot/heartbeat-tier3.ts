@@ -20,15 +20,15 @@ export interface TaskTickResult {
  * used by both production (heartbeat) and the production-shaped E2E harness.
  * Due discovery/reservation, queue execution, settlement, and delivery are
  * all real; only external boundaries are doubled in the harness.
+ *
+ * #1539: admission only. Active-run ownership, deadline policy, and recovery
+ * live in the ScheduledRunCoordinator and the lifecycle wake scheduler; the
+ * heartbeat tick never reconciles stale runs.
  */
 export async function runTaskTick(ctx: Pick<BootCtx, "cronQueue" | "telegramAdapter">): Promise<TaskTickResult> {
-  const { checkCron, readPendingReminders, clearPendingReminders, reconcileActiveTaskRunsLive } = await import("../components/tasks/task-checker.js");
+  const { checkCron, readPendingReminders, clearPendingReminders } = await import("../components/tasks/task-checker.js");
   const { loadUsers } = await import("../components/user-registry.js");
   if (!ctx.cronQueue) return { state: "idle" };
-  // #1517: live owner-aware stale-run reconciliation runs before schedule
-  // admission so an expired orphan never blocks its task forever; it never
-  // clears an unexpired owned run.
-  reconcileActiveTaskRunsLive(ctx.cronQueue);
   const dueTasks = checkCron();
   let ran = false;
   for (const reserved of dueTasks) {
@@ -71,6 +71,19 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   heartbeat.registerTask({
     name: "tasks",
     execute: () => runTaskTick(ctx),
+  });
+
+  // #1539: R3 bounded safety scan — a no-op whenever the lifecycle wake
+  // scheduler is healthy. No acceptance criterion may depend on it.
+  heartbeat.registerTask({
+    name: "lifecycle-due-safety-scan",
+    execute: async () => {
+      try {
+        const { getWakeScheduler } = await import("../components/reconciler.js");
+        getWakeScheduler()?.safetyScan();
+        return { state: "idle" as const };
+      } catch (err) { logAndSwallow(TAG, "lifecycle-due-safety-scan", err); return { state: "idle" as const }; }
+    },
   });
 
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;

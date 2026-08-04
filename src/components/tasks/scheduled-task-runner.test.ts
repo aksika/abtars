@@ -4,6 +4,9 @@ import { settleRunOnce } from "./task-run-settler.js";
 
 vi.mock("./task-state-store.js", () => ({
   updateActiveRun: vi.fn(),
+  advanceRun: vi.fn().mockReturnValue("advanced"),
+  requestRunTerminal: vi.fn().mockReturnValue("requested"),
+  readState: vi.fn(() => undefined),
   appendRun: vi.fn(),
   incrementDeferrals: vi.fn(() => 0),
   advanceNextRun: vi.fn(),
@@ -128,6 +131,39 @@ describe("ScheduledTaskRunner #1506 deadline ownership", () => {
     expect(outcome.status).toBe("timed_out");
     expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "timed_out", cardId: 43 }));
     expect(mockedSettle).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "success" }));
+  });
+
+  it("#1539 accepts a child fact whose own time predates the deadline even when observed after it", async () => {
+    const deadlineAt = Date.now() + 10_000;
+    let started!: (control: any) => void;
+    let complete!: (value: { cardId: number; result: string; factAt: number }) => void;
+    const startedPromise = new Promise<any>((resolve) => { started = resolve; });
+    const resultPromise = new Promise<{ cardId: number; result: string; factAt: number }>((resolve) => { complete = resolve; });
+    const runner = new ScheduledTaskRunner({
+      agentRunner: async (request) => {
+        request.executionControl?.setCardId(44);
+        started(request.executionControl);
+        return resultPromise;
+      },
+    });
+    const reservation = { ...makeReservation("runner-late-fact"), deadlineAt };
+    const runPromise = runner.run(makeEntry("runner-late-fact"), reservation);
+    const control = await startedPromise;
+    await vi.advanceTimersByTimeAsync(10_000);
+    // The fact occurred 5s BEFORE the deadline but is observed after it.
+    complete({ cardId: 44, result: "pre-deadline result", factAt: deadlineAt - 5000 });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const outcome = await runPromise;
+    // The pre-deadline fact is not discarded: the runner settles with the
+    // child's own outcome and factAt; the settler decides the deadline race.
+    expect(outcome.status).toBe("success");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "success",
+      cardId: 44,
+      factAt: deadlineAt - 5000,
+    }));
+    expect(mockedSettle).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "timed_out" }));
   });
 });
 

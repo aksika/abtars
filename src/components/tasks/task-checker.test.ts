@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { checkCron, readPendingReminders, clearPendingReminders, reconcileActiveTaskRuns, reconcileActiveTaskRunsLive } from "./task-checker.js";
+import { checkCron, readPendingReminders, clearPendingReminders } from "./task-checker.js";
+import { ScheduledRunCoordinator } from "./scheduled-run-coordinator.js";
+import { createRunDeadlineSource, CANCELLATION_GRACE_MS } from "./due-sources.js";
 import * as taskStore from "./task-store.js";
 import * as stateStore from "./task-state-store.js";
 import * as historyStore from "./task-history-store.js";
@@ -11,6 +13,8 @@ vi.mock("./task-store.js", () => ({
 
 vi.mock("./kanban-board.js", () => ({
   kanbanGetCard: vi.fn(),
+  kanbanDueRetryItems: vi.fn(() => []),
+  setKanbanDueChangedHook: vi.fn(),
 }));
 
 vi.mock("../reconciler.js", () => ({
@@ -28,6 +32,8 @@ vi.mock("./task-state-store.js", () => ({
   nextRunFromSchedule: vi.fn().mockReturnValue({ nextRunAt: Date.now() + 300000 }),
   reserveRun: vi.fn().mockReturnValue({ ok: true, run: { runId: "test-run", groupId: "test-group", attempt: 1, trigger: "schedule", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() } }),
   updateActiveRun: vi.fn().mockReturnValue(true),
+  advanceRun: vi.fn().mockReturnValue("advanced"),
+  requestRunTerminal: vi.fn().mockReturnValue("requested"),
   settleActiveRun: vi.fn(),
 }));
 
@@ -37,6 +43,10 @@ vi.mock("./task-history-store.js", () => ({
   appendRunOnce: vi.fn().mockReturnValue("recon-run"),
   hasRun: vi.fn(() => false),
   getRun: vi.fn(() => undefined),
+}));
+
+vi.mock("./task-failure-buffer.js", () => ({
+  addTaskFailure: vi.fn(),
 }));
 
 beforeEach(() => {
@@ -59,6 +69,15 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
   };
 }
 
+function activeRun(overrides: Record<string, unknown> = {}): any {
+  return {
+    runId: "interrupted-run", groupId: "interrupted-group", attempt: 1, trigger: "schedule",
+    occurrenceAt: Date.now() - 120_000, reservedAt: Date.now() - 120_000,
+    deadlineAt: Date.now() + 60_000, phase: "executing", lastProgressAt: Date.now() - 1_000,
+    ...overrides,
+  };
+}
+
 describe("checkCron", () => {
   it("returns empty array when no tasks are due", () => {
     vi.mocked(taskStore.readEntries).mockReturnValue([]);
@@ -72,18 +91,14 @@ describe("checkCron", () => {
     expect(due.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("does not let heartbeat reconcile an expired active run while its owner can settle", () => {
+  it("does not admit while an active run owns the task", () => {
     vi.mocked(taskStore.readEntries).mockReturnValue([makeTask()]);
     vi.mocked(stateStore.readState).mockReturnValue({
       nextRunAt: Date.now() - 1000,
       consecutiveFailures: 0,
       consecutiveDeferrals: 0,
       autoPaused: false,
-      activeRun: {
-        runId: "owner-run", groupId: "owner-group", attempt: 1, trigger: "schedule",
-        occurrenceAt: Date.now() - 120_000, reservedAt: Date.now() - 120_000,
-        deadlineAt: Date.now() - 1, phase: "cancelling", lastProgressAt: Date.now() - 1_000,
-      },
+      activeRun: activeRun({ runId: "owner-run", deadlineAt: Date.now() - 1, phase: "cancelling" }),
     });
 
     expect(checkCron()).toEqual([]);
@@ -114,51 +129,71 @@ describe("checkCron", () => {
   });
 });
 
-describe("reconcileActiveTaskRuns #1516 restart identity", () => {
+describe("coordinator.recover #1539 restart ownership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(historyStore.getRun).mockReturnValue(undefined);
   });
 
-  function runWith(cardId: number | undefined, deadlineAt: number, phase = "executing", reattach?: (entry: any, run: any) => boolean, taskOverrides: Partial<ScheduledTask> = {}): void {
+  function runWith(cardId: number | undefined, deadlineAt: number, phase = "executing", reattach?: (entry: any, run: any) => boolean, taskOverrides: Partial<ScheduledTask> = {}): Promise<void> {
     vi.mocked(taskStore.readEntries).mockReturnValue([makeTask(taskOverrides)]);
     vi.mocked(stateStore.readState).mockReturnValue({
       nextRunAt: Date.now() - 1000,
       consecutiveFailures: 0,
       consecutiveDeferrals: 0,
       autoPaused: false,
-      activeRun: {
-        runId: "interrupted-run", groupId: "interrupted-group", attempt: 1, trigger: "schedule",
-        occurrenceAt: Date.now() - 120_000, reservedAt: Date.now() - 120_000,
-        deadlineAt, phase, lastProgressAt: Date.now() - 1_000,
-        cardId,
-      },
+      activeRun: activeRun({ deadlineAt, phase, cardId }),
     });
-    reconcileActiveTaskRuns(reattach);
+    return new ScheduledRunCoordinator().recover([makeTask(taskOverrides)], reattach);
   }
 
-  it("terminalizes an interrupted run whose project reached a terminal card", () => {
-    vi.mocked(kanbanMod.kanbanGetCard).mockReturnValue({ id: 77, status: "done" } as never);
+  it("adopts a terminal done O project's actual outcome (success), not restart_interrupted", () => {
+    vi.mocked(kanbanMod.kanbanGetCard).mockReturnValue({ id: 77, status: "done", result_path: null } as never);
     runWith(77, Date.now() + 60_000);
-    expect(vi.mocked(stateStore.updateState)).not.toHaveBeenCalledWith("t1", expect.objectContaining({ activeRun: undefined }));
-    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", detail: "restart_recovery: project terminal (done)", runId: "interrupted-run" }));
-    expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith("t1", "interrupted-run", expect.objectContaining({ consecutiveFailures: 1 }));
-    expect(vi.mocked(kanbanMod.kanbanGetCard)).toHaveBeenCalledWith(77);
+    return Promise.resolve().then(() => {
+      expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+        outcome: "success",
+        runId: "interrupted-run",
+        detail: "restart_recovery: project terminal (done)",
+      }));
+      expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith("t1", "interrupted-run", expect.objectContaining({ consecutiveFailures: 0 }));
+      expect(vi.mocked(kanbanMod.kanbanGetCard)).toHaveBeenCalledWith(77);
+    });
+  });
+
+  it("settles a terminal failed O project with the project's own outcome", () => {
+    vi.mocked(kanbanMod.kanbanGetCard).mockReturnValue({ id: 78, status: "failed", error: "worker exploded" } as never);
+    runWith(78, Date.now() + 60_000);
+    return Promise.resolve().then(() => {
+      expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+        outcome: "failed",
+        detail: "restart_recovery: project terminal (failed)",
+      }));
+    });
   });
 
   it("aborts a still-live project when the scheduled deadline passed during downtime", () => {
     vi.mocked(kanbanMod.kanbanGetCard).mockReturnValue({ id: 78, status: "queued" } as never);
     runWith(78, Date.now() - 1000);
-    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", detail: "restart_recovery: deadline passed", runId: "interrupted-run" }));
-    expect(reconcilerMod.abortProjectById).toHaveBeenCalledWith(78, "restart_recovery: scheduled deadline passed");
+    return Promise.resolve().then(() => {
+      expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+        outcome: "failed",
+        detail: "restart_recovery: deadline passed",
+        runId: "interrupted-run",
+      }));
+      expect(reconcilerMod.abortProjectById).toHaveBeenCalledWith(78, "restart_recovery: scheduled deadline passed");
+    });
   });
 
   it("reattaches a live project within deadline to the scheduled lifecycle owner", () => {
     vi.mocked(kanbanMod.kanbanGetCard).mockReturnValue({ id: 79, status: "running" } as never);
     const reattach = vi.fn(() => true);
     runWith(79, Date.now() + 60_000, "executing", reattach, { orchestration: { maxAgents: 4 } });
-    expect(reattach).toHaveBeenCalledWith(expect.objectContaining({ id: "t1" }), expect.objectContaining({ runId: "interrupted-run", cardId: 79 }));
-    expect(vi.mocked(stateStore.updateState)).not.toHaveBeenCalledWith("t1", expect.objectContaining({ activeRun: undefined }));
-    expect(vi.mocked(historyStore.appendRun)).not.toHaveBeenCalled();
+    return Promise.resolve().then(() => {
+      expect(reattach).toHaveBeenCalledWith(expect.objectContaining({ id: "t1" }), expect.objectContaining({ runId: "interrupted-run", cardId: 79 }));
+      expect(vi.mocked(stateStore.updateState)).not.toHaveBeenCalledWith("t1", expect.objectContaining({ activeRun: undefined }));
+      expect(vi.mocked(historyStore.appendRun)).not.toHaveBeenCalled();
+    });
   });
 
   it("repairs state from terminal history instead of only clearing the reservation", () => {
@@ -168,93 +203,130 @@ describe("reconcileActiveTaskRuns #1516 restart identity", () => {
       startedAt: finishedAt - 1000, finishedAt, outcome: "success", groupId: "interrupted-group",
     });
     runWith(undefined, Date.now() + 60_000);
-    expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
-    expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith(
-      "t1", "interrupted-run", expect.objectContaining({ consecutiveFailures: 0, lastFinishedAt: finishedAt }),
-    );
+    return Promise.resolve().then(() => {
+      expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
+      expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith(
+        "t1", "interrupted-run", expect.objectContaining({ consecutiveFailures: 0, lastFinishedAt: finishedAt }),
+      );
+    });
+  });
+
+  it("settles an uncertain unexpired T run once as restart_interrupted and never replays it", () => {
+    runWith(undefined, Date.now() + 60_000);
+    return Promise.resolve().then(() => {
+      expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+        outcome: "failed",
+        detail: "restart_recovery: execution interrupted (no terminal history)",
+        runId: "interrupted-run",
+      }));
+      expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith("t1", "interrupted-run", expect.anything());
+    });
   });
 });
 
-describe("reconcileActiveTaskRunsLive #1517 live recovery", () => {
+describe("run-deadline due source #1539", () => {
+  let coordinator: ScheduledRunCoordinator;
+  let source: ReturnType<typeof createRunDeadlineSource>;
+
   beforeEach(() => {
     vi.clearAllMocks();
-    // Later mockReturnValue calls leak across tests; restore the no-history default.
     vi.mocked(historyStore.getRun).mockReturnValue(undefined);
-    vi.mocked(historyStore.appendRunOnce).mockReturnValue("recon-run");
+    coordinator = new ScheduledRunCoordinator();
+    source = createRunDeadlineSource(coordinator);
   });
 
-  const ownsNone: Parameters<typeof reconcileActiveTaskRunsLive>[0] = {
-    owns: () => false,
-    cancel: () => "not_owned",
-  };
-
-  function liveRunWith(activeRun: Partial<NonNullable<Awaited<ReturnType<typeof stateStore.readState>>>["activeRun"]>): void {
+  function liveRunWith(runOverrides: Record<string, unknown>): void {
     vi.mocked(taskStore.readEntries).mockReturnValue([makeTask()]);
     vi.mocked(stateStore.readState).mockReturnValue({
       nextRunAt: Date.now() - 1000,
       consecutiveFailures: 0,
       consecutiveDeferrals: 0,
       autoPaused: false,
-      activeRun: {
-        runId: "live-run", groupId: "live-group", attempt: 1, trigger: "schedule",
-        occurrenceAt: Date.now() - 120_000, reservedAt: Date.now() - 120_000,
-        deadlineAt: Date.now() - 1000, phase: "executing", lastProgressAt: Date.now() - 1_000,
-        ...activeRun,
-      },
+      activeRun: activeRun({ runId: "live-run", groupId: "live-group", ...runOverrides }),
     });
   }
 
-  it("leaves unexpired owned runs untouched", () => {
+  it("leaves unexpired runs untouched", () => {
     liveRunWith({ deadlineAt: Date.now() + 60_000, phase: "executing" });
-    const supervisor = { owns: () => true, cancel: vi.fn(() => "requested" as const) };
-    reconcileActiveTaskRunsLive(supervisor);
-    expect(supervisor.cancel).not.toHaveBeenCalled();
+    source.wakeDue(Date.now());
+    expect(vi.mocked(stateStore.requestRunTerminal)).not.toHaveBeenCalled();
     expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
   });
 
-  it("settles an expired unowned run immediately as deadline_exceeded", () => {
-    liveRunWith({});
-    reconcileActiveTaskRunsLive(ownsNone);
+  it("requests the durable deadline terminal once for an expired owned run and waits for the grace", () => {
+    liveRunWith({ deadlineAt: Date.now() - 1000, phase: "executing" });
+    coordinator.start(makeTask(), {
+      runId: "live-run", groupId: "live-group", attempt: 1, trigger: "schedule",
+      occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() - 1000,
+      phase: "executing", lastProgressAt: Date.now(),
+    }, "scheduled");
+    source.wakeDue(Date.now());
+    expect(vi.mocked(stateStore.requestRunTerminal)).toHaveBeenCalledWith(
+      "t1", "live-run", expect.objectContaining({ kind: "deadline_exceeded" }),
+    );
+    // Within the grace window: no fallback settlement yet.
+    expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
+  });
+
+  it("records the durable deadline request for an expired unowned run without settling immediately", () => {
+    liveRunWith({ deadlineAt: Date.now() - 1000, phase: "executing" });
+    source.wakeDue(Date.now());
+    expect(vi.mocked(stateStore.requestRunTerminal)).toHaveBeenCalledWith(
+      "t1", "live-run", expect.objectContaining({ kind: "deadline_exceeded" }),
+    );
+    expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
+  });
+
+  it("settles a cancelling run past its cancellation grace as deadline_exceeded even when the deadline has passed", () => {
+    liveRunWith({
+      deadlineAt: Date.now() - 60_000,
+      phase: "cancelling",
+      terminalRequest: { kind: "deadline_exceeded", requestedAt: Date.now() - CANCELLATION_GRACE_MS - 1000, reason: "deadline fired" },
+    });
+    source.wakeDue(Date.now());
     expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
       runId: "live-run",
       outcome: "failed",
-      detail: "live_recovery: deadline exceeded",
+      detail: "cancellation grace elapsed",
     }));
     expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith("t1", "live-run", expect.anything());
+    // No new terminal request is recorded — the grace fallback owns it.
+    expect(vi.mocked(stateStore.requestRunTerminal)).not.toHaveBeenCalled();
   });
 
-  it("requests cancellation once for an owned expired run and waits for the grace period", () => {
-    liveRunWith({});
-    const supervisor = { owns: () => true, cancel: vi.fn(() => "requested" as const) };
-    reconcileActiveTaskRunsLive(supervisor);
-    expect(supervisor.cancel).toHaveBeenCalledWith("live-run", "live_recovery: deadline exceeded");
-    expect(vi.mocked(stateStore.updateActiveRun)).toHaveBeenCalledWith("t1", "live-run", expect.objectContaining({ phase: "cancelling" }));
-    // Still within the 30s grace: no fallback settlement.
+  it("records the durable deadline request once for a cancelling run inside its grace", () => {
+    liveRunWith({
+      deadlineAt: Date.now() - 60_000,
+      phase: "cancelling",
+      terminalRequest: { kind: "deadline_exceeded", requestedAt: Date.now() - 1000, reason: "deadline fired" },
+    });
+    source.wakeDue(Date.now());
+    expect(vi.mocked(stateStore.requestRunTerminal)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
-  });
-
-  it("settles an owned run past its cancellation grace", () => {
-    liveRunWith({ phase: "cancelling", lastProgressAt: Date.now() - 60_000 });
-    const supervisor = { owns: () => true, cancel: vi.fn(() => "requested" as const) };
-    reconcileActiveTaskRunsLive(supervisor);
-    expect(supervisor.cancel).not.toHaveBeenCalled();
-    expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
-      runId: "live-run",
-      outcome: "failed",
-      detail: "live_recovery: cancellation grace elapsed",
-    }));
   });
 
   it("replays terminal history before any deadline decision", () => {
-    liveRunWith({});
+    liveRunWith({ deadlineAt: Date.now() - 1000, phase: "executing" });
     vi.mocked(historyStore.getRun).mockReturnValue({
       runId: "live-run", taskId: "t1", kind: "agent", trigger: "schedule",
       startedAt: Date.now() - 1000, finishedAt: Date.now(), outcome: "success", groupId: "live-group",
     });
-    reconcileActiveTaskRunsLive(ownsNone);
+    source.wakeDue(Date.now());
+    expect(vi.mocked(stateStore.requestRunTerminal)).not.toHaveBeenCalled();
     expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
     expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith(
       "t1", "live-run", expect.objectContaining({ consecutiveFailures: 0 }),
     );
+  });
+
+  it("lists deadline and cancellation-grace follow-up items for arming", () => {
+    liveRunWith({
+      deadlineAt: Date.now() + 5_000,
+      phase: "cancelling",
+      terminalRequest: { kind: "cancelled", requestedAt: Date.now(), reason: "operator" },
+    });
+    const items = source.listDueItems();
+    expect(items.some(i => i.key === "run:live-run" && i.dueAt > Date.now())).toBe(true);
+    expect(items.some(i => i.key === "grace:live-run")).toBe(true);
   });
 });

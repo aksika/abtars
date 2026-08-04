@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
-import { updateActiveRun } from "./task-state-store.js";
+import { advanceRun, requestRunTerminal, readState } from "./task-state-store.js";
 import { preflightTask, validateReportArtifact } from "./task-preflight.js";
 import type { TaskToolRegistry } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
@@ -59,8 +59,10 @@ export class ScheduledTaskRunner {
   }
 
   async run(entry: ScheduledTask & { kind: "agent" }, reservation: ActiveTaskRun): Promise<ScheduledTaskRunOutcome> {
+    const taskId = entry.id;
+    const runId = reservation.runId;
+    const factNow = (): number => Date.now();
     logTaskDebug("task_execution_started", { task: entry.id, run: reservation.runId, attempt: reservation.attempt });
-    updateActiveRun(entry.id, reservation.runId, { phase: "executing" });
 
     try {
       if (!reservation.trigger || reservation.trigger === "schedule") {
@@ -86,7 +88,7 @@ export class ScheduledTaskRunner {
       let artifactBaseline: ArtifactBaseline | undefined;
 
       if (entry.taskFile) {
-        updateActiveRun(entry.id, reservation.runId, { phase: "preflight" });
+        advanceRun(taskId, runId, { phase: "preflight" });
         const { loadTaskPackage } = await import("./task-package.js");
         const task = loadTaskPackage(entry.taskFile);
         if (task.ok) {
@@ -100,7 +102,7 @@ export class ScheduledTaskRunner {
       const toolRegistry = await getToolRegistry();
 
       if (entry.delivery === "report") {
-        updateActiveRun(entry.id, reservation.runId, { phase: "preflight" });
+        advanceRun(taskId, runId, { phase: "preflight" });
         logTaskTrace("task_preflight_started", { task: entry.id, run: reservation.runId });
         const preflight = preflightTask(entry, executionScope, toolRegistry);
         if (!preflight.ok) {
@@ -108,7 +110,7 @@ export class ScheduledTaskRunner {
           settleRunOnce({
             entry, run: reservation, outcome: "definition_failed",
             diagnostic: makeTaskFailure("definition", preflight.code, "preflight", preflight.safeDetail, "permanent"),
-            detail: preflight.safeDetail, cardId: undefined,
+            detail: preflight.safeDetail, cardId: undefined, factAt: factNow(),
           });
           return { status: "definition_failed", safeDetail: preflight.safeDetail };
         }
@@ -132,7 +134,7 @@ export class ScheduledTaskRunner {
       // terminal scheduled settlement. Later user turns belong to K, never to
       // this run's history, retry, deadline, or settlement lifecycle.
       if (entry.interaction.mode === "skill") {
-        updateActiveRun(entry.id, reservation.runId, { phase: "executing" });
+        advanceRun(taskId, runId, { phase: "executing", progressAt: factNow() });
         const { skillSessionManager } = await import("../skill-session.js");
         const launchResult = await skillSessionManager.launch({
           skill: entry.interaction.skill,
@@ -146,7 +148,7 @@ export class ScheduledTaskRunner {
           settleRunOnce({
             entry, run: reservation, outcome: "definition_failed",
             diagnostic: makeTaskFailure("definition", "invalid_definition", "executing", detail, "permanent"),
-            detail, cardId: undefined,
+            detail, cardId: undefined, factAt: factNow(),
           });
           return { status: "definition_failed", safeDetail: detail };
         }
@@ -156,14 +158,15 @@ export class ScheduledTaskRunner {
           chatId: entry.chatId ?? String(entry.interaction.target.chatId),
         });
         const detail = launchResult.response.slice(0, 200);
-        settleRunOnce({ entry, run: reservation, outcome: "success", detail, cardId: boardId, executionRef: reservation.runId, onPaused: this.onPaused });
+        settleRunOnce({ entry, run: reservation, outcome: "success", detail, cardId: boardId, executionRef: reservation.runId, onPaused: this.onPaused, factAt: factNow() });
         logTaskDebug("task_settled", { task: entry.id, run: reservation.runId }, `skill=${entry.interaction.skill} session=${launchResult.sessionId}`);
         return { status: "success", safeDetail: detail, cardId: boardId };
       }
 
-      const runId = reservation.runId;
       const execControl = registerControl(runId, { cardId: undefined });
-      updateActiveRun(entry.id, reservation.runId, { phase: "queued", executionId: runId });
+      // #1539: preparation/preflight precedes queued; successful dispatch
+      // changes queued -> executing. Attaching IDs never moves phase backward.
+      advanceRun(taskId, runId, { phase: "queued", attachments: { executionId: runId } });
 
       // #1432: every one-shot scheduled agent run is a T session. The `agent`
       // field selects runtime agent/model configuration only — it never maps
@@ -223,12 +226,17 @@ export class ScheduledTaskRunner {
           reportArtifactPath: resolvedContract?.artifactPath,
         });
 
+      // #1539: successful dispatch changes queued -> executing. Attaching the
+      // card/session is separate and never moves the phase backward.
+      advanceRun(taskId, runId, { phase: "executing", progressAt: factNow() });
+
       const raceResult = await runWithDeadline(
         executionPromise,
         safeDeadline,
         execControl,
         entry.id,
         runId,
+        reservation.deadlineAt,
       );
 
       if (raceResult.kind === "timed_out") {
@@ -239,16 +247,6 @@ export class ScheduledTaskRunner {
           detail: raceResult.reason, cardId: execControl.cardId, executionRef: runId, onPaused: this.onPaused,
         });
         return { status: "timed_out", safeDetail: raceResult.reason, ...(execControl.cardId !== undefined ? { cardId: execControl.cardId } : {}) };
-      }
-
-      if (execControl.cancelled) {
-        const reason = execControl.cancelReason ?? "cancelled";
-        settleRunOnce({
-          entry, run: reservation, outcome: "cancelled",
-          diagnostic: makeTaskFailure("interruption", "cancelled", "cancelling", `cancelled: ${reason}`, "none"),
-          detail: `cancelled: ${reason}`, executionRef: runId, onPaused: this.onPaused,
-        });
-        return { status: "cancelled", safeDetail: `cancelled: ${reason}` };
       }
 
       if (raceResult.kind !== "completed") {
@@ -271,27 +269,34 @@ export class ScheduledTaskRunner {
         // explicit retryable flag) on the boundary error selects the policy's
         // one-delayed-retry branch; nothing is inferred from message text.
         const transient = isTransientProviderError(error);
+        const errorFactAt = (error as Error & { factAt?: number }).factAt;
         settleRunOnce({
           entry, run: reservation, outcome: "failed",
           diagnostic: makeTaskFailure("execution", "model_error", "executing", detail, transient ? "transient" : "none"),
-          detail, cardId, executionRef: runId, onPaused: this.onPaused,
+          detail, cardId, executionRef: runId, onPaused: this.onPaused, factAt: errorFactAt ?? factNow(),
         });
         return { status: "failed", safeDetail: detail, ...(cardId !== undefined ? { cardId } : {}) };
       }
       const { cardId: boardId, result: response } = raceResult.value;
+      const childFactAt = raceResult.value.factAt ?? factNow();
 
-      updateActiveRun(entry.id, reservation.runId, { phase: "validating" });
-      logTaskTrace("task_validation_started", { task: entry.id, card: boardId, run: reservation.runId }, `report=${entry.delivery === "report"} response_bytes=${Buffer.byteLength(response ?? "", "utf8")}`);
-
-      if (execControl.cancelled) {
+      // #1539: only a durable OPERATOR cancellation settles as cancelled here.
+      // A deadline request (our own race timer) is normalized by the settler
+      // against the child fact's own time, so a pre-deadline fact must still
+      // reach validation/settlement instead of being discarded as cancelled.
+      const durableRequest = readState(taskId)?.activeRun?.terminalRequest;
+      if (execControl.cancelled && durableRequest?.kind === "cancelled") {
         const reason = execControl.cancelReason ?? "cancelled";
         settleRunOnce({
           entry, run: reservation, outcome: "cancelled",
           diagnostic: makeTaskFailure("interruption", "cancelled", "cancelling", `cancelled: ${reason}`, "none"),
-          detail: `cancelled: ${reason}`, cardId: boardId, executionRef: runId, onPaused: this.onPaused,
+          detail: `cancelled: ${reason}`, cardId: boardId, executionRef: runId, onPaused: this.onPaused, factAt: childFactAt,
         });
         return { status: "cancelled", safeDetail: `cancelled: ${reason}`, cardId: boardId };
       }
+
+      advanceRun(taskId, runId, { phase: "validating", progressAt: factNow() });
+      logTaskTrace("task_validation_started", { task: entry.id, card: boardId, run: reservation.runId }, `report=${entry.delivery === "report"} response_bytes=${Buffer.byteLength(response ?? "", "utf8")}`);
 
       const isReport = entry.delivery === "report";
       let resultPath: string | null = null;
@@ -311,7 +316,7 @@ export class ScheduledTaskRunner {
           // The shared settler is the exclusive delivery release point.
           settleRunOnce({
             entry, run: reservation, outcome: "success", detail: settlementDetail, resultPath, cardId: boardId,
-            executionRef: runId, releaseDelivery: true, attachResult: maxAgents > 1, onPaused: this.onPaused,
+            executionRef: runId, releaseDelivery: true, attachResult: maxAgents > 1, onPaused: this.onPaused, factAt: childFactAt,
           });
           return { status: "success", safeDetail: settlementDetail, artifactPath: resultPath ?? undefined, cardId: boardId };
         } else {
@@ -319,7 +324,7 @@ export class ScheduledTaskRunner {
           settleRunOnce({
             entry, run: reservation, outcome: "failed",
             diagnostic: makeTaskFailure("validation", artifactResult.code, "validating", settlementDetail, "none"),
-            detail: settlementDetail, cardId: boardId, executionRef: runId, onPaused: this.onPaused,
+            detail: settlementDetail, cardId: boardId, executionRef: runId, onPaused: this.onPaused, factAt: factNow(),
           });
           return { status: "failed", safeDetail: settlementDetail, cardId: boardId };
         }
@@ -332,14 +337,14 @@ export class ScheduledTaskRunner {
         settleRunOnce({
           entry, run: reservation, outcome: "definition_failed",
           diagnostic: makeTaskFailure("definition", "report_contract_missing", "validating", settlementDetail, "permanent"),
-          detail: settlementDetail, cardId: boardId, executionRef: runId, onPaused: this.onPaused,
+          detail: settlementDetail, cardId: boardId, executionRef: runId, onPaused: this.onPaused, factAt: factNow(),
         });
         return { status: "definition_failed", safeDetail: settlementDetail, cardId: boardId };
       } else {
         // The shared settler is the exclusive delivery release point.
         settleRunOnce({
           entry, run: reservation, outcome: "success", detail: response?.slice(0, 200), cardId: boardId,
-          executionRef: runId, releaseDelivery: true, onPaused: this.onPaused,
+          executionRef: runId, releaseDelivery: true, onPaused: this.onPaused, factAt: childFactAt,
         });
         return { status: "success", safeDetail: response?.slice(0, 200), cardId: boardId };
       }
@@ -349,7 +354,7 @@ export class ScheduledTaskRunner {
       settleRunOnce({
         entry, run: reservation, outcome: "failed",
         diagnostic: makeTaskFailure("execution", "model_error", "executing", msg.slice(0, 500), "none"),
-        detail: msg.slice(0, 500), cardId: reservation.cardId, onPaused: this.onPaused,
+        detail: msg.slice(0, 500), cardId: reservation.cardId, onPaused: this.onPaused, factAt: factNow(),
       });
       return { status: "failed", safeDetail: msg.slice(0, 500) };
     } finally {
@@ -378,16 +383,17 @@ function isTransientProviderError(error: unknown): boolean {
 }
 
 type ExecutionRaceResult =
-  | { kind: "completed"; value: { cardId: number; result: string } }
+  | { kind: "completed"; value: { cardId: number; result: string; factAt?: number } }
   | { kind: "failed"; error: Error & { cardId?: number } }
   | { kind: "timed_out"; reason: string };
 
 async function runWithDeadline(
-  promise: Promise<{ cardId: number; result: string }>,
+  promise: Promise<{ cardId: number; result: string; factAt?: number }>,
   timeoutMs: number,
   execControl: ReturnType<typeof registerControl>,
   taskId: string,
   runId: string,
+  deadlineAt: number,
 ): Promise<ExecutionRaceResult> {
   return new Promise<ExecutionRaceResult>((resolve) => {
     const CANCEL_GRACE_MS = 5000;
@@ -405,7 +411,10 @@ async function runWithDeadline(
       if (finished) return;
       deadlineWon = true;
       logTaskTrace("task_run_deadline_fired", { task: taskId, run: runId }, `timeout_ms=${timeoutMs}`);
-      updateActiveRun(taskId, runId, { phase: "cancelling" });
+      // #1539: the durable deadline request is recorded before signalling —
+      // precedence never depends on callback order. The settler normalizes by
+      // fact time: a child fact that predates the deadline still wins.
+      requestRunTerminal(taskId, runId, { kind: "deadline_exceeded", requestedAt: Date.now(), reason: "deadline fired" });
       // #1506: Non-blocking cancellation — signal without awaiting acknowledgement.
       // The grace timer fires independently so settlement always proceeds.
       const cancellation = execControl.signalCancel("deadline");
@@ -420,12 +429,17 @@ async function runWithDeadline(
 
     promise
       .then((value) => {
-        // Once the deadline callback has run, the result is late even if the
-        // transport happens to resolve during the cancellation grace period.
-        if (!deadlineWon) finish({ kind: "completed", value });
+        // #1539: a terminal fact whose OWN time predates the deadline is
+        // accepted even when observed after it — the settler decides by
+        // factAt, so a late completion with a pre-deadline fact must not be
+        // discarded. Facts without a factAt (or with a post-deadline one)
+        // remain late once the deadline won.
+        const lateFact = value.factAt !== undefined && Number.isFinite(value.factAt) && value.factAt < deadlineAt;
+        if (!deadlineWon || lateFact) finish({ kind: "completed", value });
       })
-      .catch((error: Error & { cardId?: number }) => {
-        if (!deadlineWon) finish({ kind: "failed", error });
+      .catch((error: Error & { cardId?: number; factAt?: number }) => {
+        const lateFact = error.factAt !== undefined && Number.isFinite(error.factAt) && error.factAt < deadlineAt;
+        if (!deadlineWon || lateFact) finish({ kind: "failed", error });
       });
   });
 }

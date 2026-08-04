@@ -41,11 +41,13 @@ let service: typeof import("../../components/tasks/task-service.js");
 let delivery: typeof import("../../components/tasks/kanban-delivery.js");
 let registry: typeof import("../../components/tasks/system-task-registry.js");
 let tick: typeof import("../../boot/heartbeat-tier3.js");
-let reconciler: typeof import("../../components/tasks/task-checker.js");
 let preflight: typeof import("../../components/tasks/task-preflight.js");
 let settler: typeof import("../../components/tasks/task-run-settler.js");
 let toolRegistry: typeof import("../../components/transport/tool-registry.js");
 let executeToolCall: typeof import("../../components/transport/tool-registry.js").executeToolCall;
+let CoordinatorClass: typeof import("../../components/tasks/scheduled-run-coordinator.js").ScheduledRunCoordinator;
+let wakeSchedulerMod: typeof import("../../components/lifecycle-wake-scheduler.js");
+let dueSourcesMod: typeof import("../../components/tasks/due-sources.js");
 
 const FIXTURES: ScheduledTask[] = [
   {
@@ -100,6 +102,8 @@ interface SchedulerDoubles {
   injectedReminders: string[];
   pausedNotifications: string[];
   spawnedCommands: string[];
+  /** #1539: when set, fakeProjectRunner holds acceptance until released. */
+  projectHold: boolean;
 }
 
 let doubles: SchedulerDoubles;
@@ -129,7 +133,7 @@ function fakeAgentRunner(request: import("../../components/spin-types.js").SpinR
   return Promise.resolve({ cardId, result: `result for ${entryId}` });
 }
 
-async function fakeProjectRunner(request: import("../../components/tasks/scheduled-project-runner.js").ScheduledProjectRequest): Promise<{ cardId: number; result: string }> {
+async function fakeProjectRunner(request: import("../../components/tasks/scheduled-project-runner.js").ScheduledProjectRequest): Promise<{ cardId: number; result: string; factAt?: number }> {
   doubles.projectRuns++;
   // Use the real scheduled O runner. The deterministic double is only the
   // coordinator/model boundary that accepts the real project after admission.
@@ -141,8 +145,18 @@ async function fakeProjectRunner(request: import("../../components/tasks/schedul
     scheduleScheduledProject(projectCardId: number) {
       setImmediate(() => {
         const store = new ProjectReviewStore();
-        const reviewCase = store.insertReviewCase(projectCardId, 1, 1, { summary: "verified" }, "digest");
-        store.settleAcceptance(projectCardId, reviewCase.id, { accepted: true }, "project accepted");
+        // Idempotent claim: a reattached admission may repeat generation/round.
+        let reviewCase = store.getLatestReviewCase(projectCardId);
+        if (!reviewCase) {
+          reviewCase = store.insertReviewCase(projectCardId, 1, 1, { summary: "verified" }, "digest");
+        }
+        if (doubles.projectHold) return;
+        try {
+          store.settleAcceptance(projectCardId, reviewCase.id, { accepted: true }, "project accepted");
+        } catch {
+          // Idempotent double: a late claim must not reverse an already-settled project.
+          return;
+        }
         nerve.fire("card:done", projectCardId);
       });
       return { kind: "claimed", context: { runId: request.runId, projectCardId } } as never;
@@ -187,11 +201,13 @@ async function loadModules(): Promise<void> {
   delivery = await import("../../components/tasks/kanban-delivery.js");
   registry = await import("../../components/tasks/system-task-registry.js");
   tick = await import("../../boot/heartbeat-tier3.js");
-  reconciler = await import("../../components/tasks/task-checker.js");
   preflight = await import("../../components/tasks/task-preflight.js");
   settler = await import("../../components/tasks/task-run-settler.js");
   toolRegistry = await import("../../components/transport/tool-registry.js");
   executeToolCall = (await import("../../components/transport/tool-registry.js")).executeToolCall;
+  CoordinatorClass = (await import("../../components/tasks/scheduled-run-coordinator.js")).ScheduledRunCoordinator;
+  wakeSchedulerMod = await import("../../components/lifecycle-wake-scheduler.js");
+  dueSourcesMod = await import("../../components/tasks/due-sources.js");
 }
 
 function writeFixtureTasks(): void {
@@ -209,10 +225,25 @@ function writeFixtureTasks(): void {
 
 async function makeQueue(): Promise<import("../../components/tasks/task-queue.js").CronQueue> {
   const { CronQueue } = await import("../../components/tasks/task-queue.js");
-  const queue = new CronQueue("kiro-cli", ".", undefined,
-    (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
-    fakeAgentRunner, fakeProjectRunner);
+  const coordinator = new CoordinatorClass({
+    onTaskPaused: (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
+    agentRunner: fakeAgentRunner,
+    projectRunner: fakeProjectRunner,
+  });
+  const queue = new CronQueue("kiro-cli", ".", coordinator);
   return queue;
+}
+
+/** #1539: coordinator + queue pair so journeys can drive deadlines/cancel. */
+async function makeQueueWithCoordinator(): Promise<{ queue: import("../../components/tasks/task-queue.js").CronQueue; coordinator: CoordinatorClass }> {
+  const { CronQueue } = await import("../../components/tasks/task-queue.js");
+  const coordinator = new CoordinatorClass({
+    onTaskPaused: (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
+    agentRunner: fakeAgentRunner,
+    projectRunner: fakeProjectRunner,
+  });
+  const queue = new CronQueue("kiro-cli", ".", coordinator);
+  return { queue, coordinator };
 }
 
 function makeTickCtx(queue: import("../../components/tasks/task-queue.js").CronQueue) {
@@ -267,7 +298,7 @@ beforeEach(async () => {
   doubles = {
     providerFailures: 0, providerErrors: [], admissionRejections: 0, projectRuns: 0,
     sleepCycleCalls: 0, sentMessages: [], sentDocuments: [], injectedReminders: [],
-    pausedNotifications: [], spawnedCommands: [],
+    pausedNotifications: [], spawnedCommands: [], projectHold: false,
   };
   vi.mocked(child_process.spawn).mockImplementation(((
     _file: string,
@@ -445,10 +476,10 @@ describe("#1520 scheduler E2E — journey 6: transient failure, retry, pause, re
     expect(doubles.pausedNotifications[0]).toContain("Flaky Task");
     expect(doubles.pausedNotifications[0]).toContain("execution/model_error");
 
-    // Restart: a fresh queue against the same durable state; reconciliation
-    // finds no active runs (all settled) and changes nothing.
+    // Restart: a fresh queue against the same durable state; coordinator
+    // recovery finds no active runs (all settled) and changes nothing.
     const queue2 = await makeQueue();
-    reconciler.reconcileActiveTaskRuns();
+    await new CoordinatorClass().recover(taskStore.readEntries());
     expect(stateStore.readState("flaky-task")!.autoPaused).toBe(true);
 
     // Atomic resume: one service call clears counters and keeps the incident.
@@ -482,7 +513,7 @@ describe("#1520 scheduler E2E — journey 7: bounded T admission deferral across
     // Restart mid-deferral: the deferredAdmission is durable; a fresh queue
     // resumes the SAME group/occurrence.
     queue = await makeQueue();
-    reconciler.reconcileActiveTaskRuns();
+    await new CoordinatorClass().recover(taskStore.readEntries());
     forceDue("deferred-task");
     await runTick(queue);
     st = stateStore.readState("deferred-task")!;
@@ -594,3 +625,154 @@ describe("#1520 scheduler E2E — journey 9: removed surfaces, canonical probes,
     expect(JSON.parse(orcOut).code).toBe("local_session_not_peer");
   });
 });
+
+describe("#1539 scheduler E2E — journey 10: due-time retry wake with no unrelated event", () => {
+  it("dispatches a deferred occurrence at its durable retryAt through the wake scheduler alone", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queue, coordinator } = await makeQueueWithCoordinator();
+      const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler.register(dueSourcesMod.createTaskAdmissionSource(() => tick.runTaskTick(makeTickCtx(queue))));
+      scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+      stateStore.setTaskDueChangedHook(() => scheduler.sourceChanged("task-admission"));
+      await scheduler.start();
+
+      // Journey 1 first leg: sys-sleep defers once at now+60s.
+      forceDue("sys-sleep");
+      await tick.runTaskTick(makeTickCtx(queue));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(doubles.sleepCycleCalls).toBe(1);
+      const st = stateStore.readState("sys-sleep")!;
+      expect(st.deferredAdmission?.attempts).toBe(1);
+      const retryAt = st.deferredAdmission!.retryAt;
+
+      // No tick, no heartbeat, no nerve event — the wake scheduler alone
+      // re-admits the SAME occurrence when retryAt passes.
+      await vi.advanceTimersByTimeAsync(Math.max(1, retryAt - Date.now() - 1));
+      expect(doubles.sleepCycleCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(2);
+      // The retry attempt dispatches without any unrelated event.
+      expect(doubles.sleepCycleCalls).toBe(2);
+      expect(events("sys-sleep")[0]!.outcome).toBe("noop");
+      expect(stateStore.readState("sys-sleep")!.deferredAdmission).toBeUndefined();
+      scheduler.stop();
+    } finally {
+      stateStore.setTaskDueChangedHook(null);
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("#1539 scheduler E2E — journey 11: two-lane admission and same-task exclusion", () => {
+  it("runs a long scheduled O project and an unrelated manual run concurrently; excludes a duplicate occurrence", async () => {
+    const { queue, coordinator } = await makeQueueWithCoordinator();
+    const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+    scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+    await scheduler.start();
+    try {
+      // A long supervised project: acceptance is held until we release it.
+      doubles.projectHold = true;
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      await waitForProjectStarted();
+      expect(doubles.projectRuns).toBe(1);
+      expect(queue.currentJobs.map(j => j.entryId)).toContain("project-task");
+
+      // An unrelated manual run starts in the manual lane concurrently.
+      const manualEntry = taskStore.readEntries().find(e => e.id === "announce-task")!;
+      const err = queue.enqueue(manualEntry, true);
+      expect(err).toBeNull();
+      await waitFor(() => queue.currentJobs.map(j => j.entryId).includes("announce-task"));
+      expect(queue.currentJobs).toHaveLength(2);
+
+      // A second occurrence of the SAME task is excluded globally across lanes.
+      const duplicate = queue.enqueue(manualEntry, true);
+      expect(duplicate).toContain("Already running");
+      expect(queue.currentJobs).toHaveLength(2);
+      expect(events("announce-task")).toHaveLength(0);
+
+      // Release the project: it settles once and releases only its lane.
+      doubles.projectHold = false;
+      const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
+      const { nerve } = await import("../../components/nerve.js");
+      const roots = board.kanbanList("*").filter(c => c.type === "O");
+      const reviewStore = new ProjectReviewStore();
+      const latestCase = reviewStore.getLatestReviewCase(roots[0]!.id);
+      reviewStore.settleAcceptance(roots[0]!.id, latestCase!.id, { accepted: true }, "project accepted");
+      nerve.fire("card:done", roots[0]!.id);
+      await waitFor(() => queue.currentJobs.length === 0 && !stateStore.readState("project-task")?.activeRun);
+
+      const ev = events("project-task");
+      expect(ev).toHaveLength(1);
+      expect(ev[0]!.outcome).toBe("success");
+      // The manual run completed independently with its own row.
+      expect(events("announce-task")).toHaveLength(1);
+      expect(cardStatuses().filter(s => s.endsWith(":done"))).toHaveLength(2);
+      scheduler.stop();
+    } finally {
+      scheduler.stop();
+      doubles.projectHold = false;
+    }
+  });
+});
+
+describe("#1539 scheduler E2E — journey 12: terminal O project reattach across restart", () => {
+  it("reattaches a live supervised project under the same run ID and settles exactly once", async () => {
+    const { queue, coordinator } = await makeQueueWithCoordinator();
+    const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+    scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+    await scheduler.start();
+    try {
+      doubles.projectHold = true;
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      await waitForProjectStarted();
+      const firstRunId = stateStore.readState("project-task")!.activeRun!.runId;
+      const rootId = stateStore.readState("project-task")!.activeRun!.cardId;
+      expect(rootId).toBeDefined();
+
+      // Restart: a fresh queue/coordinator recovers the active occurrence and
+      // reattaches the SAME run through admission.
+      const { queue: queue2, coordinator: coordinator2 } = await makeQueueWithCoordinator();
+      const scheduler2 = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler2.register(dueSourcesMod.createRunDeadlineSource(coordinator2));
+      let reattached = false;
+      await coordinator2.recover(taskStore.readEntries(), (entry, run) => {
+        const enqueueResult = queue2.enqueue(entry, false, run);
+        if (enqueueResult) return false;
+        reattached = true;
+        return true;
+      });
+      expect(reattached).toBe(true);
+      expect(stateStore.readState("project-task")!.activeRun!.runId).toBe(firstRunId);
+      expect(queue2.currentJobs.map(j => j.entryId)).toContain("project-task");
+
+      // Release acceptance: the reattached run's pending claim (queued at
+      // admission) settles the project and the occurrence settles exactly once.
+      doubles.projectHold = false;
+      await waitFor(() => queue2.currentJobs.length === 0 && !stateStore.readState("project-task")?.activeRun);
+
+      const ev = events("project-task");
+      expect(ev).toHaveLength(1);
+      expect(ev[0]!.outcome).toBe("success");
+      expect(ev[0]!.runId).toBe(firstRunId);
+      expect(cardStatuses().filter(s => s.endsWith(":done"))).toHaveLength(1);
+      scheduler2.stop();
+    } finally {
+      scheduler.stop();
+      doubles.projectHold = false;
+    }
+  });
+});
+
+async function waitForProjectStarted(): Promise<void> {
+  await waitFor(() => doubles.projectRuns === 1 && stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 400; i++) {
+    if (predicate()) return;
+    await new Promise(r => setTimeout(r, 5));
+  }
+  throw new Error("condition not reached within timeout");
+}

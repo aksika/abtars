@@ -33,7 +33,32 @@ export interface ActiveTaskRun {
   cardId?: number;
   sessionId?: string;
   executionId?: string;
+  /** #1539: monotonic meaningful-progress sequence; bounded, never per token. */
+  progressSequence?: number;
+  /** #1539: the first durable terminal request for this occurrence. */
+  terminalRequest?: RunTerminalRequest;
 }
+
+/** #1539: durable terminal request. Cancellation recorded before a deadline
+ * stays cancellation; a deadline may fill an absent request but never replaces
+ * an earlier cancellation. */
+export interface RunTerminalRequest {
+  kind: "cancelled" | "deadline_exceeded";
+  requestedAt: number;
+  reason: string;
+}
+
+/** #1539: phase rank. cancelling is a terminal-request branch: nothing advances past it. */
+const PHASE_RANK: Record<TaskRunPhase, number> = {
+  reserved: 0,
+  preflight: 1,
+  queued: 2,
+  executing: 3,
+  cancelling: 4,
+  validating: 5,
+  settling: 6,
+  delivery_pending: 7,
+};
 
 export interface TaskRuntimeState {
   nextRunAt: number | null;
@@ -183,6 +208,7 @@ export function updateState(taskId: string, update: Partial<TaskRuntimeState>): 
     state[taskId] = { ...existing, ...update };
     return state;
   });
+  notifyTaskDueChanged();
 }
 
 /** Apply a state patch only while the caller's durable predicate still holds. */
@@ -199,6 +225,7 @@ export function updateStateIf(
     changed = true;
     return state;
   });
+  if (changed) notifyTaskDueChanged();
   return changed;
 }
 
@@ -323,6 +350,7 @@ export function reserveRun(taskId: string, candidate: Omit<ActiveTaskRun, "reser
     result = { ok: true, run };
     return state;
   });
+  notifyTaskDueChanged();
   return result;
 }
 
@@ -338,6 +366,107 @@ export function updateActiveRun(taskId: string, runId: string, patch: Partial<Ac
   return found;
 }
 
+export type AdvanceRunResult = "advanced" | "stale" | "regression";
+
+/**
+ * #1539: one atomic monotonic progress write. Validates phase rank (a run
+ * never moves to an earlier phase, and nothing advances past `cancelling`),
+ * advances `lastProgressAt` only forward, increments `progressSequence` only
+ * for a meaningful progress write, and merges bounded attachments.
+ */
+export function advanceRun(
+  taskId: string,
+  runId: string,
+  update: { phase?: TaskRunPhase; progressAt?: number; attachments?: { cardId?: number; sessionId?: string; executionId?: string } },
+): AdvanceRunResult {
+  let result: AdvanceRunResult = "stale";
+  writeAtomic(state => {
+    const existing = state[taskId];
+    if (!existing?.activeRun || existing.activeRun.runId !== runId) return state;
+    const run = existing.activeRun;
+    if (update.phase !== undefined && update.phase !== run.phase) {
+      const newRank = PHASE_RANK[update.phase] ?? -1;
+      const oldRank = PHASE_RANK[run.phase] ?? -1;
+      if (run.phase === "cancelling" || newRank < oldRank) {
+        result = "regression";
+        return state;
+      }
+    }
+    const activeRun: ActiveTaskRun = { ...run };
+    if (update.phase !== undefined) activeRun.phase = update.phase;
+    if (update.progressAt !== undefined) {
+      const progressAt = Math.max(0, update.progressAt);
+      if (progressAt > activeRun.lastProgressAt) {
+        activeRun.lastProgressAt = progressAt;
+        activeRun.progressSequence = (activeRun.progressSequence ?? 0) + 1;
+      }
+    }
+    if (update.attachments) {
+      if (update.attachments.cardId !== undefined) activeRun.cardId = update.attachments.cardId;
+      if (update.attachments.sessionId !== undefined) activeRun.sessionId = update.attachments.sessionId;
+      if (update.attachments.executionId !== undefined) activeRun.executionId = update.attachments.executionId;
+    }
+    state[taskId] = { ...existing, activeRun };
+    result = "advanced";
+    return state;
+  });
+  return result;
+}
+
+export type TerminalRequestResult = "requested" | "already_requested" | "stale";
+
+/**
+ * #1539: record the first durable terminal request. Cancellation always wins
+ * over a later deadline; a deadline fills an absent request but never replaces
+ * an earlier cancellation. Moving to `cancelling` is part of the request so no
+ * code path can write the branch phase without the durable request.
+ */
+export function requestRunTerminal(
+  taskId: string,
+  runId: string,
+  request: RunTerminalRequest,
+): TerminalRequestResult {
+  let result: TerminalRequestResult = "stale";
+  writeAtomic(state => {
+    const existing = state[taskId];
+    if (!existing?.activeRun || existing.activeRun.runId !== runId) return state;
+    const run = existing.activeRun;
+    const current = run.terminalRequest;
+    if (current) {
+      if (current.kind === "cancelled") {
+        result = "already_requested";
+        return state;
+      }
+      if (request.kind === "cancelled") {
+        state[taskId] = { ...existing, activeRun: { ...run, terminalRequest: request, phase: "cancelling" } };
+        result = "requested";
+        return state;
+      }
+      result = "already_requested";
+      return state;
+    }
+    state[taskId] = { ...existing, activeRun: { ...run, terminalRequest: request, phase: "cancelling" } };
+    result = "requested";
+    return state;
+  });
+  notifyTaskDueChanged();
+  return result;
+}
+
+/** #1539: hook notified after any durable task-state mutation that can change
+ * admission/retry/deadline due times. Wired to the lifecycle wake scheduler. */
+let taskDueChangedHook: (() => void) | null = null;
+export function setTaskDueChangedHook(hook: (() => void) | null): void {
+  taskDueChangedHook = hook;
+}
+export function notifyTaskDueChanged(): void {
+  try {
+    taskDueChangedHook?.();
+  } catch (err) {
+    logAndSwallow(TAG, "notifyTaskDueChanged", err);
+  }
+}
+
 export function settleActiveRun(taskId: string, runId: string, statePatch: Partial<TaskRuntimeState>): boolean {
   let found = false;
   writeAtomic(state => {
@@ -351,5 +480,6 @@ export function settleActiveRun(taskId: string, runId: string, statePatch: Parti
     found = true;
     return state;
   });
+  if (found) notifyTaskDueChanged();
   return found;
 }

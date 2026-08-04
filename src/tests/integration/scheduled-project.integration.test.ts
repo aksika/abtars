@@ -52,7 +52,7 @@ describe("scheduled project orchestration (#1516)", () => {
       },
     } as never);
 
-    const queue = new CronQueue("unused", home, undefined, undefined, undefined, projectRunnerMod.scheduledProjectRunner);
+    const queue = new CronQueue("unused", home, undefined, undefined, undefined, undefined, projectRunnerMod.scheduledProjectRunner);
     queue.enqueue({
       id: "brief-task", kind: "agent", prompt: "produce the briefing",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
@@ -135,7 +135,7 @@ describe("scheduled project orchestration (#1516)", () => {
       },
     } as never);
 
-    const queue = new CronQueue("unused", home, undefined, undefined, undefined, projectRunnerMod.scheduledProjectRunner);
+    const queue = new CronQueue("unused", home, undefined, undefined, undefined, undefined, projectRunnerMod.scheduledProjectRunner);
     queue.enqueue({
       id: "stale-task", kind: "agent", prompt: "produce report",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),

@@ -173,6 +173,22 @@ describe("ExecutorLeaseStore", () => {
     expect(due).toEqual([]);
   });
 
+  it("#1539 getEvaluationSchedule arms future evaluations for the wake scheduler", () => {
+    const store = new ExecutorLeaseStore();
+    expect(store.getEvaluationSchedule()).toEqual([]);
+    store.appendFact(ALIVE_FACT);
+    const snap = store.getSnapshot(TEST_ATTEMPT_ID)!;
+    const future = new Date(Date.now() + 60_000).toISOString();
+    store.setUpcomingEvaluation(TEST_ATTEMPT_ID, future);
+    // The wake scheduler can arm the future evaluation.
+    const schedule = store.getEvaluationSchedule();
+    expect(schedule).toHaveLength(1);
+    expect(schedule[0]!.attemptId).toBe(TEST_ATTEMPT_ID);
+    expect(new Date(schedule[0]!.nextEvaluationAt).getTime()).toBeGreaterThan(Date.now());
+    // While getDueSnapshots — the wake target — still excludes it.
+    expect(store.getDueSnapshots()).toHaveLength(0);
+  });
+
   it("getActiveSnapshots returns only non-closed snapshots", () => {
     const store = new ExecutorLeaseStore();
     store.appendFact(ALIVE_FACT);

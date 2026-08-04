@@ -51,7 +51,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       writeFileSync(artifactPath, "# Report\n" + `${canary} report line\n`.repeat(20));
       return { cardId, result: `${canary} report line\n`.repeat(20) };
     });
-    const queue = new CronQueue("unused", home, undefined, undefined, modelBoundary);
+    const queue = new CronQueue("unused", home, undefined, undefined, undefined, modelBoundary);
     queue.enqueue({
       id: "report-task", kind: "agent", prompt: `${canary} produce report`,
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
@@ -106,7 +106,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       board.kanbanRunning(cardId);
       return { cardId, result: "too short" };
     });
-    const queue = new CronQueue("unused", home, undefined, undefined, modelBoundary);
+    const queue = new CronQueue("unused", home, undefined, undefined, undefined, modelBoundary);
     queue.enqueue({
       id: "short-task", kind: "agent", prompt: "produce report",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
@@ -137,7 +137,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       board.kanbanRunning(cardId);
       return { cardId, result: "ok" };
     });
-    const queue = new CronQueue("unused", home, undefined, undefined, modelBoundary);
+    const queue = new CronQueue("unused", home, undefined, undefined, undefined, modelBoundary);
     queue.enqueue({
       id: "dod-task", kind: "agent", prompt: "produce report",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(), enabled: true, priority: "medium",

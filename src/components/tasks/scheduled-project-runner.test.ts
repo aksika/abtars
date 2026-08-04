@@ -123,7 +123,7 @@ describe("scheduled-project-runner #1516", () => {
     nerveBus.fire("card:done", root.id);
 
     const result = await pending;
-    expect(result).toEqual({ cardId: root.id, result: "final synthesis text" });
+    expect(result).toEqual(expect.objectContaining({ cardId: root.id, result: "final synthesis text" }));
   });
 
   it("rejects with the blocked reason when the project is blocked", async () => {
@@ -216,7 +216,7 @@ describe("scheduled-project-runner #1516", () => {
     stateStore.updateActiveRun("daily-ai", "daily-ai_1", { cardId: root });
 
     const result = await mod.scheduledProjectRunner(makeRequest());
-    expect(result).toEqual({ cardId: root, result: "already accepted" });
+    expect(result).toEqual(expect.objectContaining({ cardId: root, result: "already accepted" }));
     expect(kanban.kanbanGetCard(root)?.status).toBe("done");
   });
 });

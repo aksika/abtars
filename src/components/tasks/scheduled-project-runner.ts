@@ -13,7 +13,7 @@
 import { nerve } from "../nerve.js";
 import { logInfo } from "../logger.js";
 import { kanbanEnqueue, kanbanRunning, kanbanGetCard } from "./kanban-board.js";
-import { readState, updateActiveRun } from "./task-state-store.js";
+import { readState, advanceRun } from "./task-state-store.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { abortProjectById, getOrCreateOrcCoordinator } from "../reconciler.js";
 import type { ExecutionControl } from "../execution-control.js";
@@ -41,7 +41,7 @@ export interface ScheduledProjectRequest {
 
 export type ScheduledProjectRunner = (
   request: ScheduledProjectRequest,
-) => Promise<{ cardId: number; result: string }>;
+) => Promise<{ cardId: number; result: string; factAt?: number }>;
 
 /**
  * #1516: Admit a scheduled agent task as a supervised Orc project.
@@ -86,7 +86,7 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
     });
     if (rootCardId === 0) throw new Error("scheduled project admission failed: kanban database unavailable");
     executionControl.setCardId(rootCardId);
-    updateActiveRun(entryId, runId, { cardId: rootCardId });
+    advanceRun(entryId, runId, { attachments: { cardId: rootCardId } });
     logInfo(TAG, `Admitted scheduled project card #${rootCardId} for task "${entryId}" run ${runId} maxAgents=${request.maxAgents}`);
   }
 
@@ -148,8 +148,17 @@ function buildOrcGoal(request: ScheduledProjectRequest): string {
 }
 
 type ProjectTerminalRead =
-  | { accepted: true; synthesis: string }
-  | { accepted: false; reason: string };
+  | { accepted: true; synthesis: string; factAt?: number }
+  | { accepted: false; reason: string; factAt?: number };
+
+function cardTimeMs(iso: string | null | undefined): number | undefined {
+  if (!iso) return undefined;
+  // SQLite `datetime('now')` writes UTC without a timezone marker; bare
+  // date-time strings would be parsed as LOCAL time and shift the fact time.
+  const normalized = /Z$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
+  const t = new Date(normalized).getTime();
+  return Number.isFinite(t) ? t : undefined;
+}
 
 function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefined {
   const reviewStore = new ProjectReviewStore();
@@ -158,6 +167,7 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
   if (!card) return undefined;
   if (supervision?.state === "accepted" || card.status === "done") {
     let synthesis = card.result_summary ?? "";
+    let factAt = cardTimeMs(card.updated_at);
     if (supervision?.accepted_decision_id) {
       const decision = reviewStore.getDecision(supervision.accepted_decision_id);
       if (decision) {
@@ -165,12 +175,17 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
           const parsed = JSON.parse(decision.decision_json) as { synthesis?: unknown };
           if (typeof parsed.synthesis === "string" && parsed.synthesis) synthesis = parsed.synthesis;
         } catch { /* keep the card summary */ }
+        factAt = cardTimeMs(decision.created_at) ?? factAt;
       }
     }
-    return { accepted: true, synthesis: synthesis || "project accepted" };
+    return { accepted: true, synthesis: synthesis || "project accepted", factAt };
   }
   if (supervision?.state === "blocked" || card.status === "failed") {
-    return { accepted: false, reason: (supervision?.blocked_reason ?? card.error ?? "project blocked").slice(0, 500) };
+    return {
+      accepted: false,
+      reason: (supervision?.blocked_reason ?? card.error ?? "project blocked").slice(0, 500),
+      factAt: cardTimeMs(card.updated_at),
+    };
   }
   return undefined;
 }
@@ -181,7 +196,7 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
  * race; deadline and execution-control cancellation abort the project and
  * settle through the scheduled runner's existing exactly-once path.
  */
-function waitForProjectTerminal(request: ScheduledProjectRequest, rootCardId: number): Promise<{ cardId: number; result: string }> {
+function waitForProjectTerminal(request: ScheduledProjectRequest, rootCardId: number): Promise<{ cardId: number; result: string; factAt?: number }> {
   return new Promise((resolve, reject) => {
     const { executionControl, deadlineAt } = request;
     let finished = false;
@@ -198,20 +213,26 @@ function waitForProjectTerminal(request: ScheduledProjectRequest, rootCardId: nu
         finish(() => reject(new Error(`scheduled project cancelled: ${executionControl.cancelReason ?? "cancelled"}`)));
         return;
       }
-      if (Date.now() >= deadlineAt) {
-        void abortProjectById(rootCardId, "scheduled deadline exceeded");
-        finish(() => reject(new Error("scheduled project deadline exceeded")));
-        return;
-      }
+      // #1539: terminal evidence is read BEFORE the deadline abort. A project
+      // that reached a terminal state before its deadline but is observed
+      // after it (recheck interval) carries its own fact time and settles on
+      // its merits in the settler.
       const terminal = readProjectTerminal(rootCardId);
       if (terminal) {
         finish(() => {
           if (terminal.accepted) {
-            resolve({ cardId: rootCardId, result: terminal.synthesis });
+            resolve({ cardId: rootCardId, result: terminal.synthesis, factAt: terminal.factAt });
           } else {
-            reject(new Error(terminal.reason));
+            const err = new Error(terminal.reason) as Error & { factAt?: number };
+            if (terminal.factAt !== undefined) err.factAt = terminal.factAt;
+            reject(err);
           }
         });
+        return;
+      }
+      if (Date.now() >= deadlineAt) {
+        void abortProjectById(rootCardId, "scheduled deadline exceeded");
+        finish(() => reject(new Error("scheduled project deadline exceeded")));
       }
     };
     const onCardEvent = (cardId: number): void => {

@@ -351,6 +351,24 @@ export class ExecutorLeaseStore {
   }
 
   /**
+   * #1539: every active evaluation due time (past AND future) so the
+   * lifecycle wake scheduler can arm the earliest future one. `getDueSnapshots`
+   * only returns overdue rows, which cannot arm a timer.
+   */
+  getEvaluationSchedule(): Array<{ attemptId: string; cardId: number; nextEvaluationAt: string }> {
+    const rows = this.db.prepare(`
+      SELECT attempt_id, card_id, next_evaluation_at
+      FROM attempt_lease_snapshots
+      WHERE closed_at IS NULL AND next_evaluation_at IS NOT NULL
+    `).all() as Array<{ attempt_id: string; card_id: number; next_evaluation_at: string }>;
+    return rows.map(r => ({
+      attemptId: r.attempt_id,
+      cardId: r.card_id,
+      nextEvaluationAt: r.next_evaluation_at,
+    }));
+  }
+
+  /**
    * Atomically record cancel intent in both worker_attempts and lease snapshot.
    * Uses a single transaction on the shared DB to avoid the race between
    * requestCancel and updateEvaluation as separate roundtrips.

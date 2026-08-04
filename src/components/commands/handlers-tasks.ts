@@ -78,11 +78,27 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
     listing = "(no active entries)";
   }
   let running = "";
-  if (ctx.cronCurrentJob) {
-    const j = ctx.cronCurrentJob;
-    const ago = Math.round((Date.now() - j.startedAt) / 1000);
-    const name = (j.message.split("\n")[0] ?? "").slice(0, 30);
-    running = `\n~ Running: ${name} (${ago}s)`;
+  // #1539: show every lane currently executing with its durable run identity.
+  const jobs = ctx.cronCurrentJobs ?? (ctx.cronCurrentJob ? [ctx.cronCurrentJob] : []);
+  if (jobs.length > 0) {
+    const lines = jobs.map(j => {
+      const ago = Math.round((Date.now() - j.startedAt) / 1000);
+      const name = (j.message.split("\n")[0] ?? "").slice(0, 30);
+      return `~ [${j.lane}] ${name} (${ago}s, run ${j.runId.slice(0, 16)})`;
+    });
+    running = `\n${lines.join("\n")}`;
+  }
+  // #1539: durable pending state stays visible before a model session exists.
+  const queueView = ctx.cronQueueView?.();
+  if (queueView) {
+    const pendingLines: string[] = [];
+    for (const lane of queueView) {
+      for (const p of lane.pending) {
+        const run = p.runId ? `, run ${p.runId.slice(0, 16)}` : "";
+        pendingLines.push(`  [${lane.lane}] queued: ${p.entryId}${run}`);
+      }
+    }
+    if (pendingLines.length > 0) running += `\n${pendingLines.join("\n")}`;
   }
   await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "HTML" });
   return true;

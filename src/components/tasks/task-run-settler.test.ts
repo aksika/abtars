@@ -153,3 +153,93 @@ describe("settleRunOnce manual-run policy (#1525)", () => {
     expectState(state);
   });
 });
+
+describe("settleRunOnce terminal normalization (#1539)", () => {
+  const DEADLINE = NOW + 10 * 60_000;
+
+  async function seedWithRequest(kind: "cancelled" | "deadline_exceeded"): Promise<{ run: import("./task-state-store.js").ActiveTaskRun }> {
+    const reserved = store.reserveRun(ENTRY.id, {
+      runId: "norm-" + kind,
+      groupId: "g-norm",
+      attempt: 1,
+      trigger: "schedule",
+      occurrenceAt: OCCURRENCE_AT,
+      deadlineAt: DEADLINE,
+    });
+    if (!reserved.ok) throw new Error("reserveRun failed");
+    store.requestRunTerminal(ENTRY.id, reserved.run.runId, { kind, requestedAt: NOW, reason: kind === "cancelled" ? "operator" : "deadline fired" });
+    return { run: store.readState(ENTRY.id)!.activeRun! };
+  }
+
+  it("a durable cancellation wins over a later child success or failure", async () => {
+    const { run } = await seedWithRequest("cancelled");
+    settle.settleRunOnce({ entry: ENTRY, run, outcome: "success", detail: "late success" });
+    const state = store.readState(ENTRY.id)!;
+    expect(state.activeRun).toBeUndefined();
+    expect(state.consecutiveFailures).toBe(0);
+    // The history row records the normalized cancellation.
+    const { recentRuns } = await import("./task-history-store.js");
+    const evs = recentRuns(ENTRY.id, 5);
+    expect(evs[0]!.outcome).toBe("cancelled");
+    expect(evs[0]!.detail).toBe("late success");
+  });
+
+  it("a child terminal fact that predates the deadline settles on its merits despite a deadline request", async () => {
+    const { run } = await seedWithRequest("deadline_exceeded");
+    const factAt = DEADLINE - 5000;
+    settle.settleRunOnce({ entry: ENTRY, run, outcome: "success", detail: "finished before deadline", factAt });
+    const { recentRuns } = await import("./task-history-store.js");
+    const evs = recentRuns(ENTRY.id, 5);
+    expect(evs[0]!.outcome).toBe("success");
+    expect(evs[0]!.detail).toBe("finished before deadline");
+    expect(store.readState(ENTRY.id)!.activeRun).toBeUndefined();
+  });
+
+  it("a late success without a fact time settles as deadline_exceeded", async () => {
+    const { run } = await seedWithRequest("deadline_exceeded");
+    settle.settleRunOnce({ entry: ENTRY, run, outcome: "success", detail: "observed after deadline" });
+    const { recentRuns } = await import("./task-history-store.js");
+    const evs = recentRuns(ENTRY.id, 5);
+    expect(evs[0]!.outcome).toBe("failed");
+    expect(evs[0]!.diagnostic?.category).toBe("interruption");
+    expect(evs[0]!.diagnostic?.code).toBe("deadline_exceeded");
+  });
+
+  it("a child fact whose own time is after the deadline still loses to the deadline", async () => {
+    const { run } = await seedWithRequest("deadline_exceeded");
+    settle.settleRunOnce({ entry: ENTRY, run, outcome: "success", detail: "late", factAt: DEADLINE + 1000 });
+    const { recentRuns } = await import("./task-history-store.js");
+    const evs = recentRuns(ENTRY.id, 5);
+    expect(evs[0]!.outcome).toBe("failed");
+    expect(evs[0]!.diagnostic?.code).toBe("deadline_exceeded");
+  });
+
+  it("without a terminal request the first child terminal fact wins unchanged", async () => {
+    const reserved = store.reserveRun(ENTRY.id, {
+      runId: "norm-plain",
+      groupId: "g-plain",
+      attempt: 1,
+      trigger: "schedule",
+      occurrenceAt: OCCURRENCE_AT,
+      deadlineAt: DEADLINE,
+    });
+    if (!reserved.ok) throw new Error("reserveRun failed");
+    settle.settleRunOnce({ entry: ENTRY, run: reserved.run, outcome: "success", detail: "clean" });
+    const { recentRuns } = await import("./task-history-store.js");
+    const evs = recentRuns(ENTRY.id, 5);
+    expect(evs[0]!.outcome).toBe("success");
+  });
+
+  it("emits exactly one terminal notification for the winning settlement", async () => {
+    const { run } = await seedWithRequest("cancelled");
+    const seen: Array<[string, string]> = [];
+    const unsub = settle.onRunTerminal((taskId, runId) => seen.push([taskId, runId]));
+    try {
+      settle.settleRunOnce({ entry: ENTRY, run, outcome: "success", detail: "late" });
+      settle.settleRunOnce({ entry: ENTRY, run, outcome: "success", detail: "duplicate" });
+      expect(seen).toEqual([["finance-daily", run.runId]]);
+    } finally {
+      unsub();
+    }
+  });
+});

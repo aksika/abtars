@@ -236,6 +236,17 @@ export function kanbanRunning(id: number): void {
   nerve.fire("card:running", id);
 }
 
+/** #1539: kanban due-change hook wired to the lifecycle wake scheduler. */
+let kanbanDueChangedHook: (() => void) | null = null;
+export function setKanbanDueChangedHook(hook: (() => void) | null): void {
+  kanbanDueChangedHook = hook;
+}
+function notifyKanbanDueChanged(): void {
+  try {
+    kanbanDueChangedHook?.();
+  } catch { /* hook failures must never break board writes */ }
+}
+
 export function kanbanComplete(id: number, resultPath: string | null, summary: string): void {
   const d = dbOrNull();
   if (!d) return;
@@ -250,6 +261,7 @@ export function kanbanComplete(id: number, resultPath: string | null, summary: s
     `UPDATE kanban_board SET status = 'done', result_path = ?, result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(resultPath, summary.slice(0, 4000), id);
   nerve.fire("card:done", id);
+  notifyKanbanDueChanged();
 }
 
 export function kanbanFail(id: number, error: string): void {
@@ -259,6 +271,7 @@ export function kanbanFail(id: number, error: string): void {
     `UPDATE kanban_board SET status = 'failed', error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(error.slice(0, 1000), id);
   nerve.fire("card:failed", id);
+  notifyKanbanDueChanged();
 }
 
 const MAX_RETRIES = 3;
@@ -279,6 +292,7 @@ export function kanbanRetryOrFail(id: number, error: string): "retrying" | "fail
     `UPDATE kanban_board SET status = 'queued', retry_count = ?, next_retry_at = ?, error = ?, updated_at = datetime('now') WHERE id = ?`
   ).run(retryCount, nextRetryAt, error.slice(0, 1000), id);
   nerve.fire("card:queued", id);
+  notifyKanbanDueChanged();
   return "retrying";
 }
 
@@ -319,6 +333,25 @@ export function kanbanMarkDelivered(id: number): void {
     `UPDATE kanban_board SET status = 'delivered', delivered_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(id);
   nerve.fire("card:delivered", id);
+  notifyKanbanDueChanged();
+}
+
+/**
+ * #1539: durable Kanban retry due items for the lifecycle wake scheduler.
+ * Queued cards whose `next_retry_at` has passed are woken by the source; the
+ * earliest future one arms the shared timer.
+ */
+export function kanbanDueRetryItems(): Array<{ key: string; dueAt: number }> {
+  const d = dbOrNull();
+  if (!d) return [];
+  const rows = d.prepare(
+    `SELECT id, next_retry_at FROM kanban_board WHERE status = 'queued' AND next_retry_at IS NOT NULL`
+  ).all() as Array<{ id: number; next_retry_at: string }>;
+  return rows.flatMap(r => {
+    const t = new Date(r.next_retry_at).getTime();
+    if (!Number.isFinite(t)) return [];
+    return [{ key: `kanban:${r.id}`, dueAt: t }];
+  });
 }
 
 

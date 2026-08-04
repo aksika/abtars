@@ -1489,6 +1489,15 @@ export class Spin {
     }
   }
 
+  /**
+   * #1539: wake entry for the kanban-retry due source — unsupervised dispatch
+   * without the heartbeat. Re-reads the dispatch order (future retries
+   * excluded) and dispatches what is due; supervised cards are skipped.
+   */
+  drainQueuedCards(): void {
+    this.drainQueued();
+  }
+
   /** Periodic housekeeping — registered as HB task (#980). */
   async tick(): Promise<void> {
     // #1364: drain only non-supervised cards; supervised dispatch goes through Reconciler
@@ -1496,8 +1505,7 @@ export class Spin {
     // #1248: Legacy stale scanner removed — execution timeout is the real bound
     this._housekeepCounter++;
     if (this._housekeepCounter % 72 === 0) {
-      this.pruneSkillTrash();
-      this.rotateAuditLog();
+      this.pruneSkillTrash();      this.rotateAuditLog();
       this.pruneEndedSessions();
     }
   }
