@@ -110,7 +110,6 @@ vi.mock("./soul-bundle.js", () => ({
 }));
 
 import { Spin } from "./spin.js";
-import { registerControl } from "./execution-control.js";
 import { kanbanEnqueue } from "./tasks/kanban-board.js";
 import { setUserRegistryOverride, type UserRegistry, type UserEntry } from "./user-registry.js";
 import { profileFor, isValidSessionType, SESSION_PROFILES } from "./spin-profiles.js";
@@ -433,7 +432,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
         lastUsage: () => null,
       });
       spin.setRuntime(runtime as any);
-      const control = registerControl(`spin-slot-${Date.now()}`);
+      const control = spin.executionSupervisor.open({ executionRef: `spin-slot-${Date.now()}`, type: "T" });
       const dispatch = spin.dispatchAwait({
         type: "T",
         goal: "stalled task",
@@ -711,12 +710,14 @@ describe("spin(spec) — unified session API (#1271)", () => {
       await expect((spin as any).tick()).resolves.toBeUndefined();
     });
 
-    it("markDone removes card from running set", async () => {
+    it("release removes card from running set", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const runningMap: Map<string, Set<number>> = (spin as any).running;
-      runningMap.set("W", new Set([99999]));
-      (spin as any).markDone("W", 99999);
-      expect(runningMap.get("W")?.has(99999)).toBe(false);
+      // #1540: occupancy lives in the execution supervisor behind the facade.
+      const sup = spin.executionSupervisor;
+      expect(sup.admit("W", 99999)).toBe(true);
+      expect(sup.runningCardIds()).toContain(99999);
+      sup.release("W", 99999);
+      expect(sup.runningCardIds()).not.toContain(99999);
     });
   });
 
@@ -730,10 +731,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const future = new Date(Date.now() + 86_400_000).toISOString();
       const mod = await import("./tasks/kanban-board.js");
       (mod as any)._kanbanSetCardField(id, "next_retry_at", future);
-      const runningMap: Map<string, Set<number>> = (spin as any).running;
-      runningMap.set("W", new Set());
       await (spin as any).tick();
-      expect(runningMap.get("W")?.size ?? 0).toBe(0);
+      expect(spin.getRunningCount("W")).toBe(0);
     });
 
     it("dispatches due card with stored type B, not W", async () => {
@@ -777,6 +776,54 @@ describe("spin(spec) — unified session API (#1271)", () => {
         spin.spin({ type: "D", sessionId: r1.sessionId, prompt: "step2", await: true }),
       ).rejects.toThrow(/is ended/);
       expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("#1540 — one active execution generation per session", () => {
+    it("a second executionControl bound to a busy session is rejected with a typed failure", async () => {
+      const runtime = makeRuntime({ completeResponse: "first run ok" });
+      spin.setRuntime(runtime as any);
+
+      // Allocate a reusable session (D is persistent/external).
+      const first = await spin.spin({ type: "D", prompt: "step1", await: true });
+      const sessionId = first.sessionId;
+
+      // A non-terminal control is already bound to that session (simulating
+      // an in-flight supervised generation that has not settled yet).
+      const busy = spin.executionSupervisor.open({ executionRef: "gen-1", type: "T" });
+      const session = spin.getSessionById(sessionId)!;
+      session.executionControl = busy;
+      expect(spin.executionSupervisor.bindSession("gen-1", sessionId)).toBe(true);
+
+      // A second generation for the same session must not silently overwrite.
+      const second = spin.executionSupervisor.open({ executionRef: "gen-2", type: "T" });
+      expect(spin.executionSupervisor.bindSession("gen-2", sessionId)).toBe(false);
+      await expect(
+        spin.spin({
+          type: "D",
+          sessionId,
+          prompt: "step2",
+          await: true,
+          executionControl: second,
+        }),
+      ).rejects.toMatchObject({ code: "execution_bind_rejected" });
+      await expect(
+        spin.spin({
+          type: "D",
+          sessionId,
+          prompt: "step3",
+          await: true,
+          executionControl: second,
+        }),
+      ).rejects.toThrow(/already has an active execution/);
+
+      // The session keeps the original control; the stale generation never ran.
+      expect(session.executionControl).toBe(busy);
+      expect(second.terminal).toBe(false);
+
+      // A terminal old handle frees the session for the next generation.
+      busy.markTerminal("completed");
+      expect(spin.executionSupervisor.bindSession("gen-2", sessionId)).toBe(true);
     });
   });
 

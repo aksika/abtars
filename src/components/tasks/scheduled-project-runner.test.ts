@@ -3,6 +3,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
+import { createExecutionSupervisor } from "../execution-control.js";
 
 let TEST_HOME: string;
 let mod: typeof import("./scheduled-project-runner.js");
@@ -11,7 +12,6 @@ let reviewStoreMod: typeof import("../project-acceptance/project-review-store.js
 let reconciler: typeof import("../reconciler.js");
 let stateStore: typeof import("./task-state-store.js");
 let nerveBus: typeof import("../nerve.js")["nerve"];
-let execControlMod: typeof import("../execution-control.js");
 
 beforeEach(async () => {
   vi.resetModules();
@@ -23,13 +23,16 @@ beforeEach(async () => {
   reconciler = await import("../reconciler.js");
   stateStore = await import("./task-state-store.js");
   nerveBus = (await import("../nerve.js")).nerve;
-  execControlMod = await import("../execution-control.js");
   mod = await import("./scheduled-project-runner.js");
 });
 
 afterEach(() => {
   rmSync(TEST_HOME, { recursive: true, force: true });
 });
+
+function makeControl(ref: string): import("../execution-control.js").ExecutionControl {
+  return createExecutionSupervisor({ maxConcurrent: {} }).open({ executionRef: ref, type: "T" });
+}
 
 function fakeCoordinator(): Array<{ projectCardId: number; goal: string }> {
   const claims: Array<{ projectCardId: number; goal: string }> = [];
@@ -70,7 +73,7 @@ function buildRequest(overrides: Record<string, unknown> = {}): {
     maxAgents: 4,
     deadlineAt: Date.now() + 60_000,
     executionScope: { cwd: join(TEST_HOME, "workspace", "daily-ai"), env: { WORKSPACE: join(TEST_HOME, "workspace", "daily-ai") } },
-    executionControl: execControlMod.registerControl(ref),
+    executionControl: makeControl(ref),
     delivery: "report",
     chatId: "1",
     reportArtifactPath: join(TEST_HOME, "workspace", "daily-ai", "Daily-Briefing-{today}.md"),
@@ -95,7 +98,7 @@ describe("scheduled-project-runner #1516", () => {
   it("admits one root O card with the durable cap and resolves accepted synthesis", async () => {
     const claims = fakeCoordinator();
     await seedReservation();
-    const control = execControlMod.registerControl("spr-accept");
+    const control = makeControl("spr-accept");
     const request = makeRequest({ executionControl: control });
 
     const pending = mod.scheduledProjectRunner(request);
@@ -152,7 +155,7 @@ describe("scheduled-project-runner #1516", () => {
   it("aborts the project and rejects on execution-control cancellation", async () => {
     fakeCoordinator();
     await seedReservation();
-    const control = execControlMod.registerControl("spr-cancel");
+    const control = makeControl("spr-cancel");
     const pending = mod.scheduledProjectRunner(makeRequest({ executionControl: control }));
     const root = kanban.kanbanList("*")[0]!;
 

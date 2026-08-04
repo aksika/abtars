@@ -3,7 +3,7 @@ import { spin } from "./spin.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
-import { registerControl, removeControl, getControl } from "./execution-control.js";
+import type { ExecutionSupervisor } from "./execution-control.js";
 import { logSwarmTrace } from "./swarm-trace.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
 
@@ -13,9 +13,13 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   readonly kind = "agent" as const;
   readonly schedulingPolicy = { recovery: "process_bound" as const, defaultMaxDurationMs: 1_800_000 };
   private progressEmitter?: ExecutorProgressEmitter;
+  private readonly executions: ExecutionSupervisor;
 
-  constructor(progressEmitter?: ExecutorProgressEmitter) {
+  constructor(progressEmitter?: ExecutorProgressEmitter, executions?: ExecutionSupervisor) {
     this.progressEmitter = progressEmitter;
+    // #1540: the single shared supervisor — the facade's own instance. Never
+    // a second control registry.
+    this.executions = executions ?? spin.executionSupervisor;
   }
 
   private _emitter(): ExecutorProgressEmitter {
@@ -39,7 +43,13 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     const card = await import("./tasks/kanban-board.js").then(m => m.kanbanGetCard(claim.cardId));
     if (!card) return { kind: "start_failed", reason: "card not found", retryable: false };
 
-    const ctrl = registerControl(`${claim.attemptId}:${claim.generation}`, { attemptId: claim.attemptId, generation: claim.generation, cardId: claim.cardId });
+    const ctrl = this.executions.open({
+      executionRef: `${claim.attemptId}:${claim.generation}`,
+      attemptId: claim.attemptId,
+      generation: claim.generation,
+      cardId: claim.cardId,
+      type: "W",
+    });
 
     const sup = new WorkerSupervisionService();
     const contract = sup.getContract(claim.contractId);
@@ -64,7 +74,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
         deadlineAt: claim.hardDeadlineAt ? new Date(claim.hardDeadlineAt).getTime() : undefined,
       });
     } catch (err) {
-      removeControl(`${claim.attemptId}:${claim.generation}`);
+      this.executions.remove(`${claim.attemptId}:${claim.generation}`);
       return { kind: "start_failed", reason: String(err), retryable: true };
     }
 
@@ -72,7 +82,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   }
 
   async cancel(claim: ExecutionClaim, reason: CancelReason): Promise<CancelObservation> {
-    const ctrl = getControl(`${claim.attemptId}:${claim.generation}`);
+    const ctrl = this.executions.get(`${claim.attemptId}:${claim.generation}`);
     if (!ctrl) {
       const store = new WorkerSupervisionStore();
       const attempt = store.getAttempt(claim.attemptId);
@@ -105,7 +115,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   }
 
   async inspect(claim: ExecutionClaim): Promise<ExecutionObservation> {
-    const ctrl = getControl(`${claim.attemptId}:${claim.generation}`);
+    const ctrl = this.executions.get(`${claim.attemptId}:${claim.generation}`);
     if (!ctrl) {
       const store = new WorkerSupervisionStore();
       const attempt = store.getAttempt(claim.attemptId);

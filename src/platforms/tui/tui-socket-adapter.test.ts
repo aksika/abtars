@@ -1649,7 +1649,7 @@ describe("TuiSocketAdapter — ended pipeline attachment reconciliation (#1533)"
   beforeEach(() => {
     sockPath = tmpSocketPath();
     registry = createSpinSessionRegistry({ maxTotalSessions: 12 });
-    spin = new Spin(registry);
+    spin = new Spin({ sessions: registry });
     onMessage = makeRecoveryHandler();
   });
 

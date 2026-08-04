@@ -102,7 +102,12 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     const msg = `"${title}" auto-paused.\nResume with: /task resume <id>`;
     ctx.telegramAdapter.sendNotification(String(chatId), msg);
   };
-  const coordinator = new ScheduledRunCoordinator({ onFailInject, onTaskPaused });
+
+  // #1540: the coordinator shares the facade's single execution supervisor —
+  // never a second live registry — so scheduled agent runs and the worker
+  // adapter resolve the same handles.
+  const { spin } = await import("../components/spin.js");
+  const coordinator = new ScheduledRunCoordinator({ onFailInject, onTaskPaused, executions: spin.executionSupervisor });
 
   const cronQueue = new CronQueue(
     config.transport.agentCliPath,
@@ -159,7 +164,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // Wire secret_get tool to memory DB
 
   // #894: Wire Spin (which IS the session manager now) to runtime
-  const { spin } = await import("../components/spin.js");
   spin.setRuntime(ctx.runtime);
 
   // #1319: Create Orc activity feed and wire Spin producer + Nerve bridge

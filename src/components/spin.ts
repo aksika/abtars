@@ -6,7 +6,7 @@
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { SpinDispatchAdmissionError } from "./spin-types.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanQueuedDispatchOrder, kanbanGetCard, isUnblocked, resolveRootId, checkWorkerSlotForProject } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanGetCard, resolveRootId, checkWorkerSlotForProject } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import type { CancelReason } from "./swarm-executor-types.js";
@@ -14,10 +14,11 @@ import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
 import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver, QueuedSessionInstruction } from "./spin-types.js";
 import { sessionType } from "./spin-types.js";
-import { profileFor, isValidSessionType, type SessionProfile } from "./spin-profiles.js";
+import { profileFor, type SessionProfile } from "./spin-profiles.js";
 import { WorkerSupervisionService, validateWorkerRootCriteria } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { pushLog, isHollow, cancelSessionExecution, createSpinSessionRegistry, type SpinSessionRegistry } from "./spin-sessions.js";
+import { createExecutionSupervisor, type ExecutionSupervisor, SpinBindRejectionError } from "./execution-control.js";
 import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expireInstructions, restoreBeforeDelivery, subscribeSteerEvents } from "./session-instruction-queue.js";
 import { createExecutionTelemetryScope } from "./execution-telemetry.js";
 import type { OrcActivityFeed } from "./orc-activity-feed.js";
@@ -32,13 +33,6 @@ export { isHollow };
 
 const TAG = "spin";
 
-/** #1364: Returns true if a card has an active supervision contract. */
-function cardHasSupervision(cardId: number): boolean {
-  try {
-    const store = new WorkerSupervisionStore();
-    return store.contractExists(cardId) && store.hasLiveClaim(cardId);
-  } catch { return false; }
-}
 const USER_SESSION_IDLE_MS = parseInt(process.env["USER_SESSION_IDLE_MS"] ?? "7200000", 10);
 const GUEST_SESSION_IDLE_MS = parseInt(process.env["GUEST_SESSION_IDLE_MS"] ?? "1800000", 10);
 const MAX_TOTAL_SESSIONS = parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10);
@@ -51,13 +45,18 @@ const MAX_CONCURRENT: Partial<Record<SessionType, number>> = {
   T: 1, O: 1, B: 1, D: 1, H: 1, W: 3,
 };
 
+/** #1540: composed owners behind the Spin facade. */
+export interface SpinComponents {
+  sessions: SpinSessionRegistry;
+  executions: ExecutionSupervisor;
+}
+
 export class Spin {
   private readonly sessions: SpinSessionRegistry;
-  private running = new Map<SessionType, Set<number>>();
+  private readonly executions: ExecutionSupervisor;
   private runtime: SubagentRuntime | null = null;
   private memory: { recordMessage(opts: { role: string; content: string; timestamp: number; userId: string; sessionId: string }): void } | null = null;
   private orcSession: AgentSession | null = null;
-  private _lastHealerDoneAt = 0;
   private _housekeepCounter = 0;
   private orcActivityFeed?: OrcActivityFeed;
   private sessionOutputFeed?: SessionOutputFeed;
@@ -68,9 +67,15 @@ export class Spin {
    */
   private contextProvider: import("./transport/pi-core-context.js").DurableContextProviderHolder = { current: null };
 
-  /** #1540: compose the closure-backed session registry. */
-  constructor(sessions?: SpinSessionRegistry) {
-    this.sessions = sessions ?? createSpinSessionRegistry({ maxTotalSessions: MAX_TOTAL_SESSIONS });
+  /** #1540: compose the closure-backed owners; tests may inject fresh ones. */
+  constructor(components?: Partial<SpinComponents>) {
+    this.sessions = components?.sessions ?? createSpinSessionRegistry({ maxTotalSessions: MAX_TOTAL_SESSIONS });
+    this.executions = components?.executions ?? createExecutionSupervisor({ maxConcurrent: MAX_CONCURRENT });
+  }
+
+  /** #1540: the shared live execution supervisor (single production instance). */
+  get executionSupervisor(): ExecutionSupervisor {
+    return this.executions;
   }
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
@@ -535,9 +540,21 @@ export class Spin {
     session.activeExecutionId = `${session.id}_${stepIndex}_${Date.now()}`;
     // #1502 §7: attach the caller-supplied execution control to the session so
     // killSession/endSession/shutdown can reach it without knowing the caller.
-    // (Stale references after close are harmless — executor.cancel no-ops once
-    // the execution is closed, and the registry entry is removed in finally.)
-    if (spec.executionControl) session.executionControl = spec.executionControl;
+    // #1540: the supervisor binds at most one active generation per session —
+    // a stale generation can never cancel, settle, or release its successor.
+    // A rejected bind surfaces as one typed facade failure; the session keeps
+    // its existing control and no execution starts unbound.
+    if (spec.executionControl) {
+      const bound = this.executions.bindSession(spec.executionControl.executionRef, session.id);
+      if (!bound) {
+        throw new SpinBindRejectionError(
+          spec.executionControl.executionRef,
+          session.id,
+          this.executions.getForSession(session.id)?.executionRef,
+        );
+      }
+      session.executionControl = spec.executionControl;
+    }
 
     // #1444: Execution telemetry scope — tracks provider calls for this generation
     const executionTelemetry = createExecutionTelemetryScope(session.activeExecutionId);
@@ -558,8 +575,8 @@ export class Spin {
     // control at the earliest point so forced settlement can fail it exactly
     // once instead of leaving it running.
     if (cardId !== undefined) spec.executionControl?.setCardId(cardId);
-    if (cardId !== undefined && this.canDispatch(spec.type, cardId)) {
-      this.markRunning(spec.type, cardId); kanbanRunning(cardId);
+    if (cardId !== undefined && this.executions.admit(spec.type, cardId)) {
+      kanbanRunning(cardId);
     }
 
     // #1319: Track card association and publish execution.started for Orc
@@ -980,7 +997,7 @@ export class Spin {
       // #1248: If cancellation already won, skip normal completion settlement
       if (spec.executionControl?.terminal) {
         logInfo(TAG, `Card ${cardId}: execution control already terminal — skipping finishSpin settlement`);
-        this.markDone(spec.type, cardId);
+        this.executions.release(spec.type, cardId);
         return;
       }
 
@@ -1080,7 +1097,7 @@ export class Spin {
     await spec.onStepComplete?.(stepEvent);
 
     this.applyTerminate(session, terminate);
-    if (cardId !== undefined) { this.markDone(spec.type, cardId); this.drainQueued(); }
+    if (cardId !== undefined) { this.executions.release(spec.type, cardId); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
   }
 
   private async failSpin(
@@ -1101,7 +1118,7 @@ export class Spin {
       // #1248: If terminal already won (cancellation), skip fail settlement
       if (spec.executionControl?.terminal) {
         logInfo(TAG, `Card ${cardId}: execution control already terminal — skipping failSpin settlement`);
-        this.markDone(spec.type, cardId);
+        this.executions.release(spec.type, cardId);
         return;
       }
       if (spec.attemptId) {
@@ -1170,7 +1187,7 @@ export class Spin {
     await spec.onStepComplete?.(stepEvent);
 
     this.applyTerminate(session, terminate);
-    if (cardId !== undefined) { this.markDone(spec.type, cardId); this.drainQueued(); }
+    if (cardId !== undefined) { this.executions.release(spec.type, cardId); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
   }
 
   private releaseSessionTransport(session: ManagedSession): void {
@@ -1244,7 +1261,7 @@ export class Spin {
     // Session cap: also gate here so a full Map never generates a void-spin
     // unhandled rejection (step-2 throws in spin() are outside the try/catch). (#1274)
     const aliveSessions = this.sessions.listAll().length;
-    if (aliveSessions >= MAX_TOTAL_SESSIONS || !this.canDispatch(request.type, cardId)) {
+    if (aliveSessions >= MAX_TOTAL_SESSIONS || !this.executions.canAdmit(request.type, cardId)) {
       const reason = aliveSessions >= MAX_TOTAL_SESSIONS ? "session cap" : "concurrency gate";
       logInfo(TAG, `${request.type} card:${cardId} queued (${reason})`);
       return { cardId };
@@ -1291,9 +1308,9 @@ export class Spin {
     if (aliveSessions >= MAX_TOTAL_SESSIONS) {
       throw new SpinDispatchAdmissionError("session_capacity", "System busy — max sessions reached.");
     }
-    if (!this.canDispatch(request.type, 0)) {
-      if (request.type === "H" && Date.now() - this._lastHealerDoneAt < 120_000) {
-        throw new SpinDispatchAdmissionError("model_cooldown", "Healer session in cooldown — try again shortly.", this._lastHealerDoneAt + 120_000);
+    if (!this.executions.canAdmit(request.type, 0)) {
+      if (request.type === "H" && this.executions.healerInCooldown()) {
+        throw new SpinDispatchAdmissionError("model_cooldown", "Healer session in cooldown — try again shortly.", this.executions.healerCooldownEndAt());
       }
       throw new SpinDispatchAdmissionError("type_busy", `${request.type} session busy — try again shortly.`);
     }
@@ -1434,31 +1451,7 @@ export class Spin {
 
   // ── Internal ───────────────────────────────────────────────────────────
 
-  private drainQueued(): void {
-    const queued = kanbanQueuedDispatchOrder();
-    for (const card of queued) {
-      // #1364: Supervised cards go through Reconciler — skip them here
-      if (cardHasSupervision(card.id)) continue;
-      // #677: respect DAG dependencies
-      if (!isUnblocked(card)) continue;
-      // #1327: validate card.type is a real SessionType BEFORE dispatching.
-      // Without this, an unknown type (e.g. ticket category "bug") reaches
-      // spin() and crashes the bridge on profile.agent access. Fail the card
-      // with a clear note instead — Layer A in spin() is the second line of
-      // defense if this ever regresses.
-      const type = card.type as string;
-      if (!isValidSessionType(type)) {
-        const note = `invalid type for Spin dispatch: "${type}" is not a SessionType (#1327)`;
-        logWarn(TAG, `drainQueued: card ${card.id} has invalid type "${type}" — failing (Layer B)`);
-        kanbanFail(card.id, note);
-        continue;
-      }
-      if (this.canDispatch(type, card.id)) {
-        const goal = (card as any).goal || card.title;
-        this.dispatch({ type, goal, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id, settlementOwner: "spin" });
-      }
-    }
-  }
+  // ── Internal ───────────────────────────────────────────────────────────
 
   /**
    * #1539: wake entry for the kanban-retry due source — unsupervised dispatch
@@ -1466,13 +1459,13 @@ export class Spin {
    * excluded) and dispatches what is due; supervised cards are skipped.
    */
   drainQueuedCards(): void {
-    this.drainQueued();
+    this.executions.drainLegacyQueued((request) => this.dispatch(request));
   }
 
   /** Periodic housekeeping — registered as HB task (#980). */
   async tick(): Promise<void> {
     // #1364: drain only non-supervised cards; supervised dispatch goes through Reconciler
-    this.drainQueued();
+    this.executions.drainLegacyQueued((request) => this.dispatch(request));
     // #1248: Legacy stale scanner removed — execution timeout is the real bound
     this._housekeepCounter++;
     if (this._housekeepCounter % 72 === 0) {
@@ -1545,26 +1538,6 @@ export class Spin {
     logDebug(TAG, `Session finalized: ${session.userId} id=${session.id} reason=${reason}`);
   }
 
-  private canDispatch(type: SessionType, _cardId: number): boolean {
-    const max = MAX_CONCURRENT[type] ?? 5;
-    if ((this.running.get(type)?.size ?? 0) >= max) return false;
-    // #987: 2-min cooldown after H session ends
-    if (type === "H" && Date.now() - this._lastHealerDoneAt < 120_000) return false;
-    return true;
-  }
-
-  private markRunning(type: SessionType, cardId: number): void {
-    if (!this.running.has(type)) this.running.set(type, new Set());
-    this.running.get(type)!.add(cardId);
-    this.publishActiveCardIds();
-  }
-
-  private markDone(type: SessionType, cardId: number): void {
-    this.running.get(type)?.delete(cardId);
-    if (type === "H") this._lastHealerDoneAt = Date.now();
-    this.publishActiveCardIds();
-  }
-
   /**
    * #1439: Complete set of card IDs Spin currently considers running, across
    * every session type. This is the single authoritative source doctor's
@@ -1573,22 +1546,12 @@ export class Spin {
    * exit cannot leave a stale entry indefinitely "active".
    */
   getActiveCardIds(): number[] {
-    const ids: number[] = [];
-    for (const set of this.running.values()) {
-      for (const id of set) ids.push(id);
-    }
-    return ids;
+    return [...this.executions.runningCardIds()];
   }
 
   /** Current executor occupancy for a session type (used by Reconciler adapters). */
   getRunningCount(type: SessionType): number {
-    return this.running.get(type)?.size ?? 0;
-  }
-
-  private publishActiveCardIds(): void {
-    import("./runtime-health-snapshot.js").then(({ updateActiveCardIds }) => {
-      updateActiveCardIds(this.getActiveCardIds());
-    }).catch(() => { /* best effort — snapshot is a health surface, not authoritative */ });
+    return this.executions.runningCount(type);
   }
 }
 

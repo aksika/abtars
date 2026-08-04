@@ -8,8 +8,9 @@ import type { TaskToolRegistry } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
 import { createExecutionScope } from "./task-package.js";
-import { registerControl, removeControl } from "../execution-control.js";
+import type { ExecutionControl, ExecutionSupervisor } from "../execution-control.js";
 import { SpinDispatchAdmissionError } from "../spin-types.js";
+import { spin as spinFacade } from "../spin.js";
 import { kanbanEnqueue } from "./kanban-board.js";
 import { logTaskDebug, logTaskTrace } from "./task-log-ctx.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
@@ -34,14 +35,22 @@ export type TaskPausedCallback = (chatId: number, title: string, reason: string)
 export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
 export type { ScheduledProjectRequest, ScheduledProjectRunner } from "./scheduled-project-runner.js";
 
+/** #1540: the production supervisor is the facade's own instance — never a second registry. */
+function resolveDefaultExecutions(): ExecutionSupervisor {
+  return spinFacade.executionSupervisor;
+}
+
 export class ScheduledTaskRunner {
   private readonly agentRunner?: AgentTaskRunner;
   private readonly projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner;
   private readonly onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+  private readonly executions: ExecutionSupervisor;
 
-  constructor(opts?: { agentRunner?: AgentTaskRunner; onTaskPaused?: TaskPausedCallback; onFailInject?: FailInjectCallback; projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner }) {
+  constructor(opts?: { agentRunner?: AgentTaskRunner; onTaskPaused?: TaskPausedCallback; onFailInject?: FailInjectCallback; projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner; executions?: ExecutionSupervisor }) {
     this.agentRunner = opts?.agentRunner;
     this.projectRunner = opts?.projectRunner;
+    // #1540: the single shared live supervisor (Spin's own instance by default).
+    this.executions = opts?.executions ?? resolveDefaultExecutions();
     // #1520: pause notification emitted once by the shared settler on the
     // false→true transition, keeping operator presentation in one place.
     if (opts?.onTaskPaused) {
@@ -163,7 +172,7 @@ export class ScheduledTaskRunner {
         return { status: "success", safeDetail: detail, cardId: boardId };
       }
 
-      const execControl = registerControl(runId, { cardId: undefined });
+      const execControl = this.executions.open({ executionRef: runId, type: "T" });
       // #1539: preparation/preflight precedes queued; successful dispatch
       // changes queued -> executing. Attaching IDs never moves phase backward.
       advanceRun(taskId, runId, { phase: "queued", attachments: { executionId: runId } });
@@ -358,7 +367,7 @@ export class ScheduledTaskRunner {
       });
       return { status: "failed", safeDetail: msg.slice(0, 500) };
     } finally {
-      removeControl(reservation.runId);
+      this.executions.remove(reservation.runId);
       logTaskTrace("task_resources_released", { task: entry.id, exec: reservation.runId }, "control=removed");
     }
   }
@@ -390,7 +399,7 @@ type ExecutionRaceResult =
 async function runWithDeadline(
   promise: Promise<{ cardId: number; result: string; factAt?: number }>,
   timeoutMs: number,
-  execControl: ReturnType<typeof registerControl>,
+  execControl: ExecutionControl,
   taskId: string,
   runId: string,
   deadlineAt: number,

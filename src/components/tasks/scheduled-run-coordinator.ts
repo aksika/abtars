@@ -22,7 +22,8 @@ import { addTaskFailure } from "./task-failure-buffer.js";
 import { advanceRun, readState, requestRunTerminal } from "./task-state-store.js";
 import { getRun } from "./task-history-store.js";
 import { kanbanGetCard, resolveRootId } from "./kanban-board.js";
-import { getControl } from "../execution-control.js";
+import type { ExecutionSupervisor } from "../execution-control.js";
+import { spin as spinFacade } from "../spin.js";
 import { isSystemEntry, formatTaskLabel } from "./task-types.js";
 import type { ScheduledTask } from "./task-types.js";
 import type { ActiveTaskRun } from "./task-state-store.js";
@@ -73,6 +74,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
   private readonly taskRunner: ScheduledTaskRunner;
   private readonly onFailInject?: FailInjectCallback;
   private readonly failCounts = new Map<string, { date: string; count: number }>();
+  private readonly executions: ExecutionSupervisor;
   private followUpEnqueue?: FollowUpEnqueue;
   private laneReleaseListener: (() => void) | null = null;
 
@@ -82,12 +84,16 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
     agentRunner?: AgentTaskRunner;
     projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner;
     onLaneRelease?: () => void;
+    executions?: ExecutionSupervisor;
   }) {
     this.onFailInject = opts?.onFailInject;
+    // #1540: the single shared live supervisor (Spin's own instance by default).
+    this.executions = opts?.executions ?? spinFacade.executionSupervisor;
     this.taskRunner = new ScheduledTaskRunner({
       agentRunner: opts?.agentRunner,
       onTaskPaused: opts?.onTaskPaused,
       projectRunner: opts?.projectRunner,
+      executions: this.executions,
     });
     this.laneReleaseListener = opts?.onLaneRelease ?? null;
     onRunTerminal((_taskId, runId) => {
@@ -346,7 +352,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
       return;
     }
     if (handle.kind === "agent") {
-      const control = getControl(handle.run.runId);
+      const control = this.executions.get(handle.run.runId);
       if (control) control.signalCancel(reason as import("../swarm-executor-types.js").CancelReason);
       return;
     }
