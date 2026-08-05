@@ -11,7 +11,7 @@
 import { mkdirSync, writeFileSync, copyFileSync, chmodSync, symlinkSync, rmSync, realpathSync, statSync, existsSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 /**
  * Resolve the `pi` executable the way production boot does, but never from a
@@ -267,6 +267,13 @@ function buildBridgeEnv(
   if (env.PATH) {
     env.PATH = env.PATH.split(":").filter((dir) => !dir.includes("node_modules/.bin")).join(":");
   }
+  // Keep the bridge HOME isolated while preserving access to the host's
+  // already-installed native dependencies. The production resolver checks
+  // ~/.local/lib/node_modules first; with a disposable HOME that path would
+  // otherwise point at an empty fixture directory. This is read-only path
+  // exposure, not an installation or deployment step.
+  const hostNativeNodeModules = join(homedir(), ".local", "lib", "node_modules");
+  env.NODE_PATH = [hostNativeNodeModules, env.NODE_PATH].filter((value): value is string => Boolean(value)).join(delimiter);
   const fixtureKey = `pi-fixture-${runRoot.split("/").pop()}`;
   env.HOME = homeDir;
   env.USERPROFILE = homeDir;

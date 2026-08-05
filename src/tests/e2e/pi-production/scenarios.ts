@@ -14,6 +14,7 @@ import { TuiAcceptanceClient } from "./tui-client.js";
 import { OwnerControllerClient } from "./controller-client.js";
 import { SpawnedChild, waitFor } from "./child-process.js";
 import { FIXTURE_MODEL_A, FIXTURE_MODEL_B, MASTER_USER_ID } from "./bridge-config.js";
+import { scheduledOrcRoundLimit, scheduledOrcRoundLimitRestart } from "./scheduled-orc-round-limit.js";
 
 export interface PiAcceptanceContext {
   lane: PiAcceptanceLane;
@@ -25,7 +26,7 @@ export interface PiAcceptanceContext {
   markers: MarkerFactory;
   /** Timestamp captured before scenario messages were recorded (for row assertions). */
   scenarioStart: number;
-  /** Kill the exact bridge PID and spawn dist/main.js with the same home/env. */
+  /** Kill the exact bridge PID and spawn bundle/abtars.js with the same home/env. */
   restartBridge: () => Promise<SpawnedChild>;
   /** #1548: isolated abtars home the bridge reads/writes (tasks, state, kanban). */
   abtarsHome: string;
@@ -610,9 +611,6 @@ async function cancellation(ctx: PiAcceptanceContext): Promise<void> {
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
-// Deferred Task 7 scenarios live in ./scheduled-orc-round-limit.ts
-// (scheduledOrcRoundLimit / scheduledOrcRoundLimitRestart) — see #1548 (Task 7 remaining; blockers #1565/#1567).
-
 export const PI_SCENARIOS: PiScenario[] = [
   { name: "main-continuity-and-cursor", profiles: ["core", "full"], run: mainContinuity },
   { name: "tool-multi-generation", profiles: ["core", "full"], run: toolMultiGeneration },
@@ -625,15 +623,8 @@ export const PI_SCENARIOS: PiScenario[] = [
   { name: "candidate-fallback", profiles: ["full"], run: fallback },
   { name: "model-switch", profiles: ["full"], run: modelSwitch },
   { name: "cancellation-deadline", profiles: ["full"], run: cancellation },
-  // #1548 Task 7 (DEFERRED — completion tracked in #1548; blockers #1565/#1567): the scheduled-project
-  // round-limit cells in scheduled-orc-round-limit.ts are ready but cannot
-  // reach the scripted provider: the built ESM bridge crashes in the
-  // scheduled-task-runner lazy-require path (`require is not defined`) and
-  // better-sqlite3 is unresolvable for the harness bridge home's kanban init.
-  // Unregistered so the shared full lane stays green; re-register after the
-  // built-ESM blocker lands.
-  // { name: "scheduled-orc-round-limit", profiles: ["full"], run: scheduledOrcRoundLimit },
-  // { name: "scheduled-orc-round-limit-restart", profiles: ["full"], run: scheduledOrcRoundLimitRestart },
+  { name: "scheduled-orc-round-limit", profiles: ["full"], run: scheduledOrcRoundLimit },
+  { name: "scheduled-orc-round-limit-restart", profiles: ["full"], run: scheduledOrcRoundLimitRestart },
 ];
 
 export function scenariosForProfile(profile: "core" | "full"): PiScenario[] {

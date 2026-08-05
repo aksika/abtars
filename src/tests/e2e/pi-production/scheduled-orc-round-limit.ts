@@ -2,7 +2,7 @@
  * scheduled-orc-round-limit.ts — #1548 Task 7: Pi production-composition
  * scheduled-project cells.
  *
- * Drives the BUILT bridge (dist/main.js) with a real scheduled project task:
+ * Drives the BUILT bridge (bundle/abtars.js) with a real scheduled project task:
  * the task is admitted through the real CronQueue/scheduled runner, the Orc
  * contract-authoring turn runs through the real Pi transport and the loopback
  * scripted provider, and `maxToolRounds=2` reproduces the terminal
@@ -15,12 +15,14 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { TIMEOUTS, type ProviderSummary } from "./contracts.js";
-import { FIXTURE_MODEL_A } from "./bridge-config.js";
+import { FIXTURE_MODEL_B } from "./bridge-config.js";
 import { waitFor } from "./child-process.js";
 import type { PiAcceptanceContext } from "./scenarios.js";
+import { resolveNativeDep } from "../../../utils/lazy-require.js";
 
 export const SCHEDULED_TASK_ID = "scheduled-limit";
 const SCHEDULED_GOAL = `PI-E2E-SCHEDULED ${SCHEDULED_TASK_ID}`;
+const SCHEDULED_PROJECT_MARKER = "[SCHEDULED TASK PROJECT —";
 
 /** #1548 R9: bounded scheduled fixture + per-scenario maxToolRounds override. */
 export function installScheduledRoundLimitFixture(ctx: PiAcceptanceContext): void {
@@ -67,6 +69,14 @@ interface BridgeHomeEvidence {
   providerRoundLimit: boolean;
 }
 
+function isScheduledSummary(summary: ProviderSummary): boolean {
+  // The task goal is appended after the provider fixture's bounded marker-text
+  // window, but the production Orc header is present near the beginning of
+  // the request. The caller scopes summaries to the current restart before
+  // using this predicate.
+  return summary.markerTexts.some((t) => t.includes(SCHEDULED_PROJECT_MARKER) || t.includes(SCHEDULED_GOAL));
+}
+
 /** Read-only evidence over the bridge home's durable files. */
 function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: ProviderSummary[]): BridgeHomeEvidence {
   const home = ctx.abtarsHome;
@@ -94,10 +104,9 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
   const dbPath = join(home, "kanban", "kanban.db");
   if (existsSync(dbPath)) {
     try {
-      // better-sqlite3 is a production dependency of the built bridge; the
-      // test process can open the file read-only for evidence.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const Database = require("better-sqlite3") as new (path: string, opts: { readonly: boolean }) => { prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] } };
+      // Reuse the production native-dependency resolver. The bridge HOME is
+      // isolated, but the dependency itself is the existing host install.
+      const Database = resolveNativeDep("better-sqlite3") as new (path: string, opts: { readonly: boolean }) => { prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] } };
       const db = new Database(dbPath, { readonly: true });
       try {
         if (evidence.cardId !== undefined) {
@@ -115,7 +124,7 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
   }
 
   // Round-limit class: the scheduled request stream saw two toolCall rounds.
-  const scheduled = providerSummaries.filter((s) => s.markerTexts.some((t) => t.includes(SCHEDULED_GOAL)));
+  const scheduled = providerSummaries.filter(isScheduledSummary);
   evidence.providerRoundLimit = scheduled.some((s) => s.action === "toolCall") && scheduled.length >= 2;
 
   return evidence;
@@ -124,29 +133,34 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
 function enqueueToolRounds(ctx: PiAcceptanceContext, count: number): void {
   for (let i = 0; i < count; i++) {
     ctx.provider.enqueue({
-      candidate: FIXTURE_MODEL_A,
+      // Scheduled project authoring uses the production O session profile,
+      // whose agent is browsie. In this fixture that role resolves to the
+      // fallback candidate B; queue the responses on the route the real Orc
+      // request actually takes rather than changing production routing.
+      candidate: FIXTURE_MODEL_B,
       expectation: undefined,
       action: { kind: "toolCall", name: "execute_bash", arguments: { command: "echo round" } },
     });
   }
 }
 
-async function waitForScheduledRequest(ctx: PiAcceptanceContext): Promise<ProviderSummary[]> {
+async function waitForScheduledRequest(ctx: PiAcceptanceContext, afterSeq: number): Promise<ProviderSummary[]> {
   return waitFor(async () => {
-    const summaries = ctx.provider.summariesFor(FIXTURE_MODEL_A);
-    return summaries.some((s) => s.markerTexts.some((t) => t.includes(SCHEDULED_GOAL)))
+    const summaries = ctx.provider.summariesFor(FIXTURE_MODEL_B).filter((s) => s.seq > afterSeq);
+    return summaries.filter(isScheduledSummary).length >= 2
       ? summaries
       : null;
-  }, TIMEOUTS.runMs, `scheduled request carrying ${SCHEDULED_GOAL}`);
+  }, TIMEOUTS.runMs, `scheduled Orc tool rounds for ${SCHEDULED_TASK_ID}`);
 }
 
 /** #1548 Task 7 cell A: Orc round-limit failure during a scheduled project. */
 export async function scheduledOrcRoundLimit(ctx: PiAcceptanceContext): Promise<void> {
   installScheduledRoundLimitFixture(ctx);
   enqueueToolRounds(ctx, 8); // covers the authoring retries inside the window
+  const afterSeq = ctx.provider.requestCount;
   ctx.bridge = await ctx.restartBridge();
 
-  const summaries = await waitForScheduledRequest(ctx);
+  const summaries = await waitForScheduledRequest(ctx, afterSeq);
   const evidence = readBridgeHomeEvidence(ctx, summaries);
   ctx.writeArtifact("scheduled-orc-round-limit.json", JSON.stringify({ evidence, providerSummaries: summaries.map((s) => ({ seq: s.seq, action: s.action, toolCalls: s.toolCalls, markerTexts: s.markerTexts.slice(0, 2) })) }, null, 2));
 
@@ -169,11 +183,15 @@ export async function scheduledOrcRoundLimit(ctx: PiAcceptanceContext): Promise<
 
 /** #1548 Task 7 cell B: the same failure followed by a built-bridge restart. */
 export async function scheduledOrcRoundLimitRestart(ctx: PiAcceptanceContext): Promise<void> {
-  installScheduledRoundLimitFixture(ctx);
+  // Cell A intentionally leaves the round-limited project unfinished. Reuse
+  // that durable run here; creating a second scheduled entry while the first
+  // project is still awaiting its contract races the scheduler's Orc capacity
+  // guard and produces an unrelated intent_not_actionable retry.
   enqueueToolRounds(ctx, 8);
+  const firstAfterSeq = ctx.provider.requestCount;
   ctx.bridge = await ctx.restartBridge();
 
-  const summaries = await waitForScheduledRequest(ctx);
+  const summaries = await waitForScheduledRequest(ctx, firstAfterSeq);
   const first = readBridgeHomeEvidence(ctx, summaries);
   if (!first.runId) {
     throw new Error("scheduled-orc-round-limit-restart: no durable run before restart");
@@ -182,8 +200,9 @@ export async function scheduledOrcRoundLimitRestart(ctx: PiAcceptanceContext): P
 
   // Second restart after the failure fact: the same durable run must recover.
   enqueueToolRounds(ctx, 8);
+  const secondAfterSeq = ctx.provider.requestCount;
   ctx.bridge = await ctx.restartBridge();
-  const postSummaries = await waitForScheduledRequest(ctx);
+  const postSummaries = await waitForScheduledRequest(ctx, secondAfterSeq);
   const second = readBridgeHomeEvidence(ctx, postSummaries);
   ctx.writeArtifact("scheduled-orc-round-limit-restart.json", JSON.stringify({
     beforeRestart,

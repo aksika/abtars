@@ -43,9 +43,10 @@ function runBuild(abtarsRoot: string, abmindRoot: string | undefined): void {
   if (!existsSync(join(abmind, "dist/tests/acceptance/consumer-fixture-controller.js"))) {
     execFileSync("npm", ["run", "build"], { cwd: abmind, stdio: "inherit" });
   }
-  if (!existsSync(join(abtarsRoot, "dist/main.js"))) {
-    execFileSync("npm", ["run", "build"], { cwd: abtarsRoot, stdio: "inherit" });
-  }
+  // The deployed bridge is the esbuild bundle, not raw tsc ESM output. The
+  // bundle supplies the ESM-safe require shim used by the production path.
+  execFileSync("npm", ["run", "build"], { cwd: abtarsRoot, stdio: "inherit" });
+  execFileSync("npm", ["run", "bundle"], { cwd: abtarsRoot, stdio: "inherit" });
 }
 
 function blockedResult(lane: PiAcceptanceLane, profile: PiAcceptanceProfile, reason: string): PiLaneResult {
@@ -347,7 +348,7 @@ async function spawnBridge(
   const preBootRequests = provider.summaries.length;
   const bridge = new SpawnedChild({
     execPath: process.execPath,
-    args: [resolve(abtarsRoot, "dist/main.js")],
+    args: [resolve(abtarsRoot, "bundle/abtars.js")],
     cwd: abtarsRoot,
     env,
     logDir,
