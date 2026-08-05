@@ -46,7 +46,7 @@ export interface ExpectedTerminal {
 }
 
 export interface DurableContinuation {
-  kind: "kanban_retry" | "review_request" | "input_request" | "repair_planned";
+  kind: "kanban_retry" | "review_request" | "input_request" | "repair_planned" | "orc_claim";
   key: string;
   dueAt?: number;
   owner: string;
@@ -79,7 +79,9 @@ export interface ObserverStores {
   /** Real worker attempts for a child card; a non-terminal attempt is a live child. */
   attemptsForCard(cardId: number): Array<{ id: string; lifecycle: string }>;
   leaseFor(attemptId: string): LeaseView | undefined;
-  supervision(rootCardId: number): { state: ProjectState } | undefined;
+  supervision(rootCardId: number): { state: ProjectState; generation?: number } | undefined;
+  /** #1546: a matching live Orc claim is a named durable continuation (owner `orc-coordinator`). */
+  liveOrcRun?(rootCardId: number): { runId: string; projectGeneration: number } | undefined;
   latestReviewCase(rootCardId: number): { id: number; status: string } | undefined;
   pendingInputRequests(rootCardId: number): Array<{ id: string }>;
   currentJobs(): Array<{ runId: string }>;
@@ -222,6 +224,15 @@ export class ScheduledCustodyObserver {
       }
       if (supervision?.state === "repair_planned" && this.stores.latestReviewCase(rootCardId) !== undefined) {
         continuations.push({ kind: "repair_planned", key: `repair:${rootCardId}`, owner: "reconciler" });
+      }
+      // #1546: a current-generation live Orc claim (scheduled/dispatching/
+      // running) is an existing durable owner — never treat the absolute
+      // deadline as custody.
+      if (supervision) {
+        const liveRun = this.stores.liveOrcRun?.(rootCardId);
+        if (liveRun && liveRun.projectGeneration === supervision.generation) {
+          continuations.push({ kind: "orc_claim", key: `orc:${rootCardId}:${liveRun.runId}`, owner: "orc-coordinator" });
+        }
       }
     }
 

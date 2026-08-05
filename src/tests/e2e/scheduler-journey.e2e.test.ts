@@ -56,6 +56,7 @@ let reviewStoreMod: typeof import("../../components/project-acceptance/project-r
 let leaseStoreMod: typeof import("../../components/executor-lease-store.js");
 let nerveMod: typeof import("../../components/nerve.js");
 let WorkerSupervisionStoreClass: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
+let orcRunStoreMod: typeof import("../../components/orc-project/orc-project-run-store.js");
 
 const FIXTURES: ScheduledTask[] = [
   {
@@ -190,6 +191,7 @@ async function loadModules(): Promise<void> {
   leaseStoreMod = await import("../../components/executor-lease-store.js");
   nerveMod = await import("../../components/nerve.js");
   WorkerSupervisionStoreClass = (await import("../../components/worker-supervision-store.js")).WorkerSupervisionStore;
+  orcRunStoreMod = await import("../../components/orc-project/orc-project-run-store.js");
 }
 
 function writeFixtureTasks(): void {
@@ -930,15 +932,27 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
     vi.useFakeTimers();
     const { queue, coordinator } = await makeQueueWithCoordinator();
     const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+    const drainCalls: number[] = [];
     scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
-    scheduler.register(dueSourcesMod.createKanbanRetrySource(() => reconcilerModule.requestReconcile(-1)));
+    // #1546 Task 6: production-shaped wiring — BOTH kanban-retry callbacks
+    // (Reconciler wake + unsupervised drain) are registered, so a wake that
+    // reaches the drain for a supervised root is a named harness artifact.
+    scheduler.register(dueSourcesMod.createKanbanRetrySource((cardId: number) => {
+      reconcilerModule.requestReconcile(cardId);
+    }, () => { drainCalls.push(1); }));
     await scheduler.start();
     const { fixture } = await makeFixture({ holdAcceptance: opts.holdAcceptance ?? true, workerCount: opts.workerCount ?? 1 });
-    return { queue, coordinator, scheduler, fixture };
+    return { queue, coordinator, scheduler, fixture, drainCalls };
+  }
+
+  function supervisedRetrySource(drainCalls: number[]) {
+    return dueSourcesMod.createKanbanRetrySource((cardId: number) => {
+      reconcilerModule.requestReconcile(cardId);
+    }, () => { drainCalls.push(1); });
   }
 
   it("cell 1 (#1546): Orc terminal failure in worker-owned executing leaves the retry path without an owner", async () => {
-    const { queue, coordinator, scheduler, fixture } = await setupCell();
+    const { queue, coordinator, scheduler, fixture, drainCalls } = await setupCell();
     try {
       forceDue("project-task");
       await tick.runTaskTick(makeTickCtx(queue));
@@ -950,7 +964,7 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
       const retryAt = Date.parse(board.kanbanGetCard(rootCardId)!.next_retry_at as string);
 
       const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
-      const kanbanRetrySource = dueSourcesMod.createKanbanRetrySource((cardId) => reconcilerModule.requestReconcile(cardId));
+      const kanbanRetrySource = supervisedRetrySource(drainCalls);
 
       // The retry becomes due and is woken twice, >=1s apart, with the real
       // reconciler pump attached: the retry path must re-claim the project.
@@ -1004,10 +1018,18 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
       fixture.retryRoot("orc terminal failure");
 
       // Restart before retry dispatch: fresh queue/coordinator recover the run.
+      // #1546 post-fix: the reattached runner wakes the shared driver, which
+      // promotes the due retry (claim-before-promotion), creates the review
+      // case for the terminal workers, and dispatches the Orc review. The
+      // fresh Orc dies on its review turn, leaving the open case + pending
+      // request as the durable owner — no legacy Spin dispatch, no settlement.
       const { queue: queue2, coordinator: coordinator2 } = await makeQueueWithCoordinator();
-      const fixture2 = await makeFixture({ holdAcceptance: true });
+      const fixture2 = await makeFixture({ holdAcceptance: true, reviewMode: "die" });
       const scheduler2 = new wakeSchedulerMod.LifecycleWakeScheduler();
       scheduler2.register(dueSourcesMod.createRunDeadlineSource(coordinator2));
+      const drainCalls2: number[] = [];
+      scheduler2.register(supervisedRetrySource(drainCalls2));
+      await scheduler2.start();
       let reattached = false;
       await coordinator2.recover(taskStore.readEntries(), (entry, run) => {
         const enqueueResult = queue2.enqueue(entry, false, run);
@@ -1018,16 +1040,19 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
       expect(reattached).toBe(true);
 
       const observer = new observerClass("project-task", runId, observerStores(queue2, coordinator2, runId));
-      // The durable retry was due before restart. Reattach re-claims the
-      // queued retry card into running and never re-drives it: no child, no
-      // continuation — the run must be detected before its absolute deadline.
+      // The durable retry was due before restart. The driver owns the due
+      // check and promotion; the run keeps a durable owner (open review case)
+      // and never reaches the absolute deadline.
       await vi.advanceTimersByTimeAsync(20_000);
+      expect(drainCalls2).toHaveLength(0); // the supervised root never drains
 
-      // R6: intentionally RED on current dev — see cell 1 for the contract.
+      // Post-fix contract: one correlated review claim, consumed retry item,
+      // preserved run ID, no settlement.
       try {
         observer.checkpoint();
         const snap = observer.sample();
         expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
+        expect(snap.durableContinuations.some(c => c.kind === "review_request" || c.kind === "orc_claim")).toBe(true);
         expect(snap.historyOutcome).toBeUndefined();
       } catch (e) {
         if (e instanceof CustodyGapErrorClass) {
@@ -1062,10 +1087,16 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
       fixture.failWorkers();
 
       // Restart: fresh harness reattaches the same run.
+      // #1546 post-fix: the reattach wake routes the run into the shared
+      // driver, which creates the review case for the terminal workers and
+      // dispatches the Orc review. The fresh Orc dies on its review turn,
+      // leaving the open case + pending request as the real durable owner
+      // after reattach.
       const { queue: queue2, coordinator: coordinator2 } = await makeQueueWithCoordinator();
-      const fixture2 = await makeFixture({ holdAcceptance: true });
+      const fixture2 = await makeFixture({ holdAcceptance: true, reviewMode: "die" });
       const scheduler2 = new wakeSchedulerMod.LifecycleWakeScheduler();
       scheduler2.register(dueSourcesMod.createRunDeadlineSource(coordinator2));
+      scheduler2.register(supervisedRetrySource([]));
       let reattached = false;
       await coordinator2.recover(taskStore.readEntries(), (entry, run) => {
         const enqueueResult = queue2.enqueue(entry, false, run);
@@ -1109,7 +1140,7 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
   });
 
   it("cell 4 (#1546): a due supervised-root retry whose wake produces no correlated effect", async () => {
-    const { queue, coordinator, scheduler, fixture } = await setupCell();
+    const { queue, coordinator, scheduler, fixture, drainCalls } = await setupCell();
     try {
       forceDue("project-task");
       await tick.runTaskTick(makeTickCtx(queue));
@@ -1123,7 +1154,7 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
       expect(retryAt).toBeGreaterThan(Date.now());
 
       const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
-      const kanbanRetrySource = dueSourcesMod.createKanbanRetrySource((cardId) => reconcilerModule.requestReconcile(cardId));
+      const kanbanRetrySource = supervisedRetrySource(drainCalls);
 
       // Fire two correlated wakes separated by at least 1s once due: both
       // must be no-effect on current dev (the retry path loses ownership).
@@ -1168,6 +1199,10 @@ function observerStores(queue: import("../../components/tasks/task-queue.js").Cr
     attemptsForCard: (cardId: number) => new WorkerSupervisionStoreClass().getAttemptsForCard(cardId),
     leaseFor: () => undefined,
     supervision: (rid: number) => new reviewStoreMod.ProjectReviewStore().getSupervision(rid),
+    liveOrcRun: (rid: number) => {
+      const row = new orcRunStoreMod.OrcProjectRunStore().getLiveRunForProject(rid);
+      return row ? { runId: row.id, projectGeneration: row.project_generation } : undefined;
+    },
     latestReviewCase: (rid: number) => new reviewStoreMod.ProjectReviewStore().getLatestReviewCase(rid),
     pendingInputRequests: (rid: number) => new reviewStoreMod.ProjectReviewStore().getPendingInputRequestsForProject(rid),
     currentJobs: () => queue.currentJobs,
