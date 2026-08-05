@@ -1294,6 +1294,61 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
       vi.useRealTimers();
     }
   });
+
+  it("a repair decision re-works the project through repair_planned -> repairing -> round 2 and accepts", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queue, coordinator } = await makeQueueWithCoordinator();
+      const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+      await scheduler.start();
+      const { fixture } = await makeFixture({ workerCount: 1, reviewMode: "repair" });
+
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
+      const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
+      observer.sample();
+      observer.startPolling();
+
+      // Round 1: workers done -> the Orc review decides repair (durable
+      // decision, generation advance) and the fixture creates the repair
+      // worker. A second reconcile pass (production re-wakes the card on the
+      // decision settlement) moves repair_planned -> repairing.
+      fixture.completeWorkers();
+      reconcilerModule.requestReconcile(rootCardId);
+      await waitForReachControlled(fixture, "repair_planned");
+      // The durable repair decision is a named reconciler-owned continuation.
+      expect(observer.sample().durableContinuations.some(c => c.kind === "repair_planned")).toBe(true);
+      observer.checkpoint();
+      reconcilerModule.requestReconcile(rootCardId);
+      await waitForReachControlled(fixture, "repairing");
+      await vi.advanceTimersByTimeAsync(500);
+      const snapRepair = observer.sample();
+      expect(snapRepair.liveAttempts.length).toBeGreaterThan(0);
+      observer.checkpoint();
+
+      // Repair worker completes; the reconciler opens review round 2 and the
+      // Orc review accepts.
+      fixture.completeWorkers();
+      fixture.setReviewMode("accept");
+      reconcilerModule.requestReconcile(rootCardId);
+      await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
+      if (!stateStore.readState("project-task")?.activeRun) {
+        const sup2 = new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId);
+        process.stdout.write("REPAIR2 state=" + sup2?.state + " ev=" + JSON.stringify(events("project-task")) + "\n");
+      }
+      observer.assertTerminal({ outcome: "success", source: "project_accepted" });
+      expect(events("project-task")).toHaveLength(1);
+      const sup = new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId);
+      expect(sup?.state).toBe("accepted");
+      expect(sup?.review_round).toBeGreaterThanOrEqual(1);
+      observer.stop();
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 async function waitFor(predicate: () => boolean): Promise<void> {

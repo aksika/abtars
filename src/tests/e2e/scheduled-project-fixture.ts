@@ -46,7 +46,7 @@ export interface ScheduledProjectScript {
   /** Adopt an existing root card (reattach cells where the fixture never authored). */
   adoptRoot(rootCardId: number): void;
   /** Scripted review-turn behavior: accept, demand input, or die. */
-  setReviewMode(mode: "accept" | "needs_input" | "blocked" | "die"): void;
+  setReviewMode(mode: "accept" | "needs_input" | "blocked" | "repair" | "die"): void;
   /** Answer the pending input request. */
   answerInput(text: string): void;
   holdAcceptance: boolean;
@@ -62,14 +62,14 @@ export interface ScheduledProjectFixtureOptions {
   /** When set, accept() refuses to settle (acceptance held). */
   holdAcceptance?: boolean;
   /** Scripted review-turn decision. */
-  reviewMode?: "accept" | "needs_input" | "blocked" | "die";
+  reviewMode?: "accept" | "needs_input" | "blocked" | "repair" | "die";
 }
 
 const DEFAULT_OPTIONS = {
   workerCount: 1,
   failOrcMode: null as FailOrcMode,
   holdAcceptance: false,
-  reviewMode: "accept" as "accept" | "needs_input" | "blocked" | "die",
+  reviewMode: "accept" as "accept" | "needs_input" | "blocked" | "repair" | "die",
 };
 
 export function makeScheduledProjectFixture(
@@ -243,6 +243,40 @@ export function makeScheduledProjectFixture(
       if (!openCase) {
         state.lastTurn = "failed"; // no review case to decide — nothing owned
         finish("failed");
+        return;
+      }
+      if (state.reviewMode === "repair") {
+        // Release the review claim BEFORE settleRepair advances the project
+        // generation: release() requires supervision.generation to match the
+        // run's generation (orc-project-run-store.release EXISTS clause).
+        finish("completed");
+        store.settleRepair(projectId, openCase.id, {
+          action: "repair",
+          repair: { items: [{ id: "r1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_attempts: 1 } }] },
+        }, supervision.generation, 0);
+        // The reconciler would spawn repair workers via spin.spawnChild; the
+        // fixture creates the valid repair worker rows directly.
+        const repairWorkerId = kanban.kanbanEnqueue("fixture-repair-worker", "agent", undefined, {
+          parent_id: projectId,
+          type: "W",
+          goal: "Repair: rework",
+          delivery: "silent",
+        });
+        if (repairWorkerId !== 0) {
+          kanban.kanbanRunning(repairWorkerId);
+          try {
+            const svc = new WorkerSvc();
+            const created = svc.createChild("Repair: rework", repairWorkerId, projectId, "fixture-orc", {
+              criteria: [{ id: "w1", description: "repair done" }],
+              attemptId: `att_fixture_repair_${repairWorkerId}`,
+            });
+            if (!("error" in created)) {
+              const claim = new WorkerStore().claimAttempt(repairWorkerId, created.contract.id, "agent", "fixture", 1);
+              if (claim) new WorkerStore().markAttemptRunning(claim.attemptId);
+            }
+          } catch { /* best effort */ }
+        }
+        state.lastTurn = "reviewed";
         return;
       }
       if (state.reviewMode === "blocked") {

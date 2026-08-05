@@ -46,7 +46,7 @@ export interface ExpectedTerminal {
 }
 
 export interface DurableContinuation {
-  kind: "kanban_retry" | "review_request" | "input_request";
+  kind: "kanban_retry" | "review_request" | "input_request" | "repair_planned";
   key: string;
   dueAt?: number;
   owner: string;
@@ -219,6 +219,9 @@ export class ScheduledCustodyObserver {
       }
       if (supervision?.state === "needs_input" && this.stores.pendingInputRequests(rootCardId).length > 0) {
         continuations.push({ kind: "input_request", key: `input:${rootCardId}`, owner: "dispatcher" });
+      }
+      if (supervision?.state === "repair_planned" && this.stores.latestReviewCase(rootCardId) !== undefined) {
+        continuations.push({ kind: "repair_planned", key: `repair:${rootCardId}`, owner: "reconciler" });
       }
     }
 
