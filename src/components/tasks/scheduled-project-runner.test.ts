@@ -12,6 +12,7 @@ let reviewStoreMod: typeof import("../project-acceptance/project-review-store.js
 let reconciler: typeof import("../reconciler.js");
 let stateStore: typeof import("./task-state-store.js");
 let nerveBus: typeof import("../nerve.js")["nerve"];
+let runStoreMod: typeof import("../orc-project/orc-project-run-store.js");
 
 beforeEach(async () => {
   vi.resetModules();
@@ -23,6 +24,7 @@ beforeEach(async () => {
   reconciler = await import("../reconciler.js");
   stateStore = await import("./task-state-store.js");
   nerveBus = (await import("../nerve.js")).nerve;
+  runStoreMod = await import("../orc-project/orc-project-run-store.js");
   mod = await import("./scheduled-project-runner.js");
 });
 
@@ -39,6 +41,14 @@ function fakeCoordinator(): Array<{ projectCardId: number; goal: string }> {
   reconciler.setOrcCoordinator({
     scheduleScheduledProject(projectCardId: number, goal: string) {
       claims.push({ projectCardId, goal });
+      // a real claim is durable — the shared driver observes the live row
+      try {
+        new runStoreMod.OrcProjectRunStore().claimIntent(
+          { projectCardId, intentKind: "contract_authoring", originKind: "local", cardSource: "task", sourcePeer: null },
+          "test-peer",
+          "test-instance",
+        );
+      } catch { /* best effort — the driver still observes the claim result */ }
       return { kind: "claimed", context: { runId: "or_test", projectCardId } };
     },
   } as never);
@@ -221,5 +231,135 @@ describe("scheduled-project-runner #1516", () => {
     const result = await mod.scheduledProjectRunner(makeRequest());
     expect(result).toEqual(expect.objectContaining({ cardId: root, result: "already accepted" }));
     expect(kanban.kanbanGetCard(root)?.status).toBe("done");
+  });
+});
+
+describe("scheduled-project-runner #1546 reattach routing", () => {
+  function seedExecutingReattach(overrides: Record<string, unknown> = {}): { root: number; store: reviewStoreMod.ProjectReviewStore; claims: Array<{ projectCardId: number; goal: string }> } {
+    const claims = fakeCoordinator();
+    return seedReattach({ state: "executing", claims, ...overrides }) as { root: number; store: reviewStoreMod.ProjectReviewStore; claims: Array<{ projectCardId: number; goal: string }> };
+  }
+
+  function seedReattach(opts: { state?: string; claims: Array<{ projectCardId: number; goal: string }>; cardStatus?: string; retryMarker?: string | null }): { root: number; store: reviewStoreMod.ProjectReviewStore; claims: Array<{ projectCardId: number; goal: string }> } {
+    const { claims } = opts;
+    const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
+    const store = new reviewStoreMod.ProjectReviewStore();
+    if (opts.state) {
+      store.ensureAwaitingContract(root);
+      if (opts.state !== "awaiting_contract") {
+        // a valid non-awaiting supervision carries its root contract
+        store.insertContract({
+          schema_version: 1,
+          id: `ct_${root}`,
+          digest: `dg_${root}`,
+          project_card_id: root,
+          goal: "daily briefing",
+          criteria: [{ id: "c1", description: "goal met", required: true, evidence_expectation: "synthesis" }],
+          required_outputs: [],
+          constraints: [],
+          limits: {},
+          provenance: { requested_by: "scheduler", authored_by: "orc", created_at: new Date().toISOString() },
+        } as never);
+        store.setState(root, opts.state as never);
+      }
+    }
+    stateStore.updateActiveRun("daily-ai", "daily-ai_1", { cardId: root });
+    if (opts.cardStatus === "queued") {
+      const marker = opts.retryMarker ?? new Date(Date.now() + 60_000).toISOString();
+      kanban._kanbanExecForTest(`UPDATE kanban_board SET status = 'queued', next_retry_at = ? WHERE id = ?`, [marker, root]);
+    } else {
+      kanban.kanbanRunning(root);
+    }
+    return { root, store, claims };
+  }
+
+  it("keeps the synchronous goal-bearing claim on an awaiting_contract reattach", async () => {
+    await seedReservation();
+    const { root, claims } = seedReattach({ state: "awaiting_contract", claims: fakeCoordinator() });
+    const pending = mod.scheduledProjectRunner(makeRequest());
+
+    expect(claims).toHaveLength(1);
+    expect(claims[0]!.projectCardId).toBe(root);
+    expect(kanban.kanbanGetCard(root)?.status).toBe("running");
+
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.settleAcceptance(root, "case-a", { synthesis: "ok" }, "ok", undefined, "rd_a");
+    nerveBus.fire("card:done", root);
+    await expect(pending).resolves.toEqual(expect.objectContaining({ cardId: root }));
+  });
+
+  it("reattach in a non-terminal non-awaiting state never authors and wakes the shared driver", async () => {
+    await seedReservation();
+    const { root, store, claims } = seedExecutingReattach();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+
+    // the runner itself claims nothing; the driver claims the continuation
+    // from the wake (executing + no children + no live Orc row)
+    expect(claims).toHaveLength(0);
+    await new Promise(r => setTimeout(r, 20));
+    expect(claims).toHaveLength(1);
+    expect(claims[0]!.projectCardId).toBe(root);
+    expect(store.getSupervision(root)?.state).toBe("executing");
+
+    store.settleAcceptance(root, "case-e", { synthesis: "executing ok" }, "executing ok", undefined, "rd_e");
+    nerveBus.fire("card:done", root);
+    await expect(pending).resolves.toEqual(expect.objectContaining({ cardId: root }));
+  });
+
+  it("terminal reattach reads terminal evidence without supervision insertion or a claim", async () => {
+    await seedReservation();
+    const claims = fakeCoordinator();
+    const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
+    kanban.kanbanComplete(root, null, "already completed");
+    stateStore.updateActiveRun("daily-ai", "daily-ai_1", { cardId: root });
+
+    const result = await mod.scheduledProjectRunner(makeRequest());
+
+    expect(result).toEqual(expect.objectContaining({ cardId: root, result: "already completed" }));
+    expect(new reviewStoreMod.ProjectReviewStore().getSupervision(root)).toBeUndefined();
+    expect(claims).toHaveLength(0);
+  });
+
+  it("a reattached due queued retry is promoted only by the driver, never directly", async () => {
+    await seedReservation();
+    const { root, store, claims } = seedReattach({
+      state: "executing",
+      cardStatus: "queued",
+      retryMarker: new Date(Date.now() - 1000).toISOString(),
+      claims: fakeCoordinator(),
+    });
+    const pending = mod.scheduledProjectRunner(makeRequest());
+    expect(claims).toHaveLength(0);
+
+    await new Promise(r => setTimeout(r, 20));
+    // claim-before-promotion by the driver: exactly one claim, card running
+    expect(claims).toHaveLength(1);
+    expect(kanban.kanbanGetCard(root)?.status).toBe("running");
+    expect(kanban.kanbanGetCard(root)?.next_retry_at).toBeNull();
+
+    store.settleAcceptance(root, "case-q", { synthesis: "queued ok" }, "queued ok", undefined, "rd_q");
+    nerveBus.fire("card:done", root);
+    await expect(pending).resolves.toEqual(expect.objectContaining({ cardId: root }));
+  });
+
+  it("a reattached future queued retry stays queued and keeps its marker", async () => {
+    await seedReservation();
+    const { root, claims } = seedReattach({
+      state: "executing",
+      cardStatus: "queued",
+      retryMarker: new Date(Date.now() + 60_000).toISOString(),
+      claims: fakeCoordinator(),
+    });
+    const control = makeControl("spr-future");
+    const pending = mod.scheduledProjectRunner(makeRequest({ executionControl: control }));
+    await new Promise(r => setTimeout(r, 20));
+
+    expect(claims).toHaveLength(0);
+    const card = kanban.kanbanGetCard(root)!;
+    expect(card.status).toBe("queued");
+    expect(card.next_retry_at).not.toBeNull();
+
+    control.signalCancel("test");
+    await expect(pending).rejects.toThrow(/cancelled/);
   });
 });

@@ -15,7 +15,7 @@ import { logInfo } from "../logger.js";
 import { kanbanEnqueue, kanbanRunning, kanbanGetCard } from "./kanban-board.js";
 import { readState, advanceRun } from "./task-state-store.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
-import { abortProjectById, getOrCreateOrcCoordinator } from "../reconciler.js";
+import { abortProjectById, getOrCreateOrcCoordinator, requestReconcileForProject } from "../reconciler.js";
 import type { ExecutionControl } from "../execution-control.js";
 import type { ToolExecutionScope } from "./task-package.js";
 import type { Delivery } from "./task-types.js";
@@ -71,6 +71,51 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
     }
     executionControl.setCardId(rootCardId);
     logInfo(TAG, `Reattaching scheduled project card #${rootCardId} for task "${entryId}" run ${runId}`);
+    const reviewStore = new ProjectReviewStore();
+    const supervision = reviewStore.getSupervision(rootCardId);
+    const cardTerminal = ["done", "delivered", "failed"].includes(existing.status);
+    const terminalEvidence = cardTerminal || supervision?.state === "accepted" || supervision?.state === "blocked";
+
+    if (terminalEvidence) {
+      // #1546 R5: terminal reattach reads terminal evidence; no supervision
+      // insertion and no new Orc claim.
+      logInfo(TAG, `Scheduled project #${rootCardId} already terminal on reattach — waiting for terminal evidence`);
+      executionControl.bind(async (reason) => {
+        logInfo(TAG, `Scheduled project #${rootCardId} cancelled: ${reason}`);
+        await abortProjectById(rootCardId, `scheduled cancellation: ${reason}`);
+      });
+      return waitForProjectTerminal(request, rootCardId);
+    }
+
+    if (!supervision || supervision.state === "awaiting_contract") {
+      // #1546 R5: a reattached project without a contract keeps the
+      // synchronous goal-bearing claim so the machine-derived task goal wins
+      // over a generic Reconciler authoring wake for the same card.
+      reviewStore.ensureAwaitingContract(rootCardId);
+      const coordinator = getOrCreateOrcCoordinator();
+      if (!coordinator) throw new Error("scheduled project admission failed: Orc coordinator unavailable");
+      const claim = coordinator.scheduleScheduledProject(rootCardId, goal);
+      if (claim.kind === "conflict" || claim.kind === "not_actionable") {
+        throw new Error(`scheduled project admission failed: ${claim.reason}`);
+      }
+      const currentCard = kanbanGetCard(rootCardId);
+      if (currentCard?.status === "queued") kanbanRunning(rootCardId);
+    } else {
+      // #1546 R5: any other non-terminal reattach state does not author a new
+      // contract and is never promoted directly. The shared driver owns the
+      // due check, claim-before-promotion order, retry-marker clearing, and
+      // owner selection (review, input, repair, Worker resume, Orc
+      // continuation, or last-resort settlement).
+      logInfo(TAG, `Scheduled project #${rootCardId} reattached in ${supervision.state} — waking the shared Reconciler driver`);
+      requestReconcileForProject(rootCardId);
+    }
+
+    executionControl.bind(async (reason) => {
+      logInfo(TAG, `Scheduled project #${rootCardId} cancelled: ${reason}`);
+      await abortProjectById(rootCardId, `scheduled cancellation: ${reason}`);
+    });
+
+    return waitForProjectTerminal(request, rootCardId);
   } else {
     // #1516: the root card durably carries the scheduled run correlation
     // (source_id) and the absolute deadline (due_at) alongside the agent cap.

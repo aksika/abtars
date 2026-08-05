@@ -10,8 +10,9 @@ import { readEntries as dbReadEntries } from "./task-store.js";
 import { getRun } from "./task-history-store.js";
 import { settleRunFromHistory, settleRunOnce } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
-import { kanbanDueRetryItems, kanbanGetCard } from "./kanban-board.js";
+import { kanbanDueRetryItems, kanbanGetCard, type KanbanCard } from "./kanban-board.js";
 import { abortProjectById } from "../reconciler.js";
+import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { LifecycleDueItem, LifecycleDueSource, LifecycleDueSourceId } from "../lifecycle-wake-scheduler.js";
 import type { ScheduledRunCoordinator } from "./scheduled-run-coordinator.js";
@@ -124,10 +125,29 @@ export function createTaskAdmissionSource(wake: (now: number) => void | Promise<
 }
 
 /**
+ * #1546 R1: shared active project-root supervision classification used by the
+ * retry source and the legacy drain. A root card is a scheduled project only
+ * with all durable identity facts: type O, no parent, task source, non-empty
+ * source_id (the scheduled runId), and a non-terminal `project_supervision`
+ * row. Unsupervised parentless cards and Worker children keep their domains.
+ */
+export function isActiveScheduledProjectRoot(card: KanbanCard): boolean {
+  if (card.type !== "O" || card.parent_id !== null) return false;
+  if (card.source !== "task" || !card.source_id || card.source_id.length === 0) return false;
+  try {
+    return new ProjectReviewStore().hasActiveProjectSupervision(card.id);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * #1539: Kanban retry source. Lists queued cards with a future `next_retry_at`.
  * Waking requests worker dispatch/reconciliation for every due card and, for
  * unsupervised cards, drains them through the Spin dispatch path — so due
- * retry eligibility never depends on the heartbeat. Retry, terminal, and
+ * retry eligibility never depends on the heartbeat. #1546: a due supervised
+ * scheduled root routes to the Reconciler wake callback; only unsupervised
+ * parentless cards reach the optional legacy drain. Retry, terminal, and
  * removal mutations notify through `setKanbanDueChangedHook`.
  */
 export function createKanbanRetrySource(wakeCard: (cardId: number) => void, drainUnsupervised?: () => void): LifecycleDueSource {
@@ -143,6 +163,10 @@ export function createKanbanRetrySource(wakeCard: (cardId: number) => void, drai
         const card = kanbanGetCard(Number(item.key.split(":")[1]));
         if (!card) continue;
         if (card.parent_id !== undefined && card.parent_id !== null) {
+          wakeCard(card.id);
+        } else if (isActiveScheduledProjectRoot(card)) {
+          // #1546: the scheduled root is never dispatched as a legacy Spin O;
+          // the Reconciler driver owns its continuation.
           wakeCard(card.id);
         } else {
           unsupervisedDue = true;

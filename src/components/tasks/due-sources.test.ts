@@ -103,6 +103,65 @@ describe("kanban-retry due source #1539", () => {
       vi.useRealTimers();
     }
   });
+
+  it("#1546: a due supervised scheduled root wakes the Reconciler callback and never the legacy drain", async () => {
+    vi.useFakeTimers();
+    try {
+      const scheduler = new LifecycleWakeScheduler();
+      const wakes: number[] = [];
+      const drains: number[] = [];
+      scheduler.register(dueSources.createKanbanRetrySource((cardId) => { wakes.push(cardId); }, () => { drains.push(1); }));
+
+      const root = kanban.kanbanEnqueue("Project root", "task", "run-9", { type: "O", goal: "supervised work" });
+      const child = kanban.kanbanEnqueue("Worker", "task", "run-9", { type: "W", parent_id: root });
+      // #1546 R1: durable non-terminal supervision makes the root a scheduled project.
+      const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+      const store = new ProjectReviewStore();
+      store.ensureAwaitingContract(root);
+      store.setState(root, "executing");
+      kanban.kanbanRetryOrFail(root, "orc terminal failure");
+      kanban.kanbanRetryOrFail(child, "worker retry");
+      const retryAt = new Date(kanban.kanbanGetCard(root)!.next_retry_at!).getTime();
+      await scheduler.start();
+      expect(wakes).toHaveLength(0);
+      expect(drains).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(Math.max(1, retryAt - Date.now() - 1));
+      expect(wakes).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(2);
+      // The root is routed to the Reconciler wake; the drain never fires for it.
+      expect(wakes).toContain(root);
+      expect(wakes).toContain(child);
+      expect(drains).toHaveLength(0);
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("#1546: a terminal-supervision root is not a scheduled project and drains as unsupervised", async () => {
+    vi.useFakeTimers();
+    try {
+      const scheduler = new LifecycleWakeScheduler();
+      const wakes: number[] = [];
+      const drains: number[] = [];
+      scheduler.register(dueSources.createKanbanRetrySource((cardId) => { wakes.push(cardId); }, () => { drains.push(1); }));
+
+      const root = kanban.kanbanEnqueue("Blocked root", "task", "run-10", { type: "O" });
+      const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+      const store = new ProjectReviewStore();
+      store.ensureAwaitingContract(root);
+      store.setState(root, "blocked", { blocked_reason: "terminal" });
+      kanban.kanbanRetryOrFail(root, "late retry");
+      const retryAt = new Date(kanban.kanbanGetCard(root)!.next_retry_at!).getTime();
+      await scheduler.start();
+      await vi.advanceTimersByTimeAsync(Math.max(1, retryAt - Date.now() + 1));
+      expect(wakes).toHaveLength(0);
+      expect(drains).toEqual([1]);
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("task-admission due source #1539", () => {

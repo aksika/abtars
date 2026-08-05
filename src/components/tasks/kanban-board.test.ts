@@ -287,6 +287,65 @@ describe("kanbanRetryOrFail (#1411)", () => {
   });
 });
 
+describe("kanbanPromoteDueRetry (#1546)", () => {
+  it("promotes a queued due card and clears only the retry marker", () => {
+    const id = mod.kanbanEnqueue("Due", "task", "run-1");
+    mod.kanbanRunning(id);
+    mod.kanbanRetryOrFail(id, "transient");
+    const before = mod.kanbanGetCard(id)!;
+    const retryAt = new Date(before.next_retry_at!).getTime();
+
+    expect(mod.kanbanPromoteDueRetry(id, retryAt)).toBe(true);
+    const card = mod.kanbanGetCard(id)!;
+    expect(card.status).toBe("running");
+    expect(card.next_retry_at).toBeNull();
+    expect(card.retry_count).toBe(before.retry_count); // preserved
+    expect(card.error).toBe(before.error); // preserved
+  });
+
+  it("never promotes a future retry", () => {
+    const id = mod.kanbanEnqueue("Future", "task", "run-2");
+    mod.kanbanRunning(id);
+    mod.kanbanRetryOrFail(id, "later");
+    const card = mod.kanbanGetCard(id)!;
+    const retryAt = new Date(card.next_retry_at!).getTime();
+
+    // a full second before the marker is strictly before due time
+    expect(mod.kanbanPromoteDueRetry(id, retryAt - 5000)).toBe(false);
+    expect(mod.kanbanGetCard(id)!.status).toBe("queued");
+    expect(mod.kanbanGetCard(id)!.next_retry_at).not.toBeNull();
+  });
+
+  it("is a no-op for a card without a retry marker or not queued", () => {
+    const fresh = mod.kanbanEnqueue("Fresh", "task", "run-3");
+    expect(mod.kanbanPromoteDueRetry(fresh)).toBe(false);
+    const running = mod.kanbanEnqueue("Running", "task", "run-4");
+    mod.kanbanRunning(running);
+    expect(mod.kanbanPromoteDueRetry(running)).toBe(false);
+  });
+
+  it("loses the conditional race to a concurrent promotion (single writer)", () => {
+    const id = mod.kanbanEnqueue("Race", "task", "run-5");
+    mod.kanbanRunning(id);
+    mod.kanbanRetryOrFail(id, "race");
+    const card = mod.kanbanGetCard(id)!;
+    const retryAt = new Date(card.next_retry_at!).getTime();
+
+    expect(mod.kanbanPromoteDueRetry(id, retryAt)).toBe(true);
+    expect(mod.kanbanPromoteDueRetry(id, retryAt)).toBe(false); // already running
+    expect(mod.kanbanGetCard(id)!.status).toBe("running");
+  });
+
+  it("is a no-op on a terminal card even when a marker lingers", () => {
+    const id = mod.kanbanEnqueue("Terminal", "task", "run-6");
+    mod.kanbanRunning(id);
+    mod.kanbanRetryOrFail(id, "x");
+    mod._kanbanExecForTest(`UPDATE kanban_board SET status = 'failed', next_retry_at = datetime('now', '-1 second') WHERE id = ?`, [id]);
+    expect(mod.kanbanPromoteDueRetry(id)).toBe(false);
+    expect(mod.kanbanGetCard(id)!.status).toBe("failed");
+  });
+});
+
 describe("kanbanRunningProjectIds (#1414)", () => {
   it("returns running O-type project IDs", () => {
     mod.kanbanEnqueue("Running O project", "agent", undefined, { type: "O" });

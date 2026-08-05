@@ -36,6 +36,8 @@ vi.mock("../../components/tasks/kanban-board.js", () => ({
   cascadeFail: vi.fn(),
   isUnblocked: () => true,
   resolveRootId: (id: number) => id,
+  KANBAN_TERMINAL_STATUSES: ["done", "delivered", "failed"],
+  kanbanPromoteDueRetry: () => false,
   requireTaskDatabase: () => { if (!_overrideDb) throw new Error("_overrideDb not set — call initDb() in beforeEach"); return _overrideDb; },
 }));
 

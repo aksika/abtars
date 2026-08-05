@@ -3,7 +3,7 @@ import { spin } from "./spin.js";
 import {
   kanbanFail,
   kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds,
-  kanbanQueuedDispatchOrder,
+  kanbanQueuedDispatchOrder, kanbanPromoteDueRetry, KANBAN_TERMINAL_STATUSES,
   isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn } from "./logger.js";
@@ -16,8 +16,13 @@ import { resolveSchedulingPolicy, deriveDeadline } from "./swarm-dispatch-policy
 import { LeaseReconciliationService } from "./executor-lease-reconciler.js";
 import type { LifecycleWakeScheduler } from "./lifecycle-wake-scheduler.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
-import { ProjectReviewStore, type ProjectState } from "./project-acceptance/project-review-store.js";
+import { ProjectReviewStore, type ProjectState, type ProjectSupervisionRow } from "./project-acceptance/project-review-store.js";
 import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js";
+import { OrcProjectRunStore } from "./orc-project/orc-project-run-store.js";
+import { readEntries } from "./tasks/task-store.js";
+import { readState } from "./tasks/task-state-store.js";
+import { settleRunOnce } from "./tasks/task-run-settler.js";
+import { makeTaskFailure } from "./tasks/task-failure.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js";
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
@@ -185,133 +190,268 @@ async function reconcileCard(cardId: number): Promise<void> {
 
 // ── Derive action ─────────────────────────────────────────────────────────────
 
+/**
+ * #1546 R1: scheduled-root identity — a root card with all durable identity
+ * facts: type O, no parent, task source, non-empty source_id (the scheduled
+ * runId), and a non-terminal `project_supervision` row. Unsupervised
+ * parentless cards and Worker children are never classified here.
+ */
+function isScheduledProjectRoot(card: KanbanCard): boolean {
+  if (card.type !== "O" || card.parent_id !== null) return false;
+  if (card.source !== "task" || !card.source_id || card.source_id.length === 0) return false;
+  try {
+    return new ProjectReviewStore().hasActiveProjectSupervision(card.id);
+  } catch {
+    return false;
+  }
+}
+
+/** #1546 R2: the queued due check uses the durable retry marker, never card age. */
+function isRetryDue(card: KanbanCard, now?: number): boolean {
+  if (!card.next_retry_at) return false;
+  const t = Date.parse(card.next_retry_at);
+  const nowVal = now ?? Date.now();
+  return Number.isFinite(t) && t <= nowVal;
+}
+
 async function deriveAction(cardId: number): Promise<void> {
   if (cardId <= 0) return;
   const card = kanbanGetCard(cardId);
   if (!card) return;
 
-  if (card.type === "O" && card.status === "running") {
-    await reconcileProject(cardId);
-    return;
+  if (card.type === "O") {
+    // #1546: running roots always reconcile; queued roots reconcile only when
+    // they are a scheduled project whose retry is due. Queued+future and
+    // unrelated roots remain no-ops or on their existing path.
+    if (card.status === "running") {
+      await reconcileProject(cardId);
+      return;
+    }
+    if (card.status === "queued" && isScheduledProjectRoot(card) && isRetryDue(card)) {
+      await reconcileProject(cardId);
+      return;
+    }
   }
 
   await reconcileChildCard(card);
 }
 
-async function reconcileProject(projectId: number): Promise<void> {
-  const project = kanbanGetCard(projectId);
-  if (!project || project.status !== "running") return;
+const RESUMPTIVE_ATTEMPT_LIFECYCLES = new Set<AttemptLifecycle>(["pending", "claimed", "starting", "running", "cancel_requested"]);
 
-  const reviewStore = new ProjectReviewStore();
-  const hasRootContract = reviewStore.contractExists(projectId);
-  const contractRow = hasRootContract ? reviewStore.getContractByProjectCardId(projectId) : undefined;
+type OwnerInspection =
+  | "terminal"
+  | "worker_resume"
+  | "review"
+  | "input"
+  | "repair"
+  | "executing_terminal_children"
+  | "orc_claim"
+  | "none";
+
+type BranchResult = "transitioned" | "owned" | "none";
+
+/**
+ * #1546 R3: the exact durable owner predicate. Evaluates durable rows only —
+ * in-memory handles, unsettled promises, or merely expected processes never
+ * count as custody. The Reconciler's own case creation owns an executing
+ * project whose direct children are all terminal (the Orc's `review_project`
+ * requires an open case that only the Reconciler can assemble).
+ */
+function inspectProjectOwnership(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): OwnerInspection {
+  if (supervision.state === "accepted" || supervision.state === "blocked") return "terminal";
+
   const children = kanbanGetChildren(projectId);
+  const workerStore = new WorkerSupervisionStore();
 
-  const now = Date.now();
-
-  if (contractRow) {
-    try {
-      const contract = JSON.parse(contractRow.contract_json) as { limits?: { hard_deadline_at?: string } };
-      const configuredDeadline = contract.limits?.hard_deadline_at ? Date.parse(contract.limits.hard_deadline_at) : NaN;
-      if (Number.isFinite(configuredDeadline) && now > configuredDeadline) {
-        await abortProject(projectId, children, "configured hard deadline exceeded");
-        return;
-      }
-    } catch (err) {
-      logWarn(TAG, `Project ${projectId}: invalid root contract deadline: ${err instanceof Error ? err.message : String(err)}`);
+  // R2: repair_planned with a valid durable decision and repair items is the
+  // Reconciler worker-creation owner. Checked before worker_resume so a
+  // repair round already carrying running worker rows still transitions to
+  // repairing instead of being stuck re-dispatching the same round.
+  if (supervision.state === "repair_planned") {
+    const decision = reviewStore.getLatestDecisionForProject(projectId);
+    if (decision) {
+      try {
+        const parsed = JSON.parse(decision.decision_json) as { repair?: { items?: unknown[] } };
+        if ((parsed.repair?.items?.length ?? 0) > 0) return "repair";
+      } catch { /* fall through — no durable repair items */ }
     }
   }
 
-  if (!hasRootContract) {
-    const supervision = reviewStore.getSupervision(projectId);
-    if (!supervision) {
-      reviewStore.ensureAwaitingContract(projectId);
-      logInfo(TAG, `Project ${projectId}: awaiting contract — dispatching Orc authoring turn`);
-      if (_orcCoordinator) {
-        _orcCoordinator.scheduleContractAuthoring(projectId);
-      } else {
-        legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
-      }
-    } else if (supervision.state === "awaiting_contract") {
-      logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
-      if (_orcCoordinator) {
-        _orcCoordinator.scheduleContractAuthoring(projectId);
-      } else {
-        legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
-      }
-    }
-    return;
+  // R3.1: resumable direct-child work — a non-terminal latest attempt on an
+  // exact direct child. `pending` is resumable without a lease; missing or
+  // expired leases stay owned by the existing lease reconciliation path.
+  for (const child of children) {
+    let attempt: AttemptRow | undefined;
+    try { attempt = workerStore.getLatestAttempt(child.id); } catch { attempt = undefined; }
+    if (attempt && RESUMPTIVE_ATTEMPT_LIFECYCLES.has(attempt.lifecycle)) return "worker_resume";
   }
 
-  const supervision = reviewStore.getSupervision(projectId);
-  if (!supervision) {
-    logWarn(TAG, `Project ${projectId}: root contract exists but no supervision state — initializing`);
-    if (contractRow) {
-      reviewStore.initializeSupervision(projectId, contractRow.id);
-    }
-    return;
-  }
-
-  if (supervision.state === "accepted" || supervision.state === "blocked") return;
-  if (supervision.state === "awaiting_contract") return;
-
-  if (children.length === 0) return;
-
-  if (project.max_tokens != null && (project.tokens_used ?? 0) >= project.max_tokens) {
-    await abortProject(projectId, children, `budget exceeded (${project.tokens_used}/${project.max_tokens} tokens)`);
-    return;
-  }
-
-  // #1510: Request dispatch pump instead of directly starting workers
-  requestWorkerDispatch();
-
+  // R3.2: existing project-state owners.
+  if (reviewStore.getLatestOpenCase(projectId)) return "review";
   if (supervision.state === "needs_input") {
+    // answered rows are consumed by the existing resume transition, so both
+    // pending and answered requests make the input owner authoritative
+    const pending = reviewStore.getPendingInputRequests().filter(r => r.project_card_id === projectId);
     const answered = reviewStore.getAnsweredInputRequests(projectId);
-    if (answered.length > 0) {
-      logInfo(TAG, `Project ${projectId}: ${answered.length} input(s) answered — creating new review case`);
-      reviewStore.clearInputNotice(projectId);
-      const nextRound = supervision.review_round + 1;
-      reviewStore.stateTransition(projectId, ["needs_input"], "executing", { review_round: nextRound });
-    } else {
-      const pending = reviewStore.getPendingInputRequests().filter(r => r.project_card_id === projectId);
-      if (pending.length === 0) {
-        logWarn(TAG, `Project ${projectId}: needs_input state but no pending or answered requests — recovering`);
-        reviewStore.setState(projectId, "executing", { review_round: supervision.review_round + 1 });
-      } else {
-        return;
-      }
-    }
+    if (pending.length > 0 || answered.length > 0) return "input";
+  }
+  if (supervision.state === "repairing") {
+    const anyLive = children.some(c => c.status === "queued" || c.status === "running");
+    const allTerminal = children.length > 0 && children.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status));
+    if (anyLive || allTerminal) return "repair";
   }
 
-  if (supervision.state === "review_requested") {
-    const openCase = reviewStore.getLatestOpenCase(projectId);
-    if (openCase) {
-      const existingReq = reviewStore.getReviewRequestByCaseId(openCase.id);
-      if (!existingReq) {
-        const { id: rrId } = reviewStore.insertReviewRequest(projectId, openCase.id, supervision.generation);
-        scheduleOrcReview(projectId, supervision.generation, openCase.id, rrId);
-      } else if (existingReq.status === "pending") {
-        scheduleOrcReview(projectId, supervision.generation, openCase.id, existingReq.id);
-      } else if (existingReq.status === "abandoned") {
-        logWarn(TAG, `Project ${projectId}: review request abandoned — settling blocked`);
-        reviewStore.settleBlocked(projectId, openCase.id, { action: "blocked", reason: "Review request abandoned (attempts/deadline)" }, "Review abandoned");
-        try { nerve.fire("card:failed", projectId); } catch {}
-      }
-    }
-    return;
+  // R2: the Reconciler's review case creation owns an executing project whose
+  // direct children are all terminal. Zero children is NOT this owner — it
+  // must reach the no-owner decision.
+  if (supervision.state === "executing" && children.length > 0 && children.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status))) {
+    return "executing_terminal_children";
   }
 
+  // R3.2: a live Orc row matching the current supervision generation is an
+  // existing durable owner — never a fresh claim.
+  try {
+    const liveRun = new OrcProjectRunStore().getLiveRunForProject(projectId);
+    if (liveRun && liveRun.project_generation === supervision.generation) return "orc_claim";
+  } catch { /* fail-closed: no live-claim observation */ }
+
+  return "none";
+}
+
+/**
+ * #1546: the running root's no-owner path. Only a non-terminal project with no
+ * resumable owner and no claimable continuation reaches last-resort settlement.
+ */
+function claimScheduledContinuation(projectId: number, _supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, project: KanbanCard): "owned" | "settled" {
+  const coordinator = getOrCreateOrcCoordinator();
+  if (!coordinator) {
+    logWarn(TAG, `Project ${projectId}: Orc coordinator unavailable — settling as last resort`);
+    settleProjectLastResort(projectId);
+    return "settled";
+  }
+  // The goal is the root card's durable scheduled goal when available,
+  // otherwise a bounded continuation instruction naming the card and run.
+  const goal = project.goal && project.goal.trim().length > 0
+    ? project.goal
+    : `[CONTINUATION] Scheduled project #${projectId}, run ${project.source_id ?? "unknown"}: inspect the existing project contract and durable project rows and resume the supervised lifecycle from its current durable state (spawn pending Workers, complete the review, or settle). Do not re-author the contract.`;
+
+  const result = coordinator.scheduleScheduledProject(projectId, goal);
+  switch (result.kind) {
+    case "claimed":
+    case "idempotent":
+      logInfo(TAG, `Project ${projectId}: scheduled Orc continuation ${result.kind} — coordinator owns it`);
+      return "owned";
+    case "busy": {
+      logInfo(TAG, `Project ${projectId}: scheduled continuation busy — live run ${result.activeRunId} owns it; no second run created`);
+      return "owned";
+    }
+    case "conflict": {
+      // #1546 R3: conflict is never a direct settle signal. Re-read supervision
+      // and re-derive ownership once; only a second pass that still finds no
+      // owner and no claimable continuation may settle.
+      const reRead = reviewStore.getSupervision(projectId);
+      if (reRead) {
+        const rederived = inspectProjectOwnership(projectId, reRead, reviewStore);
+        if (rederived !== "none") {
+          logInfo(TAG, `Project ${projectId}: continuation conflict — re-derive found owner ${rederived}`);
+          return "owned";
+        }
+        const retry = coordinator.scheduleScheduledProject(projectId, goal);
+        if (retry.kind === "claimed" || retry.kind === "idempotent" || retry.kind === "busy") return "owned";
+      }
+      settleProjectLastResort(projectId);
+      return "settled";
+    }
+    case "not_actionable":
+      logWarn(TAG, `Project ${projectId}: scheduled continuation not actionable (${result.reason}) — settling as last resort`);
+      settleProjectLastResort(projectId);
+      return "settled";
+  }
+}
+
+/**
+ * #1546 R3.4: last-resort settlement for a correlated scheduled root with no
+ * durable owner and no claimable continuation. Freezes the project through the
+ * existing idempotent abortProject path, then settles the matching active
+ * scheduled run exactly once with `interruption/restart_interrupted`. Never
+ * waits for the absolute run deadline. `appendRunOnce` in the settler is the
+ * single dedupe authority: a concurrent waiter settle returns duplicate/late.
+ */
+export function settleProjectLastResort(projectId: number): void {
+  const card = kanbanGetCard(projectId);
+  if (!card) return;
+  const matched = findActiveScheduledRun(card);
+  const children = kanbanGetChildren(projectId);
+  // The freeze must not prevent the exactly-once settle: even if a child
+  // cancellation rejects, the occurrence still settles through the settler.
+  void abortProject(projectId, children, "no scheduled Orc continuation owner after restart", { skipRootFail: true })
+    .catch((err) => logWarn(TAG, `last-resort abort for project ${projectId} failed — ${err instanceof Error ? err.message : String(err)}`))
+    .then(() => {
+    if (!matched) return; // no matching active scheduled run — project abort only
+    try {
+      settleRunOnce({
+        entry: matched.entry,
+        run: matched.run,
+        outcome: "failed",
+        diagnostic: makeTaskFailure("interruption", "restart_interrupted", "executing", "scheduled project continuation unavailable after restart", "none"),
+        detail: "reconcileProject: no durable owner and no claimable scheduled Orc continuation",
+        cardId: projectId,
+      });
+      logInfo(TAG, `Project ${projectId}: settled run ${matched.run.runId} as restart_interrupted (last resort)`);
+    } catch (err) {
+      logWarn(TAG, `Project ${projectId}: last-resort settlement failed — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+}
+
+function findActiveScheduledRun(card: KanbanCard): { entry: import("./tasks/task-types.js").ScheduledTask; run: import("./tasks/task-state-store.js").ActiveTaskRun } | undefined {
+  try {
+    for (const entry of readEntries()) {
+      const state = readState(entry.id);
+      const run = state?.activeRun;
+      if (run && run.runId === card.source_id && run.cardId === card.id) return { entry, run };
+    }
+  } catch (err) {
+    logWarn(TAG, `findActiveScheduledRun failed for card ${card.id}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return undefined;
+}
+
+/**
+ * #1546 R3.4: state-branch ownership handlers. `handleInputState` and
+ * `handleRepairState` return "transitioned" when they advanced the project
+ * (the driver re-reads and re-derives), "owned" when an existing owner holds
+ * the state, and "none" when a prerequisite is missing (fall through to the
+ * scheduled Orc continuation).
+ */
+function handleInputState(projectId: number, _supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): BranchResult {
+  const answered = reviewStore.getAnsweredInputRequests(projectId);
+  if (answered.length > 0) {
+    logInfo(TAG, `Project ${projectId}: ${answered.length} input(s) answered — resuming execution`);
+    reviewStore.clearInputNotice(projectId);
+    // The resume transition re-opens execution; the following case creation
+    // owns the review_round advance (a fresh read bumps exactly once).
+    reviewStore.stateTransition(projectId, ["needs_input"], "executing");
+    return "transitioned";
+  }
+  const pending = reviewStore.getPendingInputRequests().filter(r => r.project_card_id === projectId);
+  if (pending.length > 0) return "owned";
+  logWarn(TAG, `Project ${projectId}: needs_input state but no pending or answered requests — falling through to the no-owner decision`);
+  return "none";
+}
+
+function handleRepairState(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): BranchResult {
   if (supervision.state === "repair_planned") {
     const decision = reviewStore.getLatestDecisionForProject(projectId);
     if (!decision) {
-      logWarn(TAG, `Project ${projectId}: repair_planned but no decision found`);
-      return;
+      logWarn(TAG, `Project ${projectId}: repair_planned but no decision found — falling through to the no-owner decision`);
+      return "none";
     }
     const parsed = JSON.parse(decision.decision_json) as { repair?: { items: Array<{ id: string; affected_criterion_ids: string[]; strategy: string; required_evidence: string; capabilities: string[]; budget: { max_attempts?: number; max_tokens?: number } }> } };
     const items = parsed.repair?.items ?? [];
     if (items.length === 0) {
-      logWarn(TAG, `Project ${projectId}: repair_planned but no repair items`);
-      return;
+      logWarn(TAG, `Project ${projectId}: repair_planned but no repair items — falling through to the no-owner decision`);
+      return "none";
     }
     const contractRow2 = reviewStore.getContractByProjectCardId(projectId);
     const rootContract = contractRow2 ? JSON.parse(contractRow2.contract_json) as { criteria: Array<{ id: string; description: string }> } : null;
@@ -344,37 +484,64 @@ async function reconcileProject(projectId: number): Promise<void> {
       }
     }
     reviewStore.setState(projectId, "repairing");
-    return;
+    return "transitioned";
   }
-
   if (supervision.state === "repairing") {
-    const allTerminal = children.length > 0 && children.every(c => {
-      const terminalStatuses = ["done", "delivered", "failed"];
-      return terminalStatuses.includes(c.status);
-    });
+    const children = kanbanGetChildren(projectId);
+    const allTerminal = children.length > 0 && children.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status));
     if (allTerminal) {
       logInfo(TAG, `Project ${projectId}: all repair children terminal — creating new review round`);
       reviewStore.setState(projectId, "executing", { repair_round: supervision.repair_round + 1 });
-    } else {
-      return;
+      return "transitioned";
     }
+    if (children.length === 0) {
+      logWarn(TAG, `Project ${projectId}: repairing with no children — falling through to the no-owner decision`);
+      return "none";
+    }
+    // recoverable child rows — Reconciler/Worker dispatcher owns
+    requestWorkerDispatch();
+    return "owned";
   }
+  return "none";
+}
 
-  const finalChildren = kanbanGetChildren(projectId);
-  const allChildrenTerminal = finalChildren.every(c => {
-    const terminalStatuses = ["done", "delivered", "failed"];
-    return terminalStatuses.includes(c.status);
-  });
-  if (!allChildrenTerminal) return;
+/**
+ * #1546 R2: the existing review owner. `review_ready` without an open case is
+ * Reconciler case creation (crash recovery); `review_requested`/`reviewing`
+ * dispatch through the existing review request, never a fresh authoring claim.
+ */
+async function handleReviewState(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): Promise<void> {
+  if (supervision.state === "review_ready" && !reviewStore.getLatestOpenCase(projectId)) {
+    await createReviewCase(projectId, supervision, reviewStore, 0);
+    return;
+  }
+  const openCase = reviewStore.getLatestOpenCase(projectId);
+  if (!openCase) return; // no open case — the inspection classifies this as none
+  const existingReq = reviewStore.getReviewRequestByCaseId(openCase.id);
+  if (!existingReq) {
+    const { id: rrId } = reviewStore.insertReviewRequest(projectId, openCase.id, supervision.generation);
+    scheduleOrcReview(projectId, supervision.generation, openCase.id, rrId);
+  } else if (existingReq.status === "pending") {
+    scheduleOrcReview(projectId, supervision.generation, openCase.id, existingReq.id);
+  } else if (existingReq.status === "abandoned") {
+    logWarn(TAG, `Project ${projectId}: review request abandoned — settling blocked`);
+    reviewStore.settleBlocked(projectId, openCase.id, { action: "blocked", reason: "Review request abandoned (attempts/deadline)" }, "Review abandoned");
+    try { nerve.fire("card:failed", projectId); } catch {}
+  }
+}
 
-  const existingOpenCase = reviewStore.getLatestOpenCase(projectId);
-  if (existingOpenCase) return;
-
+/**
+ * #1546: the Reconciler's review case creation for a project whose direct
+ * children are all terminal. `roundOffset` is 0 when the review round was
+ * already advanced by a preceding transition (e.g. input resume), 1 otherwise.
+ */
+async function createReviewCase(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, roundOffset: 0 | 1 = 1): Promise<void> {
+  const nextRound = supervision.review_round + roundOffset;
   const transitioned = reviewStore.stateTransition(
     projectId,
     ["executing", "review_ready"] as ProjectState[],
     "review_ready",
-    { review_round: supervision.review_round + 1 },
+    { review_round: nextRound },
   );
   if (!transitioned) {
     logWarn(TAG, `Project ${projectId}: failed to transition to review_ready`);
@@ -382,26 +549,164 @@ async function reconcileProject(projectId: number): Promise<void> {
   }
 
   const assembler = new ReviewCaseAssembler();
-  const snapshot = await assembler.assembleCase(projectId, supervision.generation, supervision.review_round + 1);
+  const snapshot = await assembler.assembleCase(projectId, supervision.generation, nextRound);
   if ("error" in snapshot) {
     logWarn(TAG, `Project ${projectId}: review case assembly failed — ${snapshot.error}`);
     return;
   }
 
-  const snapshotDigest = `rc_${projectId}_${supervision.generation}_${supervision.review_round + 1}`;
+  const snapshotDigest = `rc_${projectId}_${supervision.generation}_${nextRound}`;
   let caseId = "";
   let reviewRequestId = "";
   reviewStore.db.transaction(() => {
-    const { id: cId } = reviewStore.insertReviewCase(projectId, supervision.generation, supervision.review_round + 1, snapshot, snapshotDigest);
+    const { id: cId } = reviewStore.insertReviewCase(projectId, supervision.generation, nextRound, snapshot, snapshotDigest);
     caseId = cId;
     const transitioned2 = reviewStore.stateTransition(projectId, ["review_ready"] as ProjectState[], "review_requested");
     if (!transitioned2) throw new Error(`failed to transition project ${projectId} to review_requested`);
     const { id: rrId } = reviewStore.insertReviewRequest(projectId, cId, supervision.generation);
     reviewRequestId = rrId;
   });
-  logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created, request ${reviewRequestId} (gen=${supervision.generation}, round=${supervision.review_round + 1})`);
+  logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created, request ${reviewRequestId} (gen=${supervision.generation}, round=${nextRound})`);
   logSwarmTrace({ event: "review_case_created", project: projectId, card: projectId, reviewCase: caseId, reason: "all_children_terminal", generation: supervision.generation });
   scheduleOrcReview(projectId, supervision.generation, caseId, reviewRequestId);
+}
+
+/**
+ * #1546: the single state-aware project driver. Accepts a running root or a
+ * queued due scheduled root; a future-dated queued root is a no-op. The driver
+ * decides from durable rows whether existing work resumes, whether a scheduled
+ * Orc continuation must be claimed, or whether the existing terminal authority
+ * settles the occurrence as a last resort. State transitions made during one
+ * pass are followed by a fresh durable read before selecting the next owner.
+ */
+async function reconcileProject(projectId: number): Promise<void> {
+  let project = kanbanGetCard(projectId);
+  if (!project) return;
+  if (project.status !== "running" && !(project.status === "queued" && isScheduledProjectRoot(project) && isRetryDue(project))) return;
+
+  const reviewStore = new ProjectReviewStore();
+  const hasRootContract = reviewStore.contractExists(projectId);
+  const contractRow = hasRootContract ? reviewStore.getContractByProjectCardId(projectId) : undefined;
+
+  const now = Date.now();
+
+  if (contractRow) {
+    try {
+      const contract = JSON.parse(contractRow.contract_json) as { limits?: { hard_deadline_at?: string } };
+      const configuredDeadline = contract.limits?.hard_deadline_at ? Date.parse(contract.limits.hard_deadline_at) : NaN;
+      if (Number.isFinite(configuredDeadline) && now > configuredDeadline) {
+        await abortProject(projectId, kanbanGetChildren(projectId), "configured hard deadline exceeded");
+        return;
+      }
+    } catch (err) {
+      logWarn(TAG, `Project ${projectId}: invalid root contract deadline: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  if (!hasRootContract) {
+    const supervision = reviewStore.getSupervision(projectId);
+    if (!supervision) {
+      reviewStore.ensureAwaitingContract(projectId);
+      logInfo(TAG, `Project ${projectId}: awaiting contract — dispatching Orc authoring turn`);
+      if (_orcCoordinator) {
+        _orcCoordinator.scheduleContractAuthoring(projectId);
+      } else {
+        legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
+      }
+    } else if (supervision.state === "awaiting_contract") {
+      logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
+      if (_orcCoordinator) {
+        _orcCoordinator.scheduleContractAuthoring(projectId);
+      } else {
+        legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
+      }
+    }
+    // #1546 R4: a retried queued root is promoted only after the authoring
+    // owner decision above.
+    if (project.status === "queued") kanbanPromoteDueRetry(projectId);
+    return;
+  }
+
+  const supervision = reviewStore.getSupervision(projectId);
+  if (!supervision) {
+    logWarn(TAG, `Project ${projectId}: root contract exists but no supervision state — initializing`);
+    if (contractRow) {
+      reviewStore.initializeSupervision(projectId, contractRow.id);
+    }
+    return;
+  }
+
+  if (supervision.state === "accepted" || supervision.state === "blocked") return;
+  if (supervision.state === "awaiting_contract") {
+    logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
+    if (_orcCoordinator) {
+      _orcCoordinator.scheduleContractAuthoring(projectId);
+    } else {
+      legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
+    }
+    if (project.status === "queued") kanbanPromoteDueRetry(projectId);
+    return;
+  }
+
+  // ── #1546: owner-driven loop with fresh durable reads per pass ──────────
+  for (let pass = 0; pass < 4; pass++) {
+    project = kanbanGetCard(projectId);
+    if (!project) return;
+    if (project.status !== "running" && !(project.status === "queued" && isScheduledProjectRoot(project) && isRetryDue(project))) return;
+
+    const supervision = reviewStore.getSupervision(projectId);
+    if (!supervision) return;
+    if (supervision.state === "accepted" || supervision.state === "blocked") return;
+
+    if (project.max_tokens != null && (project.tokens_used ?? 0) >= project.max_tokens) {
+      await abortProject(projectId, kanbanGetChildren(projectId), `budget exceeded (${project.tokens_used}/${project.max_tokens} tokens)`);
+      return;
+    }
+
+    if (project.status === "queued") {
+      // #1546 R4: claim-before-promotion — only when no durable owner exists.
+      // A crash between the Orc claim and the card write leaves queued+due,
+      // which the next wake observes as already owned and promotes.
+      if (inspectProjectOwnership(projectId, supervision, reviewStore) === "none") {
+        if (claimScheduledContinuation(projectId, supervision, reviewStore, project) === "settled") return;
+      }
+      if (!kanbanPromoteDueRetry(projectId)) return; // lost the conditional race — next wake re-reads
+      continue;
+    }
+
+    switch (inspectProjectOwnership(projectId, supervision, reviewStore)) {
+      case "terminal":
+        return;
+      case "worker_resume":
+        requestWorkerDispatch();
+        return;
+      case "orc_claim":
+        return; // existing live Orc row owns the project
+      case "review":
+        await handleReviewState(projectId, supervision, reviewStore);
+        return;
+      case "input": {
+        const result = handleInputState(projectId, supervision, reviewStore);
+        if (result === "transitioned" || result === "none") continue;
+        return; // pending input owned by the input dispatcher
+      }
+      case "repair": {
+        const result = handleRepairState(projectId, supervision, reviewStore);
+        if (result === "transitioned" || result === "none") continue;
+        return; // recoverable children owned by the Worker path
+      }
+      case "executing_terminal_children":
+        await createReviewCase(projectId, supervision, reviewStore, 1);
+        return;
+      case "none":
+        // #1546: the scheduled Orc continuation and last-resort settlement
+        // apply to scheduled roots only; generic unscheduled O cards retain
+        // their current fallback behavior (no claim, no freeze).
+        if (!isScheduledProjectRoot(project)) return;
+        if (claimScheduledContinuation(projectId, supervision, reviewStore, project) === "settled") return;
+        continue; // claim established — re-inspect durable ownership
+    }
+  }
 }
 
 function dispatchPendingReviewRequests(): number {
@@ -760,7 +1065,7 @@ function getLatestAttemptInfo(cardId: number): AttemptRow | undefined {
   return store.getLatestAttempt(cardId);
 }
 
-async function abortProject(projectId: number, children: KanbanCard[], reason: string): Promise<void> {
+async function abortProject(projectId: number, children: KanbanCard[], reason: string, opts?: { skipRootFail?: boolean }): Promise<void> {
   logWarn(TAG, `ABORT project ${projectId}: ${reason}`);
   // Freeze supervision before cancelling child executors. Late Orc review
   // results must not be able to move an aborted project back to accepted.
@@ -802,7 +1107,12 @@ async function abortProject(projectId: number, children: KanbanCard[], reason: s
     }
     kanbanFail(card.id, `project aborted: ${reason}`);
   }
-  kanbanFail(projectId, reason);
+  // #1546: the last-resort settler performs the one root card mutation after
+  // winning settlement; a second root fail would emit a duplicate terminal
+  // event (proved by the focused exactly-once settlement test).
+  if (!opts?.skipRootFail) {
+    kanbanFail(projectId, reason);
+  }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ const kanbanFailMock = vi.fn();
 const kanbanCompleteMock = vi.fn();
 const kanbanRunningProjectIdsMock = vi.fn().mockReturnValue([]);
 const kanbanQueuedDispatchOrderMock = vi.fn().mockReturnValue([]);
+const kanbanPromoteDueRetryMock = vi.fn().mockReturnValue(false);
 vi.mock("./tasks/kanban-board.js", () => ({
   kanbanFail: kanbanFailMock,
   kanbanComplete: kanbanCompleteMock,
@@ -33,6 +34,8 @@ vi.mock("./tasks/kanban-board.js", () => ({
   kanbanGetChildren: kanbanGetChildrenMock,
   kanbanRunningProjectIds: kanbanRunningProjectIdsMock,
   kanbanQueuedDispatchOrder: kanbanQueuedDispatchOrderMock,
+  kanbanPromoteDueRetry: kanbanPromoteDueRetryMock,
+  KANBAN_TERMINAL_STATUSES: ["done", "delivered", "failed"],
   isUnblocked: isUnblockedMock,
   cascadeFail: cascadeFailMock,
 }));
@@ -120,6 +123,7 @@ function makeReviewStoreMock() {
     markReviewRequestDispatched: vi.fn().mockReturnValue(true),
     getReviewRequestByCaseId: vi.fn().mockReturnValue(undefined),
     setState: vi.fn(),
+    hasActiveProjectSupervision: vi.fn().mockReturnValue(false),
     db: { transaction: transactionImpl },
   };
 }
@@ -160,6 +164,13 @@ vi.mock("./retry/retry-service.js", () => ({
   })),
 }));
 
+const getLiveRunForProjectMock = vi.fn().mockReturnValue(undefined);
+vi.mock("./orc-project/orc-project-run-store.js", () => ({
+  OrcProjectRunStore: vi.fn().mockImplementation(function() {
+    return { getLiveRunForProject: getLiveRunForProjectMock };
+  }),
+}));
+
 // ── Import after mocks ─────────────────────────────────────────────────────────
 
 let mod: typeof import("./reconciler.js");
@@ -188,6 +199,10 @@ beforeEach(async () => {
   kanbanRunningProjectIdsMock.mockReturnValue([]);
   kanbanFailMock.mockReset();
   kanbanCompleteMock.mockReset();
+  kanbanPromoteDueRetryMock.mockReset();
+  kanbanPromoteDueRetryMock.mockReturnValue(false);
+  getLiveRunForProjectMock.mockReset();
+  getLiveRunForProjectMock.mockReturnValue(undefined);
   mod = await import("./reconciler.js");
 });
 
@@ -488,5 +503,394 @@ describe("Reconciler — #1411 domain guard", () => {
 
       expect(kanbanCompleteMock).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ── #1546: scheduled-root driver ──────────────────────────────────────────────
+
+describe("Reconciler — #1546 scheduled-root driver", () => {
+  function supervision(overrides: Record<string, unknown> = {}) {
+    return {
+      project_card_id: 1,
+      contract_id: "pc_test_1",
+      state: "executing",
+      generation: 1,
+      review_round: 0,
+      repair_round: 0,
+      active_review_case_id: null,
+      accepted_decision_id: null,
+      blocked_reason: null,
+      updated_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  function scheduledRootCard(overrides: Record<string, unknown> = {}) {
+    return makeCard({
+      id: 1,
+      status: "running",
+      type: "O",
+      source: "task",
+      source_id: "run-1",
+      next_retry_at: null,
+      ...overrides,
+    });
+  }
+
+  function setupExecutingProject(opts: { children?: unknown[]; attemptLifecycle?: string | null } = {}) {
+    reviewStoreMock.contractExists.mockReturnValue(true);
+    reviewStoreMock.getSupervision.mockReturnValue(supervision());
+    reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(true);
+    kanbanGetCardMock.mockReturnValue(scheduledRootCard());
+    kanbanGetChildrenMock.mockReturnValue(opts.children ?? []);
+    if (opts.attemptLifecycle !== undefined) {
+      getLatestAttemptMock.mockReturnValue(
+        opts.attemptLifecycle === null ? null : { id: "a_1", lifecycle: opts.attemptLifecycle },
+      );
+    }
+  }
+
+  function fakeCoordinator(claims: Array<{ projectCardId: number; goal: string }>) {
+    mod.setOrcCoordinator({
+      scheduleScheduledProject: (projectCardId: number, goal: string) => {
+        claims.push({ projectCardId, goal });
+        // a real claim creates the durable live Orc row the next pass observes
+        getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
+        return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
+      },
+      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
+    } as never);
+  }
+
+  it("routes a queued due scheduled root to the driver and promotes only after the continuation claim", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+    let phase: "queued" | "running" = "queued";
+    kanbanGetCardMock.mockReturnValue(scheduledRootCard({
+      status: "queued",
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    }));
+    kanbanPromoteDueRetryMock.mockImplementation(() => { phase = "running"; return true; });
+    kanbanGetCardMock.mockImplementation(() => scheduledRootCard({
+      status: phase,
+      next_retry_at: phase === "queued" ? new Date(Date.now() - 1000).toISOString() : null,
+    }));
+
+    mod.requestReconcile(1);
+    await flush();
+
+    // zero children → no durable owner → one correlated claim before promotion
+    expect(claims).toHaveLength(1);
+    expect(claims[0]!.projectCardId).toBe(1);
+    expect(claims[0]!.goal).toContain("run-1");
+    expect(kanbanPromoteDueRetryMock).toHaveBeenCalledWith(1);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps a future-dated queued scheduled root a no-op", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+    kanbanGetCardMock.mockReturnValue(scheduledRootCard({
+      status: "queued",
+      next_retry_at: new Date(Date.now() + 60_000).toISOString(),
+    }));
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(0);
+    expect(kanbanPromoteDueRetryMock).not.toHaveBeenCalled();
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves an unrelated parentless queued card on the legacy path", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued", type: "O", source: "agent", next_retry_at: new Date(Date.now() - 1000).toISOString() }));
+    reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(true);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(0);
+    expect(kanbanPromoteDueRetryMock).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("resumes a pending Worker attempt without a lease (worker_resume owns)", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "queued", type: "W" }), parent_id: 1 }],
+      attemptLifecycle: "pending",
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+
+    // the dispatch pump was requested; no continuation claim and no settle
+    expect(claims).toHaveLength(0);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("retains a valid live attempt (running) — never settled, never claimed", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "running", type: "W" }), parent_id: 1 }],
+      attemptLifecycle: "running",
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(0);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("creates the review case for an executing project whose children are all terminal", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [
+        { ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 },
+        { ...makeCard({ id: 3, status: "failed", type: "W" }), parent_id: 1 },
+      ],
+    });
+    reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+    reviewStoreMock.stateTransition.mockReturnValue(true);
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(reviewStoreMock.insertReviewRequest).toHaveBeenCalledWith(1, "rc_test_1", 1);
+    expect(claims).toHaveLength(0); // case creation is the Reconciler owner — no continuation claim
+  });
+
+  it("classifies reviewing with an open case as review ownership (never a fresh authoring claim)", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    mod.setOrcCoordinator({
+      scheduleScheduledProject: (projectCardId: number, goal: string) => {
+        claims.push({ projectCardId, goal });
+        return { kind: "claimed" as const, context: { runId: "or_1", projectCardId } };
+      },
+      scheduleReview: () => ({ kind: "claimed" as const, context: { runId: "or_r", projectCardId: 1 } }),
+    } as never);
+    setupExecutingProject();
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "reviewing" }));
+    reviewStoreMock.getLatestOpenCase.mockReturnValue({ id: "rc_open", project_card_id: 1, status: "open", round: 1 } as never);
+    reviewStoreMock.getReviewRequestByCaseId.mockReturnValue({ id: "rr_1", status: "pending" });
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(0);
+    expect(reviewStoreMock.getReviewRequestByCaseId).toHaveBeenCalledWith("rc_open");
+  });
+
+  it("classifies reviewing with no open case and no live Orc row as none → continuation claim", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "reviewing" }));
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(1);
+  });
+
+  it("treats a live Orc claim matching the generation as an existing owner — no second claim", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+    getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: "or_live" });
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(0);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("treats a stale-generation live Orc row as not an owner (claim attempt resolves it)", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+    getLiveRunForProjectMock.mockReturnValue({ project_generation: 2, id: "or_stale" });
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(1);
+  });
+
+  it("never settles on a busy claim — the existing live run owns the project", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    mod.setOrcCoordinator({
+      scheduleScheduledProject: (projectCardId: number, _goal: string) => {
+        claims.push({ projectCardId, goal: _goal });
+        // busy means a live row exists — the next pass observes it as an owner
+        getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: "or_busy" });
+        return { kind: "busy" as const, activeRunId: "or_busy" };
+      },
+      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+    } as never);
+    setupExecutingProject();
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(1);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("re-derives ownership once on conflict and settles only when the second pass still finds no owner", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    let conflictFirst = true;
+    mod.setOrcCoordinator({
+      scheduleScheduledProject: (projectCardId: number, goal: string) => {
+        claims.push({ projectCardId, goal });
+        if (conflictFirst) {
+          conflictFirst = false;
+          return { kind: "conflict" as const, reason: "project_generation_mismatch" };
+        }
+        return { kind: "conflict" as const, reason: "project_generation_mismatch" };
+      },
+      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+    } as never);
+    setupExecutingProject();
+
+    mod.requestReconcile(1);
+    await flush();
+
+    // conflict → re-read (still none) → one retry claim → still conflict → the
+    // driver freezes the project through the last-resort path (the focused
+    // real-store test proves the exactly-once settler half)
+    expect(claims).toHaveLength(2);
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(
+      1,
+      expect.arrayContaining(["executing", "needs_input", "reviewing"]),
+      "blocked",
+      expect.anything(),
+    );
+  });
+
+  it("does not settle when a conflict re-derive finds an owner", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    mod.setOrcCoordinator({
+      scheduleScheduledProject: (projectCardId: number, goal: string) => {
+        claims.push({ projectCardId, goal });
+        // another writer advanced the project during the claim attempt
+        reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "accepted" }));
+        return { kind: "conflict" as const, reason: "project_generation_mismatch" };
+      },
+      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+    } as never);
+    setupExecutingProject();
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(1);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("terminal roots (accepted/blocked) are no-ops", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "blocked" }));
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(0);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("duplicate wakes do not duplicate work", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+
+    for (let i = 0; i < 5; i++) {
+      mod.requestReconcile(1);
+    }
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(claims).toHaveLength(1);
+  });
+
+  it("falls through to the no-owner decision when needs_input has neither pending nor answered requests", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "needs_input" }));
+    reviewStoreMock.getAnsweredInputRequests.mockReturnValue([]);
+    reviewStoreMock.getPendingInputRequests.mockReturnValue([]);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(1);
+    expect(reviewStoreMock.setState).not.toHaveBeenCalled();
+  });
+
+  it("resumes needs_input through the existing transition when requests are answered", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
+    });
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "needs_input" }));
+    reviewStoreMock.getAnsweredInputRequests.mockReturnValue([{ id: "ir_1", question: "q", response_text: "a" }]);
+    reviewStoreMock.stateTransition.mockReturnValue(true);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["needs_input"], "executing");
+    expect(claims).toHaveLength(0);
+  });
+
+  it("treats pending input requests as the input owner", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "needs_input" }));
+    reviewStoreMock.getAnsweredInputRequests.mockReturnValue([]);
+    reviewStoreMock.getPendingInputRequests.mockReturnValue([{ id: "ir_1", project_card_id: 1 }]);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(0);
+  });
+
+  it("falls through to the no-owner decision when repair_planned has no repair items", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "repair_planned" }));
+    reviewStoreMock.getLatestDecisionForProject.mockReturnValue({
+      id: "rd_1",
+      review_case_id: "rc_1",
+      decision_json: JSON.stringify({ action: "repair", repair: { items: [] } }),
+      decision_digest: "d",
+      created_at: new Date().toISOString(),
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(1);
   });
 });

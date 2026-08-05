@@ -108,6 +108,30 @@ describe("ProjectReviewStore", () => {
       expect(s.getSupervision(cid)!.state).toBe("review_ready");
     });
 
+    it("hasActiveProjectSupervision: true only for a non-terminal supervision row", () => {
+      expect(store.hasActiveProjectSupervision(uniqueCardId())).toBe(false);
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      expect(s.hasActiveProjectSupervision(cid)).toBe(true);
+      s.stateTransition(cid, ["executing"], "review_ready");
+      expect(s.hasActiveProjectSupervision(cid)).toBe(true);
+      s.settleBlocked(cid, "case-b", { action: "blocked", reason: "x" }, "blocker");
+      expect(s.hasActiveProjectSupervision(cid)).toBe(false);
+    });
+
+    it("hasActiveProjectSupervision: accepted supervision is not an active owner", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      s.settleAcceptance(cid, "case-a", { action: "accept", synthesis: "ok" }, "ok");
+      expect(s.hasActiveProjectSupervision(cid)).toBe(false);
+    });
+
+    it("hasActiveProjectSupervision: awaiting_contract counts as active (the authoring claim owns it)", () => {
+      const cid = uniqueCardId();
+      store.ensureAwaitingContract(cid);
+      expect(store.hasActiveProjectSupervision(cid)).toBe(true);
+    });
+
     it("rejects state transition from invalid source state", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;

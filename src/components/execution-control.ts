@@ -11,9 +11,10 @@
  */
 
 import { logDebug, logWarn } from "./logger.js";
-import { kanbanQueuedDispatchOrder, kanbanFail, isUnblocked } from "./tasks/kanban-board.js";
+import { kanbanQueuedDispatchOrder, kanbanFail, isUnblocked, type KanbanCard } from "./tasks/kanban-board.js";
 import { isValidSessionType } from "./spin-profiles.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
+import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
 import type { CancelReason } from "./swarm-executor-types.js";
 import type { SessionType } from "./spin-types.js";
 import type { SpinRequest } from "./spin-types.js";
@@ -205,6 +206,22 @@ function cardHasSupervision(cardId: number): boolean {
   } catch { return false; }
 }
 
+/**
+ * #1546 R1/R6: true for a root card carrying the durable scheduled-project
+ * identity (type O, no parent, task source, non-empty source_id) with a
+ * non-terminal `project_supervision` row. Such a root must never be dispatched
+ * as a legacy Spin `O`; the Reconciler driver owns its continuation.
+ */
+function isActiveScheduledProjectRoot(card: KanbanCard): boolean {
+  if (card.type !== "O" || card.parent_id !== null) return false;
+  if (card.source !== "task" || !card.source_id || card.source_id.length === 0) return false;
+  try {
+    return new ProjectReviewStore().hasActiveProjectSupervision(card.id);
+  } catch {
+    return false;
+  }
+}
+
 export function createExecutionSupervisor(options: ExecutionSupervisorOptions): ExecutionSupervisor {
   const controls = new Map<string, ExecutionControlImpl>();
   const sessionBindings = new Map<string, string>();   // sessionId → executionRef
@@ -256,8 +273,9 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
   function drainLegacyQueued(dispatch: (request: SpinRequest) => void): void {
     const queued = kanbanQueuedDispatchOrder();
     for (const card of queued) {
-      // #1364: Supervised cards go through Reconciler — skip them here
-      if (cardHasSupervision(card.id)) continue;
+      // #1364/#1546: Supervised cards (Worker children or active scheduled
+      // project roots) go through Reconciler — skip them here
+      if (cardHasSupervision(card.id) || isActiveScheduledProjectRoot(card)) continue;
       // #677: respect DAG dependencies
       if (!isUnblocked(card)) continue;
       // #1327: validate card.type is a real SessionType BEFORE dispatching.

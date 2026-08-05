@@ -81,6 +81,8 @@ export interface KanbanCard {
   delivery_ready: number;
   /** #1516: total agent budget (1 Orc + workers) for scheduled projects. */
   max_agents: number | null;
+  /** #1539: durable retry backoff marker; only cleared by the promotion helper. */
+  next_retry_at: string | null;
 }
 
 let _db: SqliteDb | null = null;
@@ -234,6 +236,31 @@ export function kanbanRunning(id: number): void {
   if (!d) return;
   d.prepare(`UPDATE kanban_board SET status = 'running', updated_at = datetime('now') WHERE id = ?`).run(id);
   nerve.fire("card:running", id);
+}
+
+/**
+ * #1546: atomic due-retry promotion. The single writer that clears
+ * `next_retry_at` for a retried root/child: one conditional update from
+ * `queued` + due to `running` + no marker, preserving `retry_count` and the
+ * retry error. Fires the existing running event and the due-change hook only
+ * on one changed row; a lost conditional race is a no-op. The due predicate
+ * uses `unixepoch` so both `kanbanRetryOrFail`'s ISO-8601 markers and legacy
+ * SQLite `datetime('now')` markers compare correctly.
+ */
+export function kanbanPromoteDueRetry(cardId: number, now?: number): boolean {
+  const d = dbOrNull();
+  if (!d) return false;
+  const nowVal = now ?? Date.now();
+  const result = d.prepare(
+    `UPDATE kanban_board
+     SET status = 'running', next_retry_at = NULL, updated_at = datetime('now')
+     WHERE id = ? AND status = 'queued' AND next_retry_at IS NOT NULL
+       AND unixepoch(next_retry_at) <= ?`
+  ).run(cardId, Math.floor(nowVal / 1000));
+  if ((result.changes ?? 0) !== 1) return false;
+  nerve.fire("card:running", cardId);
+  notifyKanbanDueChanged();
+  return true;
 }
 
 /** #1539: kanban due-change hook wired to the lifecycle wake scheduler. */
@@ -611,9 +638,9 @@ export function kanbanQueuedDispatchOrder(now?: number): KanbanCard[] {
     ) AS effective_priority
     FROM kanban_board k
     WHERE k.status = 'queued'
-      AND (k.next_retry_at IS NULL OR k.next_retry_at <= datetime(?, 'unixepoch'))
+      AND (k.next_retry_at IS NULL OR unixepoch(k.next_retry_at) <= ?)
     ORDER BY effective_priority DESC, k.created_at ASC, k.id ASC
-  `).all(nowVal, nowVal / 1000) as KanbanCard[];
+  `).all(nowVal, Math.floor(nowVal / 1000)) as KanbanCard[];
   return rows;
 }
 

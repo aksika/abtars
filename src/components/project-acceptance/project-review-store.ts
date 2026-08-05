@@ -308,6 +308,22 @@ export class ProjectReviewStore {
     return TERMINAL_PROJECT_STATES.includes(row.state);
   }
 
+  /**
+   * #1546: shared active-project-supervision predicate. True only when a
+   * `project_supervision` row exists and is not terminal (`accepted`/`blocked`).
+   * A terminal supervision row is not an active owner and must never be
+   * restarted. Fails closed on store unavailability, matching the legacy drain.
+   */
+  hasActiveProjectSupervision(projectCardId: number): boolean {
+    try {
+      const row = this.db.prepare(`SELECT state FROM project_supervision WHERE project_card_id = ?`).get(projectCardId) as { state: string } | undefined;
+      if (!row) return false;
+      return row.state !== "accepted" && row.state !== "blocked";
+    } catch {
+      return false;
+    }
+  }
+
   // ── Review requests ────────────────────────────────────────────────────
 
   insertReviewRequest(projectCardId: number, reviewCaseId: string, generation: number, deadlineAt?: string): { id: string } {
