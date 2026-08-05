@@ -332,4 +332,39 @@ describe("AcpTransport", () => {
       expect(deltas).toEqual([]);
     });
   });
+
+  describe("session expiry retry (#1564)", () => {
+    it("re-keys the chunk buffer and observer under the rotated session id", async () => {
+      let promptCalls = 0;
+      (transport as any).client = {
+        newSession: vi.fn()
+          .mockResolvedValueOnce({ sessionId: "sess-1" })
+          .mockResolvedValueOnce({ sessionId: "sess-2" }),
+        prompt: vi.fn().mockImplementation(async ({ sessionId: sid }: { sessionId: string }) => {
+          promptCalls++;
+          if (promptCalls === 1) throw { code: -32603, message: "No session found" };
+          (transport as any).handleSessionUpdate({
+            sessionId: sid,
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "the answer" } },
+          });
+          return { stopReason: "end_turn" };
+        }),
+      };
+
+      const outputObserver = { onDelta: vi.fn() };
+      const result = await transport.sendPrompt("key-1", "hello", undefined, { outputObserver } as any);
+
+      // The turn must return the model output, not "(no response)".
+      expect(result).toBe("the answer");
+      expect(promptCalls).toBe(2);
+      // The retry must have been sent to the freshly created session.
+      expect((transport as any).client.prompt.mock.calls[1][0].sessionId).toBe("sess-2");
+      // The live-output feed must have received the delta during the retry turn.
+      expect(outputObserver.onDelta).toHaveBeenCalledWith({ kind: "text", text: "the answer" });
+      // No stale keys may survive.
+      expect((transport as any).responseChunks.has("sess-1")).toBe(false);
+      expect((transport as any).outputObservers.has("sess-1")).toBe(false);
+      expect((transport as any).responseChunks.has("sess-2")).toBe(false);
+    });
+  });
 });

@@ -378,9 +378,22 @@ export class AcpTransport implements IKiroTransport {
 
     // client.prompt() blocks until the full turn completes.
     // While running, sessionUpdate fires for each agent_message_chunk.
+    let usedSid = sessionId;
     try {
       // #160: track in-flight so child-exit can reject immediately
       const result = await this.trackInFlight("prompt", sessionId, () => this.promptWithRetry(sessionId, message));
+      usedSid = result.sessionId;
+
+      // #1564: a session-expiry retry inside promptWithRetry rotates to a new
+      // session id — move any pre-rotation chunks under the id actually used so
+      // the turn isn't read back as "(no response)".
+      if (usedSid !== sessionId) {
+        this.responseChunks.set(usedSid, [
+          ...(this.responseChunks.get(sessionId) ?? []),
+          ...(this.responseChunks.get(usedSid) ?? []),
+        ]);
+        this.responseChunks.delete(sessionId);
+      }
 
       logDebug(this.tag, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
       logTrace(this.tag, `Model: ${this.modelId ?? "unknown"}`);
@@ -389,18 +402,18 @@ export class AcpTransport implements IKiroTransport {
       // #287: if model/agent not found was flagged during this session, reject the response
       if (this._modelNotFound) {
         this._modelNotFound = false;
-        this.responseChunks.delete(sessionId);
+        this.responseChunks.delete(usedSid);
         const model = this.modelId ?? "unknown";
         throw new ModelNotFoundError(`Model "${model}" not available — kiro-cli fell back to generic agent`);
       }
 
-      const chunks = this.responseChunks.get(sessionId) ?? [];
-      this.responseChunks.delete(sessionId);
+      const chunks = this.responseChunks.get(usedSid) ?? [];
+      this.responseChunks.delete(usedSid);
       return chunks.join("") || "(no response)";
     } finally {
       // #1338: drop the observer association so late events from a completed
       // call cannot publish into a newer attachment.
-      this.outputObservers.delete(sessionId);
+      this.outputObservers.delete(usedSid);
       // AfterPrompt hook — observe-only
       const durationMs = Date.now() - this.promptStartedAt;
       // #832: metrics
@@ -472,7 +485,7 @@ export class AcpTransport implements IKiroTransport {
     }
   }
 
-  private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
+  private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string; sessionId: string }> {
     let sid = sessionId;
 
     // #924: raw mode — use raw client directly
@@ -480,7 +493,7 @@ export class AcpTransport implements IKiroTransport {
       this.responseChunks.set(sid, []);
       const result = await this._rawClient.prompt({ sessionId: sid, prompt: [{ type: "text", text: message }] });
       this._promptSuccessCount++;
-      return result;
+      return { stopReason: result.stopReason, sessionId: sid };
     }
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -508,7 +521,7 @@ export class AcpTransport implements IKiroTransport {
           timeoutPromise,
         ]);
         this._promptSuccessCount++;
-        return result;
+        return { stopReason: result.stopReason, sessionId: sid };
       } catch (err: unknown) {
         const code = (err as { code?: number }).code;
         const msg = (err as { message?: string }).message ?? "";
@@ -532,7 +545,17 @@ export class AcpTransport implements IKiroTransport {
           logWarn(this.tag, `Session ${sessionId} expired — invalidated, will recreate`);
           if (attempt < maxRetries) {
             sid = await this.getOrCreateSession(this.lastSessionKey);
-            this.responseChunks.set(sessionId, []);
+            // #1564: re-seed the chunk buffer under the NEW session id — the
+            // notification handler keys by the id the server reports, so the
+            // retry turn would otherwise be dropped.
+            this.responseChunks.set(sid, []);
+            // #1564: the #1550 live-output observer follows the rotated session
+            // so deltas during the retry turn still reach the feed.
+            const observer = this.outputObservers.get(sessionId);
+            if (observer !== undefined) {
+              this.outputObservers.delete(sessionId);
+              this.outputObservers.set(sid, observer);
+            }
             continue;
           }
         } else if (code === -32603 && attempt < maxRetries) {
