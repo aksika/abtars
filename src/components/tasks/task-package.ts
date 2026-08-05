@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, mkdirSync } from "node:fs";
 import { resolve, join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { logTrace } from "../logger.js";
@@ -96,6 +96,9 @@ export interface ToolExecutionScope {
 
 export function createExecutionScope(taskId: string): ToolExecutionScope {
   const workspace = join(abtarsHome(), "workspace", taskId);
+  // The scope cwd doubles as the execute_bash working directory; a missing
+  // directory makes every bash spawn fail with ENOENT (#1544).
+  mkdirSync(workspace, { recursive: true });
   return {
     cwd: workspace,
     env: Object.freeze({ WORKSPACE: workspace }),

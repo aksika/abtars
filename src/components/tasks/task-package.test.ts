@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadTaskPackage, createExecutionScope } from "./task-package.js";
@@ -71,6 +71,19 @@ describe("loadTaskPackage", () => {
 });
 
 describe("createExecutionScope", () => {
+  let dir: string;
+  const prevHome = process.env.ABTARS_HOME;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "task-scope-"));
+    process.env.ABTARS_HOME = dir;
+  });
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.ABTARS_HOME;
+    else process.env.ABTARS_HOME = prevHome;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ }
+  });
+
   it("returns a scoped workspace path", () => {
     const scope = createExecutionScope("test-task");
     expect(scope.cwd).toContain("test-task");
@@ -80,5 +93,10 @@ describe("createExecutionScope", () => {
   it("returns a frozen env object", () => {
     const scope = createExecutionScope("test");
     expect(Object.isFrozen(scope.env)).toBe(true);
+  });
+
+  it("creates the workspace directory so execute_bash can spawn (#1544)", () => {
+    const scope = createExecutionScope("test-task");
+    expect(existsSync(scope.cwd)).toBe(true);
   });
 });
