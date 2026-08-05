@@ -51,6 +51,9 @@ let dueSourcesMod: typeof import("../../components/tasks/due-sources.js");
 let reconcilerModule: typeof import("../../components/reconciler.js");
 let realProjectRunner: typeof import("../../components/tasks/scheduled-project-runner.js").scheduledProjectRunner;
 let observerClass: typeof import("./scheduled-custody-observer.js").ScheduledCustodyObserver;
+let CustodyGapErrorClass: typeof import("./scheduled-custody-observer.js").CustodyGapError;
+let reviewStoreMod: typeof import("../../components/project-acceptance/project-review-store.js");
+let leaseStoreMod: typeof import("../../components/executor-lease-store.js");
 
 const FIXTURES: ScheduledTask[] = [
   {
@@ -180,6 +183,9 @@ async function loadModules(): Promise<void> {
   realProjectRunner = (await import("../../components/tasks/scheduled-project-runner.js")).scheduledProjectRunner;
   makeFixtureFactory = (await import("./scheduled-project-fixture.js")).makeScheduledProjectFixture;
   observerClass = (await import("./scheduled-custody-observer.js")).ScheduledCustodyObserver;
+  CustodyGapErrorClass = (await import("./scheduled-custody-observer.js")).CustodyGapError;
+  reviewStoreMod = await import("../../components/project-acceptance/project-review-store.js");
+  leaseStoreMod = await import("../../components/executor-lease-store.js");
 }
 
 function writeFixtureTasks(): void {
@@ -744,7 +750,7 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
       await waitFor(() => stateStore.readState("project-task")?.activeRun?.runId === firstRunId && stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
       expect(fixture2.fixture.lastTurn).toBe("none");
       const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
-      expect(new ProjectReviewStore().getSupervision(rootCardId)?.state).toBe("executing");
+      expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId)?.state).toBe("executing");
       fixture2.fixture.adoptRoot(rootCardId);
       fixture2.fixture.completeWorkers();
       fixture2.fixture.holdAcceptance = false;
@@ -782,8 +788,11 @@ describe("#1548 Task-1 gate — real admission under controlled time", () => {
       forceDue("project-task");
       await tick.runTaskTick(makeTickCtx(queue));
       // The admission chain crosses dynamic imports (real I/O), so flush
-      // event-loop turns deterministically until the card attachment lands.
-      await advanceUntil(() => stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
+      // event-loop turns deterministically until the card attachment lands
+      // and the scripted Orc has authored the contract.
+      await advanceUntil(() =>
+        stateStore.readState("project-task")?.activeRun?.cardId !== undefined
+        && fixture.lastTurn === "authored");
 
       expect(fixture.lastTurn).toBe("authored");
       const run = stateStore.readState("project-task")!.activeRun!;
@@ -825,6 +834,280 @@ async function waitForReach(fixture: Awaited<ReturnType<typeof makeFixture>>["fi
     }
   }
   throw new Error(`condition not reached: fixture.reach("${state}")`);
+}
+
+/** #1548: same as waitForReach but for controlled-time journeys (no real sleeps). */
+async function waitForReachControlled(fixture: Awaited<ReturnType<typeof makeFixture>>["fixture"], state: "executing" | "awaiting_contract"): Promise<{ runId: string; rootCardId: number }> {
+  for (let i = 0; i < 400; i++) {
+    try {
+      return await fixture.reach(state);
+    } catch {
+      await vi.advanceTimersByTimeAsync(1);
+    }
+  }
+  throw new Error(`condition not reached: fixture.reach("${state}")`);
+}
+
+describe("#1548 healthy control — long-running scheduled O project with real correlated progress", () => {
+  it("keeps the custody observer green for 2s of journey time and settles once from project_accepted", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queue, coordinator } = await makeQueueWithCoordinator();
+      const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+      await scheduler.start();
+      const { fixture } = await makeFixture({ holdAcceptance: true, workerCount: 1 });
+
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
+
+      const { ExecutorLeaseStore } = leaseStoreMod;
+      const observer = new observerClass("project-task", runId, {
+        readRun: (taskId) => stateStore.readState(taskId)?.activeRun,
+        historyOutcome: (rid) => events("project-task").find(e => e.runId === rid)?.outcome,
+        card: (id) => board.kanbanGetCard(id),
+        childrenOf: (rootId) => board.kanbanGetChildren(rootId),
+        leaseFor: (attemptId) => new ExecutorLeaseStore().getView(attemptId),
+        supervision: (rid) => new reviewStoreMod.ProjectReviewStore().getSupervision(rid),
+        latestReviewCase: (rid) => new reviewStoreMod.ProjectReviewStore().getLatestReviewCase(rid),
+        pendingInputRequests: () => [],
+        currentJobs: () => queue.currentJobs,
+        now: () => Date.now(),
+      });
+
+      // 2,000 ms of journey time with the worker card live: custody must stay
+      // green at every 100 ms checkpoint.
+      for (let t = 0; t < 2000; t += 100) {
+        await vi.advanceTimersByTimeAsync(100);
+        observer.checkpoint();
+      }
+      expect(fixture.holdAcceptance).toBe(true);
+
+      // Complete the real project path: workers terminal -> review -> accept.
+      fixture.completeWorkers();
+      await vi.advanceTimersByTimeAsync(0);
+      fixture.holdAcceptance = false;
+      fixture.accept();
+      await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
+
+      observer.assertTerminal({ outcome: "success", source: "project_accepted" });
+      const ev = events("project-task");
+      expect(ev).toHaveLength(1);
+      expect(ev[0]!.runId).toBe(runId);
+      expect(rootCardId).toBeDefined();
+      expect(queue.currentJobs).toHaveLength(0);
+      observer.stop();
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("#1548 Stage-1 defect cells — current dev must fail through the custody oracle", () => {
+  async function setupCell(opts: { holdAcceptance?: boolean; failOrc?: boolean; workerCount?: number } = {}) {
+    vi.useFakeTimers();
+    const { queue, coordinator } = await makeQueueWithCoordinator();
+    const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+    scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+    scheduler.register(dueSourcesMod.createKanbanRetrySource(() => reconcilerModule.requestReconcile(-1)));
+    await scheduler.start();
+    const { fixture } = await makeFixture({ holdAcceptance: opts.holdAcceptance ?? true, workerCount: opts.workerCount ?? 1 });
+    return { queue, coordinator, scheduler, fixture };
+  }
+
+  it("cell 1: Orc terminal failure in worker-owned executing leaves the retry path without an owner", async () => {
+    const { queue, coordinator, scheduler, fixture } = await setupCell();
+    try {
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
+
+      fixture.failOrc("terminal_tool");
+      fixture.failWorkers();
+      fixture.retryRoot("orc terminal failure");
+      const retryAt = Date.parse(board.kanbanGetCard(rootCardId)!.next_retry_at as string);
+
+      const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
+      const kanbanRetrySource = dueSourcesMod.createKanbanRetrySource((cardId) => reconcilerModule.requestReconcile(cardId));
+
+      // The retry becomes due and is woken twice, >=1s apart, with the real
+      // reconciler pump attached: the retry path must re-claim the project.
+      // Current dev produces no correlated effect — the ownership loss is the
+      // named red diagnostic.
+      await vi.advanceTimersByTimeAsync(Math.max(1, retryAt - Date.now() + 1));
+      await observer.fireWake(kanbanRetrySource);
+      await vi.advanceTimersByTimeAsync(600);
+      observer.checkpoint();
+      await vi.advanceTimersByTimeAsync(600);
+      await observer.fireWake(kanbanRetrySource);
+      await vi.advanceTimersByTimeAsync(600);
+
+      let err: unknown;
+      try { observer.checkpoint(); } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(CustodyGapErrorClass);
+      const gap = err as CustodyGapError;
+      expect(gap.kind).toBe("two_no_effect_wakes");
+      expect(gap.wake?.sourceId).toBe("kanban-retry");
+      process.stdout.write("CELL1 " + gap.message + "\n");
+      observer.stop();
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cell 2: the same failure plus bridge restart before retry dispatch", async () => {
+    const { queue, coordinator, scheduler, fixture } = await setupCell();
+    try {
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
+
+      fixture.failOrc("terminal_tool");
+      fixture.failWorkers();
+      fixture.retryRoot("orc terminal failure");
+
+      // Restart before retry dispatch: fresh queue/coordinator recover the run.
+      const { queue: queue2, coordinator: coordinator2 } = await makeQueueWithCoordinator();
+      const fixture2 = await makeFixture({ holdAcceptance: true });
+      const scheduler2 = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler2.register(dueSourcesMod.createRunDeadlineSource(coordinator2));
+      let reattached = false;
+      await coordinator2.recover(taskStore.readEntries(), (entry, run) => {
+        const enqueueResult = queue2.enqueue(entry, false, run);
+        if (enqueueResult) return false;
+        reattached = true;
+        return true;
+      });
+      expect(reattached).toBe(true);
+
+      const observer = new observerClass("project-task", runId, observerStores(queue2, coordinator2, runId));
+      // The durable retry was due before restart. Reattach re-claims the
+      // queued retry card into running and never re-drives it: no child, no
+      // continuation — the run must be detected before its absolute deadline.
+      await vi.advanceTimersByTimeAsync(20_000);
+      let err: unknown;
+      try { observer.checkpoint(); } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(CustodyGapErrorClass);
+      const gap = err as CustodyGapErrorClass;
+      expect(gap.kind).toBe("no_custody");
+      expect(gap.snapshot.rootCardId).toBe(rootCardId);
+      expect(gap.snapshot.supervisionState).toBe("executing");
+      expect(gap.snapshot.liveAttempts).toHaveLength(0);
+      expect(gap.snapshot.durableContinuations).toHaveLength(0);
+      process.stdout.write("CELL2 " + gap.message + "\n");
+      observer.stop();
+      scheduler2.stop();
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cell 3: restart reattach from valid non-terminal executing with no live child", async () => {
+    const { queue, coordinator, scheduler, fixture } = await setupCell();
+    try {
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
+
+      // The Orc dies; the live child is removed through the scripted failure.
+      fixture.failOrc("terminal_tool");
+      fixture.failWorkers();
+
+      // Restart: fresh harness reattaches the same run.
+      const { queue: queue2, coordinator: coordinator2 } = await makeQueueWithCoordinator();
+      const fixture2 = await makeFixture({ holdAcceptance: true });
+      const scheduler2 = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler2.register(dueSourcesMod.createRunDeadlineSource(coordinator2));
+      let reattached = false;
+      await coordinator2.recover(taskStore.readEntries(), (entry, run) => {
+        const enqueueResult = queue2.enqueue(entry, false, run);
+        if (enqueueResult) return false;
+        reattached = true;
+        return true;
+      });
+      expect(reattached).toBe(true);
+      expect(stateStore.readState("project-task")!.activeRun!.runId).toBe(runId);
+      fixture2.fixture.adoptRoot(rootCardId);
+
+      const observer = new observerClass("project-task", runId, observerStores(queue2, coordinator2, runId));
+      // The failed-worker terminal fact must clear its settle grace; after
+      // that the reattached run has no child, no continuation, and no driver.
+      await vi.advanceTimersByTimeAsync(20_000);
+      let err: unknown;
+      try { observer.checkpoint(); } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(CustodyGapErrorClass);
+      const gap = err as CustodyGapErrorClass;
+      expect(gap.kind).toBe("no_custody");
+      expect(gap.snapshot.rootCardId).toBe(rootCardId);
+      expect(gap.snapshot.supervisionState).toBe("executing");
+      expect(gap.snapshot.liveAttempts).toHaveLength(0);
+      process.stdout.write("CELL3 " + gap.message + "\n");
+      observer.stop();
+      scheduler2.stop();
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cell 4: a due supervised-root retry whose wake produces no correlated effect", async () => {
+    const { queue, coordinator, scheduler, fixture } = await setupCell();
+    try {
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
+
+      fixture.failOrc("terminal_tool");
+      fixture.failWorkers();
+      fixture.retryRoot("orc terminal failure");
+      const retryCard = board.kanbanGetCard(rootCardId)!;
+      const retryAt = Date.parse(retryCard.next_retry_at as string);
+      expect(retryAt).toBeGreaterThan(Date.now());
+
+      const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
+      const kanbanRetrySource = dueSourcesMod.createKanbanRetrySource((cardId) => reconcilerModule.requestReconcile(cardId));
+
+      // Fire two correlated wakes separated by at least 1s once due: both
+      // must be no-effect on current dev (the retry path loses ownership).
+      await vi.advanceTimersByTimeAsync(retryAt - Date.now() + 1);
+      await observer.fireWake(kanbanRetrySource);
+      await vi.advanceTimersByTimeAsync(600);
+      observer.checkpoint();
+      await vi.advanceTimersByTimeAsync(600);
+      await observer.fireWake(kanbanRetrySource);
+      await vi.advanceTimersByTimeAsync(600);
+      let err: unknown;
+      try { observer.checkpoint(); } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(CustodyGapErrorClass);
+      const gap = err as CustodyGapError;
+      expect(gap.kind).toBe("two_no_effect_wakes");
+      expect(gap.wake?.wakeTimes).toHaveLength(2);
+      process.stdout.write("CELL4 " + gap.message + "\n");
+      observer.stop();
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+function observerStores(queue: import("../../components/tasks/task-queue.js").CronQueue, _coordinator: CoordinatorClass, runId: string) {
+  return {
+    readRun: (taskId: string) => stateStore.readState(taskId)?.activeRun,
+    historyOutcome: (rid: string) => events("project-task").find(e => e.runId === rid)?.outcome,
+    card: (id: number) => board.kanbanGetCard(id),
+    childrenOf: (rootId: number) => board.kanbanGetChildren(rootId),
+    leaseFor: () => undefined,
+    supervision: (rid: number) => new reviewStoreMod.ProjectReviewStore().getSupervision(rid),
+    latestReviewCase: (rid: number) => new reviewStoreMod.ProjectReviewStore().getLatestReviewCase(rid),
+    pendingInputRequests: () => [],
+    currentJobs: () => queue.currentJobs,
+    now: () => Date.now(),
+  };
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {

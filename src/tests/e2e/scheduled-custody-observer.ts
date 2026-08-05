@@ -132,6 +132,7 @@ export class ScheduledCustodyObserver {
   private readonly noEffectWakes: NoEffectWake[] = [];
   private lastSnapshot: CustodySnapshot | undefined;
   private terminalSeen = false;
+  private lastRootCardId: number | undefined;
 
   constructor(taskId: string, runId: string, stores: ObserverStores) {
     this.taskId = taskId;
@@ -148,7 +149,8 @@ export class ScheduledCustodyObserver {
     const now = this.stores.now();
     const run = this.stores.readRun(this.taskId);
     const historyOutcome = this.stores.historyOutcome(this.runId);
-    const rootCardId = run?.cardId;
+    if (run?.cardId !== undefined) this.lastRootCardId = run.cardId;
+    const rootCardId = run?.cardId ?? this.lastRootCardId;
 
     const children = rootCardId !== undefined ? this.stores.childrenOf(rootCardId) : [];
     const liveAttempts: number[] = [];
@@ -313,10 +315,13 @@ export class ScheduledCustodyObserver {
   // ── internals ──────────────────────────────────────────────────────────────
 
   private isCorrelatedItem(key: string, pre: CustodySnapshot): boolean {
-    // Kanban-retry items use card ids; run-deadline and admission items embed
-    // the run id. Resolve the root card first so card keys correlate.
+    // Kanban-retry items use `kanban:<cardId>`; run-deadline and admission
+    // items embed the run id. Resolve the root card first so card keys
+    // correlate.
     if (key.includes(this.runId)) return true;
-    if (pre.rootCardId !== undefined && (key === `card:${pre.rootCardId}:retry` || key.includes(`:${pre.rootCardId}`))) return true;
+    if (pre.rootCardId !== undefined && (
+      key === `kanban:${pre.rootCardId}` || key === `card:${pre.rootCardId}:retry` || key.includes(`:${pre.rootCardId}`)
+    )) return true;
     return false;
   }
 
@@ -331,18 +336,22 @@ export class ScheduledCustodyObserver {
 
     for (const wake of due) {
       const postItems = wake.source.listDueItems();
+      const pre = wake.pre;
       for (const item of wake.correlatedItems) {
         const effect =
           // the due item disappeared or moved to a later dueAt
           !postItems.some(p => p.key === item.key) ||
           postItems.some(p => p.key === item.key && p.dueAt > item.dueAt) ||
-          // a new correlated live owner appeared
-          snapshot.liveAttempts.length > 0 || snapshot.liveLeaseIds.length > 0 ||
-          // a new correlated durable continuation appeared
-          snapshot.durableContinuations.length > 0 ||
+          // a new correlated live owner appeared (was absent pre-wake)
+          snapshot.liveAttempts.length > pre.liveAttempts.length ||
+          snapshot.liveLeaseIds.length > pre.liveLeaseIds.length ||
+          // a NEW correlated durable continuation appeared (the woken retry
+          // item itself is not its own effect)
+          snapshot.durableContinuations.some(c => !pre.durableContinuations.some(pc => pc.kind === c.kind && pc.key === c.key)) ||
           // the run/project recorded a terminal request, fact, or history row
-          snapshot.terminalRequest !== undefined || snapshot.historyOutcome !== undefined ||
-          snapshot.childTerminalFactAt !== undefined;
+          (snapshot.terminalRequest !== undefined && pre.terminalRequest === undefined) ||
+          (snapshot.historyOutcome !== undefined && pre.historyOutcome === undefined) ||
+          (snapshot.childTerminalFactAt !== undefined && pre.childTerminalFactAt === undefined);
         if (effect) continue;
 
         const prior = this.noEffectWakes.find(w => w.sourceId === wake.source.id && w.itemKey === item.key);
