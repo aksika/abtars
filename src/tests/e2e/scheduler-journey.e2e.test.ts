@@ -937,7 +937,7 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
     return { queue, coordinator, scheduler, fixture };
   }
 
-  it("cell 1: Orc terminal failure in worker-owned executing leaves the retry path without an owner", async () => {
+  it("cell 1 (#1546): Orc terminal failure in worker-owned executing leaves the retry path without an owner", async () => {
     const { queue, coordinator, scheduler, fixture } = await setupCell();
     try {
       forceDue("project-task");
@@ -992,7 +992,7 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
     }
   });
 
-  it("cell 2: the same failure plus bridge restart before retry dispatch", async () => {
+  it("cell 2 (#1546): the same failure plus bridge restart before retry dispatch", async () => {
     const { queue, coordinator, scheduler, fixture } = await setupCell();
     try {
       forceDue("project-task");
@@ -1050,7 +1050,7 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
     }
   });
 
-  it("cell 3: restart reattach from valid non-terminal executing with no live child", async () => {
+  it("cell 3 (#1547): restart reattach from valid non-terminal executing with no live child", async () => {
     const { queue, coordinator, scheduler, fixture } = await setupCell();
     try {
       forceDue("project-task");
@@ -1108,7 +1108,7 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
     }
   });
 
-  it("cell 4: a due supervised-root retry whose wake produces no correlated effect", async () => {
+  it("cell 4 (#1546): a due supervised-root retry whose wake produces no correlated effect", async () => {
     const { queue, coordinator, scheduler, fixture } = await setupCell();
     try {
       forceDue("project-task");
