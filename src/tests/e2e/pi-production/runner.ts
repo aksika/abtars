@@ -204,12 +204,10 @@ async function runLane(
       restartBridge,
       abtarsHome: config.abtarsHome,
       writeArtifact: (name: string, data: string): void => {
+        // #1548: artifact persistence is evidence — a failed write must fail
+        // the scenario, never silently pass.
         const safe = name.replace(/[^a-zA-Z0-9._-]/g, "_");
-        try {
-          writeFileSync(join(writer.relativeDirectory, `${lane}-${safe}`), data, "utf-8");
-        } catch {
-          // best effort — the matrix and junit still carry the lane outcome
-        }
+        writeFileSync(join(writer.relativeDirectory, `${lane}-${safe}`), data, "utf-8");
       },
     };
 

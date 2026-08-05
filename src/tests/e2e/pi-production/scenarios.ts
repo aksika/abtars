@@ -611,7 +611,7 @@ async function cancellation(ctx: PiAcceptanceContext): Promise<void> {
 // ── Registry ────────────────────────────────────────────────────────────────
 
 // Deferred Task 7 scenarios live in ./scheduled-orc-round-limit.ts
-// (scheduledOrcRoundLimit / scheduledOrcRoundLimitRestart) — see #1549/#1550.
+// (scheduledOrcRoundLimit / scheduledOrcRoundLimitRestart) — see #1565/#1566.
 
 export const PI_SCENARIOS: PiScenario[] = [
   { name: "main-continuity-and-cursor", profiles: ["core", "full"], run: mainContinuity },
@@ -625,7 +625,7 @@ export const PI_SCENARIOS: PiScenario[] = [
   { name: "candidate-fallback", profiles: ["full"], run: fallback },
   { name: "model-switch", profiles: ["full"], run: modelSwitch },
   { name: "cancellation-deadline", profiles: ["full"], run: cancellation },
-  // #1548 Task 7 (DEFERRED — see #1549/#1550): the scheduled-project
+  // #1548 Task 7 (DEFERRED — see #1565/#1566): the scheduled-project
   // round-limit cells in scheduled-orc-round-limit.ts are ready but cannot
   // reach the scripted provider: the built ESM bridge crashes in the
   // scheduled-task-runner lazy-require path (`require is not defined`) and
