@@ -131,7 +131,6 @@ export class ScheduledCustodyObserver {
   private readonly pendingWakes: PendingWake[] = [];
   private readonly noEffectWakes: NoEffectWake[] = [];
   private lastSnapshot: CustodySnapshot | undefined;
-  private stopped = false;
   private terminalSeen = false;
 
   constructor(taskId: string, runId: string, stores: ObserverStores) {
@@ -232,7 +231,7 @@ export class ScheduledCustodyObserver {
   async fireWake(source: LifecycleDueSource): Promise<CustodySnapshot> {
     const items = source.listDueItems();
     const pre = this.sample();
-    const correlatedItems = items.filter(i => this.isCorrelatedItem(source.id, i.key, pre));
+    const correlatedItems = items.filter(i => this.isCorrelatedItem(i.key, pre));
     this.pendingWakes.push({ source, firedAt: this.stores.now(), correlatedItems, pre });
     await source.wakeDue(this.stores.now());
     return pre;
@@ -307,14 +306,13 @@ export class ScheduledCustodyObserver {
   }
 
   stop(): void {
-    this.stopped = true;
     this.pendingWakes.length = 0;
     this.noEffectWakes.length = 0;
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
 
-  private isCorrelatedItem(sourceId: string, key: string, pre: CustodySnapshot): boolean {
+  private isCorrelatedItem(key: string, pre: CustodySnapshot): boolean {
     // Kanban-retry items use card ids; run-deadline and admission items embed
     // the run id. Resolve the root card first so card keys correlate.
     if (key.includes(this.runId)) return true;
