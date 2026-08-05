@@ -765,6 +765,56 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
   });
 });
 
+describe("#1548 Task-1 gate — real admission under controlled time", () => {
+  it("reserves through the real queue with the production 30-minute deadline and settles exactly once at it", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queue, coordinator } = await makeQueueWithCoordinator();
+      const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler.register(dueSourcesMod.createTaskAdmissionSource(() => tick.runTaskTick(makeTickCtx(queue))));
+      scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+      stateStore.setTaskDueChangedHook(() => scheduler.sourceChanged("task-admission"));
+      await scheduler.start();
+
+      // Acceptance never arrives: the run must be killed by its deadline,
+      // never by an unrelated event and never before it.
+      doubles.projectHold = true;
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      // The admission chain crosses dynamic imports (real I/O), so flush
+      // event-loop turns deterministically until the card attachment lands.
+      await advanceUntil(() => stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
+
+      expect(doubles.projectRuns).toBe(1);
+      const run = stateStore.readState("project-task")!.activeRun!;
+      // Real reservation carries the production-derived absolute deadline.
+      expect(run.deadlineAt - run.reservedAt).toBe(30 * 60 * 1000);
+      expect(run.cardId).toBeDefined();
+      expect(queue.currentJobs.map(j => j.entryId)).toContain("project-task");
+
+      // Advance well past the deadline in one controlled jump: the
+      // waitForProjectTerminal 10s recheck, the run-deadline wake source,
+      // and the coordinator's deadline path must all fire without deadlock
+      // and settle the occurrence exactly once.
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000 + 11_000);
+      await advanceUntil(() => stateStore.readState("project-task")?.activeRun === undefined);
+
+      const ev = events("project-task");
+      if (ev.length !== 1) console.error("T1:", JSON.stringify(ev));
+      expect(ev).toHaveLength(1);
+      expect(ev[0]!.outcome).toBe("failed");
+      expect(ev[0]!.detail ?? "").toContain("deadline");
+      expect(stateStore.readState("project-task")!.activeRun).toBeUndefined();
+      expect(queue.currentJobs).toHaveLength(0);
+      expect(queue.pending).toBe(0);
+      scheduler.stop();
+    } finally {
+      stateStore.setTaskDueChangedHook(null);
+      vi.useRealTimers();
+    }
+  });
+});
+
 async function waitForProjectStarted(): Promise<void> {
   await waitFor(() => doubles.projectRuns === 1 && stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
 }
@@ -775,4 +825,15 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     await new Promise(r => setTimeout(r, 5));
   }
   throw new Error("condition not reached within timeout");
+}
+
+/** #1548: deterministic flush under Vitest controlled time. Each step yields
+ *  to the event loop so dynamic-import I/O completes, without advancing the
+ *  fake clock far enough to trip any production timer. */
+async function advanceUntil(predicate: () => boolean, steps = 200): Promise<void> {
+  for (let i = 0; i < steps; i++) {
+    if (predicate()) return;
+    await vi.advanceTimersByTimeAsync(1);
+  }
+  throw new Error("condition not reached under controlled time");
 }
