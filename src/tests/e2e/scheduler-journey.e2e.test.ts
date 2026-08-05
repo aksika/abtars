@@ -1104,11 +1104,88 @@ function observerStores(queue: import("../../components/tasks/task-queue.js").Cr
     leaseFor: () => undefined,
     supervision: (rid: number) => new reviewStoreMod.ProjectReviewStore().getSupervision(rid),
     latestReviewCase: (rid: number) => new reviewStoreMod.ProjectReviewStore().getLatestReviewCase(rid),
-    pendingInputRequests: () => [],
+    pendingInputRequests: (rid: number) => new reviewStoreMod.ProjectReviewStore().getPendingInputRequestsForProject(rid),
     currentJobs: () => queue.currentJobs,
     now: () => Date.now(),
   };
 }
+
+describe("#1548 Task-6 coverage — dispatcher-owned review and external input wait", () => {
+  it("review_requested holds custody through the review_request continuation and settles from the Orc review", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queue, coordinator } = await makeQueueWithCoordinator();
+      const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+      await scheduler.start();
+      const { fixture } = await makeFixture({ workerCount: 1, reviewMode: "accept" });
+
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
+      const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
+      observer.sample(); // capture the root card before settlement
+
+      fixture.completeWorkers();
+      // The real reconciler assembles the case, inserts the review request,
+      // and schedules the Orc review turn.
+      reconcilerModule.requestReconcile(rootCardId);
+      await advanceUntil(() => fixture.lastTurn === "reviewed" || !stateStore.readState("project-task")?.activeRun);
+
+      if (!stateStore.readState("project-task")?.activeRun) {
+        console.error("T6a settled early:", JSON.stringify(events("project-task")));
+      }
+      await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
+      observer.assertTerminal({ outcome: "success", source: "project_accepted" });
+      const ev = events("project-task");
+      expect(ev).toHaveLength(1);
+      expect(ev[0]!.runId).toBe(runId);
+      observer.stop();
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("needs_input holds custody through the input_request continuation; answering resumes to acceptance", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queue, coordinator } = await makeQueueWithCoordinator();
+      const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+      await scheduler.start();
+      const { fixture } = await makeFixture({ workerCount: 1, reviewMode: "needs_input" });
+
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
+
+      fixture.completeWorkers();
+      reconcilerModule.requestReconcile(rootCardId);
+      await waitForReachControlled(fixture, "needs_input");
+
+      // Pending external input is a named durable continuation: custody is
+      // held while the run waits.
+      const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(observer.sample().durableContinuations.some(c => c.kind === "input_request")).toBe(true);
+      observer.checkpoint();
+
+      // The operator answers; the reconciler opens the next review round and
+      // the Orc review accepts.
+      fixture.answerInput("scope confirmed");
+      fixture.setReviewMode("accept");
+      reconcilerModule.requestReconcile(rootCardId);
+      await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
+      observer.assertTerminal({ outcome: "success", source: "project_accepted" });
+      expect(events("project-task")).toHaveLength(1);
+      observer.stop();
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let i = 0; i < 400; i++) {

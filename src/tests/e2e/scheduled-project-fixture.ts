@@ -28,8 +28,8 @@ export type FailOrcMode = "empty" | "terminal_tool" | "round_limit" | null;
 
 export interface ScheduledProjectScript {
   /** Assert the admitted root is in a valid lifecycle state (Stage-1 subset). */
-  reach(state: "executing" | "awaiting_contract"): Promise<{ runId: string; rootCardId: number }>;
-  /** The scripted Orc dies on its next authoring turn. */
+  reach(state: "executing" | "awaiting_contract" | "review_requested" | "needs_input"): Promise<{ runId: string; rootCardId: number }>;
+  /** The scripted Orc dies on its next authoring/review turn. */
   failOrc(mode: FailOrcMode): void;
   /** Complete every running worker card as done. */
   completeWorkers(): void;
@@ -43,9 +43,13 @@ export interface ScheduledProjectScript {
   retryRoot(error: string): void;
   /** Adopt an existing root card (reattach cells where the fixture never authored). */
   adoptRoot(rootCardId: number): void;
+  /** Scripted review-turn behavior: accept, demand input, or die. */
+  setReviewMode(mode: "accept" | "needs_input" | "die"): void;
+  /** Answer the pending input request. */
+  answerInput(text: string): void;
   holdAcceptance: boolean;
   /** Last scripted turn outcome. */
-  lastTurn: "authored" | "failed" | "none";
+  lastTurn: "authored" | "reviewed" | "input_requested" | "failed" | "none";
 }
 
 export interface ScheduledProjectFixtureOptions {
@@ -55,12 +59,15 @@ export interface ScheduledProjectFixtureOptions {
   failOrcMode?: FailOrcMode;
   /** When set, accept() refuses to settle (acceptance held). */
   holdAcceptance?: boolean;
+  /** Scripted review-turn decision. */
+  reviewMode?: "accept" | "needs_input" | "die";
 }
 
 const DEFAULT_OPTIONS = {
   workerCount: 1,
   failOrcMode: null as FailOrcMode,
   holdAcceptance: false,
+  reviewMode: "accept" as "accept" | "needs_input" | "die",
 };
 
 export function makeScheduledProjectFixture(
@@ -72,6 +79,7 @@ export function makeScheduledProjectFixture(
   const state = {
     holdAcceptance: options.holdAcceptance,
     failOrcMode: options.failOrcMode,
+    reviewMode: options.reviewMode,
     lastTurn: "none" as ScheduledProjectScript["lastTurn"],
     admittedRoot: undefined as number | undefined,
   };
@@ -145,6 +153,16 @@ export function makeScheduledProjectFixture(
     adoptRoot: (rootCardId) => {
       state.admittedRoot = rootCardId;
     },
+    setReviewMode: (mode) => {
+      state.reviewMode = mode;
+    },
+    answerInput: (text) => {
+      if (state.admittedRoot === undefined) throw new Error("fixture.answerInput: no admitted root");
+      const store = new ReviewStore();
+      const pending = store.getPendingInputRequestsForProject(state.admittedRoot);
+      if (pending.length === 0) throw new Error(`fixture.answerInput: no pending input for root #${state.admittedRoot}`);
+      for (const req of pending) store.answerInputRequest(req.id, text);
+    },
   };
 
   const orc = new OrcCtor({
@@ -154,9 +172,16 @@ export function makeScheduledProjectFixture(
       state.admittedRoot = projectId;
       const store = new ReviewStore();
       const supervision = store.getSupervision(projectId);
+      // Each scripted turn mirrors a complete real Orc session: it claims the
+      // intent (via the real run store), performs its durable writes, then
+      // releases the claim so the next intent can be promoted.
+      const finish = (outcome: "completed" | "failed"): void => {
+        try { orc.getStore().release(context, outcome); } catch { /* best effort */ }
+      };
       if (!supervision || supervision.state === "awaiting_contract") {
         if (state.failOrcMode) {
           state.lastTurn = "failed";
+          finish("failed");
           return; // the Orc dies before producing the contract
         }
         const contract = buildContract(projectId, goal);
@@ -172,9 +197,36 @@ export function makeScheduledProjectFixture(
           if (workerId !== 0) kanban.kanbanRunning(workerId);
         }
         state.lastTurn = "authored";
+        finish("completed");
         return;
       }
-      state.lastTurn = "failed"; // unscripted state — never reached by Stage-1 cells
+      // Review turn (goal from scheduleReview / dispatchPendingReviewRequests):
+      // decide accept, needs_input, or die according to the script.
+      if (state.failOrcMode || state.reviewMode === "die") {
+        state.lastTurn = "failed";
+        finish("failed");
+        return;
+      }
+      const openCase = store.getLatestOpenCase(projectId);
+      if (!openCase) {
+        state.lastTurn = "failed"; // no review case to decide — nothing owned
+        finish("failed");
+        return;
+      }
+      if (state.reviewMode === "needs_input") {
+        store.settleNeedsInput(projectId, openCase.id, { action: "needs_input" }, {
+          question: "confirm the deliverable scope",
+          affectedCriterionIds: ["c1"],
+          expectedResponseKind: "text",
+        });
+        state.lastTurn = "input_requested";
+        finish("completed");
+        return;
+      }
+      store.settleAcceptance(projectId, openCase.id, { action: "accept", synthesis: "orc review accept" }, "orc review accept");
+      try { nerve.fire("card:done", projectId); } catch { /* best effort */ }
+      state.lastTurn = "reviewed";
+      finish("completed");
     },
   });
 
