@@ -703,8 +703,11 @@ async function reconcileProject(projectId: number): Promise<void> {
         // apply to scheduled roots only; generic unscheduled O cards retain
         // their current fallback behavior (no claim, no freeze).
         if (!isScheduledProjectRoot(project)) return;
+        // At most one correlated claim per wake: the coordinator's live row
+        // (or a re-derived owner) is re-read on the next wake. The queued
+        // branch promotes first and continues so the state owner still runs.
         if (claimScheduledContinuation(projectId, supervision, reviewStore, project) === "settled") return;
-        continue; // claim established — re-inspect durable ownership
+        return; // the claim (or its re-derived owner) now owns the project
     }
   }
 }

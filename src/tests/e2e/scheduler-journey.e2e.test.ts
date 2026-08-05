@@ -989,6 +989,9 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
         const snap = observer.sample();
         expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
         expect(snap.historyOutcome).toBeUndefined();
+        // Task 6: exactly one correlated claim after the retry (the admission
+        // authoring row plus one review claim); the second wake is idempotent.
+        expect(new orcRunStoreMod.OrcProjectRunStore().getRunsForProject(rootCardId)).toHaveLength(2);
       } catch (e) {
         if (e instanceof CustodyGapErrorClass) {
           expect(e.kind).toBe("two_no_effect_wakes");
@@ -1172,6 +1175,9 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
         const snap = observer.sample();
         expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
         expect(snap.historyOutcome).toBeUndefined();
+        // Task 6: one correlated claim after the retry; the two manual wakes
+        // are idempotent — no third run row.
+        expect(new orcRunStoreMod.OrcProjectRunStore().getRunsForProject(rootCardId)).toHaveLength(2);
       } catch (e) {
         if (e instanceof CustodyGapErrorClass) {
           expect(e.kind).toBe("two_no_effect_wakes");
