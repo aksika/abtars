@@ -677,4 +677,96 @@ describe("WorkerSupervisionStore", () => {
       expect(chargedAfter.charged_tokens).toBe(150);
     });
   });
+
+  describe("pruneTerminalAttempts (#1551)", () => {
+    let ordinal = 0;
+    function seedAttempt(store: InstanceType<typeof Store>, id: string, opts: { lifecycle: string; settledAt: string | null }) {
+      ordinal += 1;
+      store.db.prepare(`
+        INSERT INTO worker_attempts
+          (id, card_id, contract_id, ordinal, executor_kind, executor_id, status,
+           lifecycle, started_at, settled_at)
+        VALUES (?, 101, ?, ?, 'agent', 'spin', ?, ?, '2026-01-01T00:00:00.000Z', ?)
+      `).run(id, TEST_CONTRACT.id, ordinal, opts.lifecycle, opts.lifecycle, opts.settledAt);
+    }
+
+    beforeEach((ctx) => {
+      const store: InstanceType<typeof Store> = new Store();
+      store.insertContract(TEST_CONTRACT, 101);
+      (ctx as unknown as { store: InstanceType<typeof Store> }).store = store;
+    });
+
+    it("deletes a terminal attempt settled well before the cutoff", (ctx) => {
+      const store = (ctx as unknown as { store: InstanceType<typeof Store> }).store;
+      seedAttempt(store, "a_old", { lifecycle: "completed", settledAt: "2020-01-01T00:00:00.000Z" });
+
+      const purged = store.pruneTerminalAttempts(7);
+
+      expect(purged).toBe(1);
+      expect(store.getAttempt("a_old")).toBeUndefined();
+    });
+
+    it("does not delete a terminal attempt settled inside the retention window", (ctx) => {
+      const store = (ctx as unknown as { store: InstanceType<typeof Store> }).store;
+      seedAttempt(store, "a_recent", { lifecycle: "completed", settledAt: new Date().toISOString() });
+
+      const purged = store.pruneTerminalAttempts(7);
+
+      expect(purged).toBe(0);
+      expect(store.getAttempt("a_recent")).toBeDefined();
+    });
+
+    it("does not delete a non-terminal (still running) attempt regardless of age", (ctx) => {
+      const store = (ctx as unknown as { store: InstanceType<typeof Store> }).store;
+      seedAttempt(store, "a_running", { lifecycle: "running", settledAt: null });
+
+      const purged = store.pruneTerminalAttempts(7);
+
+      expect(purged).toBe(0);
+      expect(store.getAttempt("a_running")).toBeDefined();
+    });
+
+    it("does not delete a terminal attempt with settled_at still NULL", (ctx) => {
+      const store = (ctx as unknown as { store: InstanceType<typeof Store> }).store;
+      // Defends the guard explicitly: terminal lifecycle alone is not sufficient.
+      seedAttempt(store, "a_unsettled", { lifecycle: "failed", settledAt: null });
+
+      const purged = store.pruneTerminalAttempts(7);
+
+      expect(purged).toBe(0);
+      expect(store.getAttempt("a_unsettled")).toBeDefined();
+    });
+
+    it("cascades to worker_results and released retry_budget_reservations for the pruned attempt", (ctx) => {
+      const store = (ctx as unknown as { store: InstanceType<typeof Store> }).store;
+      seedAttempt(store, "a_old", { lifecycle: "completed", settledAt: "2020-01-01T00:00:00.000Z" });
+      store.db.prepare(`INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at) VALUES (?, '{}', 'd', '2020-01-01T00:00:00.000Z')`).run("a_old");
+      store.db.prepare(`
+        INSERT INTO retry_budget_reservations
+          (source_attempt_id, target_attempt_id, reserved_attempts, reserved_tokens, reserved_cost, reserved_switches, status, created_at, updated_at)
+        VALUES ('a_old', 'a_next', 1, 1000, 0, 0, 'released', '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')
+      `).run();
+
+      store.pruneTerminalAttempts(7);
+
+      expect(store.db.prepare(`SELECT * FROM worker_results WHERE attempt_id = 'a_old'`).get()).toBeUndefined();
+      expect(store.db.prepare(`SELECT * FROM retry_budget_reservations WHERE source_attempt_id = 'a_old'`).get()).toBeUndefined();
+    });
+
+    it("keeps an active reservation for a pruned source attempt (status guard, not just age)", (ctx) => {
+      const store = (ctx as unknown as { store: InstanceType<typeof Store> }).store;
+      seedAttempt(store, "a_old", { lifecycle: "completed", settledAt: "2020-01-01T00:00:00.000Z" });
+      store.db.prepare(`
+        INSERT INTO retry_budget_reservations
+          (source_attempt_id, target_attempt_id, reserved_attempts, reserved_tokens, reserved_cost, reserved_switches, status, created_at, updated_at)
+        VALUES ('a_old', 'a_next', 1, 1000, 0, 0, 'active', '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')
+      `).run();
+
+      store.pruneTerminalAttempts(7);
+
+      // The reservation is still active (claimed by a live retry attempt) —
+      // age alone must not delete it even though its source attempt is gone.
+      expect(store.db.prepare(`SELECT * FROM retry_budget_reservations WHERE source_attempt_id = 'a_old'`).get()).toBeDefined();
+    });
+  });
 });

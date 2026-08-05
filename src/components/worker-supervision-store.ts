@@ -876,4 +876,39 @@ export class WorkerSupervisionStore {
       ORDER BY wa.card_id, wa.ordinal
     `).all() as unknown as AttemptRow[];
   }
+
+  /**
+   * #1551 — Prune telemetry for attempts that settled more than
+   * `olderThanDays` ago, restricted to the tables this store owns
+   * (worker_attempts, worker_results, retry_budget_reservations).
+   * worker_attempts.lifecycle + settled_at is the single terminality
+   * predicate (#1510); worker_results and retry_budget_reservations are
+   * keyed off an attempt id, so one terminal-attempt-id subquery drives
+   * every delete here. RetryStore.pruneTerminalAttempts is the companion
+   * for the retry_* tables it owns — see prunePiCommands's caller in
+   * heartbeat-housekeeping.ts for why the two are not merged into one method.
+   *
+   * First DELETE statements ever run against these tables — deliberately
+   * conservative (age-gated, terminal-only) rather than a blanket sweep.
+   */
+  pruneTerminalAttempts(olderThanDays: number): number {
+    const cutoff = `datetime('now', '-' || ${Number(olderThanDays)} || ' days')`;
+    const terminalAttempts = `
+      SELECT id FROM worker_attempts
+      WHERE lifecycle IN ('completed','failed','cancelled','timed_out')
+        AND settled_at IS NOT NULL
+        AND settled_at < ${cutoff}
+    `;
+    let deleted = 0;
+    deleted += this.db.prepare(`DELETE FROM worker_results WHERE attempt_id IN (${terminalAttempts})`).run().changes;
+    deleted += this.db.prepare(`
+      DELETE FROM retry_budget_reservations
+      WHERE status IN ('released','consumed')
+        AND updated_at < ${cutoff}
+        AND (source_attempt_id IN (${terminalAttempts}) OR target_attempt_id IN (${terminalAttempts}))
+    `).run().changes;
+    // Attempts themselves prune last so the subqueries above still resolve them.
+    deleted += this.db.prepare(`DELETE FROM worker_attempts WHERE id IN (${terminalAttempts})`).run().changes;
+    return deleted;
+  }
 }

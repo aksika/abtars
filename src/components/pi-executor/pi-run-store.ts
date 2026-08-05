@@ -1078,6 +1078,19 @@ export class PiRunStore {
   }
 
   /**
+   * #1551 — Consumed approval markers are one-shot idempotency guards; once
+   * consumed they have no further purpose, so pure age is a safe predicate
+   * (no "in-flight" state to protect, unlike cleanupOldCommands above).
+   */
+  cleanupConsumedApprovals(olderThanHours: number): number {
+    const result = this.db.prepare(`
+      DELETE FROM remote_pi_approvals_consumed
+      WHERE consumed_at < datetime('now', '-' || ? || ' hours')
+    `).run(olderThanHours);
+    return result.changes;
+  }
+
+  /**
    * Atomically consume a resume approval.
    * Returns true if the approval was newly consumed (first use),
    * false if it was already consumed by a different command.

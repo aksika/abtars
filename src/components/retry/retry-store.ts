@@ -392,4 +392,39 @@ export class RetryStore {
 
     return { totalAttempts, sameClassCount, consecutiveSameExecutorFails, executorSwitches, elapsedMs, totalTokens, totalCost, activeReservations: reservedAttempts };
   }
+
+  /**
+   * #1551 — Companion to WorkerSupervisionStore.pruneTerminalAttempts for the
+   * three tables this store owns. Reads worker_attempts.lifecycle +
+   * settled_at directly (same convention already used above for
+   * retry_budget_reservations) rather than duplicating the terminality
+   * predicate as a public export — both stores share one TaskDatabase
+   * connection, so this is a same-file cross-table query, not a cross-store
+   * coupling. retry_policy_decisions excludes status='review_required': those
+   * rows are a live review queue regardless of how old the underlying
+   * attempt is.
+   *
+   * First DELETE statements ever run against these tables.
+   */
+  pruneTerminalAttempts(olderThanDays: number): number {
+    const cutoff = `datetime('now', '-' || ${Number(olderThanDays)} || ' days')`;
+    const terminalAttempts = `
+      SELECT id FROM worker_attempts
+      WHERE lifecycle IN ('completed','failed','cancelled','timed_out')
+        AND settled_at IS NOT NULL
+        AND settled_at < ${cutoff}
+    `;
+    let deleted = 0;
+    deleted += this.db.prepare(`DELETE FROM attempt_failure_classifications WHERE attempt_id IN (${terminalAttempts})`).run().changes;
+    deleted += this.db.prepare(`
+      DELETE FROM retry_directives
+      WHERE source_attempt_id IN (${terminalAttempts}) OR target_attempt_id IN (${terminalAttempts})
+    `).run().changes;
+    deleted += this.db.prepare(`
+      DELETE FROM retry_policy_decisions
+      WHERE status != 'review_required'
+        AND source_attempt_id IN (${terminalAttempts})
+    `).run().changes;
+    return deleted;
+  }
 }

@@ -37,6 +37,8 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
     { name: "update-check", intervalMs: 6 * HOUR, run: runUpdateCheck },
     { name: "metrics-prune", intervalMs: DAY, run: pruneMetrics },
     { name: "kanban-cleanup", intervalMs: DAY, run: cleanupKanban },
+    { name: "pi-command-prune", intervalMs: DAY, run: prunePiCommands },
+    { name: "attempt-prune", intervalMs: DAY, run: pruneTerminalAttempts },
   ];
 
   const nextEligibleAt = new Float64Array(jobs.length);
@@ -149,5 +151,36 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
     const { kanbanCleanup } = await import("./tasks/kanban-board.js");
     const purged = kanbanCleanup(7);
     if (purged > 0) logInfo(TAG, `Kanban: purged ${purged} delivered cards > 7d`);
+  }
+
+  /** #1551 — wires the previously-dead PiRunStore.cleanupOldCommands + the
+   * uncovered remote_pi_approvals_consumed table onto the same 7d cadence as
+   * kanban-cleanup above. requireTaskDatabase() is the shared handle every
+   * store here already defaults to; PiRunStore itself takes no-default deps,
+   * so this constructs it directly rather than reaching through ctx. */
+  async function prunePiCommands(): Promise<void> {
+    const { requireTaskDatabase } = await import("./tasks/kanban-board.js");
+    const { PiRunStore } = await import("./pi-executor/pi-run-store.js");
+    const store = new PiRunStore({ db: requireTaskDatabase() });
+    const commands = store.cleanupOldCommands(7 * 24);
+    const approvals = store.cleanupConsumedApprovals(7 * 24);
+    if (commands > 0 || approvals > 0) {
+      logInfo(TAG, `Pi telemetry: purged ${commands} commands, ${approvals} consumed approvals > 7d`);
+    }
+  }
+
+  /** #1551 — first retention pass over worker/retry attempt telemetry.
+   * WorkerSupervisionStore and RetryStore own disjoint table sets on the same
+   * shared TaskDatabase (worker_attempts/worker_results/retry_budget_reservations
+   * vs attempt_failure_classifications/retry_directives/retry_policy_decisions);
+   * each store prunes only what it created. See their pruneTerminalAttempts
+   * for the terminality predicate and the review_required exclusion. */
+  async function pruneTerminalAttempts(): Promise<void> {
+    const { WorkerSupervisionStore } = await import("./worker-supervision-store.js");
+    const { RetryStore } = await import("./retry/retry-store.js");
+    const supStore = new WorkerSupervisionStore();
+    const retryStore = new RetryStore(supStore.db);
+    const purged = supStore.pruneTerminalAttempts(7) + retryStore.pruneTerminalAttempts(7);
+    if (purged > 0) logInfo(TAG, `Worker telemetry: purged ${purged} terminal-attempt rows > 7d`);
   }
 }
