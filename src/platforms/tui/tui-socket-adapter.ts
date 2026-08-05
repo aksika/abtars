@@ -595,9 +595,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     capturedAttGen: number,
   ): void {
     const feed = this.deps.orcActivityFeed;
-    const orcEntry = spin.listAllSessions().find(
-      s => s.id.includes("_O_") && s.status !== "ended",
-    );
+    const orcEntry = spin.getSessionById(sessionId);
     if (!feed || !orcEntry) return;
 
     this._activitySequence = 0;
@@ -671,10 +669,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
         break;
       }
       case "orc": {
-        if (!spin.getOrcSession()) return this._reject("No Orc session is running.");
-        const orcEntry = spin.listAllSessions().find(
-          s => s.id.includes("_O_") && s.status !== "ended",
-        );
+        const orcEntry = spin.getOrcSession();
         if (!orcEntry) return this._reject("No Orc session is running.");
         sessionId = orcEntry.id;
         nextMode = "orc";
@@ -704,10 +699,8 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private _recoverActivity(clearDirty = true): boolean {
     if (!this._writer || !this._activityDirty) return false;
     const feed = this.deps.orcActivityFeed;
-    if (!feed) return false;
-    const orcEntry = this.deps.spin.listAllSessions().find(
-      s => s.id.includes("_O_") && s.status !== "ended",
-    );
+    if (!feed || !this.attachedSessionId) return false;
+    const orcEntry = this.deps.spin.getSessionById(this.attachedSessionId);
     if (!orcEntry) return false;
 
     this._writer.dropActivity();
@@ -1014,25 +1007,17 @@ export class TuiSocketAdapter implements PlatformAdapter {
     const spin = this.deps.spin;
     const capturedGen = this._connGen;
 
-    if (!spin.getOrcSession()) {
-      return void this._push({
-        t: "message", role: "system",
-        markdown: "Orc is not available (not running or still warming up).",
-      });
-    }
-    const orcEntry = spin.listAllSessions().find(
-      s => s.id.includes("_O_") && s.status !== "ended",
-    );
-    if (orcEntry?.busy) {
-      return void this._push({
-        t: "message", role: "system",
-        markdown: `Orc is busy — use /steer <text> to queue a steering instruction, or wait until idle.\n\nExisting steering: try \`/steer ${text.slice(0, 80)}\` to queue this as a steering instruction.`,
-      });
-    }
+    const orcEntry = spin.getOrcSession();
     if (!orcEntry) {
       return void this._push({
         t: "message", role: "system",
         markdown: "Orc is not available (not running or still warming up).",
+      });
+    }
+    if (orcEntry.busy) {
+      return void this._push({
+        t: "message", role: "system",
+        markdown: `Orc is busy — use /steer <text> to queue a steering instruction, or wait until idle.\n\nExisting steering: try \`/steer ${text.slice(0, 80)}\` to queue this as a steering instruction.`,
       });
     }
     try {

@@ -7,7 +7,7 @@ import { logInfo, logWarn, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { SpinDispatchAdmissionError } from "./spin-types.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanGetCard, resolveRootId, checkWorkerSlotForProject } from "./tasks/kanban-board.js";
-import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
+import type { SubagentRuntime } from "./subagent-runtime.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import type { CancelReason } from "./swarm-executor-types.js";
 import { loadUsers } from "./user-registry.js";
@@ -59,7 +59,6 @@ export class Spin {
   private readonly maintenance: SpinMaintenance;
   private runtime: SubagentRuntime | null = null;
   private memory: { recordMessage(opts: { role: string; content: string; timestamp: number; userId: string; sessionId: string }): void } | null = null;
-  private orcSession: AgentSession | null = null;
   private orcActivityFeed?: OrcActivityFeed;
   private sessionOutputFeed?: SessionOutputFeed;
   /**
@@ -430,7 +429,6 @@ export class Spin {
     for (const s of this.sessions.listAll()) {
       this.finalizeSession(s, "shutdown");
     }
-    if (this.orcSession) { try { this.orcSession.destroy(); } catch (err) { logAndSwallow(TAG, "destroy", err); } this.orcSession = null; }
     this.sessions.clear();
     // #1540: shutdown clears the execution supervisor with the registry — no
     // stale live handle, occupancy, or session binding survives a destroy.
@@ -469,7 +467,12 @@ export class Spin {
 
   // ── Orc ────────────────────────────────────────────────────────────────
 
-  getOrcSession(): AgentSession | null { return this.orcSession?.isReady ? this.orcSession : null; }
+  getOrcSession(): ManagedSession | null {
+    // #1545: derive from the unified registry — the legacy cached AgentSession
+    // handle has not been populated since #1271, so a registry-backed lookup is
+    // the only source of truth for a live Orc.
+    return this.sessions.listAll().find(s => s.id.includes("_O_") && s.status !== "ended") ?? null;
+  }
 
   /** @deprecated Use `spin({ type:"O", sessionId, prompt:"[USER] "+msg, await:true })`. */
   async sendUserToOrc(message: string): Promise<string | null> {
