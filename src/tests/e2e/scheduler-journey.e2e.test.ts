@@ -48,6 +48,9 @@ let executeToolCall: typeof import("../../components/transport/tool-registry.js"
 let CoordinatorClass: typeof import("../../components/tasks/scheduled-run-coordinator.js").ScheduledRunCoordinator;
 let wakeSchedulerMod: typeof import("../../components/lifecycle-wake-scheduler.js");
 let dueSourcesMod: typeof import("../../components/tasks/due-sources.js");
+let reconcilerModule: typeof import("../../components/reconciler.js");
+let realProjectRunner: typeof import("../../components/tasks/scheduled-project-runner.js").scheduledProjectRunner;
+let observerClass: typeof import("./scheduled-custody-observer.js").ScheduledCustodyObserver;
 
 const FIXTURES: ScheduledTask[] = [
   {
@@ -95,15 +98,12 @@ interface SchedulerDoubles {
   providerFailures: number;
   providerErrors: Array<{ code?: string; retryable?: boolean }>;
   admissionRejections: number;
-  projectRuns: number;
   sleepCycleCalls: number;
   sentMessages: string[];
   sentDocuments: Array<{ chatId: string; path: string }>;
   injectedReminders: string[];
   pausedNotifications: string[];
   spawnedCommands: string[];
-  /** #1539: when set, fakeProjectRunner holds acceptance until released. */
-  projectHold: boolean;
 }
 
 let doubles: SchedulerDoubles;
@@ -131,38 +131,6 @@ function fakeAgentRunner(request: import("../../components/spin-types.js").SpinR
     writeFileSync(join(dir, "report.md"), `## Summary\n\nFinance report body with enough bytes to pass the 100-byte minimum contract. \nAdditional verified sections for the report pipeline.\n`);
   }
   return Promise.resolve({ cardId, result: `result for ${entryId}` });
-}
-
-async function fakeProjectRunner(request: import("../../components/tasks/scheduled-project-runner.js").ScheduledProjectRequest): Promise<{ cardId: number; result: string; factAt?: number }> {
-  doubles.projectRuns++;
-  // Use the real scheduled O runner. The deterministic double is only the
-  // coordinator/model boundary that accepts the real project after admission.
-  const { scheduledProjectRunner } = await import("../../components/tasks/scheduled-project-runner.js");
-  const reconcilerModule = await import("../../components/reconciler.js");
-  const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
-  const { nerve } = await import("../../components/nerve.js");
-  reconcilerModule.setOrcCoordinator({
-    scheduleScheduledProject(projectCardId: number) {
-      setImmediate(() => {
-        const store = new ProjectReviewStore();
-        // Idempotent claim: a reattached admission may repeat generation/round.
-        let reviewCase = store.getLatestReviewCase(projectCardId);
-        if (!reviewCase) {
-          reviewCase = store.insertReviewCase(projectCardId, 1, 1, { summary: "verified" }, "digest");
-        }
-        if (doubles.projectHold) return;
-        try {
-          store.settleAcceptance(projectCardId, reviewCase.id, { accepted: true }, "project accepted");
-        } catch {
-          // Idempotent double: a late claim must not reverse an already-settled project.
-          return;
-        }
-        nerve.fire("card:done", projectCardId);
-      });
-      return { kind: "claimed", context: { runId: request.runId, projectCardId } } as never;
-    },
-  } as never);
-  return scheduledProjectRunner(request);
 }
 
 function makeDeliveryDeps() {
@@ -208,6 +176,10 @@ async function loadModules(): Promise<void> {
   CoordinatorClass = (await import("../../components/tasks/scheduled-run-coordinator.js")).ScheduledRunCoordinator;
   wakeSchedulerMod = await import("../../components/lifecycle-wake-scheduler.js");
   dueSourcesMod = await import("../../components/tasks/due-sources.js");
+  reconcilerModule = await import("../../components/reconciler.js");
+  realProjectRunner = (await import("../../components/tasks/scheduled-project-runner.js")).scheduledProjectRunner;
+  makeFixtureFactory = (await import("./scheduled-project-fixture.js")).makeScheduledProjectFixture;
+  observerClass = (await import("./scheduled-custody-observer.js")).ScheduledCustodyObserver;
 }
 
 function writeFixtureTasks(): void {
@@ -228,7 +200,7 @@ async function makeQueue(): Promise<import("../../components/tasks/task-queue.js
   const coordinator = new CoordinatorClass({
     onTaskPaused: (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
     agentRunner: fakeAgentRunner,
-    projectRunner: fakeProjectRunner,
+    projectRunner: realProjectRunner,
   });
   const queue = new CronQueue("kiro-cli", ".", coordinator);
   return queue;
@@ -240,11 +212,25 @@ async function makeQueueWithCoordinator(): Promise<{ queue: import("../../compon
   const coordinator = new CoordinatorClass({
     onTaskPaused: (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
     agentRunner: fakeAgentRunner,
-    projectRunner: fakeProjectRunner,
+    projectRunner: realProjectRunner,
   });
   const queue = new CronQueue("kiro-cli", ".", coordinator);
   return { queue, coordinator };
 }
+
+/** #1548: per-test scripted Orc boundary wired into the real reconciler. */
+async function makeFixture(opts?: Parameters<typeof makeFixtureFactory>[1]) {
+  const { fixture, orc } = makeFixtureFactory({
+    OrcProjectCoordinator: (await import("../../components/orc-project/orc-project-coordinator.js")).OrcProjectCoordinator,
+    ProjectReviewStore: (await import("../../components/project-acceptance/project-review-store.js")).ProjectReviewStore,
+    kanban: await import("../../components/tasks/kanban-board.js"),
+    nerve: (await import("../../components/nerve.js")).nerve,
+  }, opts);
+  reconcilerModule.setOrcCoordinator(orc);
+  return { fixture, orc };
+}
+
+let makeFixtureFactory: typeof import("./scheduled-project-fixture.js").makeScheduledProjectFixture;
 
 function makeTickCtx(queue: import("../../components/tasks/task-queue.js").CronQueue) {
   return {
@@ -296,9 +282,9 @@ beforeEach(async () => {
     users: [{ userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 1111111111 } }],
   }));
   doubles = {
-    providerFailures: 0, providerErrors: [], admissionRejections: 0, projectRuns: 0,
+    providerFailures: 0, providerErrors: [], admissionRejections: 0,
     sleepCycleCalls: 0, sentMessages: [], sentDocuments: [], injectedReminders: [],
-    pausedNotifications: [], spawnedCommands: [], projectHold: false,
+    pausedNotifications: [], spawnedCommands: [],
   };
   vi.mocked(child_process.spawn).mockImplementation(((
     _file: string,
@@ -429,11 +415,19 @@ describe("#1520 scheduler E2E — journey 4: one-shot T announcement", () => {
 });
 
 describe("#1520 scheduler E2E — journey 5: multi-agent one-shot through the internal O project", () => {
-  it("supervises via the project runner, validates, settles, releases delivery once", async () => {
+  it("supervises via the real project runner + scripted Orc, validates, settles, releases delivery once", async () => {
     const queue = await makeQueue();
+    const { fixture } = await makeFixture();
     forceDue("project-task");
-    await runTick(queue);
-    expect(doubles.projectRuns).toBe(1);
+    await tick.runTaskTick(makeTickCtx(queue));
+    const { runId } = await waitForReach(fixture, "executing");
+    expect(runId).toBeDefined();
+    expect(board.kanbanGetCard(1)?.source_id).toBe(runId);
+    expect(fixture.lastTurn).toBe("authored");
+
+    fixture.completeWorkers();
+    fixture.accept();
+    await waitFor(() => !stateStore.readState("project-task")?.activeRun);
 
     const ev = events("project-task");
     expect(ev).toHaveLength(1);
@@ -670,12 +664,13 @@ describe("#1539 scheduler E2E — journey 11: two-lane admission and same-task e
     scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
     await scheduler.start();
     try {
-      // A long supervised project: acceptance is held until we release it.
-      doubles.projectHold = true;
+      // A long supervised project: the scripted Orc holds acceptance until
+      // the workers are completed and we release the hold.
+      const { fixture } = await makeFixture({ holdAcceptance: true, workerCount: 1 });
       forceDue("project-task");
       await tick.runTaskTick(makeTickCtx(queue));
-      await waitForProjectStarted();
-      expect(doubles.projectRuns).toBe(1);
+    const { runId } = await waitForReach(fixture, "executing");
+      expect(runId).toBeDefined();
       expect(queue.currentJobs.map(j => j.entryId)).toContain("project-task");
 
       // An unrelated manual run starts in the manual lane concurrently.
@@ -691,15 +686,10 @@ describe("#1539 scheduler E2E — journey 11: two-lane admission and same-task e
       expect(queue.currentJobs).toHaveLength(2);
       expect(events("announce-task")).toHaveLength(0);
 
-      // Release the project: it settles once and releases only its lane.
-      doubles.projectHold = false;
-      const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
-      const { nerve } = await import("../../components/nerve.js");
-      const roots = board.kanbanList("*").filter(c => c.type === "O");
-      const reviewStore = new ProjectReviewStore();
-      const latestCase = reviewStore.getLatestReviewCase(roots[0]!.id);
-      reviewStore.settleAcceptance(roots[0]!.id, latestCase!.id, { accepted: true }, "project accepted");
-      nerve.fire("card:done", roots[0]!.id);
+      // Release the project: complete workers, accept, settle once.
+      fixture.completeWorkers();
+      fixture.holdAcceptance = false;
+      fixture.accept();
       await waitFor(() => queue.currentJobs.length === 0 && !stateStore.readState("project-task")?.activeRun);
 
       const ev = events("project-task");
@@ -707,11 +697,11 @@ describe("#1539 scheduler E2E — journey 11: two-lane admission and same-task e
       expect(ev[0]!.outcome).toBe("success");
       // The manual run completed independently with its own row.
       expect(events("announce-task")).toHaveLength(1);
-      expect(cardStatuses().filter(s => s.endsWith(":done"))).toHaveLength(2);
+      // Done: project root O + its fixture worker W + the manual announce card.
+      expect(cardStatuses().filter(s => s.endsWith(":done"))).toHaveLength(3);
       scheduler.stop();
     } finally {
       scheduler.stop();
-      doubles.projectHold = false;
     }
   });
 });
@@ -723,17 +713,17 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
     scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
     await scheduler.start();
     try {
-      doubles.projectHold = true;
+      const { fixture } = await makeFixture({ holdAcceptance: true });
       forceDue("project-task");
       await tick.runTaskTick(makeTickCtx(queue));
-      await waitForProjectStarted();
-      const firstRunId = stateStore.readState("project-task")!.activeRun!.runId;
-      const rootId = stateStore.readState("project-task")!.activeRun!.cardId;
-      expect(rootId).toBeDefined();
+      const { runId, rootCardId } = await waitForReach(fixture, "executing");
+      const firstRunId = runId;
+      expect(firstRunId).toBeDefined();
 
-      // Restart: a fresh queue/coordinator recovers the active occurrence and
-      // reattaches the SAME run through admission.
+      // Restart: a fresh queue/coordinator + fresh scripted Orc recovers the
+      // active occurrence and reattaches the SAME run through admission.
       const { queue: queue2, coordinator: coordinator2 } = await makeQueueWithCoordinator();
+      const fixture2 = await makeFixture({ holdAcceptance: true });
       const scheduler2 = new wakeSchedulerMod.LifecycleWakeScheduler();
       scheduler2.register(dueSourcesMod.createRunDeadlineSource(coordinator2));
       let reattached = false;
@@ -747,20 +737,30 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
       expect(stateStore.readState("project-task")!.activeRun!.runId).toBe(firstRunId);
       expect(queue2.currentJobs.map(j => j.entryId)).toContain("project-task");
 
-      // Release acceptance: the reattached run's pending claim (queued at
-      // admission) settles the project and the occurrence settles exactly once.
-      doubles.projectHold = false;
+      // The reattached run still owns its workers (durable W cards); complete
+      // them and accept to settle the project exactly once. Reattach performs
+      // no authoring (supervision is already executing), so the fresh fixture
+      // records no turn.
+      await waitFor(() => stateStore.readState("project-task")?.activeRun?.runId === firstRunId && stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
+      expect(fixture2.fixture.lastTurn).toBe("none");
+      const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
+      expect(new ProjectReviewStore().getSupervision(rootCardId)?.state).toBe("executing");
+      fixture2.fixture.adoptRoot(rootCardId);
+      fixture2.fixture.completeWorkers();
+      fixture2.fixture.holdAcceptance = false;
+      fixture2.fixture.accept();
       await waitFor(() => queue2.currentJobs.length === 0 && !stateStore.readState("project-task")?.activeRun);
 
       const ev = events("project-task");
       expect(ev).toHaveLength(1);
       expect(ev[0]!.outcome).toBe("success");
       expect(ev[0]!.runId).toBe(firstRunId);
-      expect(cardStatuses().filter(s => s.endsWith(":done"))).toHaveLength(1);
+      expect(rootCardId).toBeDefined();
+      // Root O + its fixture worker W are done; no duplicates.
+      expect(cardStatuses().filter(s => s.endsWith(":done"))).toHaveLength(2);
       scheduler2.stop();
     } finally {
       scheduler.stop();
-      doubles.projectHold = false;
     }
   });
 });
@@ -778,14 +778,14 @@ describe("#1548 Task-1 gate — real admission under controlled time", () => {
 
       // Acceptance never arrives: the run must be killed by its deadline,
       // never by an unrelated event and never before it.
-      doubles.projectHold = true;
+      const { fixture } = await makeFixture();
       forceDue("project-task");
       await tick.runTaskTick(makeTickCtx(queue));
       // The admission chain crosses dynamic imports (real I/O), so flush
       // event-loop turns deterministically until the card attachment lands.
       await advanceUntil(() => stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
 
-      expect(doubles.projectRuns).toBe(1);
+      expect(fixture.lastTurn).toBe("authored");
       const run = stateStore.readState("project-task")!.activeRun!;
       // Real reservation carries the production-derived absolute deadline.
       expect(run.deadlineAt - run.reservedAt).toBe(30 * 60 * 1000);
@@ -815,8 +815,16 @@ describe("#1548 Task-1 gate — real admission under controlled time", () => {
   });
 });
 
-async function waitForProjectStarted(): Promise<void> {
-  await waitFor(() => doubles.projectRuns === 1 && stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
+/** #1548: wait for the scripted Orc to author the project into the state. */
+async function waitForReach(fixture: Awaited<ReturnType<typeof makeFixture>>["fixture"], state: "executing" | "awaiting_contract"): Promise<{ runId: string; rootCardId: number }> {
+  for (let i = 0; i < 400; i++) {
+    try {
+      return await fixture.reach(state);
+    } catch {
+      await new Promise(r => setTimeout(r, 5));
+    }
+  }
+  throw new Error(`condition not reached: fixture.reach("${state}")`);
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
