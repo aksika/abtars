@@ -54,6 +54,8 @@ let observerClass: typeof import("./scheduled-custody-observer.js").ScheduledCus
 let CustodyGapErrorClass: typeof import("./scheduled-custody-observer.js").CustodyGapError;
 let reviewStoreMod: typeof import("../../components/project-acceptance/project-review-store.js");
 let leaseStoreMod: typeof import("../../components/executor-lease-store.js");
+let nerveMod: typeof import("../../components/nerve.js");
+let WorkerSupervisionStoreClass: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
 
 const FIXTURES: ScheduledTask[] = [
   {
@@ -186,6 +188,8 @@ async function loadModules(): Promise<void> {
   CustodyGapErrorClass = (await import("./scheduled-custody-observer.js")).CustodyGapError;
   reviewStoreMod = await import("../../components/project-acceptance/project-review-store.js");
   leaseStoreMod = await import("../../components/executor-lease-store.js");
+  nerveMod = await import("../../components/nerve.js");
+  WorkerSupervisionStoreClass = (await import("../../components/worker-supervision-store.js")).WorkerSupervisionStore;
 }
 
 function writeFixtureTasks(): void {
@@ -231,6 +235,8 @@ async function makeFixture(opts?: Parameters<typeof makeFixtureFactory>[1]) {
     ProjectReviewStore: (await import("../../components/project-acceptance/project-review-store.js")).ProjectReviewStore,
     kanban: await import("../../components/tasks/kanban-board.js"),
     nerve: (await import("../../components/nerve.js")).nerve,
+    WorkerSupervisionService: (await import("../../components/worker-supervision-service.js")).WorkerSupervisionService,
+    WorkerSupervisionStore: (await import("../../components/worker-supervision-store.js")).WorkerSupervisionStore,
   }, opts);
   reconcilerModule.setOrcCoordinator(orc);
   return { fixture, orc };
@@ -772,16 +778,20 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
 });
 
 describe("#1548 Task-1 gate — real admission under controlled time", () => {
-  it("reserves through the real queue with the production 30-minute deadline and settles exactly once at it", async () => {
+  it("reserves through the real queue with the production 30-minute deadline and settles once as deadline_exceeded", async () => {
     vi.useFakeTimers();
     try {
       const { queue, coordinator } = await makeQueueWithCoordinator();
       const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
-      // Deadline-only scheduler: the task-admission source re-admits a fresh
-      // occurrence after a deadline settle (nextRunAt raced ahead of the
-      // state patch), which would make the observed run ambiguous. The
-      // re-admission observation is recorded as a finding, not asserted here.
+      // Production mirror (phase-pipeline-deps): a durable mutation notifies
+      // BOTH the admission and run-deadline sources. Notifying only an
+      // unregistered source would leave the deadline item unarmed and the
+      // run-deadline wake would never fire.
       scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+      stateStore.setTaskDueChangedHook(() => {
+        scheduler.sourceChanged("task-admission");
+        scheduler.sourceChanged("run-deadline");
+      });
       await scheduler.start();
 
       // Acceptance never arrives: the run must be killed by its deadline,
@@ -810,14 +820,21 @@ describe("#1548 Task-1 gate — real admission under controlled time", () => {
       await vi.advanceTimersByTimeAsync(30 * 60 * 1000 + 11_000);
       await advanceUntil(() => stateStore.readState("project-task")?.activeRun === undefined);
 
+      // R1: the declared terminal contract is deadline_exceeded — the wake's
+      // durable deadline request normalizes the settle, never a plain abort.
+      const observer = new observerClass("project-task", run.runId, observerStores(queue, coordinator, run.runId));
+      observer.sample();
+      observer.assertTerminal({ outcome: "failed", source: "deadline_exceeded", diagnosticCode: "deadline_exceeded" });
       const ev = events("project-task");
       if (ev.length !== 1) console.error("T1:", JSON.stringify(ev));
       expect(ev).toHaveLength(1);
       expect(ev[0]!.outcome).toBe("failed");
-      expect(ev[0]!.detail ?? "").toContain("deadline");
+      expect(ev[0]!.diagnostic?.category).toBe("interruption");
+      expect(ev[0]!.diagnostic?.code).toBe("deadline_exceeded");
       expect(stateStore.readState("project-task")!.activeRun).toBeUndefined();
       expect(queue.currentJobs).toHaveLength(0);
       expect(queue.pending).toBe(0);
+      observer.stop();
       scheduler.stop();
     } finally {
       stateStore.setTaskDueChangedHook(null);
@@ -870,6 +887,7 @@ describe("#1548 healthy control — long-running scheduled O project with real c
         historyOutcome: (rid) => events("project-task").find(e => e.runId === rid)?.outcome,
         card: (id) => board.kanbanGetCard(id),
         childrenOf: (rootId) => board.kanbanGetChildren(rootId),
+        attemptsForCard: (cardId) => new WorkerSupervisionStoreClass().getAttemptsForCard(cardId),
         leaseFor: (attemptId) => new ExecutorLeaseStore().getView(attemptId),
         supervision: (rid) => new reviewStoreMod.ProjectReviewStore().getSupervision(rid),
         latestReviewCase: (rid) => new reviewStoreMod.ProjectReviewStore().getLatestReviewCase(rid),
@@ -946,15 +964,29 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
       await observer.fireWake(kanbanRetrySource);
       await vi.advanceTimersByTimeAsync(600);
 
-      let err: unknown;
-      try { observer.checkpoint(); } catch (e) { err = e; }
-      expect(err).toBeInstanceOf(CustodyGapErrorClass);
-      const gap = err as CustodyGapError;
-      expect(gap.kind).toBe("two_no_effect_wakes");
-      expect(gap.wake?.sourceId).toBe("kanban-retry");
-      process.stdout.write("CELL1 " + gap.message + "\n");
-      observer.stop();
-      scheduler.stop();
+      // R6: this cell is intentionally RED on current dev. The retry path
+      // must re-claim the project; current dev cannot, so the custody oracle
+      // throws the named diagnostic. The shape is verified and the original
+      // error re-thrown — the failure IS the red evidence, never a generic
+      // timeout. After the #1546/#1547 fix the checkpoint passes and the
+      // post-fix assertions below run.
+      try {
+        observer.checkpoint();
+        const snap = observer.sample();
+        expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
+        expect(snap.historyOutcome).toBeUndefined();
+      } catch (e) {
+        if (e instanceof CustodyGapErrorClass) {
+          expect(e.kind).toBe("two_no_effect_wakes");
+          expect(e.wake?.sourceId).toBe("kanban-retry");
+          process.stdout.write("CELL1 " + e.message + "\n");
+          throw e;
+        }
+        throw e;
+      } finally {
+        observer.stop();
+        scheduler.stop();
+      }
     } finally {
       vi.useRealTimers();
     }
@@ -990,19 +1022,29 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
       // queued retry card into running and never re-drives it: no child, no
       // continuation — the run must be detected before its absolute deadline.
       await vi.advanceTimersByTimeAsync(20_000);
-      let err: unknown;
-      try { observer.checkpoint(); } catch (e) { err = e; }
-      expect(err).toBeInstanceOf(CustodyGapErrorClass);
-      const gap = err as CustodyGapErrorClass;
-      expect(gap.kind).toBe("no_custody");
-      expect(gap.snapshot.rootCardId).toBe(rootCardId);
-      expect(gap.snapshot.supervisionState).toBe("executing");
-      expect(gap.snapshot.liveAttempts).toHaveLength(0);
-      expect(gap.snapshot.durableContinuations).toHaveLength(0);
-      process.stdout.write("CELL2 " + gap.message + "\n");
-      observer.stop();
-      scheduler2.stop();
-      scheduler.stop();
+
+      // R6: intentionally RED on current dev — see cell 1 for the contract.
+      try {
+        observer.checkpoint();
+        const snap = observer.sample();
+        expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
+        expect(snap.historyOutcome).toBeUndefined();
+      } catch (e) {
+        if (e instanceof CustodyGapErrorClass) {
+          expect(e.kind).toBe("no_custody");
+          expect(e.snapshot.rootCardId).toBe(rootCardId);
+          expect(e.snapshot.supervisionState).toBe("executing");
+          expect(e.snapshot.liveAttempts).toHaveLength(0);
+          expect(e.snapshot.durableContinuations).toHaveLength(0);
+          process.stdout.write("CELL2 " + e.message + "\n");
+          throw e;
+        }
+        throw e;
+      } finally {
+        observer.stop();
+        scheduler2.stop();
+        scheduler.stop();
+      }
     } finally {
       vi.useRealTimers();
     }
@@ -1039,18 +1081,28 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
       // The failed-worker terminal fact must clear its settle grace; after
       // that the reattached run has no child, no continuation, and no driver.
       await vi.advanceTimersByTimeAsync(20_000);
-      let err: unknown;
-      try { observer.checkpoint(); } catch (e) { err = e; }
-      expect(err).toBeInstanceOf(CustodyGapErrorClass);
-      const gap = err as CustodyGapErrorClass;
-      expect(gap.kind).toBe("no_custody");
-      expect(gap.snapshot.rootCardId).toBe(rootCardId);
-      expect(gap.snapshot.supervisionState).toBe("executing");
-      expect(gap.snapshot.liveAttempts).toHaveLength(0);
-      process.stdout.write("CELL3 " + gap.message + "\n");
-      observer.stop();
-      scheduler2.stop();
-      scheduler.stop();
+
+      // R6: intentionally RED on current dev — see cell 1 for the contract.
+      try {
+        observer.checkpoint();
+        const snap = observer.sample();
+        expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
+        expect(snap.historyOutcome).toBeUndefined();
+      } catch (e) {
+        if (e instanceof CustodyGapErrorClass) {
+          expect(e.kind).toBe("no_custody");
+          expect(e.snapshot.rootCardId).toBe(rootCardId);
+          expect(e.snapshot.supervisionState).toBe("executing");
+          expect(e.snapshot.liveAttempts).toHaveLength(0);
+          process.stdout.write("CELL3 " + e.message + "\n");
+          throw e;
+        }
+        throw e;
+      } finally {
+        observer.stop();
+        scheduler2.stop();
+        scheduler.stop();
+      }
     } finally {
       vi.useRealTimers();
     }
@@ -1082,15 +1134,25 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
       await vi.advanceTimersByTimeAsync(600);
       await observer.fireWake(kanbanRetrySource);
       await vi.advanceTimersByTimeAsync(600);
-      let err: unknown;
-      try { observer.checkpoint(); } catch (e) { err = e; }
-      expect(err).toBeInstanceOf(CustodyGapErrorClass);
-      const gap = err as CustodyGapError;
-      expect(gap.kind).toBe("two_no_effect_wakes");
-      expect(gap.wake?.wakeTimes).toHaveLength(2);
-      process.stdout.write("CELL4 " + gap.message + "\n");
-      observer.stop();
-      scheduler.stop();
+
+      // R6: intentionally RED on current dev — see cell 1 for the contract.
+      try {
+        observer.checkpoint();
+        const snap = observer.sample();
+        expect(snap.liveAttempts.length + snap.durableContinuations.length).toBeGreaterThan(0);
+        expect(snap.historyOutcome).toBeUndefined();
+      } catch (e) {
+        if (e instanceof CustodyGapErrorClass) {
+          expect(e.kind).toBe("two_no_effect_wakes");
+          expect(e.wake?.wakeTimes).toHaveLength(2);
+          process.stdout.write("CELL4 " + e.message + "\n");
+          throw e;
+        }
+        throw e;
+      } finally {
+        observer.stop();
+        scheduler.stop();
+      }
     } finally {
       vi.useRealTimers();
     }
@@ -1103,12 +1165,24 @@ function observerStores(queue: import("../../components/tasks/task-queue.js").Cr
     historyOutcome: (rid: string) => events("project-task").find(e => e.runId === rid)?.outcome,
     card: (id: number) => board.kanbanGetCard(id),
     childrenOf: (rootId: number) => board.kanbanGetChildren(rootId),
+    attemptsForCard: (cardId: number) => new WorkerSupervisionStoreClass().getAttemptsForCard(cardId),
     leaseFor: () => undefined,
     supervision: (rid: number) => new reviewStoreMod.ProjectReviewStore().getSupervision(rid),
     latestReviewCase: (rid: number) => new reviewStoreMod.ProjectReviewStore().getLatestReviewCase(rid),
     pendingInputRequests: (rid: number) => new reviewStoreMod.ProjectReviewStore().getPendingInputRequestsForProject(rid),
     currentJobs: () => queue.currentJobs,
     now: () => Date.now(),
+    onCardEvent: (cb) => {
+      const n = nerveMod.nerve;
+      n.on("card:done", cb);
+      n.on("card:failed", cb);
+      n.on("card:running", cb);
+      return () => {
+        n.off("card:done", cb);
+        n.off("card:failed", cb);
+        n.off("card:running", cb);
+      };
+    },
   };
 }
 
@@ -1127,6 +1201,7 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
       const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
       const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
       observer.sample(); // capture the root card before settlement
+      observer.startPolling(); // R4: 100 ms journey-clock fallback poll
 
       fixture.completeWorkers();
       // The real reconciler assembles the case, inserts the review request,
@@ -1181,6 +1256,38 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
       await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
       observer.assertTerminal({ outcome: "success", source: "project_accepted" });
       expect(events("project-task")).toHaveLength(1);
+      observer.stop();
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a review-blocked project settles once from project_blocked", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queue, coordinator } = await makeQueueWithCoordinator();
+      const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+      await scheduler.start();
+      const { fixture } = await makeFixture({ workerCount: 1, reviewMode: "blocked" });
+
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
+      const observer = new observerClass("project-task", runId, observerStores(queue, coordinator, runId));
+      observer.sample();
+
+      fixture.completeWorkers();
+      reconcilerModule.requestReconcile(rootCardId);
+      await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
+
+      observer.assertTerminal({ outcome: "failed", source: "project_blocked" });
+      const ev = events("project-task");
+      expect(ev).toHaveLength(1);
+      expect(ev[0]!.runId).toBe(runId);
+      expect(rootCardId).toBeDefined();
+      expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId)?.state).toBe("blocked");
       observer.stop();
       scheduler.stop();
     } finally {

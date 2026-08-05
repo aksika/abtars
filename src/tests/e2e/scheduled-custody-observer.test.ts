@@ -39,6 +39,7 @@ interface FakeState {
   historyOutcome?: string;
   cards: Map<number, Record<string, unknown>>;
   children: Map<number, number[]>;
+  attempts: Map<number, Array<{ id: string; lifecycle: string }>>;
   leases: Map<string, { semanticState: string }>;
   supervision?: { state: string };
   reviewCase?: { id: number; status: string };
@@ -51,6 +52,7 @@ function makeStores(initial: Partial<FakeState> = {}): { stores: ObserverStores;
   const state: FakeState = {
     cards: new Map(),
     children: new Map(),
+    attempts: new Map(),
     leases: new Map(),
     inputs: 0,
     currentJobs: [],
@@ -62,6 +64,7 @@ function makeStores(initial: Partial<FakeState> = {}): { stores: ObserverStores;
     historyOutcome: () => state.historyOutcome,
     card: id => (state.cards.has(id) ? state.cards.get(id) as never : undefined),
     childrenOf: rootId => (state.children.get(rootId) ?? []).map(id => state.cards.get(id) as never),
+    attemptsForCard: cardId => state.attempts.get(cardId) ?? [],
     leaseFor: attemptId => state.leases.get(attemptId) as never,
     supervision: () => state.supervision as never,
     latestReviewCase: () => state.reviewCase as never,
@@ -70,6 +73,13 @@ function makeStores(initial: Partial<FakeState> = {}): { stores: ObserverStores;
     now: () => state.clock,
   };
   return { stores, state };
+}
+
+/** A running W child with a valid non-terminal attempt — the live-child shape. */
+function liveChild(state: FakeState, id: number, parentId: number): void {
+  state.children.set(parentId, [...(state.children.get(parentId) ?? []), id]);
+  state.cards.set(id, childCard(id, parentId, "running", new Date(state.clock).toISOString().slice(0, 23)));
+  state.attempts.set(id, [{ id: `att_${id}`, lifecycle: "running" }]);
 }
 
 function makeWakeSource(state: { clock: number }, items: Array<{ key: string; dueAt: number }>): LifecycleDueSource & { setItems: (i: Array<{ key: string; dueAt: number }>) => void } {
@@ -90,8 +100,7 @@ describe("ScheduledCustodyObserver — #1548", () => {
   it("rejects unrelated activity as custody for the observed run", () => {
     const { stores, state } = makeStores();
     state.run = makeRun();
-    state.children.set(2, [10]);
-    state.cards.set(10, childCard(10, 2, "running", "2026-08-05T10:00:00.000"));
+    liveChild(state, 10, 2);
     const observer = new ScheduledCustodyObserver("task-a", state.run.runId, stores);
 
     expect(() => observer.checkpoint()).toThrow(CustodyGapError);
@@ -100,8 +109,7 @@ describe("ScheduledCustodyObserver — #1548", () => {
   it("grants custody only for the observed run's own live child", () => {
     const { stores, state } = makeStores();
     state.run = makeRun({ cardId: 2 });
-    state.children.set(2, [10]);
-    state.cards.set(10, childCard(10, 2, "running", "2026-08-05T10:00:00.000"));
+    liveChild(state, 10, 2);
     const observer = new ScheduledCustodyObserver("task-a", state.run.runId, stores);
 
     expect(() => observer.checkpoint()).not.toThrow();

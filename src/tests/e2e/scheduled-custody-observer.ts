@@ -76,13 +76,19 @@ export interface ObserverStores {
   historyOutcome(runId: string): string | undefined;
   card(id: number): KanbanCard | undefined;
   childrenOf(rootId: number): KanbanCard[];
+  /** Real worker attempts for a child card; a non-terminal attempt is a live child. */
+  attemptsForCard(cardId: number): Array<{ id: string; lifecycle: string }>;
   leaseFor(attemptId: string): LeaseView | undefined;
   supervision(rootCardId: number): { state: ProjectState } | undefined;
   latestReviewCase(rootCardId: number): { id: number; status: string } | undefined;
   pendingInputRequests(rootCardId: number): Array<{ id: string }>;
   currentJobs(): Array<{ runId: string }>;
   now(): number;
+  /** Correlated card-event subscription (nerve). Optional; sampling stays checkpoint-driven without it. */
+  onCardEvent?(cb: (cardId: number) => void): () => void;
 }
+
+const TERMINAL_ATTEMPT_LIFECYCLES = new Set(["completed", "failed", "cancelled", "expired"]);
 
 /** #1548 R3: the failure names run, root card, supervision, due source/item,
  *  both wake times, and the last correlated snapshot. */
@@ -133,11 +139,33 @@ export class ScheduledCustodyObserver {
   private lastSnapshot: CustodySnapshot | undefined;
   private terminalSeen = false;
   private lastRootCardId: number | undefined;
+  private pollTimer: ReturnType<typeof setInterval> | undefined;
+  private readonly unsubscribeCard: (() => void) | undefined;
 
   constructor(taskId: string, runId: string, stores: ObserverStores) {
     this.taskId = taskId;
     this.runId = runId;
     this.stores = stores;
+    // R4: event-driven sampling on correlated nerve/card events.
+    this.unsubscribeCard = stores.onCardEvent
+      ? stores.onCardEvent((cardId) => {
+        const snapshot = this.lastSnapshot;
+        if (!snapshot) return;
+        if (cardId === snapshot.rootCardId) return;
+        if (snapshot.rootCardId !== undefined && this.stores.card(cardId)?.parent_id === snapshot.rootCardId) {
+          this.sample();
+        }
+      })
+      : undefined;
+  }
+
+  /** R4: 100 ms journey-clock fallback poll while the run is active. Driven
+   *  by the same controlled clock; stopped with the observer. */
+  startPolling(intervalMs: number = CUSTODY_CONSTANTS.SAMPLE_INTERVAL_MS): void {
+    if (this.pollTimer) return;
+    this.pollTimer = setInterval(() => {
+      if (this.stores.readRun(this.taskId)) this.sample();
+    }, intervalMs);
   }
 
   get last(): CustodySnapshot | undefined {
@@ -154,14 +182,18 @@ export class ScheduledCustodyObserver {
 
     const children = rootCardId !== undefined ? this.stores.childrenOf(rootCardId) : [];
     const liveAttempts: number[] = [];
-    for (const child of children) {
-      if (child.type === "W" && child.status === "running") liveAttempts.push(child.id);
-    }
     const liveLeaseIds: string[] = [];
     for (const child of children) {
-      const lease = this.stores.leaseFor(`${child.id}`);
-      if (lease && lease.semanticState !== "closed" && lease.semanticState !== "expired") {
-        liveLeaseIds.push(lease.attemptId);
+      if (child.type !== "W") continue;
+      const attempts = this.stores.attemptsForCard(child.id).filter(a => !TERMINAL_ATTEMPT_LIFECYCLES.has(a.lifecycle));
+      if (attempts.length > 0) {
+        liveAttempts.push(child.id);
+        for (const attempt of attempts) {
+          const lease = this.stores.leaseFor(attempt.id);
+          if (lease && lease.semanticState !== "closed" && lease.semanticState !== "expired") {
+            liveLeaseIds.push(lease.attemptId);
+          }
+        }
       }
     }
 
@@ -308,6 +340,11 @@ export class ScheduledCustodyObserver {
   }
 
   stop(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = undefined;
+    }
+    this.unsubscribeCard?.();
     this.pendingWakes.length = 0;
     this.noEffectWakes.length = 0;
   }
@@ -315,13 +352,11 @@ export class ScheduledCustodyObserver {
   // ── internals ──────────────────────────────────────────────────────────────
 
   private isCorrelatedItem(key: string, pre: CustodySnapshot): boolean {
-    // Kanban-retry items use `kanban:<cardId>`; run-deadline and admission
-    // items embed the run id. Resolve the root card first so card keys
-    // correlate.
+    // Known item key formats: run-deadline/grace embed the run id
+    // (`run:<runId>`, `grace:<runId>`); kanban-retry items are
+    // `kanban:<cardId>`. Anything else is not this run's item.
     if (key.includes(this.runId)) return true;
-    if (pre.rootCardId !== undefined && (
-      key === `kanban:${pre.rootCardId}` || key === `card:${pre.rootCardId}:retry` || key.includes(`:${pre.rootCardId}`)
-    )) return true;
+    if (pre.rootCardId !== undefined && key === `kanban:${pre.rootCardId}`) return true;
     return false;
   }
 

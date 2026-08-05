@@ -22,6 +22,8 @@ export interface FixtureModules {
   ProjectReviewStore: typeof import("../../components/project-acceptance/project-review-store.js").ProjectReviewStore;
   kanban: typeof import("../../components/tasks/kanban-board.js");
   nerve: typeof import("../../components/nerve.js").nerve;
+  WorkerSupervisionService: typeof import("../../components/worker-supervision-service.js").WorkerSupervisionService;
+  WorkerSupervisionStore: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
 }
 
 export type FailOrcMode = "empty" | "terminal_tool" | "round_limit" | null;
@@ -44,7 +46,7 @@ export interface ScheduledProjectScript {
   /** Adopt an existing root card (reattach cells where the fixture never authored). */
   adoptRoot(rootCardId: number): void;
   /** Scripted review-turn behavior: accept, demand input, or die. */
-  setReviewMode(mode: "accept" | "needs_input" | "die"): void;
+  setReviewMode(mode: "accept" | "needs_input" | "blocked" | "die"): void;
   /** Answer the pending input request. */
   answerInput(text: string): void;
   holdAcceptance: boolean;
@@ -60,21 +62,21 @@ export interface ScheduledProjectFixtureOptions {
   /** When set, accept() refuses to settle (acceptance held). */
   holdAcceptance?: boolean;
   /** Scripted review-turn decision. */
-  reviewMode?: "accept" | "needs_input" | "die";
+  reviewMode?: "accept" | "needs_input" | "blocked" | "die";
 }
 
 const DEFAULT_OPTIONS = {
   workerCount: 1,
   failOrcMode: null as FailOrcMode,
   holdAcceptance: false,
-  reviewMode: "accept" as "accept" | "needs_input" | "die",
+  reviewMode: "accept" as "accept" | "needs_input" | "blocked" | "die",
 };
 
 export function makeScheduledProjectFixture(
   modules: FixtureModules,
   opts: ScheduledProjectFixtureOptions = {},
 ): { fixture: ScheduledProjectScript; orc: OrcProjectCoordinator } {
-  const { OrcProjectCoordinator: OrcCtor, ProjectReviewStore: ReviewStore, kanban, nerve } = modules;
+  const { OrcProjectCoordinator: OrcCtor, ProjectReviewStore: ReviewStore, kanban, nerve, WorkerSupervisionService: WorkerSvc, WorkerSupervisionStore: WorkerStore } = modules;
   const options: typeof DEFAULT_OPTIONS = { ...DEFAULT_OPTIONS, ...opts };
   const state = {
     holdAcceptance: options.holdAcceptance,
@@ -106,6 +108,15 @@ export function makeScheduledProjectFixture(
     }
   };
 
+  const terminalizeAttempts = (cardId: number, lifecycle: "completed" | "failed"): void => {
+    try {
+      const store = new WorkerStore();
+      for (const attempt of store.getAttemptsForCard(cardId)) {
+        store.lifecycleTransition(attempt.id, ["pending", "claimed", "running"], lifecycle);
+      }
+    } catch { /* best effort */ }
+  };
+
   const script: ScheduledProjectScript = {
     get holdAcceptance(): boolean {
       return state.holdAcceptance;
@@ -130,10 +141,16 @@ export function makeScheduledProjectFixture(
     },
     failOrc: (mode) => { state.failOrcMode = mode; },
     completeWorkers: () => {
-      for (const child of workersOfRoot()) kanban.kanbanComplete(child.id, null, "worker complete");
+      for (const child of workersOfRoot()) {
+        kanban.kanbanComplete(child.id, null, "worker complete");
+        terminalizeAttempts(child.id, "completed");
+      }
     },
     failWorkers: () => {
-      for (const child of workersOfRoot()) kanban.kanbanFail(child.id, "worker failed");
+      for (const child of workersOfRoot()) {
+        kanban.kanbanFail(child.id, "worker failed");
+        terminalizeAttempts(child.id, "failed");
+      }
     },
     accept: () => {
       if (state.holdAcceptance) return;
@@ -194,7 +211,22 @@ export function makeScheduledProjectFixture(
             goal: `Work lane ${i}`,
             delivery: "silent",
           });
-          if (workerId !== 0) kanban.kanbanRunning(workerId);
+          if (workerId !== 0) {
+            kanban.kanbanRunning(workerId);
+            // R5: a valid worker-owned executing state carries a contract and
+            // a claimed running attempt, not just a running card.
+            try {
+              const svc = new WorkerSvc();
+              const created = svc.createChild(`Work lane ${i}`, workerId, projectId, "fixture-orc", {
+                criteria: [{ id: `w${i}`, description: "lane done" }],
+                attemptId: `att_fixture_${workerId}`,
+              });
+              if (!("error" in created)) {
+                const claim = new WorkerStore().claimAttempt(workerId, created.contract.id, "agent", "fixture", 1);
+                if (claim) new WorkerStore().markAttemptRunning(claim.attemptId);
+              }
+            } catch { /* best effort — the card alone still carries custody */ }
+          }
         }
         state.lastTurn = "authored";
         finish("completed");
@@ -211,6 +243,13 @@ export function makeScheduledProjectFixture(
       if (!openCase) {
         state.lastTurn = "failed"; // no review case to decide — nothing owned
         finish("failed");
+        return;
+      }
+      if (state.reviewMode === "blocked") {
+        store.settleBlocked(projectId, openCase.id, { action: "blocked", reason: "fixture review blocked" }, "fixture review blocked");
+        try { nerve.fire("card:failed", projectId); } catch { /* best effort */ }
+        state.lastTurn = "reviewed";
+        finish("completed");
         return;
       }
       if (state.reviewMode === "needs_input") {
