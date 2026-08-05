@@ -7,7 +7,7 @@
  * ownership order and writes matrix + JUnit results.
  */
 
-import { mkdirSync, rmSync, existsSync, chmodSync, mkdtempSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -202,6 +202,15 @@ async function runLane(
       markers: new MarkerFactory(runId),
       scenarioStart: Date.now(),
       restartBridge,
+      abtarsHome: config.abtarsHome,
+      writeArtifact: (name: string, data: string): void => {
+        const safe = name.replace(/[^a-zA-Z0-9._-]/g, "_");
+        try {
+          writeFileSync(join(writer.relativeDirectory, `${lane}-${safe}`), data, "utf-8");
+        } catch {
+          // best effort — the matrix and junit still carry the lane outcome
+        }
+      },
     };
 
     for (const scenario of scenariosForProfile(profile)) {
