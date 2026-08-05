@@ -12,6 +12,7 @@ import type { SubagentRuntime } from "./subagent-runtime.js";
 import { openaiError } from "./openai-compat-translate.js";
 import { handleModels as v1HandleModels, handleModel as v1HandleModel, handleEmbeddings as v1HandleEmbeddings, writeResult } from "./openai-compat-routes.js";
 import type { ValidatedTlsIdentity } from "./peer-transport/tls-identity.js";
+import { isLoopbackAddress } from "./pi-auth.js";
 
 const TAG = "agent-api";
 const MAX_TRAFFIC_LOG = 50;
@@ -659,14 +660,16 @@ export class AgentApiServer {
       }
     }
 
-    // #1011 — Orc worker management (localhost only, no auth — same process)
+    // #1011 — Orc worker management (local CLI only — see requireLoopback)
     if (url.startsWith("/v1/orc/")) {
+      if (!this.requireLoopback(req, res)) return;
       this.handleOrcRoute(url, method, req, res);
       return;
     }
 
-    // #955 — Kanban card creation (localhost CLI, uses shared createDispatchableCard)
+    // #955 — Kanban card creation (local CLI only, uses shared createDispatchableCard)
     if (url === "/v1/kanban" && method === "POST") {
+      if (!this.requireLoopback(req, res)) return;
       this.handleAsync(req, res, async () => {
         const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
         const { createDispatchableCard } = await import("./tasks/kanban-board.js");
@@ -748,6 +751,22 @@ export class AgentApiServer {
     } catch (err) {
       res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
     }
+  }
+
+  /**
+   * #1549 — Guard for routes that are only ever driven by a local CLI on this
+   * host and therefore carry no peer signature. The listener binds all
+   * interfaces (see start()), so "local only" must be enforced here rather
+   * than assumed. Mirrors the check performed for /v1/pi/ routes.
+   * Returns true when the caller may proceed; otherwise writes 401 and
+   * returns false.
+   */
+  private requireLoopback(req: IncomingMessage, res: ServerResponse): boolean {
+    if (isLoopbackAddress(req.socket.remoteAddress)) return true;
+    logWarn(TAG, `rejected non-loopback ${req.method ?? "?"} ${req.url ?? "?"} from ${req.socket.remoteAddress ?? "unknown"}`);
+    res.writeHead(401, { "Content-Type": "application/json" })
+      .end(JSON.stringify({ ok: false, error: "loopback only" }));
+    return false;
   }
 
   /**

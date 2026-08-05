@@ -340,7 +340,7 @@ export class AcpTransport implements IKiroTransport {
     sessionKey: string,
     message: string,
     _image?: { mime: string; base64: string },
-    _context?: PromptRequestContext,
+    context?: PromptRequestContext,
   ): Promise<string> {
     if (!this.client && !(AcpTransport._rawMode && this._rawClient?.alive)) {
       logWarn(this.tag, "ACP client dead — reinitializing");
@@ -361,6 +361,10 @@ export class AcpTransport implements IKiroTransport {
     this._toolCallsSucceeded = 0;
     const sessionId = await this.getOrCreateSession(sessionKey);
     this.responseChunks.set(sessionId, []);
+    // #1550: bind the caller's live-output observer for this session so the
+    // agent_message_chunk / tool_call mirrors below actually reach the feed.
+    // Cleared in the finally block alongside responseChunks.
+    this.outputObservers.set(sessionId, context?.outputObserver);
 
     logDebug(this.tag, `Sending prompt to session ${sessionId}: "${message.replace(/\n/g, " ").slice(0, 80)}…"`);
 
