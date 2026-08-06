@@ -152,6 +152,22 @@ function legacyOrcReviewDispatch(projectId: number, generation: number, caseId: 
   }
 }
 
+function scheduleContractAuthoringOrSettle(projectId: number): boolean {
+  if (!_orcCoordinator) {
+    logWarn(TAG, `Project ${projectId}: Orc coordinator unavailable while authoring contract — settling as last resort`);
+    settleProjectLastResort(projectId);
+    return false;
+  }
+
+  const result = _orcCoordinator.scheduleContractAuthoring(projectId);
+  if (result.kind === "not_actionable") {
+    logWarn(TAG, `Project ${projectId}: contract-authoring claim not actionable (${result.reason}) — settling as last resort`);
+    settleProjectLastResort(projectId);
+    return false;
+  }
+  return true;
+}
+
 // ── Keyed scheduler (per-card reconciliation) ────────────────────────────────
 
 interface CardReconcilerState {
@@ -196,9 +212,14 @@ async function reconcileCard(cardId: number): Promise<void> {
  * runId), and a non-terminal `project_supervision` row. Unsupervised
  * parentless cards and Worker children are never classified here.
  */
-function isScheduledProjectRoot(card: KanbanCard): boolean {
+function isScheduledRootIdentity(card: KanbanCard): boolean {
   if (card.type !== "O" || card.parent_id !== null) return false;
   if (card.source !== "task" || !card.source_id || card.source_id.length === 0) return false;
+  return true;
+}
+
+function isScheduledProjectRoot(card: KanbanCard): boolean {
+  if (!isScheduledRootIdentity(card)) return false;
   try {
     return new ProjectReviewStore().hasActiveProjectSupervision(card.id);
   } catch {
@@ -281,6 +302,9 @@ function inspectProjectOwnership(projectId: number, supervision: ProjectSupervis
   // exact direct child. `pending` is resumable without a lease; missing or
   // expired leases stay owned by the existing lease reconciliation path.
   for (const child of children) {
+    let hasContract = false;
+    try { hasContract = workerStore.contractExists(child.id); } catch { hasContract = false; }
+    if (!hasContract) continue;
     let attempt: AttemptRow | undefined;
     try { attempt = workerStore.getLatestAttempt(child.id); } catch { attempt = undefined; }
     if (attempt && RESUMPTIVE_ATTEMPT_LIFECYCLES.has(attempt.lifecycle)) return "worker_resume";
@@ -382,12 +406,19 @@ export function settleProjectLastResort(projectId: number): void {
   if (!card) return;
   const matched = findActiveScheduledRun(card);
   const children = kanbanGetChildren(projectId);
+  const reason = "no scheduled Orc continuation owner after restart";
   // The freeze must not prevent the exactly-once settle: even if a child
   // cancellation rejects, the occurrence still settles through the settler.
-  void abortProject(projectId, children, "no scheduled Orc continuation owner after restart", { skipRootFail: true })
+  void abortProject(projectId, children, reason, { skipRootFail: true })
     .catch((err) => logWarn(TAG, `last-resort abort for project ${projectId} failed — ${err instanceof Error ? err.message : String(err)}`))
     .then(() => {
-    if (!matched) return; // no matching active scheduled run — project abort only
+    if (!matched) {
+      // There is no run row to settle, but the root still needs terminal
+      // evidence. Without this mutation the supervision row is blocked while
+      // the Kanban root remains queued/running forever.
+      kanbanFail(projectId, reason);
+      return;
+    }
     try {
       settleRunOnce({
         entry: matched.entry,
@@ -440,6 +471,49 @@ function handleInputState(projectId: number, _supervision: ProjectSupervisionRow
   return "none";
 }
 
+type RepairItem = {
+  id: string;
+  affected_criterion_ids: string[];
+  strategy: string;
+  required_evidence: string;
+  capabilities: string[];
+  budget: { max_attempts?: number; max_tokens?: number };
+};
+
+function repairWorkerGoal(item: RepairItem): string {
+  // The item marker is durable in the Worker contract goal. It lets restart
+  // recovery correlate a child with one decision item even though spawnChild
+  // allocates the final card/contract IDs itself.
+  return `Repair: ${item.strategy.slice(0, 200)} [repair-item:${item.id}]`;
+}
+
+function sameStringSet(left: readonly string[] | undefined, right: readonly string[]): boolean {
+  if (!left || left.length !== right.length) return false;
+  const expected = new Set(right);
+  return left.every(value => expected.has(value));
+}
+
+function hasRepairWorkerForItem(
+  projectId: number,
+  children: readonly KanbanCard[],
+  item: RepairItem,
+  supervisionService: WorkerSupervisionService,
+): boolean {
+  const goal = repairWorkerGoal(item);
+  const legacyGoal = `Repair: ${item.strategy.slice(0, 200)}`;
+  for (const child of children) {
+    let contract: WorkerAcceptanceContractV1 | undefined;
+    try { contract = supervisionService.getContractForCard(child.id); } catch { contract = undefined; }
+    if (!contract || contract.provenance.root_card_id !== projectId) continue;
+    if (contract.goal === goal) return true;
+    // Existing workers created before the marker was added remain durable
+    // owners. Their legacy goal is accepted only with the same root criteria,
+    // so an unrelated Worker cannot satisfy a repair item by text alone.
+    if (contract.goal === legacyGoal && sameStringSet(contract.supports_root_criteria, item.affected_criterion_ids)) return true;
+  }
+  return false;
+}
+
 function handleRepairState(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): BranchResult {
   if (supervision.state === "repair_planned") {
     const decision = reviewStore.getLatestDecisionForProject(projectId);
@@ -447,7 +521,7 @@ function handleRepairState(projectId: number, supervision: ProjectSupervisionRow
       logWarn(TAG, `Project ${projectId}: repair_planned but no decision found — falling through to the no-owner decision`);
       return "none";
     }
-    const parsed = JSON.parse(decision.decision_json) as { repair?: { items: Array<{ id: string; affected_criterion_ids: string[]; strategy: string; required_evidence: string; capabilities: string[]; budget: { max_attempts?: number; max_tokens?: number } }> } };
+    const parsed = JSON.parse(decision.decision_json) as { repair?: { items: RepairItem[] } };
     const items = parsed.repair?.items ?? [];
     if (items.length === 0) {
       logWarn(TAG, `Project ${projectId}: repair_planned but no repair items — falling through to the no-owner decision`);
@@ -458,8 +532,14 @@ function handleRepairState(projectId: number, supervision: ProjectSupervisionRow
     const rootCardId = (() => {
       try { return require("./tasks/kanban-board.js").resolveRootId(projectId) ?? projectId; } catch { return projectId; }
     })();
+    const children = kanbanGetChildren(projectId);
+    const supervisionService = new WorkerSupervisionService();
     for (const item of items) {
-      const goal = `Repair: ${item.strategy.slice(0, 200)}`;
+      const goal = repairWorkerGoal(item);
+      if (hasRepairWorkerForItem(projectId, children, item, supervisionService)) {
+        logInfo(TAG, `Project ${projectId}: repair worker for item ${item.id} already exists — reusing durable Worker`);
+        continue;
+      }
       logInfo(TAG, `Project ${projectId}: creating repair worker for item ${item.id} (criteria: ${item.affected_criterion_ids.join(",")})`);
       const criteria = rootContract?.criteria
         .filter(c => item.affected_criterion_ids.includes(c.id))
@@ -608,22 +688,24 @@ async function reconcileProject(projectId: number): Promise<void> {
     if (!supervision) {
       reviewStore.ensureAwaitingContract(projectId);
       logInfo(TAG, `Project ${projectId}: awaiting contract — dispatching Orc authoring turn`);
-      if (_orcCoordinator) {
-        _orcCoordinator.scheduleContractAuthoring(projectId);
+      if (isScheduledRootIdentity(project)) {
+        const owned = scheduleContractAuthoringOrSettle(projectId);
+        if (project.status === "queued" && owned) kanbanPromoteDueRetry(projectId);
       } else {
         legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
       }
     } else if (supervision.state === "awaiting_contract") {
       logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
-      if (_orcCoordinator) {
-        _orcCoordinator.scheduleContractAuthoring(projectId);
+      if (isScheduledRootIdentity(project)) {
+        const owned = scheduleContractAuthoringOrSettle(projectId);
+        if (project.status === "queued" && owned) kanbanPromoteDueRetry(projectId);
       } else {
         legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
       }
     }
     // #1546 R4: a retried queued root is promoted only after the authoring
     // owner decision above.
-    if (project.status === "queued") kanbanPromoteDueRetry(projectId);
+    if (project.status === "queued" && !isScheduledRootIdentity(project)) kanbanPromoteDueRetry(projectId);
     return;
   }
 
@@ -639,12 +721,13 @@ async function reconcileProject(projectId: number): Promise<void> {
   if (supervision.state === "accepted" || supervision.state === "blocked") return;
   if (supervision.state === "awaiting_contract") {
     logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
-    if (_orcCoordinator) {
-      _orcCoordinator.scheduleContractAuthoring(projectId);
+    if (isScheduledRootIdentity(project)) {
+      const owned = scheduleContractAuthoringOrSettle(projectId);
+      if (project.status === "queued" && owned) kanbanPromoteDueRetry(projectId);
     } else {
       legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
+      if (project.status === "queued") kanbanPromoteDueRetry(projectId);
     }
-    if (project.status === "queued") kanbanPromoteDueRetry(projectId);
     return;
   }
 

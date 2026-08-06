@@ -151,6 +151,26 @@ describe("reconciler #1546 last-resort and claim ordering (real stores)", () => 
     }
   });
 
+  it("fails the root when no active scheduled run matches the recovered card", async () => {
+    writeFileSync(join(TEST_HOME, "tasks", "tasks.json"), "[]");
+    const rootId = kanban.kanbanEnqueue("Orphaned Scheduled Project", "task", "missing-run", {
+      type: "O",
+      goal: "supervised work",
+      maxAgents: 2,
+    });
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.insertContract(makeContract(rootId));
+    store.initializeSupervision(rootId, `ct_${rootId}`, "executing");
+    kanban.kanbanRunning(rootId);
+
+    reconciler.settleProjectLastResort(rootId);
+    await flush();
+
+    expect(kanban.kanbanGetCard(rootId)!.status).toBe("failed");
+    expect(store.getSupervision(rootId)!.state).toBe("blocked");
+    expect(historyStore.recentRuns(ENTRY.id, 10)).toHaveLength(0);
+  });
+
   it("recovers claim -> queued/due -> retry wake to a single owner and promotes exactly once", async () => {
     const coordinator = new coordinatorMod.OrcProjectCoordinator({
       ownerPeer: "test-peer",

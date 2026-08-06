@@ -12,8 +12,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // ── Mocks ──────────────────────────────────────────────────────────────────────
 
 const dispatchMock = vi.fn();
+const spawnChildMock = vi.fn();
 vi.mock("./spin.js", () => ({
-  spin: { dispatch: dispatchMock },
+  spin: { dispatch: dispatchMock, spawnChild: spawnChildMock },
 }));
 
 const kanbanGetCardMock = vi.fn();
@@ -52,6 +53,7 @@ vi.mock("./worker-supervision-service.js", () => {
 });
 
 const getLatestAttemptMock = vi.fn().mockReturnValue(null);
+const workerContractExistsMock = vi.fn().mockReturnValue(true);
 const claimAttemptMock = vi.fn().mockImplementation((cardId: number, contractId: string, executorKind: string, executorId: string, generation: number) => ({
   attemptId: "a_1", cardId, contractId, executorKind, executorId, generation, claimedAt: new Date().toISOString(),
 }));
@@ -70,6 +72,7 @@ const claimAttemptWithinLimitsMock = vi.fn().mockImplementation((input: { cardId
 vi.mock("./worker-supervision-store.js", () => {
   return {
     WorkerSupervisionStore: class {
+      contractExists = workerContractExistsMock;
       getLatestAttempt = getLatestAttemptMock;
       claimAttempt = claimAttemptMock;
       markAttemptStartObservable = markAttemptStartObservableMock;
@@ -194,6 +197,7 @@ beforeEach(async () => {
   reviewStoreMock = makeReviewStoreMock();
   isUnblockedMock.mockReturnValue(true);
   getLatestAttemptMock.mockReturnValue(null);
+  workerContractExistsMock.mockReturnValue(true);
   getContractForCardMock.mockReturnValue(undefined);
   cardHasContractMock.mockReturnValue(false);
   kanbanRunningProjectIdsMock.mockReturnValue([]);
@@ -203,6 +207,7 @@ beforeEach(async () => {
   kanbanPromoteDueRetryMock.mockReturnValue(false);
   getLiveRunForProjectMock.mockReset();
   getLiveRunForProjectMock.mockReturnValue(undefined);
+  spawnChildMock.mockReset();
   mod = await import("./reconciler.js");
 });
 
@@ -588,6 +593,27 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     expect(kanbanFailMock).not.toHaveBeenCalled();
   });
 
+  it("fails closed when contract authoring has no Orc coordinator", async () => {
+    kanbanGetCardMock.mockReturnValue(scheduledRootCard({
+      status: "queued",
+      source_id: "missing-run-for-coordinator-test",
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    }));
+    kanbanGetChildrenMock.mockReturnValue([]);
+    reviewStoreMock.contractExists.mockReturnValue(false);
+    reviewStoreMock.getSupervision.mockReturnValue(undefined);
+    reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(true);
+    mod.setOrcCoordinator(null);
+
+    mod.requestReconcile(1);
+    await flush();
+    await flush();
+
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(kanbanPromoteDueRetryMock).not.toHaveBeenCalled();
+    expect(kanbanFailMock).toHaveBeenCalledWith(1, "no scheduled Orc continuation owner after restart");
+  });
+
   it("keeps a future-dated queued scheduled root a no-op", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
     fakeCoordinator(claims);
@@ -632,6 +658,22 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
     // the dispatch pump was requested; no continuation claim and no settle
     expect(claims).toHaveLength(0);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("does not treat an orphaned attempt row without a Worker contract as ownership", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "queued", type: "W" }), parent_id: 1 }],
+      attemptLifecycle: "pending",
+    });
+    workerContractExistsMock.mockReturnValue(false);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(1);
     expect(kanbanFailMock).not.toHaveBeenCalled();
   });
 
@@ -892,5 +934,51 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await flush();
 
     expect(claims).toHaveLength(1);
+  });
+
+  it("reuses an existing repair Worker after a crash before repair state transition", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+
+    let repairState: "repair_planned" | "repairing" = "repair_planned";
+    reviewStoreMock.getSupervision.mockImplementation(() => supervision({ state: repairState }));
+    reviewStoreMock.setState.mockImplementation((_projectId: number, nextState: string) => {
+      repairState = nextState as "repair_planned" | "repairing";
+    });
+    reviewStoreMock.getLatestDecisionForProject.mockReturnValue({
+      id: "rd_repair_1",
+      review_case_id: "rc_1",
+      decision_json: JSON.stringify({
+        action: "repair",
+        repair: {
+          items: [
+            { id: "r1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
+            { id: "r2", affected_criterion_ids: ["c2"], strategy: "rewrite", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
+          ],
+        },
+      }),
+      decision_digest: "d",
+      created_at: new Date().toISOString(),
+    });
+
+    const existingRepair = { ...makeCard({ id: 2, status: "queued", type: "W", goal: "Repair: rework" }), parent_id: 1 };
+    kanbanGetChildrenMock.mockReturnValue([existingRepair]);
+    getContractForCardMock.mockImplementation((cardId: number) => cardId === 2 ? {
+      id: "c_existing_repair",
+      goal: "Repair: rework",
+      supports_root_criteria: ["c1"],
+      provenance: { root_card_id: 1 },
+    } : undefined);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(spawnChildMock).toHaveBeenCalledTimes(1);
+    expect(spawnChildMock).toHaveBeenCalledWith(1, expect.objectContaining({
+      goal: expect.stringContaining("[repair-item:r2]"),
+    }));
+    expect(spawnChildMock.mock.calls[0]?.[1]?.goal).not.toContain("r1");
+    expect(reviewStoreMock.setState).toHaveBeenCalledWith(1, "repairing");
   });
 });
