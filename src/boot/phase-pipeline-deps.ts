@@ -20,6 +20,9 @@ import { readEntry as cronReadEntry } from "../components/tasks/task-store.js";
 import { CronQueue } from "../components/tasks/task-queue.js";
 import { IdleSave } from "../components/idle-save.js";
 import { logInfo, logWarn } from "../components/logger.js";
+import { formatTaskLabel } from "../components/tasks/task-types.js";
+import { formatTaskFailureDetail, formatTaskFailureRootCause } from "../components/tasks/task-failure.js";
+import type { TaskFailureDiagnosticV1 } from "../components/tasks/task-failure.js";
 import { loadTransport, resolveAgent } from "../components/transport-config.js";
 import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
@@ -27,6 +30,16 @@ import type { PipelineDeps } from "../components/message-pipeline.js";
 
 import { getEnv } from "../components/env-schema.js";
 import { unavailable } from "../capabilities/sleep/index.js";
+
+/** #1588: operator failure notification — category/code + lane breakdown. */
+export function buildFailureNotification(entryId: string, diagnostic: TaskFailureDiagnosticV1): string {
+  return `[warn] ${formatTaskLabel(entryId)} failed - ${diagnostic.category}/${diagnostic.code}\n${formatTaskFailureDetail(diagnostic)}`;
+}
+
+/** #1588: self-healer prompt — structured root cause, bounded remediation, FORBIDDEN block. */
+export function buildShaFailurePrompt(entryId: string, diagnostic: TaskFailureDiagnosticV1, pending: string): string {
+  return `[System] You ARE the self-healing agent. A scheduled task failed.\nTask: "${entryId}"   Category: ${diagnostic.category}/${diagnostic.code}${pending}\n\n${formatTaskFailureRootCause(diagnostic)}\n\nPermitted remediation: task_manage action=adjust (bounded) or action=escalate.\n\nDiagnose the root cause. If an autonomous adjust within the permitted fields fixes it, apply it. If the fix requires human action (manual browser login, external service down, fresh auth cookie), escalate with a concrete ask: "Requires human intervention: <reason>". Do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.\n\nFORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:\n- transport.json\n- .env / .env.skills\n- peers.json\n- users.json\nException: fixing JSON structural corruption (invalid syntax, parse errors) is always allowed.\n\nA single task failure is NOT grounds for config changes. Investigate root cause, report findings.`;
+}
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, transport } = ctx;
@@ -60,13 +73,26 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   let shaState: "idle" | "running" | "cooldown" = "idle";
   const shaPending: string[] = [];
-  const onFailInject = (entryId: string, command: string, result: string): void => {
+  const shaDailyCounts = new Map<string, { date: string; count: number }>();
+  // #1588: the exactly-once failure cascade. Fires once per settled
+  // failed/timed_out run for every task kind, delivering the structured
+  // diagnostic to the operator and, when enabled, to the self-healer.
+  const onFailure = (entryId: string, diagnostic: TaskFailureDiagnosticV1): void => {
     // Three-state SHA guard (#719)
     if (shaState === "running") return; // drop entirely — SHA might be fixing it
+    const label = formatTaskLabel(entryId);
     if (ctx.telegramAdapter) {
-      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `⚠️ ${entryId} failed`);
+      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), buildFailureNotification(entryId, diagnostic));
     }
     if (!getEnv().selfhealEnabled) return;
+    // Per-day 2-attempt throttle, moved from the coordinator's tryInjectFailure.
+    const today = new Date().toISOString().slice(0, 10);
+    const fc = shaDailyCounts.get(entryId);
+    if (fc && fc.date === today && fc.count >= 2) {
+      logInfo("main", `Skip self-heal for "${entryId}" — already 2 attempts today`);
+      return;
+    }
+    shaDailyCounts.set(entryId, { date: today, count: (fc?.date === today ? fc.count : 0) + 1 });
     if (shaState === "cooldown") {
       shaPending.push(entryId);
       return;
@@ -76,9 +102,9 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     const pending = shaPending.length > 0 ? `\nAlso failed recently: ${shaPending.join(", ")}` : "";
     shaPending.length = 0;
     if (ctx.telegramAdapter) {
-      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `🔧 Calling SHA, reason: "${entryId}" failed`);
+      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `[warn] Calling self-healer, reason: "${label}" failed`);
     }
-    const msg = `[System] You ARE the self-healing agent. A scheduled task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}${pending}\n\nDiagnose the root cause. If you can fix it programmatically (script fix, token refresh, pause task), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.\n\nFORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:\n- transport.json\n- .env / .env.skills\n- peers.json\n- users.json\nException: fixing JSON structural corruption (invalid syntax, parse errors) is always allowed.\n\nA single task failure is NOT grounds for config changes. Investigate root cause, report findings.`;
+    const msg = buildShaFailurePrompt(entryId, diagnostic, pending);
     void (async () => {
       try {
         // #1271: SHA goes through the unified spin() chokepoint (S profile =
@@ -107,7 +133,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // never a second live registry — so scheduled agent runs and the worker
   // adapter resolve the same handles.
   const { spin } = await import("../components/spin.js");
-  const coordinator = new ScheduledRunCoordinator({ onFailInject, onTaskPaused, executions: spin.executionSupervisor });
+  const coordinator = new ScheduledRunCoordinator({ onFailure, onTaskPaused, executions: spin.executionSupervisor });
 
   const cronQueue = new CronQueue(
     config.transport.agentCliPath,

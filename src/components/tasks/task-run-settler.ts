@@ -38,6 +38,12 @@ export interface SettleOptions {
   /** Pause notification, emitted once per false→true transition. */
   onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
   /**
+   * #1588: failure cascade, fired exactly once per settled failed/timed_out
+   * run — after the append-once write and the cleared reservation check, so
+   * duplicate and late settlements never re-report.
+   */
+  onFailure?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+  /**
    * #1539: the terminal fact's own occurrence time — card updated_at /
    * acceptance decision time, process exit time, or provider completion time.
    * `factAt < deadlineAt` is accepted on its merits even when observed after
@@ -184,6 +190,14 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
   if (nowPaused && !wasPaused) {
     logWarn(TAG, `Auto-paused "${entry.id}" — ${formatTaskFailure(diagnostic)}`);
     onPaused?.(entry.id, diagnostic);
+  }
+
+  // #1588: exactly-once failure cascade. Fired only after both guards above —
+  // a duplicate settlement (append-once miss) and a late settlement (reservation
+  // lost) return before reaching here, so a settled run reports at most once.
+  // deferred and cancelled are deliberate non-failures and stay quiet.
+  if (effectiveOutcome === "failed" || effectiveOutcome === "timed_out") {
+    opts.onFailure?.(entry.id, diagnostic);
   }
 
   logInfo(TAG, `Run "${entry.id}" settled as ${effectiveOutcome}${nowPaused ? " (auto-paused)" : ""}`);

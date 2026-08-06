@@ -338,3 +338,38 @@ export function formatTaskFailureDetail(d: TaskFailureDiagnosticV1): string {
   if (ctx.remediationHint) lines.push(`Remediation: ${ctx.remediationHint}`);
   return lines.join("\n");
 }
+
+function escapeXml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** #1588: structured <root-cause> block for the self-healer prompt. */
+export function formatTaskFailureRootCause(d: TaskFailureDiagnosticV1): string {
+  const lines: string[] = ["<root-cause>"];
+  const ctx = d.context;
+  if (!ctx) {
+    lines.push(`  <failure code="${escapeXml(d.category)}/${escapeXml(d.code)}" message="${escapeXml(d.message)}"/>`);
+  } else {
+    if (ctx.rootCardId !== undefined) lines.push(`  <root card="${ctx.rootCardId}"/>`);
+    for (const lane of ctx.lanes) {
+      const attrs = [
+        `card="${lane.cardId}"`,
+        `contract="${escapeXml(lane.contractId)}"`,
+        `lifecycle="${escapeXml(lane.lifecycle)}"`,
+      ];
+      if (lane.cancelReason) attrs.push(`cancel-reason="${escapeXml(lane.cancelReason)}"`);
+      if (lane.hardDeadlineAt) attrs.push(`hard-deadline="${escapeXml(lane.hardDeadlineAt)}"`);
+      if (lane.settledAt) attrs.push(`settled="${escapeXml(lane.settledAt)}"`);
+      if (lane.overrunMs !== undefined) attrs.push(`overrun-ms="${lane.overrunMs}"`);
+      if (lane.bindingLimit) attrs.push(`binding-limit="${escapeXml(lane.bindingLimit.name)}=${lane.bindingLimit.value}"`);
+      lines.push(`  <lane ${attrs.join(" ")}>`);
+      for (const c of lane.criteria) {
+        const evidence = lane.missingEvidence.includes(c.id) ? "none" : "present";
+        lines.push(`    <criterion id="${escapeXml(c.id)}" status="${escapeXml(c.status)}" evidence="${evidence}"/>`);
+      }
+      lines.push("  </lane>");
+    }
+  }
+  lines.push("</root-cause>");
+  return lines.join("\n");
+}

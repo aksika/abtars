@@ -243,3 +243,76 @@ describe("settleRunOnce terminal normalization (#1539)", () => {
     }
   });
 });
+
+describe("settleRunOnce failure cascade (#1588)", () => {
+  function reserve(runId: string, trigger: "schedule" | "manual" = "schedule"): import("./task-state-store.js").ActiveTaskRun {
+    const reserved = store.reserveRun(ENTRY.id, {
+      runId,
+      groupId: "g-cascade",
+      attempt: 1,
+      trigger,
+      occurrenceAt: OCCURRENCE_AT,
+      deadlineAt: DEADLINE_AT,
+    });
+    if (!reserved.ok) throw new Error("reserveRun failed");
+    return reserved.run;
+  }
+
+  it("fires exactly once for a failed run — the headline agent-task defect", () => {
+    const run = reserve("cascade-fail");
+    const calls: Array<[string, string]> = [];
+    const settled = settle.settleRunOnce({
+      entry: ENTRY, run, outcome: "failed",
+      diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "boom", "none"),
+      onFailure: (entryId, diagnostic) => calls.push([entryId, diagnostic.code]),
+    });
+    expect(settled).toBe("settled");
+    expect(calls).toEqual([["finance-daily", "model_error"]]);
+  });
+
+  it("duplicate and late settlements add zero further invocations", () => {
+    const run = reserve("cascade-once");
+    const calls: Array<[string, string]> = [];
+    const opts = {
+      entry: ENTRY, run, outcome: "failed",
+      diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "boom", "none"),
+      onFailure: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => calls.push([entryId, diagnostic.code]),
+    };
+    expect(settle.settleRunOnce(opts)).toBe("settled");
+    expect(settle.settleRunOnce(opts)).toBe("duplicate");
+    expect(calls).toHaveLength(1);
+    // A stale run whose reservation was already cleared: history appends but
+    // the reservation check fails, so the cascade must not re-fire.
+    const staleRun = { ...run, runId: "cascade-stale" };
+    expect(settle.settleRunOnce({ ...opts, run: staleRun })).toBe("late");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("deferred and cancelled outcomes invoke it zero times", () => {
+    const calls: string[] = [];
+    const runDeferred = reserve("cascade-deferred");
+    settle.settleRunOnce({
+      entry: ENTRY, run: runDeferred, outcome: "deferred",
+      diagnostic: failure.makeTaskFailure("admission", "executor_unavailable", "queued", "busy", "transient"),
+      onFailure: (_entryId, diagnostic) => calls.push(diagnostic.code),
+    });
+    const runCancelled = reserve("cascade-cancelled");
+    settle.settleRunOnce({
+      entry: ENTRY, run: runCancelled, outcome: "cancelled",
+      diagnostic: failure.makeTaskFailure("interruption", "cancelled", "cancelling", "operator", "none"),
+      onFailure: (_entryId, diagnostic) => calls.push(diagnostic.code),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("a timed_out outcome reports the effective diagnostic exactly once", () => {
+    const run = reserve("cascade-timeout");
+    const calls: string[] = [];
+    settle.settleRunOnce({
+      entry: ENTRY, run, outcome: "timed_out",
+      diagnostic: failure.makeTaskFailure("supervision", "lane_timed_out", "executing", "deadline", "none"),
+      onFailure: (_entryId, diagnostic) => calls.push(diagnostic.category + "/" + diagnostic.code),
+    });
+    expect(calls).toEqual(["supervision/lane_timed_out"]);
+  });
+});

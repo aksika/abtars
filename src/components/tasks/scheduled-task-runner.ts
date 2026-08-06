@@ -33,7 +33,7 @@ export interface ScheduledTaskRunOutcome {
 
 export type AgentTaskRunner = (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string }>;
 export type TaskPausedCallback = (chatId: number, title: string, reason: string) => void;
-export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
+export type TaskFailureCallback = (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
 export type { ScheduledProjectRequest, ScheduledProjectRunner } from "./scheduled-project-runner.js";
 
 /** #1540: the production supervisor is the facade's own instance — never a second registry. */
@@ -45,13 +45,17 @@ export class ScheduledTaskRunner {
   private readonly agentRunner?: AgentTaskRunner;
   private readonly projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner;
   private readonly onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+  private readonly onFailure?: TaskFailureCallback;
   private readonly executions: ExecutionSupervisor;
 
-  constructor(opts?: { agentRunner?: AgentTaskRunner; onTaskPaused?: TaskPausedCallback; onFailInject?: FailInjectCallback; projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner; executions?: ExecutionSupervisor }) {
+  constructor(opts?: { agentRunner?: AgentTaskRunner; onTaskPaused?: TaskPausedCallback; onFailure?: TaskFailureCallback; projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner; executions?: ExecutionSupervisor }) {
     this.agentRunner = opts?.agentRunner;
     this.projectRunner = opts?.projectRunner;
     // #1540: the single shared live supervisor (Spin's own instance by default).
     this.executions = opts?.executions ?? resolveDefaultExecutions();
+    // #1588: the failure cascade is passed through to every settle — the
+    // settler's exactly-once placement is the single reporting point.
+    this.onFailure = opts?.onFailure;
     // #1520: pause notification emitted once by the shared settler on the
     // false→true transition, keeping operator presentation in one place.
     if (opts?.onTaskPaused) {
@@ -168,7 +172,7 @@ export class ScheduledTaskRunner {
           chatId: entry.chatId ?? String(entry.interaction.target.chatId),
         });
         const detail = launchResult.response.slice(0, 200);
-        settleRunOnce({ entry, run: reservation, outcome: "success", detail, cardId: boardId, executionRef: reservation.runId, onPaused: this.onPaused, factAt: factNow() });
+        settleRunOnce({ entry, run: reservation, outcome: "success", detail, cardId: boardId, executionRef: reservation.runId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: factNow() });
         logTaskDebug("task_settled", { task: entry.id, run: reservation.runId }, `skill=${entry.interaction.skill} session=${launchResult.sessionId}`);
         return { status: "success", safeDetail: detail, cardId: boardId };
       }
@@ -254,7 +258,7 @@ export class ScheduledTaskRunner {
         settleRunOnce({
           entry, run: reservation, outcome: "timed_out",
           diagnostic: makeTaskFailure("interruption", "timed_out", "executing", raceResult.reason, "none"),
-          detail: raceResult.reason, cardId: execControl.cardId, executionRef: runId, onPaused: this.onPaused,
+          detail: raceResult.reason, cardId: execControl.cardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure,
         });
         return { status: "timed_out", safeDetail: raceResult.reason, ...(execControl.cardId !== undefined ? { cardId: execControl.cardId } : {}) };
       }
@@ -269,7 +273,7 @@ export class ScheduledTaskRunner {
           settleRunOnce({
             entry, run: reservation, outcome: "failed",
             diagnostic: error.diagnostic, detail: error.diagnostic.message,
-            cardId, executionRef: runId, onPaused: this.onPaused, factAt: error.factAt ?? factNow(),
+            cardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: error.factAt ?? factNow(),
           });
           return { status: "failed", safeDetail: error.diagnostic.message, ...(cardId !== undefined ? { cardId } : {}) };
         }
@@ -280,7 +284,7 @@ export class ScheduledTaskRunner {
           settleRunOnce({
             entry, run: reservation, outcome: "deferred",
             diagnostic: makeTaskFailure("admission", error.code, "queued", error.message, "transient"),
-            detail: error.message, retryAt: error.retryAt, onPaused: this.onPaused,
+            detail: error.message, retryAt: error.retryAt, onPaused: this.onPaused, onFailure: this.onFailure,
           });
           logTaskDebug("task_admission_deferred", { task: entry.id }, `code=${error.code}`);
           return { status: "deferred", safeDetail: error.message };
@@ -293,7 +297,7 @@ export class ScheduledTaskRunner {
         settleRunOnce({
           entry, run: reservation, outcome: "failed",
           diagnostic: makeTaskFailure("execution", "model_error", "executing", detail, transient ? "transient" : "none"),
-          detail, cardId, executionRef: runId, onPaused: this.onPaused, factAt: errorFactAt ?? factNow(),
+          detail, cardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: errorFactAt ?? factNow(),
         });
         return { status: "failed", safeDetail: detail, ...(cardId !== undefined ? { cardId } : {}) };
       }
@@ -310,7 +314,7 @@ export class ScheduledTaskRunner {
         settleRunOnce({
           entry, run: reservation, outcome: "cancelled",
           diagnostic: makeTaskFailure("interruption", "cancelled", "cancelling", `cancelled: ${reason}`, "none"),
-          detail: `cancelled: ${reason}`, cardId: boardId, executionRef: runId, onPaused: this.onPaused, factAt: childFactAt,
+          detail: `cancelled: ${reason}`, cardId: boardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: childFactAt,
         });
         return { status: "cancelled", safeDetail: `cancelled: ${reason}`, cardId: boardId };
       }
@@ -336,7 +340,7 @@ export class ScheduledTaskRunner {
           // The shared settler is the exclusive delivery release point.
           settleRunOnce({
             entry, run: reservation, outcome: "success", detail: settlementDetail, resultPath, cardId: boardId,
-            executionRef: runId, releaseDelivery: true, attachResult: maxAgents > 1, onPaused: this.onPaused, factAt: childFactAt,
+            executionRef: runId, releaseDelivery: true, attachResult: maxAgents > 1, onPaused: this.onPaused, onFailure: this.onFailure, factAt: childFactAt,
           });
           return { status: "success", safeDetail: settlementDetail, artifactPath: resultPath ?? undefined, cardId: boardId };
         } else {
@@ -344,7 +348,7 @@ export class ScheduledTaskRunner {
           settleRunOnce({
             entry, run: reservation, outcome: "failed",
             diagnostic: makeTaskFailure("validation", artifactResult.code, "validating", settlementDetail, "none"),
-            detail: settlementDetail, cardId: boardId, executionRef: runId, onPaused: this.onPaused, factAt: factNow(),
+            detail: settlementDetail, cardId: boardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: factNow(),
           });
           return { status: "failed", safeDetail: settlementDetail, cardId: boardId };
         }
@@ -357,14 +361,14 @@ export class ScheduledTaskRunner {
         settleRunOnce({
           entry, run: reservation, outcome: "definition_failed",
           diagnostic: makeTaskFailure("definition", "report_contract_missing", "validating", settlementDetail, "permanent"),
-          detail: settlementDetail, cardId: boardId, executionRef: runId, onPaused: this.onPaused, factAt: factNow(),
+          detail: settlementDetail, cardId: boardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: factNow(),
         });
         return { status: "definition_failed", safeDetail: settlementDetail, cardId: boardId };
       } else {
         // The shared settler is the exclusive delivery release point.
         settleRunOnce({
           entry, run: reservation, outcome: "success", detail: response?.slice(0, 200), cardId: boardId,
-          executionRef: runId, releaseDelivery: true, onPaused: this.onPaused, factAt: childFactAt,
+          executionRef: runId, releaseDelivery: true, onPaused: this.onPaused, onFailure: this.onFailure, factAt: childFactAt,
         });
         return { status: "success", safeDetail: response?.slice(0, 200), cardId: boardId };
       }
@@ -374,7 +378,7 @@ export class ScheduledTaskRunner {
       settleRunOnce({
         entry, run: reservation, outcome: "failed",
         diagnostic: makeTaskFailure("execution", "model_error", "executing", msg.slice(0, 500), "none"),
-        detail: msg.slice(0, 500), cardId: reservation.cardId, onPaused: this.onPaused, factAt: factNow(),
+        detail: msg.slice(0, 500), cardId: reservation.cardId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: factNow(),
       });
       return { status: "failed", safeDetail: msg.slice(0, 500) };
     } finally {

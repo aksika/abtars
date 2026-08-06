@@ -7,7 +7,8 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { createBootCtx } from "./context.js";
-import { phasePipelineDeps } from "./phase-pipeline-deps.js";
+import { phasePipelineDeps, buildFailureNotification, buildShaFailurePrompt } from "./phase-pipeline-deps.js";
+import { makeTaskFailure } from "../components/tasks/task-failure.js";
 
 function fakePiTransport() {
   return {
@@ -74,5 +75,56 @@ describe("phasePipelineDeps #1527", () => {
     await expect(phasePipelineDeps(ctx)).rejects.toThrow();
     expect(ctx.transport).not.toBeNull();
     expect((ctx.transport as unknown as { destroy: ReturnType<typeof vi.fn> }).destroy).not.toHaveBeenCalled();
+  });
+});
+
+describe("failure cascade payloads (#1588)", () => {
+  const diagnostic = makeTaskFailure("supervision", "lane_late_completion", "executing", "late", "none", {
+    rootCardId: 7,
+    lanes: [{
+      cardId: 4,
+      contractId: "c_ce252b756fd63a25e5551f8e",
+      attemptId: "a_xyz",
+      lifecycle: "timed_out",
+      cancelReason: "late_completion_timed_out: worker_completed",
+      hardDeadlineAt: "2026-08-06T13:46:38.195Z",
+      settledAt: "2026-08-06T13:46:45.680Z",
+      overrunMs: 7485,
+      bindingLimit: { name: "max_duration_ms", value: 120000 },
+      criteria: [{ id: "c1", status: "not_run" }],
+      missingEvidence: ["c1"],
+    }],
+  });
+
+  it("the operator notification carries category/code and the lane facts", () => {
+    const text = buildFailureNotification("daily-ai", diagnostic);
+    expect(text).toContain("Daily Ai failed - supervision/lane_late_completion");
+    expect(text).toContain("card 4");
+    expect(text).toContain("contract c_ce252b756fd63a25e5551f8e");
+    expect(text).toContain("overrun_ms 7485");
+    expect(text).toContain("binding_limit max_duration_ms=120000");
+    expect(text).toContain("Unevidenced criteria: c1");
+    expect(text).not.toMatch(/[📥✅❌⏳🔧⚠️]/);
+  });
+
+  it("the SHA prompt carries the structured root cause and preserves the FORBIDDEN block", () => {
+    const text = buildShaFailurePrompt("daily-ai", diagnostic, "");
+    expect(text).toContain('Task: "daily-ai"   Category: supervision/lane_late_completion');
+    expect(text).toContain("<root-cause>");
+    expect(text).toContain('cancel-reason="late_completion_timed_out: worker_completed"');
+    expect(text).toContain('hard-deadline="2026-08-06T13:46:38.195Z"');
+    expect(text).toContain('settled="2026-08-06T13:46:45.680Z"');
+    expect(text).toContain('overrun-ms="7485"');
+    expect(text).toContain('binding-limit="max_duration_ms=120000"');
+    expect(text).toContain('<criterion id="c1" status="not_run" evidence="none"/>');
+    expect(text).toContain("Permitted remediation: task_manage action=adjust (bounded) or action=escalate.");
+    expect(text).toContain("FORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:");
+    expect(text).toContain("- transport.json\n- .env / .env.skills\n- peers.json\n- users.json");
+    expect(text).toContain("A single task failure is NOT grounds for config changes.");
+  });
+
+  it("a pending failure list is preserved in the SHA prompt", () => {
+    const text = buildShaFailurePrompt("daily-ai", diagnostic, "\nAlso failed recently: finance-daily");
+    expect(text).toContain("Also failed recently: finance-daily");
   });
 });

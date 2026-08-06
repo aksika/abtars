@@ -14,7 +14,7 @@ import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { logTaskDebug, logTaskTrace } from "./task-log-ctx.js";
 import { getSystemTaskRegistry } from "./system-task-registry.js";
-import { ScheduledTaskRunner, type AgentTaskRunner, type FailInjectCallback, type TaskPausedCallback } from "./scheduled-task-runner.js";
+import { ScheduledTaskRunner, type AgentTaskRunner, type TaskFailureCallback, type TaskPausedCallback } from "./scheduled-task-runner.js";
 import { settleRunFromHistory, settleRunOnce, onRunTerminal } from "./task-run-settler.js";
 import { settleExpiredRun } from "./due-sources.js";
 import { makeTaskFailure } from "./task-failure.js";
@@ -72,26 +72,26 @@ export type FollowUpEnqueue = (entry: ScheduledTask) => void;
 export class ScheduledRunCoordinator implements ActiveRunSupervisor {
   private readonly handles = new Map<string, CoordinatorHandle>();
   private readonly taskRunner: ScheduledTaskRunner;
-  private readonly onFailInject?: FailInjectCallback;
-  private readonly failCounts = new Map<string, { date: string; count: number }>();
+  private readonly onFailure?: TaskFailureCallback;
   private readonly executions: ExecutionSupervisor;
   private followUpEnqueue?: FollowUpEnqueue;
   private laneReleaseListener: (() => void) | null = null;
 
   constructor(opts?: {
-    onFailInject?: FailInjectCallback;
+    onFailure?: TaskFailureCallback;
     onTaskPaused?: TaskPausedCallback;
     agentRunner?: AgentTaskRunner;
     projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner;
     onLaneRelease?: () => void;
     executions?: ExecutionSupervisor;
   }) {
-    this.onFailInject = opts?.onFailInject;
+    this.onFailure = opts?.onFailure;
     // #1540: the single shared live supervisor (Spin's own instance by default).
     this.executions = opts?.executions ?? spinFacade.executionSupervisor;
     this.taskRunner = new ScheduledTaskRunner({
       agentRunner: opts?.agentRunner,
       onTaskPaused: opts?.onTaskPaused,
+      onFailure: opts?.onFailure,
       projectRunner: opts?.projectRunner,
       executions: this.executions,
     });
@@ -226,6 +226,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
             cardId: run.cardId,
             releaseDelivery: delivered,
             attachResult: Boolean(card.result_path && delivered && entry.kind === "agent" && (entry.orchestration?.maxAgents ?? 1) > 1),
+            onFailure: this.onFailure,
           });
           logInfo(TAG, `recovery: task=${entry.id} run=${run.runId} adopted project ${card.status} card=${run.cardId}`);
           continue;
@@ -253,6 +254,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
         diagnostic: makeTaskFailure("interruption", "restart_interrupted", "executing",
           "restart recovery: execution interrupted, not replayed", "none"),
         detail: "restart_recovery: execution interrupted (no terminal history)",
+        onFailure: this.onFailure,
       });
       logInfo(TAG, `recovery: task=${entry.id} run=${run.runId} settled_interrupted`);
     }
@@ -390,9 +392,9 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
             diagnostic: makeTaskFailure("execution", "process_exit", "executing", result.error, "none"),
             detail: result.error,
             factAt,
+            onFailure: this.onFailure,
           });
           logInfo(TAG, `System fail: "${entry.action}" (${entry.id}) — ${result.error}`);
-          this.tryInjectFailure(entry, result.error);
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -402,8 +404,8 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
           diagnostic: makeTaskFailure("execution", "process_exit", "executing", msg, "none"),
           detail: msg,
           factAt: Date.now(),
+          onFailure: this.onFailure,
         });
-        this.tryInjectFailure(entry, msg);
       }
     })();
   }
@@ -450,6 +452,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
           entry, run, outcome: ok ? "success" : "failed", diagnostic,
           detail: (output || `exit ${code}`).slice(0, 500),
           factAt: finishedAt,
+          onFailure: this.onFailure,
         });
         const followUp = entry.followUp;
         if (ok && output.trim() && followUp) {
@@ -473,7 +476,6 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
         }
         if (!ok) {
           addTaskFailure({ taskName: formatTaskLabel(entry.id), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: finishedAt, consecutiveFailures: 1 });
-          this.tryInjectFailure(entry, `${code === 0 ? "ok" : `exit ${code}`}\n${(output || "(no output)").slice(0, 500)}`);
         }
       });
 
@@ -484,6 +486,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
           diagnostic: makeTaskFailure("dependency", "executable_missing", "preflight", `spawn failed: ${err.message.slice(0, 200)}`, "permanent"),
           detail: err.message.slice(0, 500),
           factAt: Date.now(),
+          onFailure: this.onFailure,
         });
       });
     } catch (err) {
@@ -494,6 +497,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
         diagnostic: makeTaskFailure("dependency", "executable_missing", "preflight", message.slice(0, 200), "permanent"),
         detail: message.slice(0, 500),
         factAt: Date.now(),
+        onFailure: this.onFailure,
       });
       this.releaseHandle(handle);
     }
@@ -521,6 +525,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
         settleRunOnce({
           entry, run, outcome: outcome.status === "timed_out" ? "timed_out" : outcome.status,
           diagnostic, detail: outcome.safeDetail, cardId: outcome.cardId, factAt: Date.now(),
+          onFailure: this.onFailure,
         });
       }
     } catch (err) {
@@ -531,6 +536,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
         diagnostic: makeTaskFailure("execution", "model_error", "executing", msg.slice(0, 500), "none"),
         detail: msg.slice(0, 500),
         factAt: Date.now(),
+        onFailure: this.onFailure,
       });
     }
   }
@@ -548,22 +554,6 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
     const now = Date.now();
     if (now - handle.lastProgressAt < SCRIPT_PROGRESS_THROTTLE_MS) return;
     this.progress(handle);
-  }
-
-  private tryInjectFailure(entry: ScheduledTask, result: string): void {
-    if (!this.onFailInject) return;
-    const today = new Date().toISOString().slice(0, 10);
-    const key = entry.id;
-    const fc = this.failCounts.get(key);
-    if (fc && fc.date === today && fc.count >= 2) {
-      logInfo(TAG, `Skip auto-fix for "${key}" — already 2 attempts today`);
-      return;
-    }
-    const count = (fc?.date === today ? fc.count : 0) + 1;
-    this.failCounts.set(key, { date: today, count });
-    logInfo(TAG, `Injecting failure to agent for "${key}" (attempt ${count}/2)`);
-    const msg = entry.kind === "script" ? entry.command : entry.kind === "system" ? entry.action : "";
-    this.onFailInject(entry.id, msg, result);
   }
 }
 
