@@ -12,10 +12,14 @@
 
 import { nerve } from "../nerve.js";
 import { logInfo } from "../logger.js";
-import { kanbanEnqueue, kanbanRunning, kanbanGetCard } from "./kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanGetCard, kanbanGetChildren } from "./kanban-board.js";
 import { readState, advanceRun } from "./task-state-store.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { abortProjectById, getOrCreateOrcCoordinator, requestReconcileForProject } from "../reconciler.js";
+import { WorkerSupervisionStore } from "../worker-supervision-store.js";
+import { makeTaskFailure } from "./task-failure.js";
+import type { TaskFailureDiagnosticV1, TaskFailureLaneFact } from "./task-failure.js";
+import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
 import type { ExecutionControl } from "../execution-control.js";
 import type { ToolExecutionScope } from "./task-package.js";
 import type { Delivery } from "./task-types.js";
@@ -194,7 +198,22 @@ function buildOrcGoal(request: ScheduledProjectRequest): string {
 
 type ProjectTerminalRead =
   | { accepted: true; synthesis: string; factAt?: number }
-  | { accepted: false; reason: string; factAt?: number };
+  | { accepted: false; diagnostic: TaskFailureDiagnosticV1; factAt?: number };
+
+/**
+ * #1588: a typed carrier for a non-accepted supervised project. The diagnostic
+ * is built from durable lane facts so the settler can report the root cause
+ * verbatim instead of re-classifying a flattened string.
+ */
+export class SupervisedProjectFailure extends Error {
+  constructor(
+    readonly diagnostic: TaskFailureDiagnosticV1,
+    readonly factAt?: number,
+  ) {
+    super(diagnostic.message);
+    this.name = "SupervisedProjectFailure";
+  }
+}
 
 function cardTimeMs(iso: string | null | undefined): number | undefined {
   if (!iso) return undefined;
@@ -203,6 +222,121 @@ function cardTimeMs(iso: string | null | undefined): number | undefined {
   const normalized = /Z$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
   const t = new Date(normalized).getTime();
   return Number.isFinite(t) ? t : undefined;
+}
+
+/** #1588: per-lane facts from worker_attempts / worker_contracts / worker_results. */
+function gatherLaneFacts(rootCardId: number): TaskFailureLaneFact[] {
+  const supStore = new WorkerSupervisionStore();
+  const lanes: TaskFailureLaneFact[] = [];
+  for (const child of kanbanGetChildren(rootCardId)) {
+    const contractRow = supStore.getContractByCardId(child.id);
+    const attempt = supStore.getLatestAttempt(child.id);
+    if (!contractRow || !attempt) continue;
+    let contract: WorkerAcceptanceContractV1 | undefined;
+    try {
+      contract = JSON.parse(contractRow.contract_json) as WorkerAcceptanceContractV1;
+    } catch { /* unreadable contract — skip the lane */ }
+    if (!contract) continue;
+
+    const result = supStore.getResultByAttempt(attempt.id);
+    const criteria = result
+      ? result.envelope.criteria.map((c) => ({ id: c.criterion_id, status: c.status }))
+      : contract.criteria.map((c) => ({ id: c.id, status: "not_run" }));
+    const missingEvidence = contract.criteria
+      .filter((c) =>
+        !contract.verification_commands.some((v) => v.criterion_ids.includes(c.id)) &&
+        !contract.expected_artifacts.some((a) => a.criterion_ids.includes(c.id)))
+      .map((c) => c.id);
+    const hardDeadlineAt = attempt.hard_deadline_at ?? undefined;
+    const settledAt = attempt.settled_at ?? undefined;
+    const overrunMs = hardDeadlineAt && settledAt
+      ? new Date(settledAt).getTime() - new Date(hardDeadlineAt).getTime()
+      : undefined;
+    const bindingLimit = contract.limits.max_duration_ms !== undefined
+      ? { name: "max_duration_ms", value: contract.limits.max_duration_ms }
+      : undefined;
+
+    lanes.push({
+      cardId: child.id,
+      contractId: contract.id,
+      attemptId: attempt.id,
+      lifecycle: attempt.lifecycle,
+      ...(attempt.cancel_reason ? { cancelReason: attempt.cancel_reason } : {}),
+      ...(hardDeadlineAt ? { hardDeadlineAt } : {}),
+      ...(settledAt ? { settledAt } : {}),
+      ...(overrunMs !== undefined && Number.isFinite(overrunMs) ? { overrunMs } : {}),
+      ...(bindingLimit ? { bindingLimit } : {}),
+      criteria,
+      missingEvidence,
+    });
+  }
+  return lanes;
+}
+
+/** #1588: root criteria with no child contract mapping them. */
+function uncoveredRootCriteria(rootCardId: number): string[] {
+  const reviewStore = new ProjectReviewStore();
+  const rootRow = reviewStore.getContractByProjectCardId(rootCardId);
+  if (!rootRow) return [];
+  let rootContract: { criteria: ReadonlyArray<{ id: string }> } | undefined;
+  try {
+    rootContract = JSON.parse(rootRow.contract_json) as { criteria: ReadonlyArray<{ id: string }> };
+  } catch { return []; }
+  const mapped = new Set<string>();
+  const supStore = new WorkerSupervisionStore();
+  for (const child of kanbanGetChildren(rootCardId)) {
+    const contractRow = supStore.getContractByCardId(child.id);
+    if (!contractRow) continue;
+    try {
+      const c = JSON.parse(contractRow.contract_json) as { supports_root_criteria?: readonly string[] };
+      for (const id of c.supports_root_criteria ?? []) mapped.add(id);
+    } catch { /* skip */ }
+  }
+  return rootContract.criteria.filter((c) => !mapped.has(c.id)).map((c) => c.id);
+}
+
+/**
+ * #1588: code selection precedence — the most actionable definition-shaped
+ * fault wins over the lane outcome it produced.
+ */
+function selectSupervisionCode(
+  lanes: TaskFailureLaneFact[],
+  uncovered: readonly string[],
+): { code: string; message: string } {
+  if (uncovered.length > 0) {
+    return {
+      code: "contract_uncovered",
+      message: `root criteria without a mapped child contract: ${uncovered.join(", ")}`,
+    };
+  }
+  const unevidenced = new Set<string>();
+  for (const lane of lanes) for (const id of lane.missingEvidence) unevidenced.add(id);
+  if (unevidenced.size > 0) {
+    return {
+      code: "criterion_unevidenced",
+      message: `criterion without an evidence path: ${[...unevidenced].join(", ")}`,
+    };
+  }
+  for (const lane of lanes) {
+    if (lane.lifecycle === "timed_out" && lane.cancelReason?.includes("late_completion")) {
+      const overrun = lane.overrunMs !== undefined ? ` (overrun ${lane.overrunMs}ms)` : "";
+      return {
+        code: "lane_late_completion",
+        message: `lane card ${lane.cardId} completed after its hard deadline${overrun}; result rejected`,
+      };
+    }
+  }
+  for (const lane of lanes) {
+    if (lane.lifecycle === "timed_out") {
+      return { code: "lane_timed_out", message: `lane card ${lane.cardId} hit its hard deadline with no result` };
+    }
+  }
+  for (const lane of lanes) {
+    if (lane.lifecycle === "failed" || lane.lifecycle === "cancelled") {
+      return { code: "lane_failed", message: `lane card ${lane.cardId} settled ${lane.lifecycle}` };
+    }
+  }
+  return { code: "project_blocked", message: "project blocked" };
 }
 
 function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefined {
@@ -226,11 +360,18 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
     return { accepted: true, synthesis: synthesis || "project accepted", factAt };
   }
   if (supervision?.state === "blocked" || card.status === "failed") {
-    return {
-      accepted: false,
-      reason: (supervision?.blocked_reason ?? card.error ?? "project blocked").slice(0, 500),
-      factAt: cardTimeMs(card.updated_at),
-    };
+    const reason = (supervision?.blocked_reason ?? card.error ?? "project blocked").slice(0, 500);
+    const lanes = gatherLaneFacts(rootCardId);
+    const uncovered = uncoveredRootCriteria(rootCardId);
+    const { code, message } = selectSupervisionCode(lanes, uncovered);
+    const diagnostic = makeTaskFailure("supervision", code, "executing",
+      code === "project_blocked" ? reason : message, "none",
+      {
+        rootCardId,
+        lanes,
+        remediationHint: code === "project_blocked" ? reason : undefined,
+      });
+    return { accepted: false, diagnostic, factAt: cardTimeMs(card.updated_at) };
   }
   return undefined;
 }
@@ -268,9 +409,7 @@ function waitForProjectTerminal(request: ScheduledProjectRequest, rootCardId: nu
           if (terminal.accepted) {
             resolve({ cardId: rootCardId, result: terminal.synthesis, factAt: terminal.factAt });
           } else {
-            const err = new Error(terminal.reason) as Error & { factAt?: number };
-            if (terminal.factAt !== undefined) err.factAt = terminal.factAt;
-            reject(err);
+            reject(new SupervisedProjectFailure(terminal.diagnostic, terminal.factAt));
           }
         });
         return;

@@ -152,6 +152,108 @@ describe("scheduled-project-runner #1516", () => {
     await expect(pending).rejects.toThrow(/blocker_class_xyz/);
   });
 
+  it("#1588: a lane completing past its hard deadline yields supervision/lane_late_completion with full lane facts", async () => {
+    fakeCoordinator();
+    await seedReservation();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+    const root = kanban.kanbanList("*")[0]!;
+
+    const workerId = kanban.kanbanEnqueue("Lane 3 - Web Verification", "agent", undefined, {
+      parent_id: root.id,
+      type: "W",
+      goal: "Browse three web pages and record results",
+      delivery: "silent",
+    });
+    const supStore = new (await import("../worker-supervision-store.js")).WorkerSupervisionStore();
+    const contract: import("../worker-contract.js").WorkerAcceptanceContractV1 = {
+      schema_version: 1,
+      id: "c_late",
+      digest: "dg_late",
+      goal: "Browse three web pages and record results",
+      criteria: [{ id: "c1", description: "Three web pages browsed and results recorded" }],
+      expected_artifacts: [{ id: "a1", kind: "file", ref: "notes/web-results.md", required: true, criterion_ids: ["c1"] }],
+      verification_commands: [],
+      required_capabilities: [],
+      limits: { max_duration_ms: 120000 },
+      provenance: { root_card_id: root.id, card_id: workerId, authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    supStore.insertContract(contract, workerId);
+    supStore.insertAttempt({ id: "a_late", card_id: workerId, contract_id: contract.id, ordinal: 1, executor_kind: "agent", executor_id: "spin", status: "running", started_at: "2026-08-06T13:44:00.000Z" });
+    supStore.lifecycleTransition("a_late", ["running"], "timed_out", {
+      cancel_reason: "late_completion_timed_out: worker_completed",
+      hard_deadline_at: "2026-08-06T13:46:38.195Z",
+      settled_at: "2026-08-06T13:46:45.680Z",
+    });
+
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.settleBlocked(root.id, "case-late", { synthesis: "x" }, "criteria failed");
+    nerveBus.fire("card:failed", root.id);
+
+    const err = await pending.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
+    const failure = err as mod.SupervisedProjectFailure;
+    expect(failure.diagnostic.category).toBe("supervision");
+    expect(failure.diagnostic.code).toBe("lane_late_completion");
+    const lane = failure.diagnostic.context!.lanes[0]!;
+    expect(lane.cardId).toBe(workerId);
+    expect(lane.contractId).toBe("c_late");
+    expect(lane.attemptId).toBe("a_late");
+    expect(lane.lifecycle).toBe("timed_out");
+    expect(lane.cancelReason).toBe("late_completion_timed_out: worker_completed");
+    expect(lane.hardDeadlineAt).toBe("2026-08-06T13:46:38.195Z");
+    expect(lane.settledAt).toBe("2026-08-06T13:46:45.680Z");
+    expect(lane.overrunMs).toBe(7485);
+    expect(lane.bindingLimit).toEqual({ name: "max_duration_ms", value: 120000 });
+    expect(lane.criteria).toEqual([{ id: "c1", status: "not_run" }]);
+    expect(lane.missingEvidence).toEqual([]);
+    expect(failure.factAt).toBeDefined();
+  });
+
+  it("#1588: an unevidenceable lane reports criterion_unevidenced before the lane outcome", async () => {
+    fakeCoordinator();
+    await seedReservation();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+    const root = kanban.kanbanList("*")[0]!;
+
+    const workerId = kanban.kanbanEnqueue("Lane 3 - Web Verification", "agent", undefined, {
+      parent_id: root.id,
+      type: "W",
+      goal: "Browse three web pages and record results",
+      delivery: "silent",
+    });
+    const supStore = new (await import("../worker-supervision-store.js")).WorkerSupervisionStore();
+    const contract: import("../worker-contract.js").WorkerAcceptanceContractV1 = {
+      schema_version: 1,
+      id: "c_unev",
+      digest: "dg_unev",
+      goal: "Browse three web pages and record results",
+      criteria: [{ id: "c1", description: "Three web pages browsed and results recorded" }],
+      expected_artifacts: [],
+      verification_commands: [],
+      required_capabilities: [],
+      limits: { max_duration_ms: 120000 },
+      provenance: { root_card_id: root.id, card_id: workerId, authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    supStore.insertContract(contract, workerId);
+    supStore.insertAttempt({ id: "a_unev", card_id: workerId, contract_id: contract.id, ordinal: 1, executor_kind: "agent", executor_id: "spin", status: "running", started_at: "2026-08-06T13:44:00.000Z" });
+    supStore.lifecycleTransition("a_unev", ["running"], "timed_out", {
+      cancel_reason: "late_completion_timed_out: worker_completed",
+      hard_deadline_at: "2026-08-06T13:46:38.195Z",
+      settled_at: "2026-08-06T13:46:45.680Z",
+    });
+
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.settleBlocked(root.id, "case-unev", { synthesis: "x" }, "criteria failed");
+    nerveBus.fire("card:failed", root.id);
+
+    const err = await pending.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
+    const failure = err as mod.SupervisedProjectFailure;
+    expect(failure.diagnostic.category).toBe("supervision");
+    expect(failure.diagnostic.code).toBe("criterion_unevidenced");
+    expect(failure.diagnostic.context!.lanes[0]!.missingEvidence).toContain("c1");
+  });
+
   it("aborts the project and rejects when the scheduled deadline is already exceeded", async () => {
     fakeCoordinator();
     await seedReservation();

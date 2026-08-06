@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { makeTaskFailure, decideFailurePolicy, parseTaskFailure, formatTaskFailure } from "./task-failure.js";
+import { makeTaskFailure, decideFailurePolicy, parseTaskFailure, formatTaskFailure, formatTaskFailureDetail } from "./task-failure.js";
 import type { TaskFailureDiagnosticV1, TaskFailureCategory } from "./task-failure.js";
 
 const PHASE = "executing" as const;
@@ -71,5 +71,101 @@ describe("#1520 failure policy matrix", () => {
   it("format shows category/code plus safe message", () => {
     const d = diag("routing", "local_session_not_peer", "permanent", "local identity");
     expect(formatTaskFailure(d)).toBe("routing/local_session_not_peer: local identity");
+  });
+
+  it("a v1 history row without context still parses", () => {
+    const legacy = { version: 1, category: "execution", code: "model_error", phase: "executing", message: "x", retryability: "none", occurredAt: 1 };
+    const parsed = parseTaskFailure(JSON.parse(JSON.stringify(legacy)));
+    expect(parsed).not.toBeNull();
+    expect(parsed!.context).toBeUndefined();
+  });
+
+  it("a malformed context degrades to a valid diagnostic without context", () => {
+    const d = makeTaskFailure("supervision", "lane_late_completion", "executing", "late", "none");
+    const raw = JSON.parse(JSON.stringify(d));
+    raw.context = { lanes: [{ cardId: "not-a-number", contractId: 42 }] };
+    const parsed = parseTaskFailure(raw);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.category).toBe("supervision");
+    expect(parsed!.code).toBe("lane_late_completion");
+    expect(parsed!.context).toBeUndefined();
+  });
+
+  it("supervision never returns retry — an over-budget lane is not blindly replayed", () => {
+    expect(decideFailurePolicy(diag("supervision", "lane_late_completion", "none"))).toEqual({ action: "count", pauseNow: false });
+    expect(decideFailurePolicy(diag("supervision", "lane_timed_out", "none"))).toEqual({ action: "count", pauseNow: false });
+    expect(decideFailurePolicy(diag("supervision", "lane_failed", "none"))).toEqual({ action: "count", pauseNow: false });
+    expect(decideFailurePolicy(diag("supervision", "project_blocked", "none"))).toEqual({ action: "count", pauseNow: false });
+  });
+
+  it("definition-shaped supervision faults pause immediately", () => {
+    expect(decideFailurePolicy(diag("supervision", "criterion_unevidenced", "none"))).toEqual({ action: "count", pauseNow: true });
+    expect(decideFailurePolicy(diag("supervision", "contract_uncovered", "none"))).toEqual({ action: "count", pauseNow: true });
+  });
+
+  it("context bounds truncate lanes, criteria, and remediation hint", () => {
+    const lanes = Array.from({ length: 20 }, (_, i) => ({
+      cardId: i,
+      contractId: `c${i}`,
+      attemptId: `a${i}`,
+      lifecycle: "timed_out",
+      criteria: Array.from({ length: 30 }, (_, j) => ({ id: `crit${j}`, status: "not_run" })),
+      missingEvidence: ["c1"],
+    }));
+    const d = makeTaskFailure("supervision", "lane_timed_out", "executing", "x", "none", {
+      lanes,
+      remediationHint: "r".repeat(500),
+    });
+    expect(d.context!.lanes).toHaveLength(8);
+    expect(d.context!.lanes[0]!.criteria).toHaveLength(20);
+    expect(d.context!.lanes[0]!.missingEvidence).toHaveLength(1);
+    expect(d.context!.remediationHint!.length).toBe(300);
+  });
+
+  it("context strings are redacted before durability", () => {
+    const d = makeTaskFailure("supervision", "lane_failed", "executing", "x", "none", {
+      lanes: [{ cardId: 1, contractId: "c_secret sk-abc123def456ghi789jkl012mno", attemptId: "a1", lifecycle: "failed", criteria: [], missingEvidence: [] }],
+    });
+    expect(d.context!.lanes[0]!.contractId).not.toContain("sk-abc123def456ghi789jkl012mno");
+  });
+
+  it("context round-trips through parse and the diagnostic survives", () => {
+    const d = makeTaskFailure("supervision", "lane_late_completion", "executing", "late", "none", {
+      rootCardId: 7,
+      lanes: [{
+        cardId: 4,
+        contractId: "c_abc",
+        attemptId: "a_xyz",
+        lifecycle: "timed_out",
+        cancelReason: "late_completion_timed_out: worker_completed",
+        hardDeadlineAt: "2026-08-06T13:46:38.195Z",
+        settledAt: "2026-08-06T13:46:45.680Z",
+        overrunMs: 7485,
+        bindingLimit: { name: "max_duration_ms", value: 120000 },
+        criteria: [{ id: "c1", status: "not_run" }],
+        missingEvidence: ["c1"],
+      }],
+      remediationHint: "raise the lane budget",
+    });
+    const parsed = parseTaskFailure(JSON.parse(JSON.stringify(d)));
+    expect(parsed).toEqual(d);
+    expect(parsed!.context!.lanes[0]!.bindingLimit).toEqual({ name: "max_duration_ms", value: 120000 });
+    expect(parsed!.context!.lanes[0]!.overrunMs).toBe(7485);
+  });
+
+  it("formatTaskFailureDetail renders the lane breakdown", () => {
+    const d = makeTaskFailure("supervision", "lane_late_completion", "executing", "late", "none", {
+      lanes: [{
+        cardId: 4, contractId: "c_abc", attemptId: "a_xyz", lifecycle: "timed_out",
+        overrunMs: 7485, bindingLimit: { name: "max_duration_ms", value: 120000 },
+        criteria: [{ id: "c1", status: "not_run" }], missingEvidence: ["c1"],
+      }],
+    });
+    const text = formatTaskFailureDetail(d);
+    expect(text).toContain("supervision/lane_late_completion");
+    expect(text).toContain("card 4");
+    expect(text).toContain("overrun_ms 7485");
+    expect(text).toContain("binding_limit max_duration_ms=120000");
+    expect(text).toContain("Unevidenced criteria: c1");
   });
 });

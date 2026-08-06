@@ -15,9 +15,30 @@ export type TaskFailureCategory =
   | "execution"
   | "validation"
   | "interruption"
-  | "delivery";
+  | "delivery"
+  | "supervision";
 
 export type TaskFailureRetryability = "permanent" | "transient" | "none";
+
+export interface TaskFailureLaneFact {
+  readonly cardId: number;
+  readonly contractId: string;
+  readonly attemptId: string;
+  readonly lifecycle: string;
+  readonly cancelReason?: string;
+  readonly hardDeadlineAt?: string;
+  readonly settledAt?: string;
+  readonly overrunMs?: number;
+  readonly bindingLimit?: { readonly name: string; readonly value: number };
+  readonly criteria: ReadonlyArray<{ readonly id: string; readonly status: string }>;
+  readonly missingEvidence: ReadonlyArray<string>;
+}
+
+export interface TaskFailureContextV1 {
+  readonly rootCardId?: number;
+  readonly lanes: ReadonlyArray<TaskFailureLaneFact>;
+  readonly remediationHint?: string;
+}
 
 export interface TaskFailureDiagnosticV1 {
   version: 1;
@@ -27,9 +48,13 @@ export interface TaskFailureDiagnosticV1 {
   message: string;
   retryability: TaskFailureRetryability;
   occurredAt: number;
+  context?: TaskFailureContextV1;
 }
 
 const MAX_MESSAGE = 500;
+const MAX_CONTEXT_LANES = 8;
+const MAX_CONTEXT_CRITERIA = 20;
+const MAX_REMEDIATION_HINT = 300;
 const KNOWN_CODES: Readonly<Record<TaskFailureCategory, ReadonlySet<string>>> = {
   definition: new Set([
     "report_contract_missing",
@@ -60,6 +85,14 @@ const KNOWN_CODES: Readonly<Record<TaskFailureCategory, ReadonlySet<string>>> = 
   ]),
   interruption: new Set(["timed_out", "cancelled", "restart_interrupted", "deadline_exceeded"]),
   delivery: new Set(["definitely_not_sent", "send_unknown"]),
+  supervision: new Set([
+    "lane_timed_out",
+    "lane_late_completion",
+    "lane_failed",
+    "criterion_unevidenced",
+    "contract_uncovered",
+    "project_blocked",
+  ]),
 };
 
 /** Safe constructor: bounds the message and rejects unknown category/code pairs. */
@@ -69,6 +102,7 @@ export function makeTaskFailure(
   phase: TaskRunPhase | "delivery",
   message: string,
   retryability: TaskFailureRetryability,
+  context?: TaskFailureContextV1,
 ): TaskFailureDiagnosticV1 {
   if (!KNOWN_CODES[category]?.has(code)) {
     throw new Error(`Unknown task failure code: ${category}/${code}`);
@@ -82,6 +116,39 @@ export function makeTaskFailure(
     message: bounded,
     retryability,
     occurredAt: Date.now(),
+    ...(context !== undefined ? { context: sanitizeContext(context) } : {}),
+  };
+}
+
+function sanitizeContext(ctx: TaskFailureContextV1): TaskFailureContextV1 {
+  const lanes: TaskFailureLaneFact[] = ctx.lanes.slice(0, MAX_CONTEXT_LANES).map((lane) => {
+    const criteria = lane.criteria.slice(0, MAX_CONTEXT_CRITERIA).map((c) => ({
+      id: redactSecrets(c.id).slice(0, 200),
+      status: redactSecrets(c.status).slice(0, 50),
+    }));
+    return {
+      cardId: lane.cardId,
+      contractId: redactSecrets(lane.contractId).slice(0, 200),
+      attemptId: redactSecrets(lane.attemptId).slice(0, 200),
+      lifecycle: redactSecrets(lane.lifecycle).slice(0, 50),
+      ...(lane.cancelReason !== undefined ? { cancelReason: redactSecrets(lane.cancelReason).slice(0, 500) } : {}),
+      ...(lane.hardDeadlineAt !== undefined ? { hardDeadlineAt: redactSecrets(lane.hardDeadlineAt).slice(0, 64) } : {}),
+      ...(lane.settledAt !== undefined ? { settledAt: redactSecrets(lane.settledAt).slice(0, 64) } : {}),
+      ...(lane.overrunMs !== undefined && Number.isFinite(lane.overrunMs) ? { overrunMs: lane.overrunMs } : {}),
+      ...(lane.bindingLimit !== undefined ? {
+        bindingLimit: {
+          name: redactSecrets(lane.bindingLimit.name).slice(0, 100),
+          value: lane.bindingLimit.value,
+        },
+      } : {}),
+      criteria,
+      missingEvidence: lane.missingEvidence.slice(0, MAX_CONTEXT_CRITERIA).map((id) => redactSecrets(id).slice(0, 200)),
+    };
+  });
+  return {
+    ...(ctx.rootCardId !== undefined ? { rootCardId: ctx.rootCardId } : {}),
+    lanes,
+    ...(ctx.remediationHint !== undefined ? { remediationHint: redactSecrets(ctx.remediationHint).slice(0, MAX_REMEDIATION_HINT) } : {}),
   };
 }
 
@@ -107,6 +174,10 @@ export function parseTaskFailure(raw: unknown): TaskFailureDiagnosticV1 | null {
   const validRetry = retryability === "permanent" || retryability === "transient" || retryability === "none";
   if (!validRetry) return null;
   const message = typeof d["message"] === "string" ? (d["message"] as string).slice(0, MAX_MESSAGE) : "";
+  let context: TaskFailureContextV1 | undefined;
+  if (d["context"] !== undefined) {
+    context = parseContext(d["context"]);
+  }
   return {
     version: 1,
     category: category as TaskFailureCategory,
@@ -115,6 +186,65 @@ export function parseTaskFailure(raw: unknown): TaskFailureDiagnosticV1 | null {
     message,
     retryability: retryability as TaskFailureRetryability,
     occurredAt,
+    ...(context !== undefined ? { context } : {}),
+  };
+}
+
+/** Validate a durable context block; a malformed context is dropped whole. */
+function parseContext(raw: unknown): TaskFailureContextV1 | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const c = raw as Record<string, unknown>;
+  if (!Array.isArray(c["lanes"])) return undefined;
+  const lanes: TaskFailureLaneFact[] = [];
+  for (const rawLane of (c["lanes"] as unknown[]).slice(0, MAX_CONTEXT_LANES)) {
+    if (typeof rawLane !== "object" || rawLane === null) continue;
+    const l = rawLane as Record<string, unknown>;
+    if (
+      typeof l["cardId"] !== "number" ||
+      typeof l["contractId"] !== "string" ||
+      typeof l["attemptId"] !== "string" ||
+      typeof l["lifecycle"] !== "string" ||
+      !Array.isArray(l["criteria"])
+    ) continue;
+    const criteria: Array<{ id: string; status: string }> = [];
+    for (const rawC of (l["criteria"] as unknown[]).slice(0, MAX_CONTEXT_CRITERIA)) {
+      if (typeof rawC !== "object" || rawC === null) continue;
+      const co = rawC as Record<string, unknown>;
+      if (typeof co["id"] === "string" && typeof co["status"] === "string") {
+        criteria.push({ id: (co["id"] as string).slice(0, 200), status: (co["status"] as string).slice(0, 50) });
+      }
+    }
+    const missingEvidence = Array.isArray(l["missingEvidence"])
+      ? (l["missingEvidence"] as unknown[]).slice(0, MAX_CONTEXT_CRITERIA)
+        .filter((x): x is string => typeof x === "string")
+        .map((s) => s.slice(0, 200))
+      : [];
+    let bindingLimit: { readonly name: string; readonly value: number } | undefined;
+    if (typeof l["bindingLimit"] === "object" && l["bindingLimit"] !== null) {
+      const bl = l["bindingLimit"] as Record<string, unknown>;
+      if (typeof bl["name"] === "string" && typeof bl["value"] === "number" && Number.isFinite(bl["value"])) {
+        bindingLimit = { name: (bl["name"] as string).slice(0, 100), value: bl["value"] };
+      }
+    }
+    lanes.push({
+      cardId: l["cardId"],
+      contractId: (l["contractId"] as string).slice(0, 200),
+      attemptId: (l["attemptId"] as string).slice(0, 200),
+      lifecycle: (l["lifecycle"] as string).slice(0, 50),
+      ...(typeof l["cancelReason"] === "string" ? { cancelReason: (l["cancelReason"] as string).slice(0, 500) } : {}),
+      ...(typeof l["hardDeadlineAt"] === "string" ? { hardDeadlineAt: (l["hardDeadlineAt"] as string).slice(0, 64) } : {}),
+      ...(typeof l["settledAt"] === "string" ? { settledAt: (l["settledAt"] as string).slice(0, 64) } : {}),
+      ...(typeof l["overrunMs"] === "number" && Number.isFinite(l["overrunMs"] as number) ? { overrunMs: l["overrunMs"] as number } : {}),
+      ...(bindingLimit !== undefined ? { bindingLimit } : {}),
+      criteria,
+      missingEvidence,
+    });
+  }
+  if (lanes.length === 0) return undefined;
+  return {
+    ...(typeof c["rootCardId"] === "number" ? { rootCardId: c["rootCardId"] } : {}),
+    lanes,
+    ...(typeof c["remediationHint"] === "string" ? { remediationHint: (c["remediationHint"] as string).slice(0, MAX_REMEDIATION_HINT) } : {}),
   };
 }
 
@@ -166,10 +296,45 @@ export function decideFailurePolicy(diagnostic: TaskFailureDiagnosticV1): Failur
       return { action: "count", pauseNow: false };
     case "delivery":
       return { action: "clear" };
+    case "supervision":
+      // Only an unevidenceable/uncovered contract is a definition-shaped fault
+      // worth pausing on; lane outcomes are counted, not blindly replayed.
+      if (diagnostic.code === "criterion_unevidenced" || diagnostic.code === "contract_uncovered") {
+        return { action: "count", pauseNow: true };
+      }
+      return { action: "count", pauseNow: false };
   }
 }
 
 /** Present one diagnostic as a compact operator string: category/code + safe message. */
 export function formatTaskFailure(d: TaskFailureDiagnosticV1): string {
   return `${d.category}/${d.code}: ${d.message}`;
+}
+
+/** Multi-line lane breakdown for the operator notification and the SHA prompt. */
+export function formatTaskFailureDetail(d: TaskFailureDiagnosticV1): string {
+  const ctx = d.context;
+  if (!ctx) return formatTaskFailure(d);
+  const lines: string[] = [`${d.category}/${d.code}: ${d.message}`];
+  for (const lane of ctx.lanes) {
+    const parts = [
+      `card ${lane.cardId}`,
+      `contract ${lane.contractId}`,
+      `lifecycle ${lane.lifecycle}`,
+    ];
+    if (lane.cancelReason) parts.push(`cancel_reason "${lane.cancelReason}"`);
+    if (lane.hardDeadlineAt) parts.push(`hard_deadline ${lane.hardDeadlineAt}`);
+    if (lane.settledAt) parts.push(`settled ${lane.settledAt}`);
+    if (lane.overrunMs !== undefined) parts.push(`overrun_ms ${lane.overrunMs}`);
+    if (lane.bindingLimit) parts.push(`binding_limit ${lane.bindingLimit.name}=${lane.bindingLimit.value}`);
+    lines.push(`Lane: ${parts.join(", ")}`);
+    if (lane.criteria.length > 0) {
+      lines.push(`Criteria: ${lane.criteria.map((c) => `${c.id}=${c.status}`).join(", ")}`);
+    }
+    if (lane.missingEvidence.length > 0) {
+      lines.push(`Unevidenced criteria: ${lane.missingEvidence.join(", ")}`);
+    }
+  }
+  if (ctx.remediationHint) lines.push(`Remediation: ${ctx.remediationHint}`);
+  return lines.join("\n");
 }

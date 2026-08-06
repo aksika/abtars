@@ -7,6 +7,7 @@ import { preflightTask, validateReportArtifact } from "./task-preflight.js";
 import type { TaskToolRegistry } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
+import { SupervisedProjectFailure } from "./scheduled-project-runner.js";
 import { createExecutionScope } from "./task-package.js";
 import type { ExecutionControl, ExecutionSupervisor } from "../execution-control.js";
 import { SpinDispatchAdmissionError } from "../spin-types.js";
@@ -262,6 +263,16 @@ export class ScheduledTaskRunner {
         const error = raceResult.error;
         const detail = error.message.slice(0, 1000);
         const cardId = error.cardId ?? execControl.cardId;
+        // #1588: a typed supervision failure carries its own diagnostic —
+        // never re-classified as execution/model_error.
+        if (error instanceof SupervisedProjectFailure) {
+          settleRunOnce({
+            entry, run: reservation, outcome: "failed",
+            diagnostic: error.diagnostic, detail: error.diagnostic.message,
+            cardId, executionRef: runId, onPaused: this.onPaused, factAt: error.factAt ?? factNow(),
+          });
+          return { status: "failed", safeDetail: error.diagnostic.message, ...(cardId !== undefined ? { cardId } : {}) };
+        }
         // #1520: a typed admission rejection (capacity/type-busy/cooldown)
         // before execution starts defers the SAME occurrence; anything after
         // a model call started is an execution failure and is counted.
