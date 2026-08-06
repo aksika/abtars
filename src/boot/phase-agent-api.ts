@@ -11,7 +11,6 @@ import { AgentApiServer } from "../components/agent-api-server.js";
 import { loadAgentApiConfig } from "../components/agent-api-config.js";
 import { logInfo, logError } from "../components/logger.js";
 import { sendNotification } from "../components/notification.js";
-import { sendToMainChat } from "../components/main-chat.js";
 import { setPeerActivityCallback } from "../components/transport/tool-registry.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
@@ -73,10 +72,6 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         sessionManager: ctx.sessionManager,
         onPeerActivity: notifyPeer,
         a2aAdapter,
-        onPiNotify: (text) => sendToMainChat(
-          { telegram: ctx.telegramAdapter, discord: ctx.discordAdapter },
-          text,
-        ),
         piExecutorService: ctx.piExecutorService,
       });
 

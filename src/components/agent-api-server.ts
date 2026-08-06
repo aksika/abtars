@@ -12,7 +12,7 @@ import type { SubagentRuntime } from "./subagent-runtime.js";
 import { openaiError } from "./openai-compat-translate.js";
 import { handleModels as v1HandleModels, handleModel as v1HandleModel, handleEmbeddings as v1HandleEmbeddings, writeResult } from "./openai-compat-routes.js";
 import type { ValidatedTlsIdentity } from "./peer-transport/tls-identity.js";
-import { isLoopbackAddress } from "./pi-auth.js";
+import { isLoopbackAddress } from "../utils/net.js";
 
 const TAG = "agent-api";
 const MAX_TRAFFIC_LOG = 50;
@@ -41,7 +41,6 @@ interface AgentApiDeps {
   onPeerActivity?: (msg: string) => void;
   /** A2A platform adapter — routes chat through pipeline/Spin (#978). */
   a2aAdapter?: import("../platforms/agent-api/agent-api-adapter.js").AgentApiAdapter;
-  onPiNotify?: (text: string) => Promise<import("./main-chat.js").SendResult>;
   /** #1357 — Pi run service for remote Pi delegation on the receiving side. */
   piExecutorService?: import("./pi-executor/pi-run-service.js").PiRunService;
 }
@@ -131,25 +130,6 @@ function readBodyBounded(req: IncomingMessage, maxBytes: number): Promise<string
   });
 }
 
-/** #1313 — Read body with a smaller byte cap (for Pi routes). */
-function readBodyLimited(req: IncomingMessage, maxBytes: number): Promise<string> {
-  return readBodyBounded(req, maxBytes);
-}
-
-/** #1313 — Try reading package version from filesystem. */
-function tryReadVersion(): string | null {
-  try {
-    const { readFileSync } = require("node:fs") as typeof import("node:fs");
-    const { join, dirname } = require("node:path") as typeof import("node:path");
-    const { fileURLToPath } = require("node:url") as typeof import("node:url");
-    const here = dirname(fileURLToPath(import.meta.url));
-    const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf-8") as string) as { version?: string };
-    return pkg.version ?? null;
-  } catch {
-    return null;
-  }
-}
-
 export class AgentApiServer {
   private server: ReturnType<typeof import("node:https").createServer>;
   private config: AgentApiConfig;
@@ -162,13 +142,10 @@ export class AgentApiServer {
   private peerHelpService: import("./peer-help/service.js").PeerHelpService | null = null;
   /** Rate-limit for /v1/enroll-ws: IP → last attempt timestamp (ms). */
   private enrollRateLimit = new Map<string, number>();
-  /** #1313 — Pi notification callback (set by boot phase). */
-  private onPiNotify?: (text: string) => Promise<import("./main-chat.js").SendResult>;
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
     this.memoryRuntime = deps.memoryRuntime;
     this.onPeerActivity = deps.onPeerActivity;
-    this.onPiNotify = deps.onPiNotify;
     void deps.piExecutorService; // kept for compat
     this.a2aAdapter = deps.a2aAdapter;
 
@@ -692,18 +669,6 @@ export class AgentApiServer {
       return;
     }
 
-    // #1313 — Pi capability bridge (signed, loopback, scoped)
-    if (url.startsWith("/v1/pi/")) {
-      this.handlePiRoute(url, method, req, res).catch((err) => {
-        logWarn(TAG, `/v1/pi error: ${err instanceof Error ? err.message : String(err)}`);
-        if (!res.headersSent) {
-          res.writeHead(500, { "Content-Type": "application/json" })
-            .end(JSON.stringify({ ok: false, error: { code: "internal_error", message: "Internal server error", retryable: false } }));
-        }
-      });
-      return;
-    }
-
     res.writeHead(404).end();
   }
 
@@ -757,7 +722,7 @@ export class AgentApiServer {
    * #1549 — Guard for routes that are only ever driven by a local CLI on this
    * host and therefore carry no peer signature. The listener binds all
    * interfaces (see start()), so "local only" must be enforced here rather
-   * than assumed. Mirrors the check performed for /v1/pi/ routes.
+   * than assumed.
    * Returns true when the caller may proceed; otherwise writes 401 and
    * returns false.
    */
@@ -1208,424 +1173,6 @@ export class AgentApiServer {
       .end(JSON.stringify({ ok: true, local_card_id: card.id, status: typedBody.status }));
   }
 
-  // ── Pi capability bridge (#1313) ──────────────────────────────────────────
-
-  /** #1313 — Rate-limiter state for Pi clients (separate from peer rate limits). */
-  private piRateState = new Map<string, { reads: number[]; mutations: number[] }>();
-  private static readonly PI_READ_LIMIT = 120;
-  private static readonly PI_MUTATION_LIMIT = 30;
-
-  private checkPiRateLimit(clientId: string, isMutation: boolean): boolean {
-    const now = Date.now();
-    const window = 60_000;
-    let state = this.piRateState.get(clientId);
-    if (!state) {
-      state = { reads: [], mutations: [] };
-      this.piRateState.set(clientId, state);
-    }
-    const bucket = isMutation ? state.mutations : state.reads;
-    const limit = isMutation
-      ? AgentApiServer.PI_MUTATION_LIMIT
-      : AgentApiServer.PI_READ_LIMIT;
-    const cutoff = now - window;
-    while (bucket.length > 0 && bucket[0]! < cutoff) bucket.shift();
-    if (bucket.length >= limit) return false;
-    bucket.push(now);
-    if (this.piRateState.size > 100) {
-      for (const [k, s] of this.piRateState) {
-        while (s.reads.length > 0 && s.reads[0]! < cutoff) s.reads.shift();
-        while (s.mutations.length > 0 && s.mutations[0]! < cutoff) s.mutations.shift();
-        if (s.reads.length === 0 && s.mutations.length === 0) this.piRateState.delete(k);
-      }
-    }
-    return true;
-  }
-
-  /** #1313 — Uniform Pi API success response. */
-  private piOk(data: unknown, duplicate?: boolean): string {
-    return JSON.stringify({ ok: true, data, ...(duplicate ? { duplicate: true } : {}) });
-  }
-
-  /** #1313 — Uniform Pi API error response. */
-  private piErr(code: string, message: string, retryable: boolean): string {
-    return JSON.stringify({ ok: false, error: { code, message, retryable } });
-  }
-
-  /** #1313 — Route and handle authenticated Pi capability requests. */
-  private async handlePiRoute(
-    url: string, method: string, req: IncomingMessage, res: ServerResponse,
-  ): Promise<void> {
-    const { isLoopbackAddress, PI_MAX_BODY_BYTES, verifyPiRequest, piRouteRequiresScope } = await import("./pi-auth.js");
-
-    // 1. Loopback check
-    const addr = req.socket.remoteAddress;
-    if (!isLoopbackAddress(addr)) {
-      res.writeHead(401, { "Content-Type": "application/json" }).end(this.piErr("unauthorized", "Not authorized", false));
-      return;
-    }
-
-    // 2. Route must be a known /v1/pi/ route
-    const requiredScope = piRouteRequiresScope(url, method);
-    if (!requiredScope) {
-      res.writeHead(404, { "Content-Type": "application/json" }).end(this.piErr("not_found", "Unknown route", false));
-      return;
-    }
-
-    // 3. Read body with Pi-specific size limit (64 KiB)
-    let body = "";
-    try {
-      body = await readBodyLimited(req, PI_MAX_BODY_BYTES);
-    } catch {
-      res.writeHead(413, { "Content-Type": "application/json" }).end(this.piErr("too_large", "Request body too large", false));
-      return;
-    }
-
-    // 4. Verify authentication (registration, nonce, timestamp, body hash, signature)
-    const headers = req.headers as Record<string, string | string[] | undefined>;
-    const auth = verifyPiRequest(method, url, body, headers);
-    if (!auth.ok || !auth.registration) {
-      res.writeHead(401, { "Content-Type": "application/json" }).end(this.piErr("unauthorized", "Not authorized", false));
-      return;
-    }
-
-    // 5. Scope check
-    if (!auth.registration.scopes.includes(requiredScope)) {
-      res.writeHead(403, { "Content-Type": "application/json" }).end(this.piErr("forbidden", "Scope not granted", false));
-      return;
-    }
-
-    // 6. Rate limit (read vs mutation)
-    const isMutation = method === "POST" || method === "DELETE" || method === "PUT" || method === "PATCH";
-    if (!this.checkPiRateLimit(auth.registration.clientId, isMutation)) {
-      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" })
-        .end(this.piErr("rate_limited", "Rate limit exceeded", true));
-      return;
-    }
-
-    // 7. Parse JSON for routes that have a body
-    let parsedBody: Record<string, unknown> | undefined;
-    if (body.length > 0) {
-      try {
-        parsedBody = JSON.parse(body) as Record<string, unknown>;
-      } catch {
-        res.writeHead(400, { "Content-Type": "application/json" }).end(this.piErr("invalid_json", "Invalid JSON body", false));
-        return;
-      }
-    }
-
-    // 8. Route to handler
-    if (url === "/v1/pi/status" && method === "GET") {
-      return this.handlePiStatus(res);
-    }
-    if (url === "/v1/pi/notify" && method === "POST") {
-      return this.handlePiNotify(res, auth.registration.clientId, parsedBody);
-    }
-    if (url === "/v1/pi/tasks" && method === "POST") {
-      return this.handlePiTaskCreate(res, auth.registration.clientId, parsedBody);
-    }
-    if (url.startsWith("/v1/pi/tasks/") && method === "GET") {
-      return this.handlePiTaskStatus(url, res, auth.registration.clientId);
-    }
-    if (url === "/v1/pi/peers" && method === "GET") {
-      return this.handlePiPeerList(res);
-    }
-    if (url === "/v1/pi/peers/delegate" && method === "POST") {
-      return this.handlePiPeerDelegate(res, auth.registration.clientId, parsedBody);
-    }
-
-    res.writeHead(404, { "Content-Type": "application/json" }).end(this.piErr("not_found", "Unknown route", false));
-  }
-
-  /** #1313 — GET /v1/pi/status: bridge version, uptime, capability availability. */
-  private async handlePiStatus(res: ServerResponse): Promise<void> {
-    const uptime = Math.floor(process.uptime());
-    const pkg = await tryReadVersion();
-    res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({
-      version: pkg ?? "?",
-      uptimeSec: uptime,
-      capabilities: {
-        notify: !!this.onPiNotify,
-        tasks: true,
-        peers: true,
-        delegate: true,
-      },
-    }));
-  }
-
-  /** #1313 — POST /v1/pi/notify: send sanitized text to main chat. */
-  private async handlePiNotify(
-    res: ServerResponse, clientId: string, body: Record<string, unknown> | undefined,
-  ): Promise<void> {
-    if (!body || typeof body.request_id !== "string" || typeof body.text !== "string") {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id and text are required", false));
-      return;
-    }
-    const text = (body.text as string).slice(0, 4096);
-    const requestId = (body.request_id as string).slice(0, 128);
-
-    if (!/^[A-Za-z0-9._:\-]+$/.test(requestId)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id must match [A-Za-z0-9._:-]+", false));
-      return;
-    }
-
-    const { reserveRequest, completeRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
-    const hash = hashCanonicalJson(body as Record<string, unknown>);
-    const reservation = reserveRequest(clientId, "notify", requestId, hash);
-
-    if (!reservation.ok) {
-      if (reservation.code === "duplicate_conflict") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("id_conflict", "request_id used with different payload", false));
-        return;
-      }
-      if (reservation.code === "outcome_unknown") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("outcome_unknown", "Previous request outcome unknown", true));
-        return;
-      }
-    }
-
-    if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
-      res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
-      return;
-    }
-
-    if (!this.onPiNotify) {
-      completeRequest(clientId, "notify", requestId, this.piErr("not_available", "Main chat not configured", false));
-      res.writeHead(503, { "Content-Type": "application/json" })
-        .end(this.piErr("not_available", "Main chat not configured", false));
-      return;
-    }
-
-    try {
-      const result = await this.onPiNotify(text);
-      if (result.ok) {
-        const resp = this.piOk({ sent: true });
-        completeRequest(clientId, "notify", requestId, resp);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(resp);
-      } else {
-        const errCode = result.reason === "no-chat-id" ? "not_available"
-          : result.reason === "adapter-missing" ? "not_available"
-          : "send_failed";
-        const resp = this.piErr(errCode, "Notification failed", true);
-        completeRequest(clientId, "notify", requestId, resp);
-        res.writeHead(502, { "Content-Type": "application/json" }).end(resp);
-      }
-    } catch (err) {
-      void err;
-      const resp = this.piErr("send_failed", "Notification failed", true);
-      completeRequest(clientId, "notify", requestId, resp);
-      res.writeHead(502, { "Content-Type": "application/json" }).end(resp);
-    }
-  }
-
-  /** #1313/#1407 — POST /v1/pi/tasks: queue an async Kanban task, return tracking ID. */
-  private async handlePiTaskCreate(
-    res: ServerResponse, clientId: string, body: Record<string, unknown> | undefined,
-  ): Promise<void> {
-    if (!body || typeof body.request_id !== "string" || typeof body.goal !== "string") {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id and goal are required", false));
-      return;
-    }
-    const goal = (body.goal as string).slice(0, 32768);
-    const requestId = (body.request_id as string).slice(0, 128);
-    if (!/^[A-Za-z0-9._:\-]+$/.test(requestId)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id must match [A-Za-z0-9._:-]+", false));
-      return;
-    }
-
-    const context = typeof body.context === "string" ? (body.context as string).slice(0, 16384) : undefined;
-    const priority = typeof body.priority === "string" ? (body.priority as string) : "MEDIUM";
-    const deliveryMode = typeof body.delivery === "string" ? (body.delivery as string) : "silent";
-
-    const { reserveRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
-    const hash = hashCanonicalJson(body as Record<string, unknown>);
-    const reservation = reserveRequest(clientId, "task:create", requestId, hash);
-
-    if (!reservation.ok) {
-      if (reservation.code === "duplicate_conflict") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("id_conflict", "request_id used with different payload", false));
-        return;
-      }
-      if (reservation.code === "outcome_unknown") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("outcome_unknown", "Previous request outcome unknown", true));
-        return;
-      }
-    }
-
-    if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
-      res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
-      return;
-    }
-
-    // #1407: Use PiTaskStore for atomic card+ownership creation
-    try {
-      const { getPiTaskStore } = await import("./pi-task-store.js");
-      const store = await getPiTaskStore();
-      const fullGoal = context ? `${goal}\n\nContext: ${context}` : goal;
-      const result = store.createAndComplete({
-        clientId,
-        requestId,
-        requestHash: hash,
-        title: fullGoal.slice(0, 200),
-        goal: fullGoal,
-        priority: priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-        deliveryMode: deliveryMode as "silent" | "deliver" | "announce",
-      });
-
-      if (result.created) {
-        const { nerve } = await import("./nerve.js");
-        nerve.fire("card:queued", result.cardId);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(result.responseJson);
-      } else {
-        const resp = this.piErr("task_failed", "Task creation failed", true);
-        res.writeHead(500, { "Content-Type": "application/json" }).end(resp);
-      }
-    } catch (err) {
-      const resp = this.piErr("task_failed", "Failed to create task", true);
-      res.writeHead(500, { "Content-Type": "application/json" }).end(resp);
-    }
-  }
-
-  /** #1313/#1407 — GET /v1/pi/tasks/:id — Pi-scoped task status with exact ownership. */
-  private async handlePiTaskStatus(url: string, res: ServerResponse, clientId: string): Promise<void> {
-    const id = parseInt(url.slice("/v1/pi/tasks/".length), 10);
-    if (isNaN(id)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "Invalid task ID", false));
-      return;
-    }
-    const { getPiTaskStore } = await import("./pi-task-store.js");
-    const store = await getPiTaskStore();
-    const view = store.getOwned(id, clientId);
-    if (!view) {
-      res.writeHead(404, { "Content-Type": "application/json" })
-        .end(this.piErr("not_found", "Task not found", false));
-      return;
-    }
-    res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({
-      task_id: view.id,
-      status: view.status,
-      created_at: view.createdAt,
-      completed_at: view.completedAt,
-      result_summary: view.resultSummary,
-      error: view.error,
-    }));
-  }
-
-  /** #1313 — GET /v1/pi/peers: secret-free peer presence (static config + live broker state). */
-  private handlePiPeerList(res: ServerResponse): void {
-    try {
-      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-      const { getPeerWsBroker } = require("./peer-transport/peer-ws-broker.js") as typeof import("./peer-transport/peer-ws-broker.js");
-      const config = loadPeerConfig();
-      const broker = getPeerWsBroker();
-      const connected = broker.getConnectedPeers();
-      const peers = Object.entries(config.peers).map(([name, entry]) => ({
-        name,
-        alive: connected.includes(name),
-        host: entry.host,
-        port: entry.port,
-      }));
-      res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({ peers }));
-    } catch {
-      res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({ peers: [] }));
-    }
-  }
-
-  /** #1313 — POST /v1/pi/peers/delegate: delegate task to a peer. */
-  private async handlePiPeerDelegate(
-    res: ServerResponse, clientId: string, body: Record<string, unknown> | undefined,
-  ): Promise<void> {
-    if (!body || typeof body.request_id !== "string" || typeof body.goal !== "string") {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id and goal are required", false));
-      return;
-    }
-    const goal = (body.goal as string).slice(0, 32768);
-    const requestId = (body.request_id as string).slice(0, 128);
-    if (!/^[A-Za-z0-9._:\-]+$/.test(requestId)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id must match [A-Za-z0-9._:-]+", false));
-      return;
-    }
-
-    const peer = typeof body.peer === "string" ? (body.peer as string).slice(0, 128) : undefined;
-    const context = typeof body.context === "string" ? (body.context as string).slice(0, 16384) : undefined;
-    const priority = typeof body.priority === "string" ? (body.priority as string) : "MEDIUM";
-    const requirements = Array.isArray(body.requirements) ? (body.requirements as string[]).slice(0, 20) : [];
-
-    const { reserveRequest, completeRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
-    const hash = hashCanonicalJson(body as Record<string, unknown>);
-    const reservation = reserveRequest(clientId, "peer:delegate", requestId, hash);
-
-    if (!reservation.ok) {
-      if (reservation.code === "duplicate_conflict") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("id_conflict", "request_id used with different payload", false));
-        return;
-      }
-      if (reservation.code === "outcome_unknown") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("outcome_unknown", "Previous request outcome unknown", true));
-        return;
-      }
-    }
-
-    if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
-      res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
-      return;
-    }
-
-    try {
-      const { getPeerTransport } = await import("./peer-transport/index.js");
-      const transport = getPeerTransport();
-      let targetPeer = peer;
-
-      if (!targetPeer) {
-        const { getPeerWsBroker } = await import("./peer-transport/peer-ws-broker.js");
-        const connected = getPeerWsBroker().getConnectedPeers();
-        if (connected.length === 0) {
-          const resp = this.piErr("no_peers", "No connected peers found", true);
-          completeRequest(clientId, "peer:ask", requestId, resp);
-          res.writeHead(503, { "Content-Type": "application/json" }).end(resp);
-          return;
-        }
-        targetPeer = connected[0]!;
-      }
-
-      const fullGoal = context ? `${goal}\n\nContext: ${context}` : goal;
-      const result = await transport.askHelp(targetPeer, {
-        version: 1,
-        request_id: requestId ?? `pi_${Date.now()}`,
-        created_at: new Date().toISOString(),
-        expires_at: new Date(Date.now() + 300_000).toISOString(),
-        goal: fullGoal,
-        required_capabilities: requirements,
-        priority: priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-      });
-
-      const resp = this.piOk({
-        decision: result.decision,
-        peer: targetPeer,
-        contribution_ref: result.contribution_ref,
-        status: result.decision === "accepted" ? "help_accepted" : result.decision,
-      });
-      completeRequest(clientId, "peer:ask", requestId, resp);
-      res.writeHead(200, { "Content-Type": "application/json" }).end(resp);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const resp = this.piErr("ask_failed", `Help request failed: ${msg}`, true);
-      completeRequest(clientId, "peer:ask", requestId, resp);
-      res.writeHead(502, { "Content-Type": "application/json" }).end(resp);
-    }
-  }
 }
 
 // ── Helper functions ────────────────────────────────────────────────────────
