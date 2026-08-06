@@ -96,7 +96,6 @@ function makeService(configOverrides: Record<string, unknown> = {}): PiRunServic
       abortGraceMs: 5000,
       projectTrust: "never",
       sessionStorageRoot: "/tmp",
-      abmindPlugin: "",
       ...configOverrides,
     } as any,
     spin,

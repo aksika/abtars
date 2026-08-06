@@ -16,7 +16,6 @@ export interface PiExecutorConfig {
   abortGraceMs: number;
   projectTrust: "always" | "never";
   sessionStorageRoot: string;
-  abmindPlugin: string;
 }
 
 // ── #1394: Component-aware path containment ─────────────────────────────────
@@ -88,7 +87,6 @@ export function loadPiConfig(): PiExecutorConfig | null {
       abortGraceMs: raw.abortGraceMs ?? 10_000,
       projectTrust: raw.projectTrust ?? "never",
       sessionStorageRoot: raw.sessionStorageRoot ?? "",
-      abmindPlugin: raw.abmindPlugin ?? "",
     };
 
     logInfo(TAG, `Pi executor loaded: ${config.command} (${Object.keys(config.workspaceAliases).length} aliases, max ${config.maxConcurrent} concurrent)`);
@@ -210,9 +208,4 @@ export function validateSessionFile(
     return { error: `Session file "${canonicalFile}" escapes session storage root "${canonicalRoot}"` };
   }
   return { canonicalPath: canonicalFile };
-}
-
-export function buildPluginArgs(config: PiExecutorConfig): string[] {
-  if (!config.abmindPlugin) return [];
-  return ["--extension", config.abmindPlugin];
 }

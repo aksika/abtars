@@ -36,8 +36,7 @@ overwritten.
   "abortGraceMs": 10000,
   "projectTrust": "never",
   "workspaceAliases": {},
-  "sessionStorageRoot": "",
-  "abmindPlugin": ""
+  "sessionStorageRoot": ""
 }
 ```
 

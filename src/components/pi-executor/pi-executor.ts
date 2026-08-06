@@ -4,7 +4,7 @@ import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import { PiRunStore, type PiTerminalOutcome } from "./pi-run-store.js";
 import type { PiExecutorConfig } from "./config.js";
-import { resolveAndValidateWorkspace, buildTrustArgs, buildPluginArgs, buildChildEnv, validateSessionFile } from "./config.js";
+import { resolveAndValidateWorkspace, buildTrustArgs, buildChildEnv, validateSessionFile } from "./config.js";
 import type { PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim } from "./types.js";
 import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
 import { nerve } from "../nerve.js";
@@ -196,7 +196,6 @@ export class PiExecutor {
       ...this.config.fixedArgs,
       "--mode", "rpc",
       ...buildTrustArgs(this.config),
-      ...buildPluginArgs(this.config),
     ];
 
     const env = buildChildEnv(this.config, run);

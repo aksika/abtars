@@ -98,7 +98,7 @@ describe("validatePiWorkspaceAliases", () => {
     const config = {
       enabled: true, command: "pi", fixedArgs: [], allowedEnv: [],
       maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000,
-      projectTrust: "never", sessionStorageRoot: "", abmindPlugin: "",
+      projectTrust: "never", sessionStorageRoot: "",
       supportedRpcVersion: "0.1",
       workspaceAliases: {},
     } as PiExecutorConfig;
@@ -110,7 +110,7 @@ describe("validatePiWorkspaceAliases", () => {
     const config = {
       enabled: true, command: "pi", fixedArgs: [], allowedEnv: [],
       maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000,
-      projectTrust: "never", sessionStorageRoot: "", abmindPlugin: "",
+      projectTrust: "never", sessionStorageRoot: "",
       supportedRpcVersion: "0.1",
       workspaceAliases: {},
     } as PiExecutorConfig;
@@ -123,7 +123,7 @@ describe("validatePiWorkspaceAliases", () => {
     const config = {
       enabled: true, command: "pi", fixedArgs: [], allowedEnv: [],
       maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000,
-      projectTrust: "never", sessionStorageRoot: "", abmindPlugin: "",
+      projectTrust: "never", sessionStorageRoot: "",
       supportedRpcVersion: "0.1",
       workspaceAliases: { test: { path: "relative/path" } },
     } as PiExecutorConfig;
@@ -135,7 +135,7 @@ describe("validatePiWorkspaceAliases", () => {
     const config = {
       enabled: true, command: "pi", fixedArgs: [], allowedEnv: [],
       maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000,
-      projectTrust: "never", sessionStorageRoot: "", abmindPlugin: "",
+      projectTrust: "never", sessionStorageRoot: "",
       supportedRpcVersion: "0.1",
       workspaceAliases: { test: { path: "/nonexistent-path-1394-test" } },
     } as PiExecutorConfig;
@@ -155,7 +155,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
     return {
       enabled: true, command: "pi", fixedArgs: [], allowedEnv: [],
       maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000,
-      projectTrust: "never", sessionStorageRoot: "", abmindPlugin: "",
+      projectTrust: "never", sessionStorageRoot: "",
       supportedRpcVersion: "0.1",
       workspaceAliases: aliases,
     } as PiExecutorConfig;

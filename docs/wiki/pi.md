@@ -1,16 +1,12 @@
 # Pi Integration
 
-abTARS integrates with [Pi](https://github.com/earendil-works/pi) — a mature coding/session/model harness. Rather than compete, abTARS and Pi work as **symbiotic peers**: each runs standalone, runtime discovery bridges them. No master/slave, no npm dependency either way.
+abTARS integrates with [Pi](https://github.com/earendil-works/pi) — a mature coding/session/model harness. abTARS consumes Pi as a provider engine, a terminal UI, and a supervised coding subprocess; it does not load Pi into abmind or extend Pi with abtars features. No npm dependency either way.
 
 The adoption is **additive and reversible** — each Pi package plugs in beside existing paths. If a package breaks or goes away, abTARS keeps working.
 
 ## Architecture
 
-Two value flows drive the integration:
-
-**Flow A — Pi gains abTARS superpowers.** Pi loads abmind as a plugin for memory/soul/sleep in its TUI. Pi can also reach abTARS over A2A for messaging presence and task queueing.
-
-**Flow B — abTARS gains Pi superpowers.** Pi's provider engine (pi-ai) becomes an optional L1 motor inside `DirectApiTransport`, unlocking ~36 providers and prompt caching. Pi's coding agent becomes a supervised subprocess for complex coding tasks.
+abTARS gains Pi superpowers: Pi's provider engine (pi-ai) becomes an optional L1 motor inside `DirectApiTransport`, unlocking ~36 providers and prompt caching. Pi's coding agent becomes a supervised subprocess for complex coding tasks.
 
 ```
                 abtars
