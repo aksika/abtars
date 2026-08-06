@@ -221,7 +221,7 @@ describe("WorkerSupervisionStore", () => {
     expect(store.db.prepare("SELECT tokens_used FROM kanban_board WHERE id = 100").get()).toEqual({ tokens_used: 15 });
   });
 
-  it("terminalSettlement rejects a late result after timeout without stored evidence", () => {
+  it("terminalSettlement rejects a late result after timeout — the absence envelope blocks replay", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001", ordinal: 1,
@@ -232,7 +232,29 @@ describe("WorkerSupervisionStore", () => {
     }).kind).toBe("settled");
     expect(store.terminalSettlement({
       attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "late", envelope: TEST_ENVELOPE,
-    }).kind).toBe("stale");
+    }).kind).toBe("conflict");
+  });
+
+  it("#1588: a timed_out settlement records a readable absence envelope with not_run criteria", () => {
+    const store = new Store();
+    store.insertContract(TEST_CONTRACT, 101);
+    store.insertAttempt({
+      id: "a_timeout_001", card_id: 101, contract_id: "c_test_001", ordinal: 1,
+      executor_kind: "agent", executor_id: "spin-local", status: "running", started_at: "2026-07-12T00:00:00.000Z",
+    });
+    const result = store.terminalSettlement({
+      attemptId: "a_timeout_001", expectedGeneration: 1, desiredState: "timed_out", stableReason: "deadline fired",
+    });
+    expect(result.kind).toBe("settled");
+    const stored = store.getResultByAttempt("a_timeout_001");
+    expect(stored).toBeDefined();
+    expect(stored!.envelope.outcome).toBe("timed_out");
+    expect(stored!.envelope.criteria).toEqual([{ criterion_id: "c1", status: "not_run", evidence_ids: [] }]);
+    expect(stored!.envelope.criteria.every((c) => c.status !== "passed")).toBe(true);
+    expect(stored!.envelope.checks).toEqual([]);
+    expect(stored!.envelope.artifacts).toEqual([]);
+    expect(stored!.envelope.attempt.contract_id).toBe("c_test_001");
+    expect(stored!.envelope.attempt.contract_digest).toBe(TEST_CONTRACT.digest);
   });
 
   it("pending cancellation is terminal and cannot be claimed", () => {

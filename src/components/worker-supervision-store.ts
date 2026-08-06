@@ -571,6 +571,36 @@ export class WorkerSupervisionStore {
     return createHash("sha256").update(envelopeJson, "utf-8").digest("hex");
   }
 
+  /** #1588: a minimal result envelope for a non-completed terminal settlement. */
+  private buildAbsenceEnvelope(attempt: AttemptRow, outcome: "failed" | "cancelled" | "timed_out", now: number): WorkerResultEnvelopeV1 {
+    const contractRow = this.getContract(attempt.contract_id);
+    let criteria: Array<{ criterion_id: string; status: "not_run"; evidence_ids: readonly string[] }> = [];
+    if (contractRow) {
+      try {
+        const contract = JSON.parse(contractRow.contract_json) as { criteria: ReadonlyArray<{ id: string }> };
+        criteria = contract.criteria.map((c) => ({ criterion_id: c.id, status: "not_run" as const, evidence_ids: [] }));
+      } catch { /* contract unreadable — empty criteria */ }
+    }
+    return {
+      schema_version: 1,
+      attempt: {
+        id: attempt.id,
+        ordinal: attempt.ordinal,
+        contract_id: attempt.contract_id,
+        contract_digest: contractRow?.contract_digest ?? "",
+        executor_kind: attempt.executor_kind === "remote" ? "remote_worker" : "local_worker",
+        executor_id: attempt.executor_id,
+        started_at: attempt.started_at,
+        finished_at: new Date(now).toISOString(),
+      },
+      outcome,
+      criteria,
+      checks: [],
+      artifacts: [],
+      worker_report: { summary: `settled ${outcome} without a worker result`, claims: [], unresolved_risks: [] },
+    };
+  }
+
   // ── #1510: Atomic capacity-and-budget-guarded claim ─────────────────────
 
   getActiveAttemptCountForExecutor(executorKind: string, executorId: string): number {
@@ -852,6 +882,15 @@ export class WorkerSupervisionStore {
           const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
           if (!existingResult) {
             this.insertResult(input.attemptId, input.envelope);
+          }
+        } else if (effectiveState === "failed" || effectiveState === "cancelled" || effectiveState === "timed_out") {
+          // #1588: record evidence of absence — a non-completed terminal
+          // settlement must not leave worker_results empty, or the reviewer
+          // cannot tell "no evidence" from "evidence says failed". Criteria
+          // are derived as not_run, never passed.
+          const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
+          if (!existingResult) {
+            this.insertResult(input.attemptId, this.buildAbsenceEnvelope(attempt, effectiveState, now));
           }
         }
 
