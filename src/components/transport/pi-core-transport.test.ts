@@ -1,14 +1,27 @@
-// TEST DEFICIENCY: Real-Pi integration test (loading actual pi-agent-core) is
-// deferred — requires a full Pi installation. These tests verify the compositor
-// structure and lifecycle with mocked dependencies.
+// Pi resolution is mocked to "absent" (../pi-installation.js) so these tests
+// verify the compositor structure and lifecycle with the real loader chain
+// (pi-core-types loadAndValidatePiAgentCore stays real), deterministically,
+// regardless of whether a compatible global Pi install is present on the host.
+// A host Pi would otherwise load the real pi-agent-core and hit the provider
+// boundary with the unreachable test endpoint — see #1582.
+// Real-Pi integration coverage stays deferred: requires a full Pi installation.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PiCoreTransport, extractAssistantText } from "./pi-core-transport.js";
 import { PiCoreContextProjection, DurableContextUnavailableError, createDurableContextProvider } from "./pi-core-context.js";
+import { PiCoreContractError, convertCurrentTurnToLlm } from "./pi-core-types.js";
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage, AgentMessage } from "./pi-core-types.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
+
+vi.mock("../pi-installation.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../pi-installation.js")>();
+  return {
+    ...actual,
+    resolvePiInstallation: () => ({ state: "absent" as const }),
+  };
+});
 
 function makeCandidates(): ModelCandidate[] {
   return [{
@@ -84,7 +97,7 @@ describe("PiCoreTransport", () => {
   it("sendPrompt without Pi installation throws", async () => {
     const t = makeTransport();
     await t.initialize();
-    await expect(t.sendPrompt("test_session", "hello")).rejects.toThrow();
+    await expect(t.sendPrompt("test_session", "hello")).rejects.toThrow(PiCoreContractError);
   });
 
   it("interrupt on inactive host does not throw", async () => {
@@ -150,8 +163,9 @@ describe("PiCoreTransport", () => {
     const t = makeTransport();
     await t.initialize();
     const promise = t.sendPrompt("sess_1", "hello");
-    // Without a real Pi installation it will reject — we just want no crash
-    await expect(promise).rejects.toThrow();
+    // Pi resolution is mocked absent — it must reject with the typed contract
+    // error, and we just want no crash
+    await expect(promise).rejects.toThrow(PiCoreContractError);
     // activeHost should be null after failure
     expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
   });
@@ -170,24 +184,30 @@ describe("PiCoreTransport", () => {
     expect(t.config.candidates[0]?.maxContext).toBe(64000);
   });
 
-  it("image input advertises ['text', 'image']", async () => {
-    // Inspect piModel input property when image is passed
-    // We can't easily access the internal piModel, but we can verify
-    // that sendPrompt doesn't throw when image is provided (before Pi load)
-    const t = makeTransport();
-    await t.initialize();
-    const promise = t.sendPrompt("s", "hello", { mime: "image/png", base64: "iVBOR=" });
-    await expect(promise).rejects.toThrow(); // Pi not installed, but no crash from image handling
+  it("image input emits text+image parts in the pi-ai message", () => {
+    // The transport's internal image plumbing was previously asserted through
+    // sendPrompt with a bare rejection — which observed nothing about images.
+    // The pure conversion that carries the image shape into the pi-ai message
+    // is asserted directly (#1582).
+    const msg: AbtarsCurrentTurnMessage = {
+      role: "abtars_current_turn",
+      executionId: "exec_1",
+      sessionId: "sess_1",
+      content: "Look at this",
+      timestamp: 123,
+      imageContent: [{ mime: "image/png", base64: "iVBOR=" }],
+    };
+    const m = convertCurrentTurnToLlm(msg) as { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> };
+    expect(m.role).toBe("user");
+    expect(m.content[0]).toMatchObject({ type: "text", text: "Look at this" });
+    expect(m.content[1]).toMatchObject({ type: "image", data: "iVBOR=", mimeType: "image/png" });
   });
 
   it("host-load failure clears activeHost", async () => {
     const t = makeTransport();
     await t.initialize();
-    try {
-      await t.sendPrompt("s", "hi");
-    } catch {
-      // expected — no Pi installation
-    }
+    const err = await t.sendPrompt("s", "hi").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiCoreContractError);
     expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
   });
 
@@ -221,7 +241,7 @@ describe("PiCoreTransport", () => {
       userId: "user-1",
       durableContextIntent: { mode: "durable", beforeMessageId: 42 },
     }).catch((e: unknown) => e);
-    expect(err).not.toBeInstanceOf(DurableContextUnavailableError);
+    expect(err).toBeInstanceOf(PiCoreContractError);
   });
 
   it("lets omitted intent (not-required) past preflight — intentional ephemeral stays operable (#1529)", async () => {
@@ -230,7 +250,7 @@ describe("PiCoreTransport", () => {
     const err = await t.sendPrompt("sess_1", "hello", undefined, {
       userId: "user-1",
     }).catch((e: unknown) => e);
-    expect(err).not.toBeInstanceOf(DurableContextUnavailableError);
+    expect(err).toBeInstanceOf(PiCoreContractError);
   });
 });
 
