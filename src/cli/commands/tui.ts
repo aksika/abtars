@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { resolvePiInstallation, loadPiModule } from "../../components/pi-installation.js";
 import type { PiModuleSpecifier } from "../../components/pi-installation.js";
-import { PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
+import { PI_COMPATIBILITY, formatPiPinWarning } from "../../config/pi-compatibility.js";
 import {
   encodeFrame,
   createFrameDecoder,
@@ -296,7 +296,8 @@ export async function tui(args: string[]): Promise<number> {
 
   // Version check: warn when the installed Pi is above the pinned line
   if (piResult.installation.pinStatus === "above-pin") {
-    stderr(`Warning: Pi ${piResult.installation.version} above pin ${PI_COMPATIBILITY.pinnedRange} (built against ${PI_COMPATIBILITY.pinnedVersion})`);
+    const pinWarning = formatPiPinWarning(piResult.installation.version);
+    stderr(`Warning: ${pinWarning ?? `Pi ${piResult.installation.version} above pin ${PI_COMPATIBILITY.pinnedRange}`}`);
   }
 
   // Build the TUI.

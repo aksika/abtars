@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { getInstanceName } from "./soul-bundle.js";
 import { packagePaths, readManifest } from "../cli/deploy-lib-import.js";
-import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
+import { PI_COMPATIBILITY, formatPiPinWarning } from "../config/pi-compatibility.js";
 import type { ServiceState } from "./service-registry.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -141,14 +141,16 @@ export async function getStatus(ctx?: BridgeStatusCtx): Promise<StatusView> {
   const appPresent = existsSync(paths.app);
   if (!appPresent) warnings.push("app/ directory missing");
 
-  // #1572: an above-pin Pi is a warning on every status surface. The CLI
-  // status command's existing `warnings.length > 0 → exit 1` then applies
-  // unchanged, and /status shows it through the same data function.
+  // #1572: an above-pin Pi is a warning on every status surface. The warning
+  // carries the exact downgrade command (req 4); the CLI status command's
+  // existing `warnings.length > 0 → exit 1` then applies unchanged, and
+  // /status shows it through the same data function.
   try {
     const { resolvePiInstallation } = await import("./pi-installation.js");
     const piRes = resolvePiInstallation();
     if (piRes.state === "compatible" && piRes.installation.pinStatus === "above-pin") {
-      warnings.push(`pi ${piRes.installation.version} above pin ${PI_COMPATIBILITY.pinnedRange}`);
+      const pinWarning = formatPiPinWarning(piRes.installation.version);
+      warnings.push(pinWarning ?? `pi ${piRes.installation.version} above pin ${PI_COMPATIBILITY.pinnedRange}`);
     }
   } catch (err) {
     logAndSwallow("status", "pi", err);
@@ -272,6 +274,15 @@ export function renderOperatorStatus(view: StatusView): string {
     `  tui:           ${tuiIcon} ${tuiState} (enabled=${view.tui.enabled}, bridge tty=${view.tui.bridgeTty})`,
   );
   lines.push(`                 clients attached: ${view.tui.clientsAttached}`);
+
+  // Warnings — the operator must see why the command exits non-zero.
+  if (view.warnings.length > 0) {
+    lines.push("");
+    lines.push(`  warnings:      ${view.warnings.length}`);
+    for (const w of view.warnings) {
+      lines.push(`    - ${w.split("\n").join("\n      ")}`);
+    }
+  }
 
   return lines.join("\n") + "\n";
 }

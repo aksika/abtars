@@ -23,7 +23,7 @@ export function inspectPiInstallation(useCache = true): PiInspection {
 
   const base: PiInspection = {
     state: result.state,
-    pin: PI_COMPATIBILITY.pinnedRange,
+    pin: PI_COMPATIBILITY.pinnedVersion,
     ai: "absent",
     tui: "absent",
     core: "absent",

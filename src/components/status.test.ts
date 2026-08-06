@@ -154,6 +154,24 @@ describe("renderOperatorStatus", () => {
     expect(out).not.toContain("mood");
     expect(out).not.toContain("transport:");
   });
+
+  it("renders warnings so an exit-1 status is never silent (#1572)", () => {
+    const out = renderOperatorStatus(
+      makeOperatorView({
+        warnings: [
+          "Pi 0.84.0 is newer than the version abtars is built against (0.83.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.83.0'",
+        ],
+      }),
+    );
+    expect(out).toContain("warnings:      1");
+    expect(out).toContain("Pi 0.84.0 is newer than the version abtars is built against");
+    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.83.0'");
+  });
+
+  it("omits the warnings section when there are none", () => {
+    const out = renderOperatorStatus(makeOperatorView({ warnings: [] }));
+    expect(out).not.toContain("warnings:");
+  });
 });
 
 // ── renderChatStatus ─────────────────────────────────────────────────────────

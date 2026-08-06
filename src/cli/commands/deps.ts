@@ -583,6 +583,9 @@ function list(): number {
   })();
   process.stdout.write(`  ${piDesc}\n`);
   process.stdout.write(`    pin: ${PI_COMPATIBILITY.pinnedRange} (built against ${PI_COMPATIBILITY.pinnedVersion})\n`);
+  if (piState.state === "above-pin" && piState.remediation) {
+    process.stdout.write(`    ${piState.remediation.split("\n").join("\n    ")}\n`);
+  }
   if (piState.state === "compatible") {
     const inst = resolvePiInstallation({ useCache: true });
     if (inst.state === "compatible") {
