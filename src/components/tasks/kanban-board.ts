@@ -301,6 +301,17 @@ const STATUS_EVENT: Readonly<Record<CardStatus, string | null>> = {
 const MAX_TRANSITIONS_PER_CARD = 200;
 const MAX_JOURNAL_REASON = 300;
 
+/**
+ * #1590 — allowlisted extra CAS predicates. Callers reference these fixed
+ * internal strings only; caller-supplied SQL text is rejected in
+ * kanbanTransition.
+ */
+const EXTRA_PREDICATES = new Set<string>([
+  "COALESCE(delivery_attempts, 0) < 5",                    // kanbanClaimDelivery
+  "next_retry_at IS NOT NULL AND unixepoch(next_retry_at) <= ?", // kanbanPromoteDueRetry
+  "delivery_result IS NULL",                                // kanban-delivery markUnknown
+]);
+
 /** SQLite datetime('now')-compatible UTC timestamp for co-written columns. */
 export function sqliteNow(): string {
   return new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -345,6 +356,9 @@ export function kanbanTransition(req: TransitionRequest, database?: TaskDatabase
     if (!CO_WRITABLE_COLUMNS.has(key)) {
       throw new Error(`illegal kanban transition: field "${key}" not co-writable (${req.actor})`);
     }
+  }
+  if (req.extraPredicate !== undefined && !EXTRA_PREDICATES.has(req.extraPredicate)) {
+    throw new Error(`illegal kanban transition: extraPredicate not allowlisted (${req.actor})`);
   }
 
   let tx: TaskDatabase | null = database ?? null;

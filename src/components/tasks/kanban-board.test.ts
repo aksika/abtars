@@ -695,7 +695,10 @@ describe("#1590 transition matrix", () => {
     expect(mod.kanbanGetCard(id)).toBeUndefined();
   });
 
-  it("lifecycle queued → running → done → delivering → delivered writes five ordered journal rows", () => {
+  it("lifecycle queued → running → done → delivering → delivered writes ordered journal rows", () => {
+    // #1590 verification: the five-status chain produces exactly four
+    // transition rows — the enqueue (creation) is not a status transition and
+    // is never journaled (the design appends only inside kanbanTransition).
     const id = mod.kanbanEnqueue("lifecycle", "test");
     mod.kanbanRunning(id);
     mod.kanbanComplete(id, null, "lifecycle done");
@@ -706,6 +709,22 @@ describe("#1590 transition matrix", () => {
       "queued->running", "running->done", "done->delivering", "delivering->delivered",
     ]);
     expect(mod.kanbanGetCard(id)!.status).toBe("delivered");
+  });
+
+  it("kanbanClaimDelivery refuses a sixth attempt", () => {
+    const id = mod.kanbanEnqueue("sixth", "test");
+    mod.kanbanRunning(id);
+    mod.kanbanComplete(id, null, "ok");
+    for (let i = 0; i < 5; i++) {
+      expect(mod.kanbanClaimDelivery(id)).toBe(true);
+      // A claim moves the card to delivering; return it to done for the next.
+      mod.kanbanSetDelivering(id);
+      mod.kanbanGetCard(id); // no-op, keeps typechecking
+      const db = mod.requireTaskDatabase();
+      db.prepare(`UPDATE kanban_board SET status = 'done' WHERE id = ?`).run(id);
+    }
+    expect(mod.kanbanClaimDelivery(id)).toBe(false);
+    expect(mod.kanbanGetCard(id)!.delivery_attempts).toBe(5);
   });
 
   it("out-of-process second connection: CAS wins once, the other transition no-ops", async () => {

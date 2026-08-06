@@ -111,11 +111,15 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
       fields.error = null;
       fields.completed_at = null;
     }
+    // from is every status the computed target legally accepts per the #1590
+    // matrix — including the pairs the task-run-settler path added
+    // (queued→done, done→failed), so a queued/failed delegation card receiving
+    // a late event re-settles instead of throwing.
     const FROM_FOR_TARGET: Record<string, readonly string[]> = {
       queued: ["running", "failed", "done"],
       running: ["queued"],
-      done: ["running", "delivering"],
-      failed: ["queued", "running"],
+      done: ["running", "delivering", "queued"],
+      failed: ["queued", "running", "done"],
     };
     // `to` is appended so same-status events re-assert (fields applied, no
     // journal row) instead of no-op'ing — the design's reassertion contract.

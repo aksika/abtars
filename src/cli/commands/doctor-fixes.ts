@@ -3,6 +3,8 @@ import { join, relative } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 import type { FixResult, DoctorOutputV2 } from "./doctor-types.js";
+// Static import (not require) — the CLI bundle is ESM; require is undefined there.
+import { kanbanTransition, wrapTaskDatabase, sqliteNow } from "../../components/tasks/kanban-board.js";
 
 const STALE_MS = 5 * 60 * 1000;
 
@@ -166,7 +168,7 @@ const definitions: DoctorFixDefinition[] = [
         // transaction (a mid-sweep crash leaves a consistent prefix) and every
         // change goes through the single status-transition choke point with a
         // journal row. The reason drops the em dash for the ASCII convention.
-        const { kanbanTransition, wrapTaskDatabase, sqliteNow } = require("../../components/tasks/kanban-board.js") as typeof import("../../components/tasks/kanban-board.js");
+        // Static import at module top — synchronous apply() cannot await.
         const taskDb = wrapTaskDatabase(db);
         const stale = taskDb.prepare(
           "SELECT id FROM kanban_board WHERE status = 'running' AND updated_at < ?"

@@ -21,7 +21,13 @@ let _rawDb: any = null;
 vi.mock("../../components/tasks/kanban-board.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../components/tasks/kanban-board.js")>();
   return {
-    ...actual,
+    // kanbanTransition and sqliteNow are REAL: ProjectReviewStore and
+    // ContributionStore call the transition with their own TaskDatabase
+    // (the harness's _overrideDb), so journal writes land in the test DB.
+    // kanbanComplete/kanbanFail delegate to the real transition with the
+    // test DB too — never the module singleton (real home) path.
+    kanbanTransition: actual.kanbanTransition,
+    sqliteNow: actual.sqliteNow,
     kanbanEnqueue: (title: string, source: string, opts?: any) => {
       const id = nextCardId++;
       const card: any = { id, title, source, status: "queued", type: "W", parent_id: null, goal: null, notes: null, created_at: new Date().toISOString().replace(/Z$/, ""), result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null, priority: "MEDIUM" };
@@ -33,13 +39,31 @@ vi.mock("../../components/tasks/kanban-board.js", async (importOriginal) => {
     kanbanGetChildren: (parentId: number) => Array.from(cards.values()).filter((c: any) => c.parent_id === parentId),
     kanbanQueuedDispatchOrder: (now?: number) => Array.from(cards.values()).filter((c: any) => c.status === "queued"),
     kanbanRunning: (id: number) => { const c = cards.get(id); if (c) c.status = "running"; },
-    kanbanComplete: (id: number) => { const c = cards.get(id); if (c) c.status = "done"; },
-    kanbanFail: (id: number, reason?: string) => { const c = cards.get(id); if (c) { c.status = "failed"; c.error = reason ?? "failed"; } },
+    kanbanComplete: (id: number, resultPath: string | null, summary: string) => {
+      if (!_overrideDb) return;
+      actual.kanbanTransition({
+        cardId: id, from: ["running", "queued"], to: "done", actor: "settle_done",
+        reason: "contribution completed",
+        fields: { result_path: resultPath, result_summary: summary.slice(0, 4000), completed_at: actual.sqliteNow() },
+        emit: false,
+      }, _overrideDb);
+      // Mirror into the in-memory dispatch map — the reconciler reads cards
+      // through the mocked kanbanGetCard.
+      const c = cards.get(id);
+      if (c) { c.status = "done"; if (resultPath) c.result_path = resultPath; if (summary) c.result_summary = summary; }
+    },
+    kanbanFail: (id: number, reason?: string) => {
+      if (!_overrideDb) return;
+      actual.kanbanTransition({
+        cardId: id, from: ["queued", "running", "done"], to: "failed", actor: "settle_failed",
+        reason: reason ?? "contribution failed",
+        fields: { error: reason ?? "contribution failed", completed_at: actual.sqliteNow() },
+        emit: false,
+      }, _overrideDb);
+      const c = cards.get(id);
+      if (c) { c.status = "failed"; c.error = reason ?? "contribution failed"; }
+    },
     kanbanUpdate: vi.fn(),
-    // #1590: keep the REAL transition so ProjectReviewStore's in-transaction
-    // calls land on the real test database (the cards map is only a dispatch
-    // mirror; the acceptance assertions read the real kanban_board rows).
-    kanbanTransition: actual.kanbanTransition,
     cascadeFail: vi.fn(),
     isUnblocked: () => true,
     resolveRootId: (id: number) => id,

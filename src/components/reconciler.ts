@@ -1014,7 +1014,9 @@ async function dispatchOnePass(): Promise<void> {
       });
       // #1590: the transition owns error + completed_at + the card:failed
       // event the old kanbanFail call emitted. attemptId/generation correlate
-      // the journal row to the worker_attempt that was refused.
+      // the journal row to the worker_attempt that was refused. The store's
+      // own TaskDatabase is passed explicitly — never the module singleton,
+      // so out-of-process or mocked contexts stay on the right connection.
       kanbanTransition({
         cardId: card.id,
         from: ["queued", "running"],
@@ -1024,7 +1026,7 @@ async function dispatchOnePass(): Promise<void> {
         attemptId: latestAttempt.id,
         claimGeneration: latestAttempt.generation || 1,
         fields: { error: "budget_exhausted", completed_at: sqliteNow() },
-      });
+      }, store.db);
       continue;
     }
 
