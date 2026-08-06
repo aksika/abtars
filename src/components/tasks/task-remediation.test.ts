@@ -61,10 +61,17 @@ describe("task remediation (#1588)", () => {
   });
 
   it("refuses an over-ceiling value", () => {
-    const r = mod.remediateAdjust("daily-ai", "maxToolRounds", 100);
+    const r = mod.remediateAdjust("daily-ai", "maxToolRounds", mod.REMEDIATION_CEILINGS["maxToolRounds"]! + 1);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain("ceiling");
     expect(readTask()["maxToolRounds"]).toBe(8);
+  });
+
+  it("accepts an increase up to the ceiling itself", () => {
+    const ceiling = mod.REMEDIATION_CEILINGS["maxToolRounds"]!;
+    const r = mod.remediateAdjust("daily-ai", "maxToolRounds", ceiling);
+    expect(r.ok).toBe(true);
+    expect(readTask()["maxToolRounds"]).toBe(ceiling);
   });
 
   it("refuses a budget decrease", () => {

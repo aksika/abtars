@@ -28,7 +28,7 @@ export interface RemediationAuditRow {
 
 /** Autonomous whitelist with hard ceilings. Anything not listed is refused. */
 export const REMEDIATION_CEILINGS: Readonly<Record<string, number>> = {
-  maxToolRounds: 32,
+  maxToolRounds: 100,
   "report.minBytes": 4096,
   "orchestration.laneDurationMs": 900000,
 };
