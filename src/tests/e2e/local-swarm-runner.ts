@@ -111,6 +111,31 @@ function nextWorkerResponse(): string {
   return resp;
 }
 
+interface WorkerStartBarrier {
+  enter(): Promise<void>;
+}
+
+/** Hold the mock execution open until the expected Worker entries are visible. */
+function createWorkerStartBarrier(expected: number, timeoutMs = 10_000): WorkerStartBarrier {
+  let entered = 0;
+  let release!: () => void;
+  const allEntered = new Promise<void>(resolve => { release = resolve; });
+
+  return {
+    enter: () => {
+      entered++;
+      if (entered >= expected) release();
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Worker start barrier timed out: ${entered}/${expected} entered`)), timeoutMs);
+        void allEntered.then(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    },
+  };
+}
+
 let workerStoreCtor: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
 let reviewStoreCtor: typeof import("../../components/project-acceptance/project-review-store.js").ProjectReviewStore;
 let activeProjectCardId: number | undefined;
@@ -151,7 +176,7 @@ async function setupEnvironment(): Promise<{
   return { spin, requestReconcile, requestWorkerDispatch, startReconciler, kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, kanbanComplete, WorkerSupervisionStore, ProjectReviewStore };
 }
 
-function createMockRuntime(durationMs = 30) {
+function createMockRuntime(durationMs = 30, startBarrier?: WorkerStartBarrier) {
   return {
     lastUsage: null,
     session: async () => ({
@@ -168,6 +193,7 @@ function createMockRuntime(durationMs = 30) {
       _workerEntryCount++;
       _activeWorkerCount++;
       _peakActiveWorkers = Math.max(_peakActiveWorkers, _activeWorkerCount);
+      if (startBarrier) await startBarrier.enter();
       const resp = nextWorkerResponse();
       await new Promise(r => setTimeout(r, durationMs));
       _activeWorkerCount--;
@@ -178,6 +204,7 @@ function createMockRuntime(durationMs = 30) {
         _workerEntryCount++;
         _activeWorkerCount++;
         _peakActiveWorkers = Math.max(_peakActiveWorkers, _activeWorkerCount);
+        if (startBarrier) await startBarrier.enter();
         const resp = nextWorkerResponse();
         await new Promise(r => setTimeout(r, durationMs));
         _activeWorkerCount--;
@@ -259,7 +286,7 @@ async function runHappyPath(): Promise<LocalSwarmResult> {
   const { spin, requestReconcile, startReconciler, kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, WorkerSupervisionStore, ProjectReviewStore } = await setupEnvironment();
   const { deliverCard } = await import("../../components/tasks/kanban-delivery.js");
 
-  spin.setRuntime(createMockRuntime(100) as any);
+  spin.setRuntime(createMockRuntime(100, createWorkerStartBarrier(3)) as any);
 
   const projectCardId = kanbanEnqueue("E2E test project", "test", undefined, {
     type: "O", priority: "MEDIUM", deliveryMode: "deliver",
