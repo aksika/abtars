@@ -255,10 +255,32 @@ describe("normalize + validation", () => {
       if (!r.ok) expect(r.error).toContain("unknown kind");
     });
 
-    it("ignores top-level targetUserId (removed contract) and defaults interaction", () => {
+    it("rejects top-level targetUserId (removed #1432 contract) with a named error", () => {
       const r = normalize({ id: "t", kind: "agent", schedule: "0 9 * * *", prompt: "hi", agent: "task", targetUserId: "ada", chatId: "1", delivery: "announce" }, NOW);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("targetUserId");
+    });
+  });
+
+  describe("unrecognized top-level fields (#1569)", () => {
+    it.each([
+      ["agent on a script entry", { id: "s", kind: "script", schedule: "0 9 * * *", command: "echo hi", chatId: "1", delivery: "silent", agent: "task" }],
+      ["text on an agent entry", { id: "a", kind: "agent", schedule: "0 9 * * *", prompt: "hi", agent: "task", interaction: { mode: "oneshot" }, chatId: "1", delivery: "announce", text: "wake up" }],
+      ["command on a system entry", { id: "x", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", delivery: "silent", command: "rm -rf /" }],
+    ])("rejects cross-kind field leakage: %s", (_label, entry) => {
+      const r = normalize(entry, NOW);
+      expect(r.ok).toBe(false);
+    });
+
+    it.each([
+      ["agent oneshot", () => baseAgent({ interaction: { mode: "oneshot" } })],
+      ["agent skill", () => ({ id: "sk", kind: "agent", schedule: "0 10 * * *", prompt: "Start today's session", agent: "professor", chatId: "42", delivery: "announce", orchestration: { maxAgents: 1 }, interaction: { mode: "skill", skill: "spanish-tutor", target: { userId: "ada", platform: "telegram", chatId: "42" } } })],
+      ["script", () => ({ id: "s", kind: "script", schedule: "0 9 * * *", command: "echo hi", chatId: "1", delivery: "silent" })],
+      ["system with options", () => ({ id: "x", kind: "system", action: "hardware-sleep", schedule: "0 3 * * *", delivery: "silent", options: { idleMinutes: 20, retryMinutes: 10, latestLocalTime: "05:30", expectedWakeTime: "07:55" } })],
+    ])("accepts canonical %s definition shape", (_label, makeEntry) => {
+      const r = normalize(makeEntry(), NOW);
       expect(r.ok).toBe(true);
-      if (r.ok) expect((r.entry as ScheduledTask & { kind: "agent" }).interaction).toEqual({ mode: "oneshot" });
+      if (!r.ok) throw new Error(r.error);
     });
   });
 
