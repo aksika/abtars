@@ -280,6 +280,7 @@ export function validateContract(raw: unknown): ValidationResult {
   }
 
   const criterionIds = new Set<string>();
+  const criteriaIndex = new Map<string, number>();
 
   if (!Array.isArray(obj["criteria"])) {
     errors.push(error("missing_field", "$.criteria", "criteria is required"));
@@ -304,6 +305,7 @@ export function validateContract(raw: unknown): ValidationResult {
         e.push(error("duplicate_id", `${path}.id`, `duplicate criterion id "${cObj["id"]}"`));
       } else {
         criterionIds.add(cObj["id"] as string);
+        criteriaIndex.set(cObj["id"] as string, i);
       }
       if (!isNonEmptyString(cObj["description"])) {
         e.push(error("missing_field", `${path}.description`, "criterion description is required"));
@@ -314,6 +316,7 @@ export function validateContract(raw: unknown): ValidationResult {
     }));
   }
 
+  const artifactRefs = new Set<string>();
   if (obj["expected_artifacts"] !== undefined) {
     if (!Array.isArray(obj["expected_artifacts"])) {
       errors.push(error("type_error", "$.expected_artifacts", "must be an array"));
@@ -366,12 +369,18 @@ export function validateContract(raw: unknown): ValidationResult {
               }
             }
           }
+          if (aObj["required"] === true && Array.isArray(aObj["criterion_ids"])) {
+            for (const ref of aObj["criterion_ids"] as string[]) {
+              if (criterionIds.has(ref)) artifactRefs.add(ref);
+            }
+          }
         }
         return e;
       }));
     }
   }
 
+  const cmdRefs = new Set<string>();
   if (obj["verification_commands"] !== undefined) {
     if (!Array.isArray(obj["verification_commands"])) {
       errors.push(error("type_error", "$.verification_commands", "must be an array"));
@@ -444,6 +453,11 @@ export function validateContract(raw: unknown): ValidationResult {
               if (!criterionIds.has(ref)) {
                 e.push(error("bad_reference", `${path}.criterion_ids`, `unknown criterion id "${ref}"`));
               }
+            }
+          }
+          if (Array.isArray(cmdObj["criterion_ids"])) {
+            for (const ref of cmdObj["criterion_ids"] as string[]) {
+              if (criterionIds.has(ref)) cmdRefs.add(ref);
             }
           }
         }
@@ -534,6 +548,23 @@ export function validateContract(raw: unknown): ValidationResult {
   if (jsonBytes > MAX_CONTRACT_JSON_BYTES) {
     errors.push(error("too_long", "$", `contract JSON exceeds ${MAX_CONTRACT_JSON_BYTES} bytes`));
     return { ok: false, errors };
+  }
+
+  // #1588: a declared criterion must have an evidence path — a verification
+  // command referencing it or a required expected artifact referencing it.
+  // The exact daily-ai defect (one criterion, zero commands, zero artifacts)
+  // is rejected here at authoring time, never observed silently at review.
+  // Runs last so earlier structural and size diagnostics stay primary.
+  if (criterionIds.size > 0) {
+    for (const id of criterionIds) {
+      if (!cmdRefs.has(id) && !artifactRefs.has(id)) {
+        errors.push(error("missing_field", `$.criteria[${criteriaIndex.get(id)}]`,
+          `criterion ${id} has no evidence path: add a verification command or a required artifact`));
+      }
+    }
+    if (errors.length > 0) {
+      return { ok: false, errors };
+    }
   }
 
   return { ok: true, contract };

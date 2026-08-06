@@ -459,7 +459,7 @@ async function runRestartRecovery(): Promise<LocalSwarmResult> {
   const svc = new WorkerSupervisionSvc();
   const createResult = svc.createChild("Restart work", childCardId, projectCardId, "orc", {
     criteria: [{ id: "c1", description: "Restart criterion" }],
-    expectedArtifacts: [], verificationCommands: [], requiredCapabilities: [],
+    expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/restart.md", required: true, criterion_ids: ["c1"] }], verificationCommands: [], requiredCapabilities: [],
     supportsRootCriteria: ["c1"],
     limits: { max_tokens: 5000 },
   });
@@ -655,7 +655,7 @@ async function runPriorityAge(): Promise<LocalSwarmResult> {
   const svc = new WorkerSupervisionSvc();
   svc.createChild("Aged low priority work", backdatedCardId, projectCardId, "orc", {
     criteria: [{ id: "c_aged", description: "Aged criterion" }],
-    expectedArtifacts: [], verificationCommands: [], requiredCapabilities: [],
+    expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/aged.md", required: true, criterion_ids: ["c_aged"] }], verificationCommands: [], requiredCapabilities: [],
     supportsRootCriteria: ["c1"],
     limits: { max_tokens: 5000 },
   });
@@ -748,7 +748,7 @@ async function runTokenBudget(): Promise<LocalSwarmResult> {
       `Budget work ${i}`, cardId, projectCardId, "orc",
       {
         criteria: [{ id: `c_b${i}`, description: `Budget criterion ${i}` }],
-        expectedArtifacts: [],
+        expectedArtifacts: [{ id: `a_b${i}`, kind: "file", ref: `out/budget-${i}.md`, required: true, criterion_ids: [`c_b${i}`] }],
         verificationCommands: [],
         requiredCapabilities: [],
         limits: { max_tokens: 5000 },
@@ -825,7 +825,7 @@ async function runScheduledCap(): Promise<LocalSwarmResult> {
       digest: "",
       goal: `Research lane ${i + 1}`,
       criteria: [{ id: `c${i}`, description: `Lane ${i + 1} criterion` }],
-      expected_artifacts: [],
+      expected_artifacts: [{ id: `a${i}`, kind: "file", ref: `out/lane-${i}.md`, required: true, criterion_ids: [`c${i}`] }],
       verification_commands: [],
       required_capabilities: [],
       limits: { max_duration_ms: 60_000 },

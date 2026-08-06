@@ -219,6 +219,7 @@ export function makeScheduledProjectFixture(
               const svc = new WorkerSvc();
               const created = svc.createChild(`Work lane ${i}`, workerId, projectId, "fixture-orc", {
                 criteria: [{ id: `w${i}`, description: "lane done" }],
+                expectedArtifacts: [{ id: `a${i}`, kind: "file", ref: `out/lane-${i}.md`, required: true, criterion_ids: [`w${i}`] }],
                 attemptId: `att_fixture_${workerId}`,
               });
               if (!("error" in created)) {
@@ -268,6 +269,7 @@ export function makeScheduledProjectFixture(
             const svc = new WorkerSvc();
             const created = svc.createChild("Repair: rework", repairWorkerId, projectId, "fixture-orc", {
               criteria: [{ id: "w1", description: "repair done" }],
+              expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/repair.md", required: true, criterion_ids: ["w1"] }],
               attemptId: `att_fixture_repair_${repairWorkerId}`,
             });
             if (!("error" in created)) {

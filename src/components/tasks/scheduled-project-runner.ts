@@ -41,6 +41,8 @@ export interface ScheduledProjectRequest {
   chatId?: string;
   /** #1516: the single-writer final report artifact, owned by the Orc. */
   reportArtifactPath?: string;
+  /** #1588: per-lane hard duration budget (ms) the Orc must not under-author. */
+  laneDurationMs?: number;
 }
 
 export type ScheduledProjectRunner = (
@@ -180,6 +182,7 @@ function buildOrcGoal(request: ScheduledProjectRequest): string {
     `Absolute deadline: ${new Date(request.deadlineAt).toISOString()} — the scheduled system enforces it; never exceed it.`,
     `Agent budget: ${request.maxAgents} total agents (1 Orc + up to ${workerLimit} concurrent Workers). The system enforces this cap — do not attempt to exceed it.`,
     `Lane discipline: each Worker must own an independent, disjoint work lane. Never spawn duplicate Workers for the same source.`,
+    `Lane budgets: ${request.laneDurationMs !== undefined ? `every lane carries a hard max_duration_ms of ${request.laneDurationMs} ms; ` : ""}a lane that fetches live web pages needs >= 300000 ms (max_duration_ms). Every declared criterion MUST have an evidence path - a verification command or a required artifact - or the contract is rejected.`,
     `Artifact ownership: Workers must NOT write the declared final report artifact. They return bounded lane results/evidence only.`,
     `Workspace: ${request.executionScope.cwd}`,
   ];

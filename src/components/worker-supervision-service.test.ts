@@ -36,6 +36,8 @@ describe("WorkerSupervisionService", () => {
     const result = svc.createChild("Build report", 101, 100, "orc", {
       criteria: [{ id: "c1", description: "Report must exist" }],
       expectedArtifacts: [{ id: "a1", kind: "file", ref: "output/report.md", required: true, criterion_ids: ["c1"] }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "output/report.md", required: true, criterion_ids: ["c1"] }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "output/report.md", required: true, criterion_ids: ["c1"] }],
       verificationCommands: [{ id: "v1", argv: ["test", "-f", "output/report.md"], timeout_ms: 10_000, criterion_ids: ["c1"] }],
     });
     expect("error" in result).toBe(false);
@@ -49,8 +51,8 @@ describe("WorkerSupervisionService", () => {
 
   it("createChild returns error for duplicate card", () => {
     const svc = new Service();
-    svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }] });
-    const result = svc.createChild("Another report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }] });
+    svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }], expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }] });
+    const result = svc.createChild("Another report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }], expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }] });
     expect("error" in result).toBe(true);
     if ("error" in result) {
       expect(result.error).toContain("already has a contract");
@@ -61,6 +63,8 @@ describe("WorkerSupervisionService", () => {
     const svc = new Service();
     svc.createChild("Build report", 101, 100, "orc", {
       criteria: [{ id: "c1", description: "Test" }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
     });
     const contract = svc.getContractForCard(101);
     expect(contract).toBeDefined();
@@ -75,7 +79,7 @@ describe("WorkerSupervisionService", () => {
   it("cardHasContract returns correct state", () => {
     const svc = new Service();
     expect(svc.cardHasContract(101)).toBe(false);
-    svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }] });
+    svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }], expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }] });
     expect(svc.cardHasContract(101)).toBe(true);
   });
 
@@ -111,6 +115,8 @@ describe("WorkerSupervisionService", () => {
     const svc = new Service();
     const result = svc.createChild("Build report", 101, 100, "orc", {
       criteria: [{ id: "c1", description: "Report must exist" }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "output/report.md", required: true, criterion_ids: ["c1"] }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "output/report.md", required: true, criterion_ids: ["c1"] }],
     });
     expect("error" in result).toBe(false);
     if (!("error" in result)) {
@@ -133,6 +139,7 @@ describe("WorkerSupervisionService", () => {
       const svc = new Service();
       svc.createChild("Build report", 101, 100, "orc", {
         criteria: [{ id: "c1", description: "Must work" }],
+        expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
       });
       const outcome = svc.collectAndSettle(101, "<summary>Done</summary>");
       expect(outcome.settled).toBe(true);
@@ -146,6 +153,7 @@ describe("WorkerSupervisionService", () => {
       const svc = new Service();
       svc.createChild("Build report", 101, 100, "orc", {
         criteria: [{ id: "c1", description: "Must work" }],
+        expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
       });
       const outcome = svc.collectAndSettle(101, `
         <summary>All checks passed</summary>
@@ -162,6 +170,7 @@ describe("WorkerSupervisionService", () => {
       const svc = new Service();
       svc.createChild("Build report", 101, 100, "orc", {
         criteria: [{ id: "c1", description: "Must work" }],
+        expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
       });
       svc.collectAndSettle(101, "<summary>Done</summary>");
       const second = svc.collectAndSettle(101, "<summary>Different result</summary>");
@@ -171,7 +180,7 @@ describe("WorkerSupervisionService", () => {
 
     it("ignores a late result from an older attempt", () => {
       const svc = new Service();
-      const created = svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }] });
+      const created = svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }], expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }] });
       if ("error" in created) throw new Error(created.error);
       const store = new Store();
       const first = store.getAttempt(created.attemptId)!;

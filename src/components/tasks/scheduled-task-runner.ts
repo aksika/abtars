@@ -238,6 +238,7 @@ export class ScheduledTaskRunner {
           delivery: entry.delivery,
           chatId: String(entry.chatId),
           reportArtifactPath: resolvedContract?.artifactPath,
+          laneDurationMs: entry.orchestration?.laneDurationMs,
         });
 
       // #1539: successful dispatch changes queued -> executing. Attaching the

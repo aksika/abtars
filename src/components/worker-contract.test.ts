@@ -262,6 +262,47 @@ describe("contract validation", () => {
     }
   });
 
+  it("#1588: rejects a criterion with no evidence path (the daily-ai contract shape)", () => {
+    const unevidenced = {
+      ...MINIMAL_CONTRACT,
+      criteria: [{ id: "c1", description: "Three web pages browsed and results recorded" }],
+      expected_artifacts: [],
+      verification_commands: [],
+      limits: { max_duration_ms: 120_000 },
+    };
+    const result = validateContract(unevidenced);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some(e =>
+        e.path === "$.criteria[0]" &&
+        e.message === "criterion c1 has no evidence path: add a verification command or a required artifact")).toBe(true);
+    }
+  });
+
+  it("#1588: a required artifact alone is a valid evidence path", () => {
+    const artifactOnly = {
+      ...MINIMAL_CONTRACT,
+      verification_commands: [],
+      criteria: [{ id: "c1", description: "Report must exist" }],
+      expected_artifacts: [{ id: "a1", kind: "file", ref: "output/report.md", required: true, criterion_ids: ["c1"] }],
+    };
+    expect(validateContract(artifactOnly).ok).toBe(true);
+  });
+
+  it("#1588: an optional artifact does not count as an evidence path", () => {
+    const optionalOnly = {
+      ...MINIMAL_CONTRACT,
+      verification_commands: [],
+      criteria: [{ id: "c1", description: "Report must exist" }],
+      expected_artifacts: [{ id: "a1", kind: "file", ref: "output/report.md", required: false, criterion_ids: ["c1"] }],
+    };
+    const result = validateContract(optionalOnly);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some(e => e.message.includes("has no evidence path"))).toBe(true);
+    }
+  });
+
   it("rejects invalid artifact kind", () => {
     const result = validateContract({
       ...MINIMAL_CONTRACT,

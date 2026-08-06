@@ -118,7 +118,8 @@ describe("scheduled-project-runner #1516", () => {
     expect(claims[0]!.goal).toContain("sole writer");
     expect(claims[0]!.goal).toContain("Daily-Briefing");
     expect(claims[0]!.goal).toContain("[TASK]\nproduce the daily briefing");
-
+    expect(claims[0]!.goal).toContain("a lane that fetches live web pages needs >= 300000 ms (max_duration_ms)");
+    expect(claims[0]!.goal).toContain("Every declared criterion MUST have an evidence path - a verification command or a required artifact - or the contract is rejected.");
     const cards = kanban.kanbanList("*");
     expect(cards).toHaveLength(1);
     const root = cards[0]!;
@@ -309,6 +310,19 @@ describe("scheduled-project-runner #1516", () => {
     await seedReservation("daily-ai", "other-run");
     await expect(mod.scheduledProjectRunner(makeRequest({ runId: "daily-ai_1" }))).rejects.toThrow(/admission conflict/);
     expect(kanban.kanbanList("*")).toHaveLength(0);
+  });
+
+  it("#1588: the Orc goal carries the machine-derived lane duration budget when set", async () => {
+    const claims = fakeCoordinator();
+    await seedReservation();
+    const pending = mod.scheduledProjectRunner(makeRequest({ laneDurationMs: 600000 } as never));
+    expect(claims).toHaveLength(1);
+    expect(claims[0]!.goal).toContain("every lane carries a hard max_duration_ms of 600000 ms");
+    const root = kanban.kanbanList("*")[0]!;
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.settleAcceptance(root.id, "case-budget", { synthesis: "ok" }, "ok", undefined, "rd_budget");
+    nerveBus.fire("card:done", root.id);
+    await expect(pending).resolves.toEqual(expect.objectContaining({ cardId: root.id }));
   });
 
   it("refuses a persisted card whose durable source identity belongs to another run", async () => {

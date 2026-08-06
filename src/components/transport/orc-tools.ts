@@ -42,6 +42,33 @@ function parseJsonArray(raw: string | undefined): unknown[] {
   try { return JSON.parse(raw) as unknown[]; } catch { return []; }
 }
 
+/** #1588: a lane that fetches live web pages carries a 300s minimum budget. */
+export const MIN_BROWSING_LANE_MS = 300_000;
+const BROWSING_LANE_RE = /\b(brows|web|url|http|fetch|page|website)\b/i;
+
+function browsingShape(...texts: string[]): boolean {
+  return texts.some((t) => BROWSING_LANE_RE.test(t));
+}
+
+/**
+ * #1588: clamp a browsing-shaped lane's max_duration_ms up to the 300s floor
+ * so the contract is realistic before authoring. Pure — testable without a
+ * live project.
+ */
+export function clampBrowsingLaneDuration(
+  goal: string,
+  title: string | undefined,
+  declaresArtifacts: boolean,
+  maxDurationMs: number | undefined,
+): number | undefined {
+  if (!declaresArtifacts) return maxDurationMs;
+  if (!browsingShape(goal, title ?? "")) return maxDurationMs;
+  if (maxDurationMs === undefined || maxDurationMs < MIN_BROWSING_LANE_MS) {
+    return MIN_BROWSING_LANE_MS;
+  }
+  return maxDurationMs;
+}
+
 const spawnWorkerTool: ToolDefinition = {
   name: "spawn_worker",
   description: "Spawn a worker to execute a task in parallel. Workers run independently and report results. For supervised dispatch (Agent Swarm), provide structured criteria, artifacts, and checks.",
@@ -89,6 +116,14 @@ const spawnWorkerTool: ToolDefinition = {
     if (projectCard?.max_tokens != null && args.max_tokens === undefined) {
       return "[err] max_tokens is required when spawning a worker under a capped project";
     }
+    // #1588: a browsing-shaped lane that declares artifacts is never
+    // dispatched with a 2-minute budget — clamp max_duration_ms up to the
+    // 300s floor so the contract is realistic before authoring.
+    const requestedMs = args.max_duration_ms !== undefined ? Number(args.max_duration_ms) : undefined;
+    const maxDurationMs = clampBrowsingLaneDuration(goal, args.title, artifactsRaw.length > 0, requestedMs);
+    if (maxDurationMs !== undefined && requestedMs !== maxDurationMs) {
+      logInfo(TAG, `spawn_worker browsing lane: clamped max_duration_ms ${requestedMs ?? "unset"} -> ${maxDurationMs} (${goal.slice(0, 60)})`);
+    }
     const contract = hasStructuredData ? {
       schema_version: 1 as const,
       id: "",
@@ -100,7 +135,7 @@ const spawnWorkerTool: ToolDefinition = {
       required_capabilities: capsRaw,
       supports_root_criteria: supportsRootCriteriaRaw.length > 0 ? supportsRootCriteriaRaw : undefined,
       limits: {
-        ...(args.max_duration_ms !== undefined ? { max_duration_ms: Number(args.max_duration_ms) } : {}),
+        ...(maxDurationMs !== undefined ? { max_duration_ms: maxDurationMs } : {}),
         ...(args.max_tokens !== undefined ? { max_tokens: Number(args.max_tokens) } : {}),
       },
       provenance: { root_card_id: 0, card_id: 0, authored_by: "orc", created_at: "" },
