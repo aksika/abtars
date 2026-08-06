@@ -78,12 +78,13 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // failed/timed_out run for every task kind, delivering the structured
   // diagnostic to the operator and, when enabled, to the self-healer.
   const onFailure = (entryId: string, diagnostic: TaskFailureDiagnosticV1): void => {
-    // Three-state SHA guard (#719)
-    if (shaState === "running") return; // drop entirely — SHA might be fixing it
     const label = formatTaskLabel(entryId);
     if (ctx.telegramAdapter) {
       ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), buildFailureNotification(entryId, diagnostic));
     }
+    // Three-state SHA guard (#719). The operator notification above is still
+    // emitted for every settled failure; this guard only serializes SHA work.
+    if (shaState === "running") return;
     if (!getEnv().selfhealEnabled) return;
     // Per-day 2-attempt throttle, moved from the coordinator's tryInjectFailure.
     const today = new Date().toISOString().slice(0, 10);

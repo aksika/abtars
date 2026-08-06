@@ -173,7 +173,9 @@ export function parseTaskFailure(raw: unknown): TaskFailureDiagnosticV1 | null {
   if (!KNOWN_CODES[category as TaskFailureCategory].has(code)) return null;
   const validRetry = retryability === "permanent" || retryability === "transient" || retryability === "none";
   if (!validRetry) return null;
-  const message = typeof d["message"] === "string" ? (d["message"] as string).slice(0, MAX_MESSAGE) : "";
+  const message = typeof d["message"] === "string"
+    ? redactSecrets(d["message"] as string).slice(0, MAX_MESSAGE)
+    : "";
   let context: TaskFailureContextV1 | undefined;
   if (d["context"] !== undefined) {
     context = parseContext(d["context"]);
@@ -195,57 +197,65 @@ function parseContext(raw: unknown): TaskFailureContextV1 | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
   const c = raw as Record<string, unknown>;
   if (!Array.isArray(c["lanes"])) return undefined;
+  if (c["rootCardId"] !== undefined && (typeof c["rootCardId"] !== "number" || !Number.isFinite(c["rootCardId"]))) return undefined;
+  if (c["remediationHint"] !== undefined && typeof c["remediationHint"] !== "string") return undefined;
   const lanes: TaskFailureLaneFact[] = [];
-  for (const rawLane of (c["lanes"] as unknown[]).slice(0, MAX_CONTEXT_LANES)) {
-    if (typeof rawLane !== "object" || rawLane === null) continue;
+  for (const rawLane of c["lanes"] as unknown[]) {
+    if (typeof rawLane !== "object" || rawLane === null) return undefined;
     const l = rawLane as Record<string, unknown>;
     if (
       typeof l["cardId"] !== "number" ||
+      !Number.isFinite(l["cardId"] as number) ||
       typeof l["contractId"] !== "string" ||
       typeof l["attemptId"] !== "string" ||
       typeof l["lifecycle"] !== "string" ||
-      !Array.isArray(l["criteria"])
-    ) continue;
+      !Array.isArray(l["criteria"]) ||
+      !Array.isArray(l["missingEvidence"])
+    ) return undefined;
     const criteria: Array<{ id: string; status: string }> = [];
-    for (const rawC of (l["criteria"] as unknown[]).slice(0, MAX_CONTEXT_CRITERIA)) {
-      if (typeof rawC !== "object" || rawC === null) continue;
+    for (const rawC of l["criteria"] as unknown[]) {
+      if (typeof rawC !== "object" || rawC === null) return undefined;
       const co = rawC as Record<string, unknown>;
-      if (typeof co["id"] === "string" && typeof co["status"] === "string") {
-        criteria.push({ id: (co["id"] as string).slice(0, 200), status: (co["status"] as string).slice(0, 50) });
-      }
+      if (typeof co["id"] !== "string" || typeof co["status"] !== "string") return undefined;
+      criteria.push({ id: co["id"], status: co["status"] });
     }
-    const missingEvidence = Array.isArray(l["missingEvidence"])
-      ? (l["missingEvidence"] as unknown[]).slice(0, MAX_CONTEXT_CRITERIA)
-        .filter((x): x is string => typeof x === "string")
-        .map((s) => s.slice(0, 200))
-      : [];
+    const missingEvidenceValues = (l["missingEvidence"] as unknown[]).map((value) => {
+      if (typeof value !== "string") return undefined;
+      return value;
+    });
+    if (missingEvidenceValues.some((value) => value === undefined)) return undefined;
+    const missingEvidence = missingEvidenceValues as string[];
     let bindingLimit: { readonly name: string; readonly value: number } | undefined;
-    if (typeof l["bindingLimit"] === "object" && l["bindingLimit"] !== null) {
+    if (l["bindingLimit"] !== undefined) {
+      if (typeof l["bindingLimit"] !== "object" || l["bindingLimit"] === null) return undefined;
       const bl = l["bindingLimit"] as Record<string, unknown>;
-      if (typeof bl["name"] === "string" && typeof bl["value"] === "number" && Number.isFinite(bl["value"])) {
-        bindingLimit = { name: (bl["name"] as string).slice(0, 100), value: bl["value"] };
-      }
+      if (typeof bl["name"] !== "string" || typeof bl["value"] !== "number" || !Number.isFinite(bl["value"])) return undefined;
+      bindingLimit = { name: bl["name"], value: bl["value"] };
     }
+    if (l["cancelReason"] !== undefined && typeof l["cancelReason"] !== "string") return undefined;
+    if (l["hardDeadlineAt"] !== undefined && typeof l["hardDeadlineAt"] !== "string") return undefined;
+    if (l["settledAt"] !== undefined && typeof l["settledAt"] !== "string") return undefined;
+    if (l["overrunMs"] !== undefined && (typeof l["overrunMs"] !== "number" || !Number.isFinite(l["overrunMs"]))) return undefined;
     lanes.push({
       cardId: l["cardId"],
-      contractId: (l["contractId"] as string).slice(0, 200),
-      attemptId: (l["attemptId"] as string).slice(0, 200),
-      lifecycle: (l["lifecycle"] as string).slice(0, 50),
-      ...(typeof l["cancelReason"] === "string" ? { cancelReason: (l["cancelReason"] as string).slice(0, 500) } : {}),
-      ...(typeof l["hardDeadlineAt"] === "string" ? { hardDeadlineAt: (l["hardDeadlineAt"] as string).slice(0, 64) } : {}),
-      ...(typeof l["settledAt"] === "string" ? { settledAt: (l["settledAt"] as string).slice(0, 64) } : {}),
-      ...(typeof l["overrunMs"] === "number" && Number.isFinite(l["overrunMs"] as number) ? { overrunMs: l["overrunMs"] as number } : {}),
+      contractId: l["contractId"],
+      attemptId: l["attemptId"],
+      lifecycle: l["lifecycle"],
+      ...(l["cancelReason"] !== undefined ? { cancelReason: l["cancelReason"] } : {}),
+      ...(l["hardDeadlineAt"] !== undefined ? { hardDeadlineAt: l["hardDeadlineAt"] } : {}),
+      ...(l["settledAt"] !== undefined ? { settledAt: l["settledAt"] } : {}),
+      ...(l["overrunMs"] !== undefined ? { overrunMs: l["overrunMs"] } : {}),
       ...(bindingLimit !== undefined ? { bindingLimit } : {}),
       criteria,
       missingEvidence,
     });
   }
   if (lanes.length === 0) return undefined;
-  return {
-    ...(typeof c["rootCardId"] === "number" ? { rootCardId: c["rootCardId"] } : {}),
+  return sanitizeContext({
+    ...(c["rootCardId"] !== undefined ? { rootCardId: c["rootCardId"] } : {}),
     lanes,
-    ...(typeof c["remediationHint"] === "string" ? { remediationHint: (c["remediationHint"] as string).slice(0, MAX_REMEDIATION_HINT) } : {}),
-  };
+    ...(c["remediationHint"] !== undefined ? { remediationHint: c["remediationHint"] } : {}),
+  });
 }
 
 /** @deprecated for writes — legacy records carry free-form text. */

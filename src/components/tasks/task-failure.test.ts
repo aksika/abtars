@@ -91,6 +91,52 @@ describe("#1520 failure policy matrix", () => {
     expect(parsed!.context).toBeUndefined();
   });
 
+  it("drops the whole context when any lane is malformed", () => {
+    const d = makeTaskFailure("supervision", "lane_failed", "executing", "failed", "none", {
+      lanes: [{
+        cardId: 1,
+        contractId: "c1",
+        attemptId: "a1",
+        lifecycle: "failed",
+        criteria: [],
+        missingEvidence: [],
+      }],
+    });
+    const raw = JSON.parse(JSON.stringify(d));
+    raw.context.lanes.push({ cardId: "bad", contractId: "c2" });
+    const parsed = parseTaskFailure(raw);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.context).toBeUndefined();
+  });
+
+  it("redacts secrets when parsing externally supplied diagnostics", () => {
+    const raw = {
+      version: 1,
+      category: "supervision",
+      code: "lane_failed",
+      phase: "executing",
+      message: "worker returned sk-abc123def456ghi789jkl012mno",
+      retryability: "none",
+      occurredAt: 1,
+      context: {
+        lanes: [{
+          cardId: 1,
+          contractId: "c_secret sk-abc123def456ghi789jkl012mno",
+          attemptId: "a1",
+          lifecycle: "failed",
+          cancelReason: "token=sk-abc123def456ghi789jkl012mno",
+          criteria: [{ id: "c1", status: "failed" }],
+          missingEvidence: [],
+        }],
+      },
+    };
+    const parsed = parseTaskFailure(raw);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.message).not.toContain("sk-abc123def456ghi789jkl012mno");
+    expect(parsed!.context!.lanes[0]!.contractId).not.toContain("sk-abc123def456ghi789jkl012mno");
+    expect(parsed!.context!.lanes[0]!.cancelReason).not.toContain("sk-abc123def456ghi789jkl012mno");
+  });
+
   it("supervision never returns retry — an over-budget lane is not blindly replayed", () => {
     expect(decideFailurePolicy(diag("supervision", "lane_late_completion", "none"))).toEqual({ action: "count", pauseNow: false });
     expect(decideFailurePolicy(diag("supervision", "lane_timed_out", "none"))).toEqual({ action: "count", pauseNow: false });

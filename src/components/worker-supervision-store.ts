@@ -577,8 +577,13 @@ export class WorkerSupervisionStore {
     let criteria: Array<{ criterion_id: string; status: "not_run"; evidence_ids: readonly string[] }> = [];
     if (contractRow) {
       try {
-        const contract = JSON.parse(contractRow.contract_json) as { criteria: ReadonlyArray<{ id: string }> };
-        criteria = contract.criteria.map((c) => ({ criterion_id: c.id, status: "not_run" as const, evidence_ids: [] }));
+        const contract = JSON.parse(contractRow.contract_json) as unknown;
+        if (typeof contract === "object" && contract !== null && Array.isArray((contract as { criteria?: unknown })["criteria"])) {
+          criteria = ((contract as { criteria: unknown[] })["criteria"])
+            .filter((criterion): criterion is { id: string } =>
+              typeof criterion === "object" && criterion !== null && typeof (criterion as { id?: unknown })["id"] === "string")
+            .map((c) => ({ criterion_id: c.id, status: "not_run" as const, evidence_ids: [] }));
+        }
       } catch { /* contract unreadable — empty criteria */ }
     }
     return {

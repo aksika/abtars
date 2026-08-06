@@ -10,7 +10,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { readEntry, writeEntry } from "./task-store.js";
-import { logWarn } from "../logger.js";
+import { logWarn, redactSecrets } from "../logger.js";
 
 const TAG = "task-remediation";
 
@@ -50,13 +50,43 @@ export type RemediationResult =
   | { ok: true; message: string }
   | { ok: false; reason: string };
 
-function appendAudit(row: RemediationAuditRow): void {
+function appendAudit(row: RemediationAuditRow): boolean {
   try {
     mkdirSync(join(abtarsHome(), "tasks"), { recursive: true });
     appendFileSync(REMEDIATION_AUDIT_PATH(), JSON.stringify(row) + "\n", "utf-8");
+    return true;
   } catch (err) {
     logWarn(TAG, `audit write failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
   }
+}
+
+/**
+ * Apply a setting change only when its accepted audit row was durably written.
+ * The task store and JSONL audit are separate files, so a failed audit append
+ * is compensated with a best-effort restore before the change is rejected.
+ */
+function applyAuditedAdjustment(
+  entry: NonNullable<ReturnType<typeof readEntry>>,
+  updated: NonNullable<ReturnType<typeof readEntry>>,
+  row: RemediationAuditRow,
+  message: string,
+): RemediationResult {
+  try {
+    writeEntry(updated);
+  } catch (err) {
+    const reason = `task update failed: ${err instanceof Error ? err.message : String(err)}`;
+    appendAudit({ ...row, accepted: false, reason });
+    return { ok: false, reason };
+  }
+  if (appendAudit(row)) return { ok: true, message };
+
+  try {
+    writeEntry(entry);
+  } catch (err) {
+    logWarn(TAG, `failed to restore task after audit failure: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { ok: false, reason: "remediation rejected because its audit record could not be written" };
 }
 
 /**
@@ -100,9 +130,12 @@ export function remediateAdjust(taskId: string, field: string, value: number, di
       return { ok: false, reason: `budget fields are increase-only; ${from} -> ${value} would shrink the budget` };
     }
     const updated = { ...entry, maxToolRounds: value };
-    writeEntry(updated);
-    appendAudit({ at, taskId, field, from, to: value, actor: "sha", diagnosticCode, accepted: true });
-    return { ok: true, message: `adjusted ${taskId} ${field}: ${from ?? "unset"} -> ${value}` };
+    return applyAuditedAdjustment(
+      entry,
+      updated,
+      { at, taskId, field, from, to: value, actor: "sha", diagnosticCode, accepted: true },
+      `adjusted ${taskId} ${field}: ${from ?? "unset"} -> ${value}`,
+    );
   }
   if (field === "report.minBytes") {
     if (!entry.report) {
@@ -115,9 +148,12 @@ export function remediateAdjust(taskId: string, field: string, value: number, di
     }
     from = entry.report.minBytes;
     const updated = { ...entry, report: { ...entry.report, minBytes: value } };
-    writeEntry(updated);
-    appendAudit({ at, taskId, field, from, to: value, actor: "sha", diagnosticCode, accepted: true });
-    return { ok: true, message: `adjusted ${taskId} ${field}: ${from} -> ${value}` };
+    return applyAuditedAdjustment(
+      entry,
+      updated,
+      { at, taskId, field, from, to: value, actor: "sha", diagnosticCode, accepted: true },
+      `adjusted ${taskId} ${field}: ${from} -> ${value}`,
+    );
   }
   if (field === "orchestration.laneDurationMs") {
     from = entry.orchestration.laneDurationMs;
@@ -126,9 +162,12 @@ export function remediateAdjust(taskId: string, field: string, value: number, di
       return { ok: false, reason: `budget fields are increase-only; ${from} -> ${value} would shrink the budget` };
     }
     const updated = { ...entry, orchestration: { maxAgents: entry.orchestration.maxAgents, laneDurationMs: value } };
-    writeEntry(updated);
-    appendAudit({ at, taskId, field, from, to: value, actor: "sha", diagnosticCode, accepted: true });
-    return { ok: true, message: `adjusted ${taskId} ${field}: ${from ?? "unset"} -> ${value}` };
+    return applyAuditedAdjustment(
+      entry,
+      updated,
+      { at, taskId, field, from, to: value, actor: "sha", diagnosticCode, accepted: true },
+      `adjusted ${taskId} ${field}: ${from ?? "unset"} -> ${value}`,
+    );
   }
   appendAudit({ at, taskId, field, actor: "sha", diagnosticCode, accepted: false, reason: "field not adjustable" });
   return { ok: false, reason: `field "${field}" is not adjustable` };
@@ -140,8 +179,20 @@ export function remediateAdjust(taskId: string, field: string, value: number, di
  * notification to aksika.
  */
 export function remediateEscalate(taskId: string, ask: string, diagnosticCode?: string): RemediationResult {
-  const boundedAsk = ask.slice(0, 500);
-  appendAudit({
+  const boundedAsk = redactSecrets(ask).trim().slice(0, 500);
+  if (!boundedAsk) {
+    appendAudit({
+      at: new Date().toISOString(),
+      taskId,
+      field: "escalate",
+      actor: "sha",
+      diagnosticCode,
+      accepted: false,
+      reason: "human ask is required",
+    });
+    return { ok: false, reason: "human ask is required" };
+  }
+  const auditWritten = appendAudit({
     at: new Date().toISOString(),
     taskId,
     field: "escalate",
@@ -150,6 +201,7 @@ export function remediateEscalate(taskId: string, ask: string, diagnosticCode?: 
     accepted: true,
     reason: boundedAsk,
   });
+  if (!auditWritten) return { ok: false, reason: "escalation rejected because its audit record could not be written" };
   return { ok: true, message: `Escalated: "${taskId}" requires human intervention: ${boundedAsk}` };
 }
 

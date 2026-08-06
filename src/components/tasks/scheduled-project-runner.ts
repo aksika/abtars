@@ -19,7 +19,6 @@ import { abortProjectById, getOrCreateOrcCoordinator, requestReconcileForProject
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import { makeTaskFailure } from "./task-failure.js";
 import type { TaskFailureDiagnosticV1, TaskFailureLaneFact } from "./task-failure.js";
-import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
 import type { ExecutionControl } from "../execution-control.js";
 import type { ToolExecutionScope } from "./task-package.js";
 import type { Delivery } from "./task-types.js";
@@ -227,6 +226,61 @@ function cardTimeMs(iso: string | null | undefined): number | undefined {
   return Number.isFinite(t) ? t : undefined;
 }
 
+type ParsedWorkerContract = {
+  id: string;
+  criteria: Array<{ id: string }>;
+  verificationCommands: Array<{ criterion_ids: string[] }>;
+  expectedArtifacts: Array<{ required: boolean; criterion_ids: string[] }>;
+  maxDurationMs?: number;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/** Parse enough of a durable contract to report a lane even if a row is malformed. */
+function parseWorkerContract(contractRow: { id: string; contract_json: string }): ParsedWorkerContract {
+  const fallback: ParsedWorkerContract = {
+    id: contractRow.id,
+    criteria: [],
+    verificationCommands: [],
+    expectedArtifacts: [],
+  };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(contractRow.contract_json) as unknown;
+  } catch {
+    return fallback;
+  }
+  if (!isRecord(raw)) return fallback;
+
+  const criteria = Array.isArray(raw["criteria"])
+    ? raw["criteria"].filter((value): value is Record<string, unknown> => isRecord(value) && typeof value["id"] === "string")
+      .map((value) => ({ id: value["id"] as string }))
+    : [];
+  const verificationCommands = Array.isArray(raw["verification_commands"])
+    ? raw["verification_commands"].filter((value): value is Record<string, unknown> => isRecord(value) && Array.isArray(value["criterion_ids"]))
+      .map((value) => ({ criterion_ids: (value["criterion_ids"] as unknown[]).filter((id): id is string => typeof id === "string") }))
+    : [];
+  const expectedArtifacts = Array.isArray(raw["expected_artifacts"])
+    ? raw["expected_artifacts"].filter((value): value is Record<string, unknown> => isRecord(value) && Array.isArray(value["criterion_ids"]))
+      .map((value) => ({
+        required: value["required"] === true,
+        criterion_ids: (value["criterion_ids"] as unknown[]).filter((id): id is string => typeof id === "string"),
+      }))
+    : [];
+  const limits = isRecord(raw["limits"]) ? raw["limits"] : undefined;
+  return {
+    id: typeof raw["id"] === "string" && raw["id"] ? raw["id"] : contractRow.id,
+    criteria,
+    verificationCommands,
+    expectedArtifacts,
+    ...(limits && typeof limits["max_duration_ms"] === "number" && Number.isFinite(limits["max_duration_ms"])
+      ? { maxDurationMs: limits["max_duration_ms"] }
+      : {}),
+  };
+}
+
 /** #1588: per-lane facts from worker_attempts / worker_contracts / worker_results. */
 function gatherLaneFacts(rootCardId: number): TaskFailureLaneFact[] {
   const supStore = new WorkerSupervisionStore();
@@ -235,28 +289,37 @@ function gatherLaneFacts(rootCardId: number): TaskFailureLaneFact[] {
     const contractRow = supStore.getContractByCardId(child.id);
     const attempt = supStore.getLatestAttempt(child.id);
     if (!contractRow || !attempt) continue;
-    let contract: WorkerAcceptanceContractV1 | undefined;
+    const contract = parseWorkerContract(contractRow);
+    let result: ReturnType<WorkerSupervisionStore["getResultByAttempt"]>;
     try {
-      contract = JSON.parse(contractRow.contract_json) as WorkerAcceptanceContractV1;
-    } catch { /* unreadable contract — skip the lane */ }
-    if (!contract) continue;
-
-    const result = supStore.getResultByAttempt(attempt.id);
-    const criteria = result
-      ? result.envelope.criteria.map((c) => ({ id: c.criterion_id, status: c.status }))
-      : (contract.criteria ?? []).map((c) => ({ id: c.id, status: "not_run" }));
-    const missingEvidence = (contract.criteria ?? [])
+      result = supStore.getResultByAttempt(attempt.id);
+    } catch {
+      // A corrupt result must not hide the durable attempt failure. Fall back
+      // to the contract criteria as evidence-of-absence.
+      result = undefined;
+    }
+    const resultCriteria = result && isRecord(result.envelope) && Array.isArray(result.envelope["criteria"])
+      ? result.envelope["criteria"].filter((value): value is Record<string, unknown> =>
+        isRecord(value) && typeof value["criterion_id"] === "string" && typeof value["status"] === "string")
+        .map((value) => ({ id: value["criterion_id"] as string, status: value["status"] as string }))
+      : [];
+    const criteria = resultCriteria.length > 0
+      ? resultCriteria
+      : contract.criteria.map((c) => ({ id: c.id, status: "not_run" }));
+    const missingEvidence = contract.criteria
       .filter((c) =>
-        !(contract.verification_commands ?? []).some((v) => v.criterion_ids.includes(c.id)) &&
-        !(contract.expected_artifacts ?? []).some((a) => a.criterion_ids.includes(c.id)))
+        !contract.verificationCommands.some((v) => v.criterion_ids.includes(c.id)) &&
+        !contract.expectedArtifacts.some((a) => a.required && a.criterion_ids.includes(c.id)))
       .map((c) => c.id);
-    const hardDeadlineAt = attempt.hard_deadline_at ?? undefined;
-    const settledAt = attempt.settled_at ?? undefined;
-    const overrunMs = hardDeadlineAt && settledAt
-      ? new Date(settledAt).getTime() - new Date(hardDeadlineAt).getTime()
+    const hardDeadlineAt = typeof attempt.hard_deadline_at === "string" ? attempt.hard_deadline_at : undefined;
+    const settledAt = typeof attempt.settled_at === "string" ? attempt.settled_at : undefined;
+    const deadlineMs = cardTimeMs(hardDeadlineAt);
+    const settledMs = cardTimeMs(settledAt);
+    const overrunMs = deadlineMs !== undefined && settledMs !== undefined
+      ? settledMs - deadlineMs
       : undefined;
-    const bindingLimit = contract.limits.max_duration_ms !== undefined
-      ? { name: "max_duration_ms", value: contract.limits.max_duration_ms }
+    const bindingLimit = contract.maxDurationMs !== undefined
+      ? { name: "max_duration_ms", value: contract.maxDurationMs }
       : undefined;
 
     lanes.push({
@@ -281,21 +344,27 @@ function uncoveredRootCriteria(rootCardId: number): string[] {
   const reviewStore = new ProjectReviewStore();
   const rootRow = reviewStore.getContractByProjectCardId(rootCardId);
   if (!rootRow) return [];
-  let rootContract: { criteria: ReadonlyArray<{ id: string }> } | undefined;
+  let rootContract: unknown;
   try {
-    rootContract = JSON.parse(rootRow.contract_json) as { criteria: ReadonlyArray<{ id: string }> };
+    rootContract = JSON.parse(rootRow.contract_json) as unknown;
   } catch { return []; }
+  if (!isRecord(rootContract) || !Array.isArray(rootContract["criteria"])) return [];
+  const rootCriteria = rootContract["criteria"].filter((value): value is Record<string, unknown> =>
+    isRecord(value) && typeof value["id"] === "string");
   const mapped = new Set<string>();
   const supStore = new WorkerSupervisionStore();
   for (const child of kanbanGetChildren(rootCardId)) {
     const contractRow = supStore.getContractByCardId(child.id);
     if (!contractRow) continue;
     try {
-      const c = JSON.parse(contractRow.contract_json) as { supports_root_criteria?: readonly string[] };
-      for (const id of c.supports_root_criteria ?? []) mapped.add(id);
+      const c = JSON.parse(contractRow.contract_json) as unknown;
+      if (!isRecord(c) || !Array.isArray(c["supports_root_criteria"])) continue;
+      for (const id of c["supports_root_criteria"]) {
+        if (typeof id === "string") mapped.add(id);
+      }
     } catch { /* skip */ }
   }
-  return (rootContract.criteria ?? []).filter((c) => !mapped.has(c.id)).map((c) => c.id);
+  return rootCriteria.filter((c) => !mapped.has(c["id"] as string)).map((c) => c["id"] as string);
 }
 
 /**
