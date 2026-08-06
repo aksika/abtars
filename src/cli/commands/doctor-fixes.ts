@@ -162,9 +162,26 @@ const definitions: DoctorFixDefinition[] = [
       try {
         const Database = resolveNativeDep("better-sqlite3");
         const db = new Database(dbPath);
-        db.prepare(
-          "UPDATE kanban_board SET status = 'failed', error = ?, updated_at = datetime('now'), completed_at = datetime('now') WHERE status = 'running' AND updated_at < ?"
-        ).run("Abandoned — auto-failed by doctor fix", cutoff);
+        // #1590: select-then-transition-per-card so each card is its own
+        // transaction (a mid-sweep crash leaves a consistent prefix) and every
+        // change goes through the single status-transition choke point with a
+        // journal row. The reason drops the em dash for the ASCII convention.
+        const { kanbanTransition, wrapTaskDatabase, sqliteNow } = require("../../components/tasks/kanban-board.js") as typeof import("../../components/tasks/kanban-board.js");
+        const taskDb = wrapTaskDatabase(db);
+        const stale = taskDb.prepare(
+          "SELECT id FROM kanban_board WHERE status = 'running' AND updated_at < ?"
+        ).all(cutoff) as Array<{ id: number }>;
+        for (const { id } of stale) {
+          kanbanTransition({
+            cardId: id,
+            from: ["running"],
+            to: "failed",
+            actor: "stale_repair",
+            reason: "Abandoned - auto-failed by doctor fix",
+            fields: { error: "Abandoned - auto-failed by doctor fix", completed_at: sqliteNow() },
+            emit: false,
+          }, taskDb);
+        }
         db.close();
       } catch { /* best-effort */ }
     },

@@ -1,4 +1,4 @@
-import { requireTaskDatabase, type TaskDatabase } from "../tasks/kanban-board.js";
+import { requireTaskDatabase, kanbanTransition, sqliteNow, type TaskDatabase } from "../tasks/kanban-board.js";
 import type { ProjectAcceptanceContractV1 } from "./project-contract.js";
 import { logSwarmTrace } from "../swarm-trace.js";
 
@@ -547,10 +547,18 @@ export class ProjectReviewStore {
       `).run(decisionId, now, cardId);
       if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
 
-      // Update kanban card via projectStateToKanban mapping
-      this.db.prepare(`
-        UPDATE kanban_board SET status = ?, result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?
-      `).run(projectStateToKanban("accepted"), synthesis.slice(0, 4000), cardId);
+      // Update kanban card via projectStateToKanban mapping — #1590: through
+      // the transition helper inside this transaction. The service layer fires
+      // card:done after commit, so emit is disabled here.
+      kanbanTransition({
+        cardId,
+        from: ["running"],
+        to: projectStateToKanban("accepted"),
+        actor: "project_acceptance",
+        reason: "project accepted",
+        fields: { result_summary: synthesis.slice(0, 4000), completed_at: sqliteNow() },
+        emit: false,
+      }, this.db);
 
       // Close the case and request in the same transaction as acceptance. If
       // settlement fails, the open case remains retryable instead of being
@@ -606,9 +614,17 @@ export class ProjectReviewStore {
       `).run(blockerClass, decisionId, now, cardId);
       if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
 
-      this.db.prepare(`
-        UPDATE kanban_board SET status = ?, error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?
-      `).run(projectStateToKanban("blocked"), `blocked: ${blockerClass}`.slice(0, 1000), cardId);
+      // #1590: through the transition helper inside this transaction. The
+      // service layer fires card:failed after commit, so emit is disabled.
+      kanbanTransition({
+        cardId,
+        from: ["running"],
+        to: projectStateToKanban("blocked"),
+        actor: "project_acceptance",
+        reason: "project blocked",
+        fields: { error: `blocked: ${blockerClass}`.slice(0, 1000), completed_at: sqliteNow() },
+        emit: false,
+      }, this.db);
 
       this.db.prepare(`
         UPDATE project_review_cases SET status = 'superseded', superseded_at = ? WHERE id = ? AND status = 'open'

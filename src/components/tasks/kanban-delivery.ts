@@ -1,5 +1,5 @@
 import type { KanbanCard } from "./kanban-board.js";
-import { kanbanMarkDelivered, kanbanClaimDelivery, kanbanGetCard, kanbanPending, requireTaskDatabase } from "./kanban-board.js";
+import { kanbanMarkDelivered, kanbanClaimDelivery, kanbanGetCard, kanbanPending, kanbanTransition, sqliteNow } from "./kanban-board.js";
 import { logDebug, logWarn } from "../logger.js";
 import { logSwarmTrace } from "../swarm-trace.js";
 const TAG = "kanban-delivery";
@@ -127,10 +127,12 @@ export async function pollPendingDeliveries(deps: DeliverDeps): Promise<number> 
 
 function markSent(cardId: number, receipt: string): void {
   try {
-    const db = requireTaskDatabase();
-    db.prepare(
-      `UPDATE kanban_board SET status = 'delivered', delivery_result = 'sent', delivery_receipt = ?, delivered_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-    ).run(receipt, cardId);
+    kanbanTransition({
+      cardId, from: ["delivering"], to: "delivered", actor: "delivery_settle",
+      reason: "delivery sent",
+      fields: { delivery_result: "sent", delivery_receipt: receipt, delivered_at: sqliteNow() },
+      emit: false,
+    });
     logDebug(TAG, `Card ${cardId}: marked sent`);
   } catch (err) {
     logWarn(TAG, `markSent failed for card ${cardId}: ${err}`);
@@ -139,10 +141,13 @@ function markSent(cardId: number, receipt: string): void {
 
 function markUnknown(cardId: number): void {
   try {
-    const db = requireTaskDatabase();
-    db.prepare(
-      `UPDATE kanban_board SET status = 'done', delivery_result = 'unknown', updated_at = datetime('now') WHERE id = ? AND delivery_result IS NULL`
-    ).run(cardId);
+    kanbanTransition({
+      cardId, from: ["delivering"], to: "done", actor: "delivery_settle",
+      reason: "delivery unknown",
+      fields: { delivery_result: "unknown" },
+      extraPredicate: "delivery_result IS NULL",
+      emit: false,
+    });
     logWarn(TAG, `Card ${cardId}: delivery_result=unknown (send failed)`);
   } catch (err) {
     logWarn(TAG, `markUnknown failed for card ${cardId}: ${err}`);
@@ -151,10 +156,12 @@ function markUnknown(cardId: number): void {
 
 export function markDefinitelyNotSent(cardId: number): void {
   try {
-    const db = requireTaskDatabase();
-    db.prepare(
-      `UPDATE kanban_board SET delivery_result = 'definitely_not_sent', status = 'done', updated_at = datetime('now') WHERE id = ?`
-    ).run(cardId);
+    kanbanTransition({
+      cardId, from: ["delivering"], to: "done", actor: "delivery_settle",
+      reason: "delivery definitely not sent",
+      fields: { delivery_result: "definitely_not_sent" },
+      emit: false,
+    });
     logDebug(TAG, `Card ${cardId}: delivery_result=definitely_not_sent`);
   } catch (err) {
     logWarn(TAG, `markDefinitelyNotSent failed for card ${cardId}: ${err}`);

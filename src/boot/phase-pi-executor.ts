@@ -38,6 +38,7 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   }
 
   const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
+  const { kanbanTransition, sqliteNow } = await import("../components/tasks/kanban-board.js");
 
   let taskDb: import("../components/tasks/kanban-board.js").TaskDatabase;
   try {
@@ -83,17 +84,13 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const originReducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb), (projection, event) => {
     // #1358: keep the single #1357 origin card as the user-visible projection.
     // Kanban has no interrupted/awaiting-input states, so those remain active.
+    // On `resumed` the producer sends run.status="queued", so the projection
+    // re-asserts `queued` — not `running` as an earlier draft assumed.
     const cardStatus = projection.latest_status === "completed"
       ? "done"
       : ["failed", "cancelled"].includes(projection.latest_status)
         ? "failed"
         : projection.latest_status === "queued" ? "queued" : "running";
-    const sets = ["status = ?", "updated_at = datetime('now')"];
-    const values: unknown[] = [cardStatus];
-    if (["done", "failed"].includes(cardStatus)) sets.push("completed_at = datetime('now')");
-    if (projection.result_summary !== undefined) { sets.push("result_summary = ?"); values.push(projection.result_summary); }
-    if (projection.error_summary !== undefined) { sets.push("error = ?"); values.push(projection.error_summary); }
-    if (event.kind === "resumed") { sets.push("result_summary = NULL", "error = NULL", "completed_at = NULL"); }
     // The event card_id is the owner's Pi card. Resolve the origin-side
     // delegation card by the durable remote run reference instead of ever
     // mutating the owner's card ID in this process.
@@ -101,8 +98,37 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
       try { return (JSON.parse(row.notes ?? "{}") as Record<string, unknown>).remote_run_id === projection.run_id; } catch { return false; }
     });
     if (!localCard) return;
-    values.push(localCard.id);
-    taskDb.prepare(`UPDATE kanban_board SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    // #1590: through the single transition helper. from is every status the
+    // computed target legally accepts; same-status events re-assert (fields
+    // applied, no journal row). The projection fired no nerve events before
+    // and emits none now.
+    const fields: Record<string, unknown> = {};
+    if (["done", "failed"].includes(cardStatus)) fields.completed_at = sqliteNow();
+    if (projection.result_summary !== undefined) fields.result_summary = projection.result_summary;
+    if (projection.error_summary !== undefined) fields.error = projection.error_summary;
+    if (event.kind === "resumed") {
+      fields.result_summary = null;
+      fields.error = null;
+      fields.completed_at = null;
+    }
+    const FROM_FOR_TARGET: Record<string, readonly string[]> = {
+      queued: ["running", "failed", "done"],
+      running: ["queued"],
+      done: ["running", "delivering"],
+      failed: ["queued", "running"],
+    };
+    // `to` is appended so same-status events re-assert (fields applied, no
+    // journal row) instead of no-op'ing — the design's reassertion contract.
+    const from = [...(FROM_FOR_TARGET[cardStatus] ?? ["queued"]), cardStatus];
+    kanbanTransition({
+      cardId: localCard.id,
+      from: [...new Set(from)] as readonly import("../components/tasks/kanban-board.js").CardStatus[],
+      to: cardStatus,
+      actor: "pi_origin_projection",
+      reason: "remote origin projection",
+      fields,
+      emit: false,
+    }, taskDb);
   });
 
   setRemotePiComponents({ eventProducer, delivery: deliveryManager, controlHandler, originReducer });

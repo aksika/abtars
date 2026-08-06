@@ -3,7 +3,7 @@ import { spin } from "./spin.js";
 import {
   kanbanFail,
   kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds,
-  kanbanQueuedDispatchOrder, kanbanPromoteDueRetry, KANBAN_TERMINAL_STATUSES,
+  kanbanQueuedDispatchOrder, kanbanPromoteDueRetry, kanbanTransition, sqliteNow, KANBAN_TERMINAL_STATUSES,
   isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn } from "./logger.js";
@@ -1012,8 +1012,19 @@ async function dispatchOnePass(): Promise<void> {
         desiredState: "cancelled",
         stableReason: "budget_exhausted",
       });
-      store.db.prepare(`UPDATE kanban_board SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ?`).run("budget_exhausted", card.id);
-      kanbanFail(card.id, "budget_exhausted");
+      // #1590: the transition owns error + completed_at + the card:failed
+      // event the old kanbanFail call emitted. attemptId/generation correlate
+      // the journal row to the worker_attempt that was refused.
+      kanbanTransition({
+        cardId: card.id,
+        from: ["queued", "running"],
+        to: "failed",
+        actor: "budget_enforcement",
+        reason: "budget_exhausted",
+        attemptId: latestAttempt.id,
+        claimGeneration: latestAttempt.generation || 1,
+        fields: { error: "budget_exhausted", completed_at: sqliteNow() },
+      });
       continue;
     }
 

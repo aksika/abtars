@@ -1,4 +1,4 @@
-import { kanbanEnqueue, kanbanUpdate, kanbanComplete } from "../../components/tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanUpdate, kanbanTransition, kanbanComplete } from "../../components/tasks/kanban-board.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 
 type StepStatus = "pending" | "running" | "done" | "skipped" | "failed";
@@ -46,7 +46,10 @@ export function startSleepCard(): SleepCard {
       cardId = kanbanEnqueue(`Sleep ${dateStr}`, "scheduled", undefined, {
         type: "D", deliveryMode: "silent", notes: "",
       });
-      if (cardId) kanbanUpdate(cardId, { status: "running" });
+      // #1590: status transitions go through the choke point. The old
+      // kanbanUpdate({status}) fired no nerve event, so emit is suppressed to
+      // preserve today's wire behavior.
+      if (cardId) kanbanTransition({ cardId, from: ["queued"], to: "running", actor: "dispatch", reason: "sleep card start", emit: false });
     } catch (err) {
       logAndSwallow(TAG, "start", err);
     }

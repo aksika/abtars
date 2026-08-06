@@ -3,6 +3,7 @@ import type { PiRunRecord, PiRunStatus, PiRunView, PiRunOrigin, PiPendingRequest
 import type { UiReplyOutcome } from "./types.js";
 import { MAX_PROGRESS_ENTRIES } from "./types.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
+import { kanbanTransition, sqliteNow } from "../tasks/kanban-board.js";
 import { completePendingRequestInTransaction, ensureRequestLedgerSchema } from "../pi-request-ledger.js";
 
 export type RpcDelivery = "not_written" | "written_unacknowledged";
@@ -311,16 +312,28 @@ export class PiRunStore {
 
       if (runResult.changes === 0) return { committed: false, reason: "wrong_status" };
 
-      // Update linked kanban card
+      // Update linked kanban card — #1590: through the single transition
+      // helper, inside the same transaction. Events fire at the executor
+      // layer after commit, so emit is disabled here (no double fire).
       if (input.outcome === "completed") {
-        this.db.prepare(
-          `UPDATE kanban_board SET status = 'done', result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-        ).run(input.metadata.resultSummary?.slice(0, 4000) ?? null, cardId);
+        kanbanTransition({
+          cardId, from: ["running"], to: "done", actor: "pi_run_settle",
+          reason: "pi run settled",
+          attemptId: input.runId,
+          claimGeneration: input.generation,
+          fields: { result_summary: input.metadata.resultSummary?.slice(0, 4000) ?? null, completed_at: sqliteNow() },
+          emit: false,
+        }, this.db);
       } else {
         // failed or cancelled → kanban_board status = 'failed'
-        this.db.prepare(
-          `UPDATE kanban_board SET status = 'failed', error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-        ).run(input.metadata.error?.slice(0, 1000) ?? input.outcome, cardId);
+        kanbanTransition({
+          cardId, from: ["running"], to: "failed", actor: "pi_run_settle",
+          reason: "pi run failed",
+          attemptId: input.runId,
+          claimGeneration: input.generation,
+          fields: { error: input.metadata.error?.slice(0, 1000) ?? input.outcome, completed_at: sqliteNow() },
+          emit: false,
+        }, this.db);
       }
 
       return { committed: true, outcome: input.outcome, cardId };
@@ -514,10 +527,14 @@ export class PiRunStore {
       if (runChanged.changes === 0) return { claimed: false, reason: "not_queued" };
 
       // Card queued → running
-      const cardChanged = this.db.prepare(
-        `UPDATE kanban_board SET status = 'running', updated_at = datetime('now') WHERE id = ? AND status = 'queued'`
-      ).run(cardId);
-      if (cardChanged.changes === 0) {
+      const cardOutcome = kanbanTransition({
+        cardId, from: ["queued"], to: "running", actor: "pi_run_dispatch",
+        reason: "pi dispatch claim",
+        attemptId: runId,
+        claimGeneration: gen,
+        emit: false,
+      }, this.db);
+      if (cardOutcome.kind !== "applied") {
         // Compensate — roll back the run transition
         this.db.prepare(`UPDATE pi_runs SET status = 'queued', updated_at = datetime('now') WHERE id = ?`).run(runId);
         return { claimed: false, reason: "card_mismatch" };
@@ -569,16 +586,20 @@ export class PiRunStore {
         WHERE id = ? AND execution_generation = ? AND status IN ('interrupted', 'failed')
       `).run(newGen, input.newSessionId, input.sessionFile, input.runId, input.expectedGeneration);
 
-      // Update card
-      this.db.prepare(`
-        UPDATE kanban_board
-        SET status = 'queued',
-            completed_at = NULL,
-            error = NULL,
-            result_summary = NULL,
-            updated_at = datetime('now')
-        WHERE id = ? AND status IN ('failed', 'done')
-      `).run(cardId);
+      // Update card — #1590: through the transition helper (failed|done →
+      // queued is legal; the pi-run-service layer fires card:queued after
+      // commit, so emit is disabled here).
+      kanbanTransition({
+        cardId,
+        from: ["failed", "done"],
+        to: "queued",
+        actor: "pi_resume_generation",
+        reason: "resume generation",
+        attemptId: input.runId,
+        claimGeneration: newGen,
+        fields: { completed_at: null, error: null, result_summary: null },
+        emit: false,
+      }, this.db);
 
       return { committed: true, runId: input.runId, newGeneration: newGen, cardId };
     });
@@ -621,10 +642,13 @@ export class PiRunStore {
                 updated_at = datetime('now')
             WHERE id = ? AND status = ?
           `).run(runId, status);
-          // Update card to failed/interrupted
-          this.db.prepare(`
-            UPDATE kanban_board SET status = 'failed', error = 'interrupted by bridge restart', updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'running')
-          `).run(cardId);
+          // Update card to failed/interrupted — #1590: through the helper.
+          kanbanTransition({
+            cardId, from: ["queued", "running"], to: "failed", actor: "restart_recovery",
+            reason: "interrupted by bridge restart",
+            fields: { error: "interrupted by bridge restart" },
+            emit: false,
+          }, this.db);
           interrupted++;
         }
       }
