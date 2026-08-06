@@ -485,21 +485,41 @@ const sendDocumentTool: ToolDefinition = {
 
 const taskTool: ToolDefinition = {
   name: "task_manage",
-  description: "Manage scheduled/recurring tasks (cron). Add, list, remove, pause, resume, or run tasks. Use action=run to execute a task immediately via the cron queue (isolated subagent).",
+  description: "Manage scheduled/recurring tasks (cron). Add, list, remove, pause, resume, or run tasks. Use action=run to execute a task immediately via the cron queue (isolated subagent). Use action=adjust to change a whitelisted budget field within its hard ceiling, or action=escalate to surface a concrete human ask.",
   parameters: {
     type: "object",
     properties: {
-      action: { type: "string", enum: ["add", "list", "remove", "pause", "resume", "run"], description: "Action" },
-      message: { type: "string", description: "Task message/command (for add)" },
+      action: { type: "string", enum: ["add", "list", "remove", "pause", "resume", "run", "adjust", "escalate"], description: "Action" },
+      message: { type: "string", description: "Task message/command (for add); human ask text (for escalate)" },
       schedule: { type: "string", description: "Cron schedule expression (for add)" },
       type: { type: "string", enum: ["reminder", "script", "agent"], description: "Task type (for add)" },
       chat_id: { type: "string", description: "Chat ID (for add)" },
-      id: { type: "string", description: "Task ID (for remove/pause/resume/run)" },
+      id: { type: "string", description: "Task ID (for remove/pause/resume/run/adjust/escalate)" },
+      field: { type: "string", description: "Budget field to adjust (maxToolRounds | report.minBytes | orchestration.laneDurationMs)" },
+      value: { type: "number", description: "New value for the field, within its hard ceiling (for adjust)" },
     },
     required: ["action"],
   },
-  execute: (args) => {
+  execute: async (args) => {
     const action = stringValue(args["action"] ?? "list");
+    if (action === "adjust") {
+      const { remediateAdjust } = await import("../tasks/task-remediation.js");
+      const id = stringValue(args["id"]).trim();
+      const field = stringValue(args["field"]).trim();
+      const value = args["value"];
+      if (!id || !field) return JSON.stringify({ error: "id and field are required for adjust" });
+      if (typeof value !== "number" || !Number.isFinite(value)) return JSON.stringify({ error: "value must be a number for adjust" });
+      const result = remediateAdjust(id, field, value, undefined);
+      return JSON.stringify(result.ok ? { ok: true, message: result.message } : { error: result.reason });
+    }
+    if (action === "escalate") {
+      const { remediateEscalate } = await import("../tasks/task-remediation.js");
+      const id = stringValue(args["id"]).trim();
+      const ask = stringValue(args["message"]).trim();
+      if (!id || !ask) return JSON.stringify({ error: "id and message (the ask) are required for escalate" });
+      const result = remediateEscalate(id, ask, undefined);
+      return JSON.stringify(result.ok ? { ok: true, message: result.message } : { error: result.reason });
+    }
     if (action === "list") return runBash("abtars-task list", CLI_TIMEOUT_MS);
     if (action === "remove") return runBash(`abtars-task remove ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
     if (action === "pause") return runBash(`abtars-task pause ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);

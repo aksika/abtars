@@ -22,6 +22,8 @@ export const MAX_SCHEDULED_AGENTS = 4;
 export interface TaskOrchestration {
   /** Normalized total agent budget, 1..MAX_SCHEDULED_AGENTS — includes the Orc. */
   maxAgents: number;
+  /** #1588: per-lane hard duration budget (ms) the Orc must not under-author. */
+  laneDurationMs?: number;
 }
 
 export interface SchedulePolicy {
@@ -160,6 +162,13 @@ export function normalizeOrchestration(raw: unknown):
   if (maxAgents === undefined) return { ok: true, value: { maxAgents: 1 } };
   if (typeof maxAgents !== "number" || !Number.isInteger(maxAgents) || maxAgents < 1 || maxAgents > MAX_SCHEDULED_AGENTS) {
     return { ok: false, error: `agent orchestration.maxAgents must be an integer from 1 to ${MAX_SCHEDULED_AGENTS}` };
+  }
+  const laneDurationMs = (raw as Record<string, unknown>).laneDurationMs;
+  if (laneDurationMs !== undefined) {
+    if (typeof laneDurationMs !== "number" || !Number.isInteger(laneDurationMs) || laneDurationMs < 1) {
+      return { ok: false, error: "agent orchestration.laneDurationMs must be a positive integer (ms)" };
+    }
+    return { ok: true, value: { maxAgents, laneDurationMs } };
   }
   return { ok: true, value: { maxAgents } };
 }
