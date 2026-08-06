@@ -45,17 +45,18 @@ export class Bridge {
     }, 15_000);
     forceTimer.unref();
 
-    const step = (name: string, fn: () => Promise<void> | void, ms = 3000): Promise<void> =>
-      Promise.race([
-        Promise.resolve(fn()).catch(() => {}),
-        new Promise<void>(r => {
-          const t = setTimeout(() => {
-            logWarn("main", `Shutdown step '${name}' timed out (${ms}ms) — skipping`);
-            r();
-          }, ms);
-          (t as NodeJS.Timeout).unref?.();
-        }),
-      ]);
+    const step = (name: string, fn: () => Promise<void> | void, ms = 3000): Promise<void> => {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<void>(r => {
+        timer = setTimeout(() => {
+          logWarn("main", `Shutdown step '${name}' timed out (${ms}ms) — skipping`);
+          r();
+        }, ms);
+        timer.unref?.();
+      });
+      return Promise.race([Promise.resolve(fn()).catch(() => {}), timeout])
+        .finally(() => { if (timer) clearTimeout(timer); });
+    };
 
     await step("agent-api", () => this.ctx.agentApiServer?.stop());
     await step("peer-transport", () => {

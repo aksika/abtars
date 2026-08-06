@@ -7,7 +7,6 @@ import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { readEnvWithDefault } from "../components/env.js";
-import { startInProcWatchdog } from "./heartbeat-watchdog.js";
 
 export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   const { init: initSkillStats } = await import("../components/skill-stats.js");
@@ -17,15 +16,11 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
 
   const hbIntervalMs = Math.max(60, parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "60", "heartbeat tick interval"), 10)) * 1000;
 
-  const WD_THRESHOLD_MS = hbIntervalMs * 3;
-  const watchdog = startInProcWatchdog({ thresholdMs: WD_THRESHOLD_MS });
-
   const heartbeat = new HeartbeatSystem({
     enabled: true,
     intervalMs: hbIntervalMs,
     bridgeLockPath: ctx.bridgeLockPath,
     sleepActive: ctx.isSleepActive,
-    onTick: watchdog.kick,
     onStandbyResume: (gapMs) => {
       const gapMin = Math.round(gapMs / 60000);
       const resumeKind = classifyResume();

@@ -1,13 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { HeartbeatSystem } from "./heartbeat-system.js";
+import { updateLastHeartbeat as updateLastHeartbeatMock } from "./transport/bridge-lock-transport.js";
 import type { HeartbeatTask } from "../types/index.js";
+
+vi.mock("./transport/bridge-lock-transport.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./transport/bridge-lock-transport.js")>();
+  return { ...actual, updateLastHeartbeat: vi.fn(actual.updateLastHeartbeat) };
+});
 
 function makeHb() {
   return new HeartbeatSystem({ enabled: true, intervalMs: 5000, bridgeLockPath: "/tmp/test.lock" });
 }
 
 describe("HeartbeatSystem", { timeout: 30000 }, () => {
-  beforeEach(() => { vi.useFakeTimers(); });
+  beforeEach(() => { vi.useFakeTimers({ now: 0 }); });
   afterEach(() => { vi.useRealTimers(); });
 
   it("does not start when disabled", () => {
@@ -33,12 +39,24 @@ describe("HeartbeatSystem", { timeout: 30000 }, () => {
     expect(hb.isRunning).toBe(false);
   });
 
-  it("calls onTick callback", async () => {
-    const onTick = vi.fn();
-    const hb = new HeartbeatSystem({ enabled: true, intervalMs: 5000, bridgeLockPath: "/tmp/test.lock", onTick });
+  it("#1584: a hung task does not block the liveness write", async () => {
+    const hb = makeHb();
+    const hung = vi.fn().mockImplementation(() => new Promise<never>(() => {}));
+    hb.registerTask({ name: "hung", execute: hung });
     hb.start();
-    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
-    expect(onTick).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5000 + 10);
+    expect(updateLastHeartbeatMock).toHaveBeenCalled();
+    hb.stop();
+  });
+
+  it("#1584: a hung task does not produce overlapping task passes", async () => {
+    const hb = makeHb();
+    const hung = vi.fn().mockImplementation(() => new Promise<never>(() => {}));
+    hb.registerTask({ name: "hung", execute: hung });
+    hb.registerTask({ name: "after", execute: vi.fn().mockResolvedValue({ state: "idle" }) });
+    hb.start();
+    vi.advanceTimersByTime(2 * 5000 + 10);
+    expect(hung).toHaveBeenCalledTimes(1);
     hb.stop();
   });
 

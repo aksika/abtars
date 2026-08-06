@@ -9,7 +9,6 @@ export type HeartbeatConfig = {
   bridgeLockPath: string;
   sleepActive?: () => boolean;
   onStandbyResume?: (gapMs: number) => void;
-  onTick?: () => void;
 };
 
 const TAG = "heartbeat";
@@ -24,6 +23,7 @@ export class HeartbeatSystem implements ITaskSlot {
   private running = false;
   private lastTickAt = 0;
   private tickCount = 0;
+  private tickInFlight = false;
   private readonly taskStatuses = new Map<string, HeartbeatTaskStatus>();
   private _cronQueue: { enqueue: (entry: any, cb: any) => void } | null = null;
   private _notify: ((chatId: string, text: string) => void) | null = null;
@@ -94,60 +94,68 @@ export class HeartbeatSystem implements ITaskSlot {
   }
 
   private async tick(): Promise<void> {
-    const now = Date.now();
-    const gap = now - this.lastTickAt;
-    this.lastTickAt = now;
-
-    const standbyThresholdMs = isWsl() ? WSL_STANDBY_THRESHOLD_MS : this.config.intervalMs * 3;
-    if (gap > standbyThresholdMs) {
-      const gapMin = Math.round(gap / 60000);
-      logInfo(TAG, `Standby resume detected — suspended ${gapMin}min`);
-      updateLastHeartbeat();
-      if (this.config.onStandbyResume) {
-        this.config.onStandbyResume(gap);
-        return;
-      }
-    }
-
-    logDebug(TAG, `Tick — executing ${this.tasks.length} task(s)`);
-    let heavyRan = false;
-    const sleepBlocking = this.config.sleepActive?.() ?? false;
-
-    for (const task of this.tasks) {
-      try {
-        if (task.heavy && (heavyRan || sleepBlocking)) {
-          logDebug(TAG, `Skipping heavy task "${task.name}" — ${sleepBlocking ? "sleep in progress" : "another heavy task already ran"}`);
-          this.taskStatuses.set(task.name, { marker: "—", state: "skipped" });
-          continue;
-        }
-        const result: HeartbeatTaskOutcome = await task.execute();
-        if (task.heavy && result.state === "ran") heavyRan = true;
-        this.taskStatuses.set(task.name, {
-          marker: result.state === "ran" ? "✓" : "—",
-          state: result.state,
-          detail: result.detail,
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : JSON.stringify(err);
-        logWarn(TAG, `Task "${task.name}" failed: ${msg}`);
-        this.taskStatuses.set(task.name, { marker: "✗", state: "failed", detail: msg.slice(0, 500) });
-      }
-    }
-
+    // Liveness is "the tick timer fired and the event loop is alive". L3 reads
+    // this field; it must never depend on task completion (#1584).
     updateLastHeartbeat();
 
-    this.tickCount++;
-    if (this.tickCount % 60 === 0) {
-      const heap = Math.round(process.memoryUsage().heapUsed / 1048576);
-      updateBridgeLockField("heapUsedMB", heap);
-      if (heap > 820) {
-        logWarn(TAG, `Heap high: ${heap}MB / 1024MB (80%+)`);
-      } else {
-        logDebug(TAG, `Heap: ${heap}MB / 1024MB`);
-      }
+    if (this.tickInFlight) {
+      logWarn(TAG, "Previous tick still running — skipping this tick");
+      return;
     }
+    this.tickInFlight = true;
+    try {
+      const now = Date.now();
+      const gap = now - this.lastTickAt;
+      this.lastTickAt = now;
 
-    this.config.onTick?.();
+      const standbyThresholdMs = isWsl() ? WSL_STANDBY_THRESHOLD_MS : this.config.intervalMs * 3;
+      if (gap > standbyThresholdMs) {
+        const gapMin = Math.round(gap / 60000);
+        logInfo(TAG, `Standby resume detected — suspended ${gapMin}min`);
+        if (this.config.onStandbyResume) {
+          this.config.onStandbyResume(gap);
+          return;
+        }
+      }
+
+      logDebug(TAG, `Tick — executing ${this.tasks.length} task(s)`);
+      let heavyRan = false;
+      const sleepBlocking = this.config.sleepActive?.() ?? false;
+
+      for (const task of this.tasks) {
+        try {
+          if (task.heavy && (heavyRan || sleepBlocking)) {
+            logDebug(TAG, `Skipping heavy task "${task.name}" — ${sleepBlocking ? "sleep in progress" : "another heavy task already ran"}`);
+            this.taskStatuses.set(task.name, { marker: "—", state: "skipped" });
+            continue;
+          }
+          const result: HeartbeatTaskOutcome = await task.execute();
+          if (task.heavy && result.state === "ran") heavyRan = true;
+          this.taskStatuses.set(task.name, {
+            marker: result.state === "ran" ? "✓" : "—",
+            state: result.state,
+            detail: result.detail,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : JSON.stringify(err);
+          logWarn(TAG, `Task "${task.name}" failed: ${msg}`);
+          this.taskStatuses.set(task.name, { marker: "✗", state: "failed", detail: msg.slice(0, 500) });
+        }
+      }
+
+      this.tickCount++;
+      if (this.tickCount % 60 === 0) {
+        const heap = Math.round(process.memoryUsage().heapUsed / 1048576);
+        updateBridgeLockField("heapUsedMB", heap);
+        if (heap > 820) {
+          logWarn(TAG, `Heap high: ${heap}MB / 1024MB (80%+)`);
+        } else {
+          logDebug(TAG, `Heap: ${heap}MB / 1024MB`);
+        }
+      }
+    } finally {
+      this.tickInFlight = false;
+    }
   }
 }
 
