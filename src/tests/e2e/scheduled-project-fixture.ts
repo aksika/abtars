@@ -63,6 +63,8 @@ export interface ScheduledProjectFixtureOptions {
   holdAcceptance?: boolean;
   /** Scripted review-turn decision. */
   reviewMode?: "accept" | "needs_input" | "blocked" | "repair" | "die";
+  /** Limits carried into every authored worker contract. */
+  workerLimits?: { max_duration_ms?: number; max_tokens?: number };
 }
 
 const DEFAULT_OPTIONS = {
@@ -70,6 +72,7 @@ const DEFAULT_OPTIONS = {
   failOrcMode: null as FailOrcMode,
   holdAcceptance: false,
   reviewMode: "accept" as "accept" | "needs_input" | "blocked" | "repair" | "die",
+  workerLimits: undefined as { max_duration_ms?: number; max_tokens?: number } | undefined,
 };
 
 export function makeScheduledProjectFixture(
@@ -220,6 +223,8 @@ export function makeScheduledProjectFixture(
               const created = svc.createChild(`Work lane ${i}`, workerId, projectId, "fixture-orc", {
                 criteria: [{ id: `w${i}`, description: "lane done" }],
                 expectedArtifacts: [{ id: `a${i}`, kind: "file", ref: `out/lane-${i}.md`, required: true, criterion_ids: [`w${i}`] }],
+                supportsRootCriteria: ["c1"],
+                limits: options.workerLimits,
                 attemptId: `att_fixture_${workerId}`,
               });
               if (!("error" in created)) {
@@ -270,6 +275,7 @@ export function makeScheduledProjectFixture(
             const created = svc.createChild("Repair: rework", repairWorkerId, projectId, "fixture-orc", {
               criteria: [{ id: "w1", description: "repair done" }],
               expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/repair.md", required: true, criterion_ids: ["w1"] }],
+              limits: options.workerLimits,
               attemptId: `att_fixture_repair_${repairWorkerId}`,
             });
             if (!("error" in created)) {

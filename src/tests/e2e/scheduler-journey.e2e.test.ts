@@ -30,6 +30,7 @@ vi.mock("node:child_process", async () => {
 import * as child_process from "node:child_process";
 
 import type { ScheduledTask } from "../../components/tasks/task-types.js";
+import type { TaskFailureDiagnosticV1 } from "../../components/tasks/task-failure.js";
 
 
 // ── State store / module handles (real modules, loaded per test) ────────────
@@ -1389,6 +1390,95 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("#1588 E2E — root-cause cascade for a late-completion supervised lane", () => {
+  it("settles once with supervision/lane_late_completion, notifies the operator with the lane facts, and stays silent for deferred runs", async () => {
+    const cascadeDiagnostics: TaskFailureDiagnosticV1[] = [];
+    const cascadeNotifications: string[] = [];
+    const { buildFailureNotification } = await import("../../boot/phase-pipeline-deps.js");
+    const { CronQueue } = await import("../../components/tasks/task-queue.js");
+    const coordinator = new CoordinatorClass({
+      onTaskPaused: (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
+      agentRunner: fakeAgentRunner,
+      projectRunner: realProjectRunner,
+      onFailure: (entryId, diagnostic) => {
+        cascadeDiagnostics.push(diagnostic);
+        cascadeNotifications.push(buildFailureNotification(entryId, diagnostic));
+      },
+    });
+    const queue = new CronQueue("kiro-cli", ".", coordinator);
+    const { fixture } = await makeFixture({ workerCount: 1, workerLimits: { max_duration_ms: 120_000 } });
+    forceDue("project-task");
+    await tick.runTaskTick(makeTickCtx(queue));
+    const { runId, rootCardId } = await waitForReach(fixture, "executing");
+
+    // The lane's worker completes AFTER its hard deadline: backdate the
+    // attempt's hard_deadline_at, then settle through the real terminal
+    // settlement primitive, which force-settles lifecycle=timed_out with the
+    // late-completion cancel reason and records the absence envelope.
+    const workerCard = board.kanbanGetChildren(rootCardId).find((c) => c.type === "W")!;
+    const supStore = new WorkerSupervisionStoreClass();
+    const attempt = supStore.getLatestAttempt(workerCard.id)!;
+    supStore.db.prepare("UPDATE worker_attempts SET hard_deadline_at = ? WHERE id = ?")
+      .run(new Date(Date.now() - 30_000).toISOString(), attempt.id);
+    const settled = supStore.terminalSettlement({
+      attemptId: attempt.id, expectedGeneration: 1, desiredState: "completed", stableReason: "worker_completed",
+    });
+    expect(settled.kind).toBe("settled");
+    if (settled.kind === "settled") expect(settled.lifecycle).toBe("timed_out");
+    const lateAttempt = supStore.getAttempt(attempt.id)!;
+    expect(lateAttempt.cancel_reason).toContain("late_completion_timed_out");
+    const absence = supStore.getResultByAttempt(attempt.id);
+    expect(absence).toBeDefined();
+    expect(absence!.envelope.outcome).toBe("timed_out");
+
+    // The worker card completes; the Orc review blocks the project.
+    board.kanbanComplete(workerCard.id, null, "worker complete");
+    fixture.block("late completion review blocked");
+    await waitFor(() => !stateStore.readState("project-task")?.activeRun);
+
+    // 1. Durable history carries the supervision diagnostic with full context.
+    const ev = events("project-task");
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.runId).toBe(runId);
+    expect(ev[0]!.outcome).toBe("failed");
+    const diag = ev[0]!.diagnostic as TaskFailureDiagnosticV1;
+    expect(diag.category).toBe("supervision");
+    expect(diag.code).toBe("lane_late_completion");
+    const lane = diag.context!.lanes[0]!;
+    expect(lane.cardId).toBe(workerCard.id);
+    expect(lane.contractId).toMatch(/^c_/);
+    expect(lane.attemptId).toBe(attempt.id);
+    expect(lane.lifecycle).toBe("timed_out");
+    expect(lane.cancelReason).toContain("late_completion_timed_out");
+    expect(lane.hardDeadlineAt).toBeDefined();
+    expect(lane.settledAt).toBeDefined();
+    expect(lane.overrunMs).toBeGreaterThan(0);
+    expect(lane.bindingLimit).toEqual({ name: "max_duration_ms", value: 120_000 });
+    expect(lane.criteria).toContainEqual({ id: "w0", status: "not_run" });
+    expect(lane.missingEvidence).toEqual([]);
+
+    // 2. The failure callback fired exactly once for the run.
+    expect(cascadeDiagnostics).toHaveLength(1);
+
+    // 3. The operator notification carries category/code and the lane facts.
+    expect(cascadeNotifications).toHaveLength(1);
+    expect(cascadeNotifications[0]).toContain("Project Task failed - supervision/lane_late_completion");
+    expect(cascadeNotifications[0]).toContain(`card ${workerCard.id}`);
+    expect(cascadeNotifications[0]).toContain("binding_limit max_duration_ms=120000");
+    expect(cascadeNotifications[0]).toContain("overrun_ms");
+    expect(cascadeNotifications[0]).not.toMatch(/[📥✅❌⏳🔧⚠️]/);
+
+    // 4. A deferred occurrence produces zero cascade sends.
+    const deferredEntry = taskStore.readEntries().find((e) => e.id === "deferred-task")!;
+    const enqueueErr = queue.enqueue(deferredEntry, true);
+    expect(enqueueErr).toBeNull();
+    await waitFor(() => events("deferred-task").length === 1 && !stateStore.readState("deferred-task")?.activeRun);
+    expect(events("deferred-task")[0]!.outcome).toBe("deferred");
+    expect(cascadeDiagnostics).toHaveLength(1);
+    expect(cascadeNotifications).toHaveLength(1);
   });
 });
 
