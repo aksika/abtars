@@ -131,6 +131,12 @@ describe("kanban-board", () => {
     expect(cards[0].due_at).toBe("2026-06-10T12:00:00");
   });
 
+  it("rejects runtime lifecycle-field updates even when type checks are bypassed", () => {
+    const id = mod.kanbanEnqueue("Lifecycle-owned", "user");
+    expect(() => mod.kanbanUpdate(id, { status: "failed" } as never)).toThrow(/cannot update field "status"/);
+    expect(mod.kanbanGetCard(id)!.status).toBe("queued");
+  });
+
   it("kanbanCleanup purges old delivered cards", () => {
     const id = mod.kanbanEnqueue("Old card", "task");
     mod.kanbanRunning(id);

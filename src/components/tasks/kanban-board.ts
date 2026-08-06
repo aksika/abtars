@@ -398,18 +398,25 @@ export function kanbanTransition(req: TransitionRequest, database?: TaskDatabase
     if (observed === undefined) return { kind: "no_op", observed: null };
 
     // Reassertion: observed === to AND the caller declared reassertion intent
-    // by including `to` in the from-set. Apply fields, no status change, no
-    // journal. Callers that do NOT include `to` (kanbanComplete, claimDelivery)
-    // get a lost-CAS no_op instead — nothing written, matching the old guards.
+    // by including `to` in the from-set. Keep the status predicate in the
+    // write: the diagnostic SELECT is not the CAS, and a projection must not
+    // apply fields to a card that changed status after that read. No journal
+    // row is written. Callers that do NOT include `to` (kanbanComplete,
+    // claimDelivery) get a lost-CAS no_op instead — nothing written, matching
+    // the old guards.
     if (observed === req.to && req.from.includes(req.to)) {
-      if (fieldEntries.length > 0) {
-        const sets = [`updated_at = datetime('now')`];
-        const vals: unknown[] = [];
-        for (const [k, v] of fieldEntries) { sets.push(`${k} = ?`); vals.push(v); }
-        vals.push(req.cardId);
-        tx.prepare(`UPDATE kanban_board SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+      const sets = [`status = ?`, `updated_at = datetime('now')`];
+      const vals: unknown[] = [req.to];
+      for (const [k, v] of fieldEntries) { sets.push(`${k} = ?`); vals.push(v); }
+      let where = `WHERE id = ? AND status = ?`;
+      if (extraPredicate) where += ` AND ${extraPredicate}`;
+      const params: unknown[] = [...vals, req.cardId, req.to, ...(req.extraPredicateParams ?? [])];
+      const result = tx.prepare(`UPDATE kanban_board SET ${sets.join(", ")} ${where}`).run(...params);
+      if (result.changes === 1) {
+        return { kind: "reasserted", observed };
       }
-      return { kind: "reasserted", observed };
+      const current = tx.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(req.cardId) as { status: string } | undefined;
+      return { kind: "no_op", observed: (current?.status as CardStatus | undefined) ?? null };
     }
 
     const sets = [`status = ?`, `updated_at = datetime('now')`];
@@ -729,9 +736,11 @@ export function kanbanList(filter?: string, filterKey?: string): KanbanCard[] {
 export function kanbanUpdate(id: number, fields: Partial<Pick<KanbanCard, "title" | "priority" | "type" | "labels" | "due_at" | "notes" | "parent_id" | "approval">>): void {
   const d = dbOrNull();
   if (!d) return;
+  const allowed = new Set(["title", "priority", "type", "labels", "due_at", "notes", "parent_id", "approval"]);
   const sets: string[] = ["updated_at = datetime('now')"];
   const vals: unknown[] = [];
   for (const [k, v] of Object.entries(fields)) {
+    if (!allowed.has(k)) throw new Error(`kanbanUpdate cannot update field "${k}"`);
     if (v === undefined) continue;
     if (k === "priority") {
       sets.push("priority = ?");

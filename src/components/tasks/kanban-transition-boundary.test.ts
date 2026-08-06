@@ -14,7 +14,7 @@ import { join, relative } from "node:path";
 const SRC_ROOT = join(__dirname, "..", "..", "..", "src");
 
 /** UPDATE kanban_board SET ... where `status` is one of the assigned columns. */
-const STATUS_WRITE_RE = /UPDATE\s+kanban_board\s+SET[\s\S]*?\bstatus\s*=\s*(['"`]|\?)/i;
+const STATUS_WRITE_RE = /UPDATE\s+kanban_board\s+SET\b(?:(?![`;])[\s\S])*?\bstatus\s*=\s*(['"`]|\?)/gi;
 
 function collectSourceFiles(): string[] {
   const out: string[] = [];
@@ -41,11 +41,10 @@ describe("#1590 source boundary", () => {
       if (file.includes(".test.ts") || file.includes("src/tests/")) continue;
       const rel = relative(SRC_ROOT, file);
       if (rel === "components/tasks/kanban-board.ts") continue;
-      const lines = readFileSync(file, "utf-8").split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (STATUS_WRITE_RE.test(lines[i]!)) {
-          offenders.push({ file: rel, line: i + 1 });
-        }
+      const content = readFileSync(file, "utf-8");
+      for (const match of content.matchAll(STATUS_WRITE_RE)) {
+        const line = content.slice(0, match.index ?? 0).split("\n").length;
+        offenders.push({ file: rel, line });
       }
     }
     expect(offenders, `raw status writes must go through kanbanTransition (see kanban-board.ts): ${offenders.map(o => `${o.file}:${o.line}`).join(", ")}`).toEqual([]);
