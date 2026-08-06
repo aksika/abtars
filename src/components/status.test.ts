@@ -206,6 +206,20 @@ describe("renderChatStatus", () => {
     expect(out).toContain("⚠ runtime not available");
   });
 
+  it("renders warnings, including the Pi downgrade command", () => {
+    const out = renderChatStatus(
+      makeOperatorView({
+        runtime: makeRuntimeView(),
+        warnings: [
+          "Pi 0.84.0 is newer than the version abtars is built against (0.83.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.83.0'",
+        ],
+      }),
+    );
+    expect(out).toContain("Warnings:");
+    expect(out).toContain("Pi 0.84.0 is newer than the version abtars is built against");
+    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.83.0'");
+  });
+
   it("reflects mood from runtime failure signals", () => {
     const out = renderChatStatus(
       makeOperatorView({ runtime: makeRuntimeView({ mood: "😟" }) }),

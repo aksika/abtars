@@ -21,8 +21,9 @@ function makeInstallation(aiRoot: string, tuiRoot: string, agentCoreRoot: string
   return {
     executable: "/usr/bin/pi",
     packageRoot: "/usr/lib/pi-coding-agent",
-    version: "0.80.7",
+    version: "0.83.0",
     source: "path",
+    pinStatus: "at-pin",
     moduleRoots: { ai: aiRoot, tui: tuiRoot, agentCore: agentCoreRoot },
   };
 }

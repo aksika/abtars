@@ -164,8 +164,9 @@ describe("loadPiModels (C8)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.80.7",
+        version: "0.83.0",
         source: "path",
+        pinStatus: "at-pin",
         moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
       },
     });
@@ -182,8 +183,9 @@ describe("loadPiModels (C8)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.80.7",
+        version: "0.83.0",
         source: "path",
+        pinStatus: "at-pin",
         moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
       },
     });

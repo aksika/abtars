@@ -32,6 +32,10 @@ export async function preflightPiCompatibility(): Promise<number> {
         for (const [key, v] of unloadable) {
           process.stdout.write(`  ${key}: ${(v as { reason: string }).reason}\n`);
         }
+        const pinWarning = formatPiPinWarning(result.installation.version);
+        if (pinWarning) {
+          process.stdout.write(`[pi-preflight] ⚠ ${pinWarning.split("\n").join("\n[pi-preflight]   ")}\n`);
+        }
         return 0;
       }
       process.stdout.write(

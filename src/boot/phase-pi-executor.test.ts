@@ -132,7 +132,7 @@ describe("phasePiExecutor — #1440 disabled seed and enabled boot", () => {
     });
     mockResolvePiInstallation.mockReturnValue({
       state: "compatible",
-      installation: { version: "0.80.7", source: "path" },
+      installation: { version: "0.83.0", source: "path", pinStatus: "at-pin" },
     });
     const ctx = createBootCtx();
     const { phasePiExecutor } = await import("./phase-pi-executor.js");

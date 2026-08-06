@@ -54,7 +54,7 @@ function makeLoadedPiAgentCore(mockAgent: PiAgent): LoadedPiAgentCore {
   } as unknown as PiAgentCoreModule["Agent"];
   return {
     module: { Agent: FakeAgentClass } as PiAgentCoreModule,
-    installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.80.7", source: "path", moduleRoots: { ai: "", tui: "", agentCore: "" } },
+    installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.83.0", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
   };
 }
 
@@ -150,7 +150,7 @@ describe("PiCoreExecutionHost", () => {
     });
     await host.start({
       module: { Agent: real.Agent },
-      installation: { executable: "", packageRoot: "", version: "0.80.7", source: "path", moduleRoots: { ai: "", tui: "", agentCore: "" } },
+      installation: { executable: "", packageRoot: "", version: "0.83.0", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
     });
     expect(host.state).toBe("running");
     host.cancel();

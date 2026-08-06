@@ -305,6 +305,16 @@ export function renderChatStatus(view: StatusView): string {
   lines.push(`abTARS™ ${r.instanceName} — ${sleepLabel} ${r.mood}`);
   lines.push(`  PID ${r.pid} (up ${formatUptime(r.uptimeMs)})`);
 
+  // Keep the chat status surface aligned with the operator status surface.
+  // In particular, an above-pin Pi warning includes the actionable downgrade
+  // command and must not disappear merely because the caller is /status.
+  if (view.warnings.length > 0) {
+    lines.push("", "Warnings:");
+    for (const warning of view.warnings) {
+      lines.push(`  - ${warning.split("\n").join("\n    ")}`);
+    }
+  }
+
   // Watchdog
   if (r.watchdog.pid !== null) {
     lines.push(

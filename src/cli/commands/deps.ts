@@ -140,12 +140,16 @@ function observePi(): PiObservation {
       const unloadable = Object.entries(surfaces).filter(([, v]) => v.status === "unloadable");
       if (unloadable.length > 0) {
         const reason = unloadable.map(([key, v]) => `${key}: ${(v as { reason: string }).reason}`).join("; ");
+        const pinWarning = formatPiPinWarning(result.installation.version);
         return {
           state: "unloadable",
           version: result.installation.version,
           executable: result.installation.executable,
           reason,
-          remediation: `Pi's package structure matches, but ${unloadable.length} runtime module surface(s) failed to resolve. Reinstall with: abtars deps install pi`,
+          remediation: [
+            `Pi's package structure matches, but ${unloadable.length} runtime module surface(s) failed to resolve. Reinstall with: abtars deps install pi`,
+            pinWarning,
+          ].filter((line): line is string => Boolean(line)).join("\n"),
         };
       }
       // #1572: surface-probe failure keeps priority over pin classification —
@@ -583,7 +587,7 @@ function list(): number {
   })();
   process.stdout.write(`  ${piDesc}\n`);
   process.stdout.write(`    pin: ${PI_COMPATIBILITY.pinnedRange} (built against ${PI_COMPATIBILITY.pinnedVersion})\n`);
-  if (piState.state === "above-pin" && piState.remediation) {
+  if ((piState.state === "above-pin" || piState.state === "unloadable") && piState.remediation) {
     process.stdout.write(`    ${piState.remediation.split("\n").join("\n    ")}\n`);
   }
   if (piState.state === "compatible") {
