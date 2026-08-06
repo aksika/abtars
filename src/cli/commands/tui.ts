@@ -294,9 +294,9 @@ export async function tui(args: string[]): Promise<number> {
     return 1;
   }
 
-  // Version check: warn if Pi version differs from target minimum
-  if (piResult.installation.version !== PI_COMPATIBILITY.minimumPiVersion) {
-    stderr(`Warning: Pi ${piResult.installation.version} installed, minimum is ${PI_COMPATIBILITY.minimumPiVersion}`);
+  // Version check: warn when the installed Pi is above the pinned line
+  if (piResult.installation.pinStatus === "above-pin") {
+    stderr(`Warning: Pi ${piResult.installation.version} above pin ${PI_COMPATIBILITY.pinnedRange} (built against ${PI_COMPATIBILITY.pinnedVersion})`);
   }
 
   // Build the TUI.

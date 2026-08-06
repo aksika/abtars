@@ -15,6 +15,8 @@ import { createAgentTransport } from "../components/agent-registry.js";
 import { logDebug, logInfo, logWarn, logError } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
+import { resolvePiInstallation } from "../components/pi-installation.js";
+import { formatPiPinWarning } from "../config/pi-compatibility.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 
@@ -278,6 +280,13 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       contextProvider: ctx.durableContextProvider,
     });
     logInfo("main", `🔌 PiCore transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
+    // #1572: the api route loads Pi into the abtars process — warn once when it
+    // is above the pinned line so drift is visible in the boot log.
+    const piRes = resolvePiInstallation();
+    if (piRes.state === "compatible" && piRes.installation.pinStatus === "above-pin") {
+      const pinWarning = formatPiPinWarning(piRes.installation.version);
+      if (pinWarning) logWarn("main", pinWarning.split("\n").join("; "));
+    }
   } else {
     // Kill stale ACP processes from previous run (#921, #1012)
     const { readAndClearAcpPids } = await import("../components/transport/bridge-lock-transport.js");

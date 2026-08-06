@@ -2,6 +2,8 @@
 
 abTARS can dispatch coding tasks to a supervised Pi RPC subprocess. Orc enqueues a goal, abTARS launches `pi --mode rpc` with the workspace and model you specify, and tracks the run through completion, failure, or input requests.
 
+Pi version management (the pinned `0.83.x` line, downgrade command, `--force`) is covered in [Version policy](/abtars/pi#version-policy).
+
 ## Requirements
 
 - Pi installed on the same machine (`pi` on PATH)

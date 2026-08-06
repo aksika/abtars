@@ -38,3 +38,31 @@ Sub-chapters:
 - [TUI (Terminal Interface)](/abtars/pi-tui) — how to use `abtars tui`
 - [pi-ai Providers](/abtars/pi-providers) — enabling Pi-powered providers
 - [Pi Executor](/abtars/pi-executor) — coding delegation via `/pi run`
+
+## Version policy
+
+abTARS is built and tested against a **pinned Pi minor line** (`0.83.x`). The pin
+lives in `PI_COMPATIBILITY` (`src/config/pi-compatibility.ts`) and is mirrored in
+`package.json` devDependencies — a test fails the build if they diverge.
+
+- `abtars deps install pi` and `abtars deps update pi` install the pinned range
+  (`~0.83.0`) and will **never** move Pi above it. Patch releases (bugfixes)
+  flow in automatically.
+- Pi's own updater (`pi update`) has **no version flag** — it always goes to
+  latest. If you run it and Pi moves above the pin, abtars keeps working but
+  warns everywhere it sees Pi (`abtars status` exits non-zero, `abtars deps
+  list` shows `above pin`, the deploy preflight and boot log warn).
+- `abtars deps update` exits non-zero while Pi is above the pin. That is
+  deliberate — the operator must act.
+
+Downgrade to the tested line:
+
+```
+npm i -g '@earendil-works/pi-coding-agent@~0.83.0'
+```
+
+If you deliberately want to keep a newer Pi, re-run with `--force`:
+
+```
+abtars deps install pi --force
+```

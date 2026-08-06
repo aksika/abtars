@@ -1,7 +1,7 @@
 import { logInfo, logWarn, logError } from "../components/logger.js";
 import type { BootCtx } from "./context.js";
 import { resolvePiInstallation } from "../components/pi-installation.js";
-import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
+import { PI_COMPATIBILITY, formatPiPinWarning } from "../config/pi-compatibility.js";
 
 const TAG = "boot-pi";
 
@@ -27,11 +27,15 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const piResult = resolvePiInstallation();
   if (piResult.state !== "compatible") {
     const obsVer = piResult.state === "absent" ? "" : ` (version ${piResult.observedVersion ?? "?"})`;
-    logWarn(TAG, `Pi executor disabled — Pi ${piResult.state}${obsVer}. Minimum required: ${PI_COMPATIBILITY.minimumPiVersion}`);
+    logWarn(TAG, `Pi executor disabled — Pi ${piResult.state}${obsVer}. Pinned version: ${PI_COMPATIBILITY.pinnedVersion}`);
     if (piResult.state !== "absent" && piResult.remediation) logWarn(TAG, piResult.remediation);
     return;
   }
   logInfo(TAG, `Pi ${piResult.installation.version} (${piResult.installation.source})`);
+  if (piResult.installation.pinStatus === "above-pin") {
+    const pinWarning = formatPiPinWarning(piResult.installation.version);
+    if (pinWarning) logWarn(TAG, pinWarning.split("\n").join("; "));
+  }
 
   const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
 

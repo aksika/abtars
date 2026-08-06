@@ -2,7 +2,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, dirname, resolve, relative, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
-import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
+import { PI_COMPATIBILITY, classifyPiPin, type PiPinStatus } from "../config/pi-compatibility.js";
 import { compareSemver } from "../utils/version-compare.js";
 
 const ANCESTOR_WALK_MAX = 10;
@@ -15,6 +15,7 @@ export type PiInstallation = {
   packageRoot: string;
   version: string;
   source: PiInstallationSource;
+  pinStatus: PiPinStatus;
   moduleRoots: {
     ai: string;
     tui: string;
@@ -324,15 +325,15 @@ export function resolvePiInstallation(options?: { useCache?: boolean }): PiInsta
     };
   }
 
-  const cmp = compareSemver(pkgVersion, PI_COMPATIBILITY.minimumPiVersion);
+  const cmp = compareSemver(pkgVersion, PI_COMPATIBILITY.pinnedVersion);
   if (cmp === -1) {
     return {
       state: "below-minimum",
       executable,
       packageRoot,
       observedVersion: pkgVersion,
-      reason: `Pi version ${pkgVersion} is below minimum ${PI_COMPATIBILITY.minimumPiVersion}`,
-      remediation: `Update Pi with: abtars deps update pi, or manually run: ${executable} update --self`,
+      reason: `Pi version ${pkgVersion} is below pinned version ${PI_COMPATIBILITY.pinnedVersion}`,
+      remediation: `Update Pi with: abtars deps update pi, or manually run: npm i -g '${PI_COMPATIBILITY.packageName}@${PI_COMPATIBILITY.pinnedRange}'`,
     };
   }
 
@@ -361,6 +362,7 @@ export function resolvePiInstallation(options?: { useCache?: boolean }): PiInsta
     packageRoot,
     version: pkgVersion,
     source,
+    pinStatus: classifyPiPin(pkgVersion),
     moduleRoots: {
       ai: aiRoot!,
       tui: tuiRoot!,

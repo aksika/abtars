@@ -75,6 +75,30 @@ describe("projectPiEvent", () => {
       const e = projectPiEvent({ type: "auto_retry_end", success: true, attempt: 2 });
       expect(JSON.parse(e.progress[0]!.json)).toEqual({ status: "ended", attempt: 2 });
     });
+
+    it("summarization_retry_scheduled projects bounded attempt, never the error text", () => {
+      const proj = projectPiEvent({
+        type: "summarization_retry_scheduled",
+        attempt: 1,
+        maxAttempts: 3,
+        delayMs: 2000,
+        errorMessage: "terminated: 529 overloaded",
+      });
+      expect(JSON.parse(proj.progress[0]!.json)).toEqual({ status: "scheduled", attempt: 1 });
+      expect(proj.progress[0]!.json).not.toContain("529");
+      expect(proj.settleCompletion).toBe(false);
+    });
+
+    it("summarization_retry_attempt_start projects the bounded source enum", () => {
+      const proj = projectPiEvent({ type: "summarization_retry_attempt_start", source: "branchSummary" });
+      expect(JSON.parse(proj.progress[0]!.json)).toEqual({ status: "started", source: "branchSummary" });
+    });
+
+    it("summarization_retry_finished projects completion without settling", () => {
+      const proj = projectPiEvent({ type: "summarization_retry_finished" });
+      expect(JSON.parse(proj.progress[0]!.json)).toEqual({ status: "finished" });
+      expect(proj.settleCompletion).toBe(false);
+    });
   });
 
   describe("ignored known events", () => {
@@ -96,6 +120,8 @@ describe("projectPiEvent", () => {
       "entry_appended",
       "session_info_changed",
       "thinking_level_changed",
+      "tool_execution_update",
+      "bash_execution_update",
     ])("%s is ignored with no settlement", (type) => {
       const proj = projectPiEvent(({ type } as unknown) as PiAgentEvent);
       expect(proj.progress).toEqual([]);
