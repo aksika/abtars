@@ -1,96 +1,76 @@
 ---
 name: create-task
-description: How to create a scheduled task — common rules plus type-specific sections (agent oneshot, script, reporting, interactive)
+description: Create and verify recurring or one-shot reminders, scripts, agent jobs, reports, and interactive skill launches.
 tags: [tasks, workflow]
-related: [task, create-skill]
+related: [task, skill-authoring]
 ---
 
-# Create-Task
+# Create a Scheduled Task
 
-Author a new scheduled task: decide the type, then follow the common rules plus the section for that type. Tasks live in `~/.abtars/tasks/` — definitions only. A task fires on a schedule; a skill is loaded on demand.
+Choose the task kind, register the definition, and verify it. Tasks are scheduler definitions under `~/.abtars/tasks/`; skills are reusable procedures loaded on demand.
 
-## Decide the type first
+## Choose the task shape
 
-| Type | Use when | Key marker |
-|------|----------|------------|
-| **Agent oneshot** (Section 1) | The agent runs a prompt or TASK.md once, replies to chat | `kind: agent`, no `interaction` |
-| **Script** (Section 2) | A shell command runs directly, no model call | `kind: script` |
-| **Reporting** (Section 3) | The agent produces a deliverable artifact delivered to chat | `delivery: report` + report contract |
-| **Interactive** (Section 4) | The task launches a persistent conversational skill session (K) | `interaction: { mode: "skill" }` |
-| Reminder | Simple scheduled text, no agent | `kind: reminder` |
-| System | Internal bridge action (sleep-cycle, hardware-sleep) | `kind: system` |
+| Need | Definition |
+|------|------------|
+| Send fixed text | `kind: reminder`, `delivery: announce` |
+| Run a shell command without a model | `kind: script` |
+| Run one agent session and return text | `kind: agent`, `interaction.mode: oneshot`, `delivery: announce` |
+| Generate and deliver a file | `kind: agent`, `interaction.mode: oneshot`, `delivery: report` plus a report contract |
+| Start or resume a conversation | `kind: agent`, `interaction.mode: skill`, `delivery: announce` |
+| Run an internal bridge action | `kind: system`, `delivery: silent` |
 
-## Common rules (every task)
+Use the CLI for simple reminders, scripts, system actions, and announce-mode agent oneshots. Advanced definitions such as reports, interactive launches, orchestration, follow-ups, or policy limits require a careful read/modify/write of `~/.abtars/tasks/tasks.json`.
 
-### Location
+## Common contract
 
-```
-~/.abtars/tasks/
-├── tasks.json           # Registry: schedule, kind, taskFile (definitions only)
-├── my-task/
-│   ├── TASK.md          # Main prompt (agent kind) — {today} auto-substituted
-│   ├── feeds.json       # Any sibling file auto-injected as context
-│   └── report-template.md
-```
+- Use a lowercase kebab-case `id`. The CLI normalizes input and rejects duplicates.
+- Set exactly one of `schedule` (five-field cron: `minute hour day month weekday`) or `at` (a parseable one-shot date/time). Include an explicit timezone offset in `at` when the intended timezone matters.
+- Set `delivery` explicitly in hand-written JSON.
+- Optional common fields are `enabled`, `priority` (`high`, `medium`, or `low`), `chatId`, `catchUpHours`, and `maxRunsPerDay`.
+- Preserve every unrelated entry when editing `tasks.json`. It must remain a JSON array.
+- Do not edit `task-state.json` or `task-history.jsonl`; the runtime owns them.
+- Unknown top-level fields quarantine the affected definition. Use only these kind-specific fields:
 
-All sibling files next to TASK.md are injected as context when the task runs. Runtime state (`task-state.json`, `task-history.jsonl`) is auto-managed — never edit it.
+| Kind | Kind-specific fields |
+|------|----------------------|
+| `reminder` | `text` |
+| `agent` | `prompt`, `taskFile`, `agent`, `orchestration`, `interaction`, `report`, `maxToolRounds` |
+| `script` | `command`, `followUp` |
+| `system` | `action`, `options` |
 
-### Identifier and schedule
-
-- `id`: lowercase kebab-case, `^[a-z][a-z0-9-]*[a-z0-9]$`. Normalized on add — duplicates rejected.
-- Schedule: exactly one of `schedule` (cron: `minute hour day month weekday`) or `at` (ISO one-shot, e.g. `2026-12-25T08:00`). Both or neither is a definition error.
-- Common fields: `enabled` (default true), `priority` (high|medium|low, default medium), `chatId`, `catchUpHours`, `maxRunsPerDay`.
-- **Field strictness (#1569):** a key a kind does not define is a definition error, never ignored. Per-kind fields:
-
-| Kind | Allowed fields (besides common) |
-|------|---------------------------------|
-| reminder | `text` (required, delivery must be `announce`) |
-| agent | `prompt`, `taskFile`, `agent`, `orchestration`, `interaction`, `report`, `maxToolRounds` |
-| script | `command` (required), `followUp` |
-| system | `action` (sleep-cycle\|hardware-sleep, delivery must be `silent`), `options` |
-
-### Delivery modes
-
-| Mode | Behavior | Use for |
-|------|----------|---------|
-| `report` | Drop the result file to chat (no model call) | Reports, generated documents |
-| `announce` | Send the agent's response text directly | Greetings, conversational tasks |
-| `silent` | No output to user | Internal housekeeping, scripts |
-
-### Creating
-
-Via CLI:
+## Create a simple task with the CLI
 
 ```bash
 abtars-task add \
-  --id my-task \
-  --schedule "0 9 * * *" \
-  --message "Run my-task" \
+  --id daily-brief \
+  --schedule "30 8 * * *" \
+  --message "Give the daily brief for {today}." \
   --kind agent \
   --agent task \
-  --task-file "~/.abtars/tasks/my-task/TASK.md" \
   --chat-id <CHAT_ID>
 ```
 
-Or write the JSON entry into `~/.abtars/tasks/tasks.json` directly (and for agent kind, the TASK.md). The registry is validated at load — a malformed entry quarantines loudly with an error, never degrades silently.
+Use `--at "2026-12-25T08:00:00+01:00"` instead of `--schedule` for a one-shot. For a packaged agent prompt, add `--task-file "~/.abtars/tasks/daily-brief/TASK.md"`.
 
-### Managing and verifying
+The CLI supports `reminder`, `agent`, `script`, and `system`; for a system task, pass `--action sleep-cycle` or `--action hardware-sleep`. The CLI creates announce-mode agent oneshots only. Edit JSON for the advanced shapes below.
 
-```bash
-abtars-task list                # Show all tasks
-abtars-task remove <id>         # Delete a task
-abtars-task pause <id>          # Pause
-abtars-task resume <id>         # Resume
-abtars-task history <id>        # Show run history
+For a reminder, `--message` becomes its required `text`. For a script, `--message` becomes its required `command`; hand-written script definitions may also include `followUp: { "prompt": "...", "agent": "task" }`. Give every agent task a non-empty `prompt`, a valid `taskFile`, or both even though legacy oneshots may normalize without one. Hardware-sleep options are `idleMinutes` (1-240), `retryMinutes` (1-60), `latestLocalTime` (`HH:mm`), and `expectedWakeTime` (`HH:mm`); the latest time must precede the expected wake time.
+
+## Package an agent task
+
+```text
+~/.abtars/tasks/daily-brief/
+├── TASK.md
+├── feeds.json
+└── report-template.md
 ```
 
-Telegram: `/tasks` (list), `/task run <id>` (trigger now), `/task pause <id>`, `/task resume <id>`. After adding, verify the entry appears in `abtars-task list` and, after the first run, in `history` — never claim it fired without checking.
+`TASK.md` is the main prompt and supports `{today}` substitution. Regular, non-hidden sibling files are injected as bounded context; directories, symlinks, backups, and temporary files are excluded. Keep the prompt focused and use absolute paths, one per bullet, in any definition-of-done file list.
 
----
+Persistent notes between runs belong in `~/.abtars/workspace/<task-id>/CONTEXT.md`; up to 30,000 characters are injected on the next run.
 
-## Section 1 — Agent oneshot task (default)
-
-The agent runs the prompt or TASK.md once in a T session and the response is delivered.
+## Agent oneshot
 
 ```json
 {
@@ -99,47 +79,18 @@ The agent runs the prompt or TASK.md once in a T session and the response is del
   "agent": "task",
   "delivery": "announce",
   "schedule": "30 8 * * *",
-  "prompt": "Give the daily brief: weather, calendar, and one interesting fact. Use {today}.",
-  "chatId": "7773842843",
-  "enabled": true
+  "prompt": "Give the daily brief for {today}.",
+  "chatId": "<CHAT_ID>",
+  "interaction": { "mode": "oneshot" },
+  "orchestration": { "maxAgents": 1 },
+  "enabled": true,
+  "priority": "medium"
 }
 ```
 
-Rules:
-- `agent` must be one of: `task`, `professor`, `browsie`, `coding`, `dreamy`. It selects runtime agent/model config only — the session is always a T session.
-- One of `prompt` or `taskFile` is the instruction; `taskFile` points at the TASK.md.
-- `orchestration.maxAgents` (default 1, max 4, includes the Orc) for multi-agent runs; `laneDurationMs` optional per-lane budget. `maxToolRounds` optional.
-- Keep TASK.md focused — one clear instruction per task.
-- Persist notes between runs in `~/.abtars/workspace/<task-id>/CONTEXT.md` — it is injected as `[TASK CONTEXT]` on the next run (bounded at 30 KB).
-- The DoD section in TASK.md must contain absolute paths only, one per bullet.
+`agent` must be `task`, `professor`, `browsie`, `coding`, or `dreamy`. `orchestration.maxAgents` is 1-4 and includes the orchestrator; optional `laneDurationMs` is a positive integer. Use optional `maxToolRounds` only when a bounded tool budget is required.
 
----
-
-## Section 2 — Script task
-
-A shell command runs directly on schedule. No model call.
-
-```json
-{
-  "id": "nightly-backup",
-  "kind": "script",
-  "schedule": "30 0 * * *",
-  "command": "tar -czf ~/backup.tar.gz ~/data",
-  "delivery": "silent",
-  "priority": "low",
-  "enabled": true
-}
-```
-
-Rules:
-- `command` is required; `delivery` is normally `silent`.
-- Optional `followUp: { "prompt": "...", "agent": "task" }` — a model prompt run after the command completes.
-
----
-
-## Section 3 — Reporting task
-
-An agent task whose deliverable is a file dropped to chat. Pair `delivery: report` with a **report contract** — both are validated strictly:
+## Reporting task
 
 ```json
 {
@@ -148,31 +99,26 @@ An agent task whose deliverable is a file dropped to chat. Pair `delivery: repor
   "agent": "task",
   "delivery": "report",
   "schedule": "30 9 * * *",
-  "prompt": "Run the finance report",
-  "chatId": "7773842843",
+  "prompt": "Write today's finance report to the contracted artifact path.",
+  "chatId": "<CHAT_ID>",
+  "interaction": { "mode": "oneshot" },
+  "orchestration": { "maxAgents": 1 },
   "report": {
     "artifact": "~/.abtars/workspace/finance-report/output.md",
     "requiredSections": ["# Summary", "# Numbers"],
     "minBytes": 500,
     "requires": { "files": [], "executables": ["sqlite3"], "tools": [] }
   },
-  "enabled": true
+  "enabled": true,
+  "priority": "medium"
 }
 ```
 
-Contract rules (violations fail preflight with a permanent definition error):
-- `artifact` must be an **absolute or `~/` path** — never relative.
-- `requiredSections` must be non-empty Markdown headings that must exist in the artifact.
-- `minBytes` must be an integer ≥ 100.
-- `requires.files` must exist; `requires.executables` must be on PATH; `requires.tools` lists agent tools.
-- Write the artifact into `~/.abtars/workspace/<task-id>/` (or `reports/`) — the writable areas.
-- TASK.md should structure the output with exactly the `requiredSections` headings; delivery is automatic — the task ends after the artifact is written.
+The report artifact must use an absolute or `~/` path. `requiredSections` must contain at least one Markdown heading and `minBytes` must be an integer of at least 100. Preflight checks every required file, executable, and agent tool. Make TASK.md produce the exact headings and write into `~/.abtars/workspace/<task-id>/`; successful delivery is automatic.
 
----
+## Interactive skill launch
 
-## Section 4 — Interactive task (K skill session)
-
-The task launches a **persistent conversational skill session** bound to one conversation target (userId + platform + chatId + threadId). The skill must exist and be interactive (has a valid `skill.json` — see the create-skill skill). Later user turns belong to the K session, not to this task's run lifecycle.
+First create and validate the persistent skill using `skill-authoring`. Then register its scheduled launch:
 
 ```json
 {
@@ -182,27 +128,32 @@ The task launches a **persistent conversational skill session** bound to one con
   "delivery": "announce",
   "schedule": "0 18 * * *",
   "prompt": "Start today's short Spanish tutoring session.",
-  "chatId": "7773842843",
+  "chatId": "<CHAT_ID>",
   "interaction": {
     "mode": "skill",
     "skill": "tutor",
     "target": {
-      "userId": "ada",
+      "userId": "<USER_ID>",
       "platform": "telegram",
-      "chatId": "42"
+      "chatId": "<CHAT_ID>"
     }
   },
   "orchestration": { "maxAgents": 1 },
-  "enabled": true
+  "enabled": true,
+  "priority": "medium"
 }
 ```
 
-The target skill is a K-session skill (see the create-skill skill) — for the `tutor` skill used here: `skill.json` with `interactive: true`, `contextPath: "workspace/tutor/${userId}/CONTEXT.md"`, and a SKILL.md like `# Tutor — Teach Spanish using the Feynman method.` Its per-user memory lives in `~/.abtars/workspace/tutor/<userId>/CONTEXT.md`.
+Interactive launches require a valid skill identifier, an exact target with `userId`, `platform`, and `chatId` (plus optional `threadId`), at least one of `prompt` or `taskFile`, `delivery: announce`, and `orchestration.maxAgents: 1`. They forbid report contracts. A scheduled launch resumes the active session for the same target when one exists.
 
-Constraints (all validated at normalize — any violation quarantines the entry):
-- `delivery` must be `announce`.
-- `orchestration.maxAgents` must be 1.
-- No `report` contract allowed.
-- `interaction.skill` must be a valid identifier (`^[a-z][a-z0-9-]*[a-z0-9]$`); `target` requires `userId`, `platform`, `chatId` (optional `threadId`).
-- At least one of `prompt` or `taskFile` is required.
-- A scheduled launch resumes an existing session for the same target if one is active; `maxToolRounds` and the 30-minute inactivity fallback do not apply to K-session turns.
+## Verify and manage
+
+```bash
+abtars-task list
+abtars-task history <id>
+abtars-task pause <id>
+abtars-task resume <id>
+abtars-task remove <id>
+```
+
+After creation, confirm the normalized entry appears in `abtars-task list`. Trigger it with `/task run <id>` when an immediate run is appropriate, then inspect `abtars-task history <id>`. Never claim a task fired or delivered successfully without history or artifact evidence. Use `/tasks`, `/task pause <id>`, and `/task resume <id>` from chat for the corresponding operations.
