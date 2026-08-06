@@ -8,6 +8,7 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
 import { localISO } from "../utils/local-time.js";
 import { loadFixes, shouldAttempt, recordResult } from "./sha-tracker.js";
+import { isWithinBootQuietWindow } from "./self-healer-utils.js";
 import type { FixRule } from "./sha-tracker.js";
 import type { HeartbeatTask, HeartbeatTaskOutcome } from "../types/index.js";
 import type { TelegramAdapter } from "../platforms/telegram/telegram-adapter.js";
@@ -199,8 +200,11 @@ function handleUnknownFault(errorLine: string, errorKey: string, adapter: Telegr
   if (hour < 7) { logDebug(TAG, `Skipping SHA dispatch — night hours (${hour}:xx)`); return; }
   try {
     const lock = JSON.parse(readFileSync(join(abtarsHome(), "bridge.lock"), "utf-8"));
-    if (lock.bootType === "darkwake") { logDebug(TAG, "Skipping SHA dispatch — darkwake boot"); return; }
-  } catch {}
+    if (isWithinBootQuietWindow(lock.startedAt, Date.now())) {
+      logDebug(TAG, "Skipping SHA dispatch — inside post-boot quiet window");
+      return;
+    }
+  } catch { /* unreadable lock: fall through and allow dispatch (fail open, as before) */ }
 
   logInfo(TAG, `Unknown fault — dispatching agent: ${errorKey.slice(0, 60)}`);
   logAutoFix(`AGENT START: ${errorKey}`);

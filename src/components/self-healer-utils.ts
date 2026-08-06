@@ -7,6 +7,20 @@ import { logAndSwallow } from "./log-and-swallow.js";
 
 const TAG = "self-healer";
 
+/**
+ * #1589: bounded quiet window after boot for unknown-fault SHA dispatch.
+ * Replaces the former `bridge.lock.bootType === "darkwake"` gate, which was
+ * written once per process and therefore never expired.
+ */
+export const BOOT_QUIET_MS = 5 * 60 * 1000;
+
+/** True while `now` is inside the post-boot quiet window. Fails open on bad input. */
+export function isWithinBootQuietWindow(startedAt: unknown, now: number): boolean {
+  if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return false;
+  if (startedAt > now) return false;   // clock skew: never suppress on a future boot
+  return now - startedAt < BOOT_QUIET_MS;
+}
+
 /** Kill the process holding a port. Returns true if killed, false if nothing found. */
 export function healPort(port: number): boolean {
   try {

@@ -95,11 +95,12 @@ export function initBridgeLock(opts: { pid: number; startedAt: number; version: 
     try { existing = JSON.parse(readFileSync(p, "utf-8")); } catch { /* missing or corrupt — cold boot */ }
     const prevPid = typeof existing.pid === "number" ? existing.pid : null;
     prev = { pid: prevPid, lastHeartbeat: typeof existing.lastHeartbeat === "number" ? existing.lastHeartbeat : null };
-    // Classify boot type from previous heartbeat gap
+    // Classify boot type from previous heartbeat gap. The value reflects the
+    // gap since the previous process's last heartbeat, not any wake classification.
     let bootType = "cold";
     if (prev.lastHeartbeat) {
       const gapS = (Date.now() - prev.lastHeartbeat) / 1000;
-      if (gapS < 300) bootType = "darkwake";
+      if (gapS < 300) bootType = "quick-restart";
       else if (gapS <= 7200) bootType = "short-outage";
       else bootType = "long-outage";
     }
