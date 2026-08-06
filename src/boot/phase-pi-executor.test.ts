@@ -46,6 +46,8 @@ vi.mock("../components/logger.js", () => ({
 
 vi.mock("../components/tasks/kanban-board.js", () => ({
   requireTaskDatabase: mockRequireTaskDatabase,
+  kanbanTransition: vi.fn(() => ({ kind: "applied", from: "queued" as const })),
+  sqliteNow: () => "2026-08-06 12:00:00",
 }));
 
 vi.mock("../components/pi-executor/pi-run-store.js", () => ({

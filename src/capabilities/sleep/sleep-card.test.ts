@@ -1,15 +1,17 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const { mockEnqueue, mockUpdate, mockComplete } = vi.hoisted(() => ({
+const { mockEnqueue, mockUpdate, mockComplete, mockTransition } = vi.hoisted(() => ({
   mockEnqueue: vi.fn((_title: string, _source: string, _sid: unknown, _opts: unknown) => 42),
   mockUpdate: vi.fn(),
   mockComplete: vi.fn(),
+  mockTransition: vi.fn(),
 }));
 
 vi.mock("../../components/tasks/kanban-board.js", () => ({
   kanbanEnqueue: mockEnqueue,
   kanbanUpdate: mockUpdate,
   kanbanComplete: mockComplete,
+  kanbanTransition: mockTransition,
 }));
 
 import { startSleepCard } from "./sleep-card.js";
@@ -35,7 +37,9 @@ describe("startSleepCard (event-driven, #1381)", () => {
     expect(source).toBe("scheduled");
     expect((opts as { type: string }).type).toBe("D");
     expect((opts as { deliveryMode: string }).deliveryMode).toBe("silent");
-    expect(mockUpdate).toHaveBeenCalledWith(42, { status: "running" });
+    // #1590: status goes through the transition choke point, event-suppressed
+    // (the old kanbanUpdate({status}) fired no nerve event).
+    expect(mockTransition).toHaveBeenCalledWith({ cardId: 42, from: ["queued"], to: "running", actor: "dispatch", reason: "sleep card start", emit: false });
   });
 
   it("ticks the matching item: step_started -> [~], step_completed -> [x]", () => {

@@ -85,6 +85,8 @@ describe("buildOrcActivitySnapshot", () => {
     const rootId = Kanban.kanbanEnqueue("project", "test");
     Kanban.kanbanRunning(rootId);
     const childId = Kanban.kanbanEnqueue("done-child", "test", undefined, { parent_id: rootId });
+    // #1590: settlement is only legal from `running` — dispatch first.
+    Kanban.kanbanRunning(childId);
     Kanban.kanbanComplete(childId, null, "all done");
 
     const s = orcSession({ busy: false, activeRootCardId: rootId });

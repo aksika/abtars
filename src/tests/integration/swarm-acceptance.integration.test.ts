@@ -18,28 +18,36 @@ let nextCardId = 100;
 
 let _overrideDb: TaskDatabase | null = null;
 let _rawDb: any = null;
-vi.mock("../../components/tasks/kanban-board.js", () => ({
-  kanbanEnqueue: (title: string, source: string, opts?: any) => {
-    const id = nextCardId++;
-    const card: any = { id, title, source, status: "queued", type: "W", parent_id: null, goal: null, notes: null, created_at: new Date().toISOString().replace(/Z$/, ""), result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null, priority: "MEDIUM" };
-    if (opts) { if (opts.type) card.type = opts.type; if (opts.parent_id) card.parent_id = opts.parent_id; if (opts.notes) card.notes = opts.notes; if (opts.priority) card.priority = opts.priority; }
-    cards.set(id, card);
-    return id;
-  },
-  kanbanGetCard: (id: number) => { const c = cards.get(id); return c ?? null; },
-  kanbanGetChildren: (parentId: number) => Array.from(cards.values()).filter((c: any) => c.parent_id === parentId),
-  kanbanQueuedDispatchOrder: (now?: number) => Array.from(cards.values()).filter((c: any) => c.status === "queued"),
-  kanbanRunning: (id: number) => { const c = cards.get(id); if (c) c.status = "running"; },
-  kanbanComplete: (id: number) => { const c = cards.get(id); if (c) c.status = "done"; },
-  kanbanFail: (id: number, reason?: string) => { const c = cards.get(id); if (c) { c.status = "failed"; c.error = reason ?? "failed"; } },
-  kanbanUpdate: vi.fn(),
-  cascadeFail: vi.fn(),
-  isUnblocked: () => true,
-  resolveRootId: (id: number) => id,
-  KANBAN_TERMINAL_STATUSES: ["done", "delivered", "failed"],
-  kanbanPromoteDueRetry: () => false,
-  requireTaskDatabase: () => { if (!_overrideDb) throw new Error("_overrideDb not set — call initDb() in beforeEach"); return _overrideDb; },
-}));
+vi.mock("../../components/tasks/kanban-board.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../components/tasks/kanban-board.js")>();
+  return {
+    ...actual,
+    kanbanEnqueue: (title: string, source: string, opts?: any) => {
+      const id = nextCardId++;
+      const card: any = { id, title, source, status: "queued", type: "W", parent_id: null, goal: null, notes: null, created_at: new Date().toISOString().replace(/Z$/, ""), result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null, priority: "MEDIUM" };
+      if (opts) { if (opts.type) card.type = opts.type; if (opts.parent_id) card.parent_id = opts.parent_id; if (opts.notes) card.notes = opts.notes; if (opts.priority) card.priority = opts.priority; }
+      cards.set(id, card);
+      return id;
+    },
+    kanbanGetCard: (id: number) => { const c = cards.get(id); return c ?? null; },
+    kanbanGetChildren: (parentId: number) => Array.from(cards.values()).filter((c: any) => c.parent_id === parentId),
+    kanbanQueuedDispatchOrder: (now?: number) => Array.from(cards.values()).filter((c: any) => c.status === "queued"),
+    kanbanRunning: (id: number) => { const c = cards.get(id); if (c) c.status = "running"; },
+    kanbanComplete: (id: number) => { const c = cards.get(id); if (c) c.status = "done"; },
+    kanbanFail: (id: number, reason?: string) => { const c = cards.get(id); if (c) { c.status = "failed"; c.error = reason ?? "failed"; } },
+    kanbanUpdate: vi.fn(),
+    // #1590: keep the REAL transition so ProjectReviewStore's in-transaction
+    // calls land on the real test database (the cards map is only a dispatch
+    // mirror; the acceptance assertions read the real kanban_board rows).
+    kanbanTransition: actual.kanbanTransition,
+    cascadeFail: vi.fn(),
+    isUnblocked: () => true,
+    resolveRootId: (id: number) => id,
+    KANBAN_TERMINAL_STATUSES: ["done", "delivered", "failed"],
+    kanbanPromoteDueRetry: () => false,
+    requireTaskDatabase: () => { if (!_overrideDb) throw new Error("_overrideDb not set — call initDb() in beforeEach"); return _overrideDb; },
+  };
+});
 
 vi.mock("../../components/spin-worker-adapter.js", () => ({
   SpinWorkerAdapter: vi.fn().mockImplementation(function () {

@@ -340,6 +340,8 @@ describe("scheduled-project-runner #1516", () => {
     await seedReservation();
     const store = new reviewStoreMod.ProjectReviewStore();
     const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
+    // #1590: settleAcceptance is a running→done transition — dispatch first.
+    kanban.kanbanRunning(root);
     store.ensureAwaitingContract(root);
     store.settleAcceptance(root, "case-reattach", { synthesis: "already accepted" }, "already accepted", undefined, "rd_test_reattach");
     stateStore.updateActiveRun("daily-ai", "daily-ai_1", { cardId: root });
@@ -426,6 +428,8 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
     await seedReservation();
     const claims = fakeCoordinator();
     const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
+    // #1590: kanbanComplete is running→done — dispatch first.
+    kanban.kanbanRunning(root);
     kanban.kanbanComplete(root, null, "already completed");
     stateStore.updateActiveRun("daily-ai", "daily-ai_1", { cardId: root });
 

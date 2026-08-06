@@ -456,6 +456,9 @@ describe("kanban-board #1516 bounded agent orchestration", () => {
     const w2 = mod.kanbanEnqueue("w-2", "agent", undefined, { type: "W", parent_id: root });
     const w3 = mod.kanbanEnqueue("w-3", "agent", undefined, { type: "W", parent_id: root });
     expect(mod.checkWorkerSlotForProject(root).ok).toBe(false);
+    // #1590: settlement is only legal from `running` — dispatch first, as the
+    // scheduler does before any kanbanComplete in production.
+    mod.kanbanRunning(w1);
     mod.kanbanComplete(w1, null, "done");
     expect(mod.checkWorkerSlotForProject(root)).toEqual({ ok: true });
     const w4 = mod.kanbanEnqueue("w-4", "agent", undefined, { type: "W", parent_id: root });
@@ -498,5 +501,245 @@ describe("kanban-board #1516 bounded agent orchestration", () => {
     mod.kanbanSetDeliveryReady(root);
     mod.kanbanSetDeliveryReady(root);
     expect(mod.kanbanGetCard(root)!.delivery_ready).toBe(1);
+  });
+});
+
+// ── #1590: transition choke point + append-only journal ──────────────────────
+
+function journalFor(cardId: number): Array<Record<string, unknown>> {
+  const db = mod.requireTaskDatabase();
+  return db.prepare(
+    `SELECT id, from_status, to_status, actor, reason, attempt_id, claim_generation FROM kanban_card_transitions WHERE card_id = ? ORDER BY id`
+  ).all(cardId) as Array<Record<string, unknown>>;
+}
+
+function setStatusRaw(cardId: number, status: string): void {
+  // Test-only seeding — the boundary test proves production code never does
+  // this outside kanbanTransition.
+  mod._kanbanExecForTest(`UPDATE kanban_board SET status = ? WHERE id = ?`, [status, cardId]);
+}
+
+describe("#1590 transition matrix", () => {
+  const LEGAL_PAIRS: Array<[string, string]> = [
+    ["queued", "running"],
+    ["queued", "failed"],
+    ["queued", "done"], // task-run-settler completes one-shot K/T cards never dispatched
+    ["running", "done"],
+    ["running", "failed"],
+    ["running", "queued"],
+    ["done", "delivering"],
+    ["done", "queued"],
+    ["done", "failed"], // task-run-settler fails an accepted-but-stale project
+    ["delivering", "delivered"],
+    ["delivering", "done"],
+    ["failed", "queued"],
+  ];
+  const ILLEGAL_PAIRS: Array<[string, string]> = [
+    ["delivered", "queued"],
+    ["delivered", "done"],
+    ["delivered", "failed"],
+    ["done", "running"],
+    ["failed", "done"],
+    ["failed", "running"],
+    ["queued", "delivering"],
+    ["running", "delivering"],
+  ];
+
+  for (const [from, to] of LEGAL_PAIRS) {
+    it(`accepts ${from} -> ${to}`, () => {
+      const id = mod.kanbanEnqueue("matrix", "test");
+      setStatusRaw(id, from);
+      const outcome = mod.kanbanTransition({
+        cardId: id, from: [from as never], to: to as never, actor: "dispatch", reason: "matrix test",
+      });
+      expect(outcome.kind).toBe("applied");
+      expect(mod.kanbanGetCard(id)!.status).toBe(to);
+    });
+  }
+
+  for (const [from, to] of ILLEGAL_PAIRS) {
+    it(`throws on declared illegal pair ${from} -> ${to}`, () => {
+      const id = mod.kanbanEnqueue("matrix", "test");
+      setStatusRaw(id, from);
+      expect(() => mod.kanbanTransition({
+        cardId: id, from: [from as never], to: to as never, actor: "dispatch", reason: "matrix test",
+      })).toThrow(/illegal kanban transition/);
+    });
+  }
+
+  it("throws on an empty from-set", () => {
+    const id = mod.kanbanEnqueue("empty", "test");
+    expect(() => mod.kanbanTransition({
+      cardId: id, from: [], to: "running", actor: "dispatch", reason: "empty",
+    })).toThrow(/illegal kanban transition/);
+  });
+
+  it("throws on a non-co-writable field", () => {
+    const id = mod.kanbanEnqueue("field", "test");
+    expect(() => mod.kanbanTransition({
+      cardId: id, from: ["queued"], to: "running", actor: "dispatch", reason: "field",
+      fields: { status: "running" } as never,
+    })).toThrow(/not co-writable/);
+  });
+
+  it("applied writes exactly one journal row with actor/attempt/generation", () => {
+    const id = mod.kanbanEnqueue("journal", "test");
+    const outcome = mod.kanbanTransition({
+      cardId: id, from: ["queued"], to: "running", actor: "dispatch", reason: "journal row test",
+      attemptId: "attempt-7", claimGeneration: 3,
+    });
+    expect(outcome.kind).toBe("applied");
+    const rows = journalFor(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      from_status: "queued", to_status: "running", actor: "dispatch",
+      reason: "journal row test", attempt_id: "attempt-7", claim_generation: 3,
+    });
+  });
+
+  it("CAS loss against a wrong current status is a no_op with zero journal rows", () => {
+    const id = mod.kanbanEnqueue("cas", "test");
+    setStatusRaw(id, "failed");
+    const outcome = mod.kanbanTransition({
+      cardId: id, from: ["running"], to: "done", actor: "settle_done", reason: "lost race",
+    });
+    expect(outcome).toEqual({ kind: "no_op", observed: "failed" });
+    expect(journalFor(id)).toHaveLength(0);
+    expect(mod.kanbanGetCard(id)!.status).toBe("failed");
+  });
+
+  it("reasserted (observed === to, to in from) applies fields without a journal row", () => {
+    const id = mod.kanbanEnqueue("reassert", "test");
+    setStatusRaw(id, "running");
+    const outcome = mod.kanbanTransition({
+      cardId: id, from: ["queued", "running"], to: "running", actor: "pi_origin_projection",
+      reason: "same-status", fields: { result_summary: "re-asserted" },
+      emit: false,
+    });
+    expect(outcome).toEqual({ kind: "reasserted", observed: "running" });
+    expect(journalFor(id)).toHaveLength(0);
+    expect(mod.kanbanGetCard(id)!.result_summary).toBe("re-asserted");
+  });
+
+  it("terminal protection: a late write against a delivered card is a no_op", () => {
+    const id = mod.kanbanEnqueue("late", "test");
+    mod.kanbanRunning(id);
+    mod.kanbanComplete(id, null, "ok");
+    mod.kanbanSetDelivering(id);
+    mod.kanbanMarkDelivered(id);
+    const before = journalFor(id);
+    const outcome = mod.kanbanTransition({
+      cardId: id, from: ["running"], to: "done", actor: "pi_run_settle", reason: "superseded attempt",
+      emit: false,
+    });
+    expect(outcome).toEqual({ kind: "no_op", observed: "delivered" });
+    expect(mod.kanbanGetCard(id)!.status).toBe("delivered");
+    expect(journalFor(id)).toHaveLength(before.length);
+  });
+
+  it("reason longer than 300 chars is truncated", () => {
+    const id = mod.kanbanEnqueue("truncate", "test");
+    mod.kanbanTransition({
+      cardId: id, from: ["queued"], to: "running", actor: "dispatch", reason: "x".repeat(500),
+    });
+    const rows = journalFor(id);
+    expect(rows[0]!.reason).toHaveLength(300);
+  });
+
+  it("a 201st transition prunes the oldest and keeps the newest 200", () => {
+    const id = mod.kanbanEnqueue("prune", "test");
+    for (let i = 0; i < 205; i++) {
+      const from = i % 2 === 0 ? "queued" : "running";
+      const to = i % 2 === 0 ? "running" : "queued";
+      setStatusRaw(id, from);
+      mod.kanbanTransition({
+        cardId: id, from: [from as never], to: to as never, actor: "retry_backoff", reason: `loop-${i}`,
+        emit: false,
+      });
+    }
+    const rows = journalFor(id);
+    expect(rows).toHaveLength(200);
+    expect(rows[0]!.reason).toBe("loop-5");
+    expect(rows[199]!.reason).toBe("loop-204");
+  });
+
+  it("two concurrent settlements produce one applied, one journal row, one card:done", async () => {
+    const { nerve } = await import("../nerve.js");
+    const doneEvents: number[] = [];
+    const listener = (cardId: number) => { doneEvents.push(cardId); };
+    nerve.on("card:done", listener);
+    try {
+      const id = mod.kanbanEnqueue("race", "test");
+      mod.kanbanRunning(id);
+      mod.kanbanComplete(id, null, "first");
+      mod.kanbanComplete(id, null, "second");
+      const rows = journalFor(id);
+      expect(rows.filter(r => r.to_status === "done")).toHaveLength(1);
+      expect(doneEvents).toEqual([id]);
+      expect(mod.kanbanGetCard(id)!.result_summary).toBe("first");
+    } finally {
+      nerve.off("card:done", listener);
+    }
+  });
+
+  it("kanbanCleanup leaves zero journal rows for deleted cards", () => {
+    const id = mod.kanbanEnqueue("cleanup", "test");
+    mod.kanbanRunning(id);
+    mod.kanbanComplete(id, null, "ok");
+    mod.kanbanSetDelivering(id);
+    mod.kanbanMarkDelivered(id);
+    const db = mod.requireTaskDatabase();
+    db.prepare(`UPDATE kanban_board SET delivered_at = datetime('now', '-30 days') WHERE id = ?`).run(id);
+    expect(mod.kanbanCleanup(7)).toBeGreaterThan(0);
+    expect(journalFor(id)).toHaveLength(0);
+    expect(mod.kanbanGetCard(id)).toBeUndefined();
+  });
+
+  it("lifecycle queued → running → done → delivering → delivered writes five ordered journal rows", () => {
+    const id = mod.kanbanEnqueue("lifecycle", "test");
+    mod.kanbanRunning(id);
+    mod.kanbanComplete(id, null, "lifecycle done");
+    mod.kanbanSetDelivering(id);
+    mod.kanbanMarkDelivered(id);
+    const rows = journalFor(id);
+    expect(rows.map(r => `${r.from_status}->${r.to_status}`)).toEqual([
+      "queued->running", "running->done", "done->delivering", "delivering->delivered",
+    ]);
+    expect(mod.kanbanGetCard(id)!.status).toBe("delivered");
+  });
+
+  it("out-of-process second connection: CAS wins once, the other transition no-ops", async () => {
+    // #1590: doctor-fixes opens its own connection. Two connections against
+    // one database file must serialize on the CAS predicate.
+    const { resolveNativeDep } = await import("../../utils/lazy-require.js");
+    const Database = resolveNativeDep("better-sqlite3") as new (p: string) => {
+      prepare(sql: string): { run(...p: unknown[]): { changes: number }; get(...p: unknown[]): Record<string, unknown> | undefined; all(...p: unknown[]): unknown[] };
+      exec(sql: string): void;
+      transaction<T>(fn: () => T): () => T;
+      close(): void;
+    };
+    const dbPath = join(TEST_HOME, "kanban", "kanban.db");
+    mkdirSync(join(TEST_HOME, "kanban"), { recursive: true });
+    const conn = new Database(dbPath);
+    try {
+      // Seed a queued card through the module singleton, then race two
+      // transitions from separate connections.
+      const id = mod.kanbanEnqueue("two-conn", "test");
+      const wrap = (d: { prepare(sql: string): { run(...p: unknown[]): { changes: number }; get(...p: unknown[]): unknown; all(...p: unknown[]): unknown[] }; exec(sql: string): void; transaction<T>(fn: () => T): unknown }) =>
+        mod.wrapTaskDatabase(d);
+      const tx1 = wrap(conn);
+      const outcome1 = mod.kanbanTransition({
+        cardId: id, from: ["queued"], to: "running", actor: "dispatch", reason: "conn1",
+      }, tx1);
+      expect(outcome1.kind).toBe("applied");
+      const outcome2 = mod.kanbanTransition({
+        cardId: id, from: ["queued"], to: "running", actor: "dispatch", reason: "conn2",
+      }, tx1);
+      expect(outcome2.kind).toBe("no_op");
+      const rows = journalFor(id);
+      expect(rows).toHaveLength(1);
+    } finally {
+      conn.close();
+    }
   });
 });
