@@ -1,11 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { HeartbeatSystem } from "./heartbeat-system.js";
 import { updateLastHeartbeat as updateLastHeartbeatMock } from "./transport/bridge-lock-transport.js";
-import type { HeartbeatTask } from "../types/index.js";
+import type { HeartbeatTask, HeartbeatTaskOutcome } from "../types/index.js";
 
 vi.mock("./transport/bridge-lock-transport.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./transport/bridge-lock-transport.js")>();
   return { ...actual, updateLastHeartbeat: vi.fn(actual.updateLastHeartbeat) };
+});
+
+// The standby threshold is 180min on WSL but 3x the tick interval elsewhere. Pin
+// isWsl() to false so the standby-detection tests exercise the same path Molty
+// runs on, independently of the host the suite happens to execute on.
+vi.mock("./platform-detect.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./platform-detect.js")>();
+  return { ...actual, isWsl: () => false };
 });
 
 function makeHb() {
@@ -46,6 +54,29 @@ describe("HeartbeatSystem", { timeout: 30000 }, () => {
     hb.start();
     await vi.advanceTimersByTimeAsync(5000 + 10);
     expect(updateLastHeartbeatMock).toHaveBeenCalled();
+    hb.stop();
+  });
+
+  it("#1584: a task hanging past the standby threshold must not trigger a standby restart", async () => {
+    const onStandbyResume = vi.fn();
+    let release: (() => void) | null = null;
+    const hung = vi.fn().mockImplementation(
+      () => new Promise<HeartbeatTaskOutcome>((resolve) => { release = () => resolve({ state: "idle" }); }),
+    );
+    const hb = new HeartbeatSystem({
+      enabled: true, intervalMs: 5000, bridgeLockPath: "/tmp/test.lock", onStandbyResume,
+    });
+    hb.registerTask({ name: "hung", execute: hung });
+    hb.start();
+
+    // First tick runs and hangs; the next four fire and are skipped. The skipped
+    // span (20s) exceeds the 15s standby threshold (3 x interval).
+    await vi.advanceTimersByTimeAsync(5000 + 10);
+    await vi.advanceTimersByTimeAsync(4 * 5000);
+    release?.();
+    await vi.advanceTimersByTimeAsync(5000 + 10);
+
+    expect(onStandbyResume).not.toHaveBeenCalled();
     hb.stop();
   });
 

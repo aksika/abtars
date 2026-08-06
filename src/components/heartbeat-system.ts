@@ -98,16 +98,23 @@ export class HeartbeatSystem implements ITaskSlot {
     // this field; it must never depend on task completion (#1584).
     updateLastHeartbeat();
 
+    // Wall-clock tracking belongs to the timer, not to the task pass. A skipped
+    // tick must still advance lastTickAt: otherwise a task that hangs for longer
+    // than the standby threshold makes the next executed tick read the backlog of
+    // skipped ticks as a machine suspend and restart the bridge via
+    // onStandbyResume — the exact failure #1584 removes from the watchdog path.
+    // Cost of this ordering: a real suspend that lands while a task is hung is
+    // not classified, because that gap is consumed by a skipped tick.
+    const now = Date.now();
+    const gap = now - this.lastTickAt;
+    this.lastTickAt = now;
+
     if (this.tickInFlight) {
       logWarn(TAG, "Previous tick still running — skipping this tick");
       return;
     }
     this.tickInFlight = true;
     try {
-      const now = Date.now();
-      const gap = now - this.lastTickAt;
-      this.lastTickAt = now;
-
       const standbyThresholdMs = isWsl() ? WSL_STANDBY_THRESHOLD_MS : this.config.intervalMs * 3;
       if (gap > standbyThresholdMs) {
         const gapMin = Math.round(gap / 60000);
