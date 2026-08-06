@@ -37,10 +37,28 @@ export async function isActiveCardPeerSourced(context?: ToolExecutionContext): P
 
 // ── spawn_worker ─────────────────────────────────────────────────────────────
 
-function parseJsonArray(raw: string | undefined): unknown[] {
-  if (!raw) return [];
-  try { return JSON.parse(raw) as unknown[]; } catch { return []; }
+type ParsedJsonArray = {
+  provided: boolean;
+  value: unknown[];
+  error?: string;
+};
+
+function parseJsonArray(raw: unknown, field: string): ParsedJsonArray {
+  if (raw === undefined) return { provided: false, value: [] };
+  if (typeof raw !== "string") {
+    return { provided: true, value: [], error: `${field} must be a JSON array` };
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return { provided: true, value: [], error: `${field} must be a JSON array` };
+    return { provided: true, value: parsed };
+  } catch {
+    return { provided: true, value: [], error: `${field} must be a valid JSON array` };
+  }
 }
+
+const SUPERVISED_SPAWN_GUIDANCE =
+  "[err] supervised spawn requires ≥1 criterion in criteria (JSON array of {id, description}); omit supervised fields for an unsupervised spawn";
 
 /** #1588: a lane that fetches live web pages carries a 300s minimum budget. */
 export const MIN_BROWSING_LANE_MS = 300_000;
@@ -85,7 +103,7 @@ const spawnWorkerTool: ToolDefinition = {
       required_capabilities: { type: "string", description: "JSON array of required capability strings (supervised)" },
       supports_root_criteria: { type: "string", description: "JSON array of root project criterion IDs this worker supports (#1363)" },
       max_duration_ms: { type: "number", description: "Maximum execution duration in milliseconds (positive integer)" },
-      max_tokens: { type: "number", description: "Maximum token budget for this worker (positive integer, required when project is capped)" },
+      max_tokens: { type: "number", description: "Maximum token budget for this worker (positive integer; requires supervised criteria and is required when project is capped)" },
     },
     required: ["goal"],
   },
@@ -106,13 +124,25 @@ const spawnWorkerTool: ToolDefinition = {
     const { spin } = await import("../spin.js");
     const { kanbanGetCard } = await import("../tasks/kanban-board.js");
     const projectCard = kanbanGetCard(projectCardId);
-    const criteriaRaw = parseJsonArray(args.criteria);
-    const artifactsRaw = parseJsonArray(args.expected_artifacts);
-    const commandsRaw = parseJsonArray(args.verification_commands);
-    const capsRaw = parseJsonArray(args.required_capabilities) as string[];
-    const supportsRootCriteriaRaw = parseJsonArray(args.supports_root_criteria) as string[];
-    const hasStructuredData = criteriaRaw.length > 0 || artifactsRaw.length > 0 || commandsRaw.length > 0 || supportsRootCriteriaRaw.length > 0
-      || args.max_duration_ms !== undefined || args.max_tokens !== undefined;
+    const criteria = parseJsonArray(args.criteria, "criteria");
+    const artifacts = parseJsonArray(args.expected_artifacts, "expected_artifacts");
+    const commands = parseJsonArray(args.verification_commands, "verification_commands");
+    const caps = parseJsonArray(args.required_capabilities, "required_capabilities");
+    const supportsRootCriteria = parseJsonArray(args.supports_root_criteria, "supports_root_criteria");
+    const criteriaRaw = criteria.value;
+    const artifactsRaw = artifacts.value;
+    const commandsRaw = commands.value;
+    const capsRaw = caps.value as string[];
+    const supportsRootCriteriaRaw = supportsRootCriteria.value as string[];
+    // A duration is an execution limit, not supervision structure. Token
+    // limits remain contract-bound because capped projects reserve them from
+    // the durable supervised attempt.
+    const hasStructuredData = criteria.provided || artifacts.provided || commands.provided || caps.provided || supportsRootCriteria.provided
+      || args.max_tokens !== undefined;
+    if (hasStructuredData && (criteria.error || criteriaRaw.length === 0)) return SUPERVISED_SPAWN_GUIDANCE;
+    const parseError = [criteria, artifacts, commands, caps, supportsRootCriteria].find(parsed => parsed.error)?.error;
+    if (parseError) return `[err] ${parseError}`;
+
     if (projectCard?.max_tokens != null && args.max_tokens === undefined) {
       return "[err] max_tokens is required when spawning a worker under a capped project";
     }
@@ -120,6 +150,9 @@ const spawnWorkerTool: ToolDefinition = {
     // dispatched with a 2-minute budget — clamp max_duration_ms up to the
     // 300s floor so the contract is realistic before authoring.
     const requestedMs = args.max_duration_ms !== undefined ? Number(args.max_duration_ms) : undefined;
+    if (requestedMs !== undefined && (!Number.isInteger(requestedMs) || requestedMs <= 0)) {
+      return "[err] max_duration_ms must be a positive integer";
+    }
     const maxDurationMs = clampBrowsingLaneDuration(goal, args.title, artifactsRaw.length > 0, requestedMs);
     if (maxDurationMs !== undefined && requestedMs !== maxDurationMs) {
       logInfo(TAG, `spawn_worker browsing lane: clamped max_duration_ms ${requestedMs ?? "unset"} -> ${maxDurationMs} (${goal.slice(0, 60)})`);
@@ -147,6 +180,7 @@ const spawnWorkerTool: ToolDefinition = {
         title: args.title || goal.slice(0, 40),
         source: "agent",
         priority: args.priority as any,
+        ...(hasStructuredData ? {} : { timeoutMs: maxDurationMs }),
         contract,
         settlementOwner: "spin",
       });
