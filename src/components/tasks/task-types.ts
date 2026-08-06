@@ -102,10 +102,42 @@ export type ScheduledTask =
 
 export type TaskKind = ScheduledTask["kind"];
 
-const SYSTEM_FORBIDDEN_FIELDS = [
-  "command", "args", "taskFile", "agent", "agentMessage",
-  "agentFollowUp", "skill", "env", "environment",
+/**
+ * #1569: the complete set of top-level fields a task entry may carry, per kind.
+ *
+ * A key outside this set is a definition error, never something to ignore.
+ * #1432 removed `targetUserId` from the contract but left the leftover key
+ * silently dropped, so a task whose only expression of "interactive lesson for
+ * this user" was `targetUserId` normalized to a plain oneshot announce and ran
+ * with different semantics than its author wrote — with no error, warning, or
+ * log line. Rejecting unrecognized keys makes a stale definition quarantine
+ * loudly on first load instead of degrading in silence.
+ *
+ * This also covers what a per-kind denylist would: a field belonging to another
+ * kind (`agent` on a script, `command` on a system entry) is unrecognized here,
+ * as is a typo. Adding a field to the contract means adding it here.
+ */
+const COMMON_FIELDS = [
+  "id", "kind", "schedule", "at", "enabled", "priority",
+  "chatId", "delivery", "catchUpHours", "maxRunsPerDay",
 ] as const;
+
+const KIND_FIELDS: Readonly<Record<TaskKind, readonly string[]>> = {
+  reminder: ["text"],
+  agent: ["prompt", "taskFile", "agent", "orchestration", "interaction", "report", "maxToolRounds"],
+  script: ["command", "followUp"],
+  system: ["action", "options"],
+};
+
+function isTaskKind(value: string): value is TaskKind {
+  return Object.prototype.hasOwnProperty.call(KIND_FIELDS, value);
+}
+
+/** #1569: top-level keys the entry carries that its kind does not define. */
+function unknownFields(e: Record<string, unknown>, kind: TaskKind): string[] {
+  const allowed = new Set<string>([...COMMON_FIELDS, ...KIND_FIELDS[kind]]);
+  return Object.keys(e).filter(key => !allowed.has(key));
+}
 
 export type NormalizeResult =
   | { ok: true; entry: ScheduledTask }
@@ -145,6 +177,16 @@ export function normalize(raw: unknown): NormalizeResult {
   const kind = e["kind"];
   if (typeof kind !== "string") {
     return { ok: false, error: `missing kind`, id };
+  }
+
+  // #1569: reject a definition carrying fields its kind does not define, before
+  // any field-by-field normalization can silently drop one. An unknown kind
+  // falls through to the switch's own error below.
+  if (isTaskKind(kind)) {
+    const unknown = unknownFields(e, kind);
+    if (unknown.length > 0) {
+      return { ok: false, error: `unknown field(s) for kind "${kind}": ${unknown.join(", ")}`, id };
+    }
   }
 
   const schedule = typeof e["schedule"] === "string" ? e["schedule"] as string : undefined;
@@ -288,9 +330,6 @@ export function normalize(raw: unknown): NormalizeResult {
         return { ok: false, error: `unknown system action "${String(action)}"`, id };
       }
       if (delivery !== "silent") return { ok: false, error: "system delivery must be silent", id };
-      for (const field of SYSTEM_FORBIDDEN_FIELDS) {
-        if (e[field] !== undefined) return { ok: false, error: `system entry must not carry "${field}"`, id };
-      }
       if (action === "hardware-sleep") {
         const opts = e["options"] && typeof e["options"] === "object"
           ? (e["options"] as Record<string, unknown>) : {};
