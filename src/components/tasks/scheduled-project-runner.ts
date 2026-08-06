@@ -244,11 +244,11 @@ function gatherLaneFacts(rootCardId: number): TaskFailureLaneFact[] {
     const result = supStore.getResultByAttempt(attempt.id);
     const criteria = result
       ? result.envelope.criteria.map((c) => ({ id: c.criterion_id, status: c.status }))
-      : contract.criteria.map((c) => ({ id: c.id, status: "not_run" }));
-    const missingEvidence = contract.criteria
+      : (contract.criteria ?? []).map((c) => ({ id: c.id, status: "not_run" }));
+    const missingEvidence = (contract.criteria ?? [])
       .filter((c) =>
-        !contract.verification_commands.some((v) => v.criterion_ids.includes(c.id)) &&
-        !contract.expected_artifacts.some((a) => a.criterion_ids.includes(c.id)))
+        !(contract.verification_commands ?? []).some((v) => v.criterion_ids.includes(c.id)) &&
+        !(contract.expected_artifacts ?? []).some((a) => a.criterion_ids.includes(c.id)))
       .map((c) => c.id);
     const hardDeadlineAt = attempt.hard_deadline_at ?? undefined;
     const settledAt = attempt.settled_at ?? undefined;
@@ -295,7 +295,7 @@ function uncoveredRootCriteria(rootCardId: number): string[] {
       for (const id of c.supports_root_criteria ?? []) mapped.add(id);
     } catch { /* skip */ }
   }
-  return rootContract.criteria.filter((c) => !mapped.has(c.id)).map((c) => c.id);
+  return (rootContract.criteria ?? []).filter((c) => !mapped.has(c.id)).map((c) => c.id);
 }
 
 /**

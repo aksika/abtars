@@ -23,6 +23,7 @@ import { readEntries } from "./tasks/task-store.js";
 import { readState } from "./tasks/task-state-store.js";
 import { settleRunOnce } from "./tasks/task-run-settler.js";
 import { makeTaskFailure } from "./tasks/task-failure.js";
+import type { TaskFailureDiagnosticV1 } from "./tasks/task-failure.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js";
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
@@ -427,6 +428,7 @@ export function settleProjectLastResort(projectId: number): void {
         diagnostic: makeTaskFailure("interruption", "restart_interrupted", "executing", "scheduled project continuation unavailable after restart", "none"),
         detail: "reconcileProject: no durable owner and no claimable scheduled Orc continuation",
         cardId: projectId,
+        onFailure: _failureCascade,
       });
       logInfo(TAG, `Project ${projectId}: settled run ${matched.run.runId} as restart_interrupted (last resort)`);
     } catch (err) {
@@ -1311,6 +1313,12 @@ export function getWakeScheduler(): LifecycleWakeScheduler | null {
 let _runProgressBridge: ((cardId: number) => void) | null = null;
 export function setRunProgressBridge(bridge: ((cardId: number) => void) | null): void {
   _runProgressBridge = bridge;
+}
+
+/** #1588: the failure cascade callback, wired from boot for last-resort settlements. */
+let _failureCascade: ((entryId: string, diagnostic: TaskFailureDiagnosticV1) => void) | undefined;
+export function setFailureCascade(fn: ((entryId: string, diagnostic: TaskFailureDiagnosticV1) => void) | undefined): void {
+  _failureCascade = fn;
 }
 function projectRunProgress(cardId: number): void {
   try {

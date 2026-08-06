@@ -144,8 +144,11 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   // #1539: wire the wake scheduler into the reconciler (executor-lease source
   // registers on startReconciler) and register the remaining due sources.
-  const { setWakeScheduler } = await import("../components/reconciler.js");
+  const { setWakeScheduler, setFailureCascade } = await import("../components/reconciler.js");
   setWakeScheduler(wakeScheduler);
+  // #1588: the reconciler's last-resort scheduled settlements ride the same
+  // failure cascade as every other failed run.
+  setFailureCascade(coordinator.failureCallback);
 
   const { createRunDeadlineSource, createTaskAdmissionSource, createKanbanRetrySource } = await import("../components/tasks/due-sources.js");
   wakeScheduler.register(createKanbanRetrySource((cardId: number) => {

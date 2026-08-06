@@ -349,6 +349,7 @@ export class CronQueue {
         diagnostic: makeTaskFailure("execution", "model_error", "executing", msg.slice(0, 500), "none"),
         detail: msg.slice(0, 500),
         factAt: Date.now(),
+        onFailure: this.coordinator.failureCallback,
       });
       laneState.current = null;
       persistState(this.lanes);

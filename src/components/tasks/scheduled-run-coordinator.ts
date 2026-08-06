@@ -112,6 +112,11 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
     this.laneReleaseListener = fn;
   }
 
+  /** #1588: the failure cascade callback, exposed for shared settlement paths. */
+  get failureCallback(): TaskFailureCallback | undefined {
+    return this.onFailure;
+  }
+
   /**
    * Start exactly one adapter for the reserved occurrence. Returns "stale"
    * when the reservation no longer belongs to this run. Never awaited by the
@@ -234,7 +239,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
       }
 
       if (run.deadlineAt < Date.now()) {
-        settleExpiredRun(entry, run, "restart_recovery: deadline passed", "restart_recovery: scheduled deadline passed");
+        settleExpiredRun(entry, run, "restart_recovery: deadline passed", "restart_recovery: scheduled deadline passed", this.onFailure);
         logInfo(TAG, `recovery: task=${entry.id} run=${run.runId} settled_deadline_passed`);
         continue;
       }

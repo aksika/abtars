@@ -215,3 +215,40 @@ describe("task-admission due source #1539", () => {
     expect(items).toHaveLength(0);
   });
 });
+
+describe("settleExpiredRun failure cascade (#1588)", () => {
+  it("settles an expired run as failed and fires the cascade exactly once", () => {
+    const entry = {
+      id: "expired-task",
+      kind: "agent",
+      prompt: "p",
+      agent: "task",
+      interaction: { mode: "oneshot" },
+      orchestration: { maxAgents: 1 },
+      schedule: "* * * * *",
+      enabled: true,
+      priority: "medium",
+      delivery: "announce",
+      chatId: "1",
+    };
+    writeFileSync(join(TEST_HOME, "tasks", "tasks.json"), JSON.stringify([entry], null, 2));
+    stateStore.initializeState(taskStore.readEntries());
+    const now = Date.now();
+    const reserved = stateStore.reserveRun(entry.id, {
+      runId: "exp-1", groupId: "g", attempt: 1, trigger: "schedule",
+      occurrenceAt: now - 120_000, deadlineAt: now - 60_000,
+    });
+    if (!reserved.ok) throw new Error("reserveRun failed");
+
+    const calls: string[] = [];
+    dueSources.settleExpiredRun(entry, stateStore.readState(entry.id)!.activeRun!,
+      "deadline passed", "abort", (_entryId, diagnostic) => calls.push(diagnostic.code));
+    expect(calls).toEqual(["deadline_exceeded"]);
+    expect(stateStore.readState(entry.id)!.activeRun).toBeUndefined();
+
+    // A second settlement of the same occurrence reports nothing further.
+    const run = { runId: "exp-1", groupId: "g", attempt: 1 as const, trigger: "schedule" as const, occurrenceAt: now, reservedAt: now, deadlineAt: now - 60_000, phase: "executing" as const, lastProgressAt: now };
+    dueSources.settleExpiredRun(entry, run, "again", "abort", (_entryId, diagnostic) => calls.push(diagnostic.code));
+    expect(calls).toHaveLength(1);
+  });
+});

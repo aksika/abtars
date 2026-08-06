@@ -10,6 +10,7 @@ import { readEntries as dbReadEntries } from "./task-store.js";
 import { getRun } from "./task-history-store.js";
 import { settleRunFromHistory, settleRunOnce } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
+import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 import { kanbanDueRetryItems, kanbanGetCard, type KanbanCard } from "./kanban-board.js";
 import { abortProjectById } from "../reconciler.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
@@ -22,13 +23,20 @@ import type { ScheduledTask } from "./task-types.js";
 export const CANCELLATION_GRACE_MS = 30_000;
 
 /** Exactly-once deadline settlement shared by the due source and recovery. */
-export function settleExpiredRun(entry: ScheduledTask, run: NonNullable<ReturnType<typeof readState>>["activeRun"], detail: string, abortReason: string): void {
+export function settleExpiredRun(
+  entry: ScheduledTask,
+  run: NonNullable<ReturnType<typeof readState>>["activeRun"],
+  detail: string,
+  abortReason: string,
+  onFailure?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void,
+): void {
   if (!run) return;
   settleRunOnce({
     entry, run,
     outcome: "failed",
     diagnostic: makeTaskFailure("interruption", "deadline_exceeded", "executing", detail, "none"),
     detail,
+    onFailure,
   });
   // #1516: terminalize the interrupted project so its Orc/Worker state
   // cannot orphan after the scheduled run is settled.
@@ -81,7 +89,7 @@ export function createRunDeadlineSource(coordinator: ScheduledRunCoordinator): L
         const graceItem = run.phase === "cancelling" && run.terminalRequest
           && run.terminalRequest.requestedAt + CANCELLATION_GRACE_MS <= now;
         if (graceItem) {
-          settleExpiredRun(entry, run, "cancellation grace elapsed", "scheduled deadline passed");
+          settleExpiredRun(entry, run, "cancellation grace elapsed", "scheduled deadline passed", coordinator.failureCallback);
           continue;
         }
 

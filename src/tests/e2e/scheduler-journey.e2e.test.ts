@@ -1397,7 +1397,7 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
   it("settles once with supervision/lane_late_completion, notifies the operator with the lane facts, and stays silent for deferred runs", async () => {
     const cascadeDiagnostics: TaskFailureDiagnosticV1[] = [];
     const cascadeNotifications: string[] = [];
-    const { buildFailureNotification } = await import("../../boot/phase-pipeline-deps.js");
+    const { buildFailureNotification, buildShaFailurePrompt } = await import("../../boot/phase-pipeline-deps.js");
     const { CronQueue } = await import("../../components/tasks/task-queue.js");
     const coordinator = new CoordinatorClass({
       onTaskPaused: (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
@@ -1471,7 +1471,17 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
     expect(cascadeNotifications[0]).toContain("overrun_ms");
     expect(cascadeNotifications[0]).not.toMatch(/[📥✅❌⏳🔧⚠️]/);
 
-    // 4. A deferred occurrence produces zero cascade sends.
+    // 4. The SHA prompt built from the captured diagnostic carries the
+    // structured root cause and its guardrails (full chain per spec).
+    const shaPrompt = buildShaFailurePrompt("project-task", cascadeDiagnostics[0]!, "");
+    expect(shaPrompt).toContain("Category: supervision/lane_late_completion");
+    expect(shaPrompt).toContain("<root-cause>");
+    expect(shaPrompt).toContain(`card="${workerCard.id}"`);
+    expect(shaPrompt).toContain('cancel-reason="late_completion_timed_out: worker_completed"');
+    expect(shaPrompt).toContain("Permitted remediation: task_manage action=adjust (bounded) or action=escalate.");
+    expect(shaPrompt).toContain("- transport.json\n- .env / .env.skills\n- peers.json\n- users.json");
+
+    // 5. A deferred occurrence produces zero cascade sends.
     const deferredEntry = taskStore.readEntries().find((e) => e.id === "deferred-task")!;
     const enqueueErr = queue.enqueue(deferredEntry, true);
     expect(enqueueErr).toBeNull();
