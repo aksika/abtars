@@ -38,9 +38,16 @@ const ALLOWED_ROOTS: ReadonlySet<string> = new Set([
   join(abtarsHome(), "tasks"),
 ]);
 
+/** Substitute the {today} placeholder with the local date. Applied to every
+ *  part of a report contract that names a dated thing — artifact path and
+ *  required headings alike — so both agree on one date for the whole run. */
+function substituteToday(raw: string): string {
+  return raw.replace(/\{today\}/g, localDate());
+}
+
 function resolvePath(raw: string, taskId: string): string {
   let p = raw.replace(/^~/, homedir());
-  p = p.replace(/\{today\}/g, localDate());
+  p = substituteToday(p);
   if (!p.startsWith("/")) {
     p = join(abtarsHome(), "workspace", taskId, p);
   }
@@ -178,7 +185,7 @@ export function preflightTask(
     report: {
       artifactPath: resolvedArtifact,
       artifactLabel: contract.artifact,
-      requiredSections: contract.requiredSections,
+      requiredSections: contract.requiredSections.map(substituteToday),
       minBytes: contract.minBytes,
       requiredFiles,
       executables,
