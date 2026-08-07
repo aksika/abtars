@@ -87,8 +87,6 @@ export function loadTaskPackage(taskFile: string): TaskPackageResult | TaskPacka
   return { ok: true, prompt, contextFiles };
 }
 
-export type DeliveryMode = "silent" | "deliver" | "announce" | "report";
-
 export interface ToolExecutionScope {
   cwd: string;
   env: Readonly<Record<string, string>>;
