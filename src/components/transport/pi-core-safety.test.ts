@@ -184,11 +184,38 @@ describe("createPiExecutionSafetyController", () => {
     expect(ctrl.lastTerminalIncident?.type).toBe("exact_repeat");
   });
 
-  it("candidate limit sets lastTerminalIncident with candidate_round_limit type", () => {
-    const ctrl = createPiExecutionSafetyController(policy, { maxCandidateRounds: 1 });
-    ctrl.beginProviderTurn("k1");
-    ctrl.beginProviderTurn("k1");
+  it("candidate limit sets lastTerminalIncident with candidate_round_limit type (multi-candidate)", () => {
+    const multi = [
+      { model: "model-a", provider: "prov-a", endpoint: "https://a.test/v1", maxContext: 128000, apiKey: "key-a", source: "primary" },
+      { model: "model-b", provider: "prov-b", endpoint: "https://b.test/v1", maxContext: 128000, apiKey: "key-b", source: "primary" },
+    ];
+    const multiPolicy = new FallbackPolicy(multi, registry);
+    const ctrl = createPiExecutionSafetyController(multiPolicy, { maxCandidateRounds: 1 });
+    ctrl.beginProviderTurn("model-a@https://a.test/v1");
+    ctrl.beginProviderTurn("model-a@https://a.test/v1");
     expect(ctrl.lastTerminalIncident?.type).toBe("candidate_round_limit");
+  });
+
+  it("sole candidate bypasses rotation entirely — no incident, no exclusion churn, no candidate-limit logs (#1595)", () => {
+    // A sole-candidate execution must be able to run past the rotation
+    // threshold without recording candidate_round_limit incidents, without
+    // touching policy exclusions, and still stop at the prompt-wide bound.
+    const ctrl = createPiExecutionSafetyController(policy, { maxCandidateRounds: 2, maxPromptRounds: 4 });
+    const key = "test-model@https://api.test/v1";
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    // turns 3-4: past the candidate threshold — no rotation machinery fires.
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    expect(ctrl.beginProviderTurn(key).decision).toBe("continue");
+    expect(ctrl.lastTerminalIncident).toBeNull();
+    expect(ctrl.incident).toBeNull();
+    expect(policy.excludedKeys.size).toBe(0);
+    expect(ctrl.promptRoundsUsed).toBe(4);
+    // turn 5: prompt-wide limit is the only bound.
+    const result = ctrl.beginProviderTurn(key);
+    expect(result.decision).toBe("stop");
+    expect(result.reason).toContain("Prompt round limit");
+    expect(ctrl.lastTerminalIncident?.type).toBe("prompt_round_limit");
   });
 
   it("requestPause makes prepareNextTurn return undefined (no update)", () => {

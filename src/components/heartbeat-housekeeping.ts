@@ -150,7 +150,7 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
   async function cleanupKanban(): Promise<void> {
     const { kanbanCleanup } = await import("./tasks/kanban-board.js");
     const purged = kanbanCleanup(7);
-    if (purged > 0) logInfo(TAG, `Kanban: purged ${purged} delivered cards > 7d`);
+    if (purged > 0) logInfo(TAG, `Kanban: purged ${purged} terminal cards (done/failed/delivered) > 7d`);
   }
 
   /** #1551 — wires the previously-dead PiRunStore.cleanupOldCommands + the

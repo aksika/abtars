@@ -19,12 +19,25 @@ export interface DeliverDeps {
   chatIdFor: (card: KanbanCard) => string;
 }
 
+/**
+ * #1595: card ids whose O-type done-without-accepted-supervision skip was
+ * already warned. The delivery poll visits such cards every heartbeat, so the
+ * warning must fire once per card episode, not once per poll. The id is
+ * removed again when the card actually gets claimed — a later episode (e.g.
+ * card re-pending after repair) may warn anew.
+ */
+const warnedUnacceptedOCards = new Set<number>();
+
 export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<void> {
   if (card.type === "O") {
     const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
     const store = new ProjectReviewStore();
     const sup = store.getSupervision(card.id);
     if (!sup || sup.state !== "accepted") {
+      if (!warnedUnacceptedOCards.has(card.id)) {
+        warnedUnacceptedOCards.add(card.id);
+        logWarn(TAG, `Card ${card.id} (${card.title}) is done but its O-type project has no accepted supervision (state=${sup?.state ?? "none"}) — skipping delivery. Complete the project acceptance review (review_project accept) to deliver this card.`);
+      }
       return;
     }
   }
@@ -34,6 +47,7 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
   const fresh = kanbanGetCard(card.id);
   if (!fresh) return;
   if (fresh.status === "delivered") {
+    warnedUnacceptedOCards.delete(card.id);
     logDebug(TAG, `Card ${card.id} already delivered — skipping`);
     return;
   }
@@ -50,6 +64,7 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     logSwarmTrace({ event: "delivery_claim_lost", card: card.id, reason: "already_claimed_or_delivered" });
     return;
   }
+  warnedUnacceptedOCards.delete(card.id);
   logSwarmTrace({ event: "delivery_claim_won", card: card.id });
   const chatId = deps.chatIdFor(card);
 

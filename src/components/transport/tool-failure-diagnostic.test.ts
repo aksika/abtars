@@ -7,6 +7,8 @@ import {
   buildUnknownDiagnostic,
   buildSafetyDiagnostic,
   mergeSafetyIncident,
+  buildTerminalDiagnostic,
+  summarizeToolFailure,
   renderDiagnostic,
   PiCoreToolExecutionError,
 } from "./tool-failure-diagnostic.js";
@@ -94,6 +96,26 @@ describe("parseBashResultToDiagnostic", () => {
     const result = JSON.stringify({ exit_code: 126, stderr: "permission denied", command_fingerprint: "abcd1234abcd1234", command_preview: "chmod" });
     const d = parseBashResultToDiagnostic(result, execId, "execute_bash");
     expect(d!.reason).toBe("nonzero_exit");
+  });
+
+  it("classifies shell_syntax_error with hint and unchanged command audit fields (#1595)", () => {
+    const result = JSON.stringify({
+      error: "shell_syntax_error",
+      stderr: "bash: -c: line 1: syntax error near unexpected token `&'",
+      exit_code: 2,
+      command_fingerprint: "abcd1234abcd1234",
+      command_preview: "tail -f log 2>&",
+      syntax_hint: 'redirection operator truncated — did you mean "2>&1"? Re-submit the corrected command explicitly.',
+    });
+    const d = parseBashResultToDiagnostic(result, execId, "execute_bash");
+    expect(d).not.toBeNull();
+    expect(d!.reason).toBe("shell_syntax_error");
+    expect(d!.exit_code).toBe(2);
+    expect(d!.command_fingerprint).toBe("abcd1234abcd1234");
+    expect(d!.command_preview).toBe("tail -f log 2>&");
+    expect(d!.syntax_hint).toContain("2>&1");
+    expect(renderDiagnostic(d!)).toContain("shell syntax error");
+    expect(renderDiagnostic(d!)).toContain("syntax:");
   });
 
   it("caps and redacts stderr", () => {
@@ -218,6 +240,72 @@ describe("mergeSafetyIncident", () => {
     const merged = mergeSafetyIncident(base);
     expect(merged.reason).toBe("nonzero_exit");
     expect(merged.safety_incident).toBeUndefined();
+  });
+});
+
+describe("buildTerminalDiagnostic (#1595 Finance-Daily regression)", () => {
+  // The Finance-Daily trace: one malformed `2>&` bash command (shell_syntax_error)
+  // followed by ~20 continued turns, ending at prompt_round_limit (25). The
+  // final diagnostic must lead with the terminal cause and keep the stale bash
+  // failure as supporting context only — never present it as the primary reason
+  // and never claim candidate_exhausted for a run that continued past rotation.
+  const staleBashFailure: ToolFailureDiagnosticV1 = {
+    version: 1,
+    execution_id: "exec_1",
+    tool: "execute_bash",
+    reason: "shell_syntax_error",
+    exit_code: 2,
+    command_fingerprint: "abcd1234abcd1234",
+    command_preview: "gws report 2>&",
+    stderr_excerpt: "syntax error near unexpected token `&'",
+    timed_out: false,
+    aborted: false,
+  };
+
+  it("leads with prompt_round_limit and retains the bash failure as context only", () => {
+    const d = buildTerminalDiagnostic("exec_1", { type: "prompt_round_limit" }, staleBashFailure);
+    expect(d.reason).toBe("prompt_round_limit");
+    expect(d.safety_incident).toBe("prompt_round_limit");
+    expect(d.candidate_exhausted).not.toBe(true);
+    expect(d.command_preview).toBeUndefined();
+    expect(d.last_tool_failure).toEqual({
+      tool: "execute_bash",
+      reason: "shell_syntax_error",
+      command_preview: "gws report 2>&",
+      exit_code: 2,
+      stderr_excerpt: "syntax error near unexpected token `&'",
+    });
+    const rendered = renderDiagnostic(d);
+    expect(rendered.startsWith("Tool pi-safety failed")).toBe(true);
+    expect(rendered).toContain("prompt round limit");
+    expect(rendered).toContain("last tool failure (context): tool:execute_bash");
+    expect(rendered).not.toContain("candidate_exhausted:true");
+  });
+
+  it("sets candidate_exhausted only when the terminal incident is candidate_round_limit", () => {
+    const d = buildTerminalDiagnostic("exec_1", { type: "candidate_round_limit" }, staleBashFailure);
+    expect(d.reason).toBe("candidate_round_limit");
+    expect(d.candidate_exhausted).toBe(true);
+    expect(d.last_tool_failure?.tool).toBe("execute_bash");
+  });
+
+  it("omits last_tool_failure when no prior tool failure exists", () => {
+    const d = buildTerminalDiagnostic("exec_1", { type: "prompt_round_limit" });
+    expect(d.reason).toBe("prompt_round_limit");
+    expect(d.last_tool_failure).toBeUndefined();
+    expect(renderDiagnostic(d)).not.toContain("last tool failure");
+  });
+
+  it("summarizeToolFailure is bounded and redacted", () => {
+    const d: ToolFailureDiagnosticV1 = {
+      ...staleBashFailure,
+      stderr_excerpt: "sk-aaaaaaaaaaaaaaaaaaaaaa " + "x".repeat(600),
+      command_preview: "cmd " + "y".repeat(200),
+    };
+    const summary = summarizeToolFailure(d);
+    expect(summary.stderr_excerpt!.length).toBeLessThanOrEqual(500);
+    expect(summary.stderr_excerpt).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
+    expect(summary.command_preview!.length).toBeLessThanOrEqual(160);
   });
 });
 

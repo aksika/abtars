@@ -163,6 +163,16 @@ export function createPiExecutionSafetyController(
         activeCandidate = candidateKey;
       }
 
+      // #1595: a sole eligible candidate bypasses candidate-round rotation
+      // entirely — no temporary exclusion, reselection, or repeated
+      // "no alternate, continuing" logs. The prompt-wide limit is the only
+      // bound it can hit, so keep advancing promptRounds below.
+      if (policy.survivingCandidates().length <= 1) {
+        promptRounds++;
+        batchCancelled = false;
+        return { decision: "continue" };
+      }
+
       if (candidateRounds >= mc) {
         _incident = { type: "candidate_round_limit", candidateKey, roundsUsed: candidateRounds };
         _lastTerminalIncident = _incident;

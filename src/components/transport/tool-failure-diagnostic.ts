@@ -13,6 +13,7 @@ export type ToolFailureReason =
   | "timeout"
   | "aborted"
   | "policy_rejected"
+  | "shell_syntax_error"
   | "repeated_failure"
   | "candidate_round_limit"
   | "prompt_round_limit"
@@ -35,6 +36,16 @@ export interface ToolFailureDiagnosticV1 {
   stdout_excerpt?: string;
   safety_incident?: BehaviorIncidentType;
   candidate_exhausted?: boolean;
+  /** #1595: structured bash syntax error — never auto-corrected, model must re-submit. */
+  syntax_hint?: string;
+  /** #1595: a prior tool failure retained only as supporting context when a terminal cause leads. */
+  last_tool_failure?: {
+    tool: string;
+    reason: ToolFailureReason;
+    command_preview?: string;
+    exit_code?: number;
+    stderr_excerpt?: string;
+  };
 }
 
 export interface BashResultV1 {
@@ -105,12 +116,14 @@ export function parseBashResultToDiagnostic(
     if (!hasBashFields) return null;
 
     const isPolicyRejected = parsed.error === "policy_rejected";
+    const isShellSyntaxError = parsed.error === "shell_syntax_error";
 
     let reason: ToolFailureReason = "nonzero_exit";
     if (timedOut) reason = "timeout";
     else if (aborted) reason = "aborted";
     else if (processErrorCode) reason = "spawn_error";
     else if (isPolicyRejected) reason = "policy_rejected";
+    else if (isShellSyntaxError) reason = "shell_syntax_error";
     else if (exitCode === 0 || exitCode === null) {
       if (hasError) reason = "unknown";
       else return null;
@@ -120,6 +133,7 @@ export function parseBashResultToDiagnostic(
 
     const stderr = typeof parsed.stderr === "string" ? capAndRedact(parsed.stderr, STDERR_CAP) : undefined;
     const stdout = typeof parsed.stdout === "string" ? capAndRedact(parsed.stdout, STDOUT_CAP) : undefined;
+    const syntaxHint = typeof parsed.syntax_hint === "string" ? capAndRedact(parsed.syntax_hint, PREVIEW_CAP) : undefined;
 
     return {
       version: 1,
@@ -135,6 +149,7 @@ export function parseBashResultToDiagnostic(
       aborted,
       stderr_excerpt: stderr,
       stdout_excerpt: stdout,
+      ...(syntaxHint ? { syntax_hint: syntaxHint } : {}),
     };
   } catch {
     return null;
@@ -229,6 +244,34 @@ export function buildSafetyDiagnostic(
   };
 }
 
+/** #1595: compact supporting-context summary of a prior tool failure. */
+export function summarizeToolFailure(d: ToolFailureDiagnosticV1): NonNullable<ToolFailureDiagnosticV1["last_tool_failure"]> {
+  return {
+    tool: d.tool,
+    reason: d.reason,
+    ...(d.command_preview ? { command_preview: capAndRedact(d.command_preview, PREVIEW_CAP) } : {}),
+    ...(d.exit_code != null ? { exit_code: d.exit_code } : {}),
+    ...(d.stderr_excerpt ? { stderr_excerpt: capAndRedact(d.stderr_excerpt, STDERR_CAP) } : {}),
+  };
+}
+
+/**
+ * #1595: assemble the final diagnostic when a run ended empty after a safety
+ * termination. The terminal cause ALWAYS leads; a prior tool failure is
+ * supporting context only (`last_tool_failure`), and candidate_exhausted is
+ * never reported unless the terminal incident actually is candidate_round_limit
+ * (a run that continued past rotation must not claim exhaustion).
+ */
+export function buildTerminalDiagnostic(
+  executionId: string,
+  incident: { type: BehaviorIncidentType },
+  lastToolFailure?: ToolFailureDiagnosticV1,
+): ToolFailureDiagnosticV1 {
+  const base = buildSafetyDiagnostic(executionId, incident);
+  if (!lastToolFailure) return base;
+  return { ...base, last_tool_failure: summarizeToolFailure(lastToolFailure) };
+}
+
 export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
   const parts: string[] = [`Tool ${d.tool} failed`];
 
@@ -244,6 +287,8 @@ export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
     parts.push(`reason: spawn_error${d.process_error_code ? ` (${d.process_error_code})` : ""}`);
   } else if (d.reason === "policy_rejected") {
     parts.push("reason: blocklisted by policy");
+  } else if (d.reason === "shell_syntax_error") {
+    parts.push("reason: shell syntax error");
   } else if (d.reason === "repeated_failure") {
     parts.push("reason: 3 consecutive failures");
   } else if (d.reason === "candidate_exhausted") {
@@ -256,6 +301,7 @@ export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
     parts.push("reason: unknown error");
   }
 
+  if (d.syntax_hint) parts.push(`syntax: ${d.syntax_hint}`);
   if (d.exit_code != null && d.exit_code !== 0) parts.push(`exit:${d.exit_code}`);
   if (d.signal) parts.push(`signal:${d.signal}`);
 
@@ -264,6 +310,14 @@ export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
 
   if (d.safety_incident) parts.push(`incident:${d.safety_incident}`);
   if (d.candidate_exhausted) parts.push("candidate_exhausted:true");
+  if (d.last_tool_failure) {
+    const prior = d.last_tool_failure;
+    const priorParts = [`tool:${prior.tool}`, `reason:${prior.reason}`];
+    if (prior.command_preview) priorParts.push(`cmd:${prior.command_preview}`);
+    if (prior.exit_code != null) priorParts.push(`exit:${prior.exit_code}`);
+    if (prior.stderr_excerpt) priorParts.push(`stderr:${prior.stderr_excerpt}`);
+    parts.push(`last tool failure (context): ${priorParts.join(" ")}`);
+  }
 
   const rendered = parts.join(" | ");
   return truncateTo(rendered, DIAGNOSTIC_CAP);

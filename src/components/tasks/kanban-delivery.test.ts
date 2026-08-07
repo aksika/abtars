@@ -9,13 +9,26 @@ import { tmpdir } from "node:os";
 let TEST_HOME: string;
 let board: typeof import("./kanban-board.js");
 let deliverCard: typeof import("./kanban-delivery.js").deliverCard;
+let supervisionState: string | undefined;
+let logWarnMock: ReturnType<typeof vi.fn>;
 
 beforeEach(async () => {
   vi.resetModules();
   TEST_HOME = join(tmpdir(), `delivery-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(TEST_HOME, { recursive: true });
   vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
-  vi.doMock("../logger.js", () => ({ logInfo: vi.fn(), logWarn: vi.fn(), logError: vi.fn(), logDebug: vi.fn(), logTrace: vi.fn(), redactSecrets: (s: string) => s }));
+  supervisionState = undefined;
+  logWarnMock = vi.fn();
+  vi.doMock("../logger.js", () => ({ logInfo: vi.fn(), logWarn: logWarnMock, logError: vi.fn(), logDebug: vi.fn(), logTrace: vi.fn(), redactSecrets: (s: string) => s }));
+  vi.doMock("../project-acceptance/project-review-store.js", () => ({
+    ProjectReviewStore: class {
+      getSupervision() {
+        return supervisionState === undefined
+          ? undefined
+          : { project_card_id: 1, state: supervisionState, accepted_decision_id: supervisionState === "accepted" ? "rd_1" : null };
+      }
+    },
+  }));
   board = await import("./kanban-board.js");
   ({ deliverCard } = await import("./kanban-delivery.js"));
 });
@@ -154,5 +167,53 @@ describe("#1520 delivery separation", () => {
     await deliverCard(board.kanbanGetCard(card.id)!, deps);
     expect(deps.sendMessage).toHaveBeenCalledTimes(1);
     expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+  });
+});
+
+describe("deliverCard — O-type acceptance gate (#1595)", () => {
+  function makeOCard(): { id: number; card: import("./kanban-board.js").KanbanCard } {
+    const id = board.kanbanEnqueue("Daily Project", "task", "run-1", { type: "O" });
+    board.kanbanRunning(id);
+    board.kanbanComplete(id, join(TEST_HOME, "report.md"), "Report ready");
+    return { id, card: board.kanbanGetCard(id)! };
+  }
+
+  it("does not send an unaccepted O card and leaves it done", async () => {
+    supervisionState = "executing";
+    const { id, card } = makeOCard();
+    const deps = makeDeps();
+    await deliverCard(card, deps);
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(deps.sendDocument).not.toHaveBeenCalled();
+    expect(board.kanbanGetCard(id)!.status).toBe("done");
+    expect(board.kanbanGetCard(id)!.delivery_attempts).toBe(0);
+  });
+
+  it("warns once per card episode, not once per delivery poll", async () => {
+    supervisionState = "executing";
+    const { id, card } = makeOCard();
+    const deps = makeDeps();
+    // Three consecutive polls (heartbeat cadence) — one warning total.
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    expect(logWarnMock).toHaveBeenCalledTimes(1);
+    expect(logWarnMock.mock.calls[0]![1]).toContain("no accepted supervision");
+    // Acceptance later unblocks delivery normally.
+    supervisionState = "accepted";
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    expect(deps.sendDocument).toHaveBeenCalledTimes(1);
+    expect(board.kanbanGetCard(id)!.status).toBe("delivered");
+  });
+
+  it("delivers an accepted O card normally", async () => {
+    supervisionState = "accepted";
+    const { id, card } = makeOCard();
+    const deps = makeDeps();
+    await deliverCard(card, deps);
+    expect(deps.sendDocument).toHaveBeenCalledTimes(1);
+    expect(deps.sendDocument).toHaveBeenCalledWith("100", join(TEST_HOME, "report.md"), "Daily Project");
+    expect(board.kanbanGetCard(id)!.status).toBe("delivered");
+    expect(logWarnMock).not.toHaveBeenCalled();
   });
 });

@@ -155,6 +155,36 @@ describe("kanban-board", () => {
     expect(mod.kanbanList("*")).toHaveLength(0);
   });
 
+  it("kanbanCleanup purges old done and failed cards", () => {
+    const doneId = mod.kanbanEnqueue("Old done", "task");
+    mod.kanbanRunning(doneId);
+    mod.kanbanComplete(doneId, null, "x");
+    const failedId = mod.kanbanEnqueue("Old failed", "task");
+    mod.kanbanRunning(failedId);
+    mod.kanbanFail(failedId, "boom");
+
+    mod._kanbanExecForTest(
+      "UPDATE kanban_board SET completed_at = datetime('now', '-10 days') WHERE id IN (?, ?)",
+      [doneId, failedId],
+    );
+
+    const purged = mod.kanbanCleanup(7);
+    expect(purged).toBe(2);
+    expect(mod.kanbanList("*")).toHaveLength(0);
+  });
+
+  it("kanbanCleanup keeps recent done and failed cards", () => {
+    const doneId = mod.kanbanEnqueue("Fresh done", "task");
+    mod.kanbanRunning(doneId);
+    mod.kanbanComplete(doneId, null, "x");
+    const failedId = mod.kanbanEnqueue("Fresh failed", "task");
+    mod.kanbanRunning(failedId);
+    mod.kanbanFail(failedId, "boom");
+
+    expect(mod.kanbanCleanup(7)).toBe(0);
+    expect(mod.kanbanList("*")).toHaveLength(2);
+  });
+
   it("enqueue with options sets priority, labels, type", () => {
     mod.kanbanEnqueue("Rich card", "user", undefined, {
       priority: "HIGH",

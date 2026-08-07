@@ -146,6 +146,58 @@ describe("executeToolCall", () => {
   });
 });
 
+describe("shell syntax pre-validation (#1595)", () => {
+  it("rejects a malformed trailing 2>& without executing, with a correction hint and untouched audit fields", async () => {
+    const result = await executeToolCall("execute_bash", { command: "tail -f /var/log/x 2>&" }, { userId: "test" });
+    const parsed = JSON.parse(result) as {
+      error?: string; exit_code?: number; syntax_hint?: string;
+      command_fingerprint?: string; command_preview?: string; stderr?: string;
+    };
+    expect(parsed.error).toBe("shell_syntax_error");
+    expect(parsed.exit_code).toBe(2);
+    expect(parsed.syntax_hint).toContain("2>&1");
+    expect(parsed.command_preview).toBe("tail -f /var/log/x 2>&");
+    expect(parsed.command_fingerprint).toMatch(/^[0-9a-f]{16}$/);
+    expect(parsed.stderr).toContain("syntax error");
+  });
+
+  it("rejects other malformed syntax with a structured error and no execution side effect", async () => {
+    const result = await executeToolCall("execute_bash", { command: "echo 'unterminated" }, { userId: "test" });
+    const parsed = JSON.parse(result) as { error?: string };
+    expect(parsed.error).toBe("shell_syntax_error");
+  });
+
+  it("does not emit the 2>&1 hint for truncations that are not stderr redirects", async () => {
+    const result = await executeToolCall("execute_bash", { command: "echo hi >" }, { userId: "test" });
+    const parsed = JSON.parse(result) as { error?: string; syntax_hint?: string };
+    expect(parsed.error).toBe("shell_syntax_error");
+    expect(parsed.syntax_hint).toBeUndefined();
+  });
+
+  it("still executes valid redirects unchanged (2>&1, 2>&2, 2>&-)", async () => {
+    for (const suffix of ["2>&1", "2>&2", "2>&-"]) {
+      const result = await executeToolCall("execute_bash", { command: `echo ok ${suffix} >/dev/null` }, { userId: "test" });
+      const parsed = JSON.parse(result) as { error?: string; exit_code?: number };
+      expect(parsed.error).toBeUndefined();
+      expect(parsed.exit_code).toBe(0);
+    }
+  });
+
+  it("does not rewrite quoted or heredoc content", async () => {
+    const result = await executeToolCall("execute_bash", { command: "cat << 'EOF'\n2>& is literal text here\nEOF" }, { userId: "test" });
+    const parsed = JSON.parse(result) as { exit_code?: number; stdout?: string };
+    expect(parsed.exit_code).toBe(0);
+    expect(parsed.stdout).toContain("2>& is literal text here");
+  });
+
+  it("does not rewrite commands whose syntax is valid even with redirects mid-command", async () => {
+    const result = await executeToolCall("execute_bash", { command: "echo a > /tmp/x 2>&1; echo done" }, { userId: "test" });
+    const parsed = JSON.parse(result) as { exit_code?: number; stdout?: string };
+    expect(parsed.exit_code).toBe(0);
+    expect(parsed.stdout).toContain("done");
+  });
+});
+
 // #1266/#1507: when no memory runtime is wired, memory_* tools return
 // clear non-retryable results rather than shelling out to a CLI on PATH.
 describe("memory tools with no runtime wired (#1266 / #1507)", () => {

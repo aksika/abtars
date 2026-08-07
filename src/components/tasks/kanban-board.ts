@@ -759,11 +759,15 @@ export function kanbanCleanup(olderThanDays = 7): number {
   const d = dbOrNull();
   if (!d) return 0;
   // #1590: journal rows must not outlive their card — delete in the same
-  // transaction as the board rows.
+  // transaction as the board rows. All terminal statuses age out: delivered
+  // on delivered_at, done/failed on completed_at (fallback updated_at for
+  // cards whose completion never stamped a timestamp).
   return d.transaction(() => {
     const doomed = d.prepare(
-      `SELECT id FROM kanban_board WHERE status = 'delivered' AND delivered_at < datetime('now', '-' || ? || ' days')`
-    ).all(olderThanDays) as Array<{ id: number }>;
+      `SELECT id FROM kanban_board
+       WHERE (status = 'delivered' AND delivered_at < datetime('now', '-' || ? || ' days'))
+          OR (status IN ('done','failed') AND COALESCE(completed_at, updated_at) < datetime('now', '-' || ? || ' days'))`
+    ).all(olderThanDays, olderThanDays) as Array<{ id: number }>;
     const ids = doomed.map(r => r.id);
     if (ids.length === 0) return 0;
     const placeholders = ids.map(() => "?").join(", ");

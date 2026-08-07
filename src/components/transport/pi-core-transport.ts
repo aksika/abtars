@@ -16,7 +16,7 @@ import type { OutputObserver } from "../session-output-feed.js";
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import { buildPiModel, pickPiApi } from "./pi-ai-adapter.js";
 import { candidateKey } from "./model-candidates.js";
-import { PiCoreToolExecutionError, buildSafetyDiagnostic, mergeSafetyIncident } from "./tool-failure-diagnostic.js";
+import { PiCoreToolExecutionError, buildTerminalDiagnostic } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 
 const TAG = "pi-core-transport";
@@ -434,20 +434,20 @@ export class PiCoreTransport implements IKiroTransport {
           return responseText;
         }
 
-        if (this._lastToolFailure) {
-          const incident = safety.lastTerminalIncident;
-          const merged = mergeSafetyIncident(
-            this._lastToolFailure,
-            incident?.type,
-            incident?.type === "candidate_round_limit",
-          );
-          logInfo(TAG, `sendPrompt: empty response with terminal tool failure — throwing diagnostic`);
-          throw new PiCoreToolExecutionError(merged);
+        // #1595: the terminal cause leads; a prior tool failure is supporting
+        // context only. Never present a stale tool failure as the primary
+        // reason, and never report candidate_exhausted:true for a run that
+        // continued past rotation (sole-candidate or switched) and ended for
+        // another reason.
+        if (safety.terminalSafetyFailure && safety.lastTerminalIncident) {
+          const inc = safety.lastTerminalIncident;
+          logInfo(TAG, `sendPrompt: terminal safety incident (${inc.type}) — leading with terminal cause, prior tool failure retained as context`);
+          throw new PiCoreToolExecutionError(buildTerminalDiagnostic(executionId, inc, this._lastToolFailure ?? undefined));
         }
 
-        if (safety.terminalSafetyFailure && safety.lastTerminalIncident) {
-          logInfo(TAG, `sendPrompt: terminal Pi safety failure (${safety.lastTerminalIncident.type})`);
-          throw new PiCoreToolExecutionError(buildSafetyDiagnostic(executionId, safety.lastTerminalIncident));
+        if (this._lastToolFailure) {
+          logInfo(TAG, `sendPrompt: empty response with terminal tool failure — throwing diagnostic`);
+          throw new PiCoreToolExecutionError(this._lastToolFailure);
         }
 
         logDebug(TAG, `sendPrompt: empty response with no tool failure — returning ""`);

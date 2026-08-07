@@ -3,7 +3,7 @@
  * Phase 2: native tool schemas. Phase 3: in-process memory when available.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -58,6 +58,51 @@ function optionalStringValue(value: unknown): string | undefined {
 
 const BASH_TIMEOUT_MS = 300_000;
 const CLI_TIMEOUT_MS = 60_000;
+
+/**
+ * #1595: parse-only shell validation before any execution. A malformed command
+ * must never reach the executor: return a structured `shell_syntax_error` with
+ * bounded diagnostics and an actionable correction hint for recognizable
+ * truncated redirection operators. The command itself is never rewritten —
+ * the model must re-submit a corrected command explicitly.
+ */
+export function validateBashSyntax(cmd: string): { ok: true } | { ok: false; stderr: string; hint?: string } {
+  try {
+    execFileSync("bash", ["-n", "-c", cmd], { timeout: 5000, maxBuffer: 64 * 1024, stdio: "pipe" });
+    return { ok: true };
+  } catch (err) {
+    const e = err as { stderr?: Buffer | string; message?: string; code?: string; killed?: boolean };
+    // Fail OPEN on infrastructure failures — these are not syntax verdicts
+    // and must never block a possibly-valid command as shell_syntax_error:
+    // bash absent (ENOENT), oversized stderr/stdout (maxBuffer), or a
+    // hung/killed parse (timeout).
+    const msg = e.message ?? "";
+    if (e.code === "ENOENT" || e.killed === true || /maxBuffer/.test(msg)) return { ok: true };
+    const raw = typeof e.stderr === "string" ? e.stderr : e.stderr instanceof Buffer ? e.stderr.toString("utf-8") : "";
+    const stderr = redactSecrets(raw || msg || "syntax error").slice(0, 1000);
+    const trimmed = cmd.trimEnd();
+    let hint: string | undefined;
+    // Recognizable truncated redirection operator (e.g. trailing `2>&`) gets
+    // an actionable hint; other syntax errors rely on bash's own stderr.
+    if (/\b\d?>&\s*$/.test(trimmed)) {
+      hint = 'redirection operator truncated — did you mean "2>&1"? Re-submit the corrected command explicitly.';
+    }
+    return { ok: false, stderr, hint };
+  }
+}
+
+function shellSyntaxErrorResult(cmd: string, check: { stderr: string; hint?: string }): string {
+  logWarn("tool-registry", `Shell syntax error [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+  const result: Record<string, unknown> = {
+    error: "shell_syntax_error",
+    stderr: check.stderr,
+    exit_code: 2,
+    command_fingerprint: fingerprintCommand(cmd),
+    command_preview: previewCommand(cmd),
+  };
+  if (check.hint) result["syntax_hint"] = check.hint;
+  return JSON.stringify(result);
+}
 
 // #1266: when no in-process memory backend is wired, return this error
 // rather than silently shelling out to a CLI on PATH we don't trust.
@@ -151,6 +196,14 @@ export function setSeatbelt(active: boolean, policy?: import("../seatbelt/policy
 import { fingerprintCommand, previewCommand } from "./tool-failure-diagnostic.js";
 
 function executeBash(cmd: string, timeout: number, signal?: AbortSignal, executionScope?: ToolExecutionScope): Promise<string> {
+  // #1595: parse-only validation before any execution (every caller routes
+  // through this choke point, including the auth-granted path). A malformed
+  // command is never executed; the model receives a structured
+  // shell_syntax_error and must re-submit a corrected command. The original
+  // command text is never rewritten (fingerprint/preview are untouched).
+  const syntaxCheck = validateBashSyntax(cmd);
+  if (!syntaxCheck.ok) return Promise.resolve(shellSyntaxErrorResult(cmd, syntaxCheck));
+
   // Check pre-aborted signal BEFORE spawning — a cancelled request must
   // never execute side effects (#1497 review).
   if (signal?.aborted) {
