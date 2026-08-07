@@ -45,3 +45,5 @@ abtars-backup-*.zip
 
 # #1528 Pi production-composition E2E results (kept out of git; CI reads them in place)
 test-results/pi-production-e2e/
+# #1598 report-pipeline E2E results (run artifacts; kept out of git)
+test-results/report-pipeline-e2e/

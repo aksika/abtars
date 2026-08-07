@@ -63,6 +63,9 @@ jobs:
       - name: Build
         run: node esbuild.config.js
 
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Core tests
         run: npm test -- --silent
 
@@ -110,6 +113,10 @@ jobs:
       - name: Build
         if: env.run == 'true'
         run: node esbuild.config.js
+
+      - name: Typecheck
+        if: env.run == 'true'
+        run: npm run typecheck
 
       - name: Extended tests
         if: env.run == 'true'
