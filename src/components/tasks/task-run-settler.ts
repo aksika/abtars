@@ -256,7 +256,9 @@ function applyPostSettlementSideEffects(opts: {
     if (attachResult && resultPath) kanbanAttachResult(cardId, resultPath, summary);
     else kanbanComplete(cardId, resultPath ?? null, summary);
     if (releaseDelivery && outcome === "success") kanbanSetDeliveryReady(cardId);
-  } else if (outcome !== "deferred") {
+  } else if (outcome !== "deferred" && outcome !== "unknown") {
+    // #1601: `unknown` makes no claim — the card is left untouched rather
+    // than marked failed on a guess.
     kanbanFail(cardId, formatTaskFailure(diagnostic).slice(0, 1000));
   }
 }
@@ -284,6 +286,9 @@ function synthesizeDiagnostic(outcome: TerminalOutcome, detail: string | undefin
       return makeTaskFailure("interruption", "cancelled", phase, detail ?? "cancelled", "none");
     case "deferred":
       return makeTaskFailure("admission", "executor_unavailable", phase, detail ?? "deferred", "transient");
+    case "unknown":
+      return makeTaskFailure("interruption", "owner_lost", phase,
+        detail ?? "owner process exited before a durable terminal state; whether this run's side effects completed is unknown", "transient");
     case "failed":
       return makeTaskFailure("execution", "model_error", phase, detail ?? "failed", "none");
     default:
@@ -321,6 +326,24 @@ function computeStatePatch(
     // the patch preserves the existing incident untouched.
     return {
       lastFinishedAt: finishedAt,
+      ...nextRunFromSchedule(entry),
+      retrying: false,
+      retryGroupId: undefined,
+      retryAttempt: undefined,
+      priorFailure: undefined,
+      deferredAdmission: undefined,
+    };
+  }
+
+  // #1601: `unknown` is a terminal outcome that makes no success/failure
+  // claim. It frees the reservation, advances the schedule, and records the
+  // owner-lost incident — but it never counts a failure streak or auto-pauses,
+  // because we do not know whether the interrupted run's side effects
+  // completed.
+  if (outcome === "unknown") {
+    return {
+      lastFinishedAt: finishedAt,
+      lastIncident: diagnostic,
       ...nextRunFromSchedule(entry),
       retrying: false,
       retryGroupId: undefined,

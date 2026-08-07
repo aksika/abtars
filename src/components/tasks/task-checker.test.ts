@@ -36,6 +36,7 @@ vi.mock("./task-state-store.js", () => ({
   advanceRun: vi.fn().mockReturnValue("advanced"),
   requestRunTerminal: vi.fn().mockReturnValue("requested"),
   settleActiveRun: vi.fn(),
+  getRunOwner: vi.fn(),
 }));
 
 vi.mock("./task-history-store.js", () => ({
@@ -223,15 +224,27 @@ describe("coordinator.recover #1539 restart ownership", () => {
     });
   });
 
-  it("settles an uncertain unexpired T run once as restart_interrupted and never replays it", () => {
+  // #1601: the uncertain fallback no longer guesses `failed` — a provably-dead
+  // owner settles as `unknown`, and an unprovable/live owner is left untouched
+  // for the run-deadline source to terminate on durable evidence.
+  it("settles an uncertain run whose owner is provably dead as unknown and never replays it", () => {
+    vi.mocked(stateStore.getRunOwner).mockReturnValue({ pid: 2147483647, startedAt: 1 });
     runWith(undefined, Date.now() + 60_000);
     return Promise.resolve().then(() => {
       expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
-        outcome: "failed",
-        detail: "restart_recovery: execution interrupted (no terminal history)",
+        outcome: "unknown",
         runId: "interrupted-run",
       }));
       expect(vi.mocked(stateStore.settleActiveRun)).toHaveBeenCalledWith("t1", "interrupted-run", expect.anything());
+    });
+  });
+
+  it("leaves an uncertain run with unprovable ownership untouched for the deadline source", () => {
+    vi.mocked(stateStore.getRunOwner).mockReturnValue(undefined);
+    runWith(undefined, Date.now() + 60_000);
+    return Promise.resolve().then(() => {
+      expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
+      expect(vi.mocked(stateStore.settleActiveRun)).not.toHaveBeenCalled();
     });
   });
 });

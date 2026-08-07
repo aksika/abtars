@@ -8,7 +8,7 @@ import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 
 const TAG = "task_history_store";
 
-export type TaskOutcome = "success" | "failed" | "noop" | "deferred" | "skipped" | "cancelled" | "definition_failed" | "timed_out";
+export type TaskOutcome = "success" | "failed" | "noop" | "deferred" | "skipped" | "cancelled" | "definition_failed" | "timed_out" | "unknown";
 
 export interface TaskRunEvent {
   runId: string;

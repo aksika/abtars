@@ -11,6 +11,7 @@ import { abtarsHome } from "../../paths.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 import { logWarn, logDebug, redactSecrets } from "../logger.js";
 import { isValidSessionType } from "../spin-profiles.js";
+import { initTaskStateSchema } from "./task-state-schema.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
 type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
@@ -153,6 +154,9 @@ function db(): SqliteDb | null {
     )`);
     _db.exec(`CREATE INDEX IF NOT EXISTS idx_card_transitions_card
       ON kanban_card_transitions(card_id, id)`);
+    // #1601: durable scheduled-run state lives in the same shared database.
+    // Idempotent DDL + one-time JSON migration, inside the same open path.
+    initTaskStateSchema(wrapTaskDatabase(_db));
   } catch {
     logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
     _db = null;

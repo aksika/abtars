@@ -19,7 +19,8 @@ import { settleRunFromHistory, settleRunOnce, onRunTerminal } from "./task-run-s
 import { settleExpiredRun } from "./due-sources.js";
 import { makeTaskFailure } from "./task-failure.js";
 import { addTaskFailure } from "./task-failure-buffer.js";
-import { advanceRun, readState, requestRunTerminal } from "./task-state-store.js";
+import { advanceRun, readState, requestRunTerminal, getRunOwner } from "./task-state-store.js";
+import { ownerIsLive } from "./run-liveness.js";
 import { getRun } from "./task-history-store.js";
 import { kanbanGetCard, resolveRootId } from "./kanban-board.js";
 import type { ExecutionSupervisor } from "../execution-control.js";
@@ -253,15 +254,23 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
         logWarn(TAG, `recovery: unable to reattach scheduled project task=${entry.id} run=${run.runId} card=${run.cardId}`);
       }
 
-      // Uncertain T/script/system execution: never replayed.
-      settleRunOnce({
-        entry, run, outcome: "failed",
-        diagnostic: makeTaskFailure("interruption", "restart_interrupted", "executing",
-          "restart recovery: execution interrupted, not replayed", "none"),
-        detail: "restart_recovery: execution interrupted (no terminal history)",
-        onFailure: this.onFailure,
-      });
-      logInfo(TAG, `recovery: task=${entry.id} run=${run.runId} settled_interrupted`);
+      // Uncertain T/script/system execution: never replayed, never guessed.
+      // #1601: a provably-dead owner settles `unknown` — the run's side
+      // effects may have completed. An unprovable (e.g. migrated) or still
+      // live owner is left untouched; the run-deadline source eventually
+      // terminates it on durable evidence instead of a guess.
+      const owner = getRunOwner(run.runId);
+      if (owner && !ownerIsLive(owner.pid, owner.startedAt)) {
+        settleRunOnce({
+          entry, run, outcome: "unknown",
+          diagnostic: makeTaskFailure("interruption", "owner_lost", "executing",
+            "Owner process exited before a durable terminal state; whether this run's side effects completed is unknown.", "transient"),
+          detail: "restart_recovery: owner process gone, side effects unknown",
+        });
+        logInfo(TAG, `recovery: task=${entry.id} run=${run.runId} settled_unknown (owner ${owner.pid} provably dead)`);
+        continue;
+      }
+      logWarn(TAG, `recovery: task=${entry.id} run=${run.runId} owner liveness unprovable or live — left untouched (deadline source owns it)`);
     }
   }
 

@@ -83,7 +83,7 @@ const KNOWN_CODES: Readonly<Record<TaskFailureCategory, ReadonlySet<string>>> = 
     "artifact_stale_mtime",
     "contract_mismatch",
   ]),
-  interruption: new Set(["timed_out", "cancelled", "restart_interrupted", "deadline_exceeded"]),
+  interruption: new Set(["timed_out", "cancelled", "restart_interrupted", "deadline_exceeded", "owner_lost"]),
   delivery: new Set(["definitely_not_sent", "send_unknown"]),
   supervision: new Set([
     "lane_timed_out",

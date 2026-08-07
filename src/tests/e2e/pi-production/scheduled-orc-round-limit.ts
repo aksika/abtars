@@ -40,16 +40,32 @@ export function installScheduledRoundLimitFixture(ctx: PiAcceptanceContext): voi
     priority: "medium",
     delivery: "silent",
   }], null, 2));
-  // Pre-seed the durable runtime state so the first boot tick admits the task
-  // immediately instead of waiting for the next cron boundary.
-  writeFileSync(join(home, "tasks", "task-state.json"), JSON.stringify({
-    [SCHEDULED_TASK_ID]: {
-      nextRunAt: Date.now() - 60_000,
-      consecutiveFailures: 0,
-      consecutiveDeferrals: 0,
-      autoPaused: false,
-    },
-  }, null, 2));
+  // Pre-seed the durable runtime state (the shared task database, #1601) so
+  // the first boot tick admits the task immediately instead of waiting for
+  // the next cron boundary. The table DDL is created idempotently by the
+  // bridge at boot; the fixture creates it early with the same statements.
+  mkdirSync(join(home, "kanban"), { recursive: true });
+  const Database = resolveNativeDep("better-sqlite3") as new (path: string) => { prepare(sql: string): { run(...p: unknown[]): unknown; get(...p: unknown[]): unknown; all(...p: unknown[]): unknown[] }; exec(sql: string): void };
+  const db = new Database(join(home, "kanban", "kanban.db"));
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS task_state (
+        task_id TEXT PRIMARY KEY,
+        next_run_at INTEGER, last_started_at INTEGER, last_finished_at INTEGER,
+        retry_at INTEGER, retrying INTEGER NOT NULL DEFAULT 0,
+        completed INTEGER NOT NULL DEFAULT 0, retry_group_id TEXT,
+        retry_attempt INTEGER, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        consecutive_deferrals INTEGER NOT NULL DEFAULT 0,
+        auto_paused INTEGER NOT NULL DEFAULT 0, paused_at INTEGER,
+        prior_failure TEXT, last_incident_json TEXT, deferred_admission_json TEXT
+      );
+    `);
+    db.prepare(
+      "INSERT OR IGNORE INTO task_state (task_id, next_run_at, consecutive_failures, consecutive_deferrals, auto_paused) VALUES (?, ?, 0, 0, 0)",
+    ).run(SCHEDULED_TASK_ID, Date.now() - 60_000);
+  } finally {
+    (db as unknown as { close(): void }).close();
+  }
 
   // Per-scenario tool-round override: the round-limit failure class needs
   // maxToolRounds=2 in the transport config the restarted bridge loads.
@@ -82,25 +98,8 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
   const home = ctx.abtarsHome;
   const evidence: BridgeHomeEvidence = { workerCardCount: 0, providerRoundLimit: false };
 
-  const statePath = join(home, "tasks", "task-state.json");
-  if (existsSync(statePath)) {
-    const state = JSON.parse(readFileSync(statePath, "utf-8")) as Record<string, { activeRun?: { runId?: string; cardId?: number; phase?: string } }>;
-    const run = state[SCHEDULED_TASK_ID]?.activeRun;
-    evidence.runId = run?.runId;
-    evidence.cardId = run?.cardId;
-    evidence.phase = run?.phase;
-  }
-
-  const historyPath = join(home, "tasks", "task-history.jsonl");
-  if (existsSync(historyPath)) {
-    const rows = readFileSync(historyPath, "utf-8").split("\n").filter(Boolean).map((l) => {
-      try { return JSON.parse(l) as { taskId?: string; outcome?: string }; } catch { return null; }
-    }).filter((r): r is { taskId?: string; outcome?: string } => r !== null);
-    const terminal = rows.find((r) => r.taskId === SCHEDULED_TASK_ID);
-    evidence.terminalOutcome = terminal?.outcome;
-  }
-
-  // Supervision + worker cards via the bridge home's kanban database.
+  // #1601: durable run state now lives in the shared task database
+  // (task_runs rows); the legacy task-state.json is migrated once at boot.
   const dbPath = join(home, "kanban", "kanban.db");
   if (existsSync(dbPath)) {
     try {
@@ -109,6 +108,11 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
       const Database = resolveNativeDep("better-sqlite3") as new (path: string, opts: { readonly: boolean }) => { prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] } };
       const db = new Database(dbPath, { readonly: true });
       try {
+        const run = db.prepare("SELECT run_id, card_id, phase FROM task_runs WHERE task_id = ? ORDER BY reserved_at DESC LIMIT 1").get(SCHEDULED_TASK_ID) as { run_id?: string; card_id?: number | null; phase?: string } | undefined;
+        evidence.runId = run?.run_id;
+        evidence.cardId = run?.card_id ?? undefined;
+        evidence.phase = run?.phase;
+
         if (evidence.cardId !== undefined) {
           const sup = db.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(evidence.cardId) as { state?: string } | undefined;
           evidence.supervisionState = sup?.state;
@@ -121,6 +125,15 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
     } catch {
       // db unavailable in the test process — provider evidence still stands
     }
+  }
+
+  const historyPath = join(home, "tasks", "task-history.jsonl");
+  if (existsSync(historyPath)) {
+    const rows = readFileSync(historyPath, "utf-8").split("\n").filter(Boolean).map((l) => {
+      try { return JSON.parse(l) as { taskId?: string; outcome?: string }; } catch { return null; }
+    }).filter((r): r is { taskId?: string; outcome?: string } => r !== null);
+    const terminal = rows.find((r) => r.taskId === SCHEDULED_TASK_ID);
+    evidence.terminalOutcome = terminal?.outcome;
   }
 
   // Round-limit class: the scheduled request stream saw two toolCall rounds.
