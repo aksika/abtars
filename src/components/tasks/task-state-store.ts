@@ -473,7 +473,10 @@ export function resetDeferrals(taskId: string): void {
 export function setAutoPaused(taskId: string, paused: boolean): void {
   try {
     const db = requireTaskDatabase();
-    db.prepare("UPDATE task_state SET auto_paused = ?, paused_at = ? WHERE task_id = ?").run(paused ? 1 : 0, paused ? Date.now() : null, taskId);
+    // Pausing preserves an existing pausedAt (re-pause is idempotent);
+    // unpausing clears it — matching the old whole-file spread semantics.
+    db.prepare("UPDATE task_state SET auto_paused = ?, paused_at = CASE WHEN ? THEN COALESCE(paused_at, ?) ELSE NULL END WHERE task_id = ?")
+      .run(paused ? 1 : 0, paused ? 1 : 0, paused ? Date.now() : 0, taskId);
     notifyTaskDueChanged();
   } catch (err) {
     logAndSwallow(TAG, "setAutoPaused", err, "warn");
@@ -703,6 +706,18 @@ export function notifyTaskDueChanged(): void {
     taskDueChangedHook?.();
   } catch (err) {
     logAndSwallow(TAG, "notifyTaskDueChanged", err);
+  }
+}
+
+/** #1601: the durable terminal outcome of a settled run. Only terminal rows
+ * are writable; the outcome is decided by the single winning settler, so
+ * there is no race once the CAS has landed. */
+export function setRunOutcome(runId: string, outcome: string): void {
+  try {
+    const db = requireTaskDatabase();
+    db.prepare("UPDATE task_runs SET outcome = ? WHERE run_id = ? AND finished_at IS NOT NULL AND outcome IS NULL").run(outcome, runId);
+  } catch (err) {
+    logAndSwallow(TAG, "setRunOutcome", err, "warn");
   }
 }
 

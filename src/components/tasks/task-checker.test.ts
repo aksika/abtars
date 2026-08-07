@@ -36,6 +36,7 @@ vi.mock("./task-state-store.js", () => ({
   advanceRun: vi.fn().mockReturnValue("advanced"),
   requestRunTerminal: vi.fn().mockReturnValue("requested"),
   settleActiveRun: vi.fn(),
+  setRunOutcome: vi.fn(),
   getRunOwner: vi.fn(),
 }));
 

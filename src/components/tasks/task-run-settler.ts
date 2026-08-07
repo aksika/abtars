@@ -1,5 +1,5 @@
 import { logDebug, logInfo, logWarn, redactSecrets } from "../logger.js";
-import { nextRunFromSchedule, settleActiveRun, readState } from "./task-state-store.js";
+import { nextRunFromSchedule, settleActiveRun, setRunOutcome, readState } from "./task-state-store.js";
 import { appendRunOnce, type TaskRunEvent } from "./task-history-store.js";
 import { kanbanAttachResult, kanbanComplete, kanbanFail, kanbanSetDeliveryReady } from "./kanban-board.js";
 import { logTaskDebug } from "./task-log-ctx.js";
@@ -192,6 +192,9 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
     emitTerminal(entry.id, run.runId);
     return "late";
   }
+  // #1601: the winning settler records the durable terminal outcome on the
+  // run row; a late/duplicate settler never reaches here.
+  setRunOutcome(run.runId, effectiveOutcome);
 
   applyPostSettlementSideEffects({ cardId, outcome: effectiveOutcome, detail: safeDetail, resultPath, diagnostic, releaseDelivery, attachResult });
 
@@ -226,6 +229,7 @@ export function settleRunFromHistory(entry: ScheduledTask, run: ActiveTaskRun, e
   const safeDetail = event.detail === undefined ? undefined : redactSecrets(event.detail).slice(0, 500);
   const patch = computeStatePatch(entry, run, event.outcome, diagnostic, state, event.finishedAt);
   if (!settleActiveRun(entry.id, run.runId, patch)) return false;
+  setRunOutcome(run.runId, event.outcome);
 
   applyPostSettlementSideEffects({
     cardId: event.kanbanCardId,
@@ -256,9 +260,11 @@ function applyPostSettlementSideEffects(opts: {
     if (attachResult && resultPath) kanbanAttachResult(cardId, resultPath, summary);
     else kanbanComplete(cardId, resultPath ?? null, summary);
     if (releaseDelivery && outcome === "success") kanbanSetDeliveryReady(cardId);
-  } else if (outcome !== "deferred" && outcome !== "unknown") {
-    // #1601: `unknown` makes no claim — the card is left untouched rather
-    // than marked failed on a guess.
+  } else if (outcome !== "deferred") {
+    // `unknown` still terminates its card: the project was not delivered and
+    // the owner is gone, so a running card would orphan forever. The message
+    // carries the owner_lost diagnostic — a truthful statement, not a claim
+    // about whether the run's side effects completed.
     kanbanFail(cardId, formatTaskFailure(diagnostic).slice(0, 1000));
   }
 }
@@ -339,8 +345,15 @@ function computeStatePatch(
   // claim. It frees the reservation, advances the schedule, and records the
   // owner-lost incident — but it never counts a failure streak or auto-pauses,
   // because we do not know whether the interrupted run's side effects
-  // completed.
+  // completed. #1525 applies here too: a manual run reports only its own
+  // outcome and must never advance the scheduled occurrence.
   if (outcome === "unknown") {
+    if (run.trigger === "manual") {
+      return {
+        lastFinishedAt: finishedAt,
+        lastIncident: diagnostic,
+      };
+    }
     return {
       lastFinishedAt: finishedAt,
       lastIncident: diagnostic,

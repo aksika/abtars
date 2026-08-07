@@ -31,8 +31,10 @@ export function pidExists(pid: number): boolean {
 export function processStartTime(pid: number): number | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    // After the closing paren of comm, rest[0] is field 3 (state); field 22
+    // (starttime, in clock ticks since boot) is rest[19].
     const rest = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
-    const field22 = rest[21];
+    const field22 = rest[19];
     if (field22 !== undefined) {
       const ticks = Number(field22);
       if (Number.isFinite(ticks)) return ticks;
