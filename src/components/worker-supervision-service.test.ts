@@ -108,6 +108,83 @@ describe("WorkerSupervisionService", () => {
       .toContain("unknown root criterion id");
   });
 
+  it("#1604 rejects an empty mapping under a contract-bearing root, naming every legal id", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 1,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [
+        { id: "c1", description: "C1", required: true, evidence_expectation: "synthesis" },
+        { id: "c2", description: "C2", required: true, evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    const err = validateWorkerRootCriteria(100, "child_c1", []);
+    expect(err).toContain("supports_root_criteria is required");
+    expect(err).toContain("c1, c2");
+  });
+
+  it("#1604 admits a supervised child with no mapping when the root has no project contract", () => {
+    const err = validateWorkerRootCriteria(999_001, "child_c1", []);
+    expect(err).toBeUndefined();
+  });
+
+  it("#1604 rejects a case-mismatched mapping and names the legal set", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 1,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [
+        { id: "c1", description: "C1", required: true, evidence_expectation: "synthesis" },
+        { id: "c2", description: "C2", required: true, evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    const err = validateWorkerRootCriteria(100, "child_c1", ["C1"]);
+    expect(err).toContain(`unknown root criterion id "C1"`);
+    expect(err).toContain("legal ids: c1, c2");
+  });
+
+  it("#1604 createChild rejects a supervised child with no mapping under a contract-bearing root", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 1,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [{ id: "c1", description: "C1", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    const svc = new Service();
+    const result = svc.createChild("Child work", 101, 100, "orc", {
+      criteria: [{ id: "l1c1", description: "Must work" }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["l1c1"] }],
+    });
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("supports_root_criteria is required");
+    }
+  });
+
   it("renderContractForPrompt produces XML-formatted contract", () => {
     const svc = new Service();
     const result = svc.createChild("Build report", 101, 100, "orc", {

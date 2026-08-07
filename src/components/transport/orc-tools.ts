@@ -101,7 +101,7 @@ const spawnWorkerTool: ToolDefinition = {
       expected_artifacts: { type: "string", description: "JSON array of {id, kind, ref, required, criterion_ids} expected artifacts (supervised)" },
       verification_commands: { type: "string", description: "JSON array of {id, argv, cwd, timeout_ms, criterion_ids} verification commands (supervised)" },
       required_capabilities: { type: "string", description: "JSON array of required capability strings (supervised)" },
-      supports_root_criteria: { type: "string", description: "JSON array of root project criterion IDs this worker supports (#1363)" },
+      supports_root_criteria: { type: "string", description: "JSON array of root project criterion IDs this worker supports. Required for supervised spawns under a project contract; ids must match exactly and are case-sensitive (#1363, #1604)" },
       max_duration_ms: { type: "number", description: "Maximum execution duration in milliseconds (positive integer)" },
       max_tokens: { type: "number", description: "Maximum token budget for this worker (positive integer; requires supervised criteria and is required when project is capped)" },
     },
@@ -173,6 +173,14 @@ const spawnWorkerTool: ToolDefinition = {
       },
       provenance: { root_card_id: 0, card_id: 0, authored_by: "orc", created_at: "" },
     } : undefined;
+    // #1604 R3: surface the required-mapping rejection as actionable tool
+    // output before any card is created — same [err] shape as every other
+    // guard in this tool.
+    if (hasStructuredData) {
+      const { validateWorkerRootCriteria } = await import("../worker-supervision-service.js") as typeof import("../worker-supervision-service.js");
+      const mappingError = validateWorkerRootCriteria(projectCardId, "(pending)", supportsRootCriteriaRaw);
+      if (mappingError) return `[err] ${mappingError}`;
+    }
     let cardId: number;
     try {
       cardId = spin.spawnChild(projectCardId, {

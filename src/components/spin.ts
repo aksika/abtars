@@ -1419,6 +1419,8 @@ export class Spin {
         throw new Error(`Contract validation failed: ${preCheck.errors.map(e => e.message).join("; ")}`);
       }
       const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+      // #1604 R3: required mapping — the pre-check runs before any card is
+      // created, so an omitted mapping fails the spawn, never the settlement.
       const mappingError = validateWorkerRootCriteria(
         rootCardId,
         request.contract.id || "(pending)",

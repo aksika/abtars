@@ -10,18 +10,32 @@ import type { TaskDatabase } from "./tasks/kanban-board.js";
 import type { ContractRow } from "./worker-supervision-store.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
 import { validateCriterionMapping } from "./project-acceptance/project-contract.js";
+import { rootCriterionIds } from "./project-acceptance/project-criterion-coverage.js";
 
 const TAG = "worker-supervision-service";
 const MAX_RESULT_LENGTH = 500;
 const MAX_CHECK_OUTPUT_LENGTH = 10_000;
 
-/** Return a stable admission error when a child claims root criteria it cannot support. */
+/**
+ * Return a stable admission error when a child claims root criteria it cannot
+ * support, or when a supervised child under a contract-bearing root omits the
+ * mapping entirely (#1604 R3). A root card with no project contract, or a
+ * contract without criteria, is unaffected — standalone supervised children
+ * keep working without a mapping.
+ */
 export function validateWorkerRootCriteria(
   rootCardId: number,
   childContractId: string,
   supportsRootCriteria: readonly string[],
 ): string | undefined {
-  if (supportsRootCriteria.length === 0) return undefined;
+  const legal = rootCriterionIds(rootCardId);
+  if (legal === undefined) return undefined; // no project contract → unchanged
+  if (legal.length === 0) return undefined;  // contract without criteria → unchanged
+
+  if (supportsRootCriteria.length === 0) {
+    return `supports_root_criteria is required for supervised children of project #${rootCardId}; `
+      + `declare a JSON array of root criterion ids from: ${legal.join(", ")} (exact ids, case-sensitive)`;
+  }
 
   const reviewStore = new ProjectReviewStore();
   const rootContractRow = reviewStore.getContractByProjectCardId(rootCardId);
@@ -88,10 +102,11 @@ export class WorkerSupervisionService {
       return { error: "supervised children require at least one acceptance criterion; goal-only supervised dispatch is rejected" };
     }
 
-    if (opts?.supportsRootCriteria && opts.supportsRootCriteria.length > 0) {
-      const mappingError = validateWorkerRootCriteria(rootCardId, opts.contractId ?? "(pending)", opts.supportsRootCriteria);
-      if (mappingError) return { error: mappingError };
-    }
+    // #1604 R3: a supervised child under a contract-bearing root must declare
+    // the root criteria it supports; validated unconditionally so an omitted
+    // mapping is rejected here, at spawn time, not at settlement.
+    const mappingError = validateWorkerRootCriteria(rootCardId, opts?.contractId ?? "(pending)", opts?.supportsRootCriteria ?? []);
+    if (mappingError) return { error: mappingError };
 
     const contractId = opts?.contractId ?? createContractId();
     const raw: Record<string, unknown> = {

@@ -1,15 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { spawnChildMock, getSupervisionMock, kanbanGetCardMock } = vi.hoisted(() => ({
+const { spawnChildMock, getSupervisionMock, kanbanGetCardMock, validateWorkerRootCriteriaMock } = vi.hoisted(() => ({
   spawnChildMock: vi.fn().mockReturnValue(123),
   getSupervisionMock: vi.fn().mockReturnValue(undefined),
   kanbanGetCardMock: vi.fn().mockReturnValue({ max_tokens: null }),
+  validateWorkerRootCriteriaMock: vi.fn().mockReturnValue(undefined),
 }));
 
 vi.mock("../spin.js", () => ({ spin: { spawnChild: spawnChildMock } }));
 vi.mock("../tasks/kanban-board.js", () => ({ kanbanGetCard: kanbanGetCardMock }));
 vi.mock("../project-acceptance/project-review-store.js", () => ({
   ProjectReviewStore: class { getSupervision = getSupervisionMock; },
+}));
+vi.mock("../worker-supervision-service.js", () => ({
+  validateWorkerRootCriteria: validateWorkerRootCriteriaMock,
+  WorkerSupervisionService: class {},
 }));
 
 import { clampBrowsingLaneDuration, MIN_BROWSING_LANE_MS, getOrcTools } from "./orc-tools.js";
@@ -43,6 +48,7 @@ describe("spawn_worker contract boundary (#1591)", () => {
     spawnChildMock.mockReturnValue(123);
     getSupervisionMock.mockReturnValue(undefined);
     kanbanGetCardMock.mockReturnValue({ max_tokens: null });
+    validateWorkerRootCriteriaMock.mockReturnValue(undefined);
   });
 
   it("keeps a duration-only spawn unsupervised while preserving timeoutMs", async () => {
@@ -83,5 +89,35 @@ describe("spawn_worker contract boundary (#1591)", () => {
 
     expect(result).toContain("supervised spawn requires ≥1 criterion");
     expect(spawnChildMock).not.toHaveBeenCalled();
+  });
+
+  it("#1604 rejects criteria without supports_root_criteria and creates no card", async () => {
+    validateWorkerRootCriteriaMock.mockReturnValue(
+      "supports_root_criteria is required for supervised children of project #42; declare a JSON array of root criterion ids from: c1, c2, c3, c4, c5 (exact ids, case-sensitive)",
+    );
+    const result = await spawnWorker().execute({
+      goal: "Lane 1 — feed research",
+      criteria: JSON.stringify([{ id: "l1c1", description: "Run feed discovery" }]),
+      max_duration_ms: "300000",
+    }, orcContext);
+
+    expect(result).toContain("[err]");
+    expect(result).toContain("c1, c2, c3, c4, c5");
+    expect(spawnChildMock).not.toHaveBeenCalled();
+    expect(validateWorkerRootCriteriaMock).toHaveBeenCalledWith(42, "(pending)", []);
+  });
+
+  it("#1604 passes the declared mapping to the admission predicate", async () => {
+    validateWorkerRootCriteriaMock.mockReturnValue(undefined);
+    const result = await spawnWorker().execute({
+      goal: "Lane 1 — feed research",
+      criteria: JSON.stringify([{ id: "l1c1", description: "Run feed discovery" }]),
+      supports_root_criteria: JSON.stringify(["c1"]),
+      max_duration_ms: "300000",
+    }, orcContext);
+
+    expect(result).toContain("+ Worker card #123 created");
+    expect(validateWorkerRootCriteriaMock).toHaveBeenCalledWith(42, "(pending)", ["c1"]);
+    expect(spawnChildMock).toHaveBeenCalled();
   });
 });

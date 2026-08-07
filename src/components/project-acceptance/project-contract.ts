@@ -421,6 +421,7 @@ export function validateCriterionMapping(
     return errors;
   }
   const rootIds = new Set(rootContract.criteria.map(c => c.id));
+  const legalIds = rootContract.criteria.map(c => c.id).join(", ");
   const seen = new Set<string>();
   for (let i = 0; i < mapping.supports_root_criteria.length; i++) {
     const rcId = mapping.supports_root_criteria[i]!;
@@ -431,7 +432,7 @@ export function validateCriterionMapping(
     } else {
       seen.add(rcId);
       if (!rootIds.has(rcId)) {
-        errors.push(error("bad_reference", `$.supports_root_criteria[${i}]`, `unknown root criterion id "${rcId}"`));
+        errors.push(error("bad_reference", `$.supports_root_criteria[${i}]`, `unknown root criterion id "${rcId}"; legal ids: ${legalIds}`));
       }
     }
   }
