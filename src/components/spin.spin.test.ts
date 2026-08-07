@@ -51,6 +51,20 @@ vi.mock("./peer-transport/index.js", () => ({
   getPeerTransport: () => ({ send: callbackSend }),
 }));
 
+// #1599: controlled worker-supervision settlement for the criteria gate tests.
+// spin.ts instantiates WorkerSupervisionService directly in finishSpin; the
+// mock supplies a per-test collectAndSettle outcome without touching the DB.
+const collectAndSettleOutcome = { value: undefined as unknown };
+vi.mock("./worker-supervision-service.js", () => ({
+  WorkerSupervisionService: class {
+    collectAndSettle() { return collectAndSettleOutcome.value as any; }
+    getContract() { return undefined; }
+    cardHasContract() { return false; }
+    renderContractForPrompt() { return ""; }
+  },
+  validateWorkerRootCriteria: () => null,
+}));
+
 vi.mock("./spin-notifications.js", () => ({
   drainOrcNotifications: () => [],
 }));
@@ -472,6 +486,85 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
       expect(card.status).not.toBe("done");
+      expect(callbackSend).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("#1599 — worker criteria outcome decides card status", () => {
+    function makeEnvelope(criteria: Array<{ status: string }>): any {
+      return {
+        schema_version: 1,
+        attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "local_worker", executor_id: "e", started_at: "", finished_at: "" },
+        outcome: "completed",
+        criteria,
+        checks: [],
+        artifacts: [],
+        worker_report: { summary: "x", claims: [], unresolved_risks: [] },
+      };
+    }
+
+    beforeEach(() => {
+      callbackSend.mockReset();
+    });
+
+    it("settles a supervised worker card failed when criteria did not pass", async () => {
+      collectAndSettleOutcome.value = {
+        settled: true,
+        summary: "✗ 2/2 criteria failed",
+        envelope: makeEnvelope([{ criterion_id: "c1", status: "failed", evidence_ids: [] }, { criterion_id: "c2", status: "failed", evidence_ids: [] }]),
+      };
+      const cardId = kanbanEnqueue("worker lane", "peer");
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("failed");
+      expect(card.status).not.toBe("delivering");
+      const cb = callbackSend.mock.calls[0]?.[1] as { payload?: { status?: string } } | undefined;
+      expect(cb?.payload?.status).toBe("failed");
+    });
+
+    it("settles a supervised worker card done when all criteria pass", async () => {
+      collectAndSettleOutcome.value = {
+        settled: true,
+        summary: "✓ 2/2 criteria passed",
+        envelope: makeEnvelope([{ criterion_id: "c1", status: "passed", evidence_ids: ["v1"] }, { criterion_id: "c2", status: "passed", evidence_ids: ["v2"] }]),
+      };
+      const cardId = kanbanEnqueue("worker lane", "peer");
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("done");
+    });
+
+    it("leaves unsupervised workers on today's done path", async () => {
+      collectAndSettleOutcome.value = { settled: false, summary: "worker output" };
+      const cardId = kanbanEnqueue("plain lane", "peer");
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "W", cardId, goal: "run lane", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("done");
+    });
+
+    it("fails closed when a supervised worker's criteria outcome cannot be read", async () => {
+      collectAndSettleOutcome.value = { settled: false, summary: "[conflict] duplicate attempt with different result" };
+      const cardId = kanbanEnqueue("unreadable lane", "peer");
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).not.toBe("done");
+      expect(card.status).not.toBe("failed");
       expect(callbackSend).not.toHaveBeenCalled();
     });
   });

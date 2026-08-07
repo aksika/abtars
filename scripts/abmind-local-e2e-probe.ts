@@ -59,7 +59,6 @@ async function main(): Promise<ProbeResult> {
       failures.push(`missing capabilities: store=${runtime.supports("instantStore")} recall=${runtime.supports("recall")} edit=${runtime.supports("editMemory")}`);
     }
 
-    const storeToken = `${runId}-probe-store`;
     const storeResult = await runtime.instantStore({
       userId: user,
       contentEn: "Probe store test",
@@ -68,7 +67,7 @@ async function main(): Promise<ProbeResult> {
       emotionScore: 0.5,
       confidence: 5,
       classification: 1,
-    }, storeToken);
+    });
     if (!storeResult.stored || !storeResult.memoryId || !storeResult.semanticRevision) {
       failures.push(`instantStore failed: ${JSON.stringify(storeResult)}`);
     }

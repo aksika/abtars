@@ -1,8 +1,9 @@
 #!/usr/bin/env tsx
-import { mkdirSync, writeFileSync, existsSync, readFileSync, mkdtempSync, rmSync, lstatSync, utimesSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, mkdtempSync, rmSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import type { ScheduledTask } from "../src/components/tasks/task-types.js";
 
 const RUN_ID = `e2e-${Date.now()}-${randomUUID().slice(0, 8)}`;
 const OUT_DIR = join(process.cwd(), "test-results", "report-pipeline-e2e", RUN_ID);
@@ -77,12 +78,21 @@ async function main(): Promise<void> {
     if (queue.currentJob) throw new Error(`queue did not become idle within ${timeoutMs}ms`);
   }
 
+  // Fixtures go through the production normalizer — task-store.ts:30/:74 do
+  // the same, so any future required field flows in automatically instead of
+  // becoming the next silent drift.
+  function makeEntry(raw: Record<string, unknown>): ScheduledTask {
+    const result = taskTypes.normalize(raw);
+    if (!result.ok) throw new Error(`invalid fixture ${String(raw["id"])}: ${result.error}`);
+    return result.entry;
+  }
+
   async function runProductionFixture(
     taskId: string,
     artifactName: string,
     sections: string[],
     minBytes: number,
-  ): Promise<CheckpointSuccess> {
+  ): Promise<string | CheckpointSuccess> {
     const artifactPath = join(H, "workspace", taskId, artifactName);
     mkdirSync(join(H, "workspace", taskId), { recursive: true });
     let cardId = 0;
@@ -115,15 +125,11 @@ async function main(): Promise<void> {
     if (enqueueError) return `fixture ${taskId} was not queued: ${enqueueError}`;
     await waitForQueueIdle(queue);
     // #1539: lane release is driven by the durable terminal event; the card
-    // mutation happens in the same settlement flow, but poll for the terminal
-    // card state so a straggler side effect can never be asserted too early.
-    const terminalDeadline = Date.now() + 8000;
-    let card: ReturnType<typeof kanbanBoard.kanbanGetCard> | undefined;
-    while (Date.now() < terminalDeadline) {
-      card = kanbanBoard.kanbanGetCard(cardId);
-      if (card && (card.status === "done" || card.status === "delivered" || card.status === "failed")) break;
-      await new Promise(resolve => setTimeout(resolve, 25));
-    }
+    // mutation happens in the same settlement flow. Settlement completes
+    // synchronously before waitForQueueIdle returns — a poll loop here would
+    // mask the exact regression M46-48 exist to catch if settlement ever moves
+    // onto a heartbeat sweep.
+    const card = kanbanBoard.kanbanGetCard(cardId);
     if (!card || card.status !== "done") return `fixture ${taskId} card not done: ${card?.status ?? "missing"}`;
     const state = stateStore.readState(taskId);
     const runs = historyStore.recentRuns(taskId, 5);
@@ -136,7 +142,7 @@ async function main(): Promise<void> {
     await deliverCard(card, {
       sendMessage: async () => { sends++; return "sent" as const; },
       sendDocument: async (_chatId, path) => { if (path !== artifactPath) throw new Error("wrong artifact delivered"); sends++; return "sent" as const; },
-      announce: async () => { sends++; return "sent" as const; },
+      announce: async (_prompt) => { sends++; },
       chatIdFor: () => "acceptance",
     });
     const delivered = kanbanBoard.kanbanGetCard(cardId);
@@ -144,9 +150,9 @@ async function main(): Promise<void> {
       return `fixture ${taskId} delivery incomplete: status=${delivered?.status} result=${delivered?.delivery_result} sends=${sends}`;
     }
     await deliverCard(delivered, {
-      sendMessage: async () => { sends++; },
-      sendDocument: async () => { sends++; },
-      announce: async () => { sends++; },
+      sendMessage: async (_chatId, _text) => { sends++; return "not_sent" as const; },
+      sendDocument: async (_chatId, _filePath, _caption) => { sends++; return "not_sent" as const; },
+      announce: async (_prompt) => { sends++; },
       chatIdFor: () => "acceptance",
     });
     if (sends !== 1) return `fixture ${taskId} was delivered more than once`;
@@ -172,7 +178,6 @@ async function main(): Promise<void> {
 
   scenario("Scheduler invocation");
   await checkpoint("M02", "checkCron runs without throwing", "scheduler", "no unhandled error", async () => {
-    const { readEntries } = await import("../src/components/tasks/task-store.js");
     // No entries → empty return, not an error
     const result = taskChecker.checkCron();
     if (!Array.isArray(result)) return `checkCron did not return array`;
@@ -182,7 +187,7 @@ async function main(): Promise<void> {
   await checkpoint("M03", "checkCron returns reserved task for due entry", "scheduler", "reserved task with runId", async () => {
     const { writeEntries } = await import("../src/components/tasks/task-store.js");
     const id = `cron-${Date.now()}`;
-    const entry = { id, kind: "agent" as const, delivery: "announce" as const, schedule: "* * * * *", agent: "task" as const, prompt: "test", enabled: true, priority: "medium" as const };
+    const entry = makeEntry({ id, kind: "agent", delivery: "announce", schedule: "* * * * *", agent: "task", prompt: "test", enabled: true, priority: "medium" });
     writeEntries([entry]);
     // Force nextRunAt into the past so scheduler considers it due
     stateStore.updateState(id, { nextRunAt: Date.now() - 60000 });
@@ -320,7 +325,7 @@ async function main(): Promise<void> {
       initialState: { systemPrompt: "acceptance", model: { id: "acceptance-model" } as any, messages: [], tools: [] },
       streamFn: (() => { throw new Error("provider must not be called for empty host probe"); }) as any,
     });
-    await host.start({ module: { Agent: real.Agent }, installation: { executable: "", packageRoot: "", version: "installed", source: "path", moduleRoots: { ai: "", tui: "", agentCore: "" } } });
+    await host.start({ module: { Agent: real.Agent as unknown as import("../src/components/transport/pi-core-types.js").PiAgentCoreModule["Agent"] }, installation: { executable: "", packageRoot: "", version: "installed", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } } });
     if (host.state !== "running") return `Pi host did not enter running state: ${host.state}`;
     host.cancel();
     await host.waitForSettlement();
@@ -339,7 +344,7 @@ async function main(): Promise<void> {
   await checkpoint("M17", "Spin dispatchAwait accepts caller-owned settlement", "execution", "settlementOwner param", async () => {
     let observedRequest: import("../src/components/spin-types.js").SpinRequest | undefined;
     const id = `settlement-owner-${Date.now()}`;
-    const entry = { id, kind: "agent" as const, delivery: "announce" as const, at: new Date().toISOString(), agent: "task" as const, prompt: "settlement owner probe", enabled: true, priority: "medium" as const, interaction: { mode: "oneshot" as const } };
+    const entry = makeEntry({ id, kind: "agent", delivery: "announce", at: new Date().toISOString(), agent: "task", prompt: "settlement owner probe", enabled: true, priority: "medium", interaction: { mode: "oneshot" } });
     const reservation = stateStore.reserveRun(id, { runId: `${id}_run`, groupId: `${id}:group`, attempt: 1, trigger: "manual", occurrenceAt: Date.now(), deadlineAt: Date.now() + 60_000 });
     if (!reservation.ok) return `could not reserve settlement-owner probe`;
     const probe = new ScheduledTaskRunner({ agentRunner: async request => {
@@ -348,7 +353,7 @@ async function main(): Promise<void> {
       kanbanBoard.kanbanRunning(cardId);
       return { cardId, result: "settlement owner probe" };
     } });
-    const outcome = await probe.run(entry, reservation.run);
+    const outcome = await probe.run(entry as ScheduledTask & { kind: "agent" }, reservation.run);
     if (outcome.status !== "success") return `runner outcome=${outcome.status}: ${outcome.safeDetail}`;
     if (observedRequest?.settlementOwner !== "caller") return `runner did not pass settlementOwner=caller`;
     return { observed: "real ScheduledTaskRunner passed caller-owned settlement into provider boundary", evidence: [`run=${reservation.run.runId}`, `execution_id=${observedRequest.executionControl?.executionRef ?? "missing"}`, "settlement_owner=caller"], correlation: { taskId: id, runId: reservation.run.runId, groupId: reservation.run.groupId, executionId: observedRequest.executionControl?.executionRef } };
@@ -485,9 +490,7 @@ async function main(): Promise<void> {
     // Build a PiCoreExecutionHost with a mock Agent whose waitForIdle() never
     // resolves — this simulates a provider that ignores abort. The #1506 fix
     // must make waitForSettlement() resolve immediately on cancel regardless.
-    const emitted: any[] = [];
     const subs: Array<(e: any) => void> = [];
-    let subscribeFn: ((l: (e: any) => void) => () => void) | null = null;
     const mockAgent = {
       isRunning: false,
       subscribe: (l: (e: any) => void) => { subs.push(l); subscribed = true; return () => { const i = subs.indexOf(l); if (i >= 0) subs.splice(i, 1); }; },
@@ -499,11 +502,11 @@ async function main(): Promise<void> {
       waitForIdle: () => new Promise<void>(() => {}), // NEVER resolves
     };
     const mockModule = { Agent: class { constructor(_opts: any) { Object.assign(this, mockAgent); } } } as any;
-    const mockInstallation = { executable: "/pi", packageRoot: "/pi", version: "0.80.7", source: "path", moduleRoots: { ai: "", tui: "", agentCore: "" } };
+    const mockInstallation = { executable: "/pi", packageRoot: "/pi", version: "0.80.7", source: "path" as const, pinStatus: "at-pin" as const, moduleRoots: { ai: "", tui: "", agentCore: "" } };
     const host = new PH.PiCoreExecutionHost({
       executionId,
       sessionId: "m30-session",
-      initialState: { systemPrompt: "test", model: { id: "test" }, messages: [] },
+      initialState: { systemPrompt: "test", model: { id: "test", name: "test", api: "pi-messages", provider: "pi", baseUrl: "https://localhost", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }, messages: [] },
       streamFn: (() => {}) as any,
     });
     await host.start({ module: mockModule, installation: mockInstallation }).catch(() => {});
@@ -586,7 +589,7 @@ async function main(): Promise<void> {
     if (!before?.activeRun) return `activeRun not set before reconcile`;
     const { ScheduledRunCoordinator } = await import("../src/components/tasks/scheduled-run-coordinator.js");
     const coordinator = new ScheduledRunCoordinator();
-    const entry = { id, kind: "agent" as const, delivery: "announce" as const, at: new Date().toISOString(), agent: "task" as const, prompt: "t", enabled: true, priority: "medium" as const, interaction: { mode: "oneshot" as const } };
+    const entry = makeEntry({ id, kind: "agent", delivery: "announce", at: new Date().toISOString(), agent: "task", prompt: "t", enabled: true, priority: "medium", interaction: { mode: "oneshot" } });
     await coordinator.recover([entry]);
     const after = stateStore.readState(id);
     if (after?.activeRun) return `activeRun not cleared after recover with past deadline`;
@@ -705,7 +708,7 @@ async function main(): Promise<void> {
   // ── M45: Task listing ────────────────────────────────────────────────────
 
   await checkpoint("M45", "getTaskView has coherent definition+state+history", "operators", "definition+state+runs present", async () => {
-    const entry = { id: "vt", kind: "agent" as const, delivery: "announce" as const, at: new Date().toISOString(), agent: "task" as const, prompt: "test", enabled: true, priority: "medium" as const };
+    const entry = makeEntry({ id: "vt", kind: "agent", delivery: "announce", at: new Date().toISOString(), agent: "task", prompt: "test", enabled: true, priority: "medium" });
     const view = taskService.getTaskView(entry, new Set(["vt"]));
     if (!view.definition) return `definition missing`;
     if (view.state === undefined) return `state missing`;

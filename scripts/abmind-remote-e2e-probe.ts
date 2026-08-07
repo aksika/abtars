@@ -42,6 +42,10 @@ async function main(): Promise<ProbeResult> {
     failures.push("ABMIND_E2E_DISPOSABLE_USER must be an explicit e2e-* user");
     return { ok: false, failures };
   }
+  if (!home) {
+    failures.push("home is required");
+    return { ok: false, failures };
+  }
 
   const configDir = join(home, "config");
   if (!existsSync(join(configDir, "abmind.json"))) {
@@ -87,7 +91,6 @@ async function main(): Promise<ProbeResult> {
         `store=${result.runtime.supports("instantStore")} recall=${result.runtime.supports("recall")} edit=${result.runtime.supports("editMemory")}`);
     }
 
-    const storeToken = `${runId}-probe-store`;
     const storeResult = await result.runtime.instantStore({
       userId: user,
       contentEn: "Remote probe store test",
@@ -96,7 +99,7 @@ async function main(): Promise<ProbeResult> {
       emotionScore: 0.5,
       confidence: 5,
       classification: 1,
-    }, storeToken);
+    });
     if (!storeResult.stored || !storeResult.memoryId || !storeResult.semanticRevision) {
       failures.push(`instantStore failed: ${JSON.stringify(storeResult)}`);
     }

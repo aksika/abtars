@@ -1018,6 +1018,11 @@ export class Spin {
       // #1366: Collect evidence and settle for supervised Workers
       let workerSummary = result.slice(0, 500);
       let staleWorkerResult = false;
+      // #1599: structured criteria verdict for supervised worker dispatches.
+      // null = no criteria to consult (unsupervised); "passed"/"failed" = the
+      // settled envelope's verdict; "unreadable" = supervised but no verdict
+      // obtainable (fail closed, mirroring the O-card branch).
+      let criteriaVerdict: "passed" | "failed" | "unreadable" | null = null;
       if (spec.contractId || spec.type === "W") {
         try {
           const svc = new WorkerSupervisionService();
@@ -1025,6 +1030,12 @@ export class Spin {
           const outcome = svc.collectAndSettle(cardId, result, session.workingDir, spec.attemptId, generation, usage ?? undefined);
           if (outcome.settled) {
             workerSummary = outcome.summary;
+            if (outcome.envelope) {
+              const criteria = outcome.envelope.criteria;
+              criteriaVerdict = criteria.length > 0
+                ? criteria.every(c => c.status === "passed") ? "passed" : "failed"
+                : "unreadable";
+            }
             if (spec.executionControl) {
               spec.executionControl.markTerminal(outcome.envelope ? "completed" : "failed");
             }
@@ -1040,6 +1051,11 @@ export class Spin {
             staleWorkerResult = true;
             logWarn(TAG, `Card ${cardId}: evidence settlement failed — blocking kanbanComplete: ${err instanceof Error ? err.message : String(err)}`);
           }
+        }
+        // #1599: fail closed — a supervised worker whose criteria outcome
+        // cannot be read must never be completed or reported as successful.
+        if (spec.contractId && criteriaVerdict === null) {
+          criteriaVerdict = "unreadable";
         }
       }
       // #1363 Task 10: supervised O-cards own their lifecycle via projectStateToKanban.
@@ -1060,15 +1076,28 @@ export class Spin {
           logWarn(TAG, `Card ${cardId}: cannot verify project supervision — deferring terminal settlement: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-          if (shouldKanbanComplete && !staleWorkerResult && spec.settlementOwner !== "caller") {
-        kanbanComplete(cardId, null, workerSummary);
+      // #1599: a supervised worker card settles by its criteria verdict, not by
+      // the execution turn returning. Criteria failed → settle failed (never
+      // delivered); criteria unreadable → defer terminal settlement.
+      if (shouldKanbanComplete && !staleWorkerResult && spec.settlementOwner !== "caller") {
+        if (criteriaVerdict === "failed") {
+          kanbanFail(cardId, workerSummary);
+        } else if (criteriaVerdict === "unreadable") {
+          logWarn(TAG, `Card ${cardId}: supervised worker criteria unreadable — deferring terminal settlement`);
+        } else {
+          kanbanComplete(cardId, null, workerSummary);
+        }
       }
       // Supervised project results are emitted by ProjectReviewService only
       // after accepted settlement commits. The execution turn must not send a
       // premature peer "done" callback.
       if (spec.callbackPeer && !supervisedProject) {
-        const card = kanbanGetCard(cardId);
-        fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
+        if (criteriaVerdict === "failed") {
+          fireCallback(spec.callbackPeer, cardId, "failed", undefined, workerSummary);
+        } else if (criteriaVerdict !== "unreadable") {
+          const card = kanbanGetCard(cardId);
+          fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
+        }
       }
     }
 
