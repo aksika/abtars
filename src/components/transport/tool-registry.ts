@@ -68,23 +68,26 @@ const CLI_TIMEOUT_MS = 60_000;
  */
 export function validateBashSyntax(cmd: string): { ok: true } | { ok: false; stderr: string; hint?: string } {
   try {
-    execFileSync("bash", ["-n", "-c", cmd], { timeout: 5000, maxBuffer: 64 * 1024, stdio: "pipe" });
+    // Do not source BASH_ENV or user startup files during validation. This is
+    // a parse-only probe and must not run ambient shell initialization before
+    // the real, authorized command is started.
+    execFileSync("bash", ["--noprofile", "--norc", "-n", "-c", cmd], { timeout: 5000, maxBuffer: 64 * 1024, stdio: "pipe" });
     return { ok: true };
   } catch (err) {
-    const e = err as { stderr?: Buffer | string; message?: string; code?: string; killed?: boolean };
+    const e = err as { stderr?: Buffer | string; message?: string; code?: string | number; killed?: boolean; signal?: string };
     // Fail OPEN on infrastructure failures — these are not syntax verdicts
     // and must never block a possibly-valid command as shell_syntax_error:
     // bash absent (ENOENT), oversized stderr/stdout (maxBuffer), or a
     // hung/killed parse (timeout).
     const msg = e.message ?? "";
-    if (e.code === "ENOENT" || e.killed === true || /maxBuffer/.test(msg)) return { ok: true };
+    if (e.code === "ENOENT" || e.code === "ETIMEDOUT" || e.code === "ENOBUFS" || e.killed === true || e.signal || /maxBuffer|timed out/i.test(msg)) return { ok: true };
     const raw = typeof e.stderr === "string" ? e.stderr : e.stderr instanceof Buffer ? e.stderr.toString("utf-8") : "";
     const stderr = redactSecrets(raw || msg || "syntax error").slice(0, 1000);
     const trimmed = cmd.trimEnd();
     let hint: string | undefined;
     // Recognizable truncated redirection operator (e.g. trailing `2>&`) gets
     // an actionable hint; other syntax errors rely on bash's own stderr.
-    if (/\b\d?>&\s*$/.test(trimmed)) {
+    if (/\b2>&\s*$/.test(trimmed)) {
       hint = 'redirection operator truncated — did you mean "2>&1"? Re-submit the corrected command explicitly.';
     }
     return { ok: false, stderr, hint };

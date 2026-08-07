@@ -1,5 +1,6 @@
 import { logDebug, logWarn, logTrace } from "../logger.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
+import { candidateKey as candidateIdentityKey } from "./model-candidates.js";
 import type { AgentContext, AgentLoopTurnUpdate, AgentMessage, AbtarsAgentMessage, SafetyPrepareNextTurnContext, ModelApi, ToolDecision, TurnDecision } from "./pi-core-types.js";
 import { ToolLoopGuard } from "./tool-loop-guard.js";
 
@@ -176,19 +177,28 @@ export function createPiExecutionSafetyController(
       if (candidateRounds >= mc) {
         _incident = { type: "candidate_round_limit", candidateKey, roundsUsed: candidateRounds };
         _lastTerminalIncident = _incident;
-        policy.excludedKeys.add(candidateKey);
+        // Rotation exclusions are deliberately separate from behavior
+        // exclusions. A successful candidate must not become permanently
+        // unhealthy just because it completed one rotation segment.
+        policy.rotationExcludedKeys.add(candidateKey);
         const next = policy.selectModel();
         if (next) {
           logDebug(TAG, `Candidate round limit for ${candidateKey} — switching to ${next.model}`);
           return { decision: "stop", reason: `Candidate round limit (${mc}) for ${candidateKey} — switching` };
         }
-        policy.excludedKeys.delete(candidateKey);
+        // All eligible candidates completed this rotation segment. Start a
+        // fresh rotation cycle; the current candidate is eligible again, but
+        // provider-health and behavior exclusions remain intact.
+        policy.rotationExcludedKeys.clear();
+        const cycled = policy.selectModel();
+        if (cycled && candidateIdentityKey(cycled.model, cycled.endpoint) !== candidateKey) {
+          logDebug(TAG, `Candidate round limit for ${candidateKey} — cycling to ${cycled.model}`);
+          return { decision: "stop", reason: `Candidate round limit (${mc}) for ${candidateKey} — cycling` };
+        }
+        // No eligible alternate exists. This is normally handled by the sole
+        // candidate fast path above; retain the prompt-wide hard bound as the
+        // final safety limit for a policy that becomes exhausted mid-turn.
         logDebug(TAG, `Candidate round limit for ${candidateKey} — no alternate, continuing`);
-        // #1502: the prompt-wide limit is the hard bound for a sole candidate,
-        // so keep advancing prompt/candidate rounds even while continuing past
-        // the switch threshold. Without this, a single-candidate report that
-        // crosses the candidate-round limit never reaches the prompt-wide stop
-        // and runs until the execution deadline instead of terminating cleanly.
         promptRounds++;
         candidateRounds++;
         batchCancelled = false;
@@ -219,6 +229,9 @@ export function createPiExecutionSafetyController(
         const candidate = context.candidateKey;
         const [candidateModel, _candidateEndpoint] = candidate.split("@");
         if (candidateModel && _candidateEndpoint) {
+          // Behavior recovery should be able to use any healthy candidate;
+          // successful-turn rotation exclusions are not health exclusions.
+          policy.rotationExcludedKeys.clear();
           if (!_correctiveAdmitted) {
             policy.excludedKeys.add(candidate);
           }

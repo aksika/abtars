@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -161,6 +161,20 @@ describe("shell syntax pre-validation (#1595)", () => {
     expect(parsed.stderr).toContain("syntax error");
   });
 
+  it("does not run side effects from a syntactically invalid command", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "abtars-syntax-side-effect-"));
+    const marker = join(cwd, "must-not-exist");
+    try {
+      const result = await executeToolCall("execute_bash", {
+        command: `printf touched > ${JSON.stringify(marker)} 2>&`,
+      }, { userId: "test", executionScope: { cwd, env: Object.freeze({}) } });
+      expect(JSON.parse(result)).toMatchObject({ error: "shell_syntax_error" });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("rejects other malformed syntax with a structured error and no execution side effect", async () => {
     const result = await executeToolCall("execute_bash", { command: "echo 'unterminated" }, { userId: "test" });
     const parsed = JSON.parse(result) as { error?: string };
@@ -169,6 +183,13 @@ describe("shell syntax pre-validation (#1595)", () => {
 
   it("does not emit the 2>&1 hint for truncations that are not stderr redirects", async () => {
     const result = await executeToolCall("execute_bash", { command: "echo hi >" }, { userId: "test" });
+    const parsed = JSON.parse(result) as { error?: string; syntax_hint?: string };
+    expect(parsed.error).toBe("shell_syntax_error");
+    expect(parsed.syntax_hint).toBeUndefined();
+  });
+
+  it("does not guess a correction for the out-of-scope 1>& family", async () => {
+    const result = await executeToolCall("execute_bash", { command: "echo hi 1>&" }, { userId: "test" });
     const parsed = JSON.parse(result) as { error?: string; syntax_hint?: string };
     expect(parsed.error).toBe("shell_syntax_error");
     expect(parsed.syntax_hint).toBeUndefined();

@@ -29,19 +29,6 @@ export interface DeliverDeps {
 const warnedUnacceptedOCards = new Set<number>();
 
 export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<void> {
-  if (card.type === "O") {
-    const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
-    const store = new ProjectReviewStore();
-    const sup = store.getSupervision(card.id);
-    if (!sup || sup.state !== "accepted") {
-      if (!warnedUnacceptedOCards.has(card.id)) {
-        warnedUnacceptedOCards.add(card.id);
-        logWarn(TAG, `Card ${card.id} (${card.title}) is done but its O-type project has no accepted supervision (state=${sup?.state ?? "none"}) — skipping delivery. Complete the project acceptance review (review_project accept) to deliver this card.`);
-      }
-      return;
-    }
-  }
-
   // Only deliver cards with result_path (report artifacts) or result_summary
   // Skip cards that have already been delivered or have unknown delivery state
   const fresh = kanbanGetCard(card.id);
@@ -58,6 +45,19 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
   if (fresh.delivery_result === "unknown") {
     logDebug(TAG, `Card ${card.id} delivery_result=unknown — skipping auto-retry`);
     return;
+  }
+
+  if (fresh.type === "O") {
+    const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+    const store = new ProjectReviewStore();
+    const sup = store.getSupervision(fresh.id);
+    if (!sup || sup.state !== "accepted") {
+      if (!warnedUnacceptedOCards.has(fresh.id)) {
+        warnedUnacceptedOCards.add(fresh.id);
+        logWarn(TAG, `Card ${fresh.id} (${fresh.title}) is done but its O-type project has no accepted supervision (state=${sup?.state ?? "none"}) — skipping delivery. Complete the project acceptance review (review_project accept) to deliver this card.`);
+      }
+      return;
+    }
   }
 
   if (!kanbanClaimDelivery(card.id)) {

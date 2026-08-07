@@ -242,7 +242,16 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
   return (model: Model<Api>, context: Context, fnOptions: SimpleStreamOptions = {}): AssistantMessageEventStream => {
     const signal = fnOptions.signal ?? new AbortController().signal;
     const outer = async function* (): AsyncGenerator<AssistantMessageEvent> {
-      for (const candidate of options.policy.candidates) {
+      // Start with the policy's selected candidate, then walk the remaining
+      // candidates. Rotation can select a later candidate (for example B
+      // after A's successful-turn budget); keeping the selected candidate
+      // first ensures a provider failure can still fall back to A in the same
+      // logical turn after rotation state is cleared.
+      const firstSelected = options.policy.selectModel();
+      const orderedCandidates = firstSelected
+        ? [firstSelected, ...options.policy.candidates.filter((candidate) => candidate !== firstSelected)]
+        : [];
+      for (const candidate of orderedCandidates) {
         const selected = options.policy.selectModel();
         if (!selected || selected !== candidate) continue;
         if (signal.aborted) {
@@ -292,6 +301,10 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           const poisonCandidate = (): void => {
             options.policy.recordError(candidate, "transient");
             options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
+            // A provider failure is a fallback event, not a successful-turn
+            // rotation event. Healthy candidates from the prior rotation
+            // cycle must be eligible for recovery.
+            options.policy.rotationExcludedKeys.clear();
           };
           const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage): void => {
             if (telemetryEnded) return;

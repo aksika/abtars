@@ -87,8 +87,30 @@ describe("createPiExecutionSafetyController", () => {
     const result = ctrl.beginProviderTurn("model-a@https://a.test/v1");
     expect(result.decision).toBe("stop");
     expect(result.reason).toContain("Candidate round limit");
-    expect(altPolicy.excludedKeys.has("model-a@https://a.test/v1")).toBe(true);
+    expect(altPolicy.rotationExcludedKeys.has("model-a@https://a.test/v1")).toBe(true);
+    expect(altPolicy.excludedKeys.has("model-a@https://a.test/v1")).toBe(false);
     expect(registry.getHealth().size).toBe(0);
+  });
+
+  it("clears temporary rotation exclusions after a full multi-candidate cycle (#1595)", () => {
+    const multi = [
+      { model: "model-a", provider: "prov-a", endpoint: "https://a.test/v1", maxContext: 128000, apiKey: "key-a", source: "primary" },
+      { model: "model-b", provider: "prov-b", endpoint: "https://b.test/v1", maxContext: 128000, apiKey: "key-b", source: "primary" },
+    ];
+    const multiPolicy = new FallbackPolicy(multi, registry);
+    const ctrl = createPiExecutionSafetyController(multiPolicy, { maxCandidateRounds: 2, maxPromptRounds: 20 });
+
+    ctrl.beginProviderTurn("model-a@https://a.test/v1");
+    ctrl.beginProviderTurn("model-a@https://a.test/v1");
+    expect(ctrl.beginProviderTurn("model-a@https://a.test/v1").decision).toBe("stop");
+    expect(multiPolicy.selectModel()?.model).toBe("model-b");
+
+    ctrl.beginProviderTurn("model-b@https://b.test/v1");
+    ctrl.beginProviderTurn("model-b@https://b.test/v1");
+    expect(ctrl.beginProviderTurn("model-b@https://b.test/v1").decision).toBe("stop");
+    expect(multiPolicy.rotationExcludedKeys.size).toBe(0);
+    expect(multiPolicy.excludedKeys.size).toBe(0);
+    expect(multiPolicy.selectModel()?.model).toBe("model-a");
   });
 
   it("sole candidate keeps advancing promptRounds past the candidate limit and stops at the prompt-wide hard limit (#1502)", () => {

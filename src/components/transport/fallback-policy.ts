@@ -17,6 +17,9 @@ export class FallbackPolicy {
   readonly candidates: readonly ModelCandidate[];
   readonly registry: ModelHealthRegistry;
   lastDecision: FallbackDecision | null = null;
+  /** Candidates temporarily skipped by successful-turn rotation. */
+  rotationExcludedKeys: Set<string> = new Set();
+  /** Candidates excluded for a behavior incident in the current prompt. */
   excludedKeys: Set<string> = new Set();
 
   constructor(candidates: readonly ModelCandidate[], registry: ModelHealthRegistry) {
@@ -31,6 +34,10 @@ export class FallbackPolicy {
       const key = candidateKey(c.model, c.endpoint);
       if (this.excludedKeys.has(key)) {
         skipped.push(`${c.model}: excluded (behavior failure this prompt)`);
+        continue;
+      }
+      if (this.rotationExcludedKeys.has(key)) {
+        skipped.push(`${c.model}: excluded (rotation this prompt)`);
         continue;
       }
       if (this.registry.shouldSkip(c.model, c.endpoint)) {

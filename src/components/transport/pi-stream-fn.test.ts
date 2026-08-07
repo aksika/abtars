@@ -139,6 +139,27 @@ describe("createPiStreamFn", () => {
     expect(textEvents.some((e) => e.delta?.includes("Hello from fallback"))).toBe(true);
   });
 
+  it("falls back to a prior rotation candidate when the selected candidate fails", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const rotatedPolicy = new FallbackPolicy([first, second], registry);
+    rotatedPolicy.rotationExcludedKeys.add("first@https://first/v1");
+
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("selected candidate unavailable"))
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 1, output: 1 } } },
+      ]));
+    const streamFn = createPiStreamFn({ policy: rotatedPolicy, executionId: "rotation-fallback", createPiAiAttempt: attemptFactory });
+    const events: any[] = [];
+    for await (const event of streamFn({ id: "test" }, { messages: [] })) events.push(event);
+
+    expect(attemptFactory.mock.calls.map((call) => (call[0] as ModelCandidate).model)).toEqual(["second", "first"]);
+    expect(events.some((event) => event.type === "done" && event.message?.content === "recovered")).toBe(true);
+    expect(rotatedPolicy.excludedKeys.has("second@https://second/v1")).toBe(true);
+    expect(rotatedPolicy.rotationExcludedKeys.size).toBe(0);
+  });
+
   it("does not fall back after semantic commit", async () => {
     const firstCandidate = makeCandidate({ model: "first" });
     const secondCandidate = makeCandidate({ model: "second" });

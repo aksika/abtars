@@ -429,11 +429,6 @@ export class PiCoreTransport implements IKiroTransport {
           if (snap) this._lastUsage = snap;
         }
 
-        if (responseText.trim() !== "") {
-          logDebug(TAG, `sendPrompt: returning ${responseText.length}ch assistant text`);
-          return responseText;
-        }
-
         // #1595: the terminal cause leads; a prior tool failure is supporting
         // context only. Never present a stale tool failure as the primary
         // reason, and never report candidate_exhausted:true for a run that
@@ -443,6 +438,11 @@ export class PiCoreTransport implements IKiroTransport {
           const inc = safety.lastTerminalIncident;
           logInfo(TAG, `sendPrompt: terminal safety incident (${inc.type}) — leading with terminal cause, prior tool failure retained as context`);
           throw new PiCoreToolExecutionError(buildTerminalDiagnostic(executionId, inc, this._lastToolFailure ?? undefined));
+        }
+
+        if (responseText.trim() !== "") {
+          logDebug(TAG, `sendPrompt: returning ${responseText.length}ch assistant text`);
+          return responseText;
         }
 
         if (this._lastToolFailure) {
