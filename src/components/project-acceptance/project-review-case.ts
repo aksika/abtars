@@ -1,6 +1,6 @@
 import { ProjectReviewStore } from "./project-review-store.js";
-import type { ProjectAcceptanceContractV1, ContractCriterionMapping } from "./project-contract.js";
-import { findUncoveredCriteria } from "./project-contract.js";
+import type { ProjectAcceptanceContractV1 } from "./project-contract.js";
+import { readProjectCriterionCoverage } from "./project-criterion-coverage.js";
 import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
@@ -168,8 +168,17 @@ export class ReviewCaseAssembler {
       }
     } catch {}
 
-    // Gather child contract mappings, results, and evidence
-    const childMappings: ContractCriterionMapping[] = [];
+    // #1604: the coverage read-model is the single source of truth for
+    // child→root mappings and the uncovered set. An undeterminable read
+    // (unparseable contract) fails the assembly instead of silently treating
+    // the project as covered.
+    const coverage = readProjectCriterionCoverage(projectCardId);
+    if (coverage.kind === "undeterminable" || coverage.kind === "no_project_contract") {
+      return { error: coverage.kind === "undeterminable" ? coverage.reason : `no root contract for project ${projectCardId}` };
+    }
+    const childMappings = coverage.read.mappings;
+
+    // Gather child summaries, results, and evidence
     const childSummaries: Array<{
       card_id: number;
       contract_id: string;
@@ -183,13 +192,6 @@ export class ReviewCaseAssembler {
     for (const child of children) {
       const contract = this.supService.getContractForCard(child.id);
       if (!contract) continue;
-
-      if (contract.supports_root_criteria && contract.supports_root_criteria.length > 0) {
-        childMappings.push({
-          child_contract_id: contract.id,
-          supports_root_criteria: [...contract.supports_root_criteria],
-        });
-      }
 
       const attempts = this.supStore.getAttemptsForCard(child.id);
       const latestAttempt = attempts.length > 0 ? attempts[attempts.length - 1]! : null;
@@ -217,8 +219,8 @@ export class ReviewCaseAssembler {
       });
     }
 
-    // Compute coverage
-    const uncoveredCriteria = findUncoveredCriteria(rootContract, childMappings);
+    // Compute coverage from the read-model (already fail-closed above)
+    const uncoveredCriteria = coverage.read.uncovered;
 
     // Build per-criterion review input with evidence from attempt results
     const criterionInputs: CriterionReviewInput[] = rootContract.criteria.map(c => {
