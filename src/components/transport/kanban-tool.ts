@@ -4,6 +4,7 @@
 
 import type { ToolDefinition } from "./tool-registry.js";
 import { createDispatchableCard, kanbanUpdate, kanbanList, type KanbanCard } from "../tasks/kanban-board.js";
+import type { DeliveryMode } from "../tasks/task-types.js";
 
 function formatCard(c: KanbanCard): string {
   const icon = c.status === "delivered" ? "*" : c.status === "done" ? "*" : c.status === "running" ? "~" : c.status === "failed" ? "x" : "+";
@@ -32,7 +33,7 @@ async function execute(args: Record<string, string>): Promise<string> {
       source: args.source || "agent",
       priority: args.priority,
       labels: args.labels,
-      deliveryMode: args.delivery_mode as "silent" | "deliver" | "announce" | undefined,
+      deliveryMode: args.delivery_mode as DeliveryMode | undefined,
       chatId: args.chat_id,
     });
     if ("error" in result) return `[err] ${result.error}`;

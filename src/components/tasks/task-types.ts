@@ -16,6 +16,15 @@ function parseMinutes(value: string): number {
 
 export type Delivery = "report" | "announce" | "silent";
 
+/**
+ * The kanban `delivery_mode` column vocabulary. Distinct from `Delivery`: a
+ * card has no "report" mode, because a report is a *task-definition* intent
+ * that resolves to a delivered artifact by the time a card exists.
+ * `kanbanEnqueue` performs the report->deliver translation at the write
+ * boundary.
+ */
+export type DeliveryMode = "silent" | "deliver" | "announce";
+
 /** #1516: Upper bound on scheduled agent orchestration (1 Orc + up to 3 Workers). */
 export const MAX_SCHEDULED_AGENTS = 4;
 

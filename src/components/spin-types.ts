@@ -4,6 +4,7 @@
  */
 
 import type { AgentName } from "./subagent-runtime.js";
+import type { Delivery, DeliveryMode } from "./tasks/task-types.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
 import { logError } from "./logger.js";
@@ -207,8 +208,8 @@ export interface SpinRequest {
   source: "task" | "user" | "agent" | "peer";
   cardId?: number;
   parentCardId?: number;
-  deliveryMode?: "silent" | "deliver" | "announce";
-  delivery?: "report" | "announce" | "silent";
+  deliveryMode?: DeliveryMode;
+  delivery?: Delivery;
   /** #1520: scheduled runs create cards locked (delivery_ready=0) until the
    *  shared settler wins successful validation and releases delivery. */
   deliveryReady?: boolean;
@@ -269,8 +270,8 @@ export interface SpinSessionSpec {
   maxToolRounds?: number; // #1283: per-task circuit breaker override
 
   // Delivery (continuation / pipeline)
-  deliveryMode?: "deliver" | "silent" | "announce";
-  delivery?: "report" | "announce" | "silent";
+  deliveryMode?: DeliveryMode;
+  delivery?: Delivery;
   /** #1520: scheduled runs create cards delivery-locked until settlement. */
   deliveryReady?: boolean;
   imageContent?: unknown;   // → sendPrompt arg 3 (image passthrough)

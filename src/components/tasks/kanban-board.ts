@@ -167,7 +167,7 @@ function dbOrNull(): SqliteDb | null {
   return db();
 }
 
-import type { Delivery } from "./task-types.js";
+import type { Delivery, DeliveryMode } from "./task-types.js";
 import { MAX_SCHEDULED_AGENTS } from "./task-types.js";
 
 // ── #1590: single status-transition choke point ───────────────────────────────
@@ -471,7 +471,7 @@ export function normalizePriority(raw: string | undefined | null): KanbanPriorit
   return VALID_PRIORITIES.has(upper as KanbanPriority) ? upper as KanbanPriority : "MEDIUM";
 }
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string; maxAgents?: number; deliveryReady?: boolean }): number {
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: DeliveryMode; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string; maxAgents?: number; deliveryReady?: boolean }): number {
   const d = dbOrNull();
   if (!d) return 0;
   const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
@@ -501,7 +501,7 @@ export interface CreateCardInput {
   sourceId?: string;
   priority?: string;
   labels?: string;
-  deliveryMode?: "silent" | "deliver" | "announce";
+  deliveryMode?: DeliveryMode;
   chatId?: string;
   sourcePeer?: string;
 }
