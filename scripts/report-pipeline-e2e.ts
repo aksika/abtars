@@ -4,6 +4,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { ScheduledTask } from "../src/components/tasks/task-types.js";
+import type {
+  AgentEvent,
+  ModelApi,
+  PiAgentCoreModule,
+  PiAgentListener,
+  PiAgentOptions,
+  StreamFn,
+} from "../src/components/transport/pi-core-types.js";
 
 const RUN_ID = `e2e-${Date.now()}-${randomUUID().slice(0, 8)}`;
 const OUT_DIR = join(process.cwd(), "test-results", "report-pipeline-e2e", RUN_ID);
@@ -18,6 +26,23 @@ interface MilestoneResult {
 
 const milestones: MilestoneResult[] = [];
 type CheckpointSuccess = true | { observed: string; evidence: string[]; correlation?: MilestoneResult["correlation"] };
+
+const acceptanceModel: ModelApi = {
+  id: "acceptance-model",
+  name: "Acceptance model",
+  api: "pi-messages",
+  provider: "acceptance",
+  baseUrl: "https://acceptance.invalid",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 128_000,
+  maxTokens: 4_096,
+};
+
+const noProviderStream: StreamFn = () => {
+  throw new Error("provider must not be called for an empty host probe");
+};
 
 async function checkpoint(id: string, name: string, scenario: string, expected: string, fn: () => Promise<string | CheckpointSuccess>, deps?: string[]): Promise<void> {
   const start = Date.now();
@@ -85,6 +110,12 @@ async function main(): Promise<void> {
     const result = taskTypes.normalize(raw);
     if (!result.ok) throw new Error(`invalid fixture ${String(raw["id"])}: ${result.error}`);
     return result.entry;
+  }
+
+  function makeAgentEntry(raw: Record<string, unknown>): ScheduledTask & { kind: "agent" } {
+    const entry = makeEntry(raw);
+    if (entry.kind !== "agent") throw new Error(`fixture ${entry.id} is not an agent task`);
+    return entry;
   }
 
   async function runProductionFixture(
@@ -192,8 +223,8 @@ async function main(): Promise<void> {
     // Force nextRunAt into the past so scheduler considers it due
     stateStore.updateState(id, { nextRunAt: Date.now() - 60000 });
     const result = taskChecker.checkCron();
-    const ours = result.filter((r: any) => r.entry.id === id);
-    if (ours.length === 0) { const reasons = result.map((r: any) => r.entry.id).join(","); return `no due entries for ${id}. total due: ${result.length} ids: ${reasons}`; }
+    const ours = result.filter(r => r.entry.id === id);
+    if (ours.length === 0) { const reasons = result.map(r => r.entry.id).join(","); return `no due entries for ${id}. total due: ${result.length} ids: ${reasons}`; }
     if (!ours[0]!.run.runId) return `reserved run has no runId`;
     return true;
   });
@@ -244,17 +275,17 @@ async function main(): Promise<void> {
 
   scenario("Preflight");
   await checkpoint("M08", "Required file missing → preflight fails", "preflight", "definition_failed + code", async () => {
-    const e = { id: "pf1", kind: "agent" as const, delivery: "report" as const, agent: "task" as const, prompt: "t", at: new Date().toISOString(), enabled: true, priority: "medium" as const, report: { artifact: join(H, "workspace", "pf1", "o.md"), requiredSections: ["# X"], minBytes: 100, requires: { files: ["/nonexistent/file.xyz"], executables: [], tools: [] } } };
-    const result = taskPreflight.preflightTask(e as any, taskPackage.createExecutionScope("pf1"), undefined);
+    const e = makeAgentEntry({ id: "pf1", kind: "agent", delivery: "report", agent: "task", prompt: "t", at: new Date().toISOString(), enabled: true, priority: "medium", report: { artifact: join(H, "workspace", "pf1", "o.md"), requiredSections: ["# X"], minBytes: 100, requires: { files: ["/nonexistent/file.xyz"], executables: [], tools: [] } } });
+    const result = taskPreflight.preflightTask(e, taskPackage.createExecutionScope("pf1"), undefined);
     if (result.ok) return `should reject missing file`;
     if (result.code !== "required_file_missing") return `expected required_file_missing got ${result.code}`;
     return true;
   });
 
   await checkpoint("M09", "Missing executable → preflight fails", "preflight", "required_executable_missing", async () => {
-    const e = { id: "pfex", kind: "agent" as const, delivery: "report" as const, agent: "task" as const, prompt: "t", at: new Date().toISOString(), enabled: true, priority: "medium" as const, report: { artifact: join(H, "workspace", "pfex", "o.md"), requiredSections: ["# X"], minBytes: 100, requires: { files: [], executables: ["nonexistent_tool_xyz"], tools: [] } } };
+    const e = makeAgentEntry({ id: "pfex", kind: "agent", delivery: "report", agent: "task", prompt: "t", at: new Date().toISOString(), enabled: true, priority: "medium", report: { artifact: join(H, "workspace", "pfex", "o.md"), requiredSections: ["# X"], minBytes: 100, requires: { files: [], executables: ["nonexistent_tool_xyz"], tools: [] } } });
     const scope = taskPackage.createExecutionScope("pfex");
-    const result = taskPreflight.preflightTask(e as any, { cwd: scope.cwd, env: { ...scope.env, PATH: "/dev/null" } }, undefined);
+    const result = taskPreflight.preflightTask(e, { cwd: scope.cwd, env: { ...scope.env, PATH: "/dev/null" } }, undefined);
     if (result.ok) return `should reject missing exe`;
     if (result.code !== "required_executable_missing") return `expected required_executable_missing got ${result.code}`;
     return true;
@@ -320,12 +351,21 @@ async function main(): Promise<void> {
   await checkpoint("M15", "Pi host can be imported and validates contract", "execution", "module loads, contract shape", async () => {
     const { PiCoreExecutionHost } = await import("../src/components/transport/pi-core-host.js");
     const real = await import("@earendil-works/pi-agent-core");
+    const piTypes: typeof import("../src/components/transport/pi-core-types.js") = await import("../src/components/transport/pi-core-types.js");
+    piTypes.validatePiAgentCoreModule(real, "acceptance");
+    const realModule: PiAgentCoreModule = {
+      Agent: class extends real.Agent {
+        constructor(options?: PiAgentOptions) {
+          super(options ?? { streamFn: noProviderStream });
+        }
+      },
+    };
     const host = new PiCoreExecutionHost({
       executionId: `acceptance-exec-${Date.now()}`, sessionId: "acceptance-session",
-      initialState: { systemPrompt: "acceptance", model: { id: "acceptance-model" } as any, messages: [], tools: [] },
-      streamFn: (() => { throw new Error("provider must not be called for empty host probe"); }) as any,
+      initialState: { systemPrompt: "acceptance", model: acceptanceModel, messages: [], tools: [] },
+      streamFn: noProviderStream,
     });
-    await host.start({ module: { Agent: real.Agent as unknown as import("../src/components/transport/pi-core-types.js").PiAgentCoreModule["Agent"] }, installation: { executable: "", packageRoot: "", version: "installed", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } } });
+    await host.start({ module: realModule, installation: { executable: "", packageRoot: "", version: "installed", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } } });
     if (host.state !== "running") return `Pi host did not enter running state: ${host.state}`;
     host.cancel();
     await host.waitForSettlement();
@@ -344,7 +384,7 @@ async function main(): Promise<void> {
   await checkpoint("M17", "Spin dispatchAwait accepts caller-owned settlement", "execution", "settlementOwner param", async () => {
     let observedRequest: import("../src/components/spin-types.js").SpinRequest | undefined;
     const id = `settlement-owner-${Date.now()}`;
-    const entry = makeEntry({ id, kind: "agent", delivery: "announce", at: new Date().toISOString(), agent: "task", prompt: "settlement owner probe", enabled: true, priority: "medium", interaction: { mode: "oneshot" } });
+    const entry = makeAgentEntry({ id, kind: "agent", delivery: "announce", at: new Date().toISOString(), agent: "task", prompt: "settlement owner probe", enabled: true, priority: "medium", interaction: { mode: "oneshot" } });
     const reservation = stateStore.reserveRun(id, { runId: `${id}_run`, groupId: `${id}:group`, attempt: 1, trigger: "manual", occurrenceAt: Date.now(), deadlineAt: Date.now() + 60_000 });
     if (!reservation.ok) return `could not reserve settlement-owner probe`;
     const probe = new ScheduledTaskRunner({ agentRunner: async request => {
@@ -353,7 +393,7 @@ async function main(): Promise<void> {
       kanbanBoard.kanbanRunning(cardId);
       return { cardId, result: "settlement owner probe" };
     } });
-    const outcome = await probe.run(entry as ScheduledTask & { kind: "agent" }, reservation.run);
+    const outcome = await probe.run(entry, reservation.run);
     if (outcome.status !== "success") return `runner outcome=${outcome.status}: ${outcome.safeDetail}`;
     if (observedRequest?.settlementOwner !== "caller") return `runner did not pass settlementOwner=caller`;
     return { observed: "real ScheduledTaskRunner passed caller-owned settlement into provider boundary", evidence: [`run=${reservation.run.runId}`, `execution_id=${observedRequest.executionControl?.executionRef ?? "missing"}`, "settlement_owner=caller"], correlation: { taskId: id, runId: reservation.run.runId, groupId: reservation.run.groupId, executionId: observedRequest.executionControl?.executionRef } };
@@ -490,26 +530,41 @@ async function main(): Promise<void> {
     // Build a PiCoreExecutionHost with a mock Agent whose waitForIdle() never
     // resolves — this simulates a provider that ignores abort. The #1506 fix
     // must make waitForSettlement() resolve immediately on cancel regardless.
-    const subs: Array<(e: any) => void> = [];
-    const mockAgent = {
-      isRunning: false,
-      subscribe: (l: (e: any) => void) => { subs.push(l); subscribed = true; return () => { const i = subs.indexOf(l); if (i >= 0) subs.splice(i, 1); }; },
-      prompt: async () => {},
-      steer: () => {},
-      followUp: () => {},
-      clearAllQueues: () => {},
-      abort: () => {},
-      waitForIdle: () => new Promise<void>(() => {}), // NEVER resolves
+    const subs: PiAgentListener[] = [];
+    const pi = await import("@earendil-works/pi-agent-core");
+    const mockModule: PiAgentCoreModule = {
+      Agent: class extends pi.Agent {
+        constructor(options?: PiAgentOptions) {
+          super(options ?? { streamFn: noProviderStream });
+          this.subscribe = (listener: PiAgentListener) => {
+            subs.push(listener);
+            subscribed = true;
+            return () => {
+              const i = subs.indexOf(listener);
+              if (i >= 0) subs.splice(i, 1);
+            };
+          };
+          this.prompt = async () => {};
+          this.steer = () => {};
+          this.followUp = () => {};
+          this.clearAllQueues = () => {};
+          this.abort = () => {};
+          this.waitForIdle = () => new Promise<void>(() => {}); // NEVER resolves
+        }
+      },
     };
-    const mockModule = { Agent: class { constructor(_opts: any) { Object.assign(this, mockAgent); } } } as any;
     const mockInstallation = { executable: "/pi", packageRoot: "/pi", version: "0.80.7", source: "path" as const, pinStatus: "at-pin" as const, moduleRoots: { ai: "", tui: "", agentCore: "" } };
     const host = new PH.PiCoreExecutionHost({
       executionId,
       sessionId: "m30-session",
-      initialState: { systemPrompt: "test", model: { id: "test", name: "test", api: "pi-messages", provider: "pi", baseUrl: "https://localhost", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }, messages: [] },
-      streamFn: (() => {}) as any,
+      initialState: { systemPrompt: "test", model: acceptanceModel, messages: [] },
+      streamFn: noProviderStream,
     });
-    await host.start({ module: mockModule, installation: mockInstallation }).catch(() => {});
+    try {
+      await host.start({ module: mockModule, installation: mockInstallation });
+    } catch (err) {
+      return { observed: `mock Pi host failed to start: ${err instanceof Error ? err.message : String(err)}`, evidence: [] };
+    }
     if (!subscribed) return { observed: `agent not subscribed after start`, evidence: [] };
 
     // Cancel — must claim terminal immediately even though waitForIdle hangs
@@ -524,7 +579,10 @@ async function main(): Promise<void> {
     // Late agent_end must be rejected — check via internal state;
     // handleAgentEnd is no-op when settled, state unchanged
     const stateBefore = host.state;
-    await (host as any).handleAgentEnd({ type: "agent_end" });
+    const lateAgentEnd: AgentEvent = { type: "agent_end", messages: [] };
+    const listener = subs[0];
+    if (!listener) return { observed: `agent listener missing after start`, evidence: [] };
+    await listener(lateAgentEnd, new AbortController().signal);
     if (host.state !== stateBefore) return { observed: `late agent_end changed state from ${stateBefore} to ${host.state}`, evidence: [] };
 
     // signalCancel must be non-blocking (never await the bound handler)
