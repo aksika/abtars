@@ -350,34 +350,6 @@ function gatherLaneFacts(rootCardId: number): TaskFailureLaneFact[] {
   return lanes;
 }
 
-/** #1588: root criteria with no child contract mapping them. */
-function uncoveredRootCriteria(rootCardId: number): string[] {
-  const reviewStore = new ProjectReviewStore();
-  const rootRow = reviewStore.getContractByProjectCardId(rootCardId);
-  if (!rootRow) return [];
-  let rootContract: unknown;
-  try {
-    rootContract = JSON.parse(rootRow.contract_json) as unknown;
-  } catch { return []; }
-  if (!isRecord(rootContract) || !Array.isArray(rootContract["criteria"])) return [];
-  const rootCriteria = rootContract["criteria"].filter((value): value is Record<string, unknown> =>
-    isRecord(value) && typeof value["id"] === "string");
-  const mapped = new Set<string>();
-  const supStore = new WorkerSupervisionStore();
-  for (const child of kanbanGetChildren(rootCardId)) {
-    const contractRow = supStore.getContractByCardId(child.id);
-    if (!contractRow) continue;
-    try {
-      const c = JSON.parse(contractRow.contract_json) as unknown;
-      if (!isRecord(c) || !Array.isArray(c["supports_root_criteria"])) continue;
-      for (const id of c["supports_root_criteria"]) {
-        if (typeof id === "string") mapped.add(id);
-      }
-    } catch { /* skip */ }
-  }
-  return rootCriteria.filter((c) => !mapped.has(c["id"] as string)).map((c) => c["id"] as string);
-}
-
 /**
  * #1588: code selection precedence — the most actionable definition-shaped
  * fault wins over the lane outcome it produced.
@@ -445,7 +417,11 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
   if (supervision?.state === "blocked" || card.status === "failed") {
     const reason = (supervision?.blocked_reason ?? card.error ?? "project blocked").slice(0, 500);
     const lanes = gatherLaneFacts(rootCardId);
-    const uncovered = uncoveredRootCriteria(rootCardId);
+    // #1604: the durable coverage fact, evaluated once by the reconciler gate.
+    // NULL means coverage was never evaluated (project died before review
+    // eligibility) → [] so the real lane/deadline reason surfaces instead of
+    // a recomputed contract_uncovered.
+    const uncovered = parseCoverageUncovered(supervision?.coverage_uncovered_ids);
     const { code, message } = selectSupervisionCode(lanes, uncovered);
     const diagnostic = makeTaskFailure("supervision", code, "executing",
       code === "project_blocked" ? reason : message, "none",
@@ -457,6 +433,16 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
     return { accepted: false, diagnostic, factAt: cardTimeMs(card.updated_at) };
   }
   return undefined;
+}
+
+/** #1604: parse the durable JSON array; NULL/empty → no uncovered criteria. */
+function parseCoverageUncovered(raw: string | null | undefined): readonly string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === "string");
+  } catch { /* unparseable → treat as empty, never fabricate */ }
+  return [];
 }
 
 /**

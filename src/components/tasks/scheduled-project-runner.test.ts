@@ -381,6 +381,117 @@ describe("scheduled-project-runner #1516", () => {
     expect(result).toEqual(expect.objectContaining({ cardId: root, result: "already accepted" }));
     expect(kanban.kanbanGetCard(root)?.status).toBe("done");
   });
+
+  it("#1604: durable uncovered ids yield supervision/contract_uncovered naming them", async () => {
+    fakeCoordinator();
+    await seedReservation();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+    const root = kanban.kanbanList("*")[0]!;
+
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.settleBlocked(root.id, "case-cov", { synthesis: "x" }, "blocked");
+    store.db.prepare(`UPDATE project_supervision SET coverage_uncovered_ids = ? WHERE project_card_id = ?`)
+      .run(JSON.stringify(["c4", "c5"]), root.id);
+    nerveBus.fire("card:failed", root.id);
+
+    const err = await pending.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
+    const failure = err as mod.SupervisedProjectFailure;
+    expect(failure.diagnostic.category).toBe("supervision");
+    expect(failure.diagnostic.code).toBe("contract_uncovered");
+    expect(failure.diagnostic.message).toContain("c4");
+    expect(failure.diagnostic.message).toContain("c5");
+  });
+
+  it("#1604: NULL coverage ids surface the lane code, not contract_uncovered (deadline-misdiagnosis fix)", async () => {
+    fakeCoordinator();
+    await seedReservation();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+    const root = kanban.kanbanList("*")[0]!;
+
+    const workerId = kanban.kanbanEnqueue("Lane 3 - Web Verification", "agent", undefined, {
+      parent_id: root.id,
+      type: "W",
+      goal: "Browse three web pages and record results",
+      delivery: "silent",
+    });
+    const supStore = new (await import("../worker-supervision-store.js")).WorkerSupervisionStore();
+    const contract: import("../worker-contract.js").WorkerAcceptanceContractV1 = {
+      schema_version: 1,
+      id: "c_null",
+      digest: "dg_null",
+      goal: "Browse three web pages and record results",
+      criteria: [{ id: "c1", description: "Three web pages browsed and results recorded" }],
+      expected_artifacts: [{ id: "a1", kind: "file", ref: "notes/web-results.md", required: true, criterion_ids: ["c1"] }],
+      verification_commands: [],
+      required_capabilities: [],
+      limits: { max_duration_ms: 120000 },
+      provenance: { root_card_id: root.id, card_id: workerId, authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    supStore.insertContract(contract, workerId);
+    supStore.insertAttempt({ id: "a_null", card_id: workerId, contract_id: contract.id, ordinal: 1, executor_kind: "agent", executor_id: "spin", status: "running", started_at: "2026-08-06T13:44:00.000Z" });
+    supStore.lifecycleTransition("a_null", ["running"], "timed_out", {
+      cancel_reason: "late_completion_timed_out: worker_completed",
+      hard_deadline_at: "2026-08-06T13:46:38.195Z",
+      settled_at: "2026-08-06T13:46:45.680Z",
+    });
+
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.settleBlocked(root.id, "case-null", { synthesis: "x" }, "criteria failed");
+    // coverage_uncovered_ids stays NULL — never evaluated before death
+    nerveBus.fire("card:failed", root.id);
+
+    const err = await pending.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
+    const failure = err as mod.SupervisedProjectFailure;
+    expect(failure.diagnostic.category).toBe("supervision");
+    expect(failure.diagnostic.code).toBe("lane_late_completion");
+  });
+
+  it("#1604: empty coverage ids with a failed lane yield the lane code", async () => {
+    fakeCoordinator();
+    await seedReservation();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+    const root = kanban.kanbanList("*")[0]!;
+
+    const workerId = kanban.kanbanEnqueue("Lane 3 - Web Verification", "agent", undefined, {
+      parent_id: root.id,
+      type: "W",
+      goal: "Browse three web pages and record results",
+      delivery: "silent",
+    });
+    const supStore = new (await import("../worker-supervision-store.js")).WorkerSupervisionStore();
+    const contract: import("../worker-contract.js").WorkerAcceptanceContractV1 = {
+      schema_version: 1,
+      id: "c_empty",
+      digest: "dg_empty",
+      goal: "Browse three web pages and record results",
+      criteria: [{ id: "c1", description: "Three web pages browsed and results recorded" }],
+      expected_artifacts: [{ id: "a1", kind: "file", ref: "notes/web-results.md", required: true, criterion_ids: ["c1"] }],
+      verification_commands: [],
+      required_capabilities: [],
+      limits: { max_duration_ms: 120000 },
+      provenance: { root_card_id: root.id, card_id: workerId, authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    supStore.insertContract(contract, workerId);
+    supStore.insertAttempt({ id: "a_empty", card_id: workerId, contract_id: contract.id, ordinal: 1, executor_kind: "agent", executor_id: "spin", status: "running", started_at: "2026-08-06T13:44:00.000Z" });
+    supStore.lifecycleTransition("a_empty", ["running"], "timed_out", {
+      cancel_reason: "late_completion_timed_out: worker_completed",
+      hard_deadline_at: "2026-08-06T13:46:38.195Z",
+      settled_at: "2026-08-06T13:46:45.680Z",
+    });
+
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.settleBlocked(root.id, "case-empty", { synthesis: "x" }, "criteria failed");
+    store.db.prepare(`UPDATE project_supervision SET coverage_uncovered_ids = '[]' WHERE project_card_id = ?`).run(root.id);
+    nerveBus.fire("card:failed", root.id);
+
+    const err = await pending.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
+    const failure = err as mod.SupervisedProjectFailure;
+    expect(failure.diagnostic.category).toBe("supervision");
+    expect(failure.diagnostic.code).toBe("lane_late_completion");
+  });
 });
 
 describe("scheduled-project-runner #1546 reattach routing", () => {
