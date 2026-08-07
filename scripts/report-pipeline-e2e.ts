@@ -94,12 +94,17 @@ async function main(): Promise<void> {
         chatId: "acceptance",
       });
       if (!cardId) throw new Error(`Kanban card was not created for ${taskId}`);
+      // #1540: the shared execution control must know the card before the
+      // runner's settlement can attach result/delivery to it.
+      request.executionControl?.setCardId(cardId);
       kanbanBoard.kanbanRunning(cardId);
       const content = `${sections.join("\n\n")}\n\n${("deterministic acceptance artifact for " + taskId + "\n").repeat(80)}`;
       writeFileSync(artifactPath, content, "utf-8");
       return { cardId, result: `provider completed ${taskId}` };
     };
-    const queue = new CronQueue("acceptance", H, undefined, undefined, agentRunner);
+    const { ScheduledRunCoordinator } = await import("../src/components/tasks/scheduled-run-coordinator.js");
+    const coordinator = new ScheduledRunCoordinator({ agentRunner });
+    const queue = new CronQueue("acceptance", H, coordinator);
     const normalized = taskTypes.normalize({
       id: taskId, kind: "agent", delivery: "report", at: new Date().toISOString(),
       agent: "task", prompt: `Generate ${taskId}`, chatId: "acceptance", enabled: true, priority: "medium",
@@ -109,11 +114,19 @@ async function main(): Promise<void> {
     const enqueueError = queue.enqueue(normalized.entry, true);
     if (enqueueError) return `fixture ${taskId} was not queued: ${enqueueError}`;
     await waitForQueueIdle(queue);
-
-    const card = kanbanBoard.kanbanGetCard(cardId);
+    // #1539: lane release is driven by the durable terminal event; the card
+    // mutation happens in the same settlement flow, but poll for the terminal
+    // card state so a straggler side effect can never be asserted too early.
+    const terminalDeadline = Date.now() + 8000;
+    let card: ReturnType<typeof kanbanBoard.kanbanGetCard> | undefined;
+    while (Date.now() < terminalDeadline) {
+      card = kanbanBoard.kanbanGetCard(cardId);
+      if (card && (card.status === "done" || card.status === "delivered" || card.status === "failed")) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (!card || card.status !== "done") return `fixture ${taskId} card not done: ${card?.status ?? "missing"}`;
     const state = stateStore.readState(taskId);
     const runs = historyStore.recentRuns(taskId, 5);
-    if (!card || card.status !== "done") return `fixture ${taskId} card not done: ${card?.status ?? "missing"}`;
     if (card.result_path !== artifactPath || !existsSync(artifactPath)) return `fixture ${taskId} artifact was not settled`;
     const success = runs.find(run => run.outcome === "success");
     if (!success) return `fixture ${taskId} has no successful terminal history`;
@@ -121,9 +134,9 @@ async function main(): Promise<void> {
 
     let sends = 0;
     await deliverCard(card, {
-      sendMessage: async () => { sends++; },
-      sendDocument: async (_chatId, path) => { if (path !== artifactPath) throw new Error("wrong artifact delivered"); sends++; },
-      announce: async () => { sends++; },
+      sendMessage: async () => { sends++; return "sent" as const; },
+      sendDocument: async (_chatId, path) => { if (path !== artifactPath) throw new Error("wrong artifact delivered"); sends++; return "sent" as const; },
+      announce: async () => { sends++; return "sent" as const; },
       chatIdFor: () => "acceptance",
     });
     const delivered = kanbanBoard.kanbanGetCard(cardId);
@@ -275,13 +288,14 @@ async function main(): Promise<void> {
     return { observed: `reservation allocated ${reservation.run.runId} before execution`, evidence: [`run=${reservation.run.runId}`, `group=${reservation.run.groupId}`, `attempt=${reservation.run.attempt}`], correlation: { taskId: id, runId: reservation.run.runId, groupId: reservation.run.groupId, attempt: reservation.run.attempt } };
   });
 
-  await checkpoint("M13", "Execution control can be registered and removed", "runner", "registerControl+removeControl", async () => {
+  await checkpoint("M13", "Execution control can be registered and removed", "runner", "supervisor open+get+remove", async () => {
+    const sv = execControl.createExecutionSupervisor({ maxConcurrent: { T: 1 } });
     const ref = `ctrl-${Date.now()}`;
-    const ctrl = execControl.registerControl(ref);
-    if (!ctrl) return `registerControl returned null`;
+    const ctrl = sv.open({ executionRef: ref, type: "T" });
+    if (!ctrl) return `open returned no control`;
     if (ctrl.cancelled) return `new control should not be cancelled`;
-    execControl.removeControl(ref);
-    if (execControl.getControl(ref)) return `control still present after remove`;
+    sv.remove(ref);
+    if (sv.get(ref)) return `control still present after remove`;
     return true;
   });
 
@@ -325,7 +339,7 @@ async function main(): Promise<void> {
   await checkpoint("M17", "Spin dispatchAwait accepts caller-owned settlement", "execution", "settlementOwner param", async () => {
     let observedRequest: import("../src/components/spin-types.js").SpinRequest | undefined;
     const id = `settlement-owner-${Date.now()}`;
-    const entry = { id, kind: "agent" as const, delivery: "announce" as const, at: new Date().toISOString(), agent: "task" as const, prompt: "settlement owner probe", enabled: true, priority: "medium" as const };
+    const entry = { id, kind: "agent" as const, delivery: "announce" as const, at: new Date().toISOString(), agent: "task" as const, prompt: "settlement owner probe", enabled: true, priority: "medium" as const, interaction: { mode: "oneshot" as const } };
     const reservation = stateStore.reserveRun(id, { runId: `${id}_run`, groupId: `${id}:group`, attempt: 1, trigger: "manual", occurrenceAt: Date.now(), deadlineAt: Date.now() + 60_000 });
     if (!reservation.ok) return `could not reserve settlement-owner probe`;
     const probe = new ScheduledTaskRunner({ agentRunner: async request => {
@@ -511,7 +525,8 @@ async function main(): Promise<void> {
     if (host.state !== stateBefore) return { observed: `late agent_end changed state from ${stateBefore} to ${host.state}`, evidence: [] };
 
     // signalCancel must be non-blocking (never await the bound handler)
-    const ec = EC.registerControl(`sig-${executionId}`);
+    const sv = EC.createExecutionSupervisor({ maxConcurrent: { T: 1 } });
+    const ec = sv.open({ executionRef: `sig-${executionId}`, type: "T" });
     let handlerCalled = false;
     ec.bind(async () => { handlerCalled = true; await new Promise(() => {}); }); // never resolves
     const start = Date.now();
@@ -523,7 +538,7 @@ async function main(): Promise<void> {
     await new Promise(r => setTimeout(r, 0));
     if (!handlerCalled) return { observed: `signalCancel handler not queued`, evidence: [] };
 
-    EC.removeControl(`sig-${executionId}`);
+    sv.remove(`sig-${executionId}`);
     return { observed: `terminal: clean, cleanup: ${cleanup}, signalCancel: non-blocking (${elapsed}ms), late agent_end rejected`, evidence: [`executionId=${executionId}`] };
   }, ["M15"]);
 
@@ -569,9 +584,12 @@ async function main(): Promise<void> {
     stateStore.reserveRun(id, { runId: `stale-${Date.now()}`, groupId: "g", attempt: 1, trigger: "schedule", occurrenceAt: Date.now(), deadlineAt: Date.now() - 60000 });
     const before = stateStore.readState(id);
     if (!before?.activeRun) return `activeRun not set before reconcile`;
-    taskChecker.reconcileActiveTaskRuns();
+    const { ScheduledRunCoordinator } = await import("../src/components/tasks/scheduled-run-coordinator.js");
+    const coordinator = new ScheduledRunCoordinator();
+    const entry = { id, kind: "agent" as const, delivery: "announce" as const, at: new Date().toISOString(), agent: "task" as const, prompt: "t", enabled: true, priority: "medium" as const, interaction: { mode: "oneshot" as const } };
+    await coordinator.recover([entry]);
     const after = stateStore.readState(id);
-    if (after?.activeRun) return `activeRun not cleared after reconcile with past deadline`;
+    if (after?.activeRun) return `activeRun not cleared after recover with past deadline`;
     return true;
   });
 
