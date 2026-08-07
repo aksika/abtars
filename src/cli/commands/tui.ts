@@ -335,6 +335,11 @@ export async function tui(args: string[]): Promise<number> {
   let stopping = false;
   let latestStatus: TuiRuntimeStatus | undefined;
   let currentSessionId: string | null = null;  // #1361: tracked from ready frame
+  // #1570: the bridge emits a fresh `ready` per attachment change (commitAttachment,
+  // #1533 rebind). pi-tui's TUI.start() is NOT idempotent — it registers a new stdin
+  // data listener per call, so repeated start() doubles every keystroke. Start the
+  // UI exactly once per client lifetime; later `ready` frames only update state.
+  let uiStarted = false;
 
   // pi-tui's TUI.start() is NON-BLOCKING (event-driven: it sets up stdin/stdout
   // and returns). We need a promise to await so the process stays alive until
@@ -446,7 +451,10 @@ export async function tui(args: string[]): Promise<number> {
       case "ready":
         ready = true;
         currentSessionId = frame.sessionId;
-        ui.start();
+        if (!uiStarted) {
+          uiStarted = true;
+          ui.start();
+        }
         return;
       case "error":
         if (!ready) {
