@@ -8,6 +8,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
   let board: typeof import("../../components/tasks/kanban-board.js");
   let deliverCard: typeof import("../../components/tasks/kanban-delivery.js").deliverCard;
   let CronQueue: typeof import("../../components/tasks/task-queue.js").CronQueue;
+  let ScheduledRunCoordinator: typeof import("../../components/tasks/scheduled-run-coordinator.js").ScheduledRunCoordinator;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -17,6 +18,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     board = await import("../../components/tasks/kanban-board.js");
     ({ deliverCard } = await import("../../components/tasks/kanban-delivery.js"));
     ({ CronQueue } = await import("../../components/tasks/task-queue.js"));
+    ScheduledRunCoordinator = (await import("../../components/tasks/scheduled-run-coordinator.js")).ScheduledRunCoordinator;
   });
 
   afterEach(() => {
@@ -51,7 +53,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       writeFileSync(artifactPath, "# Report\n" + `${canary} report line\n`.repeat(20));
       return { cardId, result: `${canary} report line\n`.repeat(20) };
     });
-    const queue = new CronQueue("unused", home, undefined, undefined, undefined, modelBoundary);
+    const queue = new CronQueue(new ScheduledRunCoordinator({ agentRunner: modelBoundary }));
     queue.enqueue({
       id: "report-task", kind: "agent", prompt: `${canary} produce report`,
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
@@ -106,7 +108,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       board.kanbanRunning(cardId);
       return { cardId, result: "too short" };
     });
-    const queue = new CronQueue("unused", home, undefined, undefined, undefined, modelBoundary);
+    const queue = new CronQueue(new ScheduledRunCoordinator({ agentRunner: modelBoundary }));
     queue.enqueue({
       id: "short-task", kind: "agent", prompt: "produce report",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
@@ -137,7 +139,7 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       board.kanbanRunning(cardId);
       return { cardId, result: "ok" };
     });
-    const queue = new CronQueue("unused", home, undefined, undefined, undefined, modelBoundary);
+    const queue = new CronQueue(new ScheduledRunCoordinator({ agentRunner: modelBoundary }));
     queue.enqueue({
       id: "dod-task", kind: "agent", prompt: "produce report",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(), enabled: true, priority: "medium",

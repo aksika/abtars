@@ -10,7 +10,6 @@ import { isSystemEntry, isReminder, runCeilingMs } from "./task-types.js";
 import { settleRunOnce, onRunTerminal } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
 import { ScheduledRunCoordinator, type RunLane } from "./scheduled-run-coordinator.js";
-import type { AgentTaskRunner, TaskPausedCallback, TaskFailureCallback } from "./scheduled-task-runner.js";
 import type { ActiveTaskRun } from "./task-state-store.js";
 
 const TAG = "cron-queue";
@@ -117,18 +116,8 @@ export class CronQueue {
   private readonly coordinator: ScheduledRunCoordinator;
   private readonly terminalUnsub: () => void;
 
-  constructor(
-    _cliPath: string,
-    _workingDir: string,
-    coordinator?: ScheduledRunCoordinator,
-    onFailure?: TaskFailureCallback,
-    onTaskPaused?: TaskPausedCallback,
-    agentRunner?: AgentTaskRunner,
-    projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner,
-  ) {
-    // #1539: if no coordinator is supplied (direct construction in harnesses),
-    // create one with the provided callbacks — the queue never owns execution.
-    this.coordinator = coordinator ?? new ScheduledRunCoordinator({ onFailure, onTaskPaused, agentRunner, projectRunner });
+  constructor(coordinator: ScheduledRunCoordinator) {
+    this.coordinator = coordinator;
     this.coordinator.setFollowUpEnqueue((entry) => this.enqueue(entry, false));
     this.terminalUnsub = onRunTerminal((_taskId, runId) => this.onRunTerminal(runId));
     // #1520: the stale snapshot is correlated against the authoritative

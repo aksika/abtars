@@ -217,7 +217,7 @@ async function makeQueue(): Promise<import("../../components/tasks/task-queue.js
     agentRunner: fakeAgentRunner,
     projectRunner: realProjectRunner,
   });
-  const queue = new CronQueue("kiro-cli", ".", coordinator);
+  const queue = new CronQueue(coordinator);
   return queue;
 }
 
@@ -229,7 +229,7 @@ async function makeQueueWithCoordinator(): Promise<{ queue: import("../../compon
     agentRunner: fakeAgentRunner,
     projectRunner: realProjectRunner,
   });
-  const queue = new CronQueue("kiro-cli", ".", coordinator);
+  const queue = new CronQueue(coordinator);
   return { queue, coordinator };
 }
 
@@ -376,7 +376,7 @@ describe("#1520 scheduler E2E — journey 1: system/Dreamy sleep-cycle", () => {
       agentRunner: fakeAgentRunner,
       projectRunner: realProjectRunner,
     });
-    const queue = new CronQueue("kiro-cli", ".", coordinator);
+    const queue = new CronQueue(coordinator);
 
     // Stub: the cycle handler AWAITS its long action and reports the real
     // outcome — the run must settle failed, not success-at-dispatch.
@@ -1444,7 +1444,7 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
         cascadeNotifications.push(buildFailureNotification(entryId, diagnostic));
       },
     });
-    const queue = new CronQueue("kiro-cli", ".", coordinator);
+    const queue = new CronQueue(coordinator);
     const { fixture } = await makeFixture({ workerCount: 1, workerLimits: { max_duration_ms: 120_000 } });
     forceDue("project-task");
     await tick.runTaskTick(makeTickCtx(queue));

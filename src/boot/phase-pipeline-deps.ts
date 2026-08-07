@@ -136,11 +136,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { spin } = await import("../components/spin.js");
   const coordinator = new ScheduledRunCoordinator({ onFailure, onTaskPaused, executions: spin.executionSupervisor });
 
-  const cronQueue = new CronQueue(
-    config.transport.agentCliPath,
-    config.transport.workingDir,
-    coordinator,
-  );
+  const cronQueue = new CronQueue(coordinator);
   ctx.cronQueue = cronQueue;
 
   // #1539: wire the wake scheduler into the reconciler (executor-lease source

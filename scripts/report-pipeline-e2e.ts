@@ -145,7 +145,7 @@ async function main(): Promise<void> {
     };
     const { ScheduledRunCoordinator } = await import("../src/components/tasks/scheduled-run-coordinator.js");
     const coordinator = new ScheduledRunCoordinator({ agentRunner });
-    const queue = new CronQueue("acceptance", H, coordinator);
+    const queue = new CronQueue(coordinator);
     const normalized = taskTypes.normalize({
       id: taskId, kind: "agent", delivery: "report", at: new Date().toISOString(),
       agent: "task", prompt: `Generate ${taskId}`, chatId: "acceptance", enabled: true, priority: "medium",
@@ -169,7 +169,7 @@ async function main(): Promise<void> {
     if (!success) return `fixture ${taskId} has no successful terminal history`;
     if (state?.activeRun) return `fixture ${taskId} left activeRun=${state.activeRun.runId}`;
 
-    let sends = 0;
+    let sends: number = 0;
     await deliverCard(card, {
       sendMessage: async () => { sends++; return "sent" as const; },
       sendDocument: async (_chatId, path) => { if (path !== artifactPath) throw new Error("wrong artifact delivered"); sends++; return "sent" as const; },
@@ -787,6 +787,75 @@ async function main(): Promise<void> {
 
   await checkpoint("M48", "finance-daily shaped task normalizes and preflights", "production", "fixture with finance shape", async () => {
     return runProductionFixture("finance-daily", `Finance-Report-${new Date().toISOString().slice(0, 10)}.md`, ["# P&L", "# Cash Flow", "# Risk"], 1000);
+  });
+
+  // ── M49-M50: Document delivery outcomes ─────────────────────────────────
+
+  scenario("Document delivery outcomes");
+  await checkpoint("M49", "not_sent document outcome persists and retries exactly through delivery", "delivery", "definitely_not_sent then delivered", async () => {
+    const taskId = `not-sent-${Date.now()}`;
+    const artifactPath = join(H, "workspace", taskId, "report.md");
+    mkdirSync(join(H, "workspace", taskId), { recursive: true });
+    writeFileSync(artifactPath, "# Report\n\n" + "content\n".repeat(80), "utf-8");
+    const cardId = kanbanBoard.kanbanEnqueue(taskId, "task", taskId, { type: "T", delivery: "report", chatId: "acceptance" });
+    if (!cardId) return `kanban card was not created for ${taskId}`;
+    kanbanBoard.kanbanRunning(cardId);
+    kanbanBoard.kanbanComplete(cardId, artifactPath, "summary");
+
+    const sends = { count: 0 };
+    const deps = {
+      sendMessage: async () => { sends.count++; return "not_sent" as const; },
+      sendDocument: async (_chatId: string, path: string) => { if (path !== artifactPath) throw new Error("wrong artifact delivered"); sends.count++; return "not_sent" as const; },
+      announce: async () => { sends.count++; },
+      chatIdFor: () => "acceptance",
+    };
+    await deliverCard(kanbanBoard.kanbanGetCard(cardId)!, deps);
+    let card = kanbanBoard.kanbanGetCard(cardId)!;
+    if (card.status !== "done" || card.delivery_result !== "definitely_not_sent" || sends.count !== 1) return `not_sent mis-settled: status=${card.status} result=${card.delivery_result} sends=${sends.count}`;
+
+    // A delivery-only retry sends the pending card exactly once more.
+    await deliverCard(card, { ...deps, sendDocument: async (_chatId: string, path: string) => { if (path !== artifactPath) throw new Error("wrong artifact delivered"); sends.count++; return "sent" as const; } });
+    card = kanbanBoard.kanbanGetCard(cardId)!;
+    if (card.status !== "delivered" || card.delivery_result !== "sent") return `retry mis-settled: status=${card.status} result=${card.delivery_result}`;
+    if (Number(sends.count) !== 2) return `expected exactly one additional send on retry, got ${sends.count}`;
+    return {
+      observed: `not_sent persisted definitely_not_sent, retried exactly once through delivery, and reached delivered`,
+      evidence: [`card=${cardId}`, `status=done→delivered`, `delivery_result=definitely_not_sent→sent`, `document_sends=2`],
+      correlation: { taskId, cardId },
+    };
+  });
+
+  await checkpoint("M50", "unknown document outcome never resends on repeated polls", "delivery", "unknown persisted, send count stays 1", async () => {
+    const taskId = `unknown-${Date.now()}`;
+    const artifactPath = join(H, "workspace", taskId, "report.md");
+    mkdirSync(join(H, "workspace", taskId), { recursive: true });
+    writeFileSync(artifactPath, "# Report\n\n" + "content\n".repeat(80), "utf-8");
+    const cardId = kanbanBoard.kanbanEnqueue(taskId, "task", taskId, { type: "T", delivery: "report", chatId: "acceptance" });
+    if (!cardId) return `kanban card was not created for ${taskId}`;
+    kanbanBoard.kanbanRunning(cardId);
+    kanbanBoard.kanbanComplete(cardId, artifactPath, "summary");
+
+    const sends = { count: 0 };
+    const deps = {
+      sendMessage: async () => { sends.count++; return "unknown" as const; },
+      sendDocument: async (_chatId: string, path: string) => { if (path !== artifactPath) throw new Error("wrong artifact delivered"); sends.count++; return "unknown" as const; },
+      announce: async () => { sends.count++; },
+      chatIdFor: () => "acceptance",
+    };
+    await deliverCard(kanbanBoard.kanbanGetCard(cardId)!, deps);
+    const card = kanbanBoard.kanbanGetCard(cardId)!;
+    if (card.status !== "done" || card.delivery_result !== "unknown") return `unknown mis-settled: status=${card.status} result=${card.delivery_result}`;
+    if (sends.count !== 1) return `expected 1 document-send attempt, got ${sends.count}`;
+
+    // Repeated delivery polls must never invoke the document sender again.
+    await deliverCard(kanbanBoard.kanbanGetCard(cardId)!, deps);
+    await deliverCard(kanbanBoard.kanbanGetCard(cardId)!, deps);
+    if (Number(sends.count) !== 1) return `unknown card was resent: document send count ${sends.count}`;
+    return {
+      observed: `unknown persisted unknown; repeated delivery polls never resent the document`,
+      evidence: [`card=${cardId}`, `status=done`, `delivery_result=unknown`, `document_sends=1`],
+      correlation: { taskId, cardId },
+    };
   });
 
   // ── Report ─────────────────────────────────────────────────────────────────

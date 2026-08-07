@@ -22,6 +22,7 @@ describe("#1432 K interactive skill journey", () => {
   let skillManager: import("../../components/skill-session.js").SkillSessionManager;
   let handleInboundMessage: typeof import("../../components/message-pipeline.js").handleInboundMessage;
   let CronQueue: typeof import("../../components/tasks/task-queue.js").CronQueue;
+  let ScheduledRunCoordinator: typeof import("../../components/tasks/scheduled-run-coordinator.js").ScheduledRunCoordinator;
   let taskStore: typeof import("../../components/tasks/task-store.js");
   let record: { prompts: Array<{ sessionKey: string; prompt: string; agent: string }> };
 
@@ -153,6 +154,7 @@ describe("#1432 K interactive skill journey", () => {
     skillManager = skillSessionManager;
     ({ handleInboundMessage } = await import("../../components/message-pipeline.js"));
     ({ CronQueue } = await import("../../components/tasks/task-queue.js"));
+    ScheduledRunCoordinator = (await import("../../components/tasks/scheduled-run-coordinator.js")).ScheduledRunCoordinator;
     taskStore = await import("../../components/tasks/task-store.js");
   });
 
@@ -190,7 +192,7 @@ describe("#1432 K interactive skill journey", () => {
     };
     taskStore.writeEntry(entry);
     const stored = taskStore.readEntry("spanish-daily")!;
-    const queue = new CronQueue("unused", home);
+    const queue = new CronQueue(new ScheduledRunCoordinator());
     queue.enqueue(stored, true);
     await waitForIdle(queue);
 

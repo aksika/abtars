@@ -131,7 +131,7 @@ describe("CronQueue #1539 two-lane admission", () => {
     // Explicit defaults: later tests may re-set these per case.
     vi.mocked(stateStore.readState).mockReturnValue({ ...baseState(), activeRun: makeReservation() });
     vi.mocked(stateStore.reserveRun).mockReturnValue({ ok: true, run: makeReservation() });
-    queue = new CronQueue("kiro-cli", ".");
+    queue = new CronQueue(new ScheduledRunCoordinator());
   });
 
   afterEach(() => {
@@ -314,7 +314,7 @@ describe("CronQueue #1539 two-lane admission", () => {
     vi.useFakeTimers();
     try {
       const coordinator = new ScheduledRunCoordinator();
-      const q = new CronQueue("kiro-cli", ".", coordinator);
+      const q = new CronQueue(coordinator);
       const entry = makeEntry({ id: "deadline-1", kind: "script", command: "sleep 100" });
       const activeRun = makeReservation("deadline-run", "manual");
       vi.mocked(stateStore.reserveRun).mockReturnValue({ ok: true, run: activeRun });
@@ -365,7 +365,7 @@ describe("CronQueue #1539 lane semantics", () => {
     }) as unknown as typeof child_process.spawn);
     vi.mocked(stateStore.readState).mockReturnValue({ ...baseState(), activeRun: makeReservation() });
     vi.mocked(stateStore.reserveRun).mockReturnValue({ ok: true, run: makeReservation() });
-    queue = new CronQueue("kiro-cli", ".");
+    queue = new CronQueue(new ScheduledRunCoordinator());
   });
 
   afterEach(() => {
@@ -412,7 +412,7 @@ describe("CronQueue #1539 lane semantics", () => {
     vi.useFakeTimers();
     try {
       const coord = new ScheduledRunCoordinator();
-      const q = new CronQueue("kiro-cli", ".", coord);
+      const q = new CronQueue(coord);
       const a = makeEntry({ id: "stale-a", kind: "script", command: "echo a" });
       const runA = makeReservation("stale-a-run", "scheduled");
       vi.mocked(stateStore.reserveRun).mockReturnValue({ ok: true, run: runA });

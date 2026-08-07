@@ -12,6 +12,7 @@ describe("scheduled project orchestration (#1516)", () => {
   let nerve: import("node:events").EventEmitter;
   let reviewStoreMod: typeof import("../../components/project-acceptance/project-review-store.js");
   let projectRunnerMod: typeof import("../../components/tasks/scheduled-project-runner.js");
+  let ScheduledRunCoordinator: typeof import("../../components/tasks/scheduled-run-coordinator.js").ScheduledRunCoordinator;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -25,6 +26,7 @@ describe("scheduled project orchestration (#1516)", () => {
     nerve = (await import("../../components/nerve.js")).nerve;
     reviewStoreMod = await import("../../components/project-acceptance/project-review-store.js");
     projectRunnerMod = await import("../../components/tasks/scheduled-project-runner.js");
+    ScheduledRunCoordinator = (await import("../../components/tasks/scheduled-run-coordinator.js")).ScheduledRunCoordinator;
   });
 
   afterEach(() => {
@@ -52,7 +54,7 @@ describe("scheduled project orchestration (#1516)", () => {
       },
     } as never);
 
-    const queue = new CronQueue("unused", home, undefined, undefined, undefined, undefined, projectRunnerMod.scheduledProjectRunner);
+    const queue = new CronQueue(new ScheduledRunCoordinator({ projectRunner: projectRunnerMod.scheduledProjectRunner }));
     queue.enqueue({
       id: "brief-task", kind: "agent", prompt: "produce the briefing",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
@@ -135,7 +137,7 @@ describe("scheduled project orchestration (#1516)", () => {
       },
     } as never);
 
-    const queue = new CronQueue("unused", home, undefined, undefined, undefined, undefined, projectRunnerMod.scheduledProjectRunner);
+    const queue = new CronQueue(new ScheduledRunCoordinator({ projectRunner: projectRunnerMod.scheduledProjectRunner }));
     queue.enqueue({
       id: "stale-task", kind: "agent", prompt: "produce report",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),

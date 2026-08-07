@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CronQueue } from "./task-queue.js";
+import { ScheduledRunCoordinator } from "./scheduled-run-coordinator.js";
 import type { ScheduledTask } from "./task-types.js";
 
 vi.mock("./task-state-store.js", () => ({
@@ -41,6 +42,16 @@ vi.mock("../transport/bridge-lock-transport.js", () => ({
   readLastPromptAt: vi.fn().mockReturnValue(0),
 }));
 
+// Prevent runAgent's dynamic import of the real spin module (which pulls
+// in user-registry → env-schema) from resolving after environment teardown.
+vi.mock("../spin.js", () => ({
+  spin: {
+    dispatchAwait: vi.fn().mockResolvedValue({ cardId: 0, result: "done" }),
+    dispatch: vi.fn(),
+    injectGreeting: vi.fn().mockResolvedValue("ok"),
+  },
+}));
+
 function systemEntry(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
   return {
     id: "sleep-cycle",
@@ -59,7 +70,7 @@ describe("CronQueue.runSystem", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    queue = new CronQueue("kiro-cli", ".");
+    queue = new CronQueue(new ScheduledRunCoordinator());
   });
 
   it("accepts and runs a system entry", () => {
