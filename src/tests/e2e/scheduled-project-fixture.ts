@@ -275,6 +275,8 @@ export function makeScheduledProjectFixture(
             const created = svc.createChild("Repair: rework", repairWorkerId, projectId, "fixture-orc", {
               criteria: [{ id: "w1", description: "repair done" }],
               expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/repair.md", required: true, criterion_ids: ["w1"] }],
+              // #1604: the repair item names the affected root criterion.
+              supportsRootCriteria: ["c1"],
               limits: options.workerLimits,
               attemptId: `att_fixture_repair_${repairWorkerId}`,
             });

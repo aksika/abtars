@@ -751,6 +751,9 @@ async function runTokenBudget(): Promise<LocalSwarmResult> {
         expectedArtifacts: [{ id: `a_b${i}`, kind: "file", ref: `out/budget-${i}.md`, required: true, criterion_ids: [`c_b${i}`] }],
         verificationCommands: [],
         requiredCapabilities: [],
+        // #1604: the root contract declares c1 — every supervised child must
+        // map at least one root criterion.
+        supportsRootCriteria: ["c1"],
         limits: { max_tokens: 5000 },
       },
     );
