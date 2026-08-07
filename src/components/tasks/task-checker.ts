@@ -7,7 +7,7 @@ import { readEntries as dbReadEntries } from "./task-store.js";
 import { advanceNextRun, createRunId, readState, reserveRun } from "./task-state-store.js";
 import { todaySuccessCount } from "./task-history-store.js";
 import { settleRunOnce } from "./task-run-settler.js";
-import type { ScheduledTask } from "./task-types.js";
+import { runCeilingMs, type ScheduledTask } from "./task-types.js";
 import type { ActiveTaskRun } from "./task-state-store.js";
 
 const TAG = "cron-checker";
@@ -110,8 +110,6 @@ export interface ReservedTask {
   run: ActiveTaskRun;
 }
 
-const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
-
 /**
  * #1539: admission only. Active-run ownership, deadline policy, recovery, and
  * terminal normalization live in the ScheduledRunCoordinator; the queue
@@ -138,7 +136,7 @@ export function checkCron(): ReservedTask[] {
         attempt: retrying ? 2 : 1,
         trigger: retrying ? "retry" : "schedule",
         occurrenceAt: deferred?.occurrenceAt ?? now,
-        deadlineAt: deferred?.deadlineAt ?? now + AGENT_TIMEOUT_MS,
+        deadlineAt: deferred?.deadlineAt ?? now + runCeilingMs(),
         cardId: undefined,
       });
       if (!reservation.ok) {

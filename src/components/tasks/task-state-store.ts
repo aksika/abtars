@@ -377,6 +377,14 @@ export type AdvanceRunResult = "advanced" | "stale" | "regression";
  * never moves to an earlier phase, and nothing advances past `cancelling`),
  * advances `lastProgressAt` only forward, increments `progressSequence` only
  * for a meaningful progress write, and merges bounded attachments.
+ *
+ * #1600: deliberately does NOT call `notifyTaskDueChanged()`. The run-deadline
+ * due source is level-triggered — `wakeDue` re-reads durable state and
+ * re-validates both limits before settling — so a timer armed against a
+ * now-stale earlier idle instant fires, finds nothing expired, settles
+ * nothing, and `armEarliest()` immediately re-arms against the recomputed
+ * later instant. Adding the notify here would be write amplification on the
+ * hot progress path for zero correctness gain.
  */
 export function advanceRun(
   taskId: string,

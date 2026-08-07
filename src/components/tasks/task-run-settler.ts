@@ -78,12 +78,20 @@ function emitTerminal(taskId: string, runId: string): void {
 }
 
 /**
- * #1539: normalize a proposed outcome against the DURABLE terminal request
+ * #1539/#1600: normalize a proposed outcome against the DURABLE terminal request
  * (read from task state, never the caller's possibly-stale run object) before
  * the history append. A durable cancellation always wins; a deadline request
- * wins only when no child terminal fact occurred before `deadlineAt` (facts
- * with a known earlier `factAt` settle on their own merits); otherwise the
- * first child terminal fact wins.
+ * wins only when no child terminal fact occurred before the request itself
+ * (facts with a known earlier `factAt` settle on their own merits); otherwise
+ * the first child terminal fact wins.
+ *
+ * #1600: the fact-precedence boundary is `durableRequest.requestedAt`, the
+ * instant the kill was decided — not `run.deadlineAt`. `deadlineAt` was only a
+ * proxy for it that held while a kill fired exactly at the deadline; with a 2 h
+ * ceiling and inactivity kills, the kill's own abort consequence would land
+ * comfortably before `deadlineAt` and record as the cause of its own kill.
+ * Ceiling kills are unchanged: the wake requests terminal at `deadlineAt`, so
+ * the two instants coincide within a scan.
  */
 function normalizeTerminal(
   outcome: TerminalOutcome,
@@ -100,11 +108,11 @@ function normalizeTerminal(
       diagnostic: makeTaskFailure("interruption", "cancelled", run.phase ?? "settling", durableRequest.reason || "cancelled", "none"),
     };
   }
-  if (factAt !== undefined && Number.isFinite(factAt) && factAt < run.deadlineAt) {
-    logInfo(TAG, `Run ${run.runId}: child terminal fact at ${factAt} preceded deadline ${run.deadlineAt} — settling on its merits (deadline request set aside)`);
+  if (factAt !== undefined && Number.isFinite(factAt) && factAt < durableRequest.requestedAt) {
+    logInfo(TAG, `Run ${run.runId}: child terminal fact at ${factAt} preceded request ${durableRequest.requestedAt} — settling on its merits (deadline request set aside)`);
     return { outcome, diagnostic };
   }
-  logInfo(TAG, `Run ${run.runId}: deadline request present and no pre-deadline terminal fact (factAt=${factAt === undefined ? "unavailable" : factAt}) — deadline verdict wins`);
+  logInfo(TAG, `Run ${run.runId}: deadline request present and no pre-request terminal fact (factAt=${factAt === undefined ? "unavailable" : factAt}) — deadline verdict wins`);
   return {
     outcome: "failed",
     diagnostic: makeTaskFailure("interruption", "deadline_exceeded", run.phase ?? "executing", detail ?? "deadline exceeded", "none"),

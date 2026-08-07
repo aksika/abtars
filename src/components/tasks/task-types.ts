@@ -1,7 +1,24 @@
 
 import { CronExpressionParser } from "cron-parser";
+import { getEnv } from "../env-schema.js";
 
 const HH_MM_RE = /^\d{1,2}:\d{2}$/;
+
+/**
+ * #1600: scheduled-run limits, resolved through the env schema (override then
+ * default). The absolute ceiling bounds the whole run; the inactivity budget
+ * settles a run that stops making meaningful progress. The old single
+ * 30-minute literal was both too short (it killed healthy daily-ai runs at
+ * 30.00 min against a 23.7 min successful maximum) and too long (a silent
+ * wedge kept its reservation for 29 minutes).
+ */
+export function runCeilingMs(): number {
+  return getEnv().taskRunCeilingMs;
+}
+
+export function runIdleBudgetMs(): number {
+  return getEnv().taskRunIdleBudgetMs;
+}
 
 function isValidHHmm(value: string): boolean {
   if (!HH_MM_RE.test(value)) return false;

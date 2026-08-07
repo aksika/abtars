@@ -6,6 +6,7 @@
  */
 
 import { readState } from "./task-state-store.js";
+import type { ActiveTaskRun } from "./task-state-store.js";
 import { readEntries as dbReadEntries } from "./task-store.js";
 import { getRun } from "./task-history-store.js";
 import { settleRunFromHistory, settleRunOnce } from "./task-run-settler.js";
@@ -17,10 +18,27 @@ import { ProjectReviewStore } from "../project-acceptance/project-review-store.j
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { LifecycleDueItem, LifecycleDueSource, LifecycleDueSourceId } from "../lifecycle-wake-scheduler.js";
 import type { ScheduledRunCoordinator } from "./scheduled-run-coordinator.js";
-import type { ScheduledTask } from "./task-types.js";
+import { runIdleBudgetMs, type ScheduledTask } from "./task-types.js";
 
 /** #1517: bounded grace after an owned cancellation request before fallback settlement. */
 export const CANCELLATION_GRACE_MS = 30_000;
+
+/** #1600: the two independent limits on a live run. Both are projections over
+ *  already-persisted fields; neither is stored — a restart recomputes both
+ *  with no migration. */
+export interface RunLimits {
+  /** Absolute ceiling: fixed at reservation, unchanged `deadlineAt` semantics. */
+  readonly ceilingAt: number;
+  /** Rolling inactivity limit: moves forward with every meaningful progress. */
+  readonly idleAt: number;
+}
+
+export function effectiveRunLimits(run: ActiveTaskRun): RunLimits {
+  return {
+    ceilingAt: run.deadlineAt,
+    idleAt: run.lastProgressAt + runIdleBudgetMs(),
+  };
+}
 
 /** Exactly-once deadline settlement shared by the due source and recovery. */
 export function settleExpiredRun(
@@ -46,11 +64,14 @@ export function settleExpiredRun(
 }
 
 /**
- * #1539: active-run deadline source. Replaces the heartbeat-driven
+ * #1539/#1600: active-run deadline source. Replaces the heartbeat-driven
  * `reconcileActiveTaskRunsLive` deadline scan. Lists every non-terminal
- * occurrence's `deadlineAt`, plus a cancellation-grace follow-up item at
- * `terminalRequest.requestedAt + GRACE`. Waking requests the durable terminal
- * through the coordinator, which the settler normalizes by fact time.
+ * occurrence's ceiling and rolling inactivity limits, plus a
+ * cancellation-grace follow-up item at `terminalRequest.requestedAt + GRACE`.
+ * Waking requests the durable terminal through the coordinator, which the
+ * settler normalizes by fact time. Both limits are level-triggered: wakeDue
+ * re-validates durable state before settling, so a spurious wake can never
+ * settle a live run.
  */
 export function createRunDeadlineSource(coordinator: ScheduledRunCoordinator): LifecycleDueSource {
   const source: LifecycleDueSource = {
@@ -60,7 +81,11 @@ export function createRunDeadlineSource(coordinator: ScheduledRunCoordinator): L
       for (const entry of dbReadEntries()) {
         const run = readState(entry.id)?.activeRun;
         if (!run) continue;
-        items.push({ key: `run:${run.runId}`, dueAt: run.deadlineAt });
+        // #1600: two independent items — the scheduler arms whichever elapses
+        // first (`run:` for the ceiling, `idle:` for the inactivity limit).
+        const limits = effectiveRunLimits(run);
+        items.push({ key: `run:${run.runId}`, dueAt: limits.ceilingAt });
+        items.push({ key: `idle:${run.runId}`, dueAt: limits.idleAt });
         if (run.phase === "cancelling" && run.terminalRequest) {
           items.push({ key: `grace:${run.runId}`, dueAt: run.terminalRequest.requestedAt + CANCELLATION_GRACE_MS });
         }
@@ -93,8 +118,17 @@ export function createRunDeadlineSource(coordinator: ScheduledRunCoordinator): L
           continue;
         }
 
-        if (run.deadlineAt <= now) {
-          coordinator.deadlineExpired(entry.id, run.runId, "deadline exceeded");
+        // #1600: two independent limits, re-validated here exactly as the
+        // scheduler's arming would have them. Ceiling first so the reported
+        // reason is the stronger one when both have elapsed; the `else if`
+        // guarantees at most one deadlineExpired call per wake per run even
+        // when both limits passed.
+        const limits = effectiveRunLimits(run);
+        if (limits.ceilingAt <= now) {
+          coordinator.deadlineExpired(entry.id, run.runId, "absolute ceiling exceeded");
+        } else if (limits.idleAt <= now) {
+          coordinator.deadlineExpired(entry.id, run.runId,
+            `no progress for ${Math.round((now - run.lastProgressAt) / 60_000)}min`);
         }
       }
     },

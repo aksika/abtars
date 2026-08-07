@@ -184,14 +184,14 @@ describe("settleRunOnce terminal normalization (#1539)", () => {
     expect(evs[0]!.detail).toBe("late success");
   });
 
-  it("a child terminal fact that predates the deadline settles on its merits despite a deadline request", async () => {
+  it("a child terminal fact that predates the request settles on its merits despite a deadline request", async () => {
     const { run } = await seedWithRequest("deadline_exceeded");
-    const factAt = DEADLINE - 5000;
-    settle.settleRunOnce({ entry: ENTRY, run, outcome: "success", detail: "finished before deadline", factAt });
+    const factAt = NOW - 5000;
+    settle.settleRunOnce({ entry: ENTRY, run, outcome: "success", detail: "finished before request", factAt });
     const { recentRuns } = await import("./task-history-store.js");
     const evs = recentRuns(ENTRY.id, 5);
     expect(evs[0]!.outcome).toBe("success");
-    expect(evs[0]!.detail).toBe("finished before deadline");
+    expect(evs[0]!.detail).toBe("finished before request");
     expect(store.readState(ENTRY.id)!.activeRun).toBeUndefined();
   });
 
@@ -212,6 +212,96 @@ describe("settleRunOnce terminal normalization (#1539)", () => {
     const evs = recentRuns(ENTRY.id, 5);
     expect(evs[0]!.outcome).toBe("failed");
     expect(evs[0]!.diagnostic?.code).toBe("deadline_exceeded");
+  });
+
+  describe("fact precedence keys off the request time (#1600)", () => {
+    async function seedWithRequestAt(
+      kind: "cancelled" | "deadline_exceeded",
+      requestedAt: number,
+      deadlineAt: number,
+      runId: string,
+    ): Promise<import("./task-state-store.js").ActiveTaskRun> {
+      const reserved = store.reserveRun(ENTRY.id, {
+        runId, groupId: "g-1600", attempt: 1, trigger: "schedule",
+        occurrenceAt: OCCURRENCE_AT, deadlineAt,
+      });
+      if (!reserved.ok) throw new Error("reserveRun failed");
+      store.requestRunTerminal(ENTRY.id, runId, { kind, requestedAt, reason: "no progress for 15min" });
+      return store.readState(ENTRY.id)!.activeRun!;
+    }
+
+    function record(entryId: string) {
+      return import("./task-history-store.js").then(m => m.recentRuns(entryId, 5)[0]);
+    }
+
+    it("an idle-killed project run records deadline_exceeded, not the cause of its own abort", async () => {
+      // Idle kill at minute 15 against a 2 h ceiling: the abort it triggers is a
+      // consequence (fact at the kill instant), never an independent failure.
+      const idleKillAt = NOW + 15 * 60_000;
+      const run = await seedWithRequestAt("deadline_exceeded", idleKillAt, NOW + 120 * 60_000, "norm-idle-kill");
+      settle.settleRunOnce({
+        entry: ENTRY, run, outcome: "failed",
+        diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "scheduled project cancelled: no progress for 15min", "none"),
+        detail: "scheduled project cancelled: no progress for 15min",
+        factAt: idleKillAt + 100,
+      });
+      const ev = await record(ENTRY.id);
+      expect(ev!.outcome).toBe("failed");
+      expect(ev!.diagnostic?.category).toBe("interruption");
+      expect(ev!.diagnostic?.code).toBe("deadline_exceeded");
+      expect(ev!.detail).toBe("scheduled project cancelled: no progress for 15min");
+    });
+
+    it("a child fact genuinely earlier than the request still settles on its own merits", async () => {
+      // Guards against over-correcting into "deadline always wins".
+      const killAt = NOW + 15 * 60_000;
+      const run = await seedWithRequestAt("deadline_exceeded", killAt, NOW + 120 * 60_000, "norm-pre-kill");
+      settle.settleRunOnce({
+        entry: ENTRY, run, outcome: "failed",
+        diagnostic: failure.makeTaskFailure("supervision", "lane_failed", "executing", "lane card 7 settled failed", "none"),
+        detail: "lane card 7 settled failed",
+        factAt: killAt - 5000,
+      });
+      const ev = await record(ENTRY.id);
+      expect(ev!.outcome).toBe("failed");
+      expect(ev!.diagnostic?.category).toBe("supervision");
+      expect(ev!.diagnostic?.code).toBe("lane_failed");
+    });
+
+    it("a ceiling kill classifies exactly as today when the two instants coincide", async () => {
+      // Ceiling kill: the wake fires at deadlineAt and requests terminal in the
+      // same pass, so requestedAt and deadlineAt coincide within a scan.
+      const deadlineAt = NOW + 10 * 60_000;
+      const run = await seedWithRequestAt("deadline_exceeded", deadlineAt + 100, deadlineAt, "norm-ceiling-kill");
+      settle.settleRunOnce({
+        entry: ENTRY, run, outcome: "failed",
+        diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "scheduled project cancelled: absolute ceiling exceeded", "none"),
+        detail: "scheduled project cancelled: absolute ceiling exceeded",
+        factAt: deadlineAt + 200,
+      });
+      const ev = await record(ENTRY.id);
+      expect(ev!.outcome).toBe("failed");
+      expect(ev!.diagnostic?.code).toBe("deadline_exceeded");
+    });
+
+    it("a child fact in the recovery gap (between deadline and late request) settles on its own merits", async () => {
+      // Deliberate change: when the bridge was down across the deadline, recovery
+      // records requestedAt well after deadlineAt. A child that genuinely
+      // finished in that gap now wins instead of losing to the deadline verdict.
+      const deadlineAt = NOW + 10 * 60_000;
+      const recoveredAt = NOW + 20 * 60_000;
+      const run = await seedWithRequestAt("deadline_exceeded", recoveredAt, deadlineAt, "norm-recovery-gap");
+      settle.settleRunOnce({
+        entry: ENTRY, run, outcome: "failed",
+        diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "provider died during outage", "none"),
+        detail: "provider died during outage",
+        factAt: NOW + 12 * 60_000,
+      });
+      const ev = await record(ENTRY.id);
+      expect(ev!.outcome).toBe("failed");
+      expect(ev!.diagnostic?.category).toBe("execution");
+      expect(ev!.diagnostic?.code).toBe("model_error");
+    });
   });
 
   it("without a terminal request the first child terminal fact wins unchanged", async () => {

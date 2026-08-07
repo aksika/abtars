@@ -6,7 +6,7 @@ import { logInfo, logWarn } from "../logger.js";
 import { createRunId, reserveRun, readState } from "./task-state-store.js";
 import { logTaskDebug } from "./task-log-ctx.js";
 import type { ScheduledTask } from "./task-types.js";
-import { isSystemEntry, isReminder } from "./task-types.js";
+import { isSystemEntry, isReminder, runCeilingMs } from "./task-types.js";
 import { settleRunOnce, onRunTerminal } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
 import { ScheduledRunCoordinator, type RunLane } from "./scheduled-run-coordinator.js";
@@ -391,7 +391,7 @@ export class CronQueue {
       attempt: manual ? 1 : (readState(entry.id)?.retrying ? 2 : 1),
       trigger: manual ? "manual" : "schedule",
       occurrenceAt: now,
-      deadlineAt: now + 30 * 60 * 1000,
+      deadlineAt: now + runCeilingMs(),
     });
     if (res.ok) return res.run;
     logWarn(TAG, `Cannot run "${entry.id}": active run in progress ${res.active.runId}`);

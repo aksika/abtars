@@ -5,7 +5,7 @@ import { createRunDeadlineSource, CANCELLATION_GRACE_MS } from "./due-sources.js
 import * as taskStore from "./task-store.js";
 import * as stateStore from "./task-state-store.js";
 import * as historyStore from "./task-history-store.js";
-import type { ScheduledTask } from "./task-types.js";
+import { runCeilingMs, type ScheduledTask } from "./task-types.js";
 
 vi.mock("./task-store.js", () => ({
   readEntries: vi.fn(),
@@ -90,6 +90,17 @@ describe("checkCron", () => {
     vi.mocked(taskStore.readEntries).mockReturnValue([makeTask()]);
     const due = checkCron();
     expect(due.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("#1600: reserves a due run with the shared absolute ceiling, not a 30-minute literal", () => {
+    vi.clearAllMocks();
+    vi.mocked(taskStore.readEntries).mockReturnValue([makeTask()]);
+    checkCron();
+    const call = vi.mocked(stateStore.reserveRun).mock.calls.find(c => c[0] === "t1");
+    expect(call).toBeDefined();
+    const delta = call![1]!.deadlineAt - Date.now();
+    expect(delta).toBeGreaterThan(runCeilingMs() - 1000);
+    expect(delta).toBeLessThan(runCeilingMs() + 1000);
   });
 
   it("does not admit while an active run owns the task", () => {

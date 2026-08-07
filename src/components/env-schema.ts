@@ -126,6 +126,10 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "ENABLE_ASYNC_DELEGATION", type: "bool", default: "false", description: "Enable async session delegation tools (spawn/check/terminate)" },
   { env: "MAX_SESSIONS", type: "int", default: "10", description: "Max concurrent managed sessions per user" },
 
+  // ── Scheduled runs (#1600) ──
+  { env: "TASK_RUN_CEILING_MS", type: "int", default: "7200000", description: "Scheduled-run absolute ceiling (ms)" },
+  { env: "TASK_RUN_IDLE_BUDGET_MS", type: "int", default: "900000", description: "Scheduled-run inactivity budget (ms)" },
+
   // ── Artifact Store (S3) ──
   { env: "ARTIFACT_S3_ENDPOINT", type: "string", description: "S3-compatible endpoint for artifact store" },
   { env: "ARTIFACT_S3_KEY", type: "string", description: "S3 access key ID" },
@@ -212,6 +216,10 @@ export interface EnvConfig {
   dashboardModule: string | undefined;
   notebooklmEnabled: boolean;
   notebooklmDefaultNotebook: string;
+
+  // Scheduled runs (#1600)
+  taskRunCeilingMs: number;
+  taskRunIdleBudgetMs: number;
   permissionTimeoutMs: number;
   trustMode: boolean;
   securityMode: string;
@@ -364,6 +372,9 @@ export function initEnv(): Readonly<EnvConfig> {
     maxSessions: parseIntSafe(readOr("MAX_SESSIONS", "10"), "MAX_SESSIONS"),
     maxAgentCallPerHour: parseIntSafe(readOr("MAX_AGENT_CALL_PER_HOUR", "30"), "MAX_AGENT_CALL_PER_HOUR"),
     maxAgentCallPerDay: parseIntSafe(readOr("MAX_AGENT_CALL_PER_DAY", "100"), "MAX_AGENT_CALL_PER_DAY"),
+
+    taskRunCeilingMs: parseIntSafe(readOr("TASK_RUN_CEILING_MS", "7200000"), "TASK_RUN_CEILING_MS"),
+    taskRunIdleBudgetMs: parseIntSafe(readOr("TASK_RUN_IDLE_BUDGET_MS", "900000"), "TASK_RUN_IDLE_BUDGET_MS"),
 
     getApiKey(envName: string): string | undefined {
       return process.env[envName]?.trim() || undefined;

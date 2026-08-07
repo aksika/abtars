@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { LifecycleWakeScheduler } from "../lifecycle-wake-scheduler.js";
+import type { ScheduledRunCoordinator } from "./scheduled-run-coordinator.js";
 
 let TEST_HOME: string;
 let kanban: typeof import("./kanban-board.js");
@@ -213,6 +214,114 @@ describe("task-admission due source #1539", () => {
     stateStore.reserveRun("busy", { runId: "b-1", groupId: "g", attempt: 1, trigger: "schedule", occurrenceAt: now, deadlineAt: now + 60_000 });
     const items = dueSources.createTaskAdmissionSource(() => {}).listDueItems();
     expect(items).toHaveLength(0);
+  });
+});
+
+describe("run-deadline inactivity limits #1600", () => {
+  let taskTypes: typeof import("./task-types.js");
+
+  beforeEach(async () => {
+    taskTypes = await import("./task-types.js");
+  });
+
+  function agentEntry(id: string): import("./task-types.js").ScheduledTask {
+    return {
+      id, kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
+      orchestration: { maxAgents: 1 }, schedule: "0 9 * * *", enabled: true,
+      priority: "medium", delivery: "announce", chatId: "1",
+    };
+  }
+
+  function reserveWith(entry: import("./task-types.js").ScheduledTask, deadlineAt: number): import("./task-state-store.js").ActiveTaskRun {
+    writeFileSync(join(TEST_HOME, "tasks", "tasks.json"), JSON.stringify([entry], null, 2));
+    stateStore.initializeState(taskStore.readEntries());
+    const res = stateStore.reserveRun(entry.id, {
+      runId: "idle-run", groupId: "g", attempt: 1, trigger: "schedule",
+      occurrenceAt: Date.now(), deadlineAt,
+    });
+    if (!res.ok) throw new Error("reserveRun failed");
+    return res.run;
+  }
+
+  function deadlineSource() {
+    const coordinator = {
+      deadlineExpired: vi.fn<(taskId: string, runId: string, reason: string) => void>(),
+      failureCallback: undefined,
+    } as unknown as ScheduledRunCoordinator;
+    return { coordinator, source: dueSources.createRunDeadlineSource(coordinator) };
+  }
+
+  it("#1600: a run whose progress keeps advancing past 30 minutes is not settled and is still active at 45 minutes", () => {
+    const entry = agentEntry("idle-progress");
+    const now = Date.now();
+    const run = reserveWith(entry, now + taskTypes.runCeilingMs());
+    const { coordinator, source } = deadlineSource();
+
+    stateStore.advanceRun(entry.id, run.runId, { progressAt: now + 30 * 60_000 });
+    source.wakeDue(now + 31 * 60_000);
+    expect(coordinator.deadlineExpired).not.toHaveBeenCalled();
+
+    stateStore.advanceRun(entry.id, run.runId, { progressAt: now + 45 * 60_000 });
+    source.wakeDue(now + 46 * 60_000);
+    expect(coordinator.deadlineExpired).not.toHaveBeenCalled();
+    expect(stateStore.readState(entry.id)!.activeRun).toBeDefined();
+  });
+
+  it("#1600: a run whose progress stops advancing is settled after the idle budget, not one scan earlier", () => {
+    const entry = agentEntry("idle-wedge");
+    const run = reserveWith(entry, Date.now() + taskTypes.runCeilingMs());
+    const lastProgressAt = run.lastProgressAt;
+    const { coordinator, source } = deadlineSource();
+
+    source.wakeDue(lastProgressAt + taskTypes.runIdleBudgetMs() - 1);
+    expect(coordinator.deadlineExpired).not.toHaveBeenCalled();
+
+    source.wakeDue(lastProgressAt + taskTypes.runIdleBudgetMs());
+    expect(coordinator.deadlineExpired).toHaveBeenCalledTimes(1);
+    expect(coordinator.deadlineExpired).toHaveBeenCalledWith(entry.id, "idle-run", expect.stringContaining("no progress for"));
+  });
+
+  it("#1600: a run reporting progress forever is settled at the ceiling with the ceiling reason", () => {
+    const entry = agentEntry("idle-ceiling");
+    const now = Date.now();
+    const run = reserveWith(entry, now + 10 * 60_000);
+    const { coordinator, source } = deadlineSource();
+
+    stateStore.advanceRun(entry.id, run.runId, { progressAt: now + 5 * 60_000 });
+    source.wakeDue(now + 10 * 60_000);
+    expect(coordinator.deadlineExpired).toHaveBeenCalledTimes(1);
+    expect(coordinator.deadlineExpired).toHaveBeenCalledWith(entry.id, "idle-run", "absolute ceiling exceeded");
+  });
+
+  it("#1600: a spurious wake with no limit elapsed settles nothing", () => {
+    const entry = agentEntry("idle-spurious");
+    const now = Date.now();
+    reserveWith(entry, now + taskTypes.runCeilingMs());
+    const { coordinator, source } = deadlineSource();
+
+    source.wakeDue(now);
+    expect(coordinator.deadlineExpired).not.toHaveBeenCalled();
+  });
+
+  it("#1600: exactly one settlement when both limits elapse together", () => {
+    const entry = agentEntry("idle-both");
+    const now = Date.now();
+    reserveWith(entry, now + 10 * 60_000);
+    const { coordinator, source } = deadlineSource();
+
+    source.wakeDue(now + 25 * 60_000);
+    expect(coordinator.deadlineExpired).toHaveBeenCalledTimes(1);
+  });
+
+  it("#1600: lists both the ceiling and the idle due items for arming", () => {
+    const entry = agentEntry("idle-items");
+    const now = Date.now();
+    const run = reserveWith(entry, now + 10 * 60_000);
+    const { source } = deadlineSource();
+
+    const items = source.listDueItems();
+    expect(items.some(i => i.key === "run:idle-run" && i.dueAt === now + 10 * 60_000)).toBe(true);
+    expect(items.some(i => i.key === "idle:idle-run" && i.dueAt === run.lastProgressAt + taskTypes.runIdleBudgetMs())).toBe(true);
   });
 });
 

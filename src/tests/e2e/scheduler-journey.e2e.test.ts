@@ -58,6 +58,7 @@ let leaseStoreMod: typeof import("../../components/executor-lease-store.js");
 let nerveMod: typeof import("../../components/nerve.js");
 let WorkerSupervisionStoreClass: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
 let orcRunStoreMod: typeof import("../../components/orc-project/orc-project-run-store.js");
+let taskTypesMod: typeof import("../../components/tasks/task-types.js");
 
 const FIXTURES: ScheduledTask[] = [
   {
@@ -193,6 +194,7 @@ async function loadModules(): Promise<void> {
   nerveMod = await import("../../components/nerve.js");
   WorkerSupervisionStoreClass = (await import("../../components/worker-supervision-store.js")).WorkerSupervisionStore;
   orcRunStoreMod = await import("../../components/orc-project/orc-project-run-store.js");
+  taskTypesMod = await import("../../components/tasks/task-types.js");
 }
 
 function writeFixtureTasks(): void {
@@ -811,16 +813,16 @@ describe("#1548 Task-1 gate — real admission under controlled time", () => {
 
       expect(fixture.lastTurn).toBe("authored");
       const run = stateStore.readState("project-task")!.activeRun!;
-      // Real reservation carries the production-derived absolute deadline.
-      expect(run.deadlineAt - run.reservedAt).toBe(30 * 60 * 1000);
+      // Real reservation carries the production-derived absolute ceiling.
+      expect(run.deadlineAt - run.reservedAt).toBe(taskTypesMod.runCeilingMs());
       expect(run.cardId).toBeDefined();
       expect(queue.currentJobs.map(j => j.entryId)).toContain("project-task");
 
-      // Advance well past the deadline in one controlled jump: the
+      // Advance well past the ceiling in one controlled jump: the
       // waitForProjectTerminal 10s recheck, the run-deadline wake source,
       // and the coordinator's deadline path must all fire without deadlock
       // and settle the occurrence exactly once.
-      await vi.advanceTimersByTimeAsync(30 * 60 * 1000 + 11_000);
+      await vi.advanceTimersByTimeAsync(taskTypesMod.runCeilingMs() + 11_000);
       await advanceUntil(() => stateStore.readState("project-task")?.activeRun === undefined);
 
       // R1: the declared terminal contract is deadline_exceeded — the wake's
