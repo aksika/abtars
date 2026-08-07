@@ -266,6 +266,66 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
   });
 });
 
+describe("ScheduledTaskRunner #1602 normalized-entry guard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedSettle.mockClear();
+  });
+
+  it("settles a raw agent entry with no interaction as definition_failed, with no dispatch", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run" }));
+    const projectRunner = vi.fn(async () => ({ cardId: 8, result: "must not run" }));
+    const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
+    const raw = makeEntry("raw-entry");
+    delete raw.interaction;
+    const outcome = await runner.run(raw, makeReservation("raw-entry"));
+
+    expect(outcome.status).toBe("definition_failed");
+    expect(outcome.safeDetail).toContain("unnormalized interaction");
+    expect(agentRunner).not.toHaveBeenCalled();
+    expect(projectRunner).not.toHaveBeenCalled();
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "definition_failed",
+      diagnostic: expect.objectContaining({ category: "definition", code: "invalid_definition" }),
+    }));
+  });
+
+  it("guards a null interaction object with the same classification", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run" }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const raw = makeEntry("null-interaction");
+    raw.interaction = null;
+    const outcome = await runner.run(raw, makeReservation("null-interaction"));
+
+    expect(outcome.status).toBe("definition_failed");
+    expect(agentRunner).not.toHaveBeenCalled();
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "definition_failed",
+      diagnostic: expect.objectContaining({ code: "invalid_definition" }),
+    }));
+  });
+
+  it("settles an unsupported interaction discriminant as definition_failed without dispatch", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run" }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const raw = makeEntry("bad-mode");
+    raw.interaction = { mode: "weird" };
+    const outcome = await runner.run(raw, makeReservation("bad-mode"));
+
+    expect(outcome.status).toBe("definition_failed");
+    expect(agentRunner).not.toHaveBeenCalled();
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "definition_failed" }));
+  });
+
+  it("keeps valid oneshot entries flowing through the direct runner", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("valid-oneshot"), makeReservation("valid-oneshot"));
+    expect(outcome.status).toBe("success");
+    expect(agentRunner).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("ScheduledTaskRunner #1432 scheduled skill launch", () => {
   beforeEach(() => {
     skillLaunch.mockReset();

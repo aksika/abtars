@@ -97,6 +97,26 @@ export class ScheduledTaskRunner {
         }
       }
 
+      // #1602: the runner's invariant is a normalized agent entry. A direct
+      // raw-entry caller must settle as a definition failure, never turn a
+      // definition defect into a TypeError classified as an execution failure.
+      const interaction = (entry as { interaction?: unknown }).interaction;
+      const mode = interaction && typeof interaction === "object"
+        ? (interaction as { mode?: unknown }).mode
+        : undefined;
+      if (mode !== "oneshot" && mode !== "skill") {
+        const detail = `task "${entry.id}" has an unnormalized interaction definition`;
+        logWarn(TAG, `${detail} — settled as definition_failed without dispatch`);
+        settleRunOnce({
+          entry, run: reservation, outcome: "definition_failed",
+          diagnostic: makeTaskFailure("definition", "invalid_definition", "preflight", detail, "permanent"),
+          detail, factAt: factNow(),
+          onPaused: this.onPaused,
+          onFailure: this.onFailure,
+        });
+        return { status: "definition_failed", safeDetail: detail };
+      }
+
       let prompt = entry.prompt ?? "";
       let resolvedContract: ResolvedReportContract | undefined;
       let artifactBaseline: ArtifactBaseline | undefined;
