@@ -695,6 +695,11 @@ function settleCoverageBlocked(projectId: number, reviewStore: ProjectReviewStor
       ...(uncoveredIds !== undefined ? { coverage_uncovered_ids: JSON.stringify(uncoveredIds) } : {}),
     },
   );
+  // Match every other terminal blocked path (abortProject, settleBlocked):
+  // the supervision row alone would leave a non-scheduled card running
+  // forever. Scheduled roots are failed again by the settler — kanbanFail is
+  // idempotent for an already-failed card.
+  kanbanFail(projectId, reason.slice(0, 1000));
   logWarn(TAG, `Project ${projectId}: coverage gate blocked — ${reason}`);
 }
 
@@ -729,10 +734,16 @@ function dispatchCoverageRound(projectId: number, uncovered: readonly string[]):
  * transition, so an uncovered project never enters an acceptance review it
  * structurally cannot pass. Evaluation is fail-closed: an undeterminable read
  * blocks the project; a gap dispatches a bounded coverage round to the Orc.
+ * The gate runs only when entering review_ready from `executing` — the
+ * `review_ready` crash-recovery path (roundOffset 0) has already passed the
+ * gate, and `claimCoverageRound` pins `state = 'executing'`, so a gap there
+ * could never be claimed and would stall recovery forever.
  */
 async function createReviewCase(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, roundOffset: 0 | 1 = 1): Promise<void> {
-  const coverageGate = runCoverageGate(projectId, supervision, reviewStore);
-  if (coverageGate !== "clear") return;
+  if (supervision.state === "executing") {
+    const coverageGate = runCoverageGate(projectId, supervision, reviewStore);
+    if (coverageGate !== "clear") return;
+  }
 
   const nextRound = supervision.review_round + roundOffset;
   const transitioned = reviewStore.stateTransition(

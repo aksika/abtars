@@ -729,6 +729,45 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     expect(claims).toHaveLength(0); // case creation is the Reconciler owner — no continuation claim
   });
 
+  it("#1604: review_ready crash recovery with a stale gap never dispatches a coverage round or blocks", async () => {
+    // A project already in review_ready (crash between the review_ready
+    // transition and case insert) must recover through the continuation path.
+    // The gate only guards the executing → review_ready ENTRY (design §3);
+    // claimCoverageRound pins state='executing', so a stale gap here can never
+    // be claimed — the recovery must not deadlock on it.
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    reviewStoreMock.contractExists.mockReturnValue(true);
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({
+      state: "review_ready",
+      coverage_rounds: 0,
+      coverage_signature: null,
+      coverage_uncovered_ids: null,
+    }));
+    reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(true);
+    reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+    // Coverage read reports a gap — must NOT trigger a coverage round or block.
+    readProjectCriterionCoverageMock.mockReturnValue({
+      kind: "read",
+      read: { criterionIds: ["c1"], mappings: [], uncovered: ["c1"] },
+    });
+    kanbanGetCardMock.mockReturnValue(scheduledRootCard());
+    kanbanGetChildrenMock.mockReturnValue([
+      { ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 },
+    ]);
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(reviewStoreMock.claimCoverageRound).not.toHaveBeenCalled();
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+    const coverageDispatches = claims.filter(c => c.goal.includes("[COVERAGE GAP]"));
+    expect(coverageDispatches).toHaveLength(0);
+    expect(claims.length).toBeGreaterThan(0); // recovery continues via the scheduled continuation
+  });
+
   it("classifies reviewing with an open case as review ownership (never a fresh authoring claim)", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
     mod.setOrcCoordinator({

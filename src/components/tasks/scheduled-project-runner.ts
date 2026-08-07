@@ -421,9 +421,14 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
     // #1604: the durable coverage fact, evaluated once by the reconciler gate.
     // NULL means coverage was never evaluated (project died before review
     // eligibility) → [] so the real lane/deadline reason surfaces instead of
-    // a recomputed contract_uncovered.
+    // a recomputed contract_uncovered. An undeterminable evaluation surfaces
+    // as project_blocked with the blocked_reason verbatim — never masked by
+    // lane codes (design §5).
     const uncovered = parseCoverageUncovered(supervision?.coverage_uncovered_ids);
-    const { code, message } = selectSupervisionCode(lanes, uncovered);
+    const isCoverageUndeterminable = reason.startsWith("coverage_undeterminable");
+    const { code, message } = isCoverageUndeterminable
+      ? { code: "project_blocked" as const, message: reason }
+      : selectSupervisionCode(lanes, uncovered);
     const diagnostic = makeTaskFailure("supervision", code, "executing",
       code === "project_blocked" ? reason : message, "none",
       {
