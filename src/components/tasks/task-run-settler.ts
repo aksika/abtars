@@ -46,8 +46,9 @@ export interface SettleOptions {
   /**
    * #1539: the terminal fact's own occurrence time — card updated_at /
    * acceptance decision time, process exit time, or provider completion time.
-   * `factAt < deadlineAt` is accepted on its merits even when observed after
-   * the deadline; without it, a deadline request wins by settlement time.
+   * A fact that predates the durable terminal request is accepted on its
+   * merits even when observed afterward; without it, a deadline request wins
+   * by settlement time.
    */
   factAt?: number;
 }

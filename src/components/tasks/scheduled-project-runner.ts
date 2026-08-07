@@ -58,6 +58,7 @@ export type ScheduledProjectRunner = (
 export async function scheduledProjectRunner(request: ScheduledProjectRequest): Promise<{ cardId: number; result: string }> {
   const { entryId, runId, executionControl } = request;
   const goal = buildOrcGoal(request);
+  const cancellationState: ProjectCancellationState = { abortStarted: false };
 
   const state = readState(entryId);
   const activeRun = state?.activeRun;
@@ -85,11 +86,8 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
       // #1546 R5: terminal reattach reads terminal evidence; no supervision
       // insertion and no new Orc claim.
       logInfo(TAG, `Scheduled project #${rootCardId} already terminal on reattach — waiting for terminal evidence`);
-      executionControl.bind(async (reason) => {
-        logInfo(TAG, `Scheduled project #${rootCardId} cancelled: ${reason}`);
-        await abortProjectById(rootCardId, `scheduled cancellation: ${reason}`);
-      });
-      return waitForProjectTerminal(request, rootCardId);
+      bindProjectCancellation(executionControl, rootCardId, cancellationState);
+      return waitForProjectTerminal(request, rootCardId, cancellationState);
     }
 
     if (!supervision || supervision.state === "awaiting_contract") {
@@ -115,12 +113,9 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
       requestReconcileForProject(rootCardId);
     }
 
-    executionControl.bind(async (reason) => {
-      logInfo(TAG, `Scheduled project #${rootCardId} cancelled: ${reason}`);
-      await abortProjectById(rootCardId, `scheduled cancellation: ${reason}`);
-    });
+    bindProjectCancellation(executionControl, rootCardId, cancellationState);
 
-    return waitForProjectTerminal(request, rootCardId);
+    return waitForProjectTerminal(request, rootCardId, cancellationState);
   } else {
     // #1516: the root card durably carries the scheduled run correlation
     // (source_id) and the absolute deadline (due_at) alongside the agent cap.
@@ -161,12 +156,9 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
   const currentCard = kanbanGetCard(rootCardId);
   if (currentCard?.status === "queued") kanbanRunning(rootCardId);
 
-  executionControl.bind(async (reason) => {
-    logInfo(TAG, `Scheduled project #${rootCardId} cancelled: ${reason}`);
-    await abortProjectById(rootCardId, `scheduled cancellation: ${reason}`);
-  });
+  bindProjectCancellation(executionControl, rootCardId, cancellationState);
 
-  return waitForProjectTerminal(request, rootCardId);
+  return waitForProjectTerminal(request, rootCardId, cancellationState);
 }
 
 /**
@@ -201,6 +193,25 @@ function buildOrcGoal(request: ScheduledProjectRequest): string {
 type ProjectTerminalRead =
   | { accepted: true; synthesis: string; factAt?: number }
   | { accepted: false; diagnostic: TaskFailureDiagnosticV1; factAt?: number };
+
+interface ProjectCancellationState {
+  abortStarted: boolean;
+}
+
+function bindProjectCancellation(
+  executionControl: ExecutionControl,
+  rootCardId: number,
+  state: ProjectCancellationState,
+): void {
+  executionControl.bind(async (reason) => {
+    // If the project was already terminal when cancellation arrived, preserve
+    // that child fact for the shared settler's request-time precedence check.
+    if (readProjectTerminal(rootCardId)) return;
+    state.abortStarted = true;
+    logInfo(TAG, `Scheduled project #${rootCardId} cancelled: ${reason}`);
+    await abortProjectById(rootCardId, `scheduled cancellation: ${reason}`);
+  });
+}
 
 /**
  * #1588: a typed carrier for a non-accepted supervised project. The diagnostic
@@ -454,7 +465,11 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
  * race; deadline and execution-control cancellation abort the project and
  * settle through the scheduled runner's existing exactly-once path.
  */
-function waitForProjectTerminal(request: ScheduledProjectRequest, rootCardId: number): Promise<{ cardId: number; result: string; factAt?: number }> {
+function waitForProjectTerminal(
+  request: ScheduledProjectRequest,
+  rootCardId: number,
+  cancellationState: ProjectCancellationState,
+): Promise<{ cardId: number; result: string; factAt?: number }> {
   return new Promise((resolve, reject) => {
     const { executionControl, deadlineAt } = request;
     let finished = false;
@@ -467,7 +482,9 @@ function waitForProjectTerminal(request: ScheduledProjectRequest, rootCardId: nu
     };
     const check = (): void => {
       if (finished) return;
-      if (executionControl.cancelled) {
+      const terminalRequest = readState(request.entryId)?.activeRun?.terminalRequest;
+      const deadlineRequested = terminalRequest?.kind === "deadline_exceeded";
+      if (executionControl.cancelled && (!deadlineRequested || cancellationState.abortStarted)) {
         finish(() => reject(new Error(`scheduled project cancelled: ${executionControl.cancelReason ?? "cancelled"}`)));
         return;
       }
@@ -484,6 +501,10 @@ function waitForProjectTerminal(request: ScheduledProjectRequest, rootCardId: nu
             reject(new SupervisedProjectFailure(terminal.diagnostic, terminal.factAt));
           }
         });
+        return;
+      }
+      if (executionControl.cancelled) {
+        finish(() => reject(new Error(`scheduled project cancelled: ${executionControl.cancelReason ?? "cancelled"}`)));
         return;
       }
       if (Date.now() >= deadlineAt) {

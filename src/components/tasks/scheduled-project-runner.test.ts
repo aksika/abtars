@@ -284,6 +284,37 @@ describe("scheduled-project-runner #1516", () => {
     )).toThrow(/already terminal/);
   });
 
+  it("#1600 reads terminal project evidence before honoring a deadline cancellation", async () => {
+    vi.useFakeTimers();
+    try {
+      fakeCoordinator();
+      await seedReservation();
+      const control = makeControl("spr-pre-kill-terminal");
+      const pending = mod.scheduledProjectRunner(makeRequest({ executionControl: control }));
+      const root = kanban.kanbanList("*")[0]!;
+      const factAt = Date.now() - 1000;
+
+      // Model a durable project terminal fact that was written before the
+      // inactivity kill, but whose event is observed only by the recheck.
+      kanban._kanbanExecForTest(
+        "UPDATE kanban_board SET status = 'done', result_summary = ?, updated_at = ? WHERE id = ?",
+        ["finished before kill", new Date(factAt).toISOString(), root.id],
+      );
+      stateStore.requestRunTerminal("daily-ai", "daily-ai_1", {
+        kind: "deadline_exceeded", requestedAt: Date.now(), reason: "no progress for 15min",
+      });
+      control.signalCancel("deadline");
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(pending).resolves.toEqual(expect.objectContaining({
+        cardId: root.id,
+        result: "finished before kill",
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reattaches to the persisted card on duplicate admission and never creates a second project", async () => {
     const claims = fakeCoordinator();
     await seedReservation();

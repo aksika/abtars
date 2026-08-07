@@ -783,7 +783,7 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
 });
 
 describe("#1548 Task-1 gate — real admission under controlled time", () => {
-  it("reserves through the real queue with the production 30-minute deadline and settles once as deadline_exceeded", async () => {
+  it("reserves through the real queue with the production run limits and settles once as deadline_exceeded", async () => {
     vi.useFakeTimers();
     try {
       const { queue, coordinator } = await makeQueueWithCoordinator();
@@ -799,8 +799,8 @@ describe("#1548 Task-1 gate — real admission under controlled time", () => {
       });
       await scheduler.start();
 
-      // Acceptance never arrives: the run must be killed by its deadline,
-      // never by an unrelated event and never before it.
+      // Acceptance never arrives: the run must be killed by the lifecycle
+      // deadline source, never by an unrelated event and never before a limit.
       const { fixture } = await makeFixture();
       forceDue("project-task");
       await tick.runTaskTick(makeTickCtx(queue));
@@ -818,10 +818,10 @@ describe("#1548 Task-1 gate — real admission under controlled time", () => {
       expect(run.cardId).toBeDefined();
       expect(queue.currentJobs.map(j => j.entryId)).toContain("project-task");
 
-      // Advance well past the ceiling in one controlled jump: the
-      // waitForProjectTerminal 10s recheck, the run-deadline wake source,
-      // and the coordinator's deadline path must all fire without deadlock
-      // and settle the occurrence exactly once.
+      // Advance well past the ceiling in one controlled jump: the idle limit,
+      // waitForProjectTerminal 10s recheck, run-deadline wake source, and
+      // coordinator deadline path must all fire without deadlock and settle
+      // the occurrence exactly once.
       await vi.advanceTimersByTimeAsync(taskTypesMod.runCeilingMs() + 11_000);
       await advanceUntil(() => stateStore.readState("project-task")?.activeRun === undefined);
 
