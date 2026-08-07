@@ -10,6 +10,7 @@ vi.mock("../../components/system-event-buffer.js", () => ({
 
 vi.mock("../../components/logger.js", () => ({
   logInfo: vi.fn(),
+  logTrace: vi.fn(),
   logWarn: vi.fn(),
   logError: vi.fn(),
 }));
@@ -90,12 +91,84 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "done");
   });
 
-  it("does not grant an already expired request a fresh execution window", async () => {
+  it("does not grant an already expired request a fresh execution window — the completion is failed, the pump keeps serving", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(-5000), makeRequest(120_000)));
+    client.sleep.runtime.fail.mockResolvedValue({ status: "ok" });
+    client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
+    const spin = vi.fn().mockResolvedValue({ result: "next", sessionId: "s1" });
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect(spin).toHaveBeenCalledTimes(1);
+    expect(spin.mock.calls[0]![0]).toMatchObject({ prompt: "prompt" });
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "completion_deadline_expired");
+    // The expired completion cost only itself — the next request is served.
+    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "next");
+  });
+
+  it("#1603: a timed-out completion fails that completion only — the pump continues and serves the next request", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
+    try {
+      const client = makeFakeClient();
+      client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+      client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+      // Each request's deadline is computed at serve time (fresh fake clock).
+      client.sleep.runtime.next.mockImplementation(() => {
+        const r = makeRequest(100_000);
+        if (client.sleep.runtime.next.mock.calls.length === 1) return Promise.resolve(r);
+        if (client.sleep.runtime.next.mock.calls.length === 2) return Promise.resolve(r);
+        return Promise.resolve({ status: "lease_expired" });
+      });
+      client.sleep.runtime.fail.mockResolvedValue({ status: "invalid_completion" });
+      client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
+      const spin = vi.fn()
+        .mockReturnValueOnce(new Promise(() => {})) // hangs → deadline
+        .mockResolvedValueOnce({ result: "second", sessionId: "s1" });
+
+      const handle = createSleepHandle({
+        client,
+        memoryEnabled: true,
+        onComplete: vi.fn(),
+        onCycleEnd: vi.fn(),
+        sessionManager: { spin },
+        bufferSystemEvent: vi.fn(),
+      });
+      handle.startScheduled();
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(100_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "completion_deadline_expired");
+      // invalid_completion from the broker's deadline settle keeps the lease —
+      // the pump must serve the next request, not close after the first.
+      expect(spin).toHaveBeenCalledTimes(2);
+      expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "second");
+      expect(client.sleep.runtime.next).toHaveBeenCalledTimes(3); // 2 requests + terminal poll
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("#1603: the pump exits on invalid_lease after a deadline — the lease is genuinely gone", async () => {
     const client = makeFakeClient();
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(-5000)));
-    client.sleep.runtime.fail.mockResolvedValue({ status: "ok" });
+    client.sleep.runtime.fail.mockResolvedValue({ status: "invalid_lease" });
     const spin = vi.fn();
 
     const handle = createSleepHandle({
@@ -111,14 +184,16 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
 
     expect(spin).not.toHaveBeenCalled();
     expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "completion_deadline_expired");
+    // invalid_lease means we lost the lease — the pump must terminate.
+    expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
   });
 
-  it("exits the pump when settlement rejects the completed result", async () => {
+  it("#1603: a late completed result (invalid_completion) fails that completion only — the pump continues, then exits on lease expiry", async () => {
     const client = makeFakeClient();
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
-    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
     client.sleep.runtime.complete.mockResolvedValue({ status: "invalid_completion" });
     const spin = vi.fn().mockResolvedValue({ result: "late", sessionId: "s1" });
 
@@ -134,9 +209,13 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     await settleTicks();
 
     expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "late");
-    // One best-effort close; the pump must not keep polling for more work.
+    // The broker's deadline settle already owned this completion — the lease
+    // survives and the pump serves the next request before lease expiry.
+    expect(spin).toHaveBeenCalledTimes(2);
+    expect(client.sleep.runtime.complete).toHaveBeenCalledTimes(2);
+    // One best-effort close once the lease actually expires.
     expect(client.sleep.runtime.close).toHaveBeenCalledTimes(1);
-    expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
+    expect(client.sleep.runtime.next).toHaveBeenCalledTimes(3); // 2 requests + terminal poll
   });
 
   it("keeps polling after an accepted fail() but exits when fail() is rejected", async () => {

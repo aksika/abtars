@@ -1,7 +1,7 @@
 import { resetAllCtxStarts } from "./ctx-start.js";
 import { logInfo, logWarn } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
-import { getSystemTaskRegistry } from "../components/tasks/system-task-registry.js";
+import { getSystemTaskRegistry, type SystemTaskContext } from "../components/tasks/system-task-registry.js";
 
 function registerUnavailableHandler(reason: string): void {
   const registry = getSystemTaskRegistry();
@@ -66,15 +66,33 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
 
   const registry = getSystemTaskRegistry();
   if (!registry.has("sleep-cycle")) {
-    registry.register("sleep-cycle", () => {
-      const result = handle.startScheduled();
-      if (result.status === "already_running") {
+    registry.register("sleep-cycle", async (_entry, ctx: SystemTaskContext) => {
+      // #1603: the scheduled run settles on the cycle's REAL outcome, not on
+      // the dispatch. Progress keeps the run alive past the idle budget.
+      const started = handle.startScheduled({ onProgress: () => ctx.progress(), signal: ctx.signal });
+      if (started.status === "already_running") {
         return { status: "noop" as const, detail: "already running" };
       }
-      if (result.status === "unavailable") {
-        return { status: "failed" as const, error: result.reason };
+      if (started.status === "unavailable") {
+        return { status: "failed" as const, error: started.reason };
       }
-      return { status: "accepted" as const, detail: "sleep cycle started" };
+
+      const outcome = await started.completion;
+      const failed = outcome.failedSteps.length > 0 ? ` (failed: ${outcome.failedSteps.join(", ")})` : "";
+      switch (outcome.status) {
+        case "completed":
+          return { status: "ok" as const, detail: "sleep cycle completed" };
+        case "partial":
+          return { status: "ok" as const, detail: `essential steps completed${failed}` };
+        case "no_work":
+          return { status: "noop" as const, detail: "no messages since last sleep" };
+        case "cancelled":
+          return { status: "failed" as const, error: `sleep cycle cancelled${failed}` };
+        case "failed":
+          return { status: "failed" as const, error: `essential sleep steps failed${failed}` };
+        default:
+          return { status: "failed" as const, error: `sleep cycle outcome could not be observed${failed}` };
+      }
     });
     logInfo("boot", "registered system action sleep-cycle");
   }

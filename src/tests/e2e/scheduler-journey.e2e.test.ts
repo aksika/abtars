@@ -321,7 +321,7 @@ beforeEach(async () => {
   const entries = taskStore.readEntries();
   stateStore.initializeState(entries);
   registry._resetSystemTaskRegistry();
-  registry.getSystemTaskRegistry().register("sleep-cycle", (entry) => {
+  registry.getSystemTaskRegistry().register("sleep-cycle", (_entry, _ctx) => {
     doubles.sleepCycleCalls++;
     if (doubles.sleepCycleCalls === 1) {
       return { status: "deferred", retryAt: Date.now() + 60_000, detail: "sleep active" };
@@ -329,7 +329,7 @@ beforeEach(async () => {
     if (doubles.sleepCycleCalls === 2) {
       return { status: "noop", detail: "already asleep" };
     }
-    return { status: "accepted", detail: "cycle handled" };
+    return { status: "ok", detail: "cycle handled" };
   });
 });
 
@@ -366,6 +366,40 @@ describe("#1520 scheduler E2E — journey 1: system/Dreamy sleep-cycle", () => {
     expect(ev3[0]!.diagnostic).toBeUndefined(); // healthy runs carry no incident
     expect(stateStore.readState("sys-sleep")!.consecutiveFailures).toBe(0);
     expect(doubles.pausedNotifications).toHaveLength(0);
+  });
+
+  it("#1603: a sleep-cycle resolving failed after a delay records a failed run and fires the failure cascade exactly once", async () => {
+    const failureNotices: Array<{ entryId: string; code: string }> = [];
+    const { CronQueue } = await import("../../components/tasks/task-queue.js");
+    const coordinator = new CoordinatorClass({
+      onFailure: (entryId, diagnostic) => { failureNotices.push({ entryId, code: diagnostic.code }); },
+      agentRunner: fakeAgentRunner,
+      projectRunner: realProjectRunner,
+    });
+    const queue = new CronQueue("kiro-cli", ".", coordinator);
+
+    // Stub: the cycle handler AWAITS its long action and reports the real
+    // outcome — the run must settle failed, not success-at-dispatch.
+    registry._resetSystemTaskRegistry();
+    registry.getSystemTaskRegistry().register("sleep-cycle", async (_entry, _ctx) => {
+      doubles.sleepCycleCalls++;
+      await new Promise(r => setTimeout(r, 10));
+      return { status: "failed", error: "essential sleep steps failed (failed: retro-derive)" };
+    });
+
+    forceDue("sys-sleep");
+    await runTick(queue);
+    // The detached dispatch awaits the handler; give it a beat to settle.
+    await new Promise(r => setTimeout(r, 30));
+
+    const ev = events("sys-sleep");
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.outcome).toBe("failed");
+    expect(ev[0]!.diagnostic?.category).toBe("execution");
+    expect(stateStore.readState("sys-sleep")!.consecutiveFailures).toBeGreaterThan(0);
+    expect(failureNotices).toHaveLength(1);
+    expect(failureNotices[0]!.entryId).toBe("sys-sleep");
+    expect(failureNotices[0]!.code).toBe("process_exit");
   });
 });
 

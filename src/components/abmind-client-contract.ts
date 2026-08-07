@@ -70,9 +70,27 @@ export interface AbmindSleepRuntimeLike {
   close(leaseId: string, idempotencyKey?: string): Promise<{ status: string }>;
 }
 
+export interface SleepStatusLastLike {
+  runId?: string;
+  attemptedAt: number;
+  finishedAt?: number;
+  status: string;
+  report?: string;
+  resumable: boolean;
+  completedSteps: number;
+  failedSteps: number;
+}
+
+/** Structural shape of abmind's sleep.status output (#1603). */
+export interface SleepStatusLike {
+  state: "idle" | "running" | "terminal" | "interrupted";
+  active?: { runId: string; mode: string; startedAt: number; step?: string; percent: number };
+  last?: SleepStatusLastLike;
+}
+
 export interface AbmindSleepLike {
   start(mode: "scheduled" | "manual", level?: string, fresh?: boolean, idempotencyKey?: string): Promise<SleepStartResultLike>;
-  status(): Promise<unknown>;
+  status(): Promise<SleepStatusLike>;
   resume(runId?: string, level?: string, idempotencyKey?: string): Promise<SleepStartResultLike>;
   events(afterSeq: number, limit?: number, waitMs?: number): Promise<SleepEventsResultLike>;
   runtime: AbmindSleepRuntimeLike;

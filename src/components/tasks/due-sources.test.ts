@@ -323,6 +323,35 @@ describe("run-deadline inactivity limits #1600", () => {
     expect(items.some(i => i.key === "run:idle-run" && i.dueAt === now + 10 * 60_000)).toBe(true);
     expect(items.some(i => i.key === "idle:idle-run" && i.dueAt === run.lastProgressAt + taskTypes.runIdleBudgetMs())).toBe(true);
   });
+
+  it("#1603: a system run reporting progress through its handler survives the idle budget; a silent one is settled", () => {
+    function systemEntry(id: string): import("./task-types.js").ScheduledTask {
+      return {
+        id, kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", enabled: true,
+        priority: "medium", delivery: "silent",
+      };
+    }
+
+    // The live handler keeps rolling progress forward (ctx.progress → advanceRun).
+    const live = systemEntry("sys-progress");
+    const liveRun = reserveWith(live, Date.now() + taskTypes.runCeilingMs());
+    const { coordinator: liveC, source: liveS } = deadlineSource();
+    for (let m = 15; m <= 45; m += 15) {
+      stateStore.advanceRun(live.id, liveRun.runId, { progressAt: Date.now() + m * 60_000 });
+      liveS.wakeDue(Date.now() + (m + 1) * 60_000);
+    }
+    expect(liveC.deadlineExpired, "a healthy long cycle with progress must never be settled").not.toHaveBeenCalled();
+
+    // A handler that never reports progress (broken wiring) dies at the idle bound.
+    const silent = systemEntry("sys-silent");
+    const silentRun = reserveWith(silent, Date.now() + taskTypes.runCeilingMs());
+    const { coordinator: silentC, source: silentS } = deadlineSource();
+    silentS.wakeDue(silentRun.lastProgressAt + taskTypes.runIdleBudgetMs() - 1);
+    expect(silentC.deadlineExpired).not.toHaveBeenCalled();
+    silentS.wakeDue(silentRun.lastProgressAt + taskTypes.runIdleBudgetMs());
+    expect(silentC.deadlineExpired).toHaveBeenCalledTimes(1);
+    expect(silentC.deadlineExpired).toHaveBeenCalledWith(silent.id, "idle-run", expect.stringContaining("no progress for"));
+  });
 });
 
 describe("settleExpiredRun failure cascade (#1588)", () => {

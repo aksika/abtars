@@ -46,7 +46,7 @@ describe("HardwareSleepController", () => {
     expect(r.platform).toBe("darwin");
   });
 
-  it("attempt returns accepted and writes transition", async () => {
+  it("attempt returns ok and writes transition", async () => {
     const store = new PowerTransitionStore();
     let suspended = false;
     const ctrl = new HardwareSleepController(makeSafeProbe(), makeAdapter(async (cmd, args) => {
@@ -56,7 +56,7 @@ describe("HardwareSleepController", () => {
     // latestLocalTime must be in the future relative to test run time
     const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
     const r = await ctrl.attempt(entry);
-    expect(r.status).toBe("accepted");
+    expect(r.status).toBe("ok");
     expect(suspended).toBe(true);
     expect(store.read()).not.toBeNull();
   });
@@ -195,9 +195,9 @@ describe("HardwareSleepController", () => {
       }), store, NO_TEST_RUNTIME);
       const entry = { id: "test", idleMinutes: 20, retryMinutes: 10, latestLocalTime: "23:59", expectedWakeTime: "07:55" } as any;
       const r = await ctrl.attempt(entry);
-      expect(r.status).toBe("accepted");
+      expect(r.status).toBe("ok");
       expect(suspended).toBe(true);
-      // An accepted suspend retains the transition marker for wake/expiry recovery.
+      // An issued suspend retains the transition marker for wake/expiry recovery.
       const retained = store.read();
       expect(retained).not.toBeNull();
       expect(retained!.attemptId).toBeDefined();

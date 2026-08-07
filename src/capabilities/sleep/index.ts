@@ -33,8 +33,27 @@ export interface SleepOpts {
   bufferSystemEvent: (report: string) => void | Promise<void>;
 }
 
+/**
+ * The cycle's real outcome, observed from the daemon (#1603). The scheduled
+ * run settles from this instead of from the dispatch itself.
+ */
+export interface SleepCycleOutcome {
+  /** abmind's terminal status, or "unknown" when it could not be observed. */
+  status: "completed" | "no_work" | "partial" | "failed" | "cancelled" | "unknown";
+  /** Step ids observed failing during the cycle (from step_failed events). */
+  failedSteps: readonly string[];
+  /** abmind's run report, capped by the daemon. */
+  report?: string;
+}
+
+/** Host-side run options for a sleep start (#1603). */
+export interface SleepStartOptions {
+  onProgress?: () => void;
+  signal?: AbortSignal;
+}
+
 export type SleepStartResult =
-  | { status: "accepted" }
+  | { status: "accepted"; completion: Promise<SleepCycleOutcome> }
   | { status: "already_running" }
   | SleepUnavailable;
 
@@ -57,8 +76,8 @@ export interface SleepProgress {
 export interface SleepHandle {
   readonly isActive: boolean;
   readonly progress: SleepProgress | null;
-  startScheduled(): SleepStartResult;
-  startManual(options: { fresh: boolean; resume: boolean }): SleepStartResult;
+  startScheduled(options?: SleepStartOptions): SleepStartResult;
+  startManual(options: { fresh: boolean; resume: boolean }, runOptions?: SleepStartOptions): SleepStartResult;
 }
 
 const POLL_INTERVAL_MS = 3000;
@@ -140,10 +159,12 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
         const remainingMs = req.deadline - Date.now();
         if (remainingMs <= 0) {
-          logWarn("sleep", `Completion ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) already past its deadline — failing and closing provider pump`);
-          try {
-            await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "completion_deadline_expired");
-          } catch { /* best effort */ }
+          // #1603: a completion past its own deadline fails only that
+          // completion. invalid_completion means the broker's deadline timer
+          // already settled it — the lease is still ours, so keep serving.
+          logWarn("sleep", `Completion ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) already past its deadline — failing the completion, continuing`);
+          const failResult = await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "completion_deadline_expired").catch(() => undefined);
+          if (failResult && (failResult.status === "ok" || failResult.status === "invalid_completion")) continue;
           break;
         }
 
@@ -160,10 +181,11 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
             remainingMs,
           );
           if (spinResult.kind === "timed_out") {
-            logWarn("sleep", `Completion ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) deadline reached while awaiting the model — closing provider pump`);
-            try {
-              await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "completion_deadline_expired");
-            } catch { /* best effort */ }
+            // #1603: the model exceeded this completion's deadline — the
+            // broker settles it as a per-step failure and the cycle continues.
+            logWarn("sleep", `Completion ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) deadline reached while awaiting the model — failing the completion, continuing`);
+            const failResult = await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "completion_deadline_expired").catch(() => undefined);
+            if (failResult && (failResult.status === "ok" || failResult.status === "invalid_completion")) continue;
             break;
           }
           if (spinResult.kind === "failed") {
@@ -182,6 +204,12 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
           const completeResult = await client.sleep.runtime.complete(ownedLeaseId, req.completionId, spinResult.value.result ?? "");
           if (completeResult.status !== "ok") {
+            if (completeResult.status === "invalid_completion") {
+              // #1603: the broker's deadline timer already settled this
+              // completion; the lease survives, so keep serving the run.
+              logWarn("sleep", `Completion rejected (${completeResult.status}) for ${req.completionId} — continuing`);
+              continue;
+            }
             logWarn("sleep", `Completion rejected (${completeResult.status}) for ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) — closing provider pump`);
             break;
           }
@@ -207,11 +235,12 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
   }
 
-  async function eventPoller(): Promise<void> {
+  async function eventPoller(onProgress: (() => void) | undefined, failedSteps: string[]): Promise<string | null> {
     let afterSeq = 0;
     let sleepCard: SleepCard | null = null;
+    let observedTerminal: string | null = null;
 
-    while (!abortController.signal.aborted && currentRunId) {
+    while (!abortController.signal.aborted && currentRunId && !observedTerminal) {
       try {
         const eventsResult = await client.sleep.events(afterSeq, EVENTS_LIMIT, POLL_INTERVAL_MS);
         currentRunId = eventsResult.runId;
@@ -233,8 +262,16 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
               step: ev.event.detail ?? "running",
             };
           }
+          if (ev.event.type === "step_failed" && ev.event.detail) {
+            failedSteps.push(ev.event.detail);
+          }
+          if (ev.event.type === "cycle_finished") {
+            observedTerminal = ev.event.detail ?? null;
+          }
           sleepCard?.onEvent({ seq: ev.seq, at: ev.at, type: ev.event.type, detail: ev.event.detail } as any);
         }
+
+        if (eventsResult.events.length > 0) onProgress?.();
 
         if (eventsResult.terminal) {
           break;
@@ -245,15 +282,25 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
 
     sleepCard?.complete();
+    return observedTerminal ?? null;
   }
 
-  function startRun(mode: "scheduled" | "manual" | "resume", level: string, fresh?: boolean): SleepStartResult {
+  function startRun(mode: "scheduled" | "manual" | "resume", level: string, fresh: boolean | undefined, options?: SleepStartOptions): SleepStartResult {
     if (running) return { status: "already_running" };
     running = true;
     progress = { percent: 0, step: "starting" };
     abortController = new AbortController();
     writeSleepStatus("sleeping");
     logInfo("sleep", `😴 Sleep starting (mode=${mode}, client-backed)`);
+
+    // #1603: host cancellation (scheduled-run terminal) propagates into the
+    // cycle's internal abort controller.
+    const externalSignal = options?.signal;
+    const onExternalAbort = (): void => abortController.abort(externalSignal?.reason);
+    if (externalSignal) {
+      if (externalSignal.aborted) abortController.abort(externalSignal.reason);
+      else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
 
     if (opts.allocateSleepSession) {
       const dateStr = new Date().toISOString().slice(0, 10);
@@ -262,6 +309,16 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       nightSessionId = opts.allocateSleepSession(`Sleep ${dateStr}`);
     }
 
+    let settleCompletion: (outcome: SleepCycleOutcome) => void = () => {};
+    const completion = new Promise<SleepCycleOutcome>((resolve) => { settleCompletion = resolve; });
+    let settled = false;
+    const settle = (outcome: SleepCycleOutcome): void => {
+      if (settled) return;
+      settled = true;
+      if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
+      settleCompletion(outcome);
+    };
+
     const startPromise = mode === "resume"
       ? client.sleep.resume(undefined, level)
       : client.sleep.start(mode, level, fresh);
@@ -269,34 +326,67 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     startPromise.then((result: { status: string; runId?: string; reason?: string }) => {
       if (result.status === "accepted" && result.runId) {
         currentRunId = result.runId;
-        providerPump().finally(() => { cleanup(); opts.onCycleEnd?.(); });
-        eventPoller().catch(() => {});
+        const failedSteps: string[] = [];
+        const poller = eventPoller(options?.onProgress, failedSteps).catch(() => null);
+        Promise.all([
+          providerPump(),
+          poller,
+        ]).finally(async () => {
+          // #1603: resolve the outcome — the observed cycle_finished event
+          // first, then the daemon's own status (which also carries the
+          // report), then "unknown" when neither is available.
+          const observed = await poller;
+          const terminalSet: ReadonlySet<string> = new Set(["completed", "no_work", "partial", "failed", "cancelled"]);
+          let status: SleepCycleOutcome["status"] = observed && terminalSet.has(observed) ? observed as SleepCycleOutcome["status"] : "unknown";
+          let report: string | undefined;
+          try {
+            const st = await client.sleep.status();
+            if (!observed && st.last?.status) status = st.last.status as SleepCycleOutcome["status"];
+            report = st.last?.report;
+          } catch { /* status unavailable */ }
+          const outcome: SleepCycleOutcome = { status, failedSteps: [...failedSteps], report };
+          // Deliver the report and fire onComplete BEFORE the host's awaited
+          // completion resolves, so the scheduled run settles only after its
+          // side channels are drained. Host callbacks are wrapped so a
+          // throwing host cannot change the outcome.
+          try {
+            if (outcome.report) await opts.bufferSystemEvent(outcome.report);
+          } catch (err) { logWarn("sleep", `Report delivery failed: ${(err as Error).message}`); }
+          try {
+            if (outcome.status === "completed" || outcome.status === "partial" || outcome.status === "no_work") opts.onComplete();
+          } catch (err) { logWarn("sleep", `onComplete callback threw: ${(err as Error).message}`); }
+          settle(outcome);
+          cleanup();
+          opts.onCycleEnd?.();
+        });
       } else {
+        settle({ status: "unknown", failedSteps: [], report: undefined });
         cleanup();
         opts.onCycleEnd?.();
         logWarn("sleep", `Sleep not accepted: ${result.status}${result.reason ? ": " + result.reason : ""}`);
       }
     }).catch((err: unknown) => {
+      settle({ status: "unknown", failedSteps: [], report: undefined });
       cleanup();
       opts.onCycleEnd?.();
       logWarn("sleep", `Sleep start failed: ${(err as Error).message}`);
     });
 
-    return { status: "accepted" };
+    return { status: "accepted", completion };
   }
 
   return {
     get isActive() { return running; },
     get progress() { return progress; },
-    startScheduled(): SleepStartResult {
+    startScheduled(options?: SleepStartOptions): SleepStartResult {
       const env = getEnv();
       const level = env.sleepQuality ?? "normal";
-      return startRun("scheduled", level);
+      return startRun("scheduled", level, undefined, options);
     },
-    startManual({ fresh, resume }): SleepStartResult {
+    startManual({ fresh, resume }, runOptions?): SleepStartResult {
       const env = getEnv();
       const level = fresh ? "ultimate" : (env.sleepQuality ?? "normal");
-      return startRun(resume ? "resume" : "manual", level, fresh);
+      return startRun(resume ? "resume" : "manual", level, fresh, runOptions);
     },
   };
 }

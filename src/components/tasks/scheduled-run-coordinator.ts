@@ -66,6 +66,7 @@ interface CoordinatorHandle {
   child?: ChildProcess;
   killTimers: Set<ReturnType<typeof setTimeout>>;
   lastProgressAt: number;
+  abort?: AbortController;
 }
 
 export type FollowUpEnqueue = (entry: ScheduledTask) => void;
@@ -372,8 +373,10 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
       if (control) control.signalCancel(reason as import("../swarm-executor-types.js").CancelReason);
       return;
     }
-    // system dispatch: prompt boundary with no cancel handle; the run-deadline
-    // grace item settles it if the dispatcher never returns.
+    // system dispatch: signal the handler's cooperative cancellation context;
+    // the cancellation-grace fallback in due-sources.ts remains the backstop
+    // for a handler that ignores the signal.
+    handle.abort?.abort(new Error(reason));
   }
 
   private dispatchSystem(handle: CoordinatorHandle): void {
@@ -383,7 +386,16 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
     advanceRun(handle.taskId, run.runId, { phase: "executing", progressAt: startedAt });
     void (async () => {
       try {
-        const result = await getSystemTaskRegistry().dispatch(entry);
+        // #1603: the handler may await a long action (e.g. a sleep cycle).
+        // Progress must roll the rolling inactivity limit forward or the
+        // run-deadline source settles the run while it is still healthy.
+        const abort = new AbortController();
+        handle.abort = abort;
+        const ctx = {
+          progress: () => this.throttledProgress(handle),
+          signal: abort.signal,
+        };
+        const result = await getSystemTaskRegistry().dispatch(entry, ctx);
         const factAt = Date.now();
         if (result.status === "deferred") {
           settleRunOnce({
@@ -397,7 +409,7 @@ export class ScheduledRunCoordinator implements ActiveRunSupervisor {
         } else if (result.status === "noop") {
           settleRunOnce({ entry, run, outcome: "noop", detail: result.detail, factAt });
           logInfo(TAG, `System noop: "${entry.action}" (${entry.id})${result.detail ? ` — ${result.detail}` : ""}`);
-        } else if (result.status === "accepted") {
+        } else if (result.status === "ok") {
           settleRunOnce({ entry, run, outcome: "success", detail: result.detail, factAt });
           logInfo(TAG, `System ok: "${entry.action}" (${entry.id})${result.detail ? ` — ${result.detail}` : ""}`);
         } else {

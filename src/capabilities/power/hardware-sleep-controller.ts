@@ -110,9 +110,10 @@ export class HardwareSleepController {
 
     try {
       await this.adapter.suspend();
-      // #1517: an accepted suspend retains the transition marker for existing
-      // wake/expiry recovery behavior.
-      return { status: "accepted", detail: "suspend command issued" };
+      // #1603: for this action, issuing the suspend command IS completion —
+      // the old `accepted` variant meant "started", and the settler mapped
+      // that to success anyway. `ok` says so truthfully.
+      return { status: "ok", detail: "suspend command issued" };
     } catch (err) {
       this.transitionStore.clearIfOwned(attemptId);
       return { status: "failed", error: err instanceof Error ? err.message : String(err) };

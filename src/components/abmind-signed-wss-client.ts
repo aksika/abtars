@@ -214,7 +214,7 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
 
     this.sleep = {
       start: (m, l, f, key) => this.call("sleep.start", { mode: m, level: l, fresh: f }, key) as Promise<{ status: string; runId?: string; reason?: string }>,
-      status: () => this.call("sleep.status", {}),
+      status: () => this.call("sleep.status", {}) as Promise<import("./abmind-client-contract.js").SleepStatusLike>,
       resume: (runId, level, key) => this.call("sleep.resume", { runId, level }, key) as Promise<{ status: string; runId?: string; reason?: string }>,
       events: (afterSeq, limit, waitMs) => this.call("sleep.events", { afterSeq, limit, waitMs }) as Promise<{ runId: string; events: Array<{ seq: number; at: number; event: { type: string; detail?: string } }>; nextSeq: number; gap: boolean; terminal: boolean }>,
       runtime: {

@@ -11,7 +11,10 @@ const mockUnavailable = vi.hoisted(() => vi.fn((code: string) => ({
 const mockCreateSleepHandle = vi.hoisted(() => vi.fn(() => ({
   isActive: false,
   progress: null,
-  startScheduled: vi.fn(() => ({ status: "accepted" })),
+  startScheduled: vi.fn(() => ({
+    status: "accepted" as const,
+    completion: Promise.resolve({ status: "completed" as const, failedSteps: [] as string[], report: "test report" }),
+  })),
   startManual: vi.fn(() => ({ status: "accepted" })),
 })));
 
@@ -23,6 +26,7 @@ vi.mock("../capabilities/sleep/index.js", () => ({
 vi.mock("../components/logger.js", () => ({
   logDebug: vi.fn(),
   logInfo: vi.fn(),
+  logTrace: vi.fn(),
   logWarn: vi.fn(),
   logError: vi.fn(),
 }));
@@ -56,7 +60,10 @@ describe("phaseSleep — #1429 precedence and construction", () => {
     mockCreateSleepHandle.mockImplementation(() => ({
       isActive: false,
       progress: null,
-      startScheduled: vi.fn(() => ({ status: "accepted" })),
+      startScheduled: vi.fn(() => ({
+        status: "accepted" as const,
+        completion: Promise.resolve({ status: "completed" as const, failedSteps: [] as string[], report: "test report" }),
+      })),
       startManual: vi.fn(() => ({ status: "accepted" })),
     }));
   });
@@ -158,5 +165,62 @@ describe("phaseSleep — #1429 precedence and construction", () => {
 
     const registry = getSystemTaskRegistry();
     expect(registry.has("sleep-cycle")).toBe(true);
+  });
+
+  it("#1603: the sleep-cycle handler settles on the awaited cycle outcome — ok on completed", async () => {
+    const fakeSessionManager = {
+      spin: vi.fn().mockResolvedValue({ result: "ok", sessionId: "sess-1" }),
+      getSessionById: vi.fn().mockReturnValue(null),
+      allocateDreamySession: vi.fn(),
+    };
+    const ctx = createBootCtx({
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
+      client: makeFakeClient(),
+      sendSystemMessage: vi.fn(),
+      sessionManager: fakeSessionManager as any,
+    });
+    const { phaseSleep } = await import("./phase-sleep.js");
+    await phaseSleep(ctx);
+
+    const registry = (await import("../components/tasks/system-task-registry.js")).getSystemTaskRegistry();
+    const result = await registry.dispatch(
+      { id: "sleep-cycle", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", enabled: true, priority: "medium", delivery: "silent" },
+      { progress: vi.fn(), signal: new AbortController().signal },
+    );
+    expect(result.status).toBe("ok");
+    expect(registry.has("sleep-cycle")).toBe(true);
+  });
+
+  it("#1603: a failed cycle outcome settles the run as failed with the failing steps named", async () => {
+    mockCreateSleepHandle.mockImplementationOnce(() => ({
+      isActive: false,
+      progress: null,
+      startScheduled: vi.fn(() => ({
+        status: "accepted" as const,
+        completion: Promise.resolve({ status: "failed" as const, failedSteps: ["retro-derive"] as string[], report: "report" }),
+      })),
+      startManual: vi.fn(() => ({ status: "accepted" })),
+    }));
+    const fakeSessionManager = {
+      spin: vi.fn().mockResolvedValue({ result: "ok", sessionId: "sess-1" }),
+      getSessionById: vi.fn().mockReturnValue(null),
+      allocateDreamySession: vi.fn(),
+    };
+    const ctx = createBootCtx({
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
+      client: makeFakeClient(),
+      sendSystemMessage: vi.fn(),
+      sessionManager: fakeSessionManager as any,
+    });
+    const { phaseSleep } = await import("./phase-sleep.js");
+    await phaseSleep(ctx);
+
+    const registry = (await import("../components/tasks/system-task-registry.js")).getSystemTaskRegistry();
+    const result = await registry.dispatch(
+      { id: "sleep-cycle", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", enabled: true, priority: "medium", delivery: "silent" },
+      { progress: vi.fn(), signal: new AbortController().signal },
+    );
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") expect(result.error).toContain("retro-derive");
   });
 });
