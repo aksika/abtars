@@ -7,6 +7,7 @@
 
 import type { ToolDefinition, ToolExecutionContext } from "./tool-registry.js";
 import { logInfo } from "../logger.js";
+import { logSwarmTrace } from "../swarm-trace.js";
 
 const TAG = "orc-tools";
 
@@ -201,6 +202,19 @@ const spawnWorkerTool: ToolDefinition = {
       throw err;
     }
     logInfo(TAG, `spawn_worker card:${cardId} parent:${projectCardId} — ${(args.title || goal).slice(0, 60)}${hasStructuredData ? " [supervised]" : ""}`);
+    // #1604 R6: one swarm-trace event per supervised spawn carrying the
+    // mapped/uncovered ids, riding in `reason` (the trace schema has a fixed
+    // field allowlist).
+    if (hasStructuredData) {
+      try {
+        const { readProjectCriterionCoverage } = await import("../project-acceptance/project-criterion-coverage.js");
+        const coverage = readProjectCriterionCoverage(projectCardId);
+        if (coverage.kind === "read") {
+          const mapped = supportsRootCriteriaRaw.length > 0 ? supportsRootCriteriaRaw : [];
+          logSwarmTrace({ event: "coverage", project: projectCardId, card: cardId, reason: `mapped=${mapped.join(",") || "-"} uncovered=${coverage.read.uncovered.join(",") || "-"}` });
+        }
+      } catch { /* trace is best-effort — never fail the spawn on it */ }
+    }
     return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"${hasStructuredData ? " [supervised]" : ""}`;
   },
 };
@@ -538,7 +552,8 @@ const defineProjectContractTool: ToolDefinition = {
         }
       });
 
-      return `✓ Root contract defined (${normalized.contract.id}, digest: ${normalized.contract.digest.slice(0, 12)}…). Project may now spawn workers.`;
+      const criterionIds = normalized.contract.criteria.map(c => c.id).join(", ");
+      return `✓ Root contract defined (${normalized.contract.id}, digest: ${normalized.contract.digest.slice(0, 12)}…). Root criteria: ${criterionIds}. Every spawn_worker must pass supports_root_criteria using these exact ids; all must be covered before review_project.`;
     } catch (err) {
       return `[err] define_project_contract error: ${String(err)}`;
     }
