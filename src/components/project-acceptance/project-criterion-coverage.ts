@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { ProjectReviewStore } from "./project-review-store.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
-import { kanbanGetChildren } from "../tasks/kanban-board.js";
+import { kanbanGetChildren, requireTaskDatabase } from "../tasks/kanban-board.js";
 import { findUncoveredCriteria, type ContractCriterionMapping, type ProjectAcceptanceContractV1 } from "./project-contract.js";
 
 /**
@@ -82,6 +82,20 @@ export function readProjectCriterionCoverage(rootCardId: number): CoverageResult
     }
   }
 
+  // #1604: peer contributions are mapping sources too — a completed remote
+  // contribution declares the root criteria it supports and is accepted as
+  // evidence by the review case. Without this, a contribution-only project
+  // would be gated as uncovered and never reach review.
+  const contributionRows = peerContributionRootCriteria(rootCardId);
+  if (contributionRows === undefined) {
+    return { kind: "undeterminable", reason: `peer contributions for project #${rootCardId} are unreadable` };
+  }
+  for (const row of contributionRows) {
+    if (row.rootCriteria.length > 0) {
+      mappings.push({ child_contract_id: `peer:${row.peer}:${row.requestId}`, supports_root_criteria: row.rootCriteria });
+    }
+  }
+
   const uncovered = findUncoveredCriteria(rootContract, mappings);
   return {
     kind: "read",
@@ -91,6 +105,36 @@ export function readProjectCriterionCoverage(rootCardId: number): CoverageResult
       uncovered,
     },
   };
+}
+
+/**
+ * #1604: completed peer contributions mapped to a project, each with the root
+ * criteria it declares. `undefined` means the contributions table exists but
+ * could not be read (fail-closed — never "skip and treat as covered"). A
+ * missing table means no contributions were ever recorded — empty list.
+ */
+function peerContributionRootCriteria(projectCardId: number): Array<{ peer: string; requestId: string; rootCriteria: readonly string[] }> | undefined {
+  try {
+    const db = requireTaskDatabase();
+    const tableExists = db.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'peer_contributions'`,
+    ).get();
+    if (!tableExists) return [];
+    const rows = db.prepare(
+      `SELECT peer, request_id, root_criteria_json FROM peer_contributions
+        WHERE project_card_id = ? AND state = 'completed' AND root_criteria_json IS NOT NULL`,
+    ).all(projectCardId) as Array<{ peer: string; request_id: string; root_criteria_json: string }>;
+    return rows.map(row => {
+      let rootCriteria: readonly string[] = [];
+      try {
+        const parsed = JSON.parse(row.root_criteria_json) as unknown;
+        if (Array.isArray(parsed)) rootCriteria = parsed.filter((v): v is string => typeof v === "string");
+      } catch { rootCriteria = []; }
+      return { peer: row.peer, requestId: row.request_id, rootCriteria };
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 /**

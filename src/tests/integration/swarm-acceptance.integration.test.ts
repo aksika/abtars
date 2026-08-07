@@ -131,14 +131,121 @@ async function initDb(): Promise<void> {
   };
 }
 
-describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
-  let mod: typeof import("../../components/reconciler.js");
-  let WorkerSupervisionStore: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
-  let WorkerSupervisionService: typeof import("../../components/worker-supervision-service.js").WorkerSupervisionService;
-  let ProjectReviewStore: typeof import("../../components/project-acceptance/project-review-store.js").ProjectReviewStore;
-  let ReviewCaseAssembler: typeof import("../../components/project-acceptance/project-review-case.js").ReviewCaseAssembler;
-  let ProjectReviewService: typeof import("../../components/project-acceptance/project-review-service.js").ProjectReviewService;
+// Module-scoped bindings shared by Scenario A/B and the coverage-gate suite.
+// Each describe assigns these in beforeEach; helpers below close over them.
+let mod: typeof import("../../components/reconciler.js");
+let WorkerSupervisionStore: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
+let WorkerSupervisionService: typeof import("../../components/worker-supervision-service.js").WorkerSupervisionService;
+let ProjectReviewStore: typeof import("../../components/project-acceptance/project-review-store.js").ProjectReviewStore;
+let ReviewCaseAssembler: typeof import("../../components/project-acceptance/project-review-case.js").ReviewCaseAssembler;
+let ProjectReviewService: typeof import("../../components/project-acceptance/project-review-service.js").ProjectReviewService;
 
+function makeChildContract(childId: number, rootCardId: number, criterionId: string): import("../../components/worker-contract.js").WorkerAcceptanceContractV1 {
+  return {
+    schema_version: 1,
+    id: `cc_${childId}`,
+    digest: `d_cc_${childId}`,
+    goal: `summary ${childId}`,
+    criteria: [{ id: `wc_${childId}`, description: `worker ${childId}` }],
+    expected_artifacts: [{ id: `art_${childId}`, kind: "file", ref: `out_${childId}`, required: true, criterion_ids: [`wc_${childId}`] }],
+    verification_commands: [{ id: `chk_${childId}`, argv: ["echo", "ok"], timeout_ms: 30000, criterion_ids: [`wc_${childId}`] }],
+    required_capabilities: [],
+    supports_root_criteria: [criterionId],
+    limits: { max_duration_ms: 300000, max_tokens: 50000 },
+    provenance: { root_card_id: rootCardId, card_id: childId, authored_by: "orc", created_at: new Date().toISOString() },
+  };
+}
+
+function makeEnvelope(childId: number, contractId: string, rootCriterionId: string): import("../../components/worker-contract.js").WorkerResultEnvelopeV1 {
+  const now = new Date().toISOString();
+  return {
+    schema_version: 1,
+    attempt: { id: `a_${childId}_1`, ordinal: 1, contract_id: contractId, contract_digest: `d_${contractId}`, executor_kind: "local_worker", executor_id: "spin-local", started_at: now, finished_at: now },
+    outcome: "completed",
+    criteria: [{ criterion_id: rootCriterionId, status: "passed", evidence_ids: [`chk_${childId}`] }],
+    checks: [{ check_id: `chk_${childId}`, argv: ["echo", "ok"], started_at: now, finished_at: now, timed_out: false, exit_code: 0, signal: null, stdout_excerpt: "ok", stderr_excerpt: "" }],
+    artifacts: [{ artifact_id: `art_${childId}`, exists: true, kind: "file", ref: `out_${childId}`, size: 42 }],
+    worker_report: { summary: `Worker ${childId} ok`, claims: [], unresolved_risks: [] },
+  };
+}
+
+async function createProject(): Promise<{ projectId: number; childIds: number[] }> {
+  const projectId = nextCardId++;
+  const now = new Date().toISOString().replace(/Z$/, "");
+  cards.set(projectId, {
+    id: projectId, title: "three worker project", source: "user",
+    status: "running", type: "O", parent_id: null, goal: "Produce three summaries", notes: null,
+    created_at: now, result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
+  });
+
+  const reviewStore = new ProjectReviewStore();
+  reviewStore.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, goal, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', ?, ?, ?)`).run(
+    projectId, "three worker project", "user", "Produce three summaries", now, now,
+  );
+  const rootContractId = `pc_${projectId}`;
+  const rootContract = {
+    schema_version: 1, id: rootContractId, project_card_id: projectId, digest: `d_${rootContractId}`,
+    goal: "Produce three summaries",
+    criteria: [
+      { id: "c1", description: "Worker 1 completes", evidence_expectation: "observed" },
+      { id: "c2", description: "Worker 2 completes", evidence_expectation: "observed" },
+      { id: "c3", description: "Worker 3 completes", evidence_expectation: "observed" },
+    ],
+    required_outputs: [{ id: "out", description: "summaries", kind: "file", required: true }],
+    constraints: [], limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+    provenance: { root_card_id: projectId, authored_by: "orc", created_at: new Date().toISOString() },
+  };
+  reviewStore.ensureAwaitingContract(projectId);
+  reviewStore.insertContract(rootContract as any);
+  reviewStore.stateTransition(projectId, ["awaiting_contract"], "executing");
+
+  const childIds: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const cId = nextCardId++;
+    const createdAt = new Date().toISOString().replace(/Z$/, "");
+    cards.set(cId, {
+      id: cId, title: `worker ${i}`, source: "agent",
+      status: "queued", type: "W", parent_id: projectId,
+      goal: `summary ${i}`, notes: JSON.stringify({ supervised: true }),
+      created_at: createdAt, priority: "MEDIUM",
+      result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
+    });
+    const reviewStore = new ProjectReviewStore();
+    reviewStore.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, parent_id, goal, created_at, updated_at) VALUES (?, ?, ?, 'queued', 'W', ?, ?, ?, ?)`).run(
+      cId, `worker ${i}`, "agent", projectId, `summary ${i}`, createdAt, createdAt,
+    );
+    childIds.push(cId);
+  }
+  return { projectId, childIds };
+}
+
+async function setupChildContract(store: import("../../components/worker-supervision-store.js").WorkerSupervisionStore, childId: number, rootCardId: number, criterionId: string): Promise<string> {
+  const contract = makeChildContract(childId, rootCardId, criterionId);
+  store.insertContract(contract, childId);
+  store.insertAttempt({
+    id: `a_${childId}_1`,
+    card_id: childId,
+    contract_id: contract.id,
+    ordinal: 1,
+    executor_kind: "agent",
+    executor_id: "spin-local",
+    status: "pending",
+    started_at: new Date().toISOString(),
+  });
+  return contract.id;
+}
+
+async function completeChild(store: import("../../components/worker-supervision-store.js").WorkerSupervisionStore, childId: number, contractId: string, rootCriterionId: string): Promise<void> {
+  const attemptId = `a_${childId}_1`;
+  store.lifecycleTransition(attemptId, ["pending"], "running", { settled_at: null });
+  const env = makeEnvelope(childId, contractId, rootCriterionId);
+  store.completeAttempt(attemptId);
+  store.insertResult(attemptId, env);
+  const card = cards.get(childId);
+  if (card) card.status = "done";
+}
+
+describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     cards.clear();
@@ -162,111 +269,6 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
     vi.restoreAllMocks();
     if (_rawDb) { try { _rawDb.close(); } catch {} _rawDb = null; _overrideDb = null; }
   });
-
-  function makeChildContract(childId: number, rootCardId: number, criterionId: string): import("../../components/worker-contract.js").WorkerAcceptanceContractV1 {
-    return {
-      schema_version: 1,
-      id: `cc_${childId}`,
-      digest: `d_cc_${childId}`,
-      goal: `summary ${childId}`,
-      criteria: [{ id: `wc_${childId}`, description: `worker ${childId}` }],
-      expected_artifacts: [{ id: `art_${childId}`, kind: "file", ref: `out_${childId}`, required: true, criterion_ids: [`wc_${childId}`] }],
-      verification_commands: [{ id: `chk_${childId}`, argv: ["echo", "ok"], timeout_ms: 30000, criterion_ids: [`wc_${childId}`] }],
-      required_capabilities: [],
-      supports_root_criteria: [criterionId],
-      limits: { max_duration_ms: 300000, max_tokens: 50000 },
-      provenance: { root_card_id: rootCardId, card_id: childId, authored_by: "orc", created_at: new Date().toISOString() },
-    };
-  }
-
-  function makeEnvelope(childId: number, contractId: string, rootCriterionId: string): import("../../components/worker-contract.js").WorkerResultEnvelopeV1 {
-    const now = new Date().toISOString();
-    return {
-      schema_version: 1,
-      attempt: { id: `a_${childId}_1`, ordinal: 1, contract_id: contractId, contract_digest: `d_${contractId}`, executor_kind: "local_worker", executor_id: "spin-local", started_at: now, finished_at: now },
-      outcome: "completed",
-      criteria: [{ criterion_id: rootCriterionId, status: "passed", evidence_ids: [`chk_${childId}`] }],
-      checks: [{ check_id: `chk_${childId}`, argv: ["echo", "ok"], started_at: now, finished_at: now, timed_out: false, exit_code: 0, signal: null, stdout_excerpt: "ok", stderr_excerpt: "" }],
-      artifacts: [{ artifact_id: `art_${childId}`, exists: true, kind: "file", ref: `out_${childId}`, size: 42 }],
-      worker_report: { summary: `Worker ${childId} ok`, claims: [], unresolved_risks: [] },
-    };
-  }
-
-  async function createProject(): Promise<{ projectId: number; childIds: number[] }> {
-    const projectId = nextCardId++;
-    const now = new Date().toISOString().replace(/Z$/, "");
-    cards.set(projectId, {
-      id: projectId, title: "three worker project", source: "user",
-      status: "running", type: "O", parent_id: null, goal: "Produce three summaries", notes: null,
-      created_at: now, result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
-    });
-
-    const reviewStore = new ProjectReviewStore();
-    reviewStore.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, goal, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', ?, ?, ?)`).run(
-      projectId, "three worker project", "user", "Produce three summaries", now, now,
-    );
-    const rootContractId = `pc_${projectId}`;
-    const rootContract = {
-      schema_version: 1, id: rootContractId, project_card_id: projectId, digest: `d_${rootContractId}`,
-      goal: "Produce three summaries",
-      criteria: [
-        { id: "c1", description: "Worker 1 completes", evidence_expectation: "observed" },
-        { id: "c2", description: "Worker 2 completes", evidence_expectation: "observed" },
-        { id: "c3", description: "Worker 3 completes", evidence_expectation: "observed" },
-      ],
-      required_outputs: [{ id: "out", description: "summaries", kind: "file", required: true }],
-      constraints: [], limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
-      provenance: { root_card_id: projectId, authored_by: "orc", created_at: new Date().toISOString() },
-    };
-    reviewStore.ensureAwaitingContract(projectId);
-    reviewStore.insertContract(rootContract as any);
-    reviewStore.stateTransition(projectId, ["awaiting_contract"], "executing");
-
-    const childIds: number[] = [];
-    for (let i = 0; i < 3; i++) {
-      const cId = nextCardId++;
-      const createdAt = new Date().toISOString().replace(/Z$/, "");
-      cards.set(cId, {
-        id: cId, title: `worker ${i}`, source: "agent",
-        status: "queued", type: "W", parent_id: projectId,
-        goal: `summary ${i}`, notes: JSON.stringify({ supervised: true }),
-        created_at: createdAt, priority: "MEDIUM",
-        result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
-      });
-      const reviewStore = new ProjectReviewStore();
-      reviewStore.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, parent_id, goal, created_at, updated_at) VALUES (?, ?, ?, 'queued', 'W', ?, ?, ?, ?)`).run(
-        cId, `worker ${i}`, "agent", projectId, `summary ${i}`, createdAt, createdAt,
-      );
-      childIds.push(cId);
-    }
-    return { projectId, childIds };
-  }
-
-  async function setupChildContract(store: import("../../components/worker-supervision-store.js").WorkerSupervisionStore, childId: number, rootCardId: number, criterionId: string): Promise<string> {
-    const contract = makeChildContract(childId, rootCardId, criterionId);
-    store.insertContract(contract, childId);
-    store.insertAttempt({
-      id: `a_${childId}_1`,
-      card_id: childId,
-      contract_id: contract.id,
-      ordinal: 1,
-      executor_kind: "agent",
-      executor_id: "spin-local",
-      status: "pending",
-      started_at: new Date().toISOString(),
-    });
-    return contract.id;
-  }
-
-  async function completeChild(store: import("../../components/worker-supervision-store.js").WorkerSupervisionStore, childId: number, contractId: string, rootCriterionId: string): Promise<void> {
-    const attemptId = `a_${childId}_1`;
-    store.lifecycleTransition(attemptId, ["pending"], "running", { settled_at: null });
-    const env = makeEnvelope(childId, contractId, rootCriterionId);
-    store.completeAttempt(attemptId);
-    store.insertResult(attemptId, env);
-    const card = cards.get(childId);
-    if (card) card.status = "done";
-  }
 
   it("three supervised children are all claimed and dispatched concurrently", async () => {
     const { projectId, childIds } = await createProject();
@@ -413,6 +415,138 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
     await flush();
     const orcDispatchesAfterAcceptance = dispatchMock.mock.calls.filter((c: any) => c[0]?.type === "O");
     expect(orcDispatchesAfterAcceptance.length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("Swarm acceptance — coverage gate (#1604)", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    cards.clear();
+    nextCardId = 100;
+    await initDb();
+
+    mod = await import("../../components/reconciler.js");
+    const wss = await import("../../components/worker-supervision-store.js");
+    WorkerSupervisionStore = wss.WorkerSupervisionStore;
+    const prs = await import("../../components/project-acceptance/project-review-store.js");
+    ProjectReviewStore = prs.ProjectReviewStore;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (_rawDb) { try { _rawDb.close(); } catch {} _rawDb = null; _overrideDb = null; }
+  });
+
+  /** Root with criteria c1-c3; only c1 and c2 mapped by terminal children → c3 gap. */
+  async function createGapProject(): Promise<{ projectId: number; childIds: number[] }> {
+    const { projectId, childIds } = await createProject();
+    const store = new WorkerSupervisionStore();
+    for (let i = 0; i < 2; i++) {
+      const cId = await setupChildContract(store, childIds[i]!, projectId, `c${i + 1}`);
+      await completeChild(store, childIds[i]!, cId, `c${i + 1}`);
+    }
+    // Third child exists but has no contract — a legitimate unsupervised
+    // sibling, not a coverage fault.
+    const third = cards.get(childIds[2]!);
+    if (third) third.status = "done";
+    return { projectId, childIds };
+  }
+
+  it("partial coverage dispatches exactly one coverage round and stays executing, spawn-eligible", async () => {
+    const { projectId } = await createGapProject();
+    const reviewStore = new ProjectReviewStore();
+
+    mod.requestReconcile(projectId);
+    await flush();
+
+    const sup = reviewStore.getSupervision(projectId)!;
+    expect(sup.state).toBe("executing");
+    expect(sup.coverage_rounds).toBe(1);
+    expect(JSON.parse(sup.coverage_uncovered_ids!)).toEqual(["c3"]);
+    expect(reviewStore.getLatestOpenCase(projectId)).toBeUndefined();
+    const coverageDispatches = dispatchMock.mock.calls.filter((c: any) => c[0]?.goal?.includes("[COVERAGE GAP]"));
+    expect(coverageDispatches.length).toBe(1);
+  });
+
+  it("identical signature with grace not elapsed: no second dispatch, no settle (tight loop)", async () => {
+    const { projectId } = await createGapProject();
+    const reviewStore = new ProjectReviewStore();
+
+    mod.requestReconcile(projectId);
+    await flush();
+    mod.requestReconcile(projectId);
+    await flush();
+
+    const sup = reviewStore.getSupervision(projectId)!;
+    expect(sup.state).toBe("executing");
+    expect(sup.coverage_rounds).toBe(1);
+    const coverageDispatches = dispatchMock.mock.calls.filter((c: any) => c[0]?.goal?.includes("[COVERAGE GAP]"));
+    expect(coverageDispatches.length).toBe(1);
+  });
+
+  it("identical signature with grace elapsed settles blocked naming the uncovered ids", async () => {
+    const { projectId } = await createGapProject();
+    const reviewStore = new ProjectReviewStore();
+
+    mod.requestReconcile(projectId);
+    await flush();
+
+    // Age the supervision row past COVERAGE_ROUND_GRACE_MS (60s).
+    reviewStore.db.prepare(`UPDATE project_supervision SET updated_at = ? WHERE project_card_id = ?`)
+      .run(new Date(Date.now() - 120_000).toISOString(), projectId);
+    mod.requestReconcile(projectId);
+    await flush();
+
+    const sup = reviewStore.getSupervision(projectId)!;
+    expect(sup.state).toBe("blocked");
+    expect(sup.blocked_reason).toContain("c3");
+  });
+
+  it("gap closed by a newly mapped child proceeds to normal review", async () => {
+    const { projectId, childIds } = await createGapProject();
+    const reviewStore = new ProjectReviewStore();
+
+    mod.requestReconcile(projectId);
+    await flush();
+    expect(reviewStore.getSupervision(projectId)!.coverage_rounds).toBe(1);
+
+    // Close the gap: give the third child a contract mapping c3, complete it.
+    const store = new WorkerSupervisionStore();
+    const cId = await setupChildContract(store, childIds[2]!, projectId, "c3");
+    await completeChild(store, childIds[2]!, cId, "c3");
+
+    mod.requestReconcile(projectId);
+    await flush();
+
+    const sup = reviewStore.getSupervision(projectId)!;
+    expect(sup.state).toBe("review_requested");
+    expect(sup.coverage_uncovered_ids).toBe("[]");
+    expect(reviewStore.getLatestOpenCase(projectId)).toBeDefined();
+  });
+
+  it("coverage_rounds at the ceiling settles blocked regardless of signature", async () => {
+    const { projectId } = await createGapProject();
+    const reviewStore = new ProjectReviewStore();
+    reviewStore.db.prepare(`UPDATE project_supervision SET coverage_rounds = 3 WHERE project_card_id = ?`).run(projectId);
+
+    mod.requestReconcile(projectId);
+    await flush();
+
+    const sup = reviewStore.getSupervision(projectId)!;
+    expect(sup.state).toBe("blocked");
+    expect(sup.blocked_reason).toContain("c3");
+    expect(JSON.parse(sup.coverage_uncovered_ids!)).toEqual(["c3"]);
+  });
+
+  it("two rapid wakes claim exactly one coverage round (CAS at the gate)", async () => {
+    const { projectId } = await createGapProject();
+    const reviewStore = new ProjectReviewStore();
+
+    mod.requestReconcile(projectId);
+    mod.requestReconcile(projectId);
+    await flush();
+
+    expect(reviewStore.getSupervision(projectId)!.coverage_rounds).toBe(1);
   });
 });
 

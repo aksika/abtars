@@ -125,6 +125,8 @@ function makeReviewStoreMock() {
     insertReviewRequest: vi.fn().mockReturnValue({ id: "rr_test_1" }),
     markReviewRequestDispatched: vi.fn().mockReturnValue(true),
     getReviewRequestByCaseId: vi.fn().mockReturnValue(undefined),
+    claimCoverageRound: vi.fn().mockReturnValue(true),
+    recordCoverageClear: vi.fn(),
     setState: vi.fn(),
     hasActiveProjectSupervision: vi.fn().mockReturnValue(false),
     db: { transaction: transactionImpl },
@@ -135,6 +137,15 @@ vi.mock("./project-acceptance/project-review-store.js", () => ({
   ProjectReviewStore: vi.fn().mockImplementation(function() {
     return reviewStoreMock ?? makeReviewStoreMock();
   }),
+}));
+
+const readProjectCriterionCoverageMock = vi.fn().mockReturnValue({
+  kind: "read",
+  read: { criterionIds: [], mappings: [], uncovered: [] },
+});
+vi.mock("./project-acceptance/project-criterion-coverage.js", () => ({
+  readProjectCriterionCoverage: readProjectCriterionCoverageMock,
+  coverageSignature: vi.fn().mockReturnValue("cov-sig"),
 }));
 
 vi.mock("./project-acceptance/project-review-case.js", () => ({
@@ -195,6 +206,10 @@ let reviewStoreMock: {
 beforeEach(async () => {
   vi.clearAllMocks();
   reviewStoreMock = makeReviewStoreMock();
+  readProjectCriterionCoverageMock.mockReturnValue({
+    kind: "read",
+    read: { criterionIds: [], mappings: [], uncovered: [] },
+  });
   isUnblockedMock.mockReturnValue(true);
   getLatestAttemptMock.mockReturnValue(null);
   workerContractExistsMock.mockReturnValue(true);

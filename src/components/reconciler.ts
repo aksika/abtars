@@ -18,6 +18,7 @@ import type { LifecycleWakeScheduler } from "./lifecycle-wake-scheduler.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { ProjectReviewStore, type ProjectState, type ProjectSupervisionRow } from "./project-acceptance/project-review-store.js";
 import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js";
+import { readProjectCriterionCoverage, coverageSignature } from "./project-acceptance/project-criterion-coverage.js";
 import { OrcProjectRunStore } from "./orc-project/orc-project-run-store.js";
 import { readEntries } from "./tasks/task-store.js";
 import { readState } from "./tasks/task-state-store.js";
@@ -67,6 +68,12 @@ export function requestShutdown(): void {
 import type { OrcProjectCoordinator } from "./orc-project/orc-project-coordinator.js";
 
 let _orcCoordinator: OrcProjectCoordinator | null = null;
+
+// #1604 R2: coverage-round bounds. MAX_COVERAGE_ROUNDS is the absolute ceiling
+// on coverage turns; COVERAGE_ROUND_GRACE_MS bounds only the non-scheduled
+// legacy dispatch path, whose claim is not durably observable.
+const MAX_COVERAGE_ROUNDS = 3;
+const COVERAGE_ROUND_GRACE_MS = 60_000;
 
 export function setOrcCoordinator(c: OrcProjectCoordinator | null): void {
   _orcCoordinator = c;
@@ -613,11 +620,120 @@ async function handleReviewState(projectId: number, supervision: ProjectSupervis
 }
 
 /**
+ * #1604 R2: the coverage lifecycle gate, evaluated inside createReviewCase
+ * before the executing → review_ready transition. Returns:
+ *  - "blocked"   → project settled terminal (undeterminable read, round cap, grace)
+ *  - "waiting"   → coverage round claimed/dispatched, or another wake owns it;
+ *                  project stays executing and remains spawn-eligible
+ *  - "clear"     → all root criteria covered; proceed to review_ready
+ *
+ * The gate rides existing reconciler wakes — no timers, no heartbeat. The
+ * scheduled path's live Orc run row (orc_claim) suppresses re-entry while the
+ * coverage turn runs; the non-scheduled legacy dispatch is bounded by
+ * COVERAGE_ROUND_GRACE_MS instead, since it creates no observable claim.
+ */
+function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): "blocked" | "waiting" | "clear" {
+  const coverage = readProjectCriterionCoverage(projectId);
+
+  // 1. Undeterminable or missing root contract — fail closed, never "covered".
+  if (coverage.kind === "undeterminable") {
+    settleCoverageBlocked(projectId, reviewStore, `coverage_undeterminable: ${coverage.reason}`);
+    return "blocked";
+  }
+  if (coverage.kind === "no_project_contract") {
+    settleCoverageBlocked(projectId, reviewStore, "coverage_undeterminable: no project contract");
+    return "blocked";
+  }
+
+  const uncovered = coverage.read.uncovered;
+  const signature = coverageSignature(
+    kanbanGetChildren(projectId).map(c => c.id),
+    uncovered,
+  );
+
+  // 2. Fully covered — record the clean evaluation and proceed.
+  if (uncovered.length === 0) {
+    reviewStore.recordCoverageClear(projectId, signature);
+    return "clear";
+  }
+
+  // 3. Gap — cap check, in precedence order.
+  if (supervision.coverage_rounds >= MAX_COVERAGE_ROUNDS) {
+    settleCoverageBlocked(projectId, reviewStore, `coverage not closed after ${MAX_COVERAGE_ROUNDS} rounds: root criteria ${uncovered.join(", ")} have no mapped child contract`, uncovered);
+    return "blocked";
+  }
+  if (supervision.coverage_signature === signature) {
+    const elapsed = Date.now() - Date.parse(supervision.updated_at);
+    if (Number.isFinite(elapsed) && elapsed >= COVERAGE_ROUND_GRACE_MS) {
+      settleCoverageBlocked(projectId, reviewStore, `coverage unchanged after a coverage round: root criteria ${uncovered.join(", ")} have no mapped child contract`, uncovered);
+      return "blocked";
+    }
+    // Same signature, grace not elapsed — the Orc had its turn; wait for the
+    // next wake (tight-loop guard).
+    logInfo(TAG, `Project ${projectId}: coverage round ${supervision.coverage_rounds} in flight (${uncovered.join(", ")}) — waiting`);
+    return "waiting";
+  }
+
+  // New signature — claim one coverage round; the CAS makes concurrent wakes
+  // single-claimant.
+  if (!reviewStore.claimCoverageRound(projectId, signature, uncovered, MAX_COVERAGE_ROUNDS)) {
+    logInfo(TAG, `Project ${projectId}: coverage round claimed by another wake — waiting`);
+    return "waiting";
+  }
+  dispatchCoverageRound(projectId, uncovered);
+  return "waiting";
+}
+
+/** #1604: freeze a project as blocked, naming the coverage fact in the reason and the durable column. */
+function settleCoverageBlocked(projectId: number, reviewStore: ProjectReviewStore, reason: string, uncoveredIds?: readonly string[]): void {
+  reviewStore.stateTransition(
+    projectId,
+    ["awaiting_contract", "executing", "review_ready", "review_requested", "reviewing", "repair_planned", "repairing", "needs_input"],
+    "blocked",
+    {
+      blocked_reason: reason.slice(0, 500),
+      ...(uncoveredIds !== undefined ? { coverage_uncovered_ids: JSON.stringify(uncoveredIds) } : {}),
+    },
+  );
+  logWarn(TAG, `Project ${projectId}: coverage gate blocked — ${reason}`);
+}
+
+/** #1604: dispatch the Orc coverage turn — coordinator for scheduled roots, legacy dispatch otherwise. */
+function dispatchCoverageRound(projectId: number, uncovered: readonly string[]): void {
+  const goal = `[COVERAGE GAP] Scheduled project #${projectId}: root criteria ${uncovered.join(", ")} have no Worker mapped to them. Spawn a Worker for each with supports_root_criteria set to those exact ids, or, if a criterion cannot be satisfied, state that in review_project. Do not re-author the contract. Do not write the final report artifact yet.`;
+  const card = kanbanGetCard(projectId);
+  if (card && isScheduledProjectRoot(card)) {
+    const coordinator = getOrCreateOrcCoordinator();
+    if (!coordinator) {
+      logWarn(TAG, `Project ${projectId}: Orc coordinator unavailable for coverage round — waiting for the next wake`);
+      return;
+    }
+    const claim = coordinator.scheduleScheduledProject(projectId, goal);
+    if (claim.kind === "claimed" || claim.kind === "idempotent" || claim.kind === "busy") {
+      logInfo(TAG, `Project ${projectId}: coverage round dispatched to scheduled Orc (${uncovered.join(", ")})`);
+    } else {
+      logWarn(TAG, `Project ${projectId}: coverage round claim ${claim.kind} (${claim.reason}) — waiting for the next wake`);
+    }
+  } else {
+    legacyOrcDispatch(goal, projectId);
+    logInfo(TAG, `Project ${projectId}: coverage round dispatched via legacy Orc (${uncovered.join(", ")})`);
+  }
+}
+
+/**
  * #1546: the Reconciler's review case creation for a project whose direct
  * children are all terminal. `roundOffset` is 0 when the review round was
  * already advanced by a preceding transition (e.g. input resume), 1 otherwise.
+ *
+ * #1604 R2: coverage is gated here, BEFORE the executing → review_ready
+ * transition, so an uncovered project never enters an acceptance review it
+ * structurally cannot pass. Evaluation is fail-closed: an undeterminable read
+ * blocks the project; a gap dispatches a bounded coverage round to the Orc.
  */
 async function createReviewCase(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, roundOffset: 0 | 1 = 1): Promise<void> {
+  const coverageGate = runCoverageGate(projectId, supervision, reviewStore);
+  if (coverageGate !== "clear") return;
+
   const nextRound = supervision.review_round + roundOffset;
   const transitioned = reviewStore.stateTransition(
     projectId,
