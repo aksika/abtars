@@ -47,6 +47,10 @@ export interface ProjectSupervisionRow {
   active_review_case_id: string | null;
   accepted_decision_id: string | null;
   blocked_reason: string | null;
+  /** #1604: coverage evaluation lifecycle. NULL = never evaluated (unknown). */
+  coverage_rounds: number;
+  coverage_signature: string | null;
+  coverage_uncovered_ids: string | null;
   updated_at: string;
 }
 
@@ -214,6 +218,12 @@ export class ProjectReviewStore {
         created_at TEXT NOT NULL
       );
     `);
+
+    // #1604: additive coverage-evaluation columns. The catch is deliberate:
+    // ALTER TABLE fails when the column already exists on a re-migrated DB.
+    try { db.exec(`ALTER TABLE project_supervision ADD COLUMN coverage_rounds INTEGER NOT NULL DEFAULT 0`); } catch { /* column already present */ }
+    try { db.exec(`ALTER TABLE project_supervision ADD COLUMN coverage_signature TEXT`); } catch { /* column already present */ }
+    try { db.exec(`ALTER TABLE project_supervision ADD COLUMN coverage_uncovered_ids TEXT`); } catch { /* column already present */ }
   }
 
   // ── Root contracts ────────────────────────────────────────────────────
@@ -322,6 +332,40 @@ export class ProjectReviewStore {
     } catch {
       return false;
     }
+  }
+
+  // ── #1604 coverage rounds ──────────────────────────────────────────────
+
+  /**
+   * CAS: claim one coverage round. Returns false when another wake already
+   * claimed this exact signature, the row left `executing`, or the ceiling is
+   * reached. The signature pin plus `state = 'executing'` make concurrent
+   * wakes single-claimant.
+   */
+  claimCoverageRound(
+    projectCardId: number,
+    signature: string,
+    uncoveredIds: readonly string[],
+    maxRounds: number,
+  ): boolean {
+    const result = this.db.prepare(`
+      UPDATE project_supervision
+         SET coverage_signature = ?, coverage_uncovered_ids = ?,
+             coverage_rounds = coverage_rounds + 1, updated_at = ?
+       WHERE project_card_id = ? AND state = 'executing'
+         AND (coverage_signature IS NULL OR coverage_signature != ?)
+         AND coverage_rounds < ?
+    `).run(signature, JSON.stringify(uncoveredIds), new Date().toISOString(), projectCardId, signature, maxRounds);
+    return result.changes === 1;
+  }
+
+  /** Record a clean coverage evaluation before the review_ready transition. */
+  recordCoverageClear(projectCardId: number, signature: string): void {
+    this.db.prepare(`
+      UPDATE project_supervision
+         SET coverage_uncovered_ids = '[]', coverage_signature = ?, updated_at = ?
+       WHERE project_card_id = ?
+    `).run(signature, new Date().toISOString(), projectCardId);
   }
 
   // ── Review requests ────────────────────────────────────────────────────

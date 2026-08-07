@@ -169,6 +169,66 @@ describe("ProjectReviewStore", () => {
     });
   });
 
+  describe("#1604 coverage rounds", () => {
+    it("round-trips the coverage columns (writer + reader)", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      s.claimCoverageRound(cid, "sig-1", ["c4", "c5"], 3);
+      const sup = s.getSupervision(cid);
+      expect(sup!.coverage_rounds).toBe(1);
+      expect(sup!.coverage_signature).toBe("sig-1");
+      expect(JSON.parse(sup!.coverage_uncovered_ids!)).toEqual(["c4", "c5"]);
+    });
+
+    it("claimCoverageRound returns true once and false for a second call with the same signature", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      expect(s.claimCoverageRound(cid, "sig-1", ["c1"], 3)).toBe(true);
+      expect(s.claimCoverageRound(cid, "sig-1", ["c1"], 3)).toBe(false);
+      expect(s.getSupervision(cid)!.coverage_rounds).toBe(1);
+    });
+
+    it("claimCoverageRound allows a new signature after the first round", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      s.claimCoverageRound(cid, "sig-1", ["c1"], 3);
+      expect(s.claimCoverageRound(cid, "sig-2", ["c1"], 3)).toBe(true);
+      expect(s.getSupervision(cid)!.coverage_rounds).toBe(2);
+    });
+
+    it("claimCoverageRound returns false when state is not executing", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      s.stateTransition(cid, ["executing"], "review_ready");
+      expect(s.claimCoverageRound(cid, "sig-1", ["c1"], 3)).toBe(false);
+    });
+
+    it("claimCoverageRound returns false at the maxRounds ceiling", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      expect(s.claimCoverageRound(cid, "sig-1", ["c1"], 1)).toBe(true);
+      expect(s.claimCoverageRound(cid, "sig-2", ["c1"], 1)).toBe(false);
+      expect(s.getSupervision(cid)!.coverage_rounds).toBe(1);
+    });
+
+    it("recordCoverageClear writes an empty uncovered list and the signature", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      s.recordCoverageClear(cid, "sig-clear");
+      const sup = s.getSupervision(cid);
+      expect(sup!.coverage_uncovered_ids).toBe("[]");
+      expect(sup!.coverage_signature).toBe("sig-clear");
+    });
+
+    it("migration runs twice without error on an existing DB", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      s.migrate();
+      s.recordCoverageClear(cid, "sig-2");
+      expect(s.getSupervision(cid)!.coverage_uncovered_ids).toBe("[]");
+    });
+  });
+
   describe("review cases", () => {
     it("inserts a review case and retrieves it", () => {
       const { store: s, contract: c } = setupProject();
