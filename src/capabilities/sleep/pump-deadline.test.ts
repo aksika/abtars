@@ -189,6 +189,74 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
   });
 
+  it("#1603 recovery finding: a transient next() RPC failure is retried — the pump survives and serves the next request", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
+    try {
+      const client = makeFakeClient();
+      client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+      client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+      client.sleep.runtime.next
+        .mockRejectedValueOnce(new Error("Request timeout")) // transport race
+        .mockImplementation(nextSequence(makeRequest(120_000)));
+      client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
+      const spin = vi.fn().mockResolvedValue({ result: "served", sessionId: "s1" });
+
+      const handle = createSleepHandle({
+        client,
+        memoryEnabled: true,
+        onComplete: vi.fn(),
+        onCycleEnd: vi.fn(),
+        sessionManager: { spin },
+        bufferSystemEvent: vi.fn(),
+      });
+      handle.startScheduled();
+      await vi.advanceTimersByTimeAsync(0);
+      // Elapse the 3s RPC-retry backoff, then the pump serves the request.
+      await vi.advanceTimersByTimeAsync(4000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The RPC failure did NOT kill the pump: the completion is still served.
+      expect(spin).toHaveBeenCalledTimes(1);
+      expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "served");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("#1603 recovery finding: sustained next() RPC loss gives up — the pump closes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
+    try {
+      const client = makeFakeClient();
+      client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+      client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+      client.sleep.runtime.next.mockRejectedValue(new Error("Request timeout"));
+      const spin = vi.fn();
+
+      const handle = createSleepHandle({
+        client,
+        memoryEnabled: true,
+        onComplete: vi.fn(),
+        onCycleEnd: vi.fn(),
+        sessionManager: { spin },
+        bufferSystemEvent: vi.fn(),
+      });
+      handle.startScheduled();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 10 retries × 3s backoff, then give up.
+      await vi.advanceTimersByTimeAsync(40_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(spin).not.toHaveBeenCalled();
+      expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
+      expect(client.sleep.runtime.next).toHaveBeenCalledTimes(10);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("#1603: a late completed result (invalid_completion) fails that completion only — the pump continues, then exits on lease expiry", async () => {
     const client = makeFakeClient();
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });

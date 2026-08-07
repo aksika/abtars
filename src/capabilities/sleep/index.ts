@@ -82,7 +82,16 @@ export interface SleepHandle {
 
 const POLL_INTERVAL_MS = 3000;
 const EVENTS_LIMIT = 50;
-const RUNTIME_NEXT_WAIT_MS = 30000;
+/**
+ * The provider pump's long-poll bound. Must stay BELOW the daemon transport's
+ * REQUEST_TIMEOUT_MS (30s): a poll that sits exactly on the transport timeout
+ * races it, and a lost race surfaces as a fatal pump error, killing the cycle
+ * (#1603 recovery finding, 2026-08-07).
+ */
+const RUNTIME_NEXT_WAIT_MS = 25_000;
+/** Bounded backoff before giving up on a transient next() RPC failure. */
+const NEXT_RPC_RETRY_LIMIT = 10;
+const NEXT_RPC_RETRY_DELAY_MS = 3000;
 
 /**
  * #1517: bounds the provider pump's await on the model transport by the
@@ -148,8 +157,25 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       }
       ownedLeaseId = openResult.leaseId;
 
+      let nextRpcErrors = 0;
       while (!abortController.signal.aborted && ownedLeaseId) {
-        const nextResult = await client.sleep.runtime.next(ownedLeaseId, RUNTIME_NEXT_WAIT_MS);
+        let nextResult: Awaited<ReturnType<AbmindClientLike["sleep"]["runtime"]["next"]>>;
+        try {
+          nextResult = await client.sleep.runtime.next(ownedLeaseId, RUNTIME_NEXT_WAIT_MS);
+        } catch (err) {
+          // #1603 recovery finding: a transient RPC failure on the long-poll
+          // must not kill a healthy cycle — the daemon may simply have had a
+          // slow heartbeat. Retry with backoff; give up only on sustained loss.
+          nextRpcErrors++;
+          if (nextRpcErrors >= NEXT_RPC_RETRY_LIMIT) {
+            logWarn("sleep", `Runtime next() failed ${nextRpcErrors} times in a row — closing provider pump`);
+            break;
+          }
+          logWarn("sleep", `Runtime next() RPC failed (${nextRpcErrors}/${NEXT_RPC_RETRY_LIMIT}) — retrying in ${NEXT_RPC_RETRY_DELAY_MS}ms: ${(err as Error).message}`);
+          await new Promise(r => setTimeout(r, NEXT_RPC_RETRY_DELAY_MS));
+          continue;
+        }
+        nextRpcErrors = 0;
         if (nextResult.status === "closed" || nextResult.status === "lease_expired") break;
         if (nextResult.heartbeat) continue;
         if (nextResult.status === "no_request") continue;
