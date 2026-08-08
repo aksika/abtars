@@ -182,22 +182,46 @@ export class ProjectReviewValidator {
       }
     }
 
-    // Build set of valid evidence IDs from the case snapshot
+    // Build the valid evidence IDs from the case snapshot. Keep a
+    // criterion-local index as well: a known evidence ID from another lane is
+    // not compatible evidence for this criterion's satisfaction.
     const validEvidenceIds = new Set<string>();
+    const evidenceIdsByCriterion = new Map<string, Set<string>>();
     for (const ci of caseSnapshot.criterion_inputs) {
-      for (const eid of ci.observed_evidence_ids) validEvidenceIds.add(eid);
-      for (const eid of ci.failed_or_inconclusive_check_ids) validEvidenceIds.add(eid);
-      for (const eid of ci.artifact_observation_ids) validEvidenceIds.add(eid);
+      const criterionEvidence = evidenceIdsByCriterion.get(ci.criterion_id) ?? new Set<string>();
+      for (const eid of ci.observed_evidence_ids) {
+        validEvidenceIds.add(eid);
+        criterionEvidence.add(eid);
+      }
+      for (const eid of ci.failed_or_inconclusive_check_ids) {
+        validEvidenceIds.add(eid);
+        criterionEvidence.add(eid);
+      }
+      for (const eid of ci.artifact_observation_ids) {
+        validEvidenceIds.add(eid);
+        criterionEvidence.add(eid);
+      }
+      evidenceIdsByCriterion.set(ci.criterion_id, criterionEvidence);
     }
     for (const cc of caseSnapshot.contradiction_candidates) {
-      for (const eid of cc.evidence_ids) validEvidenceIds.add(eid);
+      for (const eid of cc.evidence_ids) {
+        validEvidenceIds.add(eid);
+        for (const criterionId of cc.affected_criterion_ids) {
+          const criterionEvidence = evidenceIdsByCriterion.get(criterionId) ?? new Set<string>();
+          criterionEvidence.add(eid);
+          evidenceIdsByCriterion.set(criterionId, criterionEvidence);
+        }
+      }
     }
 
     // Evidence references in decisions must be known
     for (const c of decision.criteria) {
+      const compatibleEvidenceIds = evidenceIdsByCriterion.get(c.criterion_id);
       for (const eid of c.evidence_ids) {
         if (!validEvidenceIds.has(eid)) {
           errors.push(error("bad_reference", `$.criteria[${c.criterion_id}].evidence_ids`, `unknown evidence id "${eid}"`));
+        } else if (rootCriterionIds.has(c.criterion_id) && !compatibleEvidenceIds?.has(eid)) {
+          errors.push(error("bad_reference", `$.criteria[${c.criterion_id}].evidence_ids`, `evidence id "${eid}" is not compatible with criterion "${c.criterion_id}"`));
         }
       }
     }

@@ -223,11 +223,20 @@ describe("ProjectReviewStore", () => {
     it("recordCoverageReviewable persists the gap without incrementing a round (CAS on executing)", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
+      expect(s.claimCoverageRound(cid, "sig-gap", ["c1", "c2"], 3)).toBe(true);
       expect(s.recordCoverageReviewable(cid, "sig-gap", ["c1", "c2"])).toBe(true);
       const sup = s.getSupervision(cid);
-      expect(sup!.coverage_rounds).toBe(0);
+      expect(sup!.coverage_rounds).toBe(1);
       expect(sup!.coverage_signature).toBe("sig-gap");
       expect(JSON.parse(sup!.coverage_uncovered_ids!)).toEqual(["c1", "c2"]);
+    });
+
+    it("recordCoverageReviewable refuses a stale coverage signature", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      expect(s.claimCoverageRound(cid, "new-signature", ["c1"], 3)).toBe(true);
+      expect(s.recordCoverageReviewable(cid, "old-signature", ["c1"])).toBe(false);
+      expect(s.getSupervision(cid)!.coverage_signature).toBe("new-signature");
     });
 
     it("recordCoverageReviewable refuses a non-executing row (false CAS)", () => {

@@ -4,6 +4,7 @@ import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import { kanbanGetChildren, requireTaskDatabase } from "../tasks/kanban-board.js";
 import {
   validateContract,
+  validateCriterionMapping,
   findUncoveredCriteria,
   criterionPolicyView,
   type ContractCriterionMapping,
@@ -62,9 +63,22 @@ function childSupportsRootCriteria(childContractJson: string): readonly string[]
   try {
     const parsed = JSON.parse(childContractJson) as unknown;
     if (!isRecord(parsed)) return undefined;
+    // Worker contracts are versioned records. A JSON object with a missing or
+    // future schema is not a trustworthy mapping source, even when its
+    // supports_root_criteria field happens to look usable.
+    if (parsed["schema_version"] !== 1) return undefined;
     const raw = parsed["supports_root_criteria"];
-    if (!Array.isArray(raw)) return [];
-    return raw.filter((value): value is string => typeof value === "string");
+    if (raw === undefined) return [];
+    if (!Array.isArray(raw)) return undefined;
+
+    const seen = new Set<string>();
+    const supports: string[] = [];
+    for (const value of raw) {
+      if (typeof value !== "string" || value.length === 0 || seen.has(value)) return undefined;
+      seen.add(value);
+      supports.push(value);
+    }
+    return supports;
   } catch {
     return undefined;
   }
@@ -101,7 +115,15 @@ export function readProjectCriterionCoverage(rootCardId: number): CoverageResult
       return { kind: "undeterminable", reason: `child contract for card #${child.id} under project #${rootCardId} is unparseable` };
     }
     if (supports.length > 0) {
-      mappings.push({ child_contract_id: contractRow.id, supports_root_criteria: supports });
+      const mapping = { child_contract_id: contractRow.id, supports_root_criteria: supports };
+      const mappingErrors = validateCriterionMapping(rootContract, mapping);
+      if (mappingErrors.length > 0) {
+        return {
+          kind: "undeterminable",
+          reason: `child contract for card #${child.id} under project #${rootCardId} has an invalid root-criterion mapping: ${mappingErrors.map(e => e.message).join("; ")}`,
+        };
+      }
+      mappings.push(mapping);
     }
   }
 
@@ -114,25 +136,31 @@ export function readProjectCriterionCoverage(rootCardId: number): CoverageResult
     return { kind: "undeterminable", reason: `peer contributions for project #${rootCardId} are unreadable` };
   }
   for (const row of contributionRows) {
+    if (row.rootCriteria === undefined) {
+      return { kind: "undeterminable", reason: `peer contribution ${row.peer}/${row.requestId} has an invalid root-criterion mapping` };
+    }
     if (row.rootCriteria.length > 0) {
-      mappings.push({ child_contract_id: `peer:${row.peer}:${row.requestId}`, supports_root_criteria: row.rootCriteria });
+      const mapping = { child_contract_id: `peer:${row.peer}:${row.requestId}`, supports_root_criteria: row.rootCriteria };
+      const mappingErrors = validateCriterionMapping(rootContract, mapping);
+      if (mappingErrors.length > 0) {
+        return {
+          kind: "undeterminable",
+          reason: `peer contribution ${row.peer}/${row.requestId} has an invalid root-criterion mapping: ${mappingErrors.map(e => e.message).join("; ")}`,
+        };
+      }
+      mappings.push(mapping);
     }
   }
 
-  // #1605: filter mappings to delegated ids only — a mapping referencing an
-  // Orc-owned criterion is a bad delegation reference and cannot cover it.
-  const delegatedIds = new Set(criterionPolicyView(rootContract).filter(c => c.execution_owner === "delegated").map(c => c.id));
-  const legalMappings = mappings.map(m => ({
-    child_contract_id: m.child_contract_id,
-    supports_root_criteria: m.supports_root_criteria.filter(id => delegatedIds.has(id)),
-  }));
-
-  const uncovered = findUncoveredCriteria(rootContract, legalMappings);
+  // #1605: all mapping sources have been validated against the delegated-only
+  // policy above. Invalid references are structural corruption, not semantic
+  // gaps to hand to the Orc.
+  const uncovered = findUncoveredCriteria(rootContract, mappings);
 
   // Per-criterion classification (design §3): orc_owned → no mapping lookup;
   // delegated with ≥1 mapping → mapped; delegated with none → gap.
   const mappedBy = new Map<string, string[]>();
-  for (const m of legalMappings) {
+  for (const m of mappings) {
     for (const rcId of m.supports_root_criteria) {
       const list = mappedBy.get(rcId) ?? [];
       list.push(m.child_contract_id);
@@ -164,7 +192,7 @@ export function readProjectCriterionCoverage(rootCardId: number): CoverageResult
     read: {
       criterionIds: criterionPolicyView(rootContract).map(c => c.id),
       criteria,
-      mappings: legalMappings,
+      mappings,
       uncovered,
     },
   };
@@ -176,7 +204,7 @@ export function readProjectCriterionCoverage(rootCardId: number): CoverageResult
  * could not be read (fail-closed — never "skip and treat as covered"). A
  * missing table means no contributions were ever recorded — empty list.
  */
-function peerContributionRootCriteria(projectCardId: number): Array<{ peer: string; requestId: string; rootCriteria: readonly string[] }> | undefined {
+function peerContributionRootCriteria(projectCardId: number): Array<{ peer: string; requestId: string; rootCriteria: readonly string[] | undefined }> | undefined {
   try {
     const db = requireTaskDatabase();
     const tableExists = db.prepare(
@@ -188,11 +216,21 @@ function peerContributionRootCriteria(projectCardId: number): Array<{ peer: stri
         WHERE project_card_id = ? AND state = 'completed' AND root_criteria_json IS NOT NULL`,
     ).all(projectCardId) as Array<{ peer: string; request_id: string; root_criteria_json: string }>;
     return rows.map(row => {
-      let rootCriteria: readonly string[] = [];
+      let rootCriteria: readonly string[] | undefined;
       try {
         const parsed = JSON.parse(row.root_criteria_json) as unknown;
-        if (Array.isArray(parsed)) rootCriteria = parsed.filter((v): v is string => typeof v === "string");
-      } catch { rootCriteria = []; }
+        if (!Array.isArray(parsed)) return { peer: row.peer, requestId: row.request_id, rootCriteria: undefined };
+        const seen = new Set<string>();
+        const values: string[] = [];
+        for (const value of parsed) {
+          if (typeof value !== "string" || value.length === 0 || seen.has(value)) {
+            return { peer: row.peer, requestId: row.request_id, rootCriteria: undefined };
+          }
+          seen.add(value);
+          values.push(value);
+        }
+        rootCriteria = values;
+      } catch { rootCriteria = undefined; }
       return { peer: row.peer, requestId: row.request_id, rootCriteria };
     });
   } catch {

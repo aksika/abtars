@@ -148,6 +148,14 @@ describe("readProjectCriterionCoverage", () => {
     expect(result.kind).toBe("undeterminable");
   });
 
+  it("invalid child mappings are undeterminable, not silently treated as gaps", () => {
+    const rootId = setupRoot([{ id: "c1" }]);
+    addChild(rootId, ["not-a-root-criterion"]);
+    const result = mod.coverage.readProjectCriterionCoverage(rootId);
+    expect(result.kind).toBe("undeterminable");
+    if (result.kind === "undeterminable") expect(result.reason).toContain("invalid root-criterion mapping");
+  });
+
   it("child without a contract row is not a mapping source but is not undeterminable", () => {
     const rootId = setupRoot([{ id: "c1" }]);
     mod.kanban.kanbanEnqueue("unsupervised sibling", "agent", undefined, { type: "W", parent_id: rootId });
@@ -233,7 +241,7 @@ describe("readProjectCriterionCoverage v2 ownership", () => {
     }
   });
 
-  it("child mapping to an Orc-owned criterion is dropped, not counted as coverage", () => {
+  it("child mapping to an Orc-owned criterion is undeterminable, not dropped", () => {
     const rootCardId = mod.kanban.kanbanEnqueue("root", "task", "run-1", { type: "O" });
     const store = new mod.reviewStore.ProjectReviewStore();
     const contract = makeRootContractV2(rootCardId, [
@@ -245,12 +253,32 @@ describe("readProjectCriterionCoverage v2 ownership", () => {
     const child = mod.kanban.kanbanEnqueue("child", "agent", undefined, { type: "W", parent_id: rootCardId });
     sup.insertContract(makeChildContract(child, rootCardId, ["c2"]), child);
     const result = mod.coverage.readProjectCriterionCoverage(rootCardId);
-    expect(result.kind).toBe("read");
-    if (result.kind === "read") {
-      expect(result.read.uncovered).toEqual(["c1"]);
-      // the bad reference is filtered out of the mapping's coverage contribution
-      expect(result.read.mappings[0]?.supports_root_criteria).toEqual([]);
-    }
+    expect(result.kind).toBe("undeterminable");
+    if (result.kind === "undeterminable") expect(result.reason).toContain("not delegable");
+  });
+
+  it("peer mapping to an Orc-owned criterion is undeterminable", () => {
+    const rootCardId = mod.kanban.kanbanEnqueue("root", "task", "run-1", { type: "O" });
+    const store = new mod.reviewStore.ProjectReviewStore();
+    store.insertContract(makeRootContractV2(rootCardId, [
+      { id: "c1", required: true, execution_owner: "delegated" },
+      { id: "c2", required: true, execution_owner: "orc" },
+    ]));
+    store.db.exec(`CREATE TABLE peer_contributions (
+      peer TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      project_card_id INTEGER,
+      root_criteria_json TEXT,
+      state TEXT NOT NULL
+    )`);
+    store.db.prepare(`
+      INSERT INTO peer_contributions (peer, request_id, project_card_id, root_criteria_json, state)
+      VALUES (?, ?, ?, ?, 'completed')
+    `).run("peer-a", "request-a", rootCardId, JSON.stringify(["c2"]));
+
+    const result = mod.coverage.readProjectCriterionCoverage(rootCardId);
+    expect(result.kind).toBe("undeterminable");
+    if (result.kind === "undeterminable") expect(result.reason).toContain("invalid root-criterion mapping");
   });
 
   it("Orc-only project: no delegated criteria, no uncovered, every state orc_owned", () => {

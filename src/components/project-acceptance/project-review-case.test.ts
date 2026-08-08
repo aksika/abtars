@@ -124,6 +124,33 @@ describe("ReviewCaseAssembler coverage read-model (#1604)", () => {
     }
   });
 
+  it("invalid JSON-shaped root contracts fail assembly without throwing", async () => {
+    const kanban = await import("../tasks/kanban-board.js");
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+
+    const rootCardId = kanban.kanbanEnqueue("root", "task", "run-invalid-root", { type: "O" });
+    const reviewStore = new reviewStoreMod.ProjectReviewStore();
+    reviewStore.insertContract({
+      schema_version: 2,
+      id: `pc_invalid_${rootCardId}`,
+      digest: "digest",
+      project_card_id: rootCardId,
+      goal: "Root goal",
+      criteria: "not-an-array",
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
+    } as never);
+    reviewStore.initializeSupervision(rootCardId, `pc_invalid_${rootCardId}`, "executing");
+
+    const assembler = new ReviewCaseAssembler();
+    const snapshot = await assembler.assembleCase(rootCardId, 1, 1);
+    expect("error" in snapshot).toBe(true);
+    if ("error" in snapshot) expect(snapshot.error).toContain("invalid");
+  });
+
   it("#1605: production shape — 3 delegated lanes + 4 Orc-owned criteria carry policy and a failed optional lane into the immutable snapshot", async () => {
     const kanban = await import("../tasks/kanban-board.js");
     const reviewStoreMod = await import("./project-review-store.js");

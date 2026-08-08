@@ -387,8 +387,9 @@ export class ProjectReviewStore {
    * executing → review_ready transition. State-CAS: only an `executing` row
    * is updated and the signature is pinned, so a concurrent wake that already
    * claimed the same signature (or transitioned the project) cannot double
-   * write. No coverage round is incremented — the cap is a loop/idempotency
-   * guard, not acceptance policy.
+   * write. The signature predicate prevents a stale grace/cap evaluation from
+   * overwriting a newer coverage read. No coverage round is incremented — the
+   * cap is a loop/idempotency guard, not acceptance policy.
    */
   recordCoverageReviewable(
     projectCardId: number,
@@ -397,9 +398,10 @@ export class ProjectReviewStore {
   ): boolean {
     const result = this.db.prepare(`
       UPDATE project_supervision
-         SET coverage_signature = ?, coverage_uncovered_ids = ?, updated_at = ?
+       SET coverage_signature = ?, coverage_uncovered_ids = ?, updated_at = ?
        WHERE project_card_id = ? AND state = 'executing'
-    `).run(signature, JSON.stringify(uncoveredIds), new Date().toISOString(), projectCardId);
+         AND (coverage_signature = ? OR coverage_signature IS NULL)
+    `).run(signature, JSON.stringify(uncoveredIds), new Date().toISOString(), projectCardId, signature);
     return result.changes === 1;
   }
 

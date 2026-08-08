@@ -119,18 +119,30 @@ export function renderAcceptedSynthesis(
 
   const order = new Map(caseSnapshot.root_contract.criteria.map((c, i) => [c.id, i]));
   const ordered = [...gaps].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
-  const lines = ordered.map(g => `- ${g.id}: ${g.verdict} — ${g.rationale.slice(0, RENDERED_RATIONALE_MAX)}`);
-  const section = `\n\nKnown gaps:\n${lines.join("\n")}`;
+  const sectionPrefix = "\n\nKnown gaps:\n";
+  const linePrefixes = ordered.map(g => `- ${g.id}: ${g.verdict} — `);
+  const fixedSectionLength = sectionPrefix.length + linePrefixes.join("\n").length;
+
+  // Reserve the bounded result for the complete gap list first. When many
+  // optional gaps exist, ration the rationale budget across them rather than
+  // truncating the finished section and silently dropping later gap IDs.
+  let rationaleBudget = Math.max(0, RENDERED_SYNTHESIS_MAX - fixedSectionLength);
+  const lines = ordered.map((g, index) => {
+    const remainingGaps = ordered.length - index;
+    const allowance = Math.min(RENDERED_RATIONALE_MAX, Math.floor(rationaleBudget / remainingGaps));
+    const rationale = g.rationale.slice(0, allowance);
+    rationaleBudget -= rationale.length;
+    return linePrefixes[index] + rationale;
+  });
+  const section = sectionPrefix + lines.join("\n");
 
   // #1605: reserve space for the disclosure so a long authored synthesis can
-  // never silently drop it. The section itself is bounded by the cap; a
-  // pathological overflow is truncated at the end of the combined result.
-  const maxBase = RENDERED_SYNTHESIS_MAX - section.length;
-  const base = decision.synthesis.length <= maxBase
-    ? decision.synthesis
-    : decision.synthesis.slice(0, Math.max(0, maxBase));
-  const combined = base + section;
-  return combined.length <= RENDERED_SYNTHESIS_MAX ? combined : combined.slice(0, RENDERED_SYNTHESIS_MAX);
+  // never silently drop the Known gaps section or any normally-sized gap ID.
+  // Extremely long criterion IDs can exceed the payload cap by themselves;
+  // retain the hard result bound even for that malformed-but-stored case.
+  const boundedSection = section.slice(0, RENDERED_SYNTHESIS_MAX);
+  const maxBase = Math.max(0, RENDERED_SYNTHESIS_MAX - boundedSection.length);
+  return decision.synthesis.slice(0, maxBase) + boundedSection;
 }
 
 export class ProjectReviewService {

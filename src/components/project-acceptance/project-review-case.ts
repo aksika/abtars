@@ -1,6 +1,6 @@
 import { ProjectReviewStore } from "./project-review-store.js";
 import type { ProjectAcceptanceContract } from "./project-contract.js";
-import { criterionPolicyView } from "./project-contract.js";
+import { criterionPolicyView, validateContract } from "./project-contract.js";
 import { readProjectCriterionCoverage } from "./project-criterion-coverage.js";
 import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
@@ -121,8 +121,21 @@ export class ReviewCaseAssembler {
     const contractRow = this.reviewStore.getContractByProjectCardId(projectCardId);
     if (!contractRow) return { error: `no root contract for project ${projectCardId}` };
 
-    const parsedContract = JSON.parse(contractRow.contract_json) as unknown;
-    const rootContract = parsedContract as ProjectAcceptanceContract;
+    // Parse and validate before projecting policy fields. Coverage also reads
+    // the contract fail-closed, but doing this first prevents a JSON-valid yet
+    // structurally corrupt record from throwing while the assembler calls
+    // criterionPolicyView.
+    let rootContract: ProjectAcceptanceContract;
+    try {
+      const parsedContract = JSON.parse(contractRow.contract_json) as unknown;
+      const validated = validateContract(parsedContract);
+      if (!validated.ok) {
+        return { error: `root contract for project ${projectCardId} is invalid: ${validated.errors.map(e => e.message).join("; ")}` };
+      }
+      rootContract = validated.contract;
+    } catch {
+      return { error: `root contract for project ${projectCardId} is unparseable` };
+    }
     const rootPolicy = criterionPolicyView(rootContract);
     const supervision = this.reviewStore.getSupervision(projectCardId);
     if (!supervision) return { error: `no supervision state for project ${projectCardId}` };

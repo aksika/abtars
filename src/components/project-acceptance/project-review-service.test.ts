@@ -325,4 +325,44 @@ describe("renderAcceptedSynthesis (#1605)", () => {
     expect(result).toContain("- lane3: unsatisfied — source feed unreachable");
     expect(result.length).toBeLessThanOrEqual(4000);
   });
+
+  it("keeps every optional gap ID when rationale text must be compacted", () => {
+    const snapshot = makeSnapshot();
+    const extraIds = Array.from({ length: 12 }, (_, i) => `gap-${i + 1}`);
+    const expanded: ReviewCaseSnapshot = {
+      ...snapshot,
+      root_contract: {
+        ...snapshot.root_contract,
+        criteria: [
+          ...snapshot.root_contract.criteria,
+          ...extraIds.map(id => ({ id, description: id, required: false, execution_owner: "delegated" as const, evidence_expectation: "artifact" as const })),
+        ],
+      },
+      criterion_inputs: [
+        ...snapshot.criterion_inputs,
+        ...extraIds.map(id => ({
+          criterion_id: id,
+          description: id,
+          required: false,
+          execution_owner: "delegated" as const,
+          evidence_expectation: "artifact" as const,
+          mapped_child_contract_ids: [],
+          observed_evidence_ids: [],
+          worker_claim_ids: [],
+          failed_or_inconclusive_check_ids: [],
+          artifact_observation_ids: [],
+          retry_lineage_ids: [],
+          coverage_hint: "gap" as const,
+        })),
+      ],
+    };
+    const decision = makeDecision("Report delivered");
+    for (const id of extraIds) {
+      decision.criteria.push({ criterion_id: id, verdict: "unsatisfied", evidence_ids: [], rationale: "x".repeat(500) });
+    }
+
+    const result = renderAcceptedSynthesis(decision, expanded);
+    expect(result.length).toBeLessThanOrEqual(4000);
+    for (const id of extraIds) expect(result).toContain(`- ${id}: unsatisfied`);
+  });
 });

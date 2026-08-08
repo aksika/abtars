@@ -378,6 +378,38 @@ describe("ProjectReviewValidator", () => {
       expect(errors.some(e => e.path.includes("lane1") && e.message.includes("no evidence"))).toBe(true);
     });
 
+    it("#1605 rejects evidence borrowed from another criterion", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = makeValidDecision(pid, {
+        criteria: [
+          { criterion_id: "c1", verdict: "satisfied", evidence_ids: ["v2"], rationale: "borrowed evidence" },
+          { criterion_id: "c2", verdict: "satisfied", evidence_ids: ["v2"], rationale: "accurate" },
+        ],
+      }, caseId);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("not compatible with criterion \"c1\""))).toBe(true);
+    });
+
+    it("allows contradiction evidence only for its affected criterion", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      snapshot.contradiction_candidates.push({
+        id: "cc_c1",
+        affected_criterion_ids: ["c1"],
+        description: "conflict",
+        evidence_ids: ["conflict-c1"],
+        sources: ["worker-a", "worker-b"],
+      });
+      const decision = makeValidDecision(pid, {
+        criteria: [
+          { criterion_id: "c1", verdict: "satisfied", evidence_ids: ["conflict-c1"], rationale: "resolved" },
+          { criterion_id: "c2", verdict: "satisfied", evidence_ids: ["conflict-c1"], rationale: "borrowed conflict evidence" },
+        ],
+      }, caseId);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("not compatible with criterion \"c2\""))).toBe(true);
+      expect(errors.some(e => e.message.includes("not compatible with criterion \"c1\""))).toBe(false);
+    });
+
     it("#1605 accepts a satisfied Orc-owned criterion with rationale and no fabricated Worker evidence", () => {
       const pid = uniquePid();
       const snapshot = snapshotWithCriteria(pid, [
