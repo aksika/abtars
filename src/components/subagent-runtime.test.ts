@@ -174,8 +174,9 @@ describe("SubagentRuntime shared registry", () => {
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    // #1527: the late-bound durable context provider holder is the 4th arg.
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, { current: null });
+    // #1527: the late-bound durable context provider holder is the 4th arg;
+    // #1552: the memory-tool deps holder is the 5th.
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, { current: null }, { current: null });
   });
 
   it("forwards the composed durable context provider holder to lazy transports (#1527)", async () => {
@@ -186,11 +187,13 @@ describe("SubagentRuntime shared registry", () => {
 
     const holder = { current: { projectContext: () => Promise.resolve({ messages: [], estimatedTokens: 0, sourceMessageCount: 0 }) } };
     runtime.setContextProvider(holder);
+    const memoryDepsHolder = { current: null };
+    runtime.setMemoryToolDependencies(memoryDepsHolder);
 
     mockSendPrompt.mockResolvedValueOnce("ok");
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, holder);
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, holder, memoryDepsHolder);
   });
 });

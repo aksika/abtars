@@ -248,6 +248,19 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     logWarn("boot", `Durable context provider not composed (memory=${ctx.memoryRuntime.state}) — durable Pi requests will fail closed`);
   }
 
+  // #1552: compose the memory-tool dependency holder (runtime + durable
+  // quota) once memory initialization has resolved. A stale quota service
+  // from a prior boot is closed first; tool turns always read the current
+  // holder, so a null holder after shutdown fails closed with
+  // private_write_unavailable.
+  if (ctx.memoryStoreQuota) ctx.memoryStoreQuota.close();
+  const { MemoryStoreQuota } = await import("../components/memory-store-quota.js");
+  const quota = new MemoryStoreQuota();
+  ctx.memoryStoreQuota = quota;
+  ctx.memoryToolDependencies.current = { runtime: ctx.memoryRuntime, quota };
+  ctx.runtime.setMemoryToolDependencies(ctx.memoryToolDependencies);
+  logInfo("boot", "Memory-tool dependencies composed (runtime + store quota)");
+
   // #907: Register Nerve notification listeners for Orc
   await import("../components/spin-notifications.js");
 

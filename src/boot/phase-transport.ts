@@ -278,6 +278,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       // #1527: late-bound holder — memory negotiates in parallel; the
       // composition point (phase-pipeline-deps) populates it afterwards.
       contextProvider: ctx.durableContextProvider,
+      // #1552: late-bound memory-tool deps holder — same composition point.
+      memoryToolDeps: ctx.memoryToolDependencies,
     });
     logInfo("main", `🔌 PiCore transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
     // #1572: the api route loads Pi into the abtars process — warn once when it

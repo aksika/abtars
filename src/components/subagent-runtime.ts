@@ -129,6 +129,13 @@ export class SubagentRuntime {
     this._contextProvider = holder;
   }
 
+  /** #1552: late-bound memory-tool dependencies holder; lazy transports
+   *  created after boot composition receive the shared holder. */
+  private _memoryToolDeps: import("./memory-store-quota.js").MemoryToolDependenciesHolder = { current: null };
+  setMemoryToolDependencies(holder: import("./memory-store-quota.js").MemoryToolDependenciesHolder): void {
+    this._memoryToolDeps = holder;
+  }
+
   /** Enable Docker sandbox for W/B/C sessions (#478). */
   setSandboxEnabled(enabled: boolean): void { this._sandboxEnabled = enabled; }
 
@@ -165,7 +172,6 @@ export class SubagentRuntime {
     const cached = this.cache.get(key);
     if (cached && sessionStrategy === "fresh") {
       await cached.transport.resetSession?.(cached.sessionKey);
-      (await import("./transport/tool-registry.js")).resetStoreCounter();
     }
 
     const cacheKey = key;
@@ -353,7 +359,7 @@ export class SubagentRuntime {
     // #1418: pass the complete last-successful Main candidate (secret-free tuple)
     // into specialist construction so fallback ordering reuses the exact Main
     // candidate that last produced a non-empty response.
-    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain, this._contextProvider);
+    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain, this._contextProvider, this._memoryToolDeps);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
     // External ACP keeps its own agent label; embedded Pi uses this label when
@@ -377,7 +383,6 @@ export class SubagentRuntime {
     const sessionKey = `system:${cacheKey ?? agent}`;
     const entry: CachedAgent = { transport, model, sessionKey };
     this.cache.set(cacheKey ?? agent, entry);
-    (await import("./transport/tool-registry.js")).resetStoreCounter();
     return entry;
   }
 }

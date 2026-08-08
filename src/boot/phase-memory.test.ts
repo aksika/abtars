@@ -34,7 +34,6 @@ vi.mock("../components/null-memory.js", () => ({
 import { phaseMemory, createMemoryRuntimeFromEndpoint, AbmindModuleMissingError, MemoryEndpointUnavailableError } from "./phase-memory.js";
 import { createDisabledRuntime, createClientRuntime } from "../components/memory-runtime.js";
 import { AbtarsSignedWssClient } from "../components/abmind-signed-wss-client.js";
-import { executeToolCall, setMemoryRuntime } from "../components/transport/tool-registry.js";
 import type { BootCtx } from "./context.js";
 
 let testHome = "";
@@ -65,7 +64,6 @@ describe("phaseMemory — endpoint selection (#1508)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockLoadAbmind.mockReset();
-    setMemoryRuntime(null);
     testHome = mkdtempSync(join(tmpdir(), "abtars-phase-mem-"));
     mkdirSync(join(testHome, "config"), { recursive: true });
     process.env["ABTARS_HOME"] = testHome;
@@ -191,29 +189,6 @@ describe("phaseMemory — endpoint selection (#1508)", () => {
 
     expect(ctx.memoryRuntime.state).toBe("unavailable");
     expect(ctx.phaseHealth.get("phaseMemory")?.status).toBe("failed");
-  });
-
-  it("clears a stale registry runtime on every path", async () => {
-    const staleStore = vi.fn().mockResolvedValue({ stored: true });
-    setMemoryRuntime({
-      ...createDisabledRuntime(),
-      state: "ready",
-      supports: capability => capability === "instantStore",
-      instantStore: staleStore,
-    });
-    const freshStore = vi.fn().mockResolvedValue({ stored: true, memoryId: 42, semanticRevision: 1 });
-    const freshClient = fakeClient({
-      privateMemory: { instantStore: freshStore },
-    });
-    mockLoadAbmind.mockResolvedValue({ getMemoryClient: vi.fn().mockResolvedValue(freshClient) });
-    const ctx = ctxWithMemory(true);
-
-    await phaseMemory(ctx);
-
-    const result = JSON.parse(await executeToolCall("memory_store", { translated: "x", type: "fact" }, { userId: "e2e-phase-test" }));
-    expect(staleStore).not.toHaveBeenCalled();
-    expect(freshStore).toHaveBeenCalled();
-    expect(result.stored).toBe(true);
   });
 });
 

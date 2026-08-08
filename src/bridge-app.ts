@@ -80,8 +80,13 @@ export class Bridge {
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
     await     step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", async () => {
-      const { setMemoryRuntime } = await import("./components/transport/tool-registry.js");
-      setMemoryRuntime(null);
+      // #1552: clear the late-bound memory-tool deps first, then close the
+      // quota service before the runtime — a tool turn must never observe
+      // stale dependencies; the next boot composes a fresh quota over the
+      // same durable DB.
+      this.ctx.memoryToolDependencies.current = null;
+      this.ctx.memoryStoreQuota?.close();
+      this.ctx.memoryStoreQuota = null;
       await this.ctx.memoryRuntime.close().catch(() => {});
     });
     await step("transport", () => this.ctx.transport?.destroy());

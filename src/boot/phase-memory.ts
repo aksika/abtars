@@ -152,11 +152,6 @@ export async function phaseMemory(ctx: BootCtx, deps: PhaseMemoryDeps = {}): Pro
   ctx.client = null;
   ctx.abmindModule = null;
 
-  // The registry outlives an individual Bridge during an in-process restart.
-  // Clear the previous boot's runtime before any branch can skip or fail.
-  const { setMemoryRuntime } = await import("../components/transport/tool-registry.js");
-  setMemoryRuntime(null);
-
   if (!ctx.memoryConfig.memoryEnabled) {
     logInfo("main", "Memory disabled");
     ctx.memoryRuntime = createDisabledRuntime();
@@ -213,10 +208,6 @@ export async function phaseMemory(ctx: BootCtx, deps: PhaseMemoryDeps = {}): Pro
     ctx.abmindModule = result.abmindModule;
     ctx.phaseHealth.set("phaseMemory", { status: "ok", error: undefined });
     logInfo("main", `Memory enabled via ${result.mode} endpoint`);
-
-    const { setMemoryRuntime: wireRuntime } = await import("../components/transport/tool-registry.js");
-    wireRuntime(result.runtime);
-    logInfo("main", "Memory runtime wired to tool registry");
 
     return "ran";
   } catch (err) {
