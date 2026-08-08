@@ -833,6 +833,8 @@ export class Spin {
               markDelivered(batch);
               result = (await driver.send(steeringPrompt, undefined, {
                 userId: spec.userId ?? userId,
+                // #1552: every context Spin builds carries the trusted type.
+                sessionType: sessionType(session),
                 executionTelemetry,
                 orcContext: session.orcContext,
               })) || "(no output)";
