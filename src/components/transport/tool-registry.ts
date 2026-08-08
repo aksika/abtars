@@ -7,7 +7,6 @@ import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { AbtarsMemoryRuntime } from "../memory-runtime.js";
 import { logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
@@ -31,6 +30,10 @@ export interface ToolExecutionContext {
   signal?: AbortSignal;
   executionScope?: ToolExecutionScope;
   orcContext?: OrcInvocationContextV1;
+  /** #1552: trusted session type (from Spin); missing/invalid fails closed for memory_store. */
+  sessionType?: import("../spin-types.js").SessionType;
+  /** #1552: late-bound memory-tool dependencies (runtime + quota). */
+  memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
 }
 
 export type ToolDefinition = {
@@ -286,13 +289,6 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal, executi
   });
 }
 
-let memoryRuntime: AbtarsMemoryRuntime | null = null;
-
-/** Wire memory runtime. Call once after memory init. */
-export function setMemoryRuntime(runtime: AbtarsMemoryRuntime | null): void {
-  memoryRuntime = runtime;
-}
-
 let _actionGate: import("../action-gate.js").ActionGate | null = null;
 
 /** Wire action gate for auth-required commands. */
@@ -320,11 +316,11 @@ const bashTool: ToolDefinition = {
   execute: (args, context) => runBash(stringValue(args["command"]), BASH_TIMEOUT_MS, context?.signal, context?.executionScope),
 };
 
-let _storeCount = 0;
-const STORE_CAP = 20;
-
-/** Reset store counter (called on new subagent session). */
-export function resetStoreCounter(): void { _storeCount = 0; }
+/** #1552: resolve the current memory-tool dependencies from the execution
+ *  context's late-bound holder. A null holder fails closed. */
+function memoryDeps(context?: ToolExecutionContext): import("../memory-store-quota.js").MemoryToolDependencies | null {
+  return context?.memoryToolDeps?.current ?? null;
+}
 
 const PRIVATE_WRITE_UNAVAILABLE = {
   stored: false,
@@ -356,42 +352,80 @@ const memoryStoreTool: ToolDefinition = {
     required: ["translated", "type"],
   },
   async execute(args, context): Promise<string> {
-    if (!memoryRuntime || !memoryRuntime.supports("instantStore")) {
+    // #1552 R1: execution-time allowlist — a forged or direct call with any
+    // other (or missing) session type fails closed without touching quota.
+    const sessionType = context?.sessionType;
+    if (sessionType !== "A" && sessionType !== "D") {
+      return JSON.stringify({ stored: false, code: "memory_store_not_allowed", retryable: false });
+    }
+    const deps = memoryDeps(context);
+    if (!deps || !deps.runtime.supports("instantStore")) {
       return JSON.stringify(PRIVATE_WRITE_UNAVAILABLE);
     }
-    if (++_storeCount > STORE_CAP) {
-      return JSON.stringify({ stored: false, error: "Store limit reached for this session. Move to next task." });
+    const userId = context?.userId ?? getMasterUserId();
+    const storeOnce = async (): Promise<import("../memory-runtime.js").InstantStoreResult> => deps.runtime.instantStore({
+      userId,
+      contentEn: stringValue(args["translated"]),
+      contentOriginal: stringValue(args["original"] ?? args["translated"]),
+      memoryType: stringValue(args["type"] ?? "fact"),
+      emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
+      confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
+      classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
+    });
+
+    // #1552 R2/R5: Main reserves exactly once before the first attempt; the
+    // FTS rebuild/retry stays inside the same reservation. Dreamy bypasses
+    // quota reservation entirely.
+    let reservationId: string | undefined;
+    if (sessionType === "A") {
+      const reserved = deps.quota.reserve(userId);
+      if (reserved.kind === "limited") {
+        return JSON.stringify({
+          stored: false,
+          code: "memory_store_quota_exceeded",
+          retryable: false,
+          limit: reserved.limit,
+          used: reserved.used,
+          retry_after: new Date(reserved.retryAfter).toISOString(),
+        });
+      }
+      if (reserved.kind === "unavailable") {
+        return JSON.stringify({
+          stored: false,
+          code: "memory_store_quota_unavailable",
+          retryable: false,
+          reason: reserved.reason,
+        });
+      }
+      reservationId = reserved.id;
     }
     try {
-      const result = await memoryRuntime.instantStore({
-        userId: context?.userId ?? getMasterUserId(),
-        contentEn: stringValue(args["translated"]),
-        contentOriginal: stringValue(args["original"] ?? args["translated"]),
-        memoryType: stringValue(args["type"] ?? "fact"),
-        emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
-        confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
-        classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
-      });
+      const result = await storeOnce();
+      // #1552 R3/R5: only a final stored:true commits the reservation; a
+      // definitively unsuccessful write releases it so it does not count.
+      if (reservationId) {
+        if (result.stored === true) deps.quota.commit(reservationId);
+        else deps.quota.release(reservationId);
+      }
       return JSON.stringify(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // #706: FTS5 corruption self-heal — rebuild indexes and retry once
-      if ((msg.includes("fts5") || msg.includes("corruption")) && memoryRuntime.supports("rebuildFts")) {
+      // #706: FTS corruption self-heal — rebuild indexes and retry once,
+      // still inside the same reservation.
+      if ((msg.includes("fts5") || msg.includes("corruption")) && deps.runtime.supports("rebuildFts")) {
         try {
-          await memoryRuntime.rebuildFtsIndexes();
+          await deps.runtime.rebuildFtsIndexes();
           logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
-          const result = await memoryRuntime.instantStore({
-            userId: context?.userId ?? getMasterUserId(),
-            contentEn: stringValue(args["translated"]),
-            contentOriginal: stringValue(args["original"] ?? args["translated"]),
-            memoryType: stringValue(args["type"] ?? "fact"),
-            emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
-            confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
-            classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
-          });
+          const result = await storeOnce();
+          if (reservationId) {
+            if (result.stored === true) deps.quota.commit(reservationId);
+            else deps.quota.release(reservationId);
+          }
           return JSON.stringify(result);
         } catch (retryErr) { /* fall through */ }
       }
+      // Known thrown failure after all retry handling: release the slot.
+      if (reservationId) deps.quota.release(reservationId);
       return JSON.stringify({ error: msg });
     }
   },
@@ -409,7 +443,8 @@ const memoryRecallTool: ToolDefinition = {
     required: ["query"],
   },
   async execute(args, context): Promise<string> {
-    if (!memoryRuntime || !memoryRuntime.supports("recall")) {
+    const runtime = memoryDeps(context)?.runtime;
+    if (!runtime || !runtime.supports("recall")) {
       return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
     }
     try {
@@ -417,7 +452,7 @@ const memoryRecallTool: ToolDefinition = {
       const userId = context?.userId ?? getMasterUserId();
       const { loadUsers } = await import("../user-registry.js");
       const userEntry = loadUsers().byUserId.get(userId);
-      const result = await memoryRuntime.recall({
+      const result = await runtime.recall({
         query: stringValue(args["query"]),
         userId,
         limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
@@ -449,7 +484,8 @@ const memoryEditTool: ToolDefinition = {
     required: ["memory_id", "expected_revision"],
   },
   async execute(args, context): Promise<string> {
-    if (!memoryRuntime || !memoryRuntime.supports("editMemory")) {
+    const runtime = memoryDeps(context)?.runtime;
+    if (!runtime || !runtime.supports("editMemory")) {
       return JSON.stringify(EDIT_UNAVAILABLE);
     }
     try {
@@ -457,7 +493,7 @@ const memoryEditTool: ToolDefinition = {
       if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
         return JSON.stringify({ ok: false, error: "expected_revision must be a positive integer" });
       }
-      const result = await memoryRuntime.editMemory({
+      const result = await runtime.editMemory({
         memoryId: parseInt(stringValue(args["memory_id"] ?? "0"), 10),
         expectedRevision,
         userId: context?.userId ?? getMasterUserId(),
