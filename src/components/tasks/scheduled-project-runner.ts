@@ -173,7 +173,8 @@ function buildOrcGoal(request: ScheduledProjectRequest): string {
     `Absolute deadline: ${new Date(request.deadlineAt).toISOString()} — the scheduled system enforces it; never exceed it.`,
     `Agent budget: ${request.maxAgents} total agents (1 Orc + up to ${workerLimit} concurrent Workers). The system enforces this cap — do not attempt to exceed it.`,
     `Lane discipline: each Worker must own an independent, disjoint work lane. Never spawn duplicate Workers for the same source.`,
-    `Root-criteria coverage: every Worker declares supports_root_criteria with the exact root criterion ids it supports; every root criterion must be mapped by at least one lane before review_project.`,
+    `Contract ownership (#1605): author delegated research criteria separately from Orc synthesis/quality criteria (execution_owner: delegated|orc; orc-owned criteria use synthesis evidence). Only delegated criteria are mapped to Workers via supports_root_criteria. Mark a criterion optional (required: false) when losing that source would still permit a useful deliverable.`,
+    `Quality manager: you (Orc) own synthesis and final quality; Workers provide evidence. After all lane outcomes, review failures yourself in review_project and decide: repair, accept with disclosed optional gaps, block, or request input. A failed optional lane does not block delivery — disclose the gap.`,
     `Lane budgets: ${request.laneDurationMs !== undefined ? `every lane carries a hard max_duration_ms of ${request.laneDurationMs} ms; ` : ""}a lane that fetches live web pages needs >= 300000 ms (max_duration_ms). Every declared criterion MUST have an evidence path - a verification command or a required artifact - or the contract is rejected.`,
     `Artifact ownership: Workers must NOT write the declared final report artifact. They return bounded lane results/evidence only.`,
     `Workspace: ${request.executionScope.cwd}`,
@@ -401,23 +402,53 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
   const card = kanbanGetCard(rootCardId);
   if (!card) return undefined;
   if (supervision?.state === "accepted" || card.status === "done") {
+    // #1605: `card.result_summary` carries the RENDERED synthesis — the
+    // settlement stored the authored decision JSON unchanged and wrote the
+    // deterministic "Known gaps" disclosure to the card result. Prefer it;
+    // fall back to the authored decision only when the card field is empty.
     let synthesis = card.result_summary ?? "";
     let factAt = cardTimeMs(card.updated_at);
-    if (supervision?.accepted_decision_id) {
+    if (!synthesis && supervision?.accepted_decision_id) {
       const decision = reviewStore.getDecision(supervision.accepted_decision_id);
       if (decision) {
         try {
           const parsed = JSON.parse(decision.decision_json) as { synthesis?: unknown };
           if (typeof parsed.synthesis === "string" && parsed.synthesis) synthesis = parsed.synthesis;
         } catch { /* keep the card summary */ }
-        factAt = cardTimeMs(decision.created_at) ?? factAt;
       }
+    }
+    if (supervision?.accepted_decision_id) {
+      const decision = reviewStore.getDecision(supervision.accepted_decision_id);
+      if (decision) factAt = cardTimeMs(decision.created_at) ?? factAt;
     }
     return { accepted: true, synthesis: synthesis || "project accepted", factAt };
   }
   if (supervision?.state === "blocked" || card.status === "failed") {
     const reason = (supervision?.blocked_reason ?? card.error ?? "project blocked").slice(0, 500);
     const lanes = gatherLaneFacts(rootCardId);
+    // #1605: an Orc-authored blocked decision is the terminal authority — the
+    // durable decision's action wins over lane/coverage diagnostic selection,
+    // so a normal post-review gap is never reclassified as contract_uncovered.
+    // Legacy/pre-review structural failures (no decision) keep the lane/coverage
+    // selection below.
+    if (supervision?.accepted_decision_id) {
+      const decision = reviewStore.getDecision(supervision.accepted_decision_id);
+      if (decision) {
+        try {
+          const parsed = JSON.parse(decision.decision_json) as { action?: unknown };
+          if (parsed.action === "blocked") {
+            const diagnostic = makeTaskFailure("supervision", "project_blocked", "executing",
+              reason, "none",
+              {
+                rootCardId,
+                lanes,
+                remediationHint: reason,
+              });
+            return { accepted: false, diagnostic, factAt: cardTimeMs(card.updated_at) };
+          }
+        } catch { /* unparseable decision — fall through to lane/coverage selection */ }
+      }
+    }
     // #1604: the durable coverage fact, evaluated once by the reconciler gate.
     // NULL means coverage was never evaluated (project died before review
     // eligibility) → [] so the real lane/deadline reason surfaces instead of

@@ -93,6 +93,46 @@ export type ReviewOutcome =
   | { kind: "invalid"; errors: readonly string[] }
   | { kind: "blocked_invalid"; decisionId: string; summary: string };
 
+/** #1605: cap for the rendered synthesis (card result summary limit is 4000). */
+export const RENDERED_SYNTHESIS_MAX = 4000;
+const RENDERED_RATIONALE_MAX = 500;
+
+/**
+ * #1605: pure renderer for the delivered synthesis. Returns the authored
+ * synthesis unchanged when there are no accepted optional gaps; otherwise
+ * appends a canonical, bounded "Known gaps" section in root-contract order so
+ * the Orc's declared omissions reach the user deterministically.
+ */
+export function renderAcceptedSynthesis(
+  decision: ProjectReviewDecisionV1,
+  caseSnapshot: ReviewCaseSnapshot,
+): string {
+  const policyByCriterionId = new Map(caseSnapshot.criterion_inputs.map(ci => [ci.criterion_id, ci]));
+  const gaps = decision.criteria
+    .filter(c => {
+      const policy = policyByCriterionId.get(c.criterion_id);
+      if (!policy) return false;
+      return !policy.required && (c.verdict === "unsatisfied" || c.verdict === "inconclusive");
+    })
+    .map(c => ({ id: c.criterion_id, verdict: c.verdict, rationale: c.rationale }));
+  if (gaps.length === 0) return decision.synthesis;
+
+  const order = new Map(caseSnapshot.root_contract.criteria.map((c, i) => [c.id, i]));
+  const ordered = [...gaps].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  const lines = ordered.map(g => `- ${g.id}: ${g.verdict} — ${g.rationale.slice(0, RENDERED_RATIONALE_MAX)}`);
+  const section = `\n\nKnown gaps:\n${lines.join("\n")}`;
+
+  // #1605: reserve space for the disclosure so a long authored synthesis can
+  // never silently drop it. The section itself is bounded by the cap; a
+  // pathological overflow is truncated at the end of the combined result.
+  const maxBase = RENDERED_SYNTHESIS_MAX - section.length;
+  const base = decision.synthesis.length <= maxBase
+    ? decision.synthesis
+    : decision.synthesis.slice(0, Math.max(0, maxBase));
+  const combined = base + section;
+  return combined.length <= RENDERED_SYNTHESIS_MAX ? combined : combined.slice(0, RENDERED_SYNTHESIS_MAX);
+}
+
 export class ProjectReviewService {
   private store: ProjectReviewStore;
   private validator: ProjectReviewValidator;
@@ -148,14 +188,18 @@ export class ProjectReviewService {
 
     switch (decision.action) {
       case "accept": {
+        // #1605: the delivered synthesis carries the Orc's declared optional
+        // omissions deterministically; the authored decision JSON stays as the
+        // Orc wrote it.
+        const deliveredSynthesis = renderAcceptedSynthesis(decision, caseSnapshot);
         // Atomic settlement: decision + supervision + kanban in one transaction
         const acceptanceId = `rd_settle_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-        const peerEvent = buildPeerAcceptanceEvent(cardId, acceptanceId, decision.synthesis, caseSnapshot);
+        const peerEvent = buildPeerAcceptanceEvent(cardId, acceptanceId, deliveredSynthesis, caseSnapshot);
         const { decisionId } = this.store.settleAcceptance(
           cardId,
           decision.review_case_id,
           decision,
-          decision.synthesis,
+          deliveredSynthesis,
           peerEvent,
           acceptanceId,
         );
@@ -165,7 +209,7 @@ export class ProjectReviewService {
         return {
           kind: "accepted",
           decisionId,
-          summary: `Project accepted: ${decision.synthesis.slice(0, 200)}`,
+          summary: `Project accepted: ${deliveredSynthesis.slice(0, 200)}`,
         };
       }
 

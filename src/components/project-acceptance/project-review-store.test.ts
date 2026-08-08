@@ -220,6 +220,23 @@ describe("ProjectReviewStore", () => {
       expect(sup!.coverage_signature).toBe("sig-clear");
     });
 
+    it("recordCoverageReviewable persists the gap without incrementing a round (CAS on executing)", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      expect(s.recordCoverageReviewable(cid, "sig-gap", ["c1", "c2"])).toBe(true);
+      const sup = s.getSupervision(cid);
+      expect(sup!.coverage_rounds).toBe(0);
+      expect(sup!.coverage_signature).toBe("sig-gap");
+      expect(JSON.parse(sup!.coverage_uncovered_ids!)).toEqual(["c1", "c2"]);
+    });
+
+    it("recordCoverageReviewable refuses a non-executing row (false CAS)", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      s.stateTransition(cid, ["executing"], "review_ready");
+      expect(s.recordCoverageReviewable(cid, "sig-gap", ["c1"])).toBe(false);
+    });
+
     it("migration runs twice without error on an existing DB", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;

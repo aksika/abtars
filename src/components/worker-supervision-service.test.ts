@@ -105,7 +105,7 @@ describe("WorkerSupervisionService", () => {
     });
 
     expect(validateWorkerRootCriteria(100, "child_c1", ["root_missing"]))
-      .toContain("unknown root criterion id");
+      .toContain("is not delegable");
   });
 
   it("#1604 rejects an empty mapping under a contract-bearing root, naming every legal id", () => {
@@ -155,8 +155,75 @@ describe("WorkerSupervisionService", () => {
     });
 
     const err = validateWorkerRootCriteria(100, "child_c1", ["C1"]);
-    expect(err).toContain(`unknown root criterion id "C1"`);
-    expect(err).toContain("legal ids: c1, c2");
+    expect(err).toContain(`is not delegable`);
+    expect(err).toContain("legal delegated ids: c1, c2");
+  });
+
+  it("#1605 rejects a mapping to an Orc-owned criterion even though the id exists", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 2,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [
+        { id: "lane1", description: "Lane 1", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+        { id: "synthesis", description: "Synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    const err = validateWorkerRootCriteria(100, "child_c1", ["synthesis"]);
+    expect(err).toContain(`"synthesis" is not delegable`);
+    expect(err).toContain("legal delegated ids: lane1");
+    // empty mapping rejected — a delegated criterion exists
+    const emptyErr = validateWorkerRootCriteria(100, "child_c1", []);
+    expect(emptyErr).toContain("supports_root_criteria is required");
+  });
+
+  it("#1605 admits an unmapped child under an Orc-only root (no delegated criteria)", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 2,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [
+        { id: "synthesis", description: "Synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    expect(validateWorkerRootCriteria(100, "child_c1", [])).toBeUndefined();
+  });
+
+  it("#1605 rejects a mapping to an Orc-owned criterion under an Orc-only root", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 2,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [
+        { id: "synthesis", description: "Synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    const err = validateWorkerRootCriteria(100, "child_c1", ["synthesis"]);
+    expect(err).toContain("no delegable root criteria");
   });
 
   it("#1604 createChild rejects a supervised child with no mapping under a contract-bearing root", () => {

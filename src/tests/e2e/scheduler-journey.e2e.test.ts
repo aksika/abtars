@@ -1482,7 +1482,10 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
     expect(ev[0]!.outcome).toBe("failed");
     const diag = ev[0]!.diagnostic as TaskFailureDiagnosticV1;
     expect(diag.category).toBe("supervision");
-    expect(diag.code).toBe("lane_late_completion");
+    // #1605 R6: an Orc-authored blocked decision is the terminal authority —
+    // project_blocked with the Orc blocker; lane facts remain review evidence.
+    expect(diag.code).toBe("project_blocked");
+    expect(diag.message).toContain("late completion review blocked");
     const lane = diag.context!.lanes[0]!;
     expect(lane.cardId).toBe(workerCard.id);
     expect(lane.contractId).toMatch(/^c_/);
@@ -1501,7 +1504,10 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
 
     // 3. The operator notification carries category/code and the lane facts.
     expect(cascadeNotifications).toHaveLength(1);
-    expect(cascadeNotifications[0]).toContain("Project Task failed - supervision/lane_late_completion");
+    // #1605 R6: the Orc-blocked decision is the terminal authority — the
+    // notification names project_blocked with the Orc blocker and the lane
+    // facts underneath.
+    expect(cascadeNotifications[0]).toContain("Project Task failed - supervision/project_blocked");
     expect(cascadeNotifications[0]).toContain(`card ${workerCard.id}`);
     expect(cascadeNotifications[0]).toContain("binding_limit max_duration_ms=120000");
     expect(cascadeNotifications[0]).toContain("overrun_ms");
@@ -1510,7 +1516,7 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
     // 4. The SHA prompt built from the captured diagnostic carries the
     // structured root cause and its guardrails (full chain per spec).
     const shaPrompt = buildShaFailurePrompt("project-task", cascadeDiagnostics[0]!, "");
-    expect(shaPrompt).toContain("Category: supervision/lane_late_completion");
+    expect(shaPrompt).toContain("Category: supervision/project_blocked");
     expect(shaPrompt).toContain("<root-cause>");
     expect(shaPrompt).toContain(`card="${workerCard.id}"`);
     expect(shaPrompt).toContain('cancel-reason="late_completion_timed_out: worker_completed"');

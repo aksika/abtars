@@ -19,9 +19,10 @@ const MAX_CHECK_OUTPUT_LENGTH = 10_000;
 /**
  * Return a stable admission error when a child claims root criteria it cannot
  * support, or when a supervised child under a contract-bearing root omits the
- * mapping entirely (#1604 R3). A root card with no project contract, or a
- * contract without criteria, is unaffected — standalone supervised children
- * keep working without a mapping.
+ * mapping entirely (#1604 R3, #1605 R2). Only DELEGATED root criteria are legal
+ * mapping targets — Orc-owned criteria are rejected as bad references. A root
+ * card with no project contract is unaffected; an Orc-only root admits
+ * unmapped children but rejects mappings to Orc-owned ids.
  */
 export function validateWorkerRootCriteria(
   rootCardId: number,
@@ -30,11 +31,19 @@ export function validateWorkerRootCriteria(
 ): string | undefined {
   const legal = rootCriterionIds(rootCardId);
   if (legal === undefined) return undefined; // no project contract → unchanged
-  if (legal.length === 0) return undefined;  // contract without criteria → unchanged
+
+  if (legal.length === 0) {
+    // #1605: an Orc-only root has no delegable criteria — an empty mapping is
+    // valid, but a mapping referencing (Orc-owned) ids is a bad reference.
+    if (supportsRootCriteria.length > 0) {
+      return `root-criterion mapping rejected: no delegable root criteria for project #${rootCardId} — all criteria are Orc-owned and cannot be mapped to Workers`;
+    }
+    return undefined;
+  }
 
   if (supportsRootCriteria.length === 0) {
     return `supports_root_criteria is required for supervised children of project #${rootCardId}; `
-      + `declare a JSON array of root criterion ids from: ${legal.join(", ")} (exact ids, case-sensitive)`;
+      + `declare a JSON array of delegated root criterion ids from: ${legal.join(", ")} (exact ids, case-sensitive)`;
   }
 
   const reviewStore = new ProjectReviewStore();
@@ -42,7 +51,7 @@ export function validateWorkerRootCriteria(
   if (!rootContractRow) {
     return `root contract not found for project ${rootCardId}; cannot validate criterion mapping`;
   }
-  const rootContract = JSON.parse(rootContractRow.contract_json);
+  const rootContract = JSON.parse(rootContractRow.contract_json) as import("./project-acceptance/project-contract.js").ProjectAcceptanceContract;
   const mappingErrors = validateCriterionMapping(rootContract, {
     child_contract_id: childContractId || "(pending)",
     supports_root_criteria: supportsRootCriteria,

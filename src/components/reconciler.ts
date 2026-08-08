@@ -620,19 +620,21 @@ async function handleReviewState(projectId: number, supervision: ProjectSupervis
 }
 
 /**
- * #1604 R2: the coverage lifecycle gate, evaluated inside createReviewCase
- * before the executing → review_ready transition. Returns:
- *  - "blocked"   → project settled terminal (undeterminable read, round cap, grace)
- *  - "waiting"   → coverage round claimed/dispatched, or another wake owns it;
- *                  project stays executing and remains spawn-eligible
- *  - "clear"     → all root criteria covered; proceed to review_ready
+ * #1604 R2 + #1605 R3: the coverage lifecycle gate, evaluated inside
+ * createReviewCase before the executing → review_ready transition. Returns:
+ *  - "blocked"    → project settled terminal (undeterminable/missing contract
+ *                   only — a readable semantic gap is never a terminal gate)
+ *  - "waiting"    → coverage round claimed/dispatched, or another wake owns it;
+ *                   project stays executing and remains spawn-eligible
+ *  - "reviewable" → proceed to review_ready (clean, or gap persisted after the
+ *                   bounded remediation turn — the Orc decides the gap)
  *
  * The gate rides existing reconciler wakes — no timers, no heartbeat. The
  * scheduled path's live Orc run row (orc_claim) suppresses re-entry while the
  * coverage turn runs; the non-scheduled legacy dispatch is bounded by
  * COVERAGE_ROUND_GRACE_MS instead, since it creates no observable claim.
  */
-function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): "blocked" | "waiting" | "clear" {
+function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): "blocked" | "waiting" | "reviewable" {
   const coverage = readProjectCriterionCoverage(projectId);
 
   // 1. Undeterminable or missing root contract — fail closed, never "covered".
@@ -654,19 +656,30 @@ function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, 
   // 2. Fully covered — record the clean evaluation and proceed.
   if (uncovered.length === 0) {
     reviewStore.recordCoverageClear(projectId, signature);
-    return "clear";
+    return "reviewable";
   }
 
-  // 3. Gap — cap check, in precedence order.
+  // 3. Gap — bounded remediation turn, then review with the persisted gap.
+  // The round cap is a loop guard only: an exhausted cap means the gap reaches
+  // review immediately (repair re-entry cannot restart coverage looping).
   if (supervision.coverage_rounds >= MAX_COVERAGE_ROUNDS) {
-    settleCoverageBlocked(projectId, reviewStore, `coverage not closed after ${MAX_COVERAGE_ROUNDS} rounds: root criteria ${uncovered.join(", ")} have no mapped child contract`, uncovered);
-    return "blocked";
+    if (reviewStore.recordCoverageReviewable(projectId, signature, uncovered)) {
+      logInfo(TAG, `Project ${projectId}: coverage round cap reached (${uncovered.join(", ")}) — proceeding to review_ready`);
+      return "reviewable";
+    }
+    return "waiting";
   }
+
   if (supervision.coverage_signature === signature) {
     const elapsed = Date.now() - Date.parse(supervision.updated_at);
     if (Number.isFinite(elapsed) && elapsed >= COVERAGE_ROUND_GRACE_MS) {
-      settleCoverageBlocked(projectId, reviewStore, `coverage unchanged after a coverage round: root criteria ${uncovered.join(", ")} have no mapped child contract`, uncovered);
-      return "blocked";
+      // #1605: the Orc had its coverage turn and the gap is unchanged — it is
+      // an evidence gap for the review, not a terminal gate decision.
+      if (reviewStore.recordCoverageReviewable(projectId, signature, uncovered)) {
+        logInfo(TAG, `Project ${projectId}: coverage gap persisted for review (${uncovered.join(", ")}) — proceeding to review_ready`);
+        return "reviewable";
+      }
+      return "waiting";
     }
     // Same signature, grace not elapsed — the Orc had its turn; wait for the
     // next wake (tight-loop guard).
@@ -674,8 +687,8 @@ function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, 
     return "waiting";
   }
 
-  // New signature — claim one coverage round; the CAS makes concurrent wakes
-  // single-claimant.
+  // New signature below cap — claim one coverage round; the CAS makes
+  // concurrent wakes single-claimant.
   if (!reviewStore.claimCoverageRound(projectId, signature, uncovered, MAX_COVERAGE_ROUNDS)) {
     logInfo(TAG, `Project ${projectId}: coverage round claimed by another wake — waiting`);
     return "waiting";
@@ -703,9 +716,9 @@ function settleCoverageBlocked(projectId: number, reviewStore: ProjectReviewStor
   logWarn(TAG, `Project ${projectId}: coverage gate blocked — ${reason}`);
 }
 
-/** #1604: dispatch the Orc coverage turn — coordinator for scheduled roots, legacy dispatch otherwise. */
+/** #1604/#1605: dispatch the Orc coverage turn — coordinator for scheduled roots, legacy dispatch otherwise. */
 function dispatchCoverageRound(projectId: number, uncovered: readonly string[]): void {
-  const goal = `[COVERAGE GAP] Scheduled project #${projectId}: root criteria ${uncovered.join(", ")} have no Worker mapped to them. Spawn a Worker for each with supports_root_criteria set to those exact ids, or, if a criterion cannot be satisfied, state that in review_project. Do not re-author the contract. Do not write the final report artifact yet.`;
+  const goal = `[COVERAGE GAP] Scheduled project #${projectId}: delegated root criteria ${uncovered.join(", ")} have no Worker mapped to them. Spawn a Worker to map any that should be delegated, or leave the gap for the imminent quality review if it cannot or should not be covered (e.g. the evidence came from another lane, or the criterion is being covered by Orc synthesis). Never spawn a Worker for Orc-owned criteria. Do not re-author the contract. Do not write the final report artifact yet.`;
   const card = kanbanGetCard(projectId);
   if (card && isScheduledProjectRoot(card)) {
     const coordinator = getOrCreateOrcCoordinator();
@@ -742,7 +755,7 @@ function dispatchCoverageRound(projectId: number, uncovered: readonly string[]):
 async function createReviewCase(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, roundOffset: 0 | 1 = 1): Promise<void> {
   if (supervision.state === "executing") {
     const coverageGate = runCoverageGate(projectId, supervision, reviewStore);
-    if (coverageGate !== "clear") return;
+    if (coverageGate === "waiting" || coverageGate === "blocked") return;
   }
 
   const nextRound = supervision.review_round + roundOffset;

@@ -1,5 +1,6 @@
 import { ProjectReviewStore } from "./project-review-store.js";
-import type { ProjectAcceptanceContractV1 } from "./project-contract.js";
+import type { ProjectAcceptanceContract } from "./project-contract.js";
+import { criterionPolicyView } from "./project-contract.js";
 import { readProjectCriterionCoverage } from "./project-criterion-coverage.js";
 import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
@@ -8,11 +9,14 @@ import { redactEnvelope } from "../worker-contract.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type CriterionCoverageHint = "supported" | "conflicting" | "gap";
+export type CriterionCoverageHint = "supported" | "conflicting" | "gap" | "orc_owned";
 
 export interface CriterionReviewInput {
   criterion_id: string;
   description: string;
+  /** #1605: durable policy fields carried into the immutable case */
+  required: boolean;
+  execution_owner: "delegated" | "orc";
   evidence_expectation: "observed" | "artifact" | "synthesis";
   mapped_child_contract_ids: string[];
   observed_evidence_ids: string[];
@@ -45,6 +49,8 @@ export interface ReviewCaseSnapshot {
     criteria: readonly {
       id: string;
       description: string;
+      required: boolean;
+      execution_owner: "delegated" | "orc";
       evidence_expectation: "observed" | "artifact" | "synthesis";
     }[];
     required_outputs: readonly {
@@ -115,7 +121,9 @@ export class ReviewCaseAssembler {
     const contractRow = this.reviewStore.getContractByProjectCardId(projectCardId);
     if (!contractRow) return { error: `no root contract for project ${projectCardId}` };
 
-    const rootContract = JSON.parse(contractRow.contract_json) as ProjectAcceptanceContractV1;
+    const parsedContract = JSON.parse(contractRow.contract_json) as unknown;
+    const rootContract = parsedContract as ProjectAcceptanceContract;
+    const rootPolicy = criterionPolicyView(rootContract);
     const supervision = this.reviewStore.getSupervision(projectCardId);
     if (!supervision) return { error: `no supervision state for project ${projectCardId}` };
 
@@ -168,15 +176,16 @@ export class ReviewCaseAssembler {
       }
     } catch {}
 
-    // #1604: the coverage read-model is the single source of truth for
-    // child→root mappings and the uncovered set. An undeterminable read
-    // (unparseable contract) fails the assembly instead of silently treating
-    // the project as covered.
+    // #1605: the coverage read-model is the single source of truth for
+    // ownership, child→root mappings, and the uncovered set. The assembler
+    // consumes CoverageRead.criteria; it never independently infers ownership
+    // or recalculates gaps. An undeterminable read (unparseable contract)
+    // fails the assembly instead of silently treating the project as covered.
     const coverage = readProjectCriterionCoverage(projectCardId);
     if (coverage.kind === "undeterminable" || coverage.kind === "no_project_contract") {
       return { error: coverage.kind === "undeterminable" ? coverage.reason : `no root contract for project ${projectCardId}` };
     }
-    const childMappings = coverage.read.mappings;
+    const coverageCriteria = coverage.read.criteria;
 
     // Gather child summaries, results, and evidence
     const childSummaries: Array<{
@@ -222,15 +231,18 @@ export class ReviewCaseAssembler {
     // Compute coverage from the read-model (already fail-closed above)
     const uncoveredCriteria = coverage.read.uncovered;
 
-    // Build per-criterion review input with evidence from attempt results
-    const criterionInputs: CriterionReviewInput[] = rootContract.criteria.map(c => {
-      const mappedChildren = childMappings
-        .filter(m => m.supports_root_criteria.includes(c.id))
-        .map(m => m.child_contract_id);
+    // Build per-criterion review input with evidence from attempt results.
+    // #1605: policy (required/execution_owner) and coverage state come from
+    // the read-model rows, never inferred here.
+    const criterionInputs: CriterionReviewInput[] = coverageCriteria.map(cov => {
+      const policy = rootPolicy.find(p => p.id === cov.criterionId)!;
+      const mappedChildren = cov.mappedContractIds;
 
-      const coverageHint: CriterionCoverageHint = !mappedChildren.length
-        ? "gap"
-        : "supported";
+      const coverageHint: CriterionCoverageHint = cov.state === "orc_owned"
+        ? "orc_owned"
+        : cov.state === "mapped"
+          ? "supported"
+          : "gap";
 
       const observedEvidence: string[] = [];
       const workerClaimIds: string[] = [];
@@ -243,7 +255,7 @@ export class ReviewCaseAssembler {
 
         // Collect evidence from attempt result criteria
         for (const cr of summary.result.criteria) {
-          if (cr.criterion_id === c.id) {
+          if (cr.criterion_id === policy.id) {
             if (cr.status === "passed") {
               observedEvidence.push(...cr.evidence_ids);
             } else if (cr.status === "failed" || cr.status === "inconclusive") {
@@ -254,7 +266,7 @@ export class ReviewCaseAssembler {
 
         // Worker claims
         for (const claim of summary.result.worker_report.claims) {
-          if (!claim.criterion_id || claim.criterion_id === c.id) {
+          if (!claim.criterion_id || claim.criterion_id === policy.id) {
             workerClaimIds.push(`claim_${summary.result.attempt.id}_${claim.text.slice(0, 20)}`);
           }
         }
@@ -273,10 +285,12 @@ export class ReviewCaseAssembler {
       }
 
       return {
-        criterion_id: c.id,
-        description: c.description,
-        evidence_expectation: c.evidence_expectation,
-        mapped_child_contract_ids: mappedChildren,
+        criterion_id: policy.id,
+        description: policy.description,
+        required: policy.required,
+        execution_owner: policy.execution_owner,
+        evidence_expectation: policy.evidence_expectation,
+        mapped_child_contract_ids: [...mappedChildren],
         observed_evidence_ids: observedEvidence,
         worker_claim_ids: workerClaimIds,
         failed_or_inconclusive_check_ids: failedOrInconclusiveChecks,
@@ -336,7 +350,7 @@ export class ReviewCaseAssembler {
         id: rootContract.id,
         digest: rootContract.digest,
         goal: rootContract.goal,
-        criteria: rootContract.criteria,
+        criteria: rootPolicy,
         required_outputs: rootContract.required_outputs,
         limits: rootContract.limits,
       },

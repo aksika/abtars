@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
-import type { ProjectAcceptanceContractV1 } from "./project-contract.js";
+import type { ProjectAcceptanceContractV1, ProjectAcceptanceContractV2, CriterionExecutionOwner } from "./project-contract.js";
 import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
 
 let TEST_HOME: string;
@@ -24,6 +24,21 @@ function makeRootContract(cardId: number, criteria: Array<{ id: string }>): Proj
     project_card_id: cardId,
     goal: "Root goal",
     criteria: criteria.map(c => ({ id: c.id, description: `Criterion ${c.id}`, required: true as const, evidence_expectation: "synthesis" as const })),
+    required_outputs: [],
+    constraints: [],
+    limits: { hard_deadline_at: undefined, max_tokens: undefined, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+    provenance: { requested_by: "user", authored_by: "orc", created_at: "2026-07-12T00:00:00.000Z" },
+  };
+}
+
+function makeRootContractV2(cardId: number, criteria: Array<{ id: string; required: boolean; execution_owner: CriterionExecutionOwner }>): ProjectAcceptanceContractV2 {
+  return {
+    schema_version: 2,
+    id: `pc_root_${cardId}`,
+    digest: `digest_root_${cardId}`,
+    project_card_id: cardId,
+    goal: "Root goal",
+    criteria: criteria.map(c => ({ id: c.id, description: `Criterion ${c.id}`, required: c.required, execution_owner: c.execution_owner, evidence_expectation: c.execution_owner === "orc" ? "synthesis" : "observed" })),
     required_outputs: [],
     constraints: [],
     limits: { hard_deadline_at: undefined, max_tokens: undefined, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
@@ -145,6 +160,152 @@ describe("readProjectCriterionCoverage", () => {
   });
 });
 
+// #1605: ownership-aware classification — one table covering mixed mapped
+// delegated + Orc-owned, unmapped delegated, Orc-only, v1, and bad child cases.
+describe("readProjectCriterionCoverage v2 ownership", () => {
+  let mod: Awaited<ReturnType<typeof loadModules>>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    TEST_HOME = join(tmpdir(), `cov-v2-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(TEST_HOME, { recursive: true });
+    vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
+    mod = await loadModules();
+  });
+
+  afterEach(() => {
+    if (TEST_HOME && existsSync(TEST_HOME)) {
+      rmSync(TEST_HOME, { recursive: true, force: true });
+    }
+  });
+
+  it("production shape: 3 mapped delegated + 4 Orc-owned criteria reaches read with orc_owned states and no uncovered", () => {
+    const rootCardId = mod.kanban.kanbanEnqueue("root", "task", "run-1", { type: "O" });
+    const store = new mod.reviewStore.ProjectReviewStore();
+    const contract = makeRootContractV2(rootCardId, [
+      { id: "lane1-feeds", required: true, execution_owner: "delegated" },
+      { id: "lane2-newsletters", required: true, execution_owner: "delegated" },
+      { id: "lane3-web", required: true, execution_owner: "delegated" },
+      { id: "synthesis", required: true, execution_owner: "orc" },
+      { id: "quality", required: true, execution_owner: "orc" },
+      { id: "budget", required: true, execution_owner: "orc" },
+      { id: "honest-stats", required: true, execution_owner: "orc" },
+    ]);
+    store.insertContract(contract);
+
+    const sup = new mod.supStore.WorkerSupervisionStore();
+    const lane1 = mod.kanban.kanbanEnqueue("lane1", "agent", undefined, { type: "W", parent_id: rootCardId });
+    sup.insertContract(makeChildContract(lane1, rootCardId, ["lane1-feeds"]), lane1);
+    const lane2 = mod.kanban.kanbanEnqueue("lane2", "agent", undefined, { type: "W", parent_id: rootCardId });
+    sup.insertContract(makeChildContract(lane2, rootCardId, ["lane2-newsletters"]), lane2);
+    const lane3 = mod.kanban.kanbanEnqueue("lane3", "agent", undefined, { type: "W", parent_id: rootCardId });
+    sup.insertContract(makeChildContract(lane3, rootCardId, ["lane3-web"]), lane3);
+
+    const result = mod.coverage.readProjectCriterionCoverage(rootCardId);
+    expect(result.kind).toBe("read");
+    if (result.kind === "read") {
+      expect(result.read.uncovered).toEqual([]);
+      const byId = new Map(result.read.criteria.map(c => [c.criterionId, c]));
+      expect(byId.get("lane1-feeds")?.state).toBe("mapped");
+      expect(byId.get("lane1-feeds")?.mappedContractIds).toEqual([`pc_child_${lane1}`]);
+      expect(byId.get("synthesis")?.state).toBe("orc_owned");
+      expect(byId.get("synthesis")?.executionOwner).toBe("orc");
+      expect(byId.get("synthesis")?.mappedContractIds).toEqual([]);
+      expect(byId.get("budget")?.state).toBe("orc_owned");
+    }
+  });
+
+  it("delegated gap survives: unmapped delegated is uncovered, orc_owned is not", () => {
+    const rootCardId = mod.kanban.kanbanEnqueue("root", "task", "run-1", { type: "O" });
+    const store = new mod.reviewStore.ProjectReviewStore();
+    const contract = makeRootContractV2(rootCardId, [
+      { id: "c1", required: true, execution_owner: "delegated" },
+      { id: "c2", required: true, execution_owner: "orc" },
+    ]);
+    store.insertContract(contract);
+    const result = mod.coverage.readProjectCriterionCoverage(rootCardId);
+    expect(result.kind).toBe("read");
+    if (result.kind === "read") {
+      expect(result.read.uncovered).toEqual(["c1"]);
+      const byId = new Map(result.read.criteria.map(c => [c.criterionId, c]));
+      expect(byId.get("c1")?.state).toBe("gap");
+      expect(byId.get("c2")?.state).toBe("orc_owned");
+    }
+  });
+
+  it("child mapping to an Orc-owned criterion is dropped, not counted as coverage", () => {
+    const rootCardId = mod.kanban.kanbanEnqueue("root", "task", "run-1", { type: "O" });
+    const store = new mod.reviewStore.ProjectReviewStore();
+    const contract = makeRootContractV2(rootCardId, [
+      { id: "c1", required: true, execution_owner: "delegated" },
+      { id: "c2", required: true, execution_owner: "orc" },
+    ]);
+    store.insertContract(contract);
+    const sup = new mod.supStore.WorkerSupervisionStore();
+    const child = mod.kanban.kanbanEnqueue("child", "agent", undefined, { type: "W", parent_id: rootCardId });
+    sup.insertContract(makeChildContract(child, rootCardId, ["c2"]), child);
+    const result = mod.coverage.readProjectCriterionCoverage(rootCardId);
+    expect(result.kind).toBe("read");
+    if (result.kind === "read") {
+      expect(result.read.uncovered).toEqual(["c1"]);
+      // the bad reference is filtered out of the mapping's coverage contribution
+      expect(result.read.mappings[0]?.supports_root_criteria).toEqual([]);
+    }
+  });
+
+  it("Orc-only project: no delegated criteria, no uncovered, every state orc_owned", () => {
+    const rootCardId = mod.kanban.kanbanEnqueue("root", "task", "run-1", { type: "O" });
+    const store = new mod.reviewStore.ProjectReviewStore();
+    const contract = makeRootContractV2(rootCardId, [
+      { id: "synthesis", required: true, execution_owner: "orc" },
+    ]);
+    store.insertContract(contract);
+    const result = mod.coverage.readProjectCriterionCoverage(rootCardId);
+    expect(result.kind).toBe("read");
+    if (result.kind === "read") {
+      expect(result.read.uncovered).toEqual([]);
+      expect(result.read.criteria[0]?.state).toBe("orc_owned");
+    }
+  });
+
+  it("optional delegated criterion is still a coverage member when required: false", () => {
+    const rootCardId = mod.kanban.kanbanEnqueue("root", "task", "run-1", { type: "O" });
+    const store = new mod.reviewStore.ProjectReviewStore();
+    const contract = makeRootContractV2(rootCardId, [
+      { id: "c1", required: false, execution_owner: "delegated" },
+    ]);
+    store.insertContract(contract);
+    const result = mod.coverage.readProjectCriterionCoverage(rootCardId);
+    expect(result.kind).toBe("read");
+    if (result.kind === "read") {
+      expect(result.read.uncovered).toEqual(["c1"]);
+      expect(result.read.criteria[0]?.required).toBe(false);
+    }
+  });
+
+  it("v1 stored contract projects every criterion as required + delegated", () => {
+    const rootCardId = mod.kanban.kanbanEnqueue("root", "task", "run-1", { type: "O" });
+    const store = new mod.reviewStore.ProjectReviewStore();
+    store.insertContract(makeRootContract(rootCardId, [{ id: "c1" }]));
+    const result = mod.coverage.readProjectCriterionCoverage(rootCardId);
+    expect(result.kind).toBe("read");
+    if (result.kind === "read") {
+      expect(result.read.uncovered).toEqual(["c1"]);
+      expect(result.read.criteria[0]?.executionOwner).toBe("delegated");
+      expect(result.read.criteria[0]?.required).toBe(true);
+    }
+  });
+
+  it("unsupported schema version in stored root contract is undeterminable", () => {
+    const store = new mod.reviewStore.ProjectReviewStore();
+    const contract = makeRootContract(444, [{ id: "c1" }]);
+    store.insertContract(contract);
+    store.db.prepare(`UPDATE project_contracts SET contract_json = '{"schema_version":3,"id":"x","project_card_id":444,"goal":"g","criteria":[],"required_outputs":[],"constraints":[],"limits":{},"provenance":{}}' WHERE project_card_id = ?`).run(444);
+    const result = mod.coverage.readProjectCriterionCoverage(444);
+    expect(result.kind).toBe("undeterminable");
+  });
+});
+
 describe("rootCriterionIds", () => {
   let mod: Awaited<ReturnType<typeof loadModules>>;
 
@@ -162,7 +323,16 @@ describe("rootCriterionIds", () => {
     }
   });
 
-  it("returns the root criteria ids", () => {
+  it("returns the root criteria ids (delegated only — Orc-owned are not mapping targets)", () => {
+    const store = new mod.reviewStore.ProjectReviewStore();
+    store.insertContract(makeRootContractV2(333, [
+      { id: "c1", required: true, execution_owner: "delegated" },
+      { id: "c2", required: true, execution_owner: "orc" },
+    ]));
+    expect(mod.coverage.rootCriterionIds(333)).toEqual(["c1"]);
+  });
+
+  it("v1 root projects all ids as delegated", () => {
     const store = new mod.reviewStore.ProjectReviewStore();
     store.insertContract(makeRootContract(333, [{ id: "c1" }, { id: "c2" }]));
     expect(mod.coverage.rootCriterionIds(333)).toEqual(["c1", "c2"]);

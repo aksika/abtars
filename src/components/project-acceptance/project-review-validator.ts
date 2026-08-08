@@ -132,6 +132,7 @@ export class ProjectReviewValidator {
     // Criteria: every root criterion must have exactly one verdict
     const rootCriterionIds = new Set(caseSnapshot.root_contract.criteria.map(c => c.id));
     const decisionCriterionIds = new Set(decision.criteria.map(c => c.criterion_id));
+    const seenDecisionIds = new Set<string>();
 
     for (const rcId of rootCriterionIds) {
       if (!decisionCriterionIds.has(rcId)) {
@@ -141,6 +142,11 @@ export class ProjectReviewValidator {
 
     const validVerdicts: CriterionVerdict[] = ["satisfied", "unsatisfied", "inconclusive", "not_evaluated"];
     for (const c of decision.criteria) {
+      // #1605: reject duplicate verdicts for the same criterion id
+      if (seenDecisionIds.has(c.criterion_id)) {
+        errors.push(error("duplicate_id", `$.criteria[${c.criterion_id}]`, `duplicate verdict for criterion "${c.criterion_id}"`));
+      }
+      seenDecisionIds.add(c.criterion_id);
       if (!rootCriterionIds.has(c.criterion_id)) {
         errors.push(error("bad_reference", `$.criteria[${c.criterion_id}]`, `unknown criterion id "${c.criterion_id}"`));
       }
@@ -149,6 +155,11 @@ export class ProjectReviewValidator {
       }
       if (c.rationale.length > 2000) {
         errors.push(error("too_long", `$.criteria[${c.criterion_id}].rationale`, "rationale exceeds 2000 characters"));
+      }
+      // #1605: any non-satisfied verdict needs a rationale the Orc can stand
+      // behind — no empty "just trust me" on gaps or failures.
+      if (c.verdict !== "satisfied" && c.rationale.trim().length === 0) {
+        errors.push(error("empty_string", `$.criteria[${c.criterion_id}].rationale`, `rationale is required for verdict "${c.verdict}"`));
       }
     }
 
@@ -240,14 +251,40 @@ export class ProjectReviewValidator {
   ): ValidationIssue[] {
     const errors: ValidationIssue[] = [];
 
-    // Every required criterion must be satisfied
+    // #1605: per-criterion policy from the immutable case — requiredness and
+    // execution ownership, not a set that implies everything is required.
+    const policyByCriterionId = new Map(caseSnapshot.criterion_inputs.map(ci => [ci.criterion_id, ci]));
+
     for (const c of decision.criteria) {
-      if (rootCriterionIds.has(c.criterion_id) && c.verdict !== "satisfied") {
-        errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}]`, `required criterion "${c.criterion_id}" is ${c.verdict}, not satisfied`));
+      const policy = policyByCriterionId.get(c.criterion_id);
+      const required = policy?.required ?? true;
+      const owner = policy?.execution_owner ?? "delegated";
+
+      // not_evaluated never accepts — required or optional
+      if (c.verdict === "not_evaluated") {
+        errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}]`, `criterion "${c.criterion_id}" is not_evaluated — every criterion must be evaluated to accept`));
+        continue;
       }
-      // Satisfied criteria must cite evidence
-      if (c.verdict === "satisfied" && c.evidence_ids.length === 0) {
-        errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].evidence_ids`, `satisfied criterion "${c.criterion_id}" has no evidence`));
+      // Hard criteria must be satisfied
+      if (required && c.verdict !== "satisfied") {
+        errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}]`, `required criterion "${c.criterion_id}" is ${c.verdict}, not satisfied`));
+        continue;
+      }
+      if (c.verdict === "satisfied") {
+        // Delegated satisfaction requires durable evidence from the case
+        if (owner === "delegated" && c.evidence_ids.length === 0) {
+          errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].evidence_ids`, `satisfied delegated criterion "${c.criterion_id}" has no evidence`));
+        }
+        // #1605: Orc-owned criteria are satisfied by the Orc's own evaluation —
+        // a non-empty rationale plus the immutable case is their evidence; no
+        // fabricated Worker evidence id is demanded.
+        if (owner === "orc" && c.rationale.trim().length === 0) {
+          errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].rationale`, `satisfied Orc-owned criterion "${c.criterion_id}" requires a non-empty rationale`));
+        }
+      }
+      // Optional gaps on accept need an explicit declared omission
+      if (!required && (c.verdict === "unsatisfied" || c.verdict === "inconclusive") && c.rationale.trim().length === 0) {
+        errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].rationale`, `optional criterion "${c.criterion_id}" accepted with verdict ${c.verdict} requires a non-empty rationale`));
       }
     }
 
@@ -292,14 +329,11 @@ export class ProjectReviewValidator {
       }
     }
 
-    // Check uncovered criteria in case — must be addressed in decision
-    if (caseSnapshot.uncovered_criteria.length > 0) {
-      const uncovered = caseSnapshot.uncovered_criteria;
-      const addressed = decision.criteria.filter(c => uncovered.includes(c.criterion_id) && c.verdict === "satisfied");
-      if (addressed.length < uncovered.length) {
-        errors.push(warn("inconclusive", "$.criteria", `${uncovered.length - addressed.length} uncovered criteria remain`));
-      }
-    }
+    // #1605: persisted coverage gaps are review evidence, decided by the Orc.
+    // A gap criterion accepted as satisfied requires case evidence (above); an
+    // accepted optional gap requires a rationale (above); a not_evaluated or
+    // missing verdict was already rejected. No legacy blanket warn here — gaps
+    // are not a reason to distrust an otherwise valid accept.
 
     return errors;
   }

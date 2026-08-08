@@ -305,9 +305,9 @@ async function runHappyPath(): Promise<LocalSwarmResult> {
     goal: "Complete the E2E test scenario with three workers",
     project_card_id: String(projectCardId),
     criteria: JSON.stringify([
-      { id: "c1", description: "Criterion 1 is met" },
-      { id: "c2", description: "Criterion 2 is satisfied" },
-      { id: "c3", description: "Criterion 3 is compliant" },
+      { id: "c1", description: "Criterion 1 is met", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+      { id: "c2", description: "Criterion 2 is satisfied", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+      { id: "c3", description: "Criterion 3 is compliant", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
     ]),
     required_outputs: JSON.stringify([
       { id: "o1", description: "Summary report", kind: "report", required: true },
@@ -443,10 +443,10 @@ async function runRestartRecovery(): Promise<LocalSwarmResult> {
   reviewStore.insertContract({
     schema_version: 1, id: rootContractId, project_card_id: projectCardId, digest: `d_${rootContractId}`,
     goal: "Restart recovery test",
-    criteria: [{ id: "c1", description: "Criterion 1", evidence_expectation: "observed" }],
+    criteria: [{ id: "c1", description: "Criterion 1", required: true, evidence_expectation: "observed" }],
     required_outputs: [{ id: "o1", description: "Report", kind: "report", required: true }],
     constraints: [], limits: { max_tokens: 50000, max_review_rounds: 1, max_repair_rounds: 0 },
-    provenance: { root_card_id: projectCardId, authored_by: "orc", created_at: new Date().toISOString() },
+    provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
   } as any);
   reviewStore.stateTransition(projectCardId, ["awaiting_contract"], "executing");
   startReconciler();
@@ -520,7 +520,7 @@ async function runCapacityDeadline(): Promise<LocalSwarmResult> {
     goal: "Capacity deadline test",
     project_card_id: String(projectCardId),
     criteria: JSON.stringify(
-      [1, 2, 3, 4, 5].map(i => ({ id: `c${i}`, description: `Criterion ${i}` }))
+      [1, 2, 3, 4, 5].map(i => ({ id: `c${i}`, description: `Criterion ${i}`, required: true, execution_owner: "delegated", evidence_expectation: "observed" }))
     ),
     required_outputs: JSON.stringify([{ id: "o1", description: "Report", kind: "report", required: true }]),
     constraints: JSON.stringify([]),
@@ -634,7 +634,7 @@ async function runPriorityAge(): Promise<LocalSwarmResult> {
     goal: "Priority age test",
     project_card_id: String(projectCardId),
     criteria: JSON.stringify(
-      [1, 2, 3, 4].map(i => ({ id: `c${i}`, description: `Criterion ${i}` }))
+      [1, 2, 3, 4].map(i => ({ id: `c${i}`, description: `Criterion ${i}`, required: true, execution_owner: "delegated", evidence_expectation: "observed" }))
     ),
     required_outputs: JSON.stringify([{ id: "o1", description: "Report", kind: "report", required: true }]),
     constraints: JSON.stringify([]),
@@ -724,10 +724,10 @@ async function runTokenBudget(): Promise<LocalSwarmResult> {
   reviewStore.insertContract({
     schema_version: 1, id: rootContractId, project_card_id: projectCardId, digest: `d_${rootContractId}`,
     goal: "Budget capped project",
-    criteria: [{ id: "c1", description: "Budget criterion", evidence_expectation: "observed" }],
+    criteria: [{ id: "c1", description: "Budget criterion", required: true, evidence_expectation: "observed" }],
     required_outputs: [{ id: "o1", description: "Report", kind: "report", required: true }],
     constraints: [], limits: { max_tokens: 20000, max_review_rounds: 1, max_repair_rounds: 0 },
-    provenance: { root_card_id: projectCardId, authored_by: "orc", created_at: new Date().toISOString() },
+    provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
   } as any);
   reviewStore.stateTransition(projectCardId, ["awaiting_contract"], "executing");
 

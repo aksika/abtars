@@ -1,5 +1,5 @@
 import { requireTaskDatabase, kanbanTransition, sqliteNow, type TaskDatabase } from "../tasks/kanban-board.js";
-import type { ProjectAcceptanceContractV1 } from "./project-contract.js";
+import type { ProjectAcceptanceContract } from "./project-contract.js";
 import { logSwarmTrace } from "../swarm-trace.js";
 
 // ── Project supervision states ────────────────────────────────────────────────
@@ -72,7 +72,7 @@ export function summarizeReviewCase(row: ReviewCaseRow | undefined): string {
   try {
     const snapshot = JSON.parse(row.case_json) as {
       root_contract?: { criteria?: unknown[] };
-      criterion_inputs?: Array<{ coverage_hint?: string; retry_lineage_ids?: unknown[] }>;
+      criterion_inputs?: Array<{ coverage_hint?: string; retry_lineage_ids?: unknown[]; required?: boolean; execution_owner?: string }>;
       uncovered_criteria?: unknown[];
       contradiction_candidates?: unknown[];
       child_summaries?: Array<{ attempts?: number }>;
@@ -81,13 +81,18 @@ export function summarizeReviewCase(row: ReviewCaseRow | undefined): string {
     const inputs = snapshot.criterion_inputs ?? [];
     const totalCriteria = snapshot.root_contract?.criteria?.length ?? 0;
     const coveredCriteria = inputs.filter(i => i.coverage_hint === "supported").length;
+    // #1605: surface the policy split the Orc must honor in review — hard vs
+    // optional criteria and which criteria are Orc-owned.
+    const orcOwned = inputs.filter(i => i.coverage_hint === "orc_owned").length;
+    const optional = inputs.filter(i => i.required === false).length;
     const gaps = snapshot.uncovered_criteria?.length ?? 0;
     const contradictions = snapshot.contradiction_candidates?.length ?? 0;
     const lineage = inputs.reduce((n, i) => n + (i.retry_lineage_ids?.length ?? 0), 0)
       + (snapshot.child_summaries ?? []).filter(c => (c.attempts ?? 0) > 1).length;
     const cost = snapshot.budgets?.total_cost === undefined ? "?" : String(snapshot.budgets.total_cost);
     const tokens = snapshot.budgets?.total_tokens === undefined ? "?" : String(snapshot.budgets.total_tokens);
-    return ` coverage:${coveredCriteria}/${totalCriteria} gaps:${gaps} contradictions:${contradictions} lineage:${lineage} cost:${cost} tokens:${tokens}`;
+    const policy = orcOwned > 0 || optional > 0 ? ` orc-owned:${orcOwned} optional:${optional}` : "";
+    return ` coverage:${coveredCriteria}/${totalCriteria} gaps:${gaps} contradictions:${contradictions} lineage:${lineage} cost:${cost} tokens:${tokens}${policy}`;
   } catch {
     return " review:unavailable";
   }
@@ -228,7 +233,7 @@ export class ProjectReviewStore {
 
   // ── Root contracts ────────────────────────────────────────────────────
 
-  insertContract(contract: ProjectAcceptanceContractV1): void {
+  insertContract(contract: ProjectAcceptanceContract): void {
     this.db.prepare(`
       INSERT INTO project_contracts (id, project_card_id, contract_json, contract_digest, created_at)
       VALUES (?, ?, ?, ?, ?)
@@ -366,6 +371,27 @@ export class ProjectReviewStore {
          SET coverage_uncovered_ids = '[]', coverage_signature = ?, updated_at = ?
        WHERE project_card_id = ?
     `).run(signature, new Date().toISOString(), projectCardId);
+  }
+
+  /**
+   * #1605: persist a normal post-remediation coverage gap before the
+   * executing → review_ready transition. State-CAS: only an `executing` row
+   * is updated and the signature is pinned, so a concurrent wake that already
+   * claimed the same signature (or transitioned the project) cannot double
+   * write. No coverage round is incremented — the cap is a loop/idempotency
+   * guard, not acceptance policy.
+   */
+  recordCoverageReviewable(
+    projectCardId: number,
+    signature: string,
+    uncoveredIds: readonly string[],
+  ): boolean {
+    const result = this.db.prepare(`
+      UPDATE project_supervision
+         SET coverage_signature = ?, coverage_uncovered_ids = ?, updated_at = ?
+       WHERE project_card_id = ? AND state = 'executing'
+    `).run(signature, JSON.stringify(uncoveredIds), new Date().toISOString(), projectCardId);
+    return result.changes === 1;
   }
 
   // ── Review requests ────────────────────────────────────────────────────

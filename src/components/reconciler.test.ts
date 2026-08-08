@@ -127,6 +127,7 @@ function makeReviewStoreMock() {
     getReviewRequestByCaseId: vi.fn().mockReturnValue(undefined),
     claimCoverageRound: vi.fn().mockReturnValue(true),
     recordCoverageClear: vi.fn(),
+    recordCoverageReviewable: vi.fn().mockReturnValue(true),
     setState: vi.fn(),
     hasActiveProjectSupervision: vi.fn().mockReturnValue(false),
     db: { transaction: transactionImpl },
@@ -766,6 +767,209 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     const coverageDispatches = claims.filter(c => c.goal.includes("[COVERAGE GAP]"));
     expect(coverageDispatches).toHaveLength(0);
     expect(claims.length).toBeGreaterThan(0); // recovery continues via the scheduled continuation
+  });
+
+  it("#1605: a fresh delegated gap dispatches exactly one coverage round and stays executing", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
+    });
+    reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({
+      state: "executing",
+      coverage_rounds: 0,
+      coverage_signature: null,
+      coverage_uncovered_ids: null,
+    }));
+    readProjectCriterionCoverageMock.mockReturnValue({
+      kind: "read",
+      read: { criterionIds: ["c1"], mappings: [], uncovered: ["c1"] },
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(reviewStoreMock.claimCoverageRound).toHaveBeenCalledTimes(1);
+    expect(reviewStoreMock.recordCoverageReviewable).not.toHaveBeenCalled();
+    const coverageDispatches = claims.filter(c => c.goal.includes("[COVERAGE GAP]"));
+    expect(coverageDispatches).toHaveLength(1);
+    expect(reviewStoreMock.stateTransition).not.toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("#1605: an unchanged gap before grace stays waiting — no second dispatch, no review case", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
+    });
+    reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({
+      state: "executing",
+      coverage_rounds: 1,
+      coverage_signature: "cov-sig",
+      coverage_uncovered_ids: JSON.stringify(["c1"]),
+      updated_at: new Date().toISOString(), // grace just started
+    }));
+    readProjectCriterionCoverageMock.mockReturnValue({
+      kind: "read",
+      read: { criterionIds: ["c1"], mappings: [], uncovered: ["c1"] },
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(reviewStoreMock.claimCoverageRound).not.toHaveBeenCalled();
+    expect(reviewStoreMock.recordCoverageReviewable).not.toHaveBeenCalled();
+    const coverageDispatches = claims.filter(c => c.goal.includes("[COVERAGE GAP]"));
+    expect(coverageDispatches).toHaveLength(0);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("#1605: an unchanged gap after grace proceeds to review with the persisted gap — never blocked", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
+    });
+    reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+    reviewStoreMock.stateTransition.mockReturnValue(true);
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({
+      state: "executing",
+      coverage_rounds: 1,
+      coverage_signature: "cov-sig",
+      coverage_uncovered_ids: JSON.stringify(["c1"]),
+      updated_at: new Date(Date.now() - 120_000).toISOString(), // grace elapsed
+    }));
+    readProjectCriterionCoverageMock.mockReturnValue({
+      kind: "read",
+      read: { criterionIds: ["c1"], mappings: [], uncovered: ["c1"] },
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(reviewStoreMock.recordCoverageReviewable).toHaveBeenCalledWith(1, "cov-sig", ["c1"]);
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("#1605: a new gap at the coverage-round cap proceeds to review, not a terminal block", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
+    });
+    reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+    reviewStoreMock.stateTransition.mockReturnValue(true);
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({
+      state: "executing",
+      coverage_rounds: 3, // MAX_COVERAGE_ROUNDS
+      coverage_signature: "other-sig",
+      coverage_uncovered_ids: null,
+    }));
+    readProjectCriterionCoverageMock.mockReturnValue({
+      kind: "read",
+      read: { criterionIds: ["c1"], mappings: [], uncovered: ["c1"] },
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(reviewStoreMock.claimCoverageRound).not.toHaveBeenCalled();
+    expect(reviewStoreMock.recordCoverageReviewable).toHaveBeenCalledWith(1, "cov-sig", ["c1"]);
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("#1605: a fully covered project proceeds to review without a coverage round", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
+    });
+    reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+    reviewStoreMock.stateTransition.mockReturnValue(true);
+    readProjectCriterionCoverageMock.mockReturnValue({
+      kind: "read",
+      read: { criterionIds: ["c1"], mappings: [], uncovered: [] },
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(reviewStoreMock.recordCoverageClear).toHaveBeenCalled();
+    expect(reviewStoreMock.claimCoverageRound).not.toHaveBeenCalled();
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("#1605: a corrupt/unreadable contract still fails closed as a structural block", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
+    });
+    reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+    readProjectCriterionCoverageMock.mockReturnValue({
+      kind: "undeterminable",
+      reason: "root contract for project #1 is unparseable",
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(kanbanFailMock).toHaveBeenCalled();
+    const coverageDispatches = claims.filter(c => c.goal.includes("[COVERAGE GAP]"));
+    expect(coverageDispatches).toHaveLength(0);
+    expect(reviewStoreMock.stateTransition).not.toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+  });
+
+  it("#1605: repair re-entry with the same capped gap returns to review, never re-dispatches", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
+    });
+    reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+    reviewStoreMock.stateTransition.mockReturnValue(true);
+    // cap exhausted + unchanged signature → the gate returns reviewable
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({
+      state: "executing",
+      coverage_rounds: 3,
+      coverage_signature: "cov-sig",
+      coverage_uncovered_ids: JSON.stringify(["c1"]),
+      updated_at: new Date().toISOString(),
+    }));
+    readProjectCriterionCoverageMock.mockReturnValue({
+      kind: "read",
+      read: { criterionIds: ["c1"], mappings: [], uncovered: ["c1"] },
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(reviewStoreMock.claimCoverageRound).not.toHaveBeenCalled();
+    expect(reviewStoreMock.recordCoverageReviewable).toHaveBeenCalledWith(1, "cov-sig", ["c1"]);
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    const coverageDispatches = claims.filter(c => c.goal.includes("[COVERAGE GAP]"));
+    expect(coverageDispatches).toHaveLength(0);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
   });
 
   it("classifies reviewing with an open case as review ownership (never a fresh authoring claim)", async () => {

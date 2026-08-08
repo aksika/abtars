@@ -229,3 +229,100 @@ describe("ProjectReviewService — full outcome matrix", () => {
     expect(result.kind).toBe("invalid");
   });
 });
+
+describe("renderAcceptedSynthesis (#1605)", () => {
+  let renderAcceptedSynthesis: typeof import("./project-review-service.js").renderAcceptedSynthesis;
+
+  beforeEach(async () => {
+    renderAcceptedSynthesis = (await import("./project-review-service.js")).renderAcceptedSynthesis;
+  });
+
+  function makeSnapshot(): ReviewCaseSnapshot {
+    return {
+      schema_version: 1,
+      project_card_id: 1,
+      generation: 1,
+      round: 1,
+      created_at: new Date().toISOString(),
+      root_contract: {
+        id: "pc_1",
+        digest: "d",
+        goal: "g",
+        criteria: [
+          { id: "lane1", description: "Lane 1", required: true, execution_owner: "delegated", evidence_expectation: "artifact" },
+          { id: "lane3", description: "Lane 3", required: false, execution_owner: "delegated", evidence_expectation: "artifact" },
+          { id: "synthesis", description: "Synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+        ],
+        required_outputs: [],
+        limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+      },
+      criterion_inputs: [
+        { criterion_id: "lane1", description: "Lane 1", required: true, execution_owner: "delegated", evidence_expectation: "artifact", mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" },
+        { criterion_id: "lane3", description: "Lane 3", required: false, execution_owner: "delegated", evidence_expectation: "artifact", mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "gap" },
+        { criterion_id: "synthesis", description: "Synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis", mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "orc_owned" },
+      ],
+      contradiction_candidates: [],
+      uncovered_criteria: ["lane3"],
+      child_summaries: [],
+      peer_contributions: [],
+      budgets: { total_cost: undefined, total_tokens: 1000, wall_clock_ms: 60000 },
+      executor_risk: { unknown_changes: false, worker_drift: 0, evidence_age_ms: 0, executor_separation: "same" },
+      complete_graph: { attempts: [], retry_chain_ids: [] },
+      outcome_summaries: { exhausted: [], cancelled: [], blocked: [] },
+    };
+  }
+
+  function makeDecision(synthesis: string): ProjectReviewDecisionV1 {
+    return {
+      schema_version: 1,
+      id: "rd_1",
+      project_card_id: 1,
+      review_case_id: "rc_1",
+      project_generation: 1,
+      action: "accept",
+      criteria: [
+        { criterion_id: "lane1", verdict: "satisfied", evidence_ids: ["e1"], rationale: "ok" },
+        { criterion_id: "lane3", verdict: "unsatisfied", evidence_ids: [], rationale: "source feed unreachable" },
+        { criterion_id: "synthesis", verdict: "satisfied", evidence_ids: [], rationale: "synthesized from lanes" },
+      ],
+      outputs: [],
+      contradictions: [],
+      residual_risks: [],
+      synthesis,
+      authored_at: new Date().toISOString(),
+    };
+  }
+
+  it("returns the authored synthesis unchanged when there are no accepted optional gaps", () => {
+    const decision = makeDecision("Everything fine");
+    decision.criteria[1] = { criterion_id: "lane3", verdict: "satisfied", evidence_ids: [], rationale: "covered by lane1 evidence" };
+    const result = renderAcceptedSynthesis(decision, makeSnapshot());
+    expect(result).toBe("Everything fine");
+  });
+
+  it("appends a canonical Known gaps section in root-contract order for accepted optional gaps", () => {
+    const snapshot = makeSnapshot();
+    const decision = makeDecision("Report delivered");
+    const result = renderAcceptedSynthesis(decision, snapshot);
+    expect(result).toContain("Known gaps:");
+    expect(result).toContain("- lane3: unsatisfied — source feed unreachable");
+    expect(result.indexOf("Report delivered")).toBeLessThan(result.indexOf("Known gaps:"));
+  });
+
+  it("bounds the rendered result", () => {
+    const snapshot = makeSnapshot();
+    const decision = makeDecision("R".repeat(3900));
+    decision.criteria[1] = { criterion_id: "lane3", verdict: "inconclusive", evidence_ids: [], rationale: "x".repeat(2000) };
+    const result = renderAcceptedSynthesis(decision, snapshot);
+    expect(result.length).toBeLessThanOrEqual(4000);
+  });
+
+  it("reserves space for the disclosure — a long authored synthesis never drops the Known gaps section", () => {
+    const snapshot = makeSnapshot();
+    const decision = makeDecision("R".repeat(3950));
+    const result = renderAcceptedSynthesis(decision, snapshot);
+    expect(result).toContain("Known gaps:");
+    expect(result).toContain("- lane3: unsatisfied — source feed unreachable");
+    expect(result.length).toBeLessThanOrEqual(4000);
+  });
+});

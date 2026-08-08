@@ -33,8 +33,8 @@ describe("ProjectReviewValidator", () => {
         digest: `digest_${p}`,
         goal: "Build the feature",
         criteria: [
-          { id: "c1", description: "Works", evidence_expectation: "artifact" },
-          { id: "c2", description: "Accurate", evidence_expectation: "synthesis" },
+          { id: "c1", description: "Works", required: true, execution_owner: "delegated", evidence_expectation: "artifact" },
+          { id: "c2", description: "Accurate", required: true, execution_owner: "delegated", evidence_expectation: "synthesis" },
         ],
         required_outputs: [
           { id: "o1", description: "Report", kind: "file", required: true },
@@ -43,8 +43,8 @@ describe("ProjectReviewValidator", () => {
         limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
       },
       criterion_inputs: [
-        { criterion_id: "c1", description: "Works", evidence_expectation: "artifact", mapped_child_contract_ids: [], observed_evidence_ids: ["v1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: ["a1"], retry_lineage_ids: [], coverage_hint: "supported" },
-        { criterion_id: "c2", description: "Accurate", evidence_expectation: "synthesis", mapped_child_contract_ids: [], observed_evidence_ids: ["v2"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" },
+        { criterion_id: "c1", description: "Works", required: true, execution_owner: "delegated", evidence_expectation: "artifact", mapped_child_contract_ids: [], observed_evidence_ids: ["v1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: ["a1"], retry_lineage_ids: [], coverage_hint: "supported" },
+        { criterion_id: "c2", description: "Accurate", required: true, execution_owner: "delegated", evidence_expectation: "synthesis", mapped_child_contract_ids: [], observed_evidence_ids: ["v2"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" },
       ],
       contradiction_candidates: [],
       uncovered_criteria: [],
@@ -258,6 +258,182 @@ describe("ProjectReviewValidator", () => {
       }, caseId);
       const errors = validator.validateDecision(decision, snapshot);
       expect(errors.some(e => e.tag === "invalid_proposal")).toBe(true);
+    });
+
+    // #1605: required vs optional and ownership-aware acceptance
+
+    function snapshotWithCriteria(pid: number, criteria: Array<{ id: string; required: boolean; execution_owner: "delegated" | "orc"; coverage_hint: string }>): ReviewCaseSnapshot {
+      const snap = makeSnapshot(pid);
+      return {
+        ...snap,
+        root_contract: {
+          ...snap.root_contract,
+          criteria: criteria.map(c => ({
+            id: c.id,
+            description: `Criterion ${c.id}`,
+            required: c.required,
+            execution_owner: c.execution_owner,
+            evidence_expectation: c.execution_owner === "orc" ? "synthesis" : "artifact",
+          })),
+        },
+        criterion_inputs: criteria.map(c => ({
+          criterion_id: c.id,
+          description: `Criterion ${c.id}`,
+          required: c.required,
+          execution_owner: c.execution_owner,
+          evidence_expectation: c.execution_owner === "orc" ? "synthesis" : "artifact",
+          mapped_child_contract_ids: [],
+          observed_evidence_ids: [`ev_${c.id}`],
+          worker_claim_ids: [],
+          failed_or_inconclusive_check_ids: [],
+          artifact_observation_ids: [],
+          retry_lineage_ids: [],
+          coverage_hint: c.coverage_hint,
+        })),
+        uncovered_criteria: criteria.filter(c => c.coverage_hint === "gap").map(c => c.id),
+      };
+    }
+
+    it("#1605 accepts an optional unsatisfied criterion with a rationale (delegated gap)", () => {
+      const pid = uniquePid();
+      const snapshot = snapshotWithCriteria(pid, [
+        { id: "lane1", required: true, execution_owner: "delegated", coverage_hint: "supported" },
+        { id: "lane3", required: false, execution_owner: "delegated", coverage_hint: "gap" },
+      ]);
+      store.insertContract({
+        schema_version: 2,
+        id: `pc_test_${pid}`,
+        digest: `digest_${pid}`,
+        project_card_id: pid,
+        goal: "Build the feature",
+        criteria: [
+          { id: "lane1", description: "Lane 1", required: true, execution_owner: "delegated", evidence_expectation: "artifact" },
+          { id: "lane3", description: "Lane 3", required: false, execution_owner: "delegated", evidence_expectation: "artifact" },
+        ],
+        required_outputs: [{ id: "o1", description: "Report", kind: "file", required: true }],
+        constraints: [],
+        limits: { hard_deadline_at: undefined, max_tokens: undefined, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+        provenance: { requested_by: "user", authored_by: "orc", created_at: "2026-07-12T00:00:00.000Z" },
+      });
+      store.initializeSupervision(pid, `pc_test_${pid}`);
+      const { id } = store.insertReviewCase(pid, 1, 1, snapshot, "digest_snap");
+      store.stateTransition(pid, ["executing"] as any, "review_ready", { review_round: 1 });
+
+      const decision = makeValidDecision(pid, {
+        criteria: [
+          { criterion_id: "lane1", verdict: "satisfied", evidence_ids: ["ev_lane1"], rationale: "lane passed" },
+          { criterion_id: "lane3", verdict: "unsatisfied", evidence_ids: [], rationale: "source lane failed; report still useful without it" },
+        ],
+      }, id);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors).toHaveLength(0);
+    });
+
+    it("#1605 rejects an optional gap accepted without a rationale", () => {
+      const pid = uniquePid();
+      const snapshot = snapshotWithCriteria(pid, [
+        { id: "lane1", required: true, execution_owner: "delegated", coverage_hint: "supported" },
+        { id: "lane3", required: false, execution_owner: "delegated", coverage_hint: "gap" },
+      ]);
+      const { id: caseId } = store.insertReviewCase(pid, 1, 1, snapshot, "digest_snap");
+      const decision = makeValidDecision(pid, {
+        criteria: [
+          { criterion_id: "lane1", verdict: "satisfied", evidence_ids: ["ev_lane1"], rationale: "lane passed" },
+          { criterion_id: "lane3", verdict: "unsatisfied", evidence_ids: [], rationale: "" },
+        ],
+      }, caseId);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.path.includes("lane3") && e.message.includes("rationale"))).toBe(true);
+    });
+
+    it("#1605 rejects not_evaluated on accept — required or optional", () => {
+      const pid = uniquePid();
+      const snapshot = snapshotWithCriteria(pid, [
+        { id: "lane1", required: true, execution_owner: "delegated", coverage_hint: "supported" },
+        { id: "lane3", required: false, execution_owner: "delegated", coverage_hint: "gap" },
+      ]);
+      const { id: caseId } = store.insertReviewCase(pid, 1, 1, snapshot, "digest_snap");
+      const decision = makeValidDecision(pid, {
+        criteria: [
+          { criterion_id: "lane1", verdict: "satisfied", evidence_ids: ["ev_lane1"], rationale: "lane passed" },
+          { criterion_id: "lane3", verdict: "not_evaluated", evidence_ids: [], rationale: "skipped" },
+        ],
+      }, caseId);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("not_evaluated"))).toBe(true);
+    });
+
+    it("#1605 rejects a satisfied delegated criterion without case evidence", () => {
+      const pid = uniquePid();
+      const snapshot = snapshotWithCriteria(pid, [
+        { id: "lane1", required: true, execution_owner: "delegated", coverage_hint: "supported" },
+      ]);
+      const { id: caseId } = store.insertReviewCase(pid, 1, 1, snapshot, "digest_snap");
+      const decision = makeValidDecision(pid, {
+        criteria: [
+          { criterion_id: "lane1", verdict: "satisfied", evidence_ids: [], rationale: "trust me" },
+        ],
+      }, caseId);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.path.includes("lane1") && e.message.includes("no evidence"))).toBe(true);
+    });
+
+    it("#1605 accepts a satisfied Orc-owned criterion with rationale and no fabricated Worker evidence", () => {
+      const pid = uniquePid();
+      const snapshot = snapshotWithCriteria(pid, [
+        { id: "synthesis", required: true, execution_owner: "orc", coverage_hint: "orc_owned" },
+      ]);
+      const { id: caseId } = store.insertReviewCase(pid, 1, 1, snapshot, "digest_snap");
+      const decision = makeValidDecision(pid, {
+        criteria: [
+          { criterion_id: "synthesis", verdict: "satisfied", evidence_ids: [], rationale: "Synthesized from all lane handoffs in the case" },
+        ],
+        outputs: [{ output_id: "o1", disposition: "verified", evidence_ids: [] }],
+      }, caseId);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors).toHaveLength(0);
+    });
+
+    it("#1605 rejects a satisfied Orc-owned criterion with an empty rationale", () => {
+      const pid = uniquePid();
+      const snapshot = snapshotWithCriteria(pid, [
+        { id: "synthesis", required: true, execution_owner: "orc", coverage_hint: "orc_owned" },
+      ]);
+      const { id: caseId } = store.insertReviewCase(pid, 1, 1, snapshot, "digest_snap");
+      const decision = makeValidDecision(pid, {
+        criteria: [
+          { criterion_id: "synthesis", verdict: "satisfied", evidence_ids: [], rationale: "" },
+        ],
+      }, caseId);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("rationale"))).toBe(true);
+    });
+
+    it("#1605 rejects duplicate verdicts for the same criterion", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = makeValidDecision(pid, {
+        criteria: [
+          { criterion_id: "c1", verdict: "satisfied", evidence_ids: [], rationale: "ok" },
+          { criterion_id: "c1", verdict: "satisfied", evidence_ids: [], rationale: "also ok" },
+          { criterion_id: "c2", verdict: "satisfied", evidence_ids: [], rationale: "ok" },
+        ],
+      }, caseId);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.tag === "duplicate_id")).toBe(true);
+    });
+
+    it("#1605 rejects a non-satisfied verdict with an empty rationale (common validation)", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = makeValidDecision(pid, {
+        action: "blocked",
+        blocker: { blocker_class: "B", affected_criterion_ids: ["c2"], exhausted_failures: [], contradiction_evidence: [], what_was_attempted: "tried", unblock_conditions: "" },
+        criteria: [
+          { criterion_id: "c1", verdict: "satisfied", evidence_ids: [], rationale: "ok" },
+          { criterion_id: "c2", verdict: "unsatisfied", evidence_ids: [], rationale: "" },
+        ],
+      }, caseId);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.path.includes("c2") && e.message.includes("rationale"))).toBe(true);
     });
   });
 

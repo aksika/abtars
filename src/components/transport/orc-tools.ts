@@ -102,7 +102,7 @@ const spawnWorkerTool: ToolDefinition = {
       expected_artifacts: { type: "string", description: "JSON array of {id, kind, ref, required, criterion_ids} expected artifacts (supervised)" },
       verification_commands: { type: "string", description: "JSON array of {id, argv, cwd, timeout_ms, criterion_ids} verification commands (supervised)" },
       required_capabilities: { type: "string", description: "JSON array of required capability strings (supervised)" },
-      supports_root_criteria: { type: "string", description: "JSON array of root project criterion IDs this worker supports. Required for supervised spawns under a project contract; ids must match exactly and are case-sensitive (#1363, #1604)" },
+      supports_root_criteria: { type: "string", description: "JSON array of DELEGATED root project criterion IDs this worker supports. Required for supervised spawns under a project contract with delegated criteria; Orc-owned criteria are not legal mapping targets. Ids must match exactly and are case-sensitive (#1363, #1604, #1605)" },
       max_duration_ms: { type: "number", description: "Maximum execution duration in milliseconds (positive integer)" },
       max_tokens: { type: "number", description: "Maximum token budget for this worker (positive integer; requires supervised criteria and is required when project is capped)" },
     },
@@ -453,7 +453,7 @@ const defineProjectContractTool: ToolDefinition = {
     properties: {
       goal: { type: "string", description: "Project goal" },
       project_card_id: { type: "number", description: "Explicit supervised project card ID" },
-      criteria: { type: "string", description: "JSON array of {id, description, evidence_expectation} — required: true, evidence_expectation: observed|artifact|synthesis" },
+      criteria: { type: "string", description: "JSON array of {id, description, required, execution_owner, evidence_expectation} — required: boolean, execution_owner: delegated|orc, evidence_expectation: observed|artifact|synthesis. Orc-owned criteria must use synthesis evidence; only delegated criteria can be mapped to Workers" },
       required_outputs: { type: "string", description: "JSON array of {id, description, kind, required} — kind: file|directory|report|logical" },
       constraints: { type: "string", description: "JSON array of constraint strings" },
       hard_deadline_at: { type: "string", description: "ISO deadline (optional)" },
@@ -489,11 +489,11 @@ const defineProjectContractTool: ToolDefinition = {
       let constraints: string[] = [];
       try { constraints = JSON.parse(args.constraints ?? "[]") as string[]; } catch { return "[err] constraints must be valid JSON array"; }
 
-      // Build raw contract object
+      // Build raw contract object (schema v2 — #1605)
       const now = new Date().toISOString();
       const card = (await import("../tasks/kanban-board.js")).kanbanGetCard(cardId);
       const raw: Record<string, unknown> = {
-        schema_version: 1,
+        schema_version: 2,
         id: createContractId(),
         digest: "",
         project_card_id: cardId,
@@ -552,8 +552,13 @@ const defineProjectContractTool: ToolDefinition = {
         }
       });
 
-      const criterionIds = normalized.contract.criteria.map(c => c.id).join(", ");
-      return `✓ Root contract defined (${normalized.contract.id}, digest: ${normalized.contract.digest.slice(0, 12)}…). Root criteria: ${criterionIds}. Every spawn_worker must pass supports_root_criteria using these exact ids; all must be covered before review_project.`;
+      // #1605: echo ownership split so the Orc's next authoring turn and any
+      // spawn use only delegated ids as mapping targets.
+      const delegatedIds = normalized.contract.criteria.filter(c => c.execution_owner === "delegated").map(c => c.id);
+      const orcOwnedIds = normalized.contract.criteria.filter(c => c.execution_owner === "orc").map(c => c.id);
+      const delegatedText = delegatedIds.length > 0 ? delegatedIds.join(", ") : "(none)";
+      const orcText = orcOwnedIds.length > 0 ? orcOwnedIds.join(", ") : "(none)";
+      return `✓ Root contract defined (${normalized.contract.id}, digest: ${normalized.contract.digest.slice(0, 12)}…). Delegated criteria: ${delegatedText}; Orc-owned criteria: ${orcText}. Every spawn_worker must pass supports_root_criteria using only delegated ids; Orc-owned criteria are evaluated by you in review_project, never mapped to Workers.`;
     } catch (err) {
       return `[err] define_project_contract error: ${String(err)}`;
     }
@@ -572,7 +577,7 @@ const reviewProjectTool: ToolDefinition = {
       project_card_id: { type: "number", description: "Explicit supervised project card ID" },
       project_generation: { type: "number", description: "Expected project supervision generation" },
       review_case_id: { type: "string", description: "Explicit review case ID" },
-      criteria: { type: "string", description: "JSON array of {criterion_id, verdict, evidence_ids, rationale} — every root criterion must have a verdict" },
+      criteria: { type: "string", description: "JSON array of {criterion_id, verdict, evidence_ids, rationale} — every root criterion must have exactly one verdict; every non-satisfied verdict requires a non-empty rationale" },
       outputs: { type: "string", description: "JSON array of {output_id, disposition, evidence_ids}" },
       contradictions: { type: "string", description: "JSON array of {id, affected_criterion_ids, evidence_ids, disposition, rationale}" },
       residual_risks: { type: "string", description: "JSON array of {text, blocking, evidence_ids}" },

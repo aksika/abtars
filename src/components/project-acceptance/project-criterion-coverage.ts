@@ -2,16 +2,36 @@ import { createHash } from "node:crypto";
 import { ProjectReviewStore } from "./project-review-store.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import { kanbanGetChildren, requireTaskDatabase } from "../tasks/kanban-board.js";
-import { findUncoveredCriteria, type ContractCriterionMapping, type ProjectAcceptanceContractV1 } from "./project-contract.js";
+import {
+  validateContract,
+  findUncoveredCriteria,
+  criterionPolicyView,
+  type ContractCriterionMapping,
+  type ProjectAcceptanceContract,
+  type CriterionExecutionOwner,
+} from "./project-contract.js";
 
 /**
  * #1604: the only coverage read-model. Gathers the root contract, the child
  * cards, and their contracts, and reduces them to one fail-closed coverage
  * result. `findUncoveredCriteria` stays the only coverage algorithm.
+ *
+ * #1605: the read-model classifies every root criterion as `mapped`,
+ * `orc_owned`, or `gap`. Only delegated criteria participate in coverage;
+ * Orc-owned criteria are satisfied by the Orc's review, never by a Worker.
  */
+
+export interface CriterionCoverage {
+  criterionId: string;
+  required: boolean;
+  executionOwner: CriterionExecutionOwner;
+  state: "mapped" | "orc_owned" | "gap";
+  mappedContractIds: readonly string[];
+}
 
 export interface CoverageRead {
   readonly criterionIds: readonly string[];
+  readonly criteria: readonly CriterionCoverage[];
   readonly mappings: readonly ContractCriterionMapping[];
   readonly uncovered: readonly string[];
 }
@@ -21,12 +41,14 @@ export type CoverageResult =
   | { readonly kind: "undeterminable"; readonly reason: string }
   | { readonly kind: "read"; readonly read: CoverageRead };
 
-function parseRootContract(contractRow: { contract_json: string } | undefined): ProjectAcceptanceContractV1 | undefined {
+function parseRootContract(contractRow: { contract_json: string } | undefined): ProjectAcceptanceContract | undefined {
   if (!contractRow) return undefined;
   try {
     const parsed = JSON.parse(contractRow.contract_json) as unknown;
     if (!isRecord(parsed) || !Array.isArray(parsed["criteria"])) return undefined;
-    return parsed as unknown as ProjectAcceptanceContractV1;
+    const validated = validateContract(parsed);
+    if (!validated.ok) return undefined;
+    return validated.contract;
   } catch {
     return undefined;
   }
@@ -51,12 +73,13 @@ function childSupportsRootCriteria(childContractJson: string): readonly string[]
 /**
  * Fail-closed coverage evaluation:
  * - no `project_contracts` row for the root card → `no_project_contract`
- * - root `contract_json` unparseable, or `criteria` not an array → `undeterminable`
+ * - root `contract_json` unparseable, unsupported version, or invalid → `undeterminable`
  * - a child's `contract_json` unparseable → `undeterminable` (never "skip and
  *   treat as unmapped" — an unreadable child could be silently hiding a gap)
  * - child with no contract row → not a mapping source, NOT undeterminable (an
  *   unsupervised sibling is legitimate)
- * - otherwise → `read` with `uncovered = findUncoveredCriteria(...)`
+ * - otherwise → `read` with per-criterion states and `uncovered` = delegated
+ *   gaps only
  */
 export function readProjectCriterionCoverage(rootCardId: number): CoverageResult {
   const reviewStore = new ProjectReviewStore();
@@ -65,7 +88,7 @@ export function readProjectCriterionCoverage(rootCardId: number): CoverageResult
 
   const rootContract = parseRootContract(rootContractRow);
   if (!rootContract) {
-    return { kind: "undeterminable", reason: `root contract for project #${rootCardId} is missing or has no criteria array` };
+    return { kind: "undeterminable", reason: `root contract for project #${rootCardId} is missing, unparseable, or has an unsupported schema version` };
   }
 
   const supStore = new WorkerSupervisionStore();
@@ -96,12 +119,52 @@ export function readProjectCriterionCoverage(rootCardId: number): CoverageResult
     }
   }
 
-  const uncovered = findUncoveredCriteria(rootContract, mappings);
+  // #1605: filter mappings to delegated ids only — a mapping referencing an
+  // Orc-owned criterion is a bad delegation reference and cannot cover it.
+  const delegatedIds = new Set(criterionPolicyView(rootContract).filter(c => c.execution_owner === "delegated").map(c => c.id));
+  const legalMappings = mappings.map(m => ({
+    child_contract_id: m.child_contract_id,
+    supports_root_criteria: m.supports_root_criteria.filter(id => delegatedIds.has(id)),
+  }));
+
+  const uncovered = findUncoveredCriteria(rootContract, legalMappings);
+
+  // Per-criterion classification (design §3): orc_owned → no mapping lookup;
+  // delegated with ≥1 mapping → mapped; delegated with none → gap.
+  const mappedBy = new Map<string, string[]>();
+  for (const m of legalMappings) {
+    for (const rcId of m.supports_root_criteria) {
+      const list = mappedBy.get(rcId) ?? [];
+      list.push(m.child_contract_id);
+      mappedBy.set(rcId, list);
+    }
+  }
+  const criteria = criterionPolicyView(rootContract).map(c => {
+    if (c.execution_owner === "orc") {
+      return {
+        criterionId: c.id,
+        required: c.required,
+        executionOwner: c.execution_owner,
+        state: "orc_owned" as const,
+        mappedContractIds: [],
+      };
+    }
+    const mapped = mappedBy.get(c.id) ?? [];
+    return {
+      criterionId: c.id,
+      required: c.required,
+      executionOwner: c.execution_owner,
+      state: (mapped.length > 0 ? "mapped" : "gap") as "mapped" | "gap",
+      mappedContractIds: mapped,
+    };
+  });
+
   return {
     kind: "read",
     read: {
-      criterionIds: rootContract.criteria.map(c => c.id),
-      mappings,
+      criterionIds: criterionPolicyView(rootContract).map(c => c.id),
+      criteria,
+      mappings: legalMappings,
       uncovered,
     },
   };
@@ -138,7 +201,8 @@ function peerContributionRootCriteria(projectCardId: number): Array<{ peer: stri
 }
 
 /**
- * Legal root criterion ids for admission errors. `undefined` means the root
+ * #1605: legal root criterion ids for admission errors — DELEGATED ids only.
+ * Orc-owned criteria are not mapping targets. `undefined` means the root
  * card has no project contract (the admission predicate is not applicable).
  */
 export function rootCriterionIds(rootCardId: number): readonly string[] | undefined {
@@ -146,7 +210,10 @@ export function rootCriterionIds(rootCardId: number): readonly string[] | undefi
   const contractRow = reviewStore.getContractByProjectCardId(rootCardId);
   const rootContract = parseRootContract(contractRow);
   if (!rootContract) return undefined;
-  return rootContract.criteria.map(c => c.id);
+  const delegated = criterionPolicyView(rootContract)
+    .filter(c => c.execution_owner === "delegated")
+    .map(c => c.id);
+  return delegated;
 }
 
 /**

@@ -382,6 +382,32 @@ describe("scheduled-project-runner #1516", () => {
     expect(kanban.kanbanGetCard(root)?.status).toBe("done");
   });
 
+  it("#1605: an accepted root delivers the RENDERED synthesis (card result with Known gaps), not the authored decision text", async () => {
+    fakeCoordinator();
+    await seedReservation();
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
+    kanban.kanbanRunning(root);
+    store.ensureAwaitingContract(root);
+    // settleAcceptance writes the rendered synthesis (with disclosure) to the
+    // card result; the durable decision keeps the authored text unchanged.
+    store.settleAcceptance(
+      root,
+      "case-render",
+      { action: "accept", synthesis: "Briefing delivered." },
+      "Briefing delivered.\n\nKnown gaps:\n- lane3-web: unsatisfied — web lane failed",
+      undefined,
+      "rd_test_render",
+    );
+    stateStore.updateActiveRun("daily-ai", "daily-ai_1", { cardId: root });
+
+    const result = await mod.scheduledProjectRunner(makeRequest());
+    expect(result.result).toContain("Known gaps:");
+    expect(result.result).toContain("lane3-web: unsatisfied");
+    // the authored decision text alone would not contain the disclosure
+    expect(result.result).not.toBe("Briefing delivered.");
+  });
+
   it("#1604: durable uncovered ids yield supervision/contract_uncovered naming them", async () => {
     fakeCoordinator();
     await seedReservation();
@@ -538,6 +564,108 @@ describe("scheduled-project-runner #1516", () => {
     expect(failure.diagnostic.category).toBe("supervision");
     expect(failure.diagnostic.code).toBe("project_blocked");
     expect(failure.diagnostic.message).toContain("coverage_undeterminable");
+  });
+
+  it("#1605: an accepted root with a failed lane returns the accepted synthesis", async () => {
+    fakeCoordinator();
+    await seedReservation();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+    const root = kanban.kanbanList("*")[0]!;
+
+    // A failed lane with a durable attempt
+    const workerId = kanban.kanbanEnqueue("Lane 2 - Failed", "agent", undefined, {
+      parent_id: root.id,
+      type: "W",
+      delivery: "silent",
+    });
+    const supStore = new (await import("../worker-supervision-store.js")).WorkerSupervisionStore();
+    const contract: import("../worker-contract.js").WorkerAcceptanceContractV1 = {
+      schema_version: 1,
+      id: "c_accepted_fail",
+      digest: "dg_accepted_fail",
+      goal: "Lane 2",
+      criteria: [{ id: "c1", description: "Lane 2 criterion" }],
+      expected_artifacts: [],
+      verification_commands: [],
+      required_capabilities: [],
+      limits: {},
+      provenance: { root_card_id: root.id, card_id: workerId, authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    supStore.insertContract(contract, workerId);
+    supStore.insertAttempt({ id: "a_failed_lane", card_id: workerId, contract_id: contract.id, ordinal: 1, executor_kind: "agent", executor_id: "spin", status: "failed", started_at: new Date().toISOString() });
+
+    // Orc accepts despite the failed lane
+    const store = new reviewStoreMod.ProjectReviewStore();
+    kanban.kanbanRunning(root.id);
+    store.ensureAwaitingContract(root.id);
+    store.settleAcceptance(root.id, "case-accepted-fail", { action: "accept", synthesis: "accepted despite lane loss" }, "accepted despite lane loss", undefined, "rd_accepted_fail");
+    nerveBus.fire("card:done", root.id);
+
+    const result = await pending;
+    expect(result.result).toContain("accepted despite lane loss");
+  });
+
+  it("#1605: an Orc-blocked decision with persisted gaps surfaces project_blocked with the Orc blocker, not contract_uncovered", async () => {
+    fakeCoordinator();
+    await seedReservation();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+    const root = kanban.kanbanList("*")[0]!;
+
+    // A failed lane exists so a naive lane code would win — the Orc decision must not.
+    const workerId = kanban.kanbanEnqueue("Lane 1 - Failed", "agent", undefined, {
+      parent_id: root.id,
+      type: "W",
+      delivery: "silent",
+    });
+    const supStore = new (await import("../worker-supervision-store.js")).WorkerSupervisionStore();
+    const contract: import("../worker-contract.js").WorkerAcceptanceContractV1 = {
+      schema_version: 1,
+      id: "c_orc_block",
+      digest: "dg_orc_block",
+      goal: "Lane 1",
+      criteria: [{ id: "c1", description: "Lane 1 criterion" }],
+      expected_artifacts: [],
+      verification_commands: [],
+      required_capabilities: [],
+      limits: {},
+      provenance: { root_card_id: root.id, card_id: workerId, authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    supStore.insertContract(contract, workerId);
+    supStore.insertAttempt({ id: "a_orc_block", card_id: workerId, contract_id: contract.id, ordinal: 1, executor_kind: "agent", executor_id: "spin", status: "failed", started_at: new Date().toISOString() });
+
+    const store = new reviewStoreMod.ProjectReviewStore();
+    // Orc-blocked decision (action: blocked) while a normal review gap is persisted
+    store.settleBlocked(root.id, "case-orc-block", { action: "blocked", blocker: { blocker_class: "insufficient_evidence" }, synthesis: "cannot deliver" }, "insufficient_evidence");
+    store.db.prepare(`UPDATE project_supervision SET coverage_uncovered_ids = ? WHERE project_card_id = ?`)
+      .run(JSON.stringify(["lane2"]), root.id);
+    nerveBus.fire("card:failed", root.id);
+
+    const err = await pending.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
+    const failure = err as mod.SupervisedProjectFailure;
+    expect(failure.diagnostic.code).toBe("project_blocked");
+    expect(failure.diagnostic.message).toContain("insufficient_evidence");
+    expect(failure.diagnostic.code).not.toBe("contract_uncovered");
+    expect(failure.diagnostic.code).not.toBe("lane_failed");
+  });
+
+  it("#1605: a pre-review structural block without an Orc decision keeps the lane/definition diagnostics", async () => {
+    fakeCoordinator();
+    await seedReservation();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+    const root = kanban.kanbanList("*")[0]!;
+
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.settleBlocked(root.id, "case-structural", { synthesis: "x" }, "criteria failed");
+    store.db.prepare(`UPDATE project_supervision SET coverage_uncovered_ids = ? WHERE project_card_id = ?`)
+      .run(JSON.stringify(["lane2"]), root.id);
+    nerveBus.fire("card:failed", root.id);
+
+    const err = await pending.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
+    const failure = err as mod.SupervisedProjectFailure;
+    // no Orc decision with action=blocked → legacy coverage/lane selection still applies
+    expect(failure.diagnostic.code).toBe("contract_uncovered");
   });
 });
 

@@ -187,13 +187,13 @@ async function createProject(): Promise<{ projectId: number; childIds: number[] 
     schema_version: 1, id: rootContractId, project_card_id: projectId, digest: `d_${rootContractId}`,
     goal: "Produce three summaries",
     criteria: [
-      { id: "c1", description: "Worker 1 completes", evidence_expectation: "observed" },
-      { id: "c2", description: "Worker 2 completes", evidence_expectation: "observed" },
-      { id: "c3", description: "Worker 3 completes", evidence_expectation: "observed" },
+      { id: "c1", description: "Worker 1 completes", required: true, evidence_expectation: "observed" },
+      { id: "c2", description: "Worker 2 completes", required: true, evidence_expectation: "observed" },
+      { id: "c3", description: "Worker 3 completes", required: true, evidence_expectation: "observed" },
     ],
     required_outputs: [{ id: "out", description: "summaries", kind: "file", required: true }],
     constraints: [], limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
-    provenance: { root_card_id: projectId, authored_by: "orc", created_at: new Date().toISOString() },
+    provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
   };
   reviewStore.ensureAwaitingContract(projectId);
   reviewStore.insertContract(rootContract as any);
@@ -484,7 +484,7 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
     expect(coverageDispatches.length).toBe(1);
   });
 
-  it("identical signature with grace elapsed settles blocked naming the uncovered ids", async () => {
+  it("identical signature with grace elapsed proceeds to review with the persisted gap (no terminal block)", async () => {
     const { projectId } = await createGapProject();
     const reviewStore = new ProjectReviewStore();
 
@@ -498,8 +498,10 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
     await flush();
 
     const sup = reviewStore.getSupervision(projectId)!;
-    expect(sup.state).toBe("blocked");
-    expect(sup.blocked_reason).toContain("c3");
+    // #1605: an unchanged post-remediation gap is review evidence, not a gate
+    expect(sup.state).toBe("review_requested");
+    expect(JSON.parse(sup.coverage_uncovered_ids!)).toEqual(["c3"]);
+    expect(reviewStore.getLatestOpenCase(projectId)).toBeDefined();
   });
 
   it("gap closed by a newly mapped child proceeds to normal review", async () => {
@@ -524,7 +526,7 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
     expect(reviewStore.getLatestOpenCase(projectId)).toBeDefined();
   });
 
-  it("coverage_rounds at the ceiling settles blocked regardless of signature", async () => {
+  it("coverage_rounds at the ceiling proceeds to review regardless of signature (cap is a loop guard)", async () => {
     const { projectId } = await createGapProject();
     const reviewStore = new ProjectReviewStore();
     reviewStore.db.prepare(`UPDATE project_supervision SET coverage_rounds = 3 WHERE project_card_id = ?`).run(projectId);
@@ -533,9 +535,10 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
     await flush();
 
     const sup = reviewStore.getSupervision(projectId)!;
-    expect(sup.state).toBe("blocked");
-    expect(sup.blocked_reason).toContain("c3");
+    // #1605: exhausted cap means the gap reaches review, never a terminal block
+    expect(sup.state).toBe("review_requested");
     expect(JSON.parse(sup.coverage_uncovered_ids!)).toEqual(["c3"]);
+    expect(reviewStore.getLatestOpenCase(projectId)).toBeDefined();
   });
 
   it("two rapid wakes claim exactly one coverage round (CAS at the gate)", async () => {
@@ -547,6 +550,218 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
     await flush();
 
     expect(reviewStore.getSupervision(projectId)!.coverage_rounds).toBe(1);
+  });
+});
+
+describe("Swarm acceptance — production contract shape (#1605)", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    cards.clear();
+    nextCardId = 100;
+    await initDb();
+
+    mod = await import("../../components/reconciler.js");
+    const wss = await import("../../components/worker-supervision-store.js");
+    WorkerSupervisionStore = wss.WorkerSupervisionStore;
+    const prs = await import("../../components/project-acceptance/project-review-store.js");
+    ProjectReviewStore = prs.ProjectReviewStore;
+    const rca = await import("../../components/project-acceptance/project-review-case.js");
+    ReviewCaseAssembler = rca.ReviewCaseAssembler;
+    const prsvc = await import("../../components/project-acceptance/project-review-service.js");
+    ProjectReviewService = prsvc.ProjectReviewService;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (_rawDb) { try { _rawDb.close(); } catch {} _rawDb = null; _overrideDb = null; }
+  });
+
+  /**
+   * Production-shaped v2 root contract: three delegated lane criteria (one
+   * optional) + four Orc-owned synthesis criteria. One optional delegated lane
+   * fails; the Orc accepts with the disclosed gap.
+   */
+  async function createProductionShapeProject(): Promise<{ projectId: number; laneIds: number[]; failedLaneId: number }> {
+    const projectId = nextCardId++;
+    const now = new Date().toISOString().replace(/Z$/, "");
+    cards.set(projectId, {
+      id: projectId, title: "daily-ai shape", source: "task",
+      status: "running", type: "O", parent_id: null, goal: "Produce the daily briefing", notes: null,
+      created_at: now, result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
+    });
+
+    const reviewStore = new ProjectReviewStore();
+    reviewStore.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, goal, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', ?, ?, ?)`).run(
+      projectId, "daily-ai shape", "task", "Produce the daily briefing", now, now,
+    );
+    const rootContractId = `pc_${projectId}`;
+    const rootContract = {
+      schema_version: 2, id: rootContractId, project_card_id: projectId, digest: `d_${rootContractId}`,
+      goal: "Produce the daily briefing",
+      criteria: [
+        { id: "lane1-feeds", description: "Feed research lane", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+        { id: "lane2-newsletters", description: "Newsletter lane", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+        { id: "lane3-web", description: "Web lane", required: false, execution_owner: "delegated", evidence_expectation: "observed" },
+        { id: "synthesis", description: "Orc synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+        { id: "quality", description: "Final quality", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+        { id: "budget", description: "Budget discipline", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+        { id: "honest-stats", description: "Honest stats", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [{ id: "out", description: "briefing", kind: "file", required: true }],
+      constraints: [], limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    reviewStore.ensureAwaitingContract(projectId);
+    reviewStore.insertContract(rootContract as any);
+    reviewStore.stateTransition(projectId, ["awaiting_contract"], "executing");
+
+    const laneIds: number[] = [];
+    for (const [i, cid] of ["lane1-feeds", "lane2-newsletters", "lane3-web"].entries()) {
+      const cId = nextCardId++;
+      const createdAt = new Date().toISOString().replace(/Z$/, "");
+      cards.set(cId, {
+        id: cId, title: `lane ${i}`, source: "agent",
+        status: "queued", type: "W", parent_id: projectId,
+        goal: `lane ${i}`, notes: JSON.stringify({ supervised: true }),
+        created_at: createdAt, priority: "MEDIUM",
+        result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
+      });
+      reviewStore.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, parent_id, goal, created_at, updated_at) VALUES (?, ?, ?, 'queued', 'W', ?, ?, ?, ?)`).run(
+        cId, `lane ${i}`, "agent", projectId, `lane ${i}`, createdAt, createdAt,
+      );
+      laneIds.push(cId);
+    }
+    return { projectId, laneIds, failedLaneId: laneIds[2]! };
+  }
+
+  async function completeLane(store: import("../../components/worker-supervision-store.js").WorkerSupervisionStore, childId: number, rootCardId: number, criterionId: string): Promise<string> {
+    const contract = makeChildContract(childId, rootCardId, criterionId);
+    store.insertContract(contract, childId);
+    store.insertAttempt({
+      id: `a_${childId}_1`,
+      card_id: childId,
+      contract_id: contract.id,
+      ordinal: 1,
+      executor_kind: "agent",
+      executor_id: "spin-local",
+      status: "pending",
+      started_at: new Date().toISOString(),
+    });
+    await completeChild(store, childId, contract.id, criterionId);
+    return contract.id;
+  }
+
+  async function failLane(store: import("../../components/worker-supervision-store.js").WorkerSupervisionStore, childId: number, rootCardId: number, criterionId: string): Promise<void> {
+    const contract = makeChildContract(childId, rootCardId, criterionId);
+    store.insertContract(contract, childId);
+    store.insertAttempt({
+      id: `a_${childId}_1`,
+      card_id: childId,
+      contract_id: contract.id,
+      ordinal: 1,
+      executor_kind: "agent",
+      executor_id: "spin-local",
+      status: "failed",
+      started_at: new Date().toISOString(),
+    });
+    const card = cards.get(childId);
+    if (card) card.status = "failed";
+  }
+
+  it("reaches review without any coverage turn for Orc-owned criteria, with the failed optional lane in the case", async () => {
+    const { projectId, laneIds, failedLaneId } = await createProductionShapeProject();
+    const store = new WorkerSupervisionStore();
+    await completeLane(store, laneIds[0]!, projectId, "lane1-feeds");
+    await completeLane(store, laneIds[1]!, projectId, "lane2-newsletters");
+    await failLane(store, failedLaneId, projectId, "lane3-web");
+
+    mod.requestReconcile(projectId);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    const reviewStore = new ProjectReviewStore();
+    const sup = reviewStore.getSupervision(projectId)!;
+    expect(sup.state).toBe("review_requested");
+
+    // Orc-owned criteria are covered by the Orc — no coverage rounds, no gaps
+    expect(sup.coverage_rounds).toBe(0);
+    expect(JSON.parse(sup.coverage_uncovered_ids ?? "[]")).toEqual([]);
+
+    const coverageDispatches = dispatchMock.mock.calls.filter((c: any) => c[0]?.goal?.includes("[COVERAGE GAP]"));
+    expect(coverageDispatches).toHaveLength(0);
+
+    const openCase = reviewStore.getLatestOpenCase(projectId);
+    expect(openCase).toBeDefined();
+    const snap = JSON.parse((openCase as any).case_json) as any;
+    // failed optional lane is durable evidence
+    const lane3Summary = snap.child_summaries.find((s: any) => s.card_id === failedLaneId);
+    expect(lane3Summary).toBeDefined();
+    expect(lane3Summary.outcome).toContain("failed");
+    // orc_owned hints present
+    const synthesisInput = snap.criterion_inputs.find((ci: any) => ci.criterion_id === "synthesis");
+    expect(synthesisInput.coverage_hint).toBe("orc_owned");
+    expect(synthesisInput.execution_owner).toBe("orc");
+  });
+
+  it("accepts with the canonical Known gaps disclosure in the delivered synthesis", async () => {
+    const { projectId, laneIds, failedLaneId } = await createProductionShapeProject();
+    const store = new WorkerSupervisionStore();
+    await completeLane(store, laneIds[0]!, projectId, "lane1-feeds");
+    await completeLane(store, laneIds[1]!, projectId, "lane2-newsletters");
+    await failLane(store, failedLaneId, projectId, "lane3-web");
+
+    mod.requestReconcile(projectId);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    const reviewStore = new ProjectReviewStore();
+    const openCase = reviewStore.getLatestOpenCase(projectId);
+    expect(openCase).toBeDefined();
+    const supervision = reviewStore.getSupervision(projectId) as any;
+    const snap = JSON.parse((openCase as any).case_json) as any;
+
+    const verdicts = snap.criterion_inputs.map((ci: any) => {
+      if (ci.criterion_id === "lane3-web") {
+        return { criterion_id: ci.criterion_id, verdict: "unsatisfied", evidence_ids: [], rationale: "web lane failed; briefing remains useful" };
+      }
+      if (ci.execution_owner === "orc") {
+        return { criterion_id: ci.criterion_id, verdict: "satisfied", evidence_ids: [], rationale: `Orc-owned: ${ci.criterion_id} evaluated in review` };
+      }
+      return { criterion_id: ci.criterion_id, verdict: "satisfied", evidence_ids: ci.observed_evidence_ids.length > 0 ? [ci.observed_evidence_ids[0]!] : [], rationale: "lane passed" };
+    });
+
+    const decision: import("../../components/project-acceptance/project-review-validator.js").ProjectReviewDecisionV1 = {
+      schema_version: 1, id: `d_${projectId}`, project_card_id: projectId,
+      review_case_id: (openCase as any).id, project_generation: supervision.generation,
+      action: "accept",
+      criteria: verdicts,
+      outputs: [{ output_id: "out", disposition: "present", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      authored_at: new Date().toISOString(),
+      synthesis: "Daily briefing delivered with all required lanes.",
+    };
+
+    const svc = new ProjectReviewService();
+    const result = svc.processDecision(decision);
+    expect(result.kind).toBe("accepted");
+
+    const updated = reviewStore.getSupervision(projectId) as any;
+    expect(updated.state).toBe("accepted");
+
+    // delivered synthesis carries the deterministic Known gaps section
+    const kanbanRow = reviewStore.db.prepare("SELECT status, result_summary FROM kanban_board WHERE id = ?").get(projectId) as any;
+    expect(kanbanRow.status).toBe("done");
+    expect(kanbanRow.result_summary).toContain("Daily briefing delivered");
+    expect(kanbanRow.result_summary).toContain("Known gaps:");
+    expect(kanbanRow.result_summary).toContain("lane3-web: unsatisfied");
+
+    // the authored decision keeps the original synthesis (no prose mutating)
+    const decisionRow = reviewStore.getDecision(updated.accepted_decision_id);
+    const parsed = JSON.parse((decisionRow as any).decision_json) as any;
+    expect(parsed.synthesis).toBe("Daily briefing delivered with all required lanes.");
   });
 });
 
@@ -620,10 +835,10 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
     const rootContract = {
       schema_version: 1, id: rootContractId, project_card_id: projectId, digest: `d_${rootContractId}`,
       goal: "Contribution project",
-      criteria: [{ id: "c1", description: "Remote contribution received and reviewed", evidence_expectation: "observed" }],
+      criteria: [{ id: "c1", description: "Remote contribution received and reviewed", required: true, evidence_expectation: "observed" }],
       required_outputs: [{ id: "out", description: "result", kind: "file", required: true }],
       constraints: [], limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
-      provenance: { root_card_id: projectId, authored_by: "orc", created_at: new Date().toISOString() },
+      provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
     };
     reviewStore.ensureAwaitingContract(projectId);
     reviewStore.insertContract(rootContract as any);
