@@ -667,6 +667,9 @@ export class Spin {
       //    #1332: wrap with steering continuation loop for persistent sessions.
       const promptContext: import("./transport/kiro-transport.js").PromptRequestContext = {
         userId: spec.userId ?? userId,
+        // #1552: the trusted session type always comes from the allocated
+        // ManagedSession — model arguments can never select or override it.
+        sessionType: sessionType(session),
         durableContextIntent: spec.durableContextIntent,
         directContextTurn: spec.directContextTurn,
         executionScope: spec.executionScope,

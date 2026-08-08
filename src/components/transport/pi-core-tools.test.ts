@@ -8,7 +8,8 @@ import type { ModelCandidate } from "./model-candidates.js";
 import { buildPolicy } from "../tool-sandbox.js";
 import { PiCoreToolExecutionError } from "./tool-failure-diagnostic.js";
 import { createClientRuntime } from "../memory-runtime.js";
-import { setMemoryRuntime } from "./tool-registry.js";
+import type { MemoryToolDependenciesHolder } from "../memory-store-quota.js";
+import type { SessionType } from "../spin-types.js";
 
 function makeRegistry() {
   return new ModelHealthRegistry();
@@ -29,14 +30,16 @@ function makeCandidate(overrides?: Partial<ModelCandidate>): ModelCandidate {
 describe("createPiAgentTools", () => {
   let registry: ModelHealthRegistry;
   let policy: FallbackPolicy;
+  let depsHolder: MemoryToolDependenciesHolder;
 
   beforeEach(() => {
     registry = makeRegistry();
     policy = new FallbackPolicy([makeCandidate()], registry);
+    depsHolder = { current: null };
   });
 
   afterEach(() => {
-    setMemoryRuntime(null);
+    depsHolder.current = null;
   });
 
   function makeContext(overrides?: Partial<PiCoreToolContext>): PiCoreToolContext {
@@ -45,6 +48,7 @@ describe("createPiAgentTools", () => {
       userId: "user_1",
       sandboxPolicy: buildPolicy("owner"),
       safety: createPiExecutionSafetyController(policy),
+      memoryToolDeps: depsHolder,
       ...overrides,
     };
   }
@@ -128,7 +132,7 @@ describe("createPiAgentTools", () => {
       },
       privateMemory: { instantStore },
     } as unknown as import("abmind").AbmindClient;
-    setMemoryRuntime(createClientRuntime(client));
+    depsHolder.current = { runtime: createClientRuntime(client), quota: null as never };
 
     const onToolFailure = vi.fn();
     const onToolSuccess = vi.fn();
@@ -136,6 +140,7 @@ describe("createPiAgentTools", () => {
       sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
       onToolFailure,
       onToolSuccess,
+      sessionType: "A",
     }));
     const storeTool = tools.find(tool => tool.name === "memory_store");
     expect(storeTool).toBeDefined();
@@ -148,6 +153,37 @@ describe("createPiAgentTools", () => {
     expect(instantStore).not.toHaveBeenCalled();
     expect(onToolFailure).not.toHaveBeenCalled();
     expect(onToolSuccess).toHaveBeenCalledTimes(3);
+  });
+
+  // #1552 R1: memory_store is visible to Main (A) and Dreamy (D) only.
+  it.each([
+    ["B", "Browse"], ["C", "Code"], ["T", "Task"], ["P", "Peer"], ["S", "System"],
+    ["O", "Orc"], ["W", "Worker"], ["H", "Healer"], ["K", "Skill"],
+  ] as const)("hides memory_store from %s sessions while A and D see it", (type) => {
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
+      sessionType: type as SessionType,
+    });
+    const tools = createPiAgentTools(ctx);
+    expect(tools.find(tool => tool.name === "memory_store")).toBeUndefined();
+    const aCtx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
+      sessionType: "A",
+    });
+    expect(createPiAgentTools(aCtx).find(tool => tool.name === "memory_store")).toBeDefined();
+    const dCtx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
+      sessionType: "D",
+    });
+    expect(createPiAgentTools(dCtx).find(tool => tool.name === "memory_store")).toBeDefined();
+  });
+
+  it("hides memory_store when the session type is missing entirely", () => {
+    const tools = createPiAgentTools(makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
+      sessionType: undefined,
+    }));
+    expect(tools.find(tool => tool.name === "memory_store")).toBeUndefined();
   });
 
   it("throws PiCoreToolExecutionError on exact_repeat from beforeTool", async () => {

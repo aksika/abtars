@@ -19,6 +19,9 @@ import type { DurableContextIntent } from "../spin-types.js";
  */
 export interface PromptRequestContext {
   userId?: string;
+  /** #1552: trusted session type from Spin's allocated ManagedSession. Never
+   *  selectable by model arguments; transports may use it to scope tools. */
+  sessionType?: import("../spin-types.js").SessionType;
   /** #1529: explicit durable-context intent for Pi transport enforcement. */
   durableContextIntent?: DurableContextIntent;
   /** #1445: execution ID for Pi-core host correlation. */

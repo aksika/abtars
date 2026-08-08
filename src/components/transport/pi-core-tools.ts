@@ -25,6 +25,10 @@ export interface PiCoreToolContext {
   executionScope?: ToolExecutionScope;
   /** #1480: Orc invocation context for durable project ownership fencing. */
   orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  /** #1552: trusted session type supplied by Spin; absent types fail closed. */
+  sessionType?: import("../spin-types.js").SessionType;
+  /** #1552: late-bound memory-tool dependencies (runtime + quota holder). */
+  memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
 }
 
 function adaptParameters(params: Record<string, unknown>): Record<string, unknown> {
@@ -113,6 +117,8 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
           sandboxPolicy: context.sandboxPolicy,
           executionScope: context.executionScope,
           orcContext: context.orcContext,
+          sessionType: context.sessionType,
+          memoryToolDeps: context.memoryToolDeps,
         });
 
         const diag = parseToolResultToDiagnostic(result, context.executionId, def.name);
@@ -180,6 +186,11 @@ export function createPiAgentTools(context: PiCoreToolContext): AgentTool[] {
   for (const def of definitions) {
     const allowed = checkTool(def.name, policy);
     if (!allowed.allowed) continue;
+
+    // #1552 R1: memory_store is only ever presented to Main (A) and Dreamy
+    // (D). Every other type — including missing/forged types — does not see
+    // the tool, so a model cannot even attempt it through the schema.
+    if (def.name === "memory_store" && context.sessionType !== "A" && context.sessionType !== "D") continue;
 
     try {
       const agentTool = definitionToAgentTool(def, context);

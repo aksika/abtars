@@ -44,6 +44,8 @@ export interface PiCoreTransportOptions {
   session?: { instructionQueue: Array<import("../spin-types.js").QueuedSessionInstruction>; id: string };
   /** #1527: late-bound durable context provider holder (parallel boot composition). */
   contextProvider?: DurableContextProviderHolder;
+  /** #1552: late-bound memory-tool dependencies holder (runtime + quota). */
+  memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
   maxPromptRounds?: number;
   maxCandidateRounds?: number;
 }
@@ -83,6 +85,8 @@ export class PiCoreTransport implements IKiroTransport {
 
   /** #1527: late-bound durable context provider; populated once memory is ready. */
   private _contextProvider: DurableContextProviderHolder;
+  /** #1552: late-bound memory-tool dependencies; read per execution. */
+  private _memoryToolDeps: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
   private _toolCallsSucceeded = 0;
   private _lastResponse = "";
   private _intermediateText = "";
@@ -104,6 +108,7 @@ export class PiCoreTransport implements IKiroTransport {
     this.sandboxPolicy = opts.sandboxPolicy;
     this.session = opts.session;
     this._contextProvider = opts.contextProvider ?? { current: null };
+    this._memoryToolDeps = opts.memoryToolDeps ?? { current: null };
     this.maxPromptRounds = opts.maxPromptRounds;
     this.maxCandidateRounds = opts.maxCandidateRounds;
     this.policy = new FallbackPolicy(opts.candidates, opts.healthRegistry);
@@ -343,6 +348,8 @@ export class PiCoreTransport implements IKiroTransport {
         },
         executionScope: context?.executionScope,
         orcContext: context?.orcContext,
+        sessionType: context?.sessionType,
+        memoryToolDeps: this._memoryToolDeps,
       };
       const tools = createPiAgentTools(toolContext);
 
