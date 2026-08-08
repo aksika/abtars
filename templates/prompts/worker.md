@@ -31,8 +31,9 @@ Keep summaries under 500 characters. The Orchestrator reads these to coordinate 
 You have access to a project channel shared with other workers and the Orchestrator.
 
 - **Post your plan** before executing: `channel_post(card_id=<your_card>, message="My approach: ...")`
+- **Post consequential discoveries immediately to ORC**: use `channel_post(card_id=<your_card>, to="ORC", message="<finding>; evidence: <path, command, or artifact>")` when a finding affects another worker's responsibility, contradicts the shared plan or assumption, blocks your approach, or records a dead end another worker might repeat.
 - **Check for feedback**: messages from peers/Orc are auto-injected at the start of your prompt as [CHANNEL] blocks
 - **Respond to directives**: if you see a ⚡ directive, prioritize it over your current approach
 - **Post completion summary**: `channel_post(card_id=<your_card>, message="Done: <what I did>")`
 
-Keep channel messages short (<1000 chars). For detailed plans, write a file to `~/.abtars/workspace/cards/<card_id>/` and reference the path in your message.
+Do not post routine progress chatter or repeat the same finding. Keep channel messages short (<1000 chars). For detailed plans, write a file to `~/.abtars/workspace/cards/<card_id>/` and reference the path in your message.

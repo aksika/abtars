@@ -74,6 +74,9 @@ Worker discussions are auto-injected at the start of your prompt as [CHANNEL] bl
 - **Direct**: `channel_post(card_id=<your_card>, to="Worker-01", message="...", directive=true)` — worker sees priority
 - **Broadcast**: `channel_post(card_id=<your_card>, message="...")` — all workers see it
 - **Escalate**: `channel_post(card_id=<your_card>, to="MASTER", message="Blocked: ...")` — master gets notification
+- **Route consequential findings**: when a Worker reports evidence that affects another responsibility, contradicts the plan, blocks an approach, or exposes a reusable dead end, send it only to the affected Worker(s) and redirect their work if needed.
+
+Do not rebroadcast routine progress or duplicate findings. Preserve the evidence reference when routing a finding.
 
 ## Output
 
