@@ -72,7 +72,7 @@ export function summarizeReviewCase(row: ReviewCaseRow | undefined): string {
   try {
     const snapshot = JSON.parse(row.case_json) as {
       root_contract?: { criteria?: unknown[] };
-      criterion_inputs?: Array<{ coverage_hint?: string; retry_lineage_ids?: unknown[]; required?: boolean; execution_owner?: string }>;
+      criterion_inputs?: Array<{ criterion_id?: string; coverage_hint?: string; retry_lineage_ids?: unknown[]; required?: boolean; execution_owner?: string }>;
       uncovered_criteria?: unknown[];
       contradiction_candidates?: unknown[];
       child_summaries?: Array<{ attempts?: number }>;
@@ -86,13 +86,22 @@ export function summarizeReviewCase(row: ReviewCaseRow | undefined): string {
     const orcOwned = inputs.filter(i => i.coverage_hint === "orc_owned").length;
     const optional = inputs.filter(i => i.required === false).length;
     const gaps = snapshot.uncovered_criteria?.length ?? 0;
+    // #1605 Task 5: name the gaps and mark each optional vs hard so the Orc
+    // sees what it may consciously omit vs what must be satisfied/repaired.
+    const gapIds = (snapshot.uncovered_criteria ?? []) as string[];
+    const gapDetail = gapIds.length > 0
+      ? " gap-ids:" + gapIds.map(id => {
+          const input = inputs.find(i => i.criterion_id === id);
+          return input?.required === false ? `${id}(optional)` : id;
+        }).join(",")
+      : "";
     const contradictions = snapshot.contradiction_candidates?.length ?? 0;
     const lineage = inputs.reduce((n, i) => n + (i.retry_lineage_ids?.length ?? 0), 0)
       + (snapshot.child_summaries ?? []).filter(c => (c.attempts ?? 0) > 1).length;
     const cost = snapshot.budgets?.total_cost === undefined ? "?" : String(snapshot.budgets.total_cost);
     const tokens = snapshot.budgets?.total_tokens === undefined ? "?" : String(snapshot.budgets.total_tokens);
     const policy = orcOwned > 0 || optional > 0 ? ` orc-owned:${orcOwned} optional:${optional}` : "";
-    return ` coverage:${coveredCriteria}/${totalCriteria} gaps:${gaps} contradictions:${contradictions} lineage:${lineage} cost:${cost} tokens:${tokens}${policy}`;
+    return ` coverage:${coveredCriteria}/${totalCriteria} gaps:${gaps}${gapDetail} contradictions:${contradictions} lineage:${lineage} cost:${cost} tokens:${tokens}${policy}`;
   } catch {
     return " review:unavailable";
   }

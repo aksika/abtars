@@ -19,6 +19,7 @@ import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { ProjectReviewStore, type ProjectState, type ProjectSupervisionRow } from "./project-acceptance/project-review-store.js";
 import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js";
 import { readProjectCriterionCoverage, coverageSignature } from "./project-acceptance/project-criterion-coverage.js";
+import { delegatedCriterionIds } from "./project-acceptance/project-contract.js";
 import { OrcProjectRunStore } from "./orc-project/orc-project-run-store.js";
 import { readEntries } from "./tasks/task-store.js";
 import { readState } from "./tasks/task-state-store.js";
@@ -280,6 +281,26 @@ type OwnerInspection =
 type BranchResult = "transitioned" | "owned" | "none";
 
 /**
+ * #1605: true when the root contract exists and has NO delegated criteria
+ * (an Orc-only project — the Orc satisfies every criterion itself). Fail-open
+ * to false when the contract is missing, unparseable, or an unknown schema
+ * version: such a project must not be classified as this owner (the coverage
+ * gate blocks it anyway). v1 contracts are always delegated.
+ */
+function hasNoDelegatedCriteria(projectId: number, reviewStore: ProjectReviewStore): boolean {
+  try {
+    const row = reviewStore.getContractByProjectCardId(projectId);
+    if (!row) return false;
+    const parsed = JSON.parse(row.contract_json) as { schema_version?: unknown; criteria?: unknown[] };
+    if (parsed.schema_version !== 2) return false;
+    if (!Array.isArray(parsed.criteria)) return false;
+    return delegatedCriterionIds(parsed as never).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * #1546 R3: the exact durable owner predicate. Evaluates durable rows only —
  * in-memory handles, unsettled promises, or merely expected processes never
  * count as custody. The Reconciler's own case creation owns an executing
@@ -334,10 +355,18 @@ function inspectProjectOwnership(projectId: number, supervision: ProjectSupervis
   }
 
   // R2: the Reconciler's review case creation owns an executing project whose
-  // direct children are all terminal. Zero children is NOT this owner — it
-  // must reach the no-owner decision.
-  if (supervision.state === "executing" && children.length > 0 && children.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status))) {
-    return "executing_terminal_children";
+  // direct children are all terminal. Zero children is normally NOT this
+  // owner — it must reach the no-owner decision so the Orc spawns Workers.
+  // #1605: an Orc-only project (no delegated criteria) is the exception — the
+  // Orc is the sole executor, no Worker lane can exist, and the design §2
+  // requires it to proceed directly to review with zero children.
+  if (supervision.state === "executing") {
+    if (children.length > 0 && children.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status))) {
+      return "executing_terminal_children";
+    }
+    if (children.length === 0 && hasNoDelegatedCriteria(projectId, reviewStore)) {
+      return "executing_terminal_children";
+    }
   }
 
   // R3.2: a live Orc row matching the current supervision generation is an

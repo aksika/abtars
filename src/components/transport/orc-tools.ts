@@ -552,13 +552,16 @@ const defineProjectContractTool: ToolDefinition = {
         }
       });
 
-      // #1605: echo ownership split so the Orc's next authoring turn and any
-      // spawn use only delegated ids as mapping targets.
+      // #1605: echo ownership + requiredness so the Orc's next authoring turn
+      // and any spawn use only delegated ids as mapping targets, and knows
+      // which criteria are optional vs hard.
       const delegatedIds = normalized.contract.criteria.filter(c => c.execution_owner === "delegated").map(c => c.id);
       const orcOwnedIds = normalized.contract.criteria.filter(c => c.execution_owner === "orc").map(c => c.id);
+      const optionalIds = normalized.contract.criteria.filter(c => c.required === false).map(c => c.id);
       const delegatedText = delegatedIds.length > 0 ? delegatedIds.join(", ") : "(none)";
       const orcText = orcOwnedIds.length > 0 ? orcOwnedIds.join(", ") : "(none)";
-      return `✓ Root contract defined (${normalized.contract.id}, digest: ${normalized.contract.digest.slice(0, 12)}…). Delegated criteria: ${delegatedText}; Orc-owned criteria: ${orcText}. Every spawn_worker must pass supports_root_criteria using only delegated ids; Orc-owned criteria are evaluated by you in review_project, never mapped to Workers.`;
+      const optionalText = optionalIds.length > 0 ? `; optional (required: false) criteria: ${optionalIds.join(", ")}` : "";
+      return `✓ Root contract defined (${normalized.contract.id}, digest: ${normalized.contract.digest.slice(0, 12)}…). Delegated criteria: ${delegatedText}; Orc-owned criteria: ${orcText}${optionalText}. Every spawn_worker must pass supports_root_criteria using only delegated ids; Orc-owned criteria are evaluated by you in review_project, never mapped to Workers.`;
     } catch (err) {
       return `[err] define_project_contract error: ${String(err)}`;
     }

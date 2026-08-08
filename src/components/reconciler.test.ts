@@ -915,6 +915,95 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     expect(kanbanFailMock).not.toHaveBeenCalled();
   });
 
+  it("#1605: an Orc-only project with zero children proceeds directly to review (no continuation claim, no spawn loop)", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({ children: [] });
+    reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+    reviewStoreMock.stateTransition.mockReturnValue(true);
+    reviewStoreMock.getContractByProjectCardId.mockReturnValue({
+      id: "pc_orc_only",
+      project_card_id: 1,
+      contract_digest: "d",
+      created_at: new Date().toISOString(),
+      contract_json: JSON.stringify({
+        schema_version: 2,
+        id: "pc_orc_only",
+        digest: "d",
+        project_card_id: 1,
+        goal: "g",
+        criteria: [{ id: "synthesis", description: "S", required: true, execution_owner: "orc", evidence_expectation: "synthesis" }],
+        required_outputs: [],
+        constraints: [],
+        limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+        provenance: { requested_by: "u", authored_by: "orc", created_at: new Date().toISOString() },
+      }),
+    });
+    readProjectCriterionCoverageMock.mockReturnValue({
+      kind: "read",
+      read: { criterionIds: ["synthesis"], mappings: [], uncovered: [] },
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    // review case creation is the owner — no scheduled continuation claim
+    expect(claims).toHaveLength(0);
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+    expect(reviewStoreMock.claimCoverageRound).not.toHaveBeenCalled();
+  });
+
+  it("#1605: a zero-child executing project WITH delegated criteria still claims the scheduled continuation (Orc must spawn Workers)", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({ children: [] });
+    reviewStoreMock.getContractByProjectCardId.mockReturnValue({
+      id: "pc_delegated",
+      project_card_id: 1,
+      contract_digest: "d",
+      created_at: new Date().toISOString(),
+      contract_json: JSON.stringify({
+        schema_version: 2,
+        id: "pc_delegated",
+        digest: "d",
+        project_card_id: 1,
+        goal: "g",
+        criteria: [{ id: "lane1", description: "L", required: true, execution_owner: "delegated", evidence_expectation: "observed" }],
+        required_outputs: [],
+        constraints: [],
+        limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+        provenance: { requested_by: "u", authored_by: "orc", created_at: new Date().toISOString() },
+      }),
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    // delegation exists → zero children is NOT this owner → continuation claim
+    expect(claims).toHaveLength(1);
+    expect(reviewStoreMock.stateTransition).not.toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+  });
+
+  it("#1605: an executing project with a missing/unparseable contract is not this owner (gate blocks it)", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject({ children: [] });
+    reviewStoreMock.getContractByProjectCardId.mockReturnValue(undefined);
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(claims).toHaveLength(1);
+    expect(reviewStoreMock.stateTransition).not.toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+  });
+
   it("#1605: a corrupt/unreadable contract still fails closed as a structural block", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
     fakeCoordinator(claims);
