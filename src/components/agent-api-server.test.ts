@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { AgentApiServer } from "./agent-api-server.js";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ValidatedTlsIdentity } from "./peer-transport/tls-identity.js";
@@ -194,6 +194,110 @@ describe("AgentApiServer", () => {
         expect(written.status).toBe(401);
         expect(dispatched).toBe(false);
       });
+    });
+  });
+
+  describe("POST /v1/orc/delegate (#1618)", () => {
+    const origReject = process.env["NODE_TLS_REJECT_UNAUTHORIZED"];
+    let addr: any;
+    let sends: string[] = [];
+
+    beforeEach(async () => {
+      // The suite redirects HOME to a temp dir, which breaks the native
+      // better-sqlite3 resolution (~/.local/lib/node_modules). Symlink the
+      // real global node_modules into the temp HOME so the task database
+      // works while runtime files stay isolated.
+      if (originalHome) {
+        mkdirSync(join(tmpDir, ".local", "lib"), { recursive: true });
+        const link = join(tmpDir, ".local", "lib", "node_modules");
+        if (!existsSync(link)) {
+          (await import("node:fs")).symlinkSync(join(originalHome, ".local", "lib", "node_modules"), link, "dir");
+        }
+      }
+      // Deterministic requester service on the worker-scoped task database:
+      // real stores, fake transport, no Reconciler churn in the test process.
+      const { RequesterContributionService } = await import("./peer-help/requester-contribution-service.js");
+      const { ContributionStore } = await import("./peer-help/contribution-store.js");
+      const { ProjectReviewStore } = await import("./project-acceptance/project-review-store.js");
+      const { requireTaskDatabase } = await import("./tasks/kanban-board.js");
+      const taskDb = requireTaskDatabase() as any;
+      sends = [];
+      const service = new RequesterContributionService({
+        taskDb,
+        contributionStore: new ContributionStore(taskDb, { kanbanGetCard: () => undefined, kanbanUpdate: () => {}, kanbanComplete: () => {}, kanbanFail: () => {} }),
+        reviewStore: new ProjectReviewStore(taskDb),
+        askHelp: async (peer) => {
+          sends.push(peer);
+          return { version: 1, request_id: "x", decision: "accepted", contribution_ref: `help_${sends.length}` };
+        },
+        wakeProject: () => {},
+      });
+
+      process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0";
+      server = new AgentApiServer({ ...makeConfig(), tls: makeTestTls(tmpDir) });
+      server.setRequesterContributionService(service);
+      await server.start();
+      addr = (server as any).server.address();
+    });
+
+    afterEach(() => {
+      process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = origReject;
+    });
+
+    async function postDelegate(body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+      const res = await fetch(`https://127.0.0.1:${addr.port}/v1/orc/delegate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: await res.json() };
+    }
+
+    it("creates root+supervision+proxy+ledger before transport and replays with stable identities", async () => {
+      const first = await postDelegate({ peer: "molty", goal: "reply ok", request_id: "orc_route_1" });
+      expect(first.status).toBe(200);
+      expect(first.body.ok).toBe(true);
+      expect(first.body.decision).toBe("accepted");
+      expect(first.body.request_id).toBe("orc_route_1");
+      expect(first.body.project_card_id).toBeGreaterThan(0);
+      expect(first.body.proxy_card_id).toBeGreaterThan(0);
+      expect(first.body.contribution_ref).toBeTruthy();
+      expect(sends).toEqual(["molty"]);
+
+      // replay with the same request id returns the same identities, no duplicates, no resend
+      const second = await postDelegate({ peer: "molty", goal: "reply ok", request_id: "orc_route_1" });
+      expect(second.body.project_card_id).toBe(first.body.project_card_id);
+      expect(second.body.proxy_card_id).toBe(first.body.proxy_card_id);
+      expect(sends).toEqual(["molty"]);
+
+      const { abtarsHome } = await import("../paths.js");
+      const { resolveNativeDep } = await import("../utils/lazy-require.js") as typeof import("../utils/lazy-require.js");
+      const Database = resolveNativeDep("better-sqlite3");
+      const d = new Database(join(abtarsHome(), "kanban", "kanban.db"));
+
+      const root = d.prepare("SELECT * FROM kanban_board WHERE id = ?").get(first.body.project_card_id) as any;
+      expect(root.source).toBe("cli");
+      expect(root.type).toBe("O");
+      expect(root.status).toBe("queued");
+      const sup = d.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(first.body.project_card_id) as any;
+      expect(sup.state).toBe("awaiting_contract");
+
+      const proxy = d.prepare("SELECT * FROM kanban_board WHERE id = ?").get(first.body.proxy_card_id) as any;
+      expect(proxy.type).toBe("contribution");
+      expect(proxy.parent_id).toBe(first.body.project_card_id);
+      expect(proxy.status).toBe("running");
+
+      const ledger = d.prepare("SELECT * FROM peer_contributions WHERE peer = 'molty' AND request_id = 'orc_route_1'").get() as any;
+      expect(ledger).toBeDefined();
+      expect(ledger.state).toBe("accepted");
+      expect(ledger.project_card_id).toBe(first.body.project_card_id);
+      expect(ledger.proxy_card_id).toBe(first.body.proxy_card_id);
+
+      const roots = d.prepare("SELECT COUNT(*) as cnt FROM kanban_board WHERE source = 'cli'").get() as any;
+      expect(roots.cnt).toBe(1);
+      const ledgers = d.prepare("SELECT COUNT(*) as cnt FROM peer_contributions WHERE request_id = 'orc_route_1'").get() as any;
+      expect(ledgers.cnt).toBe(1);
+      d.close();
     });
   });
 });

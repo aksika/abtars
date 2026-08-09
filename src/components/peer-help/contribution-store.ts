@@ -299,6 +299,8 @@ export class ContributionStore {
       return "conflict";
     }
 
+    const proxyCardId = row.proxy_card_id;
+
     this.db.transaction(() => {
       if (event.kind === "completed" || event.kind === "failed") {
         this.db.prepare(
@@ -320,17 +322,28 @@ export class ContributionStore {
         `INSERT INTO peer_contribution_events (peer, event_id, request_id, contribution_ref, sequence, payload_digest, projection_json, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
       ).run(peer, event.event_id, event.request_id, event.contribution_ref, event.sequence, payloadDigest, projectionJson);
-    });
 
-    const proxyCardId = row.proxy_card_id;
-
-    if ((event.kind === "completed" || event.kind === "failed") && proxyCardId) {
-      if (event.kind === "completed") {
-        this.kanban.kanbanComplete(proxyCardId, null, event.summary?.slice(0, 1000) ?? "contribution completed");
-      } else {
-        this.kanban.kanbanFail(proxyCardId, "contribution failed");
+      // #1618: the proxy transition and operator-visible projection are part of
+      // the SAME transaction as the ledger/event writes — a crash can never
+      // leave a terminal ledger with a running proxy. The ledger stays the
+      // authority; the card notes are a bounded operator view.
+      if ((event.kind === "completed" || event.kind === "failed") && proxyCardId) {
+        if (event.kind === "completed") {
+          this.kanban.kanbanComplete(proxyCardId, null, event.summary?.slice(0, 1000) ?? "contribution completed");
+        } else {
+          this.kanban.kanbanFail(proxyCardId, "contribution failed");
+        }
+        const notes = {
+          outcome: event.kind,
+          summary: event.summary?.slice(0, 1000) ?? null,
+          receiver_peer: event.projection?.provenance.receiver_peer ?? null,
+          receiver_project_ref: event.projection?.provenance.receiver_project_ref ?? null,
+          acceptance_id: event.projection?.provenance.acceptance_id ?? null,
+          event_id: event.event_id,
+        };
+        this.kanban.kanbanUpdate(proxyCardId, { notes: JSON.stringify(notes) });
       }
-    }
+    });
 
     return "applied";
   }

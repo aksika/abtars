@@ -271,12 +271,14 @@ export class ProjectReviewStore {
     `).run(projectCardId, contractId, initialState, new Date().toISOString());
   }
 
-  /** Create the durable admission state before the first Orc authoring turn. */
+  /** Create the durable admission state before the first Orc authoring turn.
+   *  The placeholder contract id is unique per project so concurrent admissions
+   *  cannot collide on the UNIQUE(contract_id) constraint (#1618). */
   ensureAwaitingContract(projectCardId: number): boolean {
     const result = this.db.prepare(`
       INSERT OR IGNORE INTO project_supervision (project_card_id, contract_id, state, updated_at)
-      VALUES (?, '', 'awaiting_contract', ?)
-    `).run(projectCardId, new Date().toISOString());
+      VALUES (?, ?, 'awaiting_contract', ?)
+    `).run(projectCardId, `awaiting:${projectCardId}`, new Date().toISOString());
     return result.changes > 0;
   }
 
@@ -678,8 +680,10 @@ export class ProjectReviewStore {
     reviewCaseId: string,
     decision: unknown,
     blockerClass: string,
+    peerEvent?: { peer: string; payload: unknown },
+    decisionId?: string,
   ): { decisionId: string } {
-    const decisionId = `rd_block_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const settledId = decisionId ?? `rd_block_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const decisionDigest = `sd_blk_${cardId}_${reviewCaseId}_${Date.now()}`;
     const now = new Date().toISOString();
 
@@ -687,12 +691,12 @@ export class ProjectReviewStore {
       this.db.prepare(`
         INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
         VALUES (?, ?, ?, ?, ?)
-      `).run(decisionId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
+      `).run(settledId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
 
       const state = this.db.prepare(`
         UPDATE project_supervision SET state = 'blocked', blocked_reason = ?, accepted_decision_id = ?, updated_at = ?
         WHERE project_card_id = ? AND state NOT IN ('accepted', 'blocked')
-      `).run(blockerClass, decisionId, now, cardId);
+      `).run(blockerClass, settledId, now, cardId);
       if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
 
       // #1590: through the transition helper inside this transaction. The
@@ -714,11 +718,25 @@ export class ProjectReviewStore {
         UPDATE project_review_requests SET status = 'settled', updated_at = ?
         WHERE review_case_id = ? AND status IN ('pending', 'dispatched')
       `).run(now, reviewCaseId);
+
+      // #1618: a failed terminal event row lands in the same transaction that
+      // wins the blocked settlement — duplicate settlement cannot create a
+      // second row (outbox is UNIQUE per project_card_id).
+      if (peerEvent) {
+        const payload = peerEvent.payload && typeof peerEvent.payload === "object"
+          ? { ...(peerEvent.payload as Record<string, unknown>), acceptance_id: settledId }
+          : peerEvent.payload;
+        this.db.prepare(`
+          INSERT OR IGNORE INTO project_acceptance_outbox
+            (id, project_card_id, peer, payload_json, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(`ao_${settledId}`, cardId, peerEvent.peer, JSON.stringify(payload), now, now);
+      }
     });
 
-    logSwarmTrace({ event: "project_blocked", project: cardId, reviewCase: reviewCaseId, decision: decisionId, reason: blockerClass });
+    logSwarmTrace({ event: "project_blocked", project: cardId, reviewCase: reviewCaseId, decision: settledId, reason: blockerClass });
 
-    return { decisionId };
+    return { decisionId: settledId };
   }
 
   /** Atomically persist a repair decision, advance its generation, and close the review turn. */

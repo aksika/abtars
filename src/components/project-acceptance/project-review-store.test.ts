@@ -388,4 +388,61 @@ describe("ProjectReviewStore", () => {
       });
     }
   });
+
+  describe("#1618 terminal event outbox", () => {
+    it("settleAcceptance with a peer event creates exactly one completed outbox row", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      const caseId = `case-accept-${cid}`;
+      const event = { peer: "kp", payload: { event_id: `accept_1_${cid}`, kind: "completed", request_id: "r1", contribution_ref: "c1" } };
+      s.settleAcceptance(cid, caseId, { action: "accept", synthesis: "ok" }, "ok", event, `rd_settle_${cid}`);
+
+      const rows = s.db.prepare("SELECT id, project_card_id, peer, payload_json FROM project_acceptance_outbox WHERE project_card_id = ?").all(cid) as any[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.peer).toBe("kp");
+      const payload = JSON.parse(rows[0]!.payload_json) as Record<string, unknown>;
+      expect(payload.kind).toBe("completed");
+      expect(payload.acceptance_id).toBe(`rd_settle_${cid}`);
+    });
+
+    it("settleBlocked with a peer event creates a FAILED row and never a completed one", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      const caseId = `case-block-${cid}`;
+      const event = { peer: "kp", payload: { event_id: `fail_1_${cid}`, kind: "failed", request_id: "r1", contribution_ref: "c1", summary: "blocked: blocker" } };
+      s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker", event, `rd_block_${cid}`);
+
+      const rows = s.db.prepare("SELECT payload_json FROM project_acceptance_outbox WHERE project_card_id = ?").all(cid) as any[];
+      expect(rows).toHaveLength(1);
+      const payload = JSON.parse(rows[0]!.payload_json) as Record<string, unknown>;
+      expect(payload.kind).toBe("failed");
+      expect(payload.acceptance_id).toBe(`rd_block_${cid}`);
+    });
+
+    it("duplicate settlement cannot create a second outbox row", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      const caseId = `case-dup-${cid}`;
+      const event = { peer: "kp", payload: { kind: "completed", request_id: "r1", contribution_ref: "c1" } };
+      s.settleAcceptance(cid, caseId, { action: "accept", synthesis: "ok" }, "ok", event, `rd_dup_${cid}`);
+      expect(() => s.settleAcceptance(cid, `case-dup2-${cid}`, { action: "accept", synthesis: "ok" }, "ok", event, `rd_dup2_${cid}`)).toThrow();
+
+      const rows = s.db.prepare("SELECT COUNT(*) as cnt FROM project_acceptance_outbox WHERE project_card_id = ?").get(cid) as any;
+      expect(rows.cnt).toBe(1);
+    });
+
+    it("rollback on a decision conflict leaves no outbox row", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      const caseId = `case-roll-${cid}`;
+      const event = { peer: "kp", payload: { kind: "failed", request_id: "r1", contribution_ref: "c1" } };
+      s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker", event, `rd_roll_${cid}`);
+      // same review case again → UNIQUE(review_case_id) on decisions rolls the
+      // whole transaction back, including the outbox insert
+      expect(() => s.settleBlocked(cid, caseId, { action: "blocked", reason: "y" }, "blocker", event, `rd_roll2_${cid}`)).toThrow();
+
+      const rows = s.db.prepare("SELECT COUNT(*) as cnt FROM project_acceptance_outbox WHERE project_card_id = ?").get(cid) as any;
+      expect(rows.cnt).toBe(1);
+    });
+  });
 });

@@ -6,6 +6,16 @@ import { vi } from "vitest";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
 import type { ProjectReviewDecisionV1 } from "./project-review-validator.js";
 
+// #1618: acceptance-outbox drain tests drive a fake broker. Hoisted so the
+// module factory can reference it; tests that never call the drain are
+// unaffected.
+const { testBroker } = vi.hoisted(() => ({
+  testBroker: { sendRequest: async () => { throw new Error("no broker configured"); } },
+}));
+vi.mock("../peer-transport/peer-ws-broker.js", () => ({
+  getPeerWsBroker: () => testBroker,
+}));
+
 let TEST_HOME: string;
 let ProjectReviewStore: typeof import("./project-review-store.js").ProjectReviewStore;
 let ProjectReviewService: typeof import("./project-review-service.js").ProjectReviewService;
@@ -364,5 +374,66 @@ describe("renderAcceptedSynthesis (#1605)", () => {
     const result = renderAcceptedSynthesis(decision, expanded);
     expect(result.length).toBeLessThanOrEqual(4000);
     for (const id of extraIds) expect(result).toContain(`- ${id}: unsatisfied`);
+  });
+});
+
+describe("#1618 acceptance outbox drain retry", () => {
+  let store: ProjectReviewStore;
+  let broker: { sendRequest: ReturnType<typeof vi.fn> };
+
+  beforeEach(async () => {
+    TEST_HOME = join(tmpdir(), `ab-review-drain-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(TEST_HOME, { recursive: true });
+    vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
+    broker = { sendRequest: vi.fn() };
+    testBroker.sendRequest = broker.sendRequest;
+    const mod = await import("./project-review-store.js");
+    ProjectReviewStore = mod.ProjectReviewStore;
+    await import("./project-review-service.js");
+    store = new ProjectReviewStore();
+  });
+
+  afterEach(() => {
+    if (TEST_HOME && existsSync(TEST_HOME)) {
+      rmSync(TEST_HOME, { recursive: true, force: true });
+    }
+  });
+
+  async function drain(): Promise<number> {
+    const svcMod = await import("./project-review-service.js");
+    return svcMod.drainAcceptanceOutbox();
+  }
+
+  it("retains the row on broker failure and marks it sent only after success", async () => {
+    const cardId = 91001;
+    store.db.prepare(
+      `INSERT INTO project_acceptance_outbox (id, project_card_id, peer, payload_json, created_at, updated_at)
+       VALUES ('ao_1', ?, 'kp', ?, datetime('now'), datetime('now'))`,
+    ).run(cardId, JSON.stringify({ event_id: "accept_1", kind: "completed", request_id: "r1", contribution_ref: "c1" }));
+
+    broker.sendRequest.mockRejectedValueOnce(new Error("network down"));
+    expect(await drain()).toBe(0);
+    const afterFailure = store.db.prepare("SELECT sent_at, attempts, last_error FROM project_acceptance_outbox WHERE id = 'ao_1'").get() as any;
+    expect(afterFailure.sent_at).toBeNull();
+    expect(afterFailure.attempts).toBe(1);
+    expect(afterFailure.last_error).toContain("network down");
+
+    broker.sendRequest.mockResolvedValueOnce(undefined);
+    expect(await drain()).toBe(1);
+    const afterSuccess = store.db.prepare("SELECT sent_at FROM project_acceptance_outbox WHERE id = 'ao_1'").get() as any;
+    expect(afterSuccess.sent_at).not.toBeNull();
+    expect(broker.sendRequest).toHaveBeenCalledWith("kp", "help.event.v1", expect.objectContaining({ kind: "completed" }));
+  });
+
+  it("does not resend a row already marked sent", async () => {
+    const cardId = 91002;
+    store.db.prepare(
+      `INSERT INTO project_acceptance_outbox (id, project_card_id, peer, payload_json, sent_at, created_at, updated_at)
+       VALUES ('ao_2', ?, 'kp', ?, datetime('now'), datetime('now'), datetime('now'))`,
+    ).run(cardId, JSON.stringify({ event_id: "accept_2", kind: "completed" }));
+
+    broker.sendRequest.mockResolvedValueOnce(undefined);
+    expect(await drain()).toBe(0);
+    expect(broker.sendRequest).not.toHaveBeenCalled();
   });
 });

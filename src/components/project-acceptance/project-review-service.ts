@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 
 const MAX_INVALID_PROPOSALS = 5;
 
-function buildPeerAcceptanceEvent(cardId: number, acceptanceId: string, synthesis: string, caseSnapshot?: ReviewCaseSnapshot): { peer: string; payload: unknown } | undefined {
+function buildPeerTerminalEvent(cardId: number, decisionId: string, kind: "completed" | "failed", summary: string, caseSnapshot?: ReviewCaseSnapshot, failureReason?: string): { peer: string; payload: unknown } | undefined {
   try {
     const { kanbanGetCard } = require("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
     const card = kanbanGetCard(cardId);
@@ -17,8 +17,18 @@ function buildPeerAcceptanceEvent(cardId: number, acceptanceId: string, synthesi
     const contributionRef = typeof notes.contribution_ref === "string" ? notes.contribution_ref : undefined;
     if (!requestId || !contributionRef) return undefined;
 
-    const projection: ContributionProjectionV1 | undefined = caseSnapshot && buildTerminalProjection(caseSnapshot, card.source_peer, acceptanceId, synthesis);
-    const eventId = `accept_${requestId}_${contributionRef}_${acceptanceId.replace(/[^a-zA-Z0-9]/g, "_")}`.slice(0, 128);
+    // #1618: the projection's receiver_peer must be the RECEIVER's own logical
+    // name (the sender of this event). The requester's reducer compares it
+    // against the sender's name as it knows it — card.source_peer is the
+    // requester's name and would always mismatch on a real two-node topology.
+    let receiverPeer = card.source_peer;
+    try {
+      const { loadPeerConfig } = require("../peer-config.js") as typeof import("../peer-config.js");
+      receiverPeer = loadPeerConfig().self.name;
+    } catch { /* keep source_peer fallback */ }
+
+    const projection: ContributionProjectionV1 | undefined = caseSnapshot && buildTerminalProjection(caseSnapshot, receiverPeer, decisionId, summary, kind, failureReason);
+    const eventId = `${kind === "completed" ? "accept" : "fail"}_${requestId}_${contributionRef}_${decisionId.replace(/[^a-zA-Z0-9]/g, "_")}`.slice(0, 128);
 
     return {
       peer: card.source_peer,
@@ -28,9 +38,9 @@ function buildPeerAcceptanceEvent(cardId: number, acceptanceId: string, synthesi
         sequence: 0,
         request_id: requestId,
         contribution_ref: contributionRef,
-        kind: "completed",
+        kind,
         occurred_at: new Date().toISOString(),
-        summary: synthesis.slice(0, 1000),
+        summary: summary.slice(0, 1000),
         projection,
       },
     };
@@ -39,28 +49,31 @@ function buildPeerAcceptanceEvent(cardId: number, acceptanceId: string, synthesi
   }
 }
 
-function buildTerminalProjection(snapshot: ReviewCaseSnapshot, receiverPeer: string, acceptanceId: string, synthesis: string): ContributionProjectionV1 {
+function buildTerminalProjection(snapshot: ReviewCaseSnapshot, receiverPeer: string, decisionId: string, summary: string, kind: "completed" | "failed", failureReason?: string): ContributionProjectionV1 {
   const MAX_EVIDENCE_ITEMS = 20;
   const MAX_EVIDENCE_ID_LENGTH = 128;
   const evidence: Array<{ id: string; kind: string; summary: string; observed_by: string }> = [];
-  for (const ci of snapshot.criterion_inputs) {
-    for (const eid of ci.observed_evidence_ids.slice(0, MAX_EVIDENCE_ITEMS)) {
-      evidence.push({ id: eid.slice(0, MAX_EVIDENCE_ID_LENGTH), kind: "check", summary: "observed", observed_by: receiverPeer.slice(0, 64) });
-    }
-    for (const eid of ci.artifact_observation_ids.slice(0, MAX_EVIDENCE_ITEMS)) {
-      evidence.push({ id: eid.slice(0, MAX_EVIDENCE_ID_LENGTH), kind: "artifact", summary: "present", observed_by: receiverPeer.slice(0, 64) });
+  if (kind === "completed") {
+    for (const ci of snapshot.criterion_inputs) {
+      for (const eid of ci.observed_evidence_ids.slice(0, MAX_EVIDENCE_ITEMS)) {
+        evidence.push({ id: eid.slice(0, MAX_EVIDENCE_ID_LENGTH), kind: "check", summary: "observed", observed_by: receiverPeer.slice(0, 64) });
+      }
+      for (const eid of ci.artifact_observation_ids.slice(0, MAX_EVIDENCE_ITEMS)) {
+        evidence.push({ id: eid.slice(0, MAX_EVIDENCE_ID_LENGTH), kind: "artifact", summary: "present", observed_by: receiverPeer.slice(0, 64) });
+      }
     }
   }
+  const failureSuffix = kind === "failed" && failureReason ? `\nReason: ${failureReason}` : "";
   return {
     schema_version: 1,
-    outcome: "completed",
-    summary: synthesis.slice(0, 1000),
+    outcome: kind,
+    summary: (summary + failureSuffix).slice(0, 1000),
     evidence: evidence.slice(0, MAX_EVIDENCE_ITEMS),
     artifacts: [],
     provenance: {
       receiver_peer: receiverPeer,
       receiver_project_ref: snapshot.root_contract?.id?.slice(0, 128) ?? `project_${snapshot.project_card_id}`,
-      acceptance_id: acceptanceId,
+      acceptance_id: decisionId,
       accepted_at: new Date().toISOString(),
     },
   };
@@ -181,12 +194,15 @@ export class ProjectReviewService {
       const { total, requestId } = this.store.incrementInvalidProposals(decision.review_case_id);
       if (total >= MAX_INVALID_PROPOSALS && requestId) {
         const cardId = decision.project_card_id;
-        const { decisionId } = this.store.settleBlocked(cardId, decision.review_case_id, { action: "blocked", reason: "Exceeded max invalid proposals" }, `Exceeded ${MAX_INVALID_PROPOSALS} invalid proposals`);
+        // #1618: invalid-proposal exhaustion is a failed terminal settlement.
+        const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
+        const peerEvent = buildPeerTerminalEvent(cardId, decisionId, "failed", `Project blocked after ${total} invalid proposals`, caseSnapshot);
+        const { decisionId: settledId } = this.store.settleBlocked(cardId, decision.review_case_id, { action: "blocked", reason: "Exceeded max invalid proposals" }, `Exceeded ${MAX_INVALID_PROPOSALS} invalid proposals`, peerEvent, decisionId);
         this.store.markReviewRequestSettled(requestId);
         try { nerve.fire("card:failed", cardId); } catch {}
         return {
           kind: "blocked_invalid",
-          decisionId,
+          decisionId: settledId,
           summary: `Project blocked after ${total} invalid proposals`,
         };
       }
@@ -206,7 +222,7 @@ export class ProjectReviewService {
         const deliveredSynthesis = renderAcceptedSynthesis(decision, caseSnapshot);
         // Atomic settlement: decision + supervision + kanban in one transaction
         const acceptanceId = `rd_settle_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-        const peerEvent = buildPeerAcceptanceEvent(cardId, acceptanceId, deliveredSynthesis, caseSnapshot);
+        const peerEvent = buildPeerTerminalEvent(cardId, acceptanceId, "completed", deliveredSynthesis, caseSnapshot);
         const { decisionId } = this.store.settleAcceptance(
           cardId,
           decision.review_case_id,
@@ -248,18 +264,24 @@ export class ProjectReviewService {
 
       case "blocked": {
         const blocker = decision.blocker!;
+        // #1618: a blocked receiver settlement emits a FAILED terminal event —
+        // never false success — in the same transaction as the settlement.
+        const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
+        const peerEvent = buildPeerTerminalEvent(cardId, decisionId, "failed", `Project blocked: ${blocker.blocker_class}`, caseSnapshot);
         // Atomic settlement: decision + supervision + kanban in one transaction
-        const { decisionId } = this.store.settleBlocked(
+        const { decisionId: settledId } = this.store.settleBlocked(
           cardId,
           decision.review_case_id,
           decision,
           blocker.blocker_class,
+          peerEvent,
+          decisionId,
         );
         // Fire events after commit
         try { nerve.fire("card:failed", cardId); } catch {}
         return {
           kind: "blocked",
-          decisionId,
+          decisionId: settledId,
           summary: `Project blocked: ${blocker.blocker_class}`,
         };
       }

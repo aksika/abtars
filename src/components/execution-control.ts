@@ -207,14 +207,13 @@ function cardHasSupervision(cardId: number): boolean {
 }
 
 /**
- * #1546 R1/R6: true for a root card carrying the durable scheduled-project
- * identity (type O, no parent, task source, non-empty source_id) with a
- * non-terminal `project_supervision` row. Such a root must never be dispatched
- * as a legacy Spin `O`; the Reconciler driver owns its continuation.
+ * #1618: source-neutral supervised-root identity — any root card (type O, no
+ * parent) with a non-terminal `project_supervision` row. Supervised roots are
+ * owned by the Orc/Reconciler driver and must never be dispatched by the
+ * legacy Spin drain, regardless of how they were admitted.
  */
-function isActiveScheduledProjectRoot(card: KanbanCard): boolean {
+function isSupervisedRootIdentity(card: KanbanCard): boolean {
   if (card.type !== "O" || card.parent_id !== null) return false;
-  if (card.source !== "task" || !card.source_id || card.source_id.length === 0) return false;
   try {
     return new ProjectReviewStore().hasActiveProjectSupervision(card.id);
   } catch {
@@ -273,9 +272,10 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
   function drainLegacyQueued(dispatch: (request: SpinRequest) => void): void {
     const queued = kanbanQueuedDispatchOrder();
     for (const card of queued) {
-      // #1364/#1546: Supervised cards (Worker children or active scheduled
-      // project roots) go through Reconciler — skip them here
-      if (cardHasSupervision(card.id) || isActiveScheduledProjectRoot(card)) continue;
+      // #1364/#1546/#1618: Supervised cards (Worker children or any actively
+      // supervised project root — scheduled, peer, CLI) go through the
+      // Reconciler/Orc coordinator — skip them here
+      if (cardHasSupervision(card.id) || isSupervisedRootIdentity(card)) continue;
       // #677: respect DAG dependencies
       if (!isUnblocked(card)) continue;
       // #1327: validate card.type is a real SessionType BEFORE dispatching.

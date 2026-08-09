@@ -573,6 +573,11 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   function fakeCoordinator(claims: Array<{ projectCardId: number; goal: string }>) {
     mod.setOrcCoordinator({
+      scheduleContractAuthoring: (projectCardId: number) => {
+        claims.push({ projectCardId, goal: "contract_authoring" });
+        getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
+        return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
+      },
       scheduleScheduledProject: (projectCardId: number, goal: string) => {
         claims.push({ projectCardId, goal });
         // a real claim creates the durable live Orc row the next pass observes
@@ -647,17 +652,47 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     expect(kanbanFailMock).not.toHaveBeenCalled();
   });
 
-  it("leaves an unrelated parentless queued card on the legacy path", async () => {
+  it("leaves an unrelated parentless queued card without supervision on the legacy path", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
     fakeCoordinator(claims);
     kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued", type: "O", source: "agent", next_retry_at: new Date(Date.now() - 1000).toISOString() }));
-    reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(true);
+    reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(false);
 
     mod.requestReconcile(1);
     await flush();
 
     expect(claims).toHaveLength(0);
     expect(kanbanPromoteDueRetryMock).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("#1618 routes a queued supervised peer root to the Orc coordinator, never the legacy drain", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued", type: "O", source: "peer", source_id: "req_1", next_retry_at: null }));
+    reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(true);
+    reviewStoreMock.contractExists.mockReturnValue(false);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    // the awaiting-contract authoring claim is owned by the coordinator
+    expect(claims).toHaveLength(1);
+    expect(claims[0]!.projectCardId).toBe(1);
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("#1618 does not silently adopt a peer root without supervision", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued", type: "O", source: "peer", source_id: "req_2", next_retry_at: null }));
+    reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(false);
+    reviewStoreMock.contractExists.mockReturnValue(false);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(claims).toHaveLength(0);
     expect(dispatchMock).not.toHaveBeenCalled();
   });
 

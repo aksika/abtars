@@ -236,12 +236,42 @@ function isScheduledProjectRoot(card: KanbanCard): boolean {
   }
 }
 
+/**
+ * #1618: source-neutral supervised-root identity — any root card (type O, no
+ * parent) with a non-terminal `project_supervision` row. This is the ownership
+ * gate for the Orc/Reconciler supervised lifecycle, independent of how the
+ * root was admitted (scheduled task, peer contribution, CLI project). Source
+ * alone is not supervision; scheduled-task behavior remains gated by
+ * `isScheduledRootIdentity`.
+ */
+function isSupervisedRootIdentity(card: KanbanCard): boolean {
+  if (card.type !== "O" || card.parent_id !== null) return false;
+  try {
+    return new ProjectReviewStore().hasActiveProjectSupervision(card.id);
+  } catch {
+    return false;
+  }
+}
+
 /** #1546 R2: the queued due check uses the durable retry marker, never card age. */
 function isRetryDue(card: KanbanCard, now?: number): boolean {
   if (!card.next_retry_at) return false;
   const t = Date.parse(card.next_retry_at);
   const nowVal = now ?? Date.now();
   return Number.isFinite(t) && t <= nowVal;
+}
+
+/**
+ * #1618: the reconcile driver's entry gate. Running roots always reconcile;
+ * queued roots reconcile when they are a scheduled project whose durable retry
+ * is due, or a peer/CLI supervised root that was event-woken at admission.
+ */
+function isProjectReconcileEligible(project: KanbanCard): boolean {
+  if (project.status === "running") return true;
+  if (project.status !== "queued") return false;
+  if (isScheduledProjectRoot(project) && isRetryDue(project)) return true;
+  if (isSupervisedRootIdentity(project) && !isScheduledRootIdentity(project)) return true;
+  return false;
 }
 
 async function deriveAction(cardId: number): Promise<void> {
@@ -258,6 +288,12 @@ async function deriveAction(cardId: number): Promise<void> {
       return;
     }
     if (card.status === "queued" && isScheduledProjectRoot(card) && isRetryDue(card)) {
+      await reconcileProject(cardId);
+      return;
+    }
+    // #1618: peer/CLI supervised roots are event-woken (admission fires
+    // card:queued after commit) and reconcile without a scheduled retry gate.
+    if (card.status === "queued" && isSupervisedRootIdentity(card) && !isScheduledRootIdentity(card)) {
       await reconcileProject(cardId);
       return;
     }
@@ -383,18 +419,18 @@ function inspectProjectOwnership(projectId: number, supervision: ProjectSupervis
  * #1546: the running root's no-owner path. Only a non-terminal project with no
  * resumable owner and no claimable continuation reaches last-resort settlement.
  */
-function claimScheduledContinuation(projectId: number, _supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, project: KanbanCard): "owned" | "settled" {
+function claimOrcContinuation(projectId: number, _supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, project: KanbanCard): "owned" | "settled" {
   const coordinator = getOrCreateOrcCoordinator();
   if (!coordinator) {
     logWarn(TAG, `Project ${projectId}: Orc coordinator unavailable — settling as last resort`);
     settleProjectLastResort(projectId);
     return "settled";
   }
-  // The goal is the root card's durable scheduled goal when available,
+  // The goal is the root card's durable goal when available,
   // otherwise a bounded continuation instruction naming the card and run.
   const goal = project.goal && project.goal.trim().length > 0
     ? project.goal
-    : `[CONTINUATION] Scheduled project #${projectId}, run ${project.source_id ?? "unknown"}: inspect the existing project contract and durable project rows and resume the supervised lifecycle from its current durable state (spawn pending Workers, complete the review, or settle). Do not re-author the contract.`;
+    : `[CONTINUATION] Supervised project #${projectId}, run ${project.source_id ?? "unknown"}: inspect the existing project contract and durable project rows and resume the supervised lifecycle from its current durable state (spawn pending Workers, complete the review, or settle). Do not re-author the contract.`;
 
   const result = coordinator.scheduleScheduledProject(projectId, goal);
   switch (result.kind) {
@@ -745,11 +781,11 @@ function settleCoverageBlocked(projectId: number, reviewStore: ProjectReviewStor
   logWarn(TAG, `Project ${projectId}: coverage gate blocked — ${reason}`);
 }
 
-/** #1604/#1605: dispatch the Orc coverage turn — coordinator for scheduled roots, legacy dispatch otherwise. */
+/** #1604/#1605: dispatch the Orc coverage turn — coordinator for supervised roots, legacy dispatch otherwise. */
 function dispatchCoverageRound(projectId: number, uncovered: readonly string[]): void {
-  const goal = `[COVERAGE GAP] Scheduled project #${projectId}: delegated root criteria ${uncovered.join(", ")} have no Worker mapped to them. Spawn a Worker to map any that should be delegated, or leave the gap for the imminent quality review if it cannot or should not be covered (e.g. the evidence came from another lane, or the criterion is being covered by Orc synthesis). Never spawn a Worker for Orc-owned criteria. Do not re-author the contract. Do not write the final report artifact yet.`;
+  const goal = `[COVERAGE GAP] Supervised project #${projectId}: delegated root criteria ${uncovered.join(", ")} have no Worker mapped to them. Spawn a Worker to map any that should be delegated, or leave the gap for the imminent quality review if it cannot or should not be covered (e.g. the evidence came from another lane, or the criterion is being covered by Orc synthesis). Never spawn a Worker for Orc-owned criteria. Do not re-author the contract. Do not write the final report artifact yet.`;
   const card = kanbanGetCard(projectId);
-  if (card && isScheduledProjectRoot(card)) {
+  if (card && isSupervisedRootIdentity(card)) {
     const coordinator = getOrCreateOrcCoordinator();
     if (!coordinator) {
       logWarn(TAG, `Project ${projectId}: Orc coordinator unavailable for coverage round — waiting for the next wake`);
@@ -833,7 +869,7 @@ async function createReviewCase(projectId: number, supervision: ProjectSupervisi
 async function reconcileProject(projectId: number): Promise<void> {
   let project = kanbanGetCard(projectId);
   if (!project) return;
-  if (project.status !== "running" && !(project.status === "queued" && isScheduledProjectRoot(project) && isRetryDue(project))) return;
+  if (!isProjectReconcileEligible(project)) return;
 
   const reviewStore = new ProjectReviewStore();
   const hasRootContract = reviewStore.contractExists(projectId);
@@ -862,6 +898,9 @@ async function reconcileProject(projectId: number): Promise<void> {
       if (isScheduledRootIdentity(project)) {
         const owned = scheduleContractAuthoringOrSettle(projectId);
         if (project.status === "queued" && owned) kanbanPromoteDueRetry(projectId);
+      } else if (isSupervisedRootIdentity(project)) {
+        // #1618: peer/CLI supervised roots use the same durable Orc coordinator.
+        scheduleContractAuthoringOrSettle(projectId);
       } else {
         legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
       }
@@ -870,6 +909,9 @@ async function reconcileProject(projectId: number): Promise<void> {
       if (isScheduledRootIdentity(project)) {
         const owned = scheduleContractAuthoringOrSettle(projectId);
         if (project.status === "queued" && owned) kanbanPromoteDueRetry(projectId);
+      } else if (isSupervisedRootIdentity(project)) {
+        // #1618: peer/CLI supervised roots use the same durable Orc coordinator.
+        scheduleContractAuthoringOrSettle(projectId);
       } else {
         legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
       }
@@ -895,6 +937,9 @@ async function reconcileProject(projectId: number): Promise<void> {
     if (isScheduledRootIdentity(project)) {
       const owned = scheduleContractAuthoringOrSettle(projectId);
       if (project.status === "queued" && owned) kanbanPromoteDueRetry(projectId);
+    } else if (isSupervisedRootIdentity(project)) {
+      // #1618: peer/CLI supervised roots use the same durable Orc coordinator.
+      scheduleContractAuthoringOrSettle(projectId);
     } else {
       legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
       if (project.status === "queued") kanbanPromoteDueRetry(projectId);
@@ -906,7 +951,7 @@ async function reconcileProject(projectId: number): Promise<void> {
   for (let pass = 0; pass < 4; pass++) {
     project = kanbanGetCard(projectId);
     if (!project) return;
-    if (project.status !== "running" && !(project.status === "queued" && isScheduledProjectRoot(project) && isRetryDue(project))) return;
+    if (!isProjectReconcileEligible(project)) return;
 
     const supervision = reviewStore.getSupervision(projectId);
     if (!supervision) return;
@@ -922,7 +967,7 @@ async function reconcileProject(projectId: number): Promise<void> {
       // A crash between the Orc claim and the card write leaves queued+due,
       // which the next wake observes as already owned and promotes.
       if (inspectProjectOwnership(projectId, supervision, reviewStore) === "none") {
-        if (claimScheduledContinuation(projectId, supervision, reviewStore, project) === "settled") return;
+        if (claimOrcContinuation(projectId, supervision, reviewStore, project) === "settled") return;
       }
       if (!kanbanPromoteDueRetry(projectId)) return; // lost the conditional race — next wake re-reads
       continue;
@@ -953,14 +998,15 @@ async function reconcileProject(projectId: number): Promise<void> {
         await createReviewCase(projectId, supervision, reviewStore, 1);
         return;
       case "none":
-        // #1546: the scheduled Orc continuation and last-resort settlement
-        // apply to scheduled roots only; generic unscheduled O cards retain
-        // their current fallback behavior (no claim, no freeze).
-        if (!isScheduledProjectRoot(project)) return;
+        // #1546/#1618: the Orc continuation claim and last-resort settlement
+        // apply to supervised roots (scheduled, peer, and CLI projects).
+        // Generic unscheduled O cards without supervision retain their current
+        // fallback behavior (no claim, no freeze).
+        if (!isScheduledProjectRoot(project) && !isSupervisedRootIdentity(project)) return;
         // At most one correlated claim per wake: the coordinator's live row
         // (or a re-derived owner) is re-read on the next wake. The queued
         // branch promotes first and continues so the state owner still runs.
-        if (claimScheduledContinuation(projectId, supervision, reviewStore, project) === "settled") return;
+        if (claimOrcContinuation(projectId, supervision, reviewStore, project) === "settled") return;
         return; // the claim (or its re-derived owner) now owns the project
     }
   }

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { PeerHelpRequestV1 } from "./contract.js";
 
 const mockReserve = vi.hoisted(() => vi.fn());
@@ -11,6 +11,11 @@ const mockGetPublicStatus = vi.hoisted(() => vi.fn());
 const mockRecordContributionEvent = vi.hoisted(() => vi.fn());
 const mockKanbanList = vi.hoisted(() => vi.fn(() => []));
 const mockPiLedgerReserve = vi.hoisted(() => vi.fn());
+const mockRequestReconcile = vi.hoisted(() => vi.fn());
+
+vi.mock("../reconciler.js", () => ({
+  requestReconcile: mockRequestReconcile,
+}));
 
 vi.mock("../peer-config.js", () => ({
   loadPeerConfig: () => ({
@@ -210,5 +215,161 @@ describe("PeerHelpService — handleHelpWithdraw", () => {
     });
     expect(resp.acknowledged).toBe(true);
     expect(mockRecordWithdrawal).toHaveBeenCalledWith("kp", "req1", "help_abc");
+  });
+});
+
+describe("PeerHelpService — terminal reduction wakes (#1618)", () => {
+  let contributionStore: any;
+  let svc: import("./service.js").PeerHelpService;
+  let db: import("better-sqlite3").Database;
+
+  beforeEach(async () => {
+    const { resolveNativeDep } = await import("../../utils/lazy-require.js") as typeof import("../../utils/lazy-require.js");
+    const Database = resolveNativeDep("better-sqlite3");
+    db = new Database(":memory:");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS kanban_board (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        source TEXT NOT NULL,
+        source_id TEXT,
+        priority TEXT NOT NULL DEFAULT 'MEDIUM',
+        status TEXT NOT NULL DEFAULT 'queued',
+        type TEXT,
+        goal TEXT,
+        notes TEXT,
+        parent_id INTEGER,
+        delivery_mode TEXT DEFAULT 'deliver',
+        source_peer TEXT,
+        result_summary TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    const wrapper = {
+      prepare: (sql: string) => {
+        const stmt = db.prepare(sql);
+        return {
+          run: (...p: unknown[]) => stmt.run(...p),
+          get: (...p: unknown[]) => stmt.get(...p) as Record<string, unknown> | undefined,
+          all: (...p: unknown[]) => stmt.all(...p) as Record<string, unknown>[],
+        };
+      },
+      exec: (sql: string) => db.exec(sql),
+      transaction: <T>(fn: () => T): T => db.transaction(fn)(),
+    };
+    const { ContributionStore } = await import("./contribution-store.js");
+    const proxyUpdates: string[] = [];
+    contributionStore = new ContributionStore(wrapper as any, {
+      kanbanGetCard: (id: number) => db.prepare("SELECT id, status, result_summary, error FROM kanban_board WHERE id = ?").get(id) as any,
+      kanbanUpdate: (id: number, updates: Record<string, unknown>) => {
+        const sets = Object.keys(updates).map(k => `${k} = ?`).join(", ");
+        db.prepare(`UPDATE kanban_board SET ${sets} WHERE id = ?`).run(...Object.values(updates), id);
+        proxyUpdates.push(`update:${id}`);
+      },
+      kanbanComplete: (id: number, _r: string | null, summary: string) => {
+        db.prepare(`UPDATE kanban_board SET status = 'done', result_summary = ? WHERE id = ?`).run(summary, id);
+        proxyUpdates.push(`complete:${id}`);
+      },
+      kanbanFail: (id: number, error: string) => {
+        db.prepare(`UPDATE kanban_board SET status = 'failed', error = ? WHERE id = ?`).run(error, id);
+        proxyUpdates.push(`fail:${id}`);
+      },
+    });
+    const { PeerHelpService } = await import("./service.js");
+    svc = new PeerHelpService({} as any, () => []);
+    svc.setContributionStore(contributionStore);
+    mockRequestReconcile.mockClear();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function terminalEvent(ref: string, overrides: Record<string, unknown> = {}) {
+    return {
+      version: 1 as const,
+      event_id: "evt_term_1",
+      sequence: 1,
+      request_id: "r1",
+      contribution_ref: ref,
+      kind: "completed" as const,
+      occurred_at: new Date().toISOString(),
+      summary: "peer finished",
+      projection: {
+        schema_version: 1,
+        outcome: "completed",
+        summary: "peer finished",
+        evidence: [],
+        artifacts: [],
+        provenance: { receiver_peer: "kp", receiver_project_ref: "pc_1", acceptance_id: "rd_1", accepted_at: new Date().toISOString() },
+      },
+      ...overrides,
+    };
+  }
+
+  it("applies the terminal event and wakes the linked parent exactly once", async () => {
+    contributionStore.reserveProxy({
+      peer: "kp", requestId: "r1", requestHash: "h1", projectCardId: 77, proxyCardId: 5,
+      title: "t", goal: "g", priority: "MEDIUM", sourcePeer: "kp", notes: {},
+    });
+    const row = contributionStore.getContribution("kp", "r1");
+    contributionStore.transitionToAccepted("kp", "r1");
+
+    const result = await svc.handleContributionEvent("kp", terminalEvent(row!.contribution_ref));
+    expect(result.ok).toBe(true);
+    expect(mockRequestReconcile).toHaveBeenCalledTimes(1);
+    expect(mockRequestReconcile).toHaveBeenCalledWith(77);
+    expect(contributionStore.getContribution("kp", "r1")!.state).toBe("completed");
+  });
+
+  it("does not wake the parent on duplicate replay", async () => {
+    contributionStore.reserveProxy({
+      peer: "kp", requestId: "r1", requestHash: "h1", projectCardId: 77, proxyCardId: 5,
+      title: "t", goal: "g", priority: "MEDIUM", sourcePeer: "kp", notes: {},
+    });
+    const row = contributionStore.getContribution("kp", "r1");
+    contributionStore.transitionToAccepted("kp", "r1");
+    const evt = terminalEvent(row!.contribution_ref);
+
+    expect((await svc.handleContributionEvent("kp", evt)).ok).toBe(true);
+    expect((await svc.handleContributionEvent("kp", evt)).ok).toBe(true);
+    expect(mockRequestReconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a conflicting second terminal event without mutation or wake", async () => {
+    contributionStore.reserveProxy({
+      peer: "kp", requestId: "r1", requestHash: "h1", projectCardId: 77, proxyCardId: 5,
+      title: "t", goal: "g", priority: "MEDIUM", sourcePeer: "kp", notes: {},
+    });
+    const row = contributionStore.getContribution("kp", "r1");
+    contributionStore.transitionToAccepted("kp", "r1");
+
+    expect((await svc.handleContributionEvent("kp", terminalEvent(row!.contribution_ref))).ok).toBe(true);
+    const conflicting = terminalEvent(row!.contribution_ref, { event_id: "evt_term_2", sequence: 2 });
+    expect((await svc.handleContributionEvent("kp", conflicting)).ok).toBe(false);
+    expect(mockRequestReconcile).toHaveBeenCalledTimes(1);
+    const events = db.prepare("SELECT COUNT(*) as cnt FROM peer_contribution_events").get() as any;
+    expect(events.cnt).toBe(1);
+  });
+
+  it("rejects an event whose provenance names a different receiver", async () => {
+    contributionStore.reserveProxy({
+      peer: "kp", requestId: "r1", requestHash: "h1", projectCardId: 77, proxyCardId: 5,
+      title: "t", goal: "g", priority: "MEDIUM", sourcePeer: "kp", notes: {},
+    });
+    const row = contributionStore.getContribution("kp", "r1");
+    contributionStore.transitionToAccepted("kp", "r1");
+
+    const foreign = terminalEvent(row!.contribution_ref, {
+      projection: {
+        schema_version: 1, outcome: "completed", summary: "x", evidence: [], artifacts: [],
+        provenance: { receiver_peer: "other", receiver_project_ref: "pc_9", acceptance_id: "rd_9", accepted_at: new Date().toISOString() },
+      },
+    });
+    expect((await svc.handleContributionEvent("kp", foreign)).ok).toBe(false);
+    expect(mockRequestReconcile).not.toHaveBeenCalled();
+    expect(contributionStore.getContribution("kp", "r1")!.state).toBe("accepted");
   });
 });

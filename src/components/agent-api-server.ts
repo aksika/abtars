@@ -162,6 +162,16 @@ export class AgentApiServer {
     this.peerHelpService = service;
   }
 
+  /**
+   * #1618 — Wire the requester contribution service for /v1/orc/delegate.
+   * Defaults to a production instance; tests inject a deterministic one.
+   */
+  private requesterContributionService: import("./peer-help/requester-contribution-service.js").RequesterContributionService | null = null;
+
+  setRequesterContributionService(service: import("./peer-help/requester-contribution-service.js").RequesterContributionService): void {
+    this.requesterContributionService = service;
+  }
+
   async start(): Promise<void> {
     // #972: WebSocket server for persistent peer connections
     const { WebSocketServer } = await import("ws");
@@ -697,19 +707,37 @@ export class AgentApiServer {
       }
       if (url === "/v1/orc/delegate" && method === "POST") {
         const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
-        const { peer, goal } = body as { peer?: string; goal?: string };
+        const { peer, goal, title } = body as { peer?: string; goal?: string; title?: string; request_id?: string };
         if (!peer || !goal) { res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: "peer and goal required" })); return; }
-        const { getPeerTransport } = await import("./peer-transport/index.js");
-        const transport = getPeerTransport();
-        const response = await transport.askHelp(peer, {
-          version: 1,
-          request_id: `orc_${Date.now()}`,
-          created_at: new Date().toISOString(),
-          expires_at: new Date(Date.now() + 300_000).toISOString(),
-          goal,
-          required_capabilities: [],
+        const requestId = typeof body.request_id === "string" && body.request_id.length > 0 ? body.request_id : `orc_${Date.now()}`;
+        // #1618: the CLI delegate route now runs the full requester lifecycle —
+        // durable root + supervision + contribution proxy + ledger before any
+        // network I/O, with the shared RequesterContributionService.
+        const { RequesterContributionService } = await import("./peer-help/requester-contribution-service.js");
+        const service = this.requesterContributionService ?? new RequesterContributionService();
+        const result = await service.delegate({
+          peer,
+          request: {
+            version: 1,
+            request_id: requestId,
+            created_at: new Date().toISOString(),
+            expires_at: new Date(Date.now() + 300_000).toISOString(),
+            goal,
+            priority: (body.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW") ?? "MEDIUM",
+            required_capabilities: [],
+          },
+          binding: { kind: "create_cli_project", title: title ?? `[delegate:${peer}] ${goal.slice(0, 80)}`, goal },
         });
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result: `Asked ${peer} for help — ${response.decision}${response.contribution_ref ? ` ref=${response.contribution_ref}` : ""}` }));
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+          ok: true,
+          decision: result.decision,
+          project_card_id: result.projectCardId,
+          proxy_card_id: result.proxyCardId,
+          request_id: result.requestId,
+          contribution_ref: result.contributionRef,
+          reason_code: result.response?.reason_code,
+          reason: result.response?.reason,
+        }));
         return;
       }
       res.writeHead(404).end();

@@ -54,6 +54,11 @@ interface NerveEmitter {
   fire(event: "card:queued" | "card:running" | "card:done" | "card:failed" | "card:delivered", cardId: number): void;
 }
 
+/** #1618: database-only receiver project admission. No Nerve/Spin/network/timer side effects. */
+interface ReceiverProjectAdmission {
+  ensureAwaitingContract(projectCardId: number): boolean;
+}
+
 interface Db {
   prepare(sql: string): {
     run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
@@ -68,11 +73,13 @@ export class PeerHelpStore {
   private db: Db;
   private kanban: KanbanBoard;
   private nerve: NerveEmitter;
+  private admission?: ReceiverProjectAdmission;
 
-  constructor(db: Db, kanban: KanbanBoard, nerve: NerveEmitter) {
+  constructor(db: Db, kanban: KanbanBoard, nerve: NerveEmitter, admission?: ReceiverProjectAdmission) {
     this.db = db;
     this.kanban = kanban;
     this.nerve = nerve;
+    this.admission = admission;
     this.migrate();
   }
 
@@ -169,6 +176,11 @@ export class PeerHelpStore {
 
       const cardId = Number(insert.lastInsertRowid);
       if (!cardId) throw new Error("Failed to insert help card");
+
+      // #1618: admit the receiver-owned project in the same transaction so the
+      // peer root is supervised from birth — no window where the card exists
+      // without its awaiting_contract supervision row.
+      this.admission?.ensureAwaitingContract(cardId);
 
       this.db.prepare(
         `UPDATE peer_help_requests
