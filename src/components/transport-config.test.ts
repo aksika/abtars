@@ -11,9 +11,10 @@
 //      Requires Telegram API mock.
 //   Deferred: develop when mock-fs infrastructure or integration harness is in place.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { resolveAgent, resolveHailMary, getEnvFallback, clearTransportCache, validateTransportConfig, validateRouteProvidersReady, writeTransportConfig } from "./transport-config.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { resolveAgent, resolveHailMary, getEnvFallback, clearTransportCache, validateTransportConfig, validateRouteProvidersReady, writeTransportConfig, getModelsForProvider } from "./transport-config.js";
 import type { TransportConfig, ModelCatalog } from "./transport-config.js";
+import { _setWarmedForTest, _resetForTest } from "./transport/pi-catalog.js";
 
 const MODELS: ModelCatalog = {
   "claude-sonnet-4.6": { contextWindow: 1000000, maxOutput: 16384, rank: 2, cost: { input: 3.0, output: 15.0 }, transports: ["kiro-free"] },
@@ -540,5 +541,59 @@ describe("cleanDemotedModels", () => {
     cleanDemotedModels(tc);
     const tcRa = tc.routes["acp"]!;
     expect(tcRa.fallbacks).toHaveLength(2);
+  });
+});
+
+describe("getModelsForProvider — pi-catalog fallback (#1613)", () => {
+  const piList = (): Array<{ id: string; contextWindow: number; maxTokens: number; cost: { input: number; output: number } }> => [
+    { id: "deepseek-v4-flash", contextWindow: 1000000, maxTokens: 65536, cost: { input: 0.14, output: 0.28 } },
+    { id: "kimi-k3", contextWindow: 1000000, maxTokens: 32768, cost: { input: 3, output: 15 } },
+  ];
+
+  const fakePiModels = (list = piList()): unknown => ({
+    getModels: (_p?: string) => list,
+    getModel: (_p: string, id: string) => list.find(m => m.id === id) ?? null,
+  });
+
+  afterEach(() => _resetForTest());
+
+  it("returns pi models with $/token costs for a pi-mapped provider with no curated entries", () => {
+    _setWarmedForTest(fakePiModels() as never);
+    const out = getModelsForProvider("opencode-go", {});
+    expect(out.map(m => m.id)).toEqual(["deepseek-v4-flash", "kimi-k3"]); // sorted by input cost
+    const flash = out[0]!;
+    expect(flash.entry).toMatchObject({
+      contextWindow: 1000000,
+      maxOutput: 65536,
+      rank: 3,
+      transports: ["opencode-go"],
+      status: "alive",
+    });
+    // #1614: pi rates are $/1M — synthetic entries normalize to the $/token ModelCost contract.
+    expect(flash.entry.cost.input).toBe(0.14 / 1_000_000);
+    expect(flash.entry.cost.output).toBe(0.28 / 1_000_000);
+  });
+
+  it("leaves curated providers untouched even when pi is warmed", () => {
+    _setWarmedForTest(fakePiModels([...piList(), { id: "claude-sonnet-4.6", contextWindow: 1000000, maxTokens: 16384, cost: { input: 3, output: 15 } }]) as never);
+    const out = getModelsForProvider("kiro-free", MODELS);
+    expect(out.map(m => m.id)).toEqual(["claude-sonnet-4.6"]);
+    expect(out[0]!.entry.cost.input).toBe(3.0); // models.json values untouched
+  });
+
+  it("returns empty for an uncurated pi provider whose catalog exceeds the picker cap", () => {
+    const big = Array.from({ length: 60 }, (_, i) => ({ id: `m${i}`, contextWindow: 128000, maxTokens: 8192, cost: { input: 0.1, output: 0.2 } }));
+    _setWarmedForTest(fakePiModels(big) as never);
+    expect(getModelsForProvider("opencode-go", {})).toEqual([]);
+  });
+
+  it("returns curated-only on a cold cache", () => {
+    _resetForTest();
+    expect(getModelsForProvider("opencode-go", {})).toEqual([]);
+  });
+
+  it("never merges for unmapped providers", () => {
+    _setWarmedForTest(fakePiModels() as never);
+    expect(getModelsForProvider("ollama", {})).toEqual([]);
   });
 });

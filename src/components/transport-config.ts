@@ -10,7 +10,7 @@ import { abtarsHome } from "../paths.js";
 import { readEnvWithDefault } from "./env.js";
 import { getEnv } from "./env-schema.js";
 import { logDebug, logInfo, logWarn } from "./logger.js";
-import { resolveModelMeta, mapProviderName } from "./transport/pi-catalog.js";
+import { resolveModelMeta, mapProviderName, isWarmed, getWarmedModels } from "./transport/pi-catalog.js";
 
 const TAG = "transport-config";
 
@@ -1323,12 +1323,39 @@ export function loadProviderDefaults(providerName: string, tc?: TransportConfig 
 
 // ── Model helpers ───────────────────────────────────────────────────────────
 
+// #1320: Telegram picker hard cap (inline-keyboard size). Mirrors telegram-model-picker.ts.
+const PI_PICKER_CAP = 50;
+
 export function getModelsForProvider(providerName: string, models?: ModelCatalog): Array<{ id: string; entry: ModelEntry }> {
   const mc = models ?? loadModels();
-  return Object.entries(mc)
+  const curated = Object.entries(mc)
     .filter(([, entry]) => entry.transports.includes(providerName))
     .map(([id, entry]) => ({ id, entry }))
     .sort((a, b) => a.entry.rank - b.entry.rank || a.entry.cost.input - b.entry.cost.input);
+  // #1613: pi-catalog fallback for pi-mapped providers with no curated models.json
+  // entries (e.g. opencode-go). Only when the curated list is empty, the catalog is
+  // warmed, and the pi list is small — big uncurated providers stay out of the
+  // Telegram picker (#1320), and curated providers are never extended.
+  if (curated.length === 0 && mapProviderName(providerName) && isWarmed()) {
+    const pi = getWarmedModels()?.getModels(providerName) ?? [];
+    if (pi.length > 0 && pi.length <= PI_PICKER_CAP) {
+      return pi
+        .map((m) => ({
+          id: m.id,
+          entry: {
+            contextWindow: m.contextWindow,
+            maxOutput: m.maxTokens,
+            rank: 3,
+            // pi catalog costs are $/1M tokens; ModelCost is $/token — normalize.
+            cost: { input: m.cost.input / 1_000_000, output: m.cost.output / 1_000_000 },
+            transports: [providerName],
+            status: "alive" as const,
+          },
+        }))
+        .sort((a, b) => a.entry.cost.input - b.entry.cost.input);
+    }
+  }
+  return curated;
 }
 
 export function formatRank(rank: number): string {
