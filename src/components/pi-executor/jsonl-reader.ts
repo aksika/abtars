@@ -24,7 +24,7 @@ export interface JsonlReaderCallbacks {
   /** Deliver one complete, bounded record (trailing CR already stripped). */
   onRecord(record: string): void;
   /** Oversized or malformed frame dropped — bounded reason and byte count. */
-  onDiscarded(reason: "oversized" | "partial_overflow", bytes: number): void;
+  onDiscarded(reason: "oversized" | "partial_overflow" | "incomplete_at_eof", bytes: number): void;
 }
 
 export class JsonlReader {
@@ -86,7 +86,7 @@ export class JsonlReader {
   flush(): void {
     this.decoder.end();
     if (this.buffer.length > 0) {
-      this.callbacks.onDiscarded("oversized", Buffer.byteLength(this.buffer, "utf-8"));
+      this.callbacks.onDiscarded("incomplete_at_eof", Buffer.byteLength(this.buffer, "utf-8"));
     }
     this.buffer = "";
     this.discardUntilLf = false;

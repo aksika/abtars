@@ -368,8 +368,9 @@ export class PiExecutor {
       return { ...base, status: "failed", message: "Run is settling" };
     }
     const run = this.store.get(input.runId);
-    if (!run || run.status !== "running") {
-      return { ...base, status: "failed", message: `Run is ${run?.status ?? "unknown"}` };
+    if (!run || !["running", "awaiting_input"].includes(run.status)) {
+      // Idle states are compactable; starting/cancelling/terminal are not.
+      return { ...base, status: run?.status === "starting" ? "busy" : "failed", message: `Run is ${run?.status ?? "unknown"}` };
     }
     if (run.ownerPrincipalId !== input.ownerPrincipalId) {
       return { ...base, status: "failed", message: "Run belongs to a different principal" };
@@ -392,16 +393,19 @@ export class PiExecutor {
     // `compact` response is the official terminal signal; the lifecycle
     // listener cleans itself up on compaction_end or after a bounded grace.
     let compactionEnded = false;
+    let lifecycleTimer: ReturnType<typeof setTimeout> | null = null;
     const lifecycle = new Promise<void>((resolve) => {
       let unsub: (() => void) | null = null;
       unsub = owned.client.subscribe((event) => {
         if (event.type === "compaction_end") {
           compactionEnded = true;
+          if (lifecycleTimer) { clearTimeout(lifecycleTimer); lifecycleTimer = null; }
           unsub?.();
           resolve();
         }
       });
-      setTimeout(() => unsub?.(), 15_000);
+      lifecycleTimer = setTimeout(() => { lifecycleTimer = null; unsub?.(); }, 15_000);
+      if (typeof lifecycleTimer.unref === "function") lifecycleTimer.unref();
     });
 
     try {
@@ -411,6 +415,7 @@ export class PiExecutor {
         lifecycle,
         new Promise<void>(resolve => setTimeout(resolve, 10_000)),
       ]);
+      if (lifecycleTimer) { clearTimeout(lifecycleTimer); lifecycleTimer = null; }
       this.store.touchActivity(input.runId);
       if (!compactionEnded) {
         logDebug(TAG, `Run ${input.runId}: compact response ok, no compaction_end observed (${Date.now() - started}ms)`);

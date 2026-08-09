@@ -1,6 +1,7 @@
 import type { CommandContext } from "./types.js";
 import { PiRunService } from "../pi-executor/pi-run-service.js";
 import type { PiRunView, PiRunOrigin } from "../pi-executor/types.js";
+import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../compact-summarizer.js";
 
 let piService: PiRunService | null = null;
 
@@ -122,6 +123,10 @@ export async function handlePiCompact(text: string, ctx: CommandContext): Promis
     if (!parts) { await ctx.reply("Usage: /pi compact <runId> [instructions]"); return true; }
     const runId = parts[1]!;
     const instructions = parts[2]?.trim() || undefined;
+    if (instructions && Buffer.byteLength(instructions, "utf-8") > MAX_COMPACT_INSTRUCTIONS_BYTES) {
+      await ctx.reply(`Custom instructions exceed ${MAX_COMPACT_INSTRUCTIONS_BYTES} bytes.`);
+      return true;
+    }
     const view = svc.get(runId, { userId: ctx.userId });
     const result = await svc.compact(runId, instructions, { userId: ctx.userId });
     const savings = result.tokensBefore && result.tokensAfter

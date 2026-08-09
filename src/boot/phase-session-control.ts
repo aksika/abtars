@@ -21,10 +21,12 @@ export async function phaseSessionControl(ctx: BootCtx): Promise<PhaseResult> {
   const service = new SessionControlService({
     onTelemetry: (event) => {
       // #1406: feed the metrics.jsonl audit trail + latency/savings rings.
+      // Only a real failure counts as failed; busy/stale/unsupported are
+      // skipped (no work was done), nothing_to_compact is a clean no-op.
       recordCompaction({
         level: event.status === "completed" ? "completed"
-          : event.status === "nothing_to_compact" ? "skipped"
-          : "failed",
+          : event.status === "failed" ? "failed"
+          : "skipped",
         durationMs: event.durationMs,
         savingsPct: event.savingsPct,
         failureReason: event.status === "failed" ? "control_failed" : undefined,

@@ -116,7 +116,7 @@ export class DurableConversationCompactionAdapter
         ...base,
         status: "completed",
         tokensBefore: candidate.sourceTokenCount,
-        tokensAfter: commit.generation > 0 ? Math.ceil(summary.text.length / 4) : undefined,
+        tokensAfter: Math.ceil(summary.text.length / 4),
         generation: commit.generation,
         message: `Checkpoint ${commit.checkpointId} committed (generation ${commit.generation})`,
       };

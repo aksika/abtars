@@ -2,6 +2,7 @@ import { logInfo, logError } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext } from "./types.js";
 import { triggerResetSession} from "./registry.js";
+import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../compact-summarizer.js";
 
 const TAG = "cmd";
 
@@ -93,8 +94,6 @@ export function formatCompactReply(result: {
       return `Compaction failed: ${result.message.slice(0, 200)}`;
   }
 }
-
-const MAX_COMPACT_INSTRUCTIONS_BYTES = 4_000;
 
 export async function handleEmergencyAlias(_text: string, ctx: CommandContext): Promise<boolean> {
   return handleModels("/model emergency", ctx);
