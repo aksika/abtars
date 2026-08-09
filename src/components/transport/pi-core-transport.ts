@@ -444,6 +444,13 @@ export class PiCoreTransport implements IKiroTransport {
           const snap = context.executionTelemetry.snapshot();
           if (snap) this._lastUsage = snap;
         }
+        // #1612: prefer the host's captured assistant-message usage (real
+        // provider tokens) over the telemetry scope, which pi-core never
+        // populates with token counts.
+        const hostUsage = host.lastUsage;
+        if (hostUsage) {
+          this._lastUsage = hostUsage;
+        }
 
         // #1595: the terminal cause leads; a prior tool failure is supporting
         // context only. Never present a stale tool failure as the primary

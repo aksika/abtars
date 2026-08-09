@@ -34,7 +34,7 @@ import {
   type TuiClientFrame,
   type TuiServerFrame,
 } from "../../platforms/tui/tui-protocol.js";
-import { TuiApp, identityEditorTheme, type TuiPresentationModules } from "./tui-ui.js";
+import { TuiApp, nativeEditorTheme, type TuiPresentationModules } from "./tui-ui.js";
 
 /** Pretty stderr writer (no colorful emoji per abtars.md). */
 function stderr(line: string): void {
@@ -213,7 +213,7 @@ export async function tui(args: string[]): Promise<number> {
   process.stdout.on("error", () => { /* swallowed: terminal is gone */ });
   const terminal = new modules.tui.ProcessTerminal();
   const ui = new modules.tui.TUI(terminal, true);   // showHardwareCursor=true
-  const editor = new modules.tui.Editor(ui, identityEditorTheme());
+  const editor = new modules.tui.Editor(ui, nativeEditorTheme(modules.codingAgent));
 
   // Connect.
   let decoder: FrameDecoder<TuiServerFrame> | null = null;

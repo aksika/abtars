@@ -53,6 +53,7 @@ export class PiCoreExecutionHost {
   private settled = false;
   private _cleanupPromise: Promise<"complete" | "timed_out"> = Promise.resolve("complete");
   private _terminalResolve: ((value: string) => void) | null = null;
+  private _lastUsage: { input: number; output: number; cacheRead?: number; cacheWrite?: number } | null = null;
   readonly terminalPromise: Promise<string>;
   private outstandingLeases: Map<string, OutstandingLease> = new Map();
   private opts: PiCoreExecutionHostOptions;
@@ -72,6 +73,11 @@ export class PiCoreExecutionHost {
 
   get generation(): number { return this._generation; }
   get ready(): Promise<void> { return this._readyPromise; }
+
+  /** #1612: token usage captured from the terminal assistant message, if the provider reported any. */
+  get lastUsage(): { input: number; output: number; cacheRead?: number; cacheWrite?: number } | null {
+    return this._lastUsage;
+  }
 
   constructor(opts: PiCoreExecutionHostOptions) {
     this.executionId = opts.executionId;
@@ -484,10 +490,30 @@ export class PiCoreExecutionHost {
     outstanding.resolve();
   }
 
-  private handleAgentEnd(_event: Extract<AgentEvent, { type: "agent_end" }>): void {
+  private handleAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): void {
     if (this.settled) {
       logWarn(TAG, `Late agent_end rejected for execution ${this.executionId} gen=${this._generation} — already terminal`);
       return;
+    }
+    // #1612: capture the real token usage from the final assistant message so
+    // the transport can surface it to runtime status / the TUI footer. The
+    // provider's usage lives on the assistant message; zero-only usage means
+    // the provider reported none and stays null (never fabricated).
+    for (let i = event.messages.length - 1; i >= 0; i--) {
+      const msg = event.messages[i];
+      if (msg?.role === "assistant" && msg.usage) {
+        const u = msg.usage;
+        if (u.input > 0 || u.output > 0 || u.cacheRead > 0 || u.cacheWrite > 0) {
+          this._lastUsage = {
+            input: u.input,
+            output: u.output,
+            cacheRead: u.cacheRead,
+            cacheWrite: u.cacheWrite,
+          };
+          logDebug(TAG, `Captured usage for execution ${this.executionId}: in=${u.input} out=${u.output}`);
+          break;
+        }
+      }
     }
     this.terminalResolve("agent_end");
     logInfo(TAG, `Agent ended for execution ${this.executionId} gen=${this._generation}`);

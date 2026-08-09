@@ -114,6 +114,17 @@ function makeModules(): TuiPresentationModules {
     codingAgent: {
       initTheme: vi.fn(),
       getMarkdownTheme: vi.fn(() => ({})),
+      getSelectListTheme: vi.fn(() => ({
+        selectedPrefix: (s: string) => s,
+        selectedText: (s: string) => s,
+        description: (s: string) => s,
+        scrollInfo: (s: string) => s,
+        noMatch: (s: string) => s,
+      })),
+      theme: {
+        fg: (_color: string, s: string) => s,
+        bg: (_color: string, s: string) => s,
+      } as never,
       UserMessageComponent: FakeUserMessage,
       AssistantMessageComponent: FakeAssistantMessage,
       DynamicBorder: FakeDynamicBorder,

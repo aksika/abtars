@@ -106,6 +106,14 @@ function fakeModules() {
   const codingAgent = {
     initTheme: vi.fn(),
     getMarkdownTheme: vi.fn(() => ({})),
+    getSelectListTheme: vi.fn(() => ({
+      selectedPrefix: (s: string) => s,
+      selectedText: (s: string) => s,
+      description: (s: string) => s,
+      scrollInfo: (s: string) => s,
+      noMatch: (s: string) => s,
+    })),
+    theme: { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s },
     UserMessageComponent,
     AssistantMessageComponent,
     DynamicBorder,

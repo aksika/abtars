@@ -214,6 +214,39 @@ describe("PiCoreExecutionHost", () => {
     expect(onEvent).toHaveBeenCalledWith(event);
   });
 
+  it("#1612: captures real token usage from the terminal assistant message", async () => {
+    const { agent } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    await host.start(loaded).catch(() => {});
+
+    const end: AgentEvent = {
+      type: "agent_end",
+      messages: [
+        { role: "user", content: "hi", timestamp: 0 },
+        { role: "assistant", content: [{ type: "text", text: "hello" }], usage: { input: 120, output: 34, cacheRead: 0, cacheWrite: 0, totalTokens: 154, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", api: "openai-completions", provider: "x", model: "m", timestamp: 0 } as never,
+      ],
+    };
+    await (host as any).handleEvent(end);
+    expect(host.lastUsage).toEqual({ input: 120, output: 34, cacheRead: 0, cacheWrite: 0 });
+  });
+
+  it("#1612: zero-only usage is not captured (provider reported none)", async () => {
+    const { agent } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    await host.start(loaded).catch(() => {});
+
+    const end: AgentEvent = {
+      type: "agent_end",
+      messages: [
+        { role: "assistant", content: [{ type: "text", text: "hello" }], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", api: "openai-completions", provider: "x", model: "m", timestamp: 0 } as never,
+      ],
+    };
+    await (host as any).handleEvent(end);
+    expect(host.lastUsage).toBeNull();
+  });
+
   it("catches and isolates observer exceptions", async () => {
     const { agent } = makeMockAgent();
     const onEvent = vi.fn().mockRejectedValue(new Error("observer failed"));

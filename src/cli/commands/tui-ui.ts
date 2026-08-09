@@ -32,7 +32,7 @@ export interface TuiPresentationModules {
     "ProcessTerminal" | "TUI" | "Container" | "Editor" | "Text" |
     "Markdown" | "Loader" | "matchesKey">;
   codingAgent: Pick<typeof import("@earendil-works/pi-coding-agent"),
-    "initTheme" | "getMarkdownTheme" |
+    "initTheme" | "getMarkdownTheme" | "getSelectListTheme" |
     "UserMessageComponent" | "AssistantMessageComponent" | "DynamicBorder">;
 }
 
@@ -101,22 +101,23 @@ function boundText(text: string, maxBytes: number): string {
   return res;
 }
 
-/** Monochrome editor theme (border + select list) for the abtars shell.
- *  Must be passed at Editor construction — the editor renders with
- *  `theme.borderColor` and any render before the shell build crashes if it
- *  is undefined (#1612 regression: Loader construction triggers an early
- *  render). */
-export function identityEditorTheme(): import("@earendil-works/pi-tui").EditorTheme {
-  const passthrough = (s: string): string => s;
+/** Native-colored editor theme (border + select list) for the abtars shell,
+ *  built from the loaded Pi theme through PUBLIC exports only. Must be passed
+ *  at Editor construction — the editor renders with `theme.borderColor` and
+ *  any render before the shell build crashes if it is undefined (#1612
+ *  regression: Loader construction triggers an early render).
+ *
+ *  The `theme` instance is not a root export on the pinned line, so colors
+ *  come from the public theme functions: `getSelectListTheme()` for accent/
+ *  muted, and the markdown theme's `hr` (gray) as the closest public match
+ *  for the editor's `borderMuted` border. */
+export function nativeEditorTheme(
+  codingAgent: TuiPresentationModules["codingAgent"],
+): import("@earendil-works/pi-tui").EditorTheme {
+  const selectList = codingAgent.getSelectListTheme();
   return {
-    borderColor: passthrough,
-    selectList: {
-      selectedPrefix: passthrough,
-      selectedText: passthrough,
-      description: passthrough,
-      scrollInfo: passthrough,
-      noMatch: passthrough,
-    },
+    borderColor: codingAgent.getMarkdownTheme().hr,
+    selectList,
   };
 }
 
@@ -291,10 +292,13 @@ export class TuiApp {
     this._m.codingAgent.initTheme();
     this._markdownTheme = this._m.codingAgent.getMarkdownTheme();
 
+    // Pi-native colors via public theme functions: accent spinner + muted
+    // message (same functions Pi's getSelectListTheme uses).
+    const selectListTheme = this._m.codingAgent.getSelectListTheme();
     this._busy = new this._m.tui.Loader(
       this._ui,
-      (s: string) => s,
-      (s: string) => s,
+      (s: string) => selectListTheme.selectedPrefix(s),
+      (s: string) => selectListTheme.description(s),
       "Working",
       { frames: ["-", "\\", "|", "/"], intervalMs: 80 },
     );
@@ -511,7 +515,9 @@ export class TuiApp {
   private _buildShell(): void {
     const header = new this._m.tui.Container();
     const headerText = new this._m.tui.Text("", 0, 0);
-    header.addChild(new this._m.codingAgent.DynamicBorder((s: string) => s));
+    // No color argument: the DynamicBorder default is theme.fg("border", ...),
+    // matching Pi's own usage of the component.
+    header.addChild(new this._m.codingAgent.DynamicBorder());
     header.addChild(headerText);
     this._headerText = headerText;
 

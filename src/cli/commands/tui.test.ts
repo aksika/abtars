@@ -9,12 +9,13 @@
 
 import { describe, it, expect, vi } from "vitest";
 import * as piTui from "@earendil-works/pi-tui";
+import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   isTuiExitCommand,
   parseAttachMode,
   consumeServerFrames,
 } from "./tui.js";
-import { formatRuntimeStatus, identityEditorTheme } from "./tui-ui.js";
+import { formatRuntimeStatus, nativeEditorTheme } from "./tui-ui.js";
 import {
   createFrameDecoder,
   encodeFrame,
@@ -155,23 +156,36 @@ describe("Text.setText (#1423)", () => {
 
 // ── #1612: live-client crash regression (Molty `abtars tui` first paint) ──
 
-describe("identityEditorTheme (#1612)", () => {
+describe("nativeEditorTheme (#1612)", () => {
   it("constructs the real pi-tui Editor with a functional borderColor", () => {
+    const codingAgent = piTuiCodingAgent();
     const terminal = new piTui.ProcessTerminal();
     const ui = new piTui.TUI(terminal, true);
-    const editor = new piTui.Editor(ui, identityEditorTheme());
+    const editor = new piTui.Editor(ui, nativeEditorTheme(codingAgent));
     expect(typeof editor.borderColor).toBe("function");
-    expect(editor.borderColor("─")).toBe("─");
   });
 
   it("renders the editor without throwing at any width", () => {
     const terminal = new piTui.ProcessTerminal();
     const ui = new piTui.TUI(terminal, true);
-    const editor = new piTui.Editor(ui, identityEditorTheme());
+    const editor = new piTui.Editor(ui, nativeEditorTheme(piTuiCodingAgent()));
     expect(() => editor.render(40)).not.toThrow();
     expect(() => editor.render(10)).not.toThrow();
   });
+
+  it("applies the native Pi border color (not identity)", () => {
+    const codingAgent = piTuiCodingAgent();
+    const borderColor = nativeEditorTheme(codingAgent).borderColor;
+    const rendered = borderColor("─");
+    expect(rendered).not.toBe("─"); // ANSI-wrapped by theme.fg("border", ...)
+  });
 });
+
+/** The real coding-agent module, theme initialized exactly as the client does. */
+function piTuiCodingAgent(): typeof import("@earendil-works/pi-coding-agent") {
+  piCodingAgent.initTheme();
+  return piCodingAgent;
+}
 
 // ── #1400: FrameDecoder socket-data integration ────────────────────────
 
