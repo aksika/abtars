@@ -207,6 +207,10 @@ export async function tui(args: string[]): Promise<number> {
   // constructor triggers an early render — an `{}` theme crashes the first
   // paint (#1612 regression on the live client). The shell adds the editor
   // to the tree exactly once in TuiApp._buildShell.
+  // #1612: pi-tui writes to process.stdout; an abruptly-destroyed PTY emits
+  // 'error' (EIO) on it. Without a listener that becomes an unhandled crash
+  // during teardown — swallow it, the terminal is already gone.
+  process.stdout.on("error", () => { /* swallowed: terminal is gone */ });
   const terminal = new modules.tui.ProcessTerminal();
   const ui = new modules.tui.TUI(terminal, true);   // showHardwareCursor=true
   const editor = new modules.tui.Editor(ui, identityEditorTheme());
