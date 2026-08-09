@@ -14,6 +14,13 @@ const RETRY_DELAY_MS = 10 * 60 * 1000;
 const ADMISSION_MIN_DELAY_MS = 60 * 1000;
 const MAX_ADMISSION_ATTEMPTS = 5;
 
+/** #1610: shared local redact-and-bounds applied to every settlement string
+ * field. Keeps operational `detail` (500) and user-facing `deliveryText`
+ * (4,000) independently bounded inside this module only. */
+function sanitizeText(text: string | undefined, bound: number): string | undefined {
+  return text === undefined ? undefined : redactSecrets(text).slice(0, bound);
+}
+
 export type TerminalOutcome = TaskOutcome;
 
 export type SettleResult = "settled" | "late" | "duplicate";
@@ -26,6 +33,11 @@ export interface SettleOptions {
   /** #1520: structured classification carried from the failing boundary. */
   diagnostic?: TaskFailureDiagnosticV1;
   detail?: string;
+  /** #1610: bounded user-facing payload for successful scheduled one-shot
+   * announce runs. Redacted and bound to 4,000 characters independently of
+   * `detail`; populates the card's `result_summary` (precedence
+   * deliveryText -> detail -> "completed"). */
+  deliveryText?: string;
   resultPath?: string;
   cardId?: number;
   executionRef?: string;
@@ -128,9 +140,10 @@ function normalizeTerminal(
  * completion whose run has already settled is ignored.
  */
 export function settleRunOnce(opts: SettleOptions): SettleResult {
-  const { entry, run, outcome, detail, resultPath, cardId, executionRef, releaseDelivery, attachResult, onPaused, factAt } = opts;
+  const { entry, run, outcome, detail, deliveryText, resultPath, cardId, executionRef, releaseDelivery, attachResult, onPaused, factAt } = opts;
   const finishedAt = Date.now();
-  const safeDetail = detail === undefined ? undefined : redactSecrets(detail).slice(0, 500);
+  const safeDetail = sanitizeText(detail, 500);
+  const safeDeliveryText = sanitizeText(deliveryText, 4000);
 
   if (executionRef) {
     logTaskDebug("task_settlement_processing", { task: entry.id, run: run.runId, exec: executionRef }, `outcome=${outcome}`);
@@ -163,6 +176,7 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
     finishedAt,
     outcome: effectiveOutcome,
     detail: safeDetail,
+    deliveryText: safeDeliveryText,
     resultPath,
     kanbanCardId: cardId,
     groupId: run.groupId,
@@ -196,7 +210,7 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
   // run row; a late/duplicate settler never reaches here.
   setRunOutcome(run.runId, effectiveOutcome);
 
-  applyPostSettlementSideEffects({ cardId, outcome: effectiveOutcome, detail: safeDetail, resultPath, diagnostic, releaseDelivery, attachResult });
+  applyPostSettlementSideEffects({ cardId, outcome: effectiveOutcome, detail: safeDetail, deliveryText: safeDeliveryText, resultPath, diagnostic, releaseDelivery, attachResult });
 
   const nowPaused = patch.autoPaused === true;
   if (nowPaused && !wasPaused) {
@@ -226,7 +240,7 @@ export function settleRunFromHistory(entry: ScheduledTask, run: ActiveTaskRun, e
   const state = readState(entry.id);
   if (!state?.activeRun || state.activeRun.runId !== run.runId) return false;
   const diagnostic = event.diagnostic ?? synthesizeDiagnostic(event.outcome, event.detail, run.phase ?? "settling");
-  const safeDetail = event.detail === undefined ? undefined : redactSecrets(event.detail).slice(0, 500);
+  const safeDetail = sanitizeText(event.detail, 500);
   const patch = computeStatePatch(entry, run, event.outcome, diagnostic, state, event.finishedAt);
   if (!settleActiveRun(entry.id, run.runId, patch)) return false;
   setRunOutcome(run.runId, event.outcome);
@@ -235,6 +249,7 @@ export function settleRunFromHistory(entry: ScheduledTask, run: ActiveTaskRun, e
     cardId: event.kanbanCardId,
     outcome: event.outcome,
     detail: safeDetail,
+    deliveryText: sanitizeText(event.deliveryText, 4000),
     resultPath: event.resultPath,
     diagnostic,
     releaseDelivery: event.outcome === "success",
@@ -248,15 +263,19 @@ function applyPostSettlementSideEffects(opts: {
   cardId?: number;
   outcome: TerminalOutcome;
   detail?: string;
+  deliveryText?: string;
   resultPath?: string;
   diagnostic: TaskFailureDiagnosticV1;
   releaseDelivery?: boolean;
   attachResult?: boolean;
 }): void {
-  const { cardId, outcome, detail, resultPath, diagnostic, releaseDelivery, attachResult } = opts;
+  const { cardId, outcome, detail, deliveryText, resultPath, diagnostic, releaseDelivery, attachResult } = opts;
   if (cardId === undefined) return;
   if (outcome === "success" || outcome === "noop" || outcome === "skipped") {
-    const summary = detail || "completed";
+    // #1610: the user-facing payload wins when present; operational detail and
+    // the truthful fallback follow. Normal settlement and history-led repair
+    // share this one selection.
+    const summary = deliveryText || detail || "completed";
     if (attachResult && resultPath) kanbanAttachResult(cardId, resultPath, summary);
     else kanbanComplete(cardId, resultPath ?? null, summary);
     if (releaseDelivery && outcome === "success") kanbanSetDeliveryReady(cardId);

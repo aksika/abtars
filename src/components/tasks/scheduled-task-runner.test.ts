@@ -373,3 +373,94 @@ describe("ScheduledTaskRunner #1432 scheduled skill launch", () => {
     expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "definition_failed" }));
   });
 });
+
+describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedSettle.mockClear();
+  });
+
+  const LONG_RESULT = [
+    "Good morning aksika!",
+    "",
+    "The day ahead looks clear and calm: no blocked projects are waiting on you, and all scheduled tasks finished cleanly overnight.",
+    "",
+    "Your main focus today is the steering consolidation work. Take it at your own pace.",
+  ].join("\n");
+
+  it("appends the delivery contract to one-shot announce dispatch prompts", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("contract-announce"), makeReservation("contract-announce"));
+
+    expect(outcome.status).toBe("success");
+    const goal = agentRunner.mock.calls[0]![0].goal as string;
+    expect(goal).toContain("[DELIVERY CONTRACT]");
+    expect(goal).toContain("automatically delivered");
+    expect(goal).toContain("Do not call platform delivery tools");
+    expect(goal).not.toContain("Telegram");
+    expect(goal).not.toContain("DeepSeek");
+  });
+
+  it("leaves report dispatch prompts unchanged", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "report result" }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const entry = makeEntry("contract-report");
+    entry.delivery = "report";
+    entry.report = {
+      artifact: "/tmp/daily.md",
+      requiredSections: ["# Summary"],
+      minBytes: 100,
+      requires: { files: [], executables: [], tools: [] },
+    };
+    const preflightMod = await import("./task-preflight.js");
+    vi.mocked(preflightMod.preflightTask).mockReturnValue({
+      ok: true,
+      report: {
+        artifactPath: "/tmp/daily.md",
+        artifactLabel: "/tmp/daily.md",
+        requiredSections: ["# Summary"],
+        minBytes: 100,
+        requiredFiles: [],
+        executables: [],
+        tools: [],
+      },
+      artifactBaseline: { existed: false },
+    });
+    vi.mocked(preflightMod.validateReportArtifact).mockReturnValue({ ok: true, size: 1234 });
+    const outcome = await runner.run(entry, makeReservation("contract-report"));
+
+    expect(outcome.status).toBe("success");
+    const goal = agentRunner.mock.calls[0]![0].goal as string;
+    expect(goal).not.toContain("[DELIVERY CONTRACT]");
+  });
+
+  it("leaves interactive skill launch messages unchanged", async () => {
+    skillLaunch.mockResolvedValue({
+      ok: true, kind: "launched", sessionId: "s", response: "Hola!", skillName: "spanish-tutor",
+    });
+    const entry = makeEntry("contract-skill");
+    entry.interaction = { mode: "skill", skill: "spanish-tutor", target: { userId: "ada", platform: "telegram", chatId: "42" } };
+    const runner = new ScheduledTaskRunner({ agentRunner: undefined, projectRunner: undefined });
+    const outcome = await runner.run(entry, makeReservation("contract-skill"));
+
+    expect(outcome.status).toBe("success");
+    expect(skillLaunch.mock.calls[0]![0].message as string).not.toContain("[DELIVERY CONTRACT]");
+  });
+
+  it("passes the final response as deliveryText while detail stays a short prefix", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: LONG_RESULT }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("contract-long"), makeReservation("contract-long"));
+
+    expect(outcome.status).toBe("success");
+    expect(LONG_RESULT.length).toBeGreaterThan(200);
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "success",
+      cardId: 7,
+      deliveryText: LONG_RESULT,
+      detail: LONG_RESULT.slice(0, 200),
+    }));
+    expect(outcome.safeDetail).toBe(LONG_RESULT.slice(0, 200));
+  });
+});

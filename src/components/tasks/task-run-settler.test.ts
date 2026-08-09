@@ -406,3 +406,109 @@ describe("settleRunOnce failure cascade (#1588)", () => {
     expect(calls).toEqual(["supervision/lane_timed_out"]);
   });
 });
+
+describe("settleRunOnce deliveryText (#1610)", () => {
+  // Production-shaped: a multi-paragraph greeting longer than 200 characters,
+  // like the escaped Molty morning-greeting regression.
+  const GREETING = [
+    "Good morning aksika!",
+    "",
+    "The day ahead looks clear and calm: no blocked projects are waiting on you, and all scheduled tasks finished cleanly overnight.",
+    "",
+    "Your main focus today is the steering consolidation work. Take it at your own pace.",
+  ].join("\n");
+
+  function reserve(runId: string): import("./task-state-store.js").ActiveTaskRun {
+    const reserved = store.reserveRun(ENTRY.id, {
+      runId,
+      groupId: "g-dtext",
+      attempt: 1,
+      trigger: "schedule",
+      occurrenceAt: OCCURRENCE_AT,
+      deadlineAt: DEADLINE_AT,
+    });
+    if (!reserved.ok) throw new Error("reserveRun failed");
+    return reserved.run;
+  }
+
+  it("persists bounded deliveryText separately from short detail and completes the card with the user payload", async () => {
+    const { kanbanEnqueue, kanbanGetCard } = await import("./kanban-board.js");
+    const { recentRuns } = await import("./task-history-store.js");
+    const run = reserve("dtext-1");
+    const cardId = kanbanEnqueue("Morning Greeting", "task", "dtext-1");
+    const settled = settle.settleRunOnce({
+      entry: ENTRY, run, outcome: "success",
+      detail: "result for dtext-1",
+      deliveryText: GREETING,
+      cardId,
+    });
+
+    expect(settled).toBe("settled");
+    const ev = recentRuns(ENTRY.id, 5)[0]!;
+    expect(ev.deliveryText).toBe(GREETING);
+    expect(ev.detail).toBe("result for dtext-1");
+    expect(ev.detail!.length).toBeLessThanOrEqual(200);
+    // The card carries the actual user-facing result beyond character 200.
+    const card = kanbanGetCard(cardId)!;
+    expect(card.result_summary).toBe(GREETING);
+    expect(card.result_summary!.length).toBeGreaterThan(200);
+  });
+
+  it("repair from durable history reconstructs the same card summary from deliveryText", async () => {
+    const { kanbanEnqueue, kanbanGetCard } = await import("./kanban-board.js");
+    const { appendRunOnce, getRun } = await import("./task-history-store.js");
+    const run = reserve("dtext-repair");
+    const cardId = kanbanEnqueue("Morning Greeting", "task", "dtext-repair");
+    // Crash after history append, before card mutation: the durable event is
+    // authoritative, so repair must redo the card with the same payload.
+    appendRunOnce({
+      runId: run.runId,
+      taskId: ENTRY.id,
+      kind: "agent",
+      trigger: "schedule",
+      startedAt: run.reservedAt,
+      finishedAt: Date.now(),
+      outcome: "success",
+      detail: "result for dtext-repair",
+      deliveryText: GREETING,
+      kanbanCardId: cardId,
+    });
+    const repaired = settle.settleRunFromHistory(ENTRY, run, getRun(run.runId)!);
+    expect(repaired).toBe(true);
+    const card = kanbanGetCard(cardId)!;
+    expect(card.result_summary).toBe(GREETING);
+    expect(card.result_summary!.length).toBeGreaterThan(200);
+  });
+
+  it("redacts secrets and bounds deliveryText at 4,000 characters before persist and card", async () => {
+    const { kanbanEnqueue, kanbanGetCard } = await import("./kanban-board.js");
+    const { recentRuns } = await import("./task-history-store.js");
+    const run = reserve("dtext-bound");
+    const cardId = kanbanEnqueue("Morning Greeting", "task", "dtext-bound");
+    const secret = "sk-live_abcdefghijklmnopqrstuvwxyz0123456789";
+    const padded = secret + "x".repeat(5000);
+    const settled = settle.settleRunOnce({
+      entry: ENTRY, run, outcome: "success",
+      detail: "bound",
+      deliveryText: padded,
+      cardId,
+    });
+
+    expect(settled).toBe("settled");
+    const ev = recentRuns(ENTRY.id, 5)[0]!;
+    expect(ev.deliveryText).not.toContain(secret);
+    expect(ev.deliveryText!.length).toBeLessThanOrEqual(4000);
+    const card = kanbanGetCard(cardId)!;
+    expect(card.result_summary!.length).toBeLessThanOrEqual(4000);
+    expect(card.result_summary).not.toContain(secret);
+  });
+
+  it("keeps the truthful fallback when deliveryText and detail are both absent", async () => {
+    const { kanbanEnqueue, kanbanGetCard } = await import("./kanban-board.js");
+    const run = reserve("dtext-fallback");
+    const cardId = kanbanEnqueue("No Output", "task", "dtext-fallback");
+    const settled = settle.settleRunOnce({ entry: ENTRY, run, outcome: "success", cardId });
+    expect(settled).toBe("settled");
+    expect(kanbanGetCard(cardId)!.result_summary).toBe("completed");
+  });
+});

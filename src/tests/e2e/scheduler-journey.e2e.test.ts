@@ -60,6 +60,16 @@ let WorkerSupervisionStoreClass: typeof import("../../components/worker-supervis
 let orcRunStoreMod: typeof import("../../components/orc-project/orc-project-run-store.js");
 let taskTypesMod: typeof import("../../components/tasks/task-types.js");
 
+// #1610: the announce task's model result — a multi-paragraph greeting longer
+// than 200 characters, matching the escaped Molty morning-greeting shape.
+const ANNOUNCE_GREETING = [
+  "Good morning aksika!",
+  "",
+  "The day ahead looks clear and calm: no blocked projects are waiting on you, and all scheduled tasks finished cleanly overnight.",
+  "",
+  "Your main focus today is the steering consolidation work. Take it at your own pace.",
+].join("\n");
+
 const FIXTURES: ScheduledTask[] = [
   {
     id: "sys-sleep", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *",
@@ -137,6 +147,11 @@ function fakeAgentRunner(request: import("../../components/spin-types.js").SpinR
     const dir = join(TEST_HOME, "workspace", "report-task");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "report.md"), `## Summary\n\nFinance report body with enough bytes to pass the 100-byte minimum contract. \nAdditional verified sections for the report pipeline.\n`);
+  }
+  // #1610: the announce task's model result is a multi-paragraph greeting
+  // longer than 200 characters — the exact escaped production shape.
+  if (entryId === "announce-task") {
+    return Promise.resolve({ cardId, result: ANNOUNCE_GREETING });
   }
   return Promise.resolve({ cardId, result: `result for ${entryId}` });
 }
@@ -282,7 +297,7 @@ function advanceAdmissionDeferral(taskId: string): void {
   }
 }
 
-function events(taskId: string): Array<{ outcome: string; runId?: string; groupId?: string; diagnostic?: { category: string; code: string } }> {
+function events(taskId: string): Array<{ outcome: string; runId?: string; groupId?: string; detail?: string; deliveryText?: string; kanbanCardId?: number; diagnostic?: { category: string; code: string } }> {
   return historyStore.recentRuns(taskId, 50);
 }
 
@@ -449,7 +464,7 @@ describe("#1520 scheduler E2E — journey 3: one-shot T report with validation a
 });
 
 describe("#1520 scheduler E2E — journey 4: one-shot T announcement", () => {
-  it("delivers exactly one announcement after settlement", async () => {
+  it("delivers the actual one-shot result after settlement, not a completion summary (#1610)", async () => {
     const queue = await makeQueue();
     forceDue("announce-task");
     await runTick(queue);
@@ -457,11 +472,21 @@ describe("#1520 scheduler E2E — journey 4: one-shot T announcement", () => {
     expect(ev).toHaveLength(1);
     expect(ev[0]!.outcome).toBe("success");
 
+    // #1610: durable history separates the user payload from operational detail.
+    expect(ev[0]!.deliveryText).toBe(ANNOUNCE_GREETING);
+    expect(ev[0]!.detail).toBe(ANNOUNCE_GREETING.slice(0, 200));
+
+    // #1610: the card carries the actual result beyond character 200.
+    const card = board.kanbanGetCard(ev[0]!.kanbanCardId!)!;
+    expect(card.result_summary).toBe(ANNOUNCE_GREETING);
+    expect(card.result_summary!.length).toBeGreaterThan(200);
+
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     expect(doubles.sentMessages).toHaveLength(1);
-    expect(doubles.sentMessages[0]).toContain("complete");
+    // The greeting text itself is delivered — not a status summary.
+    expect(doubles.sentMessages[0]).toContain(ANNOUNCE_GREETING);
   });
 });
 

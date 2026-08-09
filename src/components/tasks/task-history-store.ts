@@ -19,7 +19,12 @@ export interface TaskRunEvent {
   finishedAt: number;
   outcome: TaskOutcome;
   exitCode?: number;
+  /** #1610: short operational context for diagnostics and task status. */
   detail?: string;
+  /** #1610: bounded user-facing payload for successful scheduled one-shot
+   * announce runs. Populates the Kanban `result_summary`; never conflated with
+   * operational `detail`. Absent for non-agent and non-announce runs. */
+  deliveryText?: string;
   resultPath?: string;
   kanbanCardId?: number;
   /** #1502 Task 9: groups attempts 1 and 2 without relying on retrying alone. */

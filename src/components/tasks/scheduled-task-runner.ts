@@ -162,6 +162,15 @@ export class ScheduledTaskRunner {
         }
       }
 
+      // #1610: a scheduled one-shot announce run's final response IS the
+      // delivered payload. The contract is appended after task-file and
+      // context composition, before dispatch, only for announce one-shots —
+      // report and interactive-skill prompts stay unchanged.
+      const deliveryContract = entry.interaction.mode === "oneshot" && entry.delivery === "announce";
+      if (deliveryContract) {
+        prompt = `${prompt}\n\n[DELIVERY CONTRACT]\nYour final response is automatically delivered to the target user when this run ends.\n- Return the requested user-facing content in your final response.\n- Do not return only a completion status, a saved-file path, or a summary of what was produced.\n- Do not call platform delivery tools to deliver the result yourself.\n- Saving a workspace copy is allowed but does not replace returning the content in your final response.`;
+      }
+
       // #1432: scheduled interactive skill launch. The skill manager launches
       // or resumes K and returns the first model response; this runner stays
       // the sole owner of the announcement card, initial delivery, and
@@ -386,12 +395,17 @@ export class ScheduledTaskRunner {
         });
         return { status: "definition_failed", safeDetail: settlementDetail, cardId: boardId };
       } else {
+        // #1610: the one-shot announce final response is the user-facing
+        // payload. deliveryText feeds the card's result_summary and delivery;
+        // the short response prefix remains the operational detail.
+        const settlementDetail = response?.slice(0, 200);
         // The shared settler is the exclusive delivery release point.
         settleRunOnce({
-          entry, run: reservation, outcome: "success", detail: response?.slice(0, 200), cardId: boardId,
+          entry, run: reservation, outcome: "success", detail: settlementDetail,
+          deliveryText: deliveryContract ? response : undefined, cardId: boardId,
           executionRef: runId, releaseDelivery: true, onPaused: this.onPaused, onFailure: this.onFailure, factAt: childFactAt,
         });
-        return { status: "success", safeDetail: response?.slice(0, 200), cardId: boardId };
+        return { status: "success", safeDetail: settlementDetail, cardId: boardId };
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
