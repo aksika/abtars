@@ -103,7 +103,7 @@ export class OrcProjectCoordinator {
       cardSource: this.getRootIdentity(projectCardId).source,
       sourcePeer: origin.originPeer,
       expectedProjectGeneration: _projectGeneration,
-    }, `Review project #${projectCardId}: project_card_id=${projectCardId}, project_generation=${_projectGeneration}, review_case_id=${reviewCaseId}`);
+    }, `Review project #${projectCardId}: first read the immutable case with get_project_review_case (project_card_id=${projectCardId}, project_generation=${_projectGeneration}, review_case_id=${reviewCaseId}), then submit exactly one review_project decision using its legal_values and compatible evidence ids.`);
   }
 
   scheduleRepairReview(projectCardId: number, _projectGeneration: number): OrcRunClaimResult {

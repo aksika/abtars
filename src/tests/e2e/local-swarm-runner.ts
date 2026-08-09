@@ -380,17 +380,18 @@ async function runHappyPath(): Promise<LocalSwarmResult> {
     project_card_id: String(projectCardId),
     project_generation: String(supervision.generation),
     review_case_id: reviewCase.id,
-    criteria: JSON.stringify([
+    criteria: [
       { criterion_id: "c1", verdict: "satisfied", evidence_ids: evidenceByCriterion.get("c1") ?? [], rationale: "Worker A confirmed criterion 1" },
       { criterion_id: "c2", verdict: "satisfied", evidence_ids: evidenceByCriterion.get("c2") ?? [], rationale: "Worker B confirmed criterion 2" },
       { criterion_id: "c3", verdict: "satisfied", evidence_ids: evidenceByCriterion.get("c3") ?? [], rationale: "Worker C confirmed criterion 3" },
-    ]),
-    outputs: JSON.stringify([{ output_id: "o1", disposition: "verified", evidence_ids: [...evidenceByCriterion.values()].flat().slice(0, 10) }]),
-    contradictions: JSON.stringify([]),
-    residual_risks: JSON.stringify([]),
+    ],
+    outputs: [{ output_id: "o1", disposition: "verified", evidence_ids: [...evidenceByCriterion.values()].flat().slice(0, 10) }],
+    contradictions: [],
+    residual_risks: [],
     synthesis: "All criteria satisfied. Project accepted.",
-  });
-  if (reviewResult.startsWith("[err]")) fail("review_project", "REVIEW_FAILED", reviewResult);
+  }, { userId: "test", orcContext: orcContext as any });
+  const reviewOutcome = JSON.parse(reviewResult) as { outcome?: string };
+  if (reviewOutcome.outcome !== "accepted") fail("review_project", "REVIEW_FAILED", reviewResult);
 
   emitCheckpoint("project_accepted");
   await deliverCard(kanbanGetCard(projectCardId)!, testDeliverDeps);

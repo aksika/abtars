@@ -217,3 +217,185 @@ describe("ReviewCaseAssembler coverage read-model (#1604)", () => {
     expect(laneSummary.outcome).toContain("failed");
   });
 });
+
+describe("projectReviewBrief decision-ready projection (#1620)", () => {
+  function makeProjectionSnapshot(): ReviewCaseSnapshot {
+    return {
+      schema_version: 1,
+      project_card_id: 7717,
+      generation: 2,
+      round: 1,
+      created_at: "2026-08-09T00:00:00.000Z",
+      root_contract: {
+        id: "pc_7717",
+        digest: "d_7717",
+        goal: "Produce the report",
+        criteria: [
+          { id: "c_orc", description: "Orc synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+          { id: "c_sup", description: "Delegated supported", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+          { id: "c_gap", description: "Delegated gap", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+        ],
+        required_outputs: [
+          { id: "out_required", description: "Report file", kind: "file", required: true },
+          { id: "out_optional", description: "Notes", kind: "logical", required: false },
+        ],
+        limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+      },
+      criterion_inputs: [
+        {
+          criterion_id: "c_orc", description: "Orc synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis",
+          mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [],
+          artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "orc_owned",
+        },
+        {
+          criterion_id: "c_sup", description: "Delegated supported", required: true, execution_owner: "delegated", evidence_expectation: "observed",
+          mapped_child_contract_ids: ["cc_1"], observed_evidence_ids: ["chk_1"], worker_claim_ids: ["claim_1"],
+          failed_or_inconclusive_check_ids: ["chk_fail"], artifact_observation_ids: ["art_1"], retry_lineage_ids: ["card_1_2_attempts"],
+          coverage_hint: "supported",
+        },
+        {
+          criterion_id: "c_gap", description: "Delegated gap", required: true, execution_owner: "delegated", evidence_expectation: "observed",
+          mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [],
+          artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "gap",
+        },
+      ],
+      contradiction_candidates: [
+        { id: "cc_1", affected_criterion_ids: ["c_sup"], description: "Conflicting outcomes", evidence_ids: ["chk_1"], sources: ["card_1", "card_2"] },
+      ],
+      uncovered_criteria: ["c_gap"],
+      child_summaries: [
+        { card_id: 1001, contract_id: "cc_1", outcome: "completed", criterion_statuses: [{ criterion_id: "c_sup", status: "passed" }], attempts: 2, executor_kind: "local_worker" },
+      ],
+      peer_contributions: [
+        { card_id: 2001, peer: "molty", outcome: "completed", projection_summary: "Molty completed the analysis", root_criteria: ["c_sup"], provenance: '{"receiver_peer":"molty"}' },
+      ],
+      budgets: { total_cost: 12.5, total_tokens: 4500, wall_clock_ms: 60000, review_round: 1, repair_round: 0 },
+      evidence_ref_count: 3,
+      contradiction_count: 1,
+    };
+  }
+
+  it("projects criteria policy, grouped compatible evidence, claims, budgets, and legal values", async () => {
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { projectReviewBrief } = await import("./project-review-case.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const snapshot = makeProjectionSnapshot();
+    const { id } = store.insertReviewCase(7717, 2, 1, snapshot, "digest_brief");
+
+    const result = projectReviewBrief(id, store);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const brief = result.brief;
+
+    expect(brief.schema_version).toBe(1);
+    expect(brief.project_card_id).toBe(7717);
+    expect(brief.project_generation).toBe(2);
+    expect(brief.review_case_id).toBe(id);
+    expect(brief.round).toBe(1);
+    expect(brief.goal).toBe("Produce the report");
+
+    const byId = new Map(brief.criteria.map(c => [c.criterion_id, c]));
+    expect(byId.get("c_orc")?.execution_owner).toBe("orc");
+    expect(byId.get("c_orc")?.coverage_hint).toBe("orc_owned");
+    expect(byId.get("c_orc")?.compatible_evidence).toEqual({ observed: [], failed_or_inconclusive: [], artifacts: [] });
+
+    const sup = byId.get("c_sup")!;
+    expect(sup.compatible_evidence.observed).toEqual(["chk_1"]);
+    expect(sup.compatible_evidence.failed_or_inconclusive).toEqual(["chk_fail"]);
+    expect(sup.compatible_evidence.artifacts).toEqual(["art_1"]);
+    // worker claim ids are not promoted into compatible evidence
+    expect(sup.compatible_evidence.observed).not.toContain("claim_1");
+
+    expect(byId.get("c_gap")?.coverage_hint).toBe("gap");
+    expect(brief.uncovered_criteria).toEqual(["c_gap"]);
+
+    const outRequired = brief.outputs.find(o => o.output_id === "out_required")!;
+    expect(outRequired.required).toBe(true);
+    const outOptional = brief.outputs.find(o => o.output_id === "out_optional")!;
+    expect(outOptional.required).toBe(false);
+
+    expect(brief.contradictions).toHaveLength(1);
+    expect(brief.contradictions[0]!.id).toBe("cc_1");
+    expect(brief.children).toHaveLength(1);
+    expect(brief.children[0]!.attempts).toBe(2);
+
+    // peer contributions are labeled claims, never evidence
+    expect(brief.peer_claims).toHaveLength(1);
+    expect(brief.peer_claims[0]!.peer).toBe("molty");
+    expect(brief.budgets.total_cost).toBe(12.5);
+
+    expect(brief.legal_values.actions).toEqual(["accept", "repair", "blocked", "needs_input"]);
+    expect(brief.legal_values.criterion_verdicts).toContain("satisfied");
+    expect(brief.legal_values.output_dispositions).toContain("remote_only");
+    expect(brief.legal_values.contradiction_dispositions).toContain("blocking");
+  });
+
+  it("decision skeleton contains only ids and empty fields — never invented verdicts", async () => {
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { projectReviewBrief } = await import("./project-review-case.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const { id } = store.insertReviewCase(7717, 2, 1, makeProjectionSnapshot(), "digest_brief_2");
+
+    const result = projectReviewBrief(id, store);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const skeleton = result.brief.decision_skeleton as {
+      project_card_id: number;
+      criteria: Array<{ criterion_id: string; verdict: unknown; evidence_ids: unknown[]; rationale: string }>;
+      outputs: Array<{ output_id: string; disposition: unknown }>;
+      contradictions: unknown[];
+      residual_risks: unknown[];
+      synthesis: string;
+    };
+    expect(skeleton.project_card_id).toBe(7717);
+    expect(skeleton.criteria).toHaveLength(3);
+    for (const c of skeleton.criteria) {
+      expect(c.verdict).toBeNull();
+      expect(c.evidence_ids).toEqual([]);
+      expect(c.rationale).toBe("");
+    }
+    expect(skeleton.outputs).toHaveLength(2);
+    for (const o of skeleton.outputs) expect(o.disposition).toBeNull();
+    expect(skeleton.contradictions).toEqual([]);
+    expect(skeleton.residual_risks).toEqual([]);
+    expect(skeleton.synthesis).toBe("");
+  });
+
+  it("fails closed on missing or closed cases", async () => {
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { projectReviewBrief } = await import("./project-review-case.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const { id } = store.insertReviewCase(7717, 2, 1, makeProjectionSnapshot(), "digest_brief_3");
+    store.supersedeCase(id);
+
+    const missing = projectReviewBrief("nonexistent", store);
+    expect(missing.ok).toBe(false);
+    const closed = projectReviewBrief(id, store);
+    expect(closed.ok).toBe(false);
+    if (!closed.ok) expect(closed.error).toContain("not open");
+  });
+
+  it("truncates prose but preserves every id and evidence reference", async () => {
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { projectReviewBrief } = await import("./project-review-case.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const snapshot = makeProjectionSnapshot();
+    const longDesc = "x".repeat(1000);
+    snapshot.root_contract = {
+      ...snapshot.root_contract,
+      goal: "g".repeat(5000),
+      criteria: snapshot.root_contract.criteria.map(c => ({ ...c, description: c.id === "c_sup" ? longDesc : c.description })),
+    };
+    const { id } = store.insertReviewCase(7717, 2, 1, snapshot, "digest_brief_4");
+
+    const result = projectReviewBrief(id, store);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.brief.goal.length).toBeLessThanOrEqual(1000);
+    const sup = result.brief.criteria.find(c => c.criterion_id === "c_sup")!;
+    expect(sup.description.length).toBeLessThanOrEqual(300);
+    expect(sup.compatible_evidence.observed).toEqual(["chk_1"]);
+    expect(result.brief.uncovered_criteria).toEqual(["c_gap"]);
+    expect(result.brief.peer_claims[0]!.card_id).toBe(2001);
+  });
+});

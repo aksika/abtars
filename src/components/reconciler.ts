@@ -154,7 +154,7 @@ function legacyOrcDispatch(goal: string, cardId: number): void {
 
 function legacyOrcReviewDispatch(projectId: number, generation: number, caseId: string, requestId: string): void {
   try {
-    spin.dispatch({ type: "O", goal: `Review project #${projectId}: project_card_id=${projectId}, project_generation=${generation}, review_case_id=${caseId}`, source: "agent", cardId: projectId, settlementOwner: "spin" });
+    spin.dispatch({ type: "O", goal: `Review project #${projectId}: first read the immutable case with get_project_review_case (project_card_id=${projectId}, project_generation=${generation}, review_case_id=${caseId}), then submit exactly one review_project decision using its legal_values and compatible evidence ids.`, source: "agent", cardId: projectId, settlementOwner: "spin" });
     try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch {}
   } catch (err) {
     logWarn(TAG, `Failed to dispatch Orc review — ${err instanceof Error ? err.message : String(err)}`);

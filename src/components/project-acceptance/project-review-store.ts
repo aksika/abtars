@@ -466,12 +466,28 @@ export class ProjectReviewStore {
     return result.changes > 0;
   }
 
-  incrementInvalidProposals(caseId: string): { total: number; requestId: string } {
-    const existing = this.db.prepare(`SELECT id, invalid_proposals FROM project_review_requests WHERE review_case_id = ?`).get(caseId) as { id: string; invalid_proposals: number } | undefined;
-    if (!existing) return { total: 0, requestId: "" };
-    const total = existing.invalid_proposals + 1;
-    this.db.prepare(`UPDATE project_review_requests SET invalid_proposals = ?, updated_at = ? WHERE id = ?`).run(total, new Date().toISOString(), existing.id);
-    return { total, requestId: existing.id };
+  /**
+   * #1620: atomic single-statement invalid-proposal increment, guarded by the
+   * request row's live status. Returns the authoritative post-increment count
+   * plus the request id. `settled: true` means the request was already
+   * terminal (or vanished) — the caller must not settle again, and the
+   * increment must not be double-counted by concurrent duplicates: SQLite
+   * serializes the UPDATE itself, and a settled request row can never be
+   * re-incremented.
+   */
+  incrementInvalidProposals(caseId: string): { total: number; requestId: string; settled: boolean } {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(`
+      UPDATE project_review_requests
+         SET invalid_proposals = invalid_proposals + 1, updated_at = ?
+       WHERE review_case_id = ? AND status IN ('pending','dispatched')
+    `).run(now, caseId);
+    if (result.changes !== 1) {
+      return { total: 0, requestId: "", settled: true };
+    }
+    const row = this.db.prepare(`SELECT id, invalid_proposals FROM project_review_requests WHERE review_case_id = ?`).get(caseId) as { id: string; invalid_proposals: number } | undefined;
+    if (!row) return { total: 0, requestId: "", settled: true };
+    return { total: row.invalid_proposals, requestId: row.id, settled: false };
   }
 
   getReviewRequestByCaseId(reviewCaseId: string): { id: string; status: string } | undefined {

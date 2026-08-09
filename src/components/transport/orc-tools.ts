@@ -8,10 +8,11 @@
 import type { ToolDefinition, ToolExecutionContext } from "./tool-registry.js";
 import { logInfo } from "../logger.js";
 import { logSwarmTrace } from "../swarm-trace.js";
+import { REVIEW_PROJECT_PARAMETERS } from "../project-acceptance/project-review-contract.js";
 
 const TAG = "orc-tools";
 
-function resolveCardId(args: Record<string, string>, context?: ToolExecutionContext): number | null {
+function resolveCardId(args: Record<string, unknown>, context?: ToolExecutionContext): number | null {
   const bound = context?.orcContext;
   if (!bound) return null;
   if (args.project_card_id !== undefined && Number(args.project_card_id) !== bound.projectCardId) return null;
@@ -568,128 +569,145 @@ const defineProjectContractTool: ToolDefinition = {
   },
 };
 
-// ── review_project (#1363) ─────────────────────────────────────────────────────
+// ── review_project (#1363, #1620) ─────────────────────────────────────────────
 
-const reviewProjectTool: ToolDefinition = {
-  name: "review_project",
-  description: "Submit a final review decision for the current supervised project. All root criteria must be evaluated. Required for project acceptance.",
+function stringValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isSafeInteger(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
+  return null;
+}
+
+/**
+ * #1620: read the immutable open review case for the current supervised
+ * project. Side-effect-free: repeated reads never transition state and never
+ * consume the invalid-proposal budget. The response is the authoritative,
+ * decision-ready projection consumed by review_project.
+ */
+const getProjectReviewCaseTool: ToolDefinition = {
+  name: "get_project_review_case",
+  description: "Read the immutable open review case for the current supervised project. Returns the exact project/generation/case ids, every criterion with its compatible evidence ids, required outputs, contradictions, peer claims, review budgets, the legal decision vocabulary, and an empty decision skeleton. Side-effect-free — call it before deciding, then submit exactly one review_project decision.",
   parameters: {
     type: "object",
     properties: {
-      action: { type: "string", description: "accept | repair | blocked | needs_input", enum: ["accept", "repair", "blocked", "needs_input"] },
-      project_card_id: { type: "number", description: "Explicit supervised project card ID" },
-      project_generation: { type: "number", description: "Expected project supervision generation" },
-      review_case_id: { type: "string", description: "Explicit review case ID" },
-      criteria: { type: "string", description: "JSON array of {criterion_id, verdict, evidence_ids, rationale} — every root criterion must have exactly one verdict; every non-satisfied verdict requires a non-empty rationale" },
-      outputs: { type: "string", description: "JSON array of {output_id, disposition, evidence_ids}" },
-      contradictions: { type: "string", description: "JSON array of {id, affected_criterion_ids, evidence_ids, disposition, rationale}" },
-      residual_risks: { type: "string", description: "JSON array of {text, blocking, evidence_ids}" },
-      synthesis: { type: "string", description: "Final synthesis of the review" },
-      repair_items: { type: "string", description: "JSON array of repair items (required if action=repair)" },
-      blocker_class: { type: "string", description: "Blocker class (required if action=blocked)" },
-      what_was_attempted: { type: "string", description: "What was attempted before blocking (required if action=blocked)" },
-      input_question: { type: "string", description: "Question for user input (required if action=needs_input)" },
+      project_card_id: { type: "number", description: "Explicit supervised project card ID (must match the active Orc project)" },
+      review_case_id: { type: "string", description: "Explicit review case ID from the review dispatch goal" },
     },
-    required: ["action", "project_card_id", "project_generation", "review_case_id", "criteria", "synthesis"],
+    required: ["project_card_id", "review_case_id"],
   },
-  async execute(args: Record<string, string>): Promise<string> {
-    const projectCardId = Number(args.project_card_id);
-    const projectGeneration = Number(args.project_generation);
-    if (!Number.isSafeInteger(projectCardId) || projectCardId < 1) return "[err] project_card_id is required and must be a positive integer.";
-    if (!Number.isSafeInteger(projectGeneration) || projectGeneration < 1) return "[err] project_generation is required and must be a positive integer.";
-    const explicitCaseId = args.review_case_id;
-    if (!explicitCaseId) return "[err] review_case_id is required.";
+  async execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<string> {
+    const bound = context?.orcContext;
+    if (!bound) return JSON.stringify({ error: "No active Orc project. get_project_review_case only works during a project review turn." });
 
-    const action = args.action ?? "";
-    if (!["accept", "repair", "blocked", "needs_input"].includes(action)) return "[err] action must be accept, repair, blocked, or needs_input";
+    const reviewCaseId = stringValue(args.review_case_id);
+    if (!reviewCaseId) return JSON.stringify({ error: "review_case_id is required." });
+    const explicitProjectId = numberValue(args.project_card_id);
+    if (explicitProjectId === null) return JSON.stringify({ error: "project_card_id is required and must be a positive integer." });
+    if (explicitProjectId !== bound.projectCardId) {
+      return JSON.stringify({ error: `project_card_id ${explicitProjectId} does not match the bound project ${bound.projectCardId}` });
+    }
 
     try {
-      const criteria: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1["criteria"] = JSON.parse(args.criteria ?? "[]");
-      const outputs: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1["outputs"] = JSON.parse(args.outputs ?? "[]");
-      const contradictions: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1["contradictions"] = JSON.parse(args.contradictions ?? "[]");
-      const residual_risks: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1["residual_risks"] = JSON.parse(args.residual_risks ?? "[]");
+      const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+      const { projectReviewBrief } = await import("../project-acceptance/project-review-case.js");
+      const store = new ProjectReviewStore();
+
+      const supervision = store.getSupervision(explicitProjectId);
+      if (!supervision) return JSON.stringify({ error: "No project supervision state found. Is this a supervised project?" });
+
+      const openCase = store.getReviewCase(reviewCaseId);
+      if (!openCase) return JSON.stringify({ error: `Review case "${reviewCaseId}" not found` });
+      if (openCase.project_card_id !== explicitProjectId) return JSON.stringify({ error: `Case "${reviewCaseId}" does not belong to project ${explicitProjectId}` });
+      if (openCase.generation !== supervision.generation) return JSON.stringify({ error: `Case generation ${openCase.generation} does not match supervision generation ${supervision.generation}` });
+      if (openCase.status !== "open") return JSON.stringify({ error: `Review case "${reviewCaseId}" is ${openCase.status}, not open` });
+
+      const brief = projectReviewBrief(reviewCaseId, store);
+      if (!brief.ok) return JSON.stringify({ error: brief.error });
+      return JSON.stringify(brief.brief);
+    } catch (err) {
+      return JSON.stringify({ error: `get_project_review_case error: ${String(err)}` });
+    }
+  },
+};
+
+const reviewProjectTool: ToolDefinition = {
+  name: "review_project",
+  description: "Submit a final review decision for the current supervised project. All root criteria must be evaluated. First read the immutable case with get_project_review_case, then submit exactly one decision using its legal_values and compatible evidence ids.",
+  parameters: REVIEW_PROJECT_PARAMETERS as unknown as Record<string, unknown>,
+  async execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<string> {
+    try {
+      const { narrowReviewProjectArgs } = await import("../project-acceptance/project-review-contract.js");
+      const narrowed = narrowReviewProjectArgs(args);
+      if (!narrowed.ok) {
+        return JSON.stringify({
+          outcome: "invalid_payload",
+          issues: narrowed.issues,
+          message: "review_project payload did not match the declared schema — no decision was created and no state changed",
+        });
+      }
+      const decision = narrowed.decision;
+
+      const projectCardId = decision.project_card_id;
+      const projectGeneration = decision.project_generation;
+
+      // #1480: the bound Orc context is the authority for the active project.
+      const bound = context?.orcContext;
+      if (!bound) return JSON.stringify({ error: "No active Orc project. review_project only works during a project review turn." });
+      if (projectCardId !== bound.projectCardId) {
+        return JSON.stringify({ error: `project_card_id ${projectCardId} does not match the bound project ${bound.projectCardId}` });
+      }
 
       const { ProjectReviewService } = await import("../project-acceptance/project-review-service.js");
       const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
 
       const store = new ProjectReviewStore();
       const supervision = store.getSupervision(projectCardId);
-      if (!supervision) return "[err] No project supervision state found. Is this a supervised project?";
-      if (supervision.generation !== projectGeneration) return `[err] Project generation mismatch: expected ${supervision.generation}, got ${projectGeneration}`;
-      if (supervision.state !== "review_ready" && supervision.state !== "review_requested" && supervision.state !== "reviewing") return `[err] Project is in state "${supervision.state}", not ready for review`;
+      if (!supervision) return JSON.stringify({ error: "No project supervision state found. Is this a supervised project?" });
+      if (supervision.generation !== projectGeneration) return JSON.stringify({ error: `Project generation mismatch: expected ${supervision.generation}, got ${projectGeneration}` });
+      if (supervision.state !== "review_ready" && supervision.state !== "review_requested" && supervision.state !== "reviewing") return JSON.stringify({ error: `Project is in state "${supervision.state}", not ready for review` });
 
-      // If explicit case ID provided, validate it; otherwise find latest open case
-      let openCase;
-      if (explicitCaseId) {
-        openCase = store.getReviewCase(explicitCaseId);
-        if (!openCase) return `[err] Review case "${explicitCaseId}" not found`;
-        if (openCase.project_card_id !== projectCardId) return `[err] Case "${explicitCaseId}" does not belong to project ${projectCardId}`;
-      }
-      if (!openCase || openCase.status !== "open") return `[err] Review case "${explicitCaseId}" is not open`;
+      const openCase = store.getReviewCase(decision.review_case_id);
+      if (!openCase) return JSON.stringify({ error: `Review case "${decision.review_case_id}" not found` });
+      if (openCase.project_card_id !== projectCardId) return JSON.stringify({ error: `Case "${decision.review_case_id}" does not belong to project ${projectCardId}` });
+      if (openCase.generation !== supervision.generation) return JSON.stringify({ error: `Case generation ${openCase.generation} does not match supervision generation ${supervision.generation}` });
+      if (openCase.status !== "open") return JSON.stringify({ error: `Review case "${decision.review_case_id}" is ${openCase.status}, not open` });
 
-      // Transition from review_requested to reviewing if needed
+      // Transition from review_requested to reviewing only when ready to
+      // process a structurally complete decision — the narrow step above
+      // already guarantees structural completeness.
       if (supervision.state === "review_requested") {
         store.stateTransition(projectCardId, ["review_requested"], "reviewing");
       }
 
       const service = new ProjectReviewService();
-
-      const repair: import("../project-acceptance/project-review-validator.js").ProjectRepairProposal | undefined = action === "repair" ? {
-        items: JSON.parse(args.repair_items ?? "[]") as import("../project-acceptance/project-review-validator.js").ProjectRepairProposal["items"],
-        rationale: args.synthesis ?? "",
-      } : undefined;
-
-      const blocker: import("../project-acceptance/project-review-validator.js").ProjectBlocker | undefined = action === "blocked" ? {
-        blocker_class: args.blocker_class ?? "unknown",
-        affected_criterion_ids: criteria.filter(c => c.verdict === "unsatisfied").map(c => c.criterion_id),
-        exhausted_failures: [],
-        contradiction_evidence: contradictions.filter(c => c.disposition === "blocking").flatMap(c => c.evidence_ids),
-        what_was_attempted: args.what_was_attempted ?? "",
-        unblock_conditions: "",
-      } : undefined;
-
-      const input_request: import("../project-acceptance/project-review-validator.js").ProjectInputRequest | undefined = action === "needs_input" ? {
-        question: args.input_question ?? "",
-        affected_criterion_ids: criteria.filter(c => c.verdict === "inconclusive").map(c => c.criterion_id),
-        expected_response_kind: "text",
-        context: args.synthesis ?? "",
-      } : undefined;
-
-      const decision: import("../project-acceptance/project-review-validator.js").ProjectReviewDecisionV1 = {
-        schema_version: 1,
-        id: `rd_${projectCardId}_${Date.now()}`,
-        project_card_id: projectCardId,
-        review_case_id: openCase.id,
-        project_generation: projectGeneration,
-        action: action as import("../project-acceptance/project-review-validator.js").ProjectReviewAction,
-        criteria,
-        outputs,
-        contradictions,
-        residual_risks,
-        synthesis: args.synthesis ?? "",
-        repair,
-        blocker,
-        input_request,
-        authored_at: new Date().toISOString(),
-      };
-
       const result = service.processDecision(decision);
 
       switch (result.kind) {
         case "accepted":
-          return `✓ Project accepted (${result.decisionId}). ${result.summary}`;
+          return JSON.stringify({ outcome: "accepted", decision_id: result.decisionId, summary: result.summary, warnings: result.warnings ?? [] });
         case "repair":
-          return `→ Repair planned (${result.decisionId}). ${result.summary}`;
+          return JSON.stringify({ outcome: "repair", decision_id: result.decisionId, summary: result.summary, warnings: result.warnings ?? [] });
         case "blocked":
-        case "blocked_invalid":
-          return `✗ Project blocked (${result.decisionId}). ${result.summary}`;
+          return JSON.stringify({ outcome: "blocked", decision_id: result.decisionId, summary: result.summary, warnings: result.warnings ?? [] });
         case "needs_input":
-          return `? Input requested (${result.decisionId}). ${result.summary}`;
+          return JSON.stringify({ outcome: "needs_input", decision_id: result.decisionId, summary: result.summary, warnings: result.warnings ?? [] });
+        case "blocked_invalid":
+          return JSON.stringify({ outcome: "blocked_invalid", decision_id: result.decisionId, summary: result.summary, invalid_proposal_count: result.invalidProposalCount });
         case "invalid":
-          return `[err] Invalid review:\n${result.errors.join("\n")}`;
+          return JSON.stringify({
+            outcome: "invalid",
+            issues: result.issues.map(i => ({ severity: i.severity, tag: i.tag, path: i.path, message: i.message })),
+            invalid_proposal_count: result.invalidProposalCount,
+            remaining_attempts: result.remainingAttempts,
+          });
       }
     } catch (err) {
-      return `[err] review_project error: ${String(err)}`;
+      return JSON.stringify({ error: `review_project error: ${String(err)}` });
     }
   },
 };
@@ -697,5 +715,5 @@ const reviewProjectTool: ToolDefinition = {
 // ── Export ────────────────────────────────────────────────────────────────────
 
 export function getOrcTools(): ToolDefinition[] {
-  return [defineProjectContractTool, spawnWorkerTool, checkWorkersTool, cancelWorkerTool, reviewWorkerFailureTool, reviewProjectTool];
+  return [defineProjectContractTool, spawnWorkerTool, checkWorkersTool, cancelWorkerTool, reviewWorkerFailureTool, getProjectReviewCaseTool, reviewProjectTool];
 }

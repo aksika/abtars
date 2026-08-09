@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { TaskDatabase } from "../../components/tasks/kanban-board.js";
+import { getOrcTools } from "../../components/transport/orc-tools.js";
 
 const dispatchMock = vi.fn();
 let _DbCtor: any = null;
@@ -1045,5 +1046,327 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
     const supervision = new ProjectReviewStore().getSupervision(projectId) as any;
     expect(supervision).toBeDefined();
     expect(["executing", "review_ready", "review_requested"].includes(supervision.state)).toBe(true);
+  });
+});
+
+describe("Swarm acceptance — escaped Orc review journeys (#1620)", () => {
+  let ProjectReviewStore: typeof import("../../components/project-acceptance/project-review-store.js").ProjectReviewStore;
+  let WorkerSupervisionStore: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
+  let mod: typeof import("../../components/reconciler.js");
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    cards.clear();
+    nextCardId = 100;
+    await initDb();
+
+    mod = await import("../../components/reconciler.js");
+    const prs = await import("../../components/project-acceptance/project-review-store.js");
+    ProjectReviewStore = prs.ProjectReviewStore;
+    const wss = await import("../../components/worker-supervision-store.js");
+    WorkerSupervisionStore = wss.WorkerSupervisionStore;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (_rawDb) { try { _rawDb.close(); } catch {} _rawDb = null; _overrideDb = null; }
+  });
+
+  const reviewProjectTool = () => getOrcTools().find(t => t.name === "review_project")!;
+  const reviewCaseTool = () => getOrcTools().find(t => t.name === "get_project_review_case")!;
+  const orcCtx = (pid: number) => ({ userId: "test", orcContext: { projectCardId: pid } } as any);
+
+  function insertRoot(projectId: number, title: string, contract: Record<string, unknown>): void {
+    const now = new Date().toISOString().replace(/Z$/, "");
+    cards.set(projectId, {
+      id: projectId, title, source: "user",
+      status: "running", type: "O", parent_id: null, goal: contract.goal, notes: null,
+      created_at: now, result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
+    });
+    const reviewStore = new ProjectReviewStore();
+    reviewStore.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, goal, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', ?, ?, ?)`).run(
+      projectId, title, "user", contract.goal, now, now,
+    );
+    reviewStore.ensureAwaitingContract(projectId);
+    reviewStore.insertContract(contract as any);
+    reviewStore.stateTransition(projectId, ["awaiting_contract"], "executing");
+  }
+
+  async function completeChild(store: import("../../components/worker-supervision-store.js").WorkerSupervisionStore, childId: number, contractId: string, rootCriterionId: string): Promise<void> {
+    const attemptId = `a_${childId}_1`;
+    store.lifecycleTransition(attemptId, ["pending"], "running", { settled_at: null });
+    const env = makeEnvelope(childId, contractId, rootCriterionId);
+    store.completeAttempt(attemptId);
+    store.insertResult(attemptId, env);
+    const card = cards.get(childId);
+    if (card) card.status = "done";
+  }
+
+  async function setupChildContract(store: import("../../components/worker-supervision-store.js").WorkerSupervisionStore, childId: number, rootCardId: number, criterionId: string): Promise<string> {
+    const contract = makeChildContract(childId, rootCardId, criterionId);
+    store.insertContract(contract, childId);
+    store.insertAttempt({
+      id: `a_${childId}_1`,
+      card_id: childId,
+      contract_id: contract.id,
+      ordinal: 1,
+      executor_kind: "agent",
+      executor_id: "spin-local",
+      status: "pending",
+      started_at: new Date().toISOString(),
+    });
+    return contract.id;
+  }
+
+  async function addWorkerChild(projectId: number, criterionId: string): Promise<void> {
+    const cId = nextCardId++;
+    const createdAt = new Date().toISOString().replace(/Z$/, "");
+    cards.set(cId, {
+      id: cId, title: `worker ${cId}`, source: "agent",
+      status: "queued", type: "W", parent_id: projectId,
+      goal: `worker ${cId}`, notes: JSON.stringify({ supervised: true }),
+      created_at: createdAt, priority: "MEDIUM",
+      result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
+    });
+    new ProjectReviewStore().db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, parent_id, goal, created_at, updated_at) VALUES (?, ?, ?, 'queued', 'W', ?, ?, ?, ?)`).run(
+      cId, `worker ${cId}`, "agent", projectId, `worker ${cId}`, createdAt, createdAt,
+    );
+    const store = new WorkerSupervisionStore();
+    const contractId = await setupChildContract(store, cId, projectId, criterionId);
+    await completeChild(store, cId, contractId, criterionId);
+  }
+
+  it("Molty 54 shape: Orc-only root reads its case and submits one typed accept", async () => {
+    const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
+    installFakeCoordinator(claims);
+    const projectId = nextCardId++;
+    const rootContract = {
+      schema_version: 2, id: `pc_${projectId}`, project_card_id: projectId, digest: `d_${projectId}`,
+      goal: "Produce the analysis",
+      criteria: [
+        { id: "synth1", description: "Synthesize findings", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+        { id: "synth2", description: "Quality gate", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [{ id: "out", description: "analysis report", kind: "file", required: true }],
+      constraints: [], limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    insertRoot(projectId, "orc-only analysis", rootContract);
+
+    mod.requestReconcile(projectId);
+    await flush();
+
+    const reviewStore = new ProjectReviewStore();
+    const sup = reviewStore.getSupervision(projectId)!;
+    // Orc-owned criteria need no coverage round and no children
+    expect(sup.state).toBe("review_requested");
+    expect(sup.coverage_rounds).toBe(0);
+    const openCase = reviewStore.getLatestOpenCase(projectId);
+    expect(openCase).toBeDefined();
+
+    // the Orc reads the immutable case first — no private SQL needed
+    const briefRaw = await reviewCaseTool().execute(
+      { project_card_id: projectId, review_case_id: (openCase as any).id }, orcCtx(projectId),
+    );
+    const brief = JSON.parse(briefRaw) as any;
+    expect(brief.schema_version).toBe(1);
+    expect(brief.criteria.every((c: any) => c.execution_owner === "orc")).toBe(true);
+    expect(brief.outputs.some((o: any) => o.output_id === "out" && o.required)).toBe(true);
+    expect(brief.legal_values.output_dispositions).toContain("remote_only");
+
+    const resultRaw = await reviewProjectTool().execute({
+      action: "accept",
+      project_card_id: projectId,
+      project_generation: sup.generation,
+      review_case_id: (openCase as any).id,
+      criteria: [
+        { criterion_id: "synth1", verdict: "satisfied", evidence_ids: [], rationale: "Synthesized from the immutable case" },
+        { criterion_id: "synth2", verdict: "satisfied", evidence_ids: [], rationale: "Quality gate passed on Orc evaluation" },
+      ],
+      outputs: [{ output_id: "out", disposition: "present", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "Analysis complete",
+    }, orcCtx(projectId));
+
+    const result = JSON.parse(resultRaw) as { outcome: string };
+    expect(result.outcome).toBe("accepted");
+
+    const settled = reviewStore.getSupervision(projectId)!;
+    expect(settled.state).toBe("accepted");
+    const kanbanRow = reviewStore.db.prepare("SELECT status FROM kanban_board WHERE id = ?").get(projectId) as any;
+    expect(kanbanRow.status).toBe("done");
+  });
+
+  it("KP 24 shape: requester root with failed peer claim and delegated gap blocks for the authored reason", async () => {
+    const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
+    installFakeCoordinator(claims);
+    const projectId = nextCardId++;
+    const rootContract = {
+      schema_version: 2, id: `pc_${projectId}`, project_card_id: projectId, digest: `d_${projectId}`,
+      goal: "Deliver the analysis",
+      criteria: [
+        { id: "c1", description: "Peer lane", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+        { id: "c2", description: "Local synthesis", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+      ],
+      required_outputs: [{ id: "out", description: "result", kind: "file", required: true }],
+      constraints: [], limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    insertRoot(projectId, "requester analysis", rootContract);
+
+    // c1 is covered by a completed local child; c2 stays uncovered
+    await addWorkerChild(projectId, "c1");
+
+    // the peer contribution failed — a durable claim, not requester evidence
+    _overrideDb!.exec(`
+      CREATE TABLE IF NOT EXISTS peer_contributions (
+        peer TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        contribution_ref TEXT NOT NULL,
+        project_card_id INTEGER,
+        proxy_card_id INTEGER,
+        root_criteria_json TEXT,
+        state TEXT NOT NULL DEFAULT 'pending'
+          CHECK(state IN ('pending','accepted','running','completed','failed','declined','deferred','unknown','withdrawal_noted')),
+        last_sequence INTEGER NOT NULL DEFAULT -1,
+        terminal_event_id TEXT,
+        terminal_digest TEXT,
+        projection_json TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (peer, request_id),
+        UNIQUE (contribution_ref)
+      );
+    `);
+    const proxyId = nextCardId++;
+    const now = new Date().toISOString().replace(/Z$/, "");
+    new ProjectReviewStore().db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, parent_id, goal, source_peer, created_at, updated_at) VALUES (?, ?, 'peer', 'failed', 'contribution', ?, ?, 'molty', ?, ?)`).run(
+      proxyId, "[help:molty] analysis", projectId, "analyze data", now, now,
+    );
+    _overrideDb!.prepare(`INSERT INTO peer_contributions (peer, request_id, request_hash, contribution_ref, project_card_id, proxy_card_id, root_criteria_json, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', datetime('now'), datetime('now'))`).run(
+      "molty", "req-kp24", "hash_kp24", "help_ref_kp24", projectId, proxyId, JSON.stringify(["c1"]),
+    );
+
+    mod.requestReconcile(projectId);
+    await flush();
+    // the c2 gap goes through a coverage round, then reaches review after grace
+    const reviewStore = new ProjectReviewStore();
+    expect(reviewStore.getSupervision(projectId)!.coverage_rounds).toBe(1);
+    reviewStore.db.prepare(`UPDATE project_supervision SET updated_at = ? WHERE project_card_id = ?`)
+      .run(new Date(Date.now() - 120_000).toISOString(), projectId);
+    mod.requestReconcile(projectId);
+    await flush();
+
+    const sup = reviewStore.getSupervision(projectId)!;
+    expect(sup.state).toBe("review_requested");
+    const openCase = reviewStore.getLatestOpenCase(projectId);
+    expect(openCase).toBeDefined();
+
+    const briefRaw = await reviewCaseTool().execute(
+      { project_card_id: projectId, review_case_id: (openCase as any).id }, orcCtx(projectId),
+    );
+    const brief = JSON.parse(briefRaw) as any;
+    expect(brief.uncovered_criteria).toContain("c2");
+    // the failed peer contribution is a labeled claim, never compatible evidence
+    expect(brief.peer_claims.length).toBeGreaterThanOrEqual(1);
+    expect(brief.peer_claims[0].outcome).toBe("failed");
+    const c1 = brief.criteria.find((c: any) => c.criterion_id === "c1");
+    expect(c1.compatible_evidence.observed).not.toContain("help_ref_kp24");
+
+    const resultRaw = await reviewProjectTool().execute({
+      action: "blocked",
+      project_card_id: projectId,
+      project_generation: sup.generation,
+      review_case_id: (openCase as any).id,
+      criteria: [
+        { criterion_id: "c1", verdict: "satisfied", evidence_ids: c1.compatible_evidence.observed, rationale: "local lane passed" },
+        { criterion_id: "c2", verdict: "unsatisfied", evidence_ids: [], rationale: "peer contribution failed; no local lane covered this criterion" },
+      ],
+      outputs: [{ output_id: "out", disposition: "missing", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "Cannot complete without the failed criterion",
+      blocker: { blocker_class: "peer_contribution_failed", affected_criterion_ids: ["c2"], what_was_attempted: "waited for molty contribution" },
+    }, orcCtx(projectId));
+
+    const result = JSON.parse(resultRaw) as { outcome: string; summary: string };
+    expect(result.outcome).toBe("blocked");
+    expect(result.summary).toContain("peer_contribution_failed");
+    expect(result.summary).not.toContain("review_protocol_exhausted");
+
+    const settled = reviewStore.getSupervision(projectId)!;
+    expect(settled.state).toBe("blocked");
+    expect(settled.blocked_reason).toBe("peer_contribution_failed");
+    expect(reviewStore.getDecision(settled.accepted_decision_id!)).toBeDefined();
+  });
+
+  it("ordinary non-peer supervised project uses the same tools and enums", async () => {
+    const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
+    installFakeCoordinator(claims);
+    const projectId = nextCardId++;
+    const now = new Date().toISOString().replace(/Z$/, "");
+    cards.set(projectId, {
+      id: projectId, title: "ordinary project", source: "task",
+      status: "running", type: "O", parent_id: null, goal: "Produce three summaries", notes: null,
+      created_at: now, result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
+    });
+    const reviewStore = new ProjectReviewStore();
+    reviewStore.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, goal, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', ?, ?, ?)`).run(
+      projectId, "ordinary project", "task", "Produce three summaries", now, now,
+    );
+    const rootContract = {
+      schema_version: 1, id: `pc_${projectId}`, project_card_id: projectId, digest: `d_${projectId}`,
+      goal: "Produce three summaries",
+      criteria: [
+        { id: "c1", description: "Worker 1", required: true, evidence_expectation: "observed" },
+        { id: "c2", description: "Worker 2", required: true, evidence_expectation: "observed" },
+      ],
+      required_outputs: [{ id: "out", description: "summaries", kind: "file", required: true }],
+      constraints: [], limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    reviewStore.ensureAwaitingContract(projectId);
+    reviewStore.insertContract(rootContract as any);
+    reviewStore.stateTransition(projectId, ["awaiting_contract"], "executing");
+    await addWorkerChild(projectId, "c1");
+    await addWorkerChild(projectId, "c2");
+
+    mod.requestReconcile(projectId);
+    await flush();
+
+    const sup = reviewStore.getSupervision(projectId)!;
+    expect(sup.state).toBe("review_requested");
+    const openCase = reviewStore.getLatestOpenCase(projectId);
+    expect(openCase).toBeDefined();
+
+    const briefRaw = await reviewCaseTool().execute(
+      { project_card_id: projectId, review_case_id: (openCase as any).id }, orcCtx(projectId),
+    );
+    const brief = JSON.parse(briefRaw) as any;
+    expect(brief.peer_claims).toHaveLength(0);
+
+    const verdicts = brief.criteria.map((c: any) => ({
+      criterion_id: c.criterion_id,
+      verdict: "satisfied",
+      evidence_ids: c.compatible_evidence.observed.slice(0, 1),
+      rationale: "lane passed",
+    }));
+    const resultRaw = await reviewProjectTool().execute({
+      action: "accept",
+      project_card_id: projectId,
+      project_generation: sup.generation,
+      review_case_id: (openCase as any).id,
+      criteria: verdicts,
+      outputs: [{ output_id: "out", disposition: "present", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "All workers completed",
+    }, orcCtx(projectId));
+
+    const result = JSON.parse(resultRaw) as { outcome: string };
+    expect(result.outcome).toBe("accepted");
+    expect(reviewStore.getSupervision(projectId)!.state).toBe("accepted");
   });
 });

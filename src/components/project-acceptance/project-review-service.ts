@@ -1,11 +1,15 @@
 import { ProjectReviewStore } from "./project-review-store.js";
 import { ProjectReviewValidator, type ProjectReviewDecisionV1 } from "./project-review-validator.js";
+import type { ValidationIssue } from "./project-review-contract.js";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
 import type { ContributionProjectionV1 } from "../peer-help/contract.js";
 import { nerve } from "../nerve.js";
 import { randomUUID } from "node:crypto";
 
 const MAX_INVALID_PROPOSALS = 5;
+
+/** #1620: stable blocker class for protocol exhaustion — review failed, criteria were not semantically evaluated. */
+export const REVIEW_PROTOCOL_EXHAUSTED = "review_protocol_exhausted";
 
 function buildPeerTerminalEvent(cardId: number, decisionId: string, kind: "completed" | "failed", summary: string, caseSnapshot?: ReviewCaseSnapshot, failureReason?: string): { peer: string; payload: unknown } | undefined {
   try {
@@ -99,12 +103,18 @@ export async function drainAcceptanceOutbox(): Promise<number> {
 }
 
 export type ReviewOutcome =
-  | { kind: "accepted"; decisionId: string; summary: string }
-  | { kind: "repair"; decisionId: string; summary: string }
-  | { kind: "blocked"; decisionId: string; summary: string }
-  | { kind: "needs_input"; decisionId: string; summary: string }
-  | { kind: "invalid"; errors: readonly string[] }
-  | { kind: "blocked_invalid"; decisionId: string; summary: string };
+  | { kind: "accepted"; decisionId: string; summary: string; warnings?: readonly string[] }
+  | { kind: "repair"; decisionId: string; summary: string; warnings?: readonly string[] }
+  | { kind: "blocked"; decisionId: string; summary: string; warnings?: readonly string[] }
+  | { kind: "needs_input"; decisionId: string; summary: string; warnings?: readonly string[] }
+  | {
+      kind: "invalid";
+      errors: readonly string[];
+      issues: readonly ValidationIssue[];
+      invalidProposalCount: number;
+      remainingAttempts: number;
+    }
+  | { kind: "blocked_invalid"; decisionId: string; summary: string; invalidProposalCount: number };
 
 /** #1605: cap for the rendered synthesis (card result summary limit is 4000). */
 export const RENDERED_SYNTHESIS_MAX = 4000;
@@ -170,45 +180,66 @@ export class ProjectReviewService {
   /**
    * Process a review decision submitted by Orc.
    * Validates, persists, and transitions project state.
+   * #1620: validation issues are partitioned by severity — errors reject and
+   * count against the invalid-proposal budget; warnings ride along on
+   * successful outcomes and never increment the counter.
    */
   processDecision(decision: ProjectReviewDecisionV1): ReviewOutcome {
     // Load the case
     const caseRow = this.store.getReviewCase(decision.review_case_id);
     if (!caseRow) {
-      return { kind: "invalid", errors: [`review case "${decision.review_case_id}" not found`] };
+      return { kind: "invalid", errors: [`review case "${decision.review_case_id}" not found`], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
     }
 
     if (caseRow.status !== "open") {
-      return { kind: "invalid", errors: [`review case "${decision.review_case_id}" is ${caseRow.status}, not open`] };
+      return { kind: "invalid", errors: [`review case "${decision.review_case_id}" is ${caseRow.status}, not open`], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
     }
 
     const caseSnapshot = JSON.parse(caseRow.case_json) as ReviewCaseSnapshot;
     if (!caseSnapshot) {
-      return { kind: "invalid", errors: ["failed to parse case snapshot"] };
+      return { kind: "invalid", errors: ["failed to parse case snapshot"], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
     }
 
     // Validate the decision
-    const errors = this.validator.validateDecision(decision, caseSnapshot);
+    const issues = this.validator.validateDecision(decision, caseSnapshot);
+    const errors = issues.filter(i => i.severity === "error");
+    const warnings = issues.filter(i => i.severity === "warn");
+
     if (errors.length > 0) {
-      // Track invalid proposals
-      const { total, requestId } = this.store.incrementInvalidProposals(decision.review_case_id);
-      if (total >= MAX_INVALID_PROPOSALS && requestId) {
+      // Track invalid proposals. A settled request (already terminal) must
+      // never be counted again or settle a second terminal decision.
+      const { total, requestId, settled } = this.store.incrementInvalidProposals(decision.review_case_id);
+      if (!settled && total >= MAX_INVALID_PROPOSALS && requestId) {
         const cardId = decision.project_card_id;
-        // #1618: invalid-proposal exhaustion is a failed terminal settlement.
+        // #1620: exhaustion is review-protocol failure, not a semantic
+        // verdict on the project's criteria. The blocker and every
+        // projection state that no valid review decision was produced.
         const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-        const peerEvent = buildPeerTerminalEvent(cardId, decisionId, "failed", `Project blocked after ${total} invalid proposals`, caseSnapshot);
-        const { decisionId: settledId } = this.store.settleBlocked(cardId, decision.review_case_id, { action: "blocked", reason: "Exceeded max invalid proposals" }, `Exceeded ${MAX_INVALID_PROPOSALS} invalid proposals`, peerEvent, decisionId);
+        const summary = `Project blocked after ${total} invalid proposals: review protocol exhausted before a valid decision`;
+        const peerEvent = buildPeerTerminalEvent(cardId, decisionId, "failed", summary, caseSnapshot);
+        const exhaustionDecision = {
+          action: "blocked",
+          blocker_class: REVIEW_PROTOCOL_EXHAUSTED,
+          invalid_proposals: total,
+          reason: "review protocol exhausted before a valid semantic decision",
+        };
+        const { decisionId: settledId } = this.store.settleBlocked(cardId, decision.review_case_id, exhaustionDecision, REVIEW_PROTOCOL_EXHAUSTED, peerEvent, decisionId);
         this.store.markReviewRequestSettled(requestId);
         try { nerve.fire("card:failed", cardId); } catch {}
         return {
           kind: "blocked_invalid",
           decisionId: settledId,
-          summary: `Project blocked after ${total} invalid proposals`,
+          summary,
+          invalidProposalCount: total,
         };
       }
+      const count = total;
       return {
         kind: "invalid",
         errors: errors.map(e => `[${e.path}] ${e.message}`),
+        issues: errors,
+        invalidProposalCount: count,
+        remainingAttempts: Math.max(0, MAX_INVALID_PROPOSALS - count),
       };
     }
 
@@ -238,6 +269,7 @@ export class ProjectReviewService {
           kind: "accepted",
           decisionId,
           summary: `Project accepted: ${deliveredSynthesis.slice(0, 200)}`,
+          warnings: warnings.map(w => `[${w.path}] ${w.message}`),
         };
       }
 
@@ -259,6 +291,7 @@ export class ProjectReviewService {
           kind: "repair",
           decisionId,
           summary: `Repair planned: ${repairItems.length} items (${repairItems.map(i => i.affected_criterion_ids.join(",")).join("; ")})`,
+          warnings: warnings.map(w => `[${w.path}] ${w.message}`),
         };
       }
 
@@ -283,6 +316,7 @@ export class ProjectReviewService {
           kind: "blocked",
           decisionId: settledId,
           summary: `Project blocked: ${blocker.blocker_class}`,
+          warnings: warnings.map(w => `[${w.path}] ${w.message}`),
         };
       }
 
@@ -305,11 +339,12 @@ export class ProjectReviewService {
           kind: "needs_input",
           decisionId,
           summary: `Input requested: ${inputReq.question.slice(0, 200)}`,
+          warnings: warnings.map(w => `[${w.path}] ${w.message}`),
         };
       }
 
       default:
-        return { kind: "invalid", errors: [`unknown action: ${decision.action}`] };
+        return { kind: "invalid", errors: [`unknown action: ${decision.action}`], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
     }
   }
 }

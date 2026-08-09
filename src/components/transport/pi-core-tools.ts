@@ -38,7 +38,7 @@ function adaptParameters(params: Record<string, unknown>): Record<string, unknow
   return structuredClone(params) as Record<string, unknown>;
 }
 
-function validatePiSchemaOrThrow(schema: Record<string, unknown>): void {
+export function validatePiSchemaOrThrow(schema: Record<string, unknown>): void {
   if (schema == null || typeof schema !== "object" || Array.isArray(schema)) throw new Error("schema_not_object");
   if (schema.type !== undefined && typeof schema.type !== "string") throw new Error("schema_type_invalid");
   if (schema.properties !== undefined && (typeof schema.properties !== "object" || schema.properties === null || Array.isArray(schema.properties))) {
@@ -47,8 +47,14 @@ function validatePiSchemaOrThrow(schema: Record<string, unknown>): void {
   if (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.some((key) => typeof key !== "string"))) {
     throw new Error("schema_required_invalid");
   }
-  if (schema.items !== undefined && (typeof schema.items !== "object" || schema.items === null || Array.isArray(schema.items))) {
-    throw new Error("schema_items_invalid");
+  if (schema.items !== undefined) {
+    if (typeof schema.items !== "object" || schema.items === null || Array.isArray(schema.items)) {
+      throw new Error("schema_items_invalid");
+    }
+    // #1620: recurse through array `items` so nested schema constraints
+    // (properties, required, enum) are validated at registration instead of
+    // reaching a provider with a malformed sub-schema.
+    validatePiSchemaOrThrow(schema.items as Record<string, unknown>);
   }
   const properties = schema.properties as Record<string, unknown> | undefined;
   if (properties) {

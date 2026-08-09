@@ -6,6 +6,7 @@ import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
 import { redactEnvelope } from "../worker-contract.js";
+import { REVIEW_ACTIONS, CRITERION_VERDICTS, OUTPUT_DISPOSITIONS, CONTRADICTION_DISPOSITIONS } from "./project-review-contract.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -383,4 +384,146 @@ export class ReviewCaseAssembler {
       contradiction_count: contradictionCandidates.length,
     };
   }
+}
+
+// ── Decision-ready brief projection (#1620) ───────────────────────────────────
+// A bounded, side-effect-free read over the immutable case snapshot. Facts
+// come only from the stored case JSON and shared typed constants — never from
+// Worker or peer tables, and never from free-form prose that could drift from
+// the validator's enums.
+
+export interface ProjectReviewBriefV1 {
+  schema_version: 1;
+  project_card_id: number;
+  project_generation: number;
+  review_case_id: string;
+  round: number;
+  goal: string;
+  criteria: Array<{
+    criterion_id: string;
+    description: string;
+    required: boolean;
+    execution_owner: "delegated" | "orc";
+    evidence_expectation: "observed" | "artifact" | "synthesis";
+    coverage_hint: CriterionCoverageHint;
+    compatible_evidence: {
+      observed: string[];
+      failed_or_inconclusive: string[];
+      artifacts: string[];
+    };
+  }>;
+  outputs: Array<{ output_id: string; description: string; kind: string; required: boolean }>;
+  contradictions: ContradictionCandidate[];
+  children: ReviewCaseSnapshot["child_summaries"];
+  /** #1433/#1493: peer claims are claims, never requester-observed evidence. */
+  peer_claims: ReviewCaseSnapshot["peer_contributions"];
+  uncovered_criteria: string[];
+  budgets: ReviewCaseSnapshot["budgets"];
+  legal_values: {
+    actions: readonly string[];
+    criterion_verdicts: readonly string[];
+    output_dispositions: readonly string[];
+    contradiction_dispositions: readonly string[];
+  };
+  decision_skeleton: unknown;
+}
+
+const BRIEF_GOAL_MAX = 1000;
+const BRIEF_DESCRIPTION_MAX = 300;
+
+function truncateProse(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(max - 3, 0))}...`;
+}
+
+/**
+ * Project the immutable open review case into a decision-ready brief.
+ * The caller (the Orc tool boundary) owns ownership/generation/status checks;
+ * this projection is pure after the row is loaded.
+ */
+export function projectReviewBrief(
+  caseId: string,
+  store = new ProjectReviewStore(),
+): { ok: true; brief: ProjectReviewBriefV1 } | { ok: false; error: string } {
+  const row = store.getReviewCase(caseId);
+  if (!row) return { ok: false, error: `review case "${caseId}" not found` };
+  if (row.status !== "open") return { ok: false, error: `review case "${caseId}" is ${row.status}, not open` };
+
+  let snapshot: ReviewCaseSnapshot;
+  try {
+    snapshot = JSON.parse(row.case_json) as ReviewCaseSnapshot;
+  } catch {
+    return { ok: false, error: "review case snapshot is unparseable" };
+  }
+  if (!snapshot || snapshot.schema_version !== 1 || snapshot.project_card_id === undefined) {
+    return { ok: false, error: "review case snapshot is structurally invalid" };
+  }
+
+  const policyByCriterionId = new Map(snapshot.criterion_inputs.map(ci => [ci.criterion_id, ci]));
+
+  const criteria = snapshot.root_contract.criteria.map(c => {
+    const input = policyByCriterionId.get(c.id);
+    return {
+      criterion_id: c.id,
+      description: truncateProse(c.description, BRIEF_DESCRIPTION_MAX),
+      required: c.required,
+      execution_owner: c.execution_owner,
+      evidence_expectation: c.evidence_expectation,
+      coverage_hint: input?.coverage_hint ?? (c.execution_owner === "orc" ? "orc_owned" : "gap"),
+      compatible_evidence: {
+        observed: [...(input?.observed_evidence_ids ?? [])],
+        failed_or_inconclusive: [...(input?.failed_or_inconclusive_check_ids ?? [])],
+        artifacts: [...(input?.artifact_observation_ids ?? [])],
+      },
+    };
+  });
+
+  const outputs = snapshot.root_contract.required_outputs.map(o => ({
+    output_id: o.id,
+    description: truncateProse(o.description, BRIEF_DESCRIPTION_MAX),
+    kind: o.kind,
+    required: o.required,
+  }));
+
+  const decisionSkeleton = {
+    project_card_id: snapshot.project_card_id,
+    project_generation: snapshot.generation,
+    review_case_id: row.id,
+    criteria: snapshot.root_contract.criteria.map(c => ({
+      criterion_id: c.id,
+      verdict: null,
+      evidence_ids: [],
+      rationale: "",
+    })),
+    outputs: outputs.map(o => ({ output_id: o.output_id, disposition: null, evidence_ids: [] })),
+    contradictions: [],
+    residual_risks: [],
+    synthesis: "",
+  };
+
+  return {
+    ok: true,
+    brief: {
+      schema_version: 1,
+      project_card_id: snapshot.project_card_id,
+      project_generation: snapshot.generation,
+      review_case_id: row.id,
+      round: snapshot.round,
+      goal: truncateProse(snapshot.root_contract.goal, BRIEF_GOAL_MAX),
+      criteria,
+      outputs,
+      contradictions: snapshot.contradiction_candidates,
+      children: snapshot.child_summaries,
+      peer_claims: snapshot.peer_contributions,
+      uncovered_criteria: [...snapshot.uncovered_criteria],
+      budgets: snapshot.budgets,
+      legal_values: {
+        actions: REVIEW_ACTIONS,
+        criterion_verdicts: CRITERION_VERDICTS,
+        output_dispositions: OUTPUT_DISPOSITIONS,
+        contradiction_dispositions: CONTRADICTION_DISPOSITIONS,
+      },
+      decision_skeleton: decisionSkeleton,
+    },
+  };
 }

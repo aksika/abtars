@@ -1,95 +1,24 @@
 import { ProjectReviewStore } from "./project-review-store.js";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
+import {
+  REVIEW_ACTIONS,
+  CRITERION_VERDICTS,
+  OUTPUT_DISPOSITIONS,
+  CONTRADICTION_DISPOSITIONS,
+  validationError as error,
+  validationWarn as warn,
+  type ValidationIssue,
+  type ProjectReviewDecisionV1,
+} from "./project-review-contract.js";
 
 // ── Decision types ────────────────────────────────────────────────────────────
+// #1620: one runtime source for every enum lives in project-review-contract.ts;
+// these re-exports keep historical importers working.
 
-export type ProjectReviewAction = "accept" | "repair" | "blocked" | "needs_input";
-export type CriterionVerdict = "satisfied" | "unsatisfied" | "inconclusive" | "not_evaluated";
-export type OutputDisposition = "verified" | "present" | "missing" | "invalid" | "remote_only";
-
-export interface ProjectReviewDecisionV1 {
-  schema_version: 1;
-  id: string;
-  project_card_id: number;
-  review_case_id: string;
-  project_generation: number;
-  action: ProjectReviewAction;
-  criteria: Array<{
-    criterion_id: string;
-    verdict: CriterionVerdict;
-    evidence_ids: string[];
-    rationale: string;
-  }>;
-  outputs: Array<{
-    output_id: string;
-    disposition: OutputDisposition;
-    evidence_ids: string[];
-  }>;
-  contradictions: Array<{
-    id: string;
-    affected_criterion_ids: string[];
-    evidence_ids: string[];
-    disposition: "resolved" | "repair" | "blocking" | "inconclusive";
-    rationale: string;
-  }>;
-  residual_risks: Array<{
-    text: string;
-    blocking: boolean;
-    evidence_ids: string[];
-  }>;
-  synthesis: string;
-  repair?: ProjectRepairProposal;
-  blocker?: ProjectBlocker;
-  input_request?: ProjectInputRequest;
-  authored_at: string;
-}
-
-export interface ProjectRepairProposal {
-  items: Array<{
-    id: string;
-    affected_criterion_ids: string[];
-    required_evidence: string;
-    strategy: string;
-    do_not_repeat: string[];
-    capabilities: string[];
-    budget: { max_attempts?: number; max_tokens?: number };
-  }>;
-  rationale: string;
-}
-
-export interface ProjectBlocker {
-  blocker_class: string;
-  affected_criterion_ids: string[];
-  exhausted_failures: string[];
-  contradiction_evidence: string[];
-  what_was_attempted: string;
-  unblock_conditions: string;
-}
-
-export interface ProjectInputRequest {
-  question: string;
-  affected_criterion_ids: string[];
-  expected_response_kind: string;
-  context: string;
-}
+export type { ProjectReviewAction, CriterionVerdict, OutputDisposition, ProjectReviewDecisionV1, ProjectRepairProposal, ProjectBlocker, ProjectInputRequest } from "./project-review-contract.js";
+export type { ValidationSeverity, ValidationIssue } from "./project-review-contract.js";
 
 // ── Validation ────────────────────────────────────────────────────────────────
-
-export type ValidationSeverity = "error" | "warn";
-export interface ValidationIssue {
-  readonly severity: ValidationSeverity;
-  readonly tag: string;
-  readonly path: string;
-  readonly message: string;
-}
-
-function error(tag: string, path: string, message: string): ValidationIssue {
-  return { severity: "error", tag, path, message };
-}
-
-function warn(tag: string, path: string, message: string): ValidationIssue {
-  return { severity: "warn", tag, path, message };
-}
 
 export class ProjectReviewValidator {
   private store: ProjectReviewStore;
@@ -140,7 +69,7 @@ export class ProjectReviewValidator {
       }
     }
 
-    const validVerdicts: CriterionVerdict[] = ["satisfied", "unsatisfied", "inconclusive", "not_evaluated"];
+    const validVerdicts: readonly string[] = CRITERION_VERDICTS;
     for (const c of decision.criteria) {
       // #1605: reject duplicate verdicts for the same criterion id
       if (seenDecisionIds.has(c.criterion_id)) {
@@ -151,7 +80,7 @@ export class ProjectReviewValidator {
         errors.push(error("bad_reference", `$.criteria[${c.criterion_id}]`, `unknown criterion id "${c.criterion_id}"`));
       }
       if (!validVerdicts.includes(c.verdict)) {
-        errors.push(error("type_error", `$.criteria[${c.criterion_id}].verdict`, `invalid verdict "${c.verdict}"`));
+        errors.push(error("type_error", `$.criteria[${c.criterion_id}].verdict`, `invalid verdict "${c.verdict}" — legal values: ${CRITERION_VERDICTS.join(", ")}`));
       }
       if (c.rationale.length > 2000) {
         errors.push(error("too_long", `$.criteria[${c.criterion_id}].rationale`, "rationale exceeds 2000 characters"));
@@ -163,7 +92,10 @@ export class ProjectReviewValidator {
       }
     }
 
-    // Outputs: every required output must have a disposition
+    // Outputs: every required output must have a disposition. #1620: on
+    // `accept` an omitted required output disposition is an ERROR (the
+    // shipped artifact was never classified); on non-accept actions it
+    // remains a deliberate warning — proceeding does not claim delivery.
     const requiredOutputIds = new Set(
       caseSnapshot.root_contract.required_outputs.filter(o => o.required).map(o => o.id),
     );
@@ -171,14 +103,18 @@ export class ProjectReviewValidator {
 
     for (const oid of requiredOutputIds) {
       if (!decisionOutputIds.has(oid)) {
-        errors.push(warn("missing_field", `$.outputs`, `missing disposition for required output "${oid}"`));
+        if (decision.action === "accept") {
+          errors.push(error("missing_field", `$.outputs`, `missing disposition for required output "${oid}"`));
+        } else {
+          errors.push(warn("missing_field", `$.outputs`, `missing disposition for required output "${oid}"`));
+        }
       }
     }
 
-    const validDispositions: OutputDisposition[] = ["verified", "present", "missing", "invalid", "remote_only"];
+    const validDispositions: readonly string[] = OUTPUT_DISPOSITIONS;
     for (const o of decision.outputs) {
       if (!validDispositions.includes(o.disposition)) {
-        errors.push(error("type_error", `$.outputs[${o.output_id}].disposition`, `invalid disposition "${o.disposition}"`));
+        errors.push(error("type_error", `$.outputs[${o.output_id}].disposition`, `invalid disposition "${o.disposition}" — legal values: ${OUTPUT_DISPOSITIONS.join(", ")}`));
       }
     }
 
@@ -234,10 +170,10 @@ export class ProjectReviewValidator {
     }
 
     // Contradictions
-    const validContradictionDispositions = ["resolved", "repair", "blocking", "inconclusive"];
+    const validContradictionDispositions: readonly string[] = CONTRADICTION_DISPOSITIONS;
     for (const cc of decision.contradictions) {
       if (!validContradictionDispositions.includes(cc.disposition)) {
-        errors.push(error("type_error", `$.contradictions[${cc.id}].disposition`, `invalid disposition "${cc.disposition}"`));
+        errors.push(error("type_error", `$.contradictions[${cc.id}].disposition`, `invalid disposition "${cc.disposition}" — legal values: ${CONTRADICTION_DISPOSITIONS.join(", ")}`));
       }
       for (const acid of cc.affected_criterion_ids) {
         if (!rootCriterionIds.has(acid)) {
@@ -261,7 +197,7 @@ export class ProjectReviewValidator {
         errors.push(...this.validateNeedsInput(decision));
         break;
       default:
-        errors.push(error("type_error", "$.action", `invalid action "${decision.action}"`));
+        errors.push(error("type_error", "$.action", `invalid action "${decision.action}" — legal values: ${REVIEW_ACTIONS.join(", ")}`));
     }
 
     return errors;

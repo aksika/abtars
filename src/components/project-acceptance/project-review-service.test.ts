@@ -377,6 +377,207 @@ describe("renderAcceptedSynthesis (#1605)", () => {
   });
 });
 
+describe("ProjectReviewService — #1620 severity, correction budget, truthful exhaustion", () => {
+  let service: ProjectReviewService;
+  let store: ProjectReviewStore;
+  let seq = 0;
+
+  function uniquePid(): number {
+    return 15000 + (++seq);
+  }
+
+  async function setupCase(pid?: number): Promise<{ cardId: number; caseId: string }> {
+    const cardId = pid ?? uniquePid();
+    const contract = {
+      schema_version: 1,
+      id: `pc_sv2_${cardId}`,
+      digest: `digest_${cardId}`,
+      project_card_id: cardId,
+      goal: "Build the feature",
+      criteria: [{ id: "c1", description: "Works", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [{ id: "o1", description: "Output", kind: "logical", required: true }],
+      constraints: [],
+      limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "user", authored_by: "orc", created_at: "2026-07-12T00:00:00.000Z" },
+    };
+    const s = new ProjectReviewStore();
+    s.insertContract(contract);
+    s.initializeSupervision(cardId, contract.id, "executing");
+    s.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, goal, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', ?, datetime('now'), datetime('now'))`)
+      .run(cardId, "sv2 project", "task", "sv2 goal");
+    const snapshot: ReviewCaseSnapshot = {
+      schema_version: 1 as const,
+      project_card_id: cardId,
+      generation: 1,
+      round: 1,
+      created_at: new Date().toISOString(),
+      root_contract: {
+        id: contract.id,
+        digest: contract.digest,
+        goal: contract.goal,
+        criteria: contract.criteria as ReviewCaseSnapshot["root_contract"]["criteria"],
+        required_outputs: contract.required_outputs as ReviewCaseSnapshot["root_contract"]["required_outputs"],
+        limits: contract.limits,
+      },
+      criterion_inputs: [{ criterion_id: "c1", description: "Works", evidence_expectation: "synthesis", mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" }],
+      contradiction_candidates: [],
+      uncovered_criteria: [],
+      child_summaries: [],
+      peer_contributions: [],
+      budgets: { total_cost: undefined, total_tokens: 1000, wall_clock_ms: 60000, review_round: 1, repair_round: 0 },
+    };
+    const caseRow = s.insertReviewCase(cardId, 1, 1, snapshot, `digest_${cardId}`);
+    s.insertReviewRequest(cardId, caseRow.id, 1);
+    s.stateTransition(cardId, ["executing"], "review_ready");
+    return { cardId, caseId: caseRow.id };
+  }
+
+  function makeDecision(cardId: number, caseId: string, overrides?: Partial<ProjectReviewDecisionV1>): ProjectReviewDecisionV1 {
+    return {
+      schema_version: 1,
+      id: `rd_sv2_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      project_card_id: cardId,
+      review_case_id: caseId,
+      project_generation: 1,
+      action: "accept",
+      criteria: [{ criterion_id: "c1", verdict: "satisfied", evidence_ids: ["e1"], rationale: "Works correctly" }],
+      outputs: [{ output_id: "o1", disposition: "verified", evidence_ids: ["e1"] }],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "Complete.",
+      authored_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  function invalidCount(): number {
+    return store.getReviewRequestByCaseId(caseId) as never as { invalid_proposals: number } | undefined
+      ? Number((store.db.prepare("SELECT invalid_proposals FROM project_review_requests WHERE review_case_id = ?").get(caseId) as { invalid_proposals: number }).invalid_proposals)
+      : 0;
+  }
+
+  let caseId: string;
+  let cardId: number;
+
+  beforeEach(async () => {
+    TEST_HOME = join(tmpdir(), `ab-review-sv2-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(TEST_HOME, { recursive: true });
+    vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
+    const mod = await import("./project-review-store.js");
+    ProjectReviewStore = mod.ProjectReviewStore;
+    const svcMod = await import("./project-review-service.js");
+    ProjectReviewService = svcMod.ProjectReviewService;
+    store = new ProjectReviewStore();
+    service = new ProjectReviewService();
+    const setup = await setupCase();
+    cardId = setup.cardId;
+    caseId = setup.caseId;
+  });
+
+  afterEach(() => {
+    if (TEST_HOME && existsSync(TEST_HOME)) {
+      rmSync(TEST_HOME, { recursive: true, force: true });
+    }
+  });
+
+  it("a warning-only decision settles and leaves the invalid count unchanged", () => {
+    const decision = makeDecision(cardId, caseId, {
+      action: "blocked",
+      // required output o1 omitted → warn (non-accept action proceeds safely)
+      outputs: [],
+      blocker: { blocker_class: "external_dependency", affected_criterion_ids: ["c1"], exhausted_failures: [], contradiction_evidence: [], what_was_attempted: "tried", unblock_conditions: "" },
+    });
+    const result = service.processDecision(decision);
+    expect(result.kind).toBe("blocked");
+    if (result.kind === "blocked") {
+      expect(result.warnings?.length).toBe(1);
+      expect(result.warnings![0]).toContain("missing disposition for required output");
+    }
+    expect(invalidCount()).toBe(0);
+    const sup = store.getSupervision(cardId)!;
+    expect(sup.state).toBe("blocked");
+    expect(sup.blocked_reason).toBe("external_dependency");
+  });
+
+  it("first error reports count and remaining attempts; a corrected call succeeds", () => {
+    // accept with the required output omitted is an explicit error (#1620)
+    const bad = makeDecision(cardId, caseId, { outputs: [] });
+    const first = service.processDecision(bad);
+    expect(first.kind).toBe("invalid");
+    if (first.kind === "invalid") {
+      expect(first.invalidProposalCount).toBe(1);
+      expect(first.remainingAttempts).toBe(4);
+      expect(first.issues.some(i => i.tag === "missing_field")).toBe(true);
+    }
+    const second = service.processDecision(bad);
+    if (second.kind === "invalid") {
+      expect(second.invalidProposalCount).toBe(2);
+      expect(second.remainingAttempts).toBe(3);
+    }
+    expect(store.hasDecisionForCase(caseId)).toBe(false);
+
+    const fixed = makeDecision(cardId, caseId);
+    const success = service.processDecision(fixed);
+    expect(success.kind).toBe("accepted");
+    expect(invalidCount()).toBe(2);
+  });
+
+  it("fifth error settles exactly once with review_protocol_exhausted and no accepted decision", () => {
+    const bad = makeDecision(cardId, caseId, { outputs: [] });
+    const outcomes: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const r = service.processDecision(bad);
+      outcomes.push(r.kind);
+    }
+    expect(outcomes.filter(k => k === "invalid")).toHaveLength(4);
+    expect(outcomes.filter(k => k === "blocked_invalid")).toHaveLength(1);
+
+    const sup = store.getSupervision(cardId)!;
+    expect(sup.state).toBe("blocked");
+    expect(sup.blocked_reason).toBe("review_protocol_exhausted");
+
+    // exactly one terminal decision row, and the durable blocker carries the count
+    const decisions = store.db.prepare("SELECT decision_json FROM project_review_decisions WHERE review_case_id = ?").all(caseId) as Array<{ decision_json: string }>;
+    expect(decisions).toHaveLength(1);
+    const blocker = JSON.parse(decisions[0]!.decision_json) as { blocker_class: string; invalid_proposals: number };
+    expect(blocker.blocker_class).toBe("review_protocol_exhausted");
+    expect(blocker.invalid_proposals).toBe(5);
+
+    // card error says protocol failed — it does not claim criteria were reviewed
+    const kanbanRow = store.db.prepare("SELECT status, error FROM kanban_board WHERE id = ?").get(cardId) as { status: string; error: string };
+    expect(kanbanRow.status).toBe("failed");
+    expect(kanbanRow.error).toContain("review_protocol_exhausted");
+  });
+
+  it("a settled request can never be re-incremented or double-settled", () => {
+    const bad = makeDecision(cardId, caseId, { outputs: [] });
+    for (let i = 0; i < 5; i++) service.processDecision(bad);
+    expect(store.getSupervision(cardId)!.state).toBe("blocked");
+
+    // a late duplicate decision for the already-settled case is rejected and
+    // cannot consume budget or overwrite the terminal decision
+    const late = service.processDecision(bad);
+    expect(late.kind).toBe("invalid");
+    if (late.kind === "invalid") {
+      expect(late.invalidProposalCount).toBe(0);
+    }
+    const decisions = store.db.prepare("SELECT COUNT(*) as cnt FROM project_review_decisions WHERE review_case_id = ?").get(caseId) as { cnt: number };
+    expect(Number(decisions.cnt)).toBe(1);
+  });
+
+  it("warnings are surfaced on successful non-accept outcomes without incrementing", () => {
+    const decision = makeDecision(cardId, caseId, {
+      action: "repair",
+      outputs: [],
+      repair: { items: [{ affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], budget: { max_tokens: 5000 } }], rationale: "needs evidence" },
+    });
+    const result = service.processDecision(decision);
+    expect(result.kind).toBe("repair");
+    if (result.kind === "repair") expect(result.warnings?.length).toBe(1);
+    expect(invalidCount()).toBe(0);
+  });
+});
+
 describe("#1618 acceptance outbox drain retry", () => {
   let store: ProjectReviewStore;
   let broker: { sendRequest: ReturnType<typeof vi.fn> };
