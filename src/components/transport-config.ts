@@ -537,8 +537,8 @@ export function loadModels(): ModelCatalog {
 
 export function computeCostDisplay(cost: ModelCost): { inputPer1M: string; outputPer1M: string } {
   const fmt = (perToken: number): string => {
-    if (!perToken) return "0.0000";
-    return (perToken * 1_000_000).toFixed(4);
+    if (!perToken) return "0.00";
+    return (perToken * 1_000_000).toFixed(2);
   };
   return { inputPer1M: fmt(cost.input), outputPer1M: fmt(cost.output) };
 }

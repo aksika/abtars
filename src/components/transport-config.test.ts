@@ -12,7 +12,7 @@
 //   Deferred: develop when mock-fs infrastructure or integration harness is in place.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { resolveAgent, resolveHailMary, getEnvFallback, clearTransportCache, validateTransportConfig, validateRouteProvidersReady, writeTransportConfig, getModelsForProvider } from "./transport-config.js";
+import { resolveAgent, resolveHailMary, getEnvFallback, clearTransportCache, validateTransportConfig, validateRouteProvidersReady, writeTransportConfig, getModelsForProvider, computeCostDisplay } from "./transport-config.js";
 import type { TransportConfig, ModelCatalog } from "./transport-config.js";
 import { _setWarmedForTest, _resetForTest } from "./transport/pi-catalog.js";
 
@@ -541,6 +541,14 @@ describe("cleanDemotedModels", () => {
     cleanDemotedModels(tc);
     const tcRa = tc.routes["acp"]!;
     expect(tcRa.fallbacks).toHaveLength(2);
+  });
+});
+
+describe("computeCostDisplay (#1614)", () => {
+  it("renders $/1M with 2 decimals, zero-padded", () => {
+    expect(computeCostDisplay({ input: 0.14, output: 0.28 })).toEqual({ inputPer1M: "0.14", outputPer1M: "0.28" });
+    expect(computeCostDisplay({ input: 0.4, output: 1.2 })).toEqual({ inputPer1M: "0.40", outputPer1M: "1.20" });
+    expect(computeCostDisplay({ input: 0, output: 0 })).toEqual({ inputPer1M: "0.00", outputPer1M: "0.00" });
   });
 });
 
