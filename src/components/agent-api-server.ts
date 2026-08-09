@@ -23,6 +23,7 @@ import {
   handleOrcSpawn, handleOrcStatus, handleOrcCancel, handleOrcDelegate, handleKanbanCreate,
 } from "./agent-api-local-routes.js";
 import type { AgentApiLocalRouteDeps } from "./agent-api-local-routes.js";
+import { PeerEnrollmentHandler } from "./peer-enrollment-handler.js";
 
 const TAG = "agent-api";
 const MAX_TRAFFIC_LOG = 50;
@@ -150,8 +151,8 @@ export class AgentApiServer {
   private peerWsConnections = new Map<string, import("ws").WebSocket>();
   private peerWss: import("ws").WebSocketServer | null = null;
   private peerHelpService: import("./peer-help/service.js").PeerHelpService | null = null;
-  /** Rate-limit for /v1/enroll-ws: IP → last attempt timestamp (ms). */
-  private enrollRateLimit = new Map<string, number>();
+  /** #1557 — Long-lived enrollment handler; owns the per-IP rate limiter. */
+  private enrollmentHandler: PeerEnrollmentHandler | null = null;
   /** #1557 — Declarative production route registry + dispatcher security deps. */
   private routes: AgentApiRoute[];
   private routerDeps: AgentApiDispatcherDeps;
@@ -420,11 +421,18 @@ export class AgentApiServer {
     const { WebSocketServer } = await import("ws");
     this.peerWss = new WebSocketServer({ noServer: true });
 
+    // #1557 — One enrollment handler per server: per-IP rate limiter +
+    // per-socket enrollment sessions. Promotion hands sockets back to the
+    // server's steady-state peer registration.
+    this.enrollmentHandler = new PeerEnrollmentHandler({
+      registerPeerWs: (peerName, ws) => this.registerPeerWs(peerName, ws),
+    });
+
     this.server.on("upgrade", (req: IncomingMessage, socket: any, head: Buffer) => {
-      // /v1/enroll-ws — identity-less enrollment path (Task 6)
+      // /v1/enroll-ws — identity-less enrollment path
       if (req.url === "/v1/enroll-ws") {
         this.peerWss!.handleUpgrade(req, socket, head, (ws) => {
-          this.handleEnrollWs(ws, req).catch(err => logAndSwallow(TAG, "enroll-ws", err));
+          this.enrollmentHandler!.accept(ws, req).catch(err => logAndSwallow(TAG, "enroll-ws", err));
         });
         return;
       }
@@ -548,144 +556,6 @@ export class AgentApiServer {
       // Requests are handled by the broker — no longer verified here
       // The broker owns signature verification and dispatch
     } catch { /* malformed — ignore */ }
-  }
-
-  /**
-   * #1391 — Enrollment WS handler (responder side).
-   * Uses explicit stages and named listeners so promotion removes only the
-   * enrollment handler and registers the socket for steady-state messaging
-   * BEFORE the acknowledgement is sent.
-   */
-  private async handleEnrollWs(ws: import("ws").WebSocket, req: IncomingMessage): Promise<void> {
-    const ip = normalizeIp(req.socket?.remoteAddress ?? "");
-    const ENROLL_RATE_MS = 5 * 60 * 1000; // 1 per 5 min per IP
-
-    const lastAttempt = this.enrollRateLimit.get(ip) ?? 0;
-    if (Date.now() - lastAttempt < ENROLL_RATE_MS) {
-      logWarn(TAG, `Enrollment rate-limit hit for ${ip}`);
-      ws.close(1008, "rate limited");
-      return;
-    }
-    this.enrollRateLimit.set(ip, Date.now());
-
-    const {
-      macTribe, verifyEnroll, signAck,
-    } = await import("./peer-transport/peer-auth.js");
-    const { loadPeerConfig, deriveVerifyKey, clearPeerConfigCache } = await import("./peer-config.js");
-    const { randomBytes } = await import("node:crypto");
-    const { writeFileSync, existsSync } = await import("node:fs");
-    const { join } = await import("node:path");
-
-    const config = loadPeerConfig();
-    const selfVerifyKey = deriveVerifyKey(config.self.signingKey);
-    const nonceR = randomBytes(16).toString("hex");
-
-    type EnrollmentStage = "awaiting_knock" | "awaiting_enroll" | "promoting" | "steady_state" | "closed";
-    let stage: EnrollmentStage = "awaiting_knock";
-    let pubKeyI = "";
-
-    const onEnrollmentClose = () => {
-      stage = "closed";
-    };
-    const onEnrollmentError = () => {
-      stage = "closed";
-    };
-
-    const onEnrollmentMessage = async (rawData: import("ws").RawData) => {
-      try {
-        const msg = JSON.parse(rawData.toString());
-
-        if (stage === "awaiting_knock") {
-          // Step A: knock
-          const { pubKey_i, nonce_i, ts } = msg as { pubKey_i: string; nonce_i: string; ts: number };
-          if (!pubKey_i || !nonce_i || !ts) { ws.close(1008, "invalid knock"); return; }
-          const nowSec = Math.floor(Date.now() / 1000);
-          if (Math.abs(nowSec - ts) > 30) { ws.close(1008, "stale ts"); return; }
-
-          pubKeyI = pubKey_i;
-          stage = "awaiting_enroll";
-
-          // Step B: challenge
-          const macR = macTribe(config.self.tribeToken, selfVerifyKey + nonce_i);
-          ws.send(JSON.stringify({ pubKey_r: selfVerifyKey, nonce_r: nonceR, ts: nowSec, mac_r: macR }));
-          return;
-        }
-
-        if (stage === "awaiting_enroll") {
-          // Step C: enroll — transition to promoting BEFORE the first await
-          stage = "promoting";
-
-          const { mac_i, name, nonce_r, ts, selfSig } = msg as { mac_i: string; name: string; nonce_r: string; ts: number; selfSig: string };
-          if (!mac_i || !name || !nonce_r || !selfSig) { ws.close(1008, "invalid enroll msg"); return; }
-
-          if (nonce_r !== nonceR) { ws.close(1008, "nonce mismatch"); return; }
-
-          const nowSec = Math.floor(Date.now() / 1000);
-          if (Math.abs(nowSec - ts) > 30) { ws.close(1008, "stale ts"); return; }
-
-          // Verify mac_i
-          const expectedMacI = macTribe(config.self.tribeToken, pubKeyI + nonceR);
-          if (mac_i !== expectedMacI) { ws.close(1008, "mac mismatch"); stage = "closed"; return; }
-
-          // Verify selfSig
-          if (!verifyEnroll(selfSig, pubKeyI, pubKeyI, nonceR, name)) {
-            ws.close(1008, "bad selfSig"); stage = "closed"; return;
-          }
-
-          // Pin-and-alert: reject if existing peer has different verifyKey
-          const existing = config.peers[name];
-          if (existing && existing.verifyKey !== pubKeyI) {
-            logWarn(TAG, `Enrollment rejected — peer '${name}' verifyKey changed (pin-and-alert)`);
-            ws.close(1008, "key changed — operator action required"); stage = "closed"; return;
-          }
-
-          // Persist peer (first I/O — stage is already "promoting")
-          const peersPath = join(abtarsHome(), "config", "peers.json");
-          let raw: Record<string, unknown> = {};
-          if (existsSync(peersPath)) { try { raw = JSON.parse(require("fs").readFileSync(peersPath, "utf-8")); } catch { raw = {}; } }
-          if (!raw.peers || typeof raw.peers !== "object") raw.peers = {};
-          (raw.peers as Record<string, unknown>)[name] = {
-            host: ip,
-            port: parseInt(req.headers["x-peer-port"] as string ?? "0", 10) || 0,
-            verifyKey: pubKeyI,
-            trust: 1,
-          };
-          writeFileSync(peersPath, JSON.stringify(raw, null, 2) + "\n", { encoding: "utf-8" });
-          clearPeerConfigCache();
-
-          logInfo(TAG, `Enrolled new peer '${name}' from ${ip} at trust=1`);
-
-          // Build ack payload
-          const ackSig = signAck(config.self.signingKey, config.self.name, selfVerifyKey, nonceR);
-          const ackPayload = JSON.stringify({ name_r: config.self.name, pubKey_r: selfVerifyKey, ackSig });
-
-          // Detach handshake message listener
-          ws.removeListener("message", onEnrollmentMessage);
-          ws.removeListener("close", onEnrollmentClose);
-          ws.removeListener("error", onEnrollmentError);
-
-          // Register for steady-state messaging (BEFORE sending ack)
-          if (ws.readyState === ws.OPEN) {
-            this.registerPeerWs(name, ws);
-            stage = "steady_state";
-            ws.send(ackPayload);
-          } else {
-            stage = "closed";
-          }
-          return;
-        }
-
-        // Any message in promoting/steady_state/closed is a protocol violation
-        ws.close(1008, "unexpected frame after enrollment");
-      } catch (err) {
-        logWarn(TAG, `Enrollment error from ${ip}: ${err instanceof Error ? err.message : String(err)}`);
-        ws.close(1011, "enrollment error");
-      }
-    };
-
-    ws.on("message", onEnrollmentMessage);
-    ws.on("close", onEnrollmentClose);
-    ws.on("error", onEnrollmentError);
   }
 
   /** #898 — GET /v1/agent-card: live capabilities + health. */
