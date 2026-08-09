@@ -1053,6 +1053,38 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     conn.destroy();
   });
 
+  it("#1612: a suppressed exact-stream delivery still refreshes the runtime status", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin();
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
+
+    // Streamed turn: the whole result is suppressed, but the footer must
+    // still advance past the attach-time revision.
+    const statusesAtAttach = frames.filter((f) => f.t === "status").length;
+
+    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "streamed" });
+    feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
+    await new Promise((r) => setTimeout(r, 30));
+
+    await adapter.sendMessage("tui:local", "streamed", {
+      deliveryCorrelation: { sessionId: sid, executionId: "e1", kind: "final_assistant" },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(frames.filter((f) => f.t === "message").length).toBe(0); // suppressed
+    const statusesAfter = frames.filter((f) => f.t === "status");
+    expect(statusesAfter.length).toBeGreaterThan(statusesAtAttach);
+    const last = statusesAfter[statusesAfter.length - 1] as Extract<TuiServerFrame, { t: "status" }>;
+    expect(last.status.revision).toBeGreaterThan(statusesAtAttach);
+
+    conn.destroy();
+  });
+
   it("suppresses the duplicate whole-result when streaming was observed", async () => {
     const feed = new SessionOutputFeed();
     const mockSpin = makeMockSpin();

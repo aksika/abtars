@@ -28,6 +28,18 @@ function withCacheHit(usage?: RuntimeUsageSnapshot): TuiUsageSnapshot | undefine
   return result;
 }
 
+/**
+ * #1612 R4.3: a usage snapshot whose every metric is zero (or absent) means
+ * the provider reported no usage — the TUI must not display it as measured
+ * zeros. Treat it as unknown (`?`/omitted) instead of inventing usage.
+ */
+export function truthfulUsage(usage?: TuiUsageSnapshot): TuiUsageSnapshot | undefined {
+  if (!usage) return undefined;
+  const hasAny = [usage.input, usage.output, usage.cacheRead, usage.cacheWrite]
+    .some((v) => v !== undefined && v > 0);
+  return hasAny ? usage : undefined;
+}
+
 /** Build an allowlisted, secret-free status projection for the TUI. */
 export function buildTuiRuntimeStatus(session: ManagedSession, revision: number): TuiRuntimeStatus {
   const transport = session.transport;
@@ -42,7 +54,7 @@ export function buildTuiRuntimeStatus(session: ManagedSession, revision: number)
     contextWindow: transportStatus.contextWindow,
     autoCompaction: transportStatus.autoCompaction,
     reasoning: transportStatus.reasoning,
-    lastTurnUsage: withCacheHit(transportStatus.lastTurnUsage ?? session.lastTurnUsage),
-    sessionUsage: withCacheHit(session.sessionUsage),
+    lastTurnUsage: truthfulUsage(withCacheHit(transportStatus.lastTurnUsage ?? session.lastTurnUsage)),
+    sessionUsage: truthfulUsage(withCacheHit(session.sessionUsage)),
   };
 }

@@ -237,7 +237,13 @@ export class TuiSocketAdapter implements PlatformAdapter {
     // #1338/#1397: suppress whole result when the exact execution's
     // complete streamed text matches the delivered text.
     const correlation = _opts?.deliveryCorrelation;
-    if (this.shouldSuppressWholeResult(text, correlation)) return;
+    if (this.shouldSuppressWholeResult(text, correlation)) {
+      // #1612: an exact-stream delivery still settles the turn — refresh the
+      // runtime status so the footer reflects post-turn metrics instead of
+      // staying at the attach-time values.
+      this._pushStatus();
+      return;
+    }
     // #1612: copy the delivery execution ID so the client can reconcile the
     // whole result with its streamed rows. Internal wire metadata — never
     // rendered.
