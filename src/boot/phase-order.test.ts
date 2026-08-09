@@ -51,7 +51,7 @@ describe("Boot graph integrity", () => {
     // Config is handled explicitly in startBridge, not in the graph
     expect(BOOT_PHASES.length).toBeGreaterThanOrEqual(BOOT_NODES.length + 1);
     // #1380: memoryIpc removed (daemon replaces legacy IPC server)
-    expect(BOOT_NODES).toHaveLength(11);
+    expect(BOOT_NODES).toHaveLength(12);
   });
 
   // #1455: Source-boundary — no Agent Swarm imports in heartbeat modules

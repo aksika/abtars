@@ -1,5 +1,5 @@
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import { SupervisedPiRpcClient, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
+import { SupervisedPiRpcClient, PiRpcError, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
 import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import { PiRunStore, type PiTerminalOutcome } from "./pi-run-store.js";
@@ -343,6 +343,100 @@ export class PiExecutor {
     return true;
   }
 
+  /**
+   * #1406: native Pi RPC compaction of an owned, live run. Ownership,
+   * generation, live process identity, and state are verified before any
+   * write; the correlated `compact` response (plus bounded compaction
+   * lifecycle observation) determines the terminal result. An accepted write
+   * is never reported as completion without its response.
+   */
+  async compactOwnedRun(input: {
+    runId: string;
+    ownerPrincipalId: string;
+    expectedGeneration: number;
+    customInstructions?: string;
+  }): Promise<import("./pi-run-service.js").CompactionControlResult> {
+    const base = { targetKind: "local_pi_run" as const, message: "" };
+    const owned = this.live.get(input.runId);
+    if (!owned) {
+      return { ...base, status: "failed", message: "Run is not running (terminal or not started)" };
+    }
+    if (owned.generation !== input.expectedGeneration) {
+      return { ...base, status: "stale", message: "Run generation changed since the request was resolved" };
+    }
+    if (owned.settling) {
+      return { ...base, status: "failed", message: "Run is settling" };
+    }
+    const run = this.store.get(input.runId);
+    if (!run || run.status !== "running") {
+      return { ...base, status: "failed", message: `Run is ${run?.status ?? "unknown"}` };
+    }
+    if (run.ownerPrincipalId !== input.ownerPrincipalId) {
+      return { ...base, status: "failed", message: "Run belongs to a different principal" };
+    }
+
+    let state: { isStreaming: boolean; isCompacting: boolean };
+    try {
+      state = await owned.client.getState();
+    } catch (err) {
+      return { ...base, status: "failed", message: `Cannot probe run state: ${boundedError(err)}` };
+    }
+    if (state.isCompacting) {
+      return { ...base, status: "busy", message: "Run is already compacting" };
+    }
+    if (state.isStreaming) {
+      return { ...base, status: "busy", message: "Run is streaming an active turn" };
+    }
+
+    // Observe compaction lifecycle events during the call. The correlated
+    // `compact` response is the official terminal signal; the lifecycle
+    // listener cleans itself up on compaction_end or after a bounded grace.
+    let compactionEnded = false;
+    const lifecycle = new Promise<void>((resolve) => {
+      let unsub: (() => void) | null = null;
+      unsub = owned.client.subscribe((event) => {
+        if (event.type === "compaction_end") {
+          compactionEnded = true;
+          unsub?.();
+          resolve();
+        }
+      });
+      setTimeout(() => unsub?.(), 15_000);
+    });
+
+    try {
+      const started = Date.now();
+      const result = await owned.client.compact(input.customInstructions);
+      await Promise.race([
+        lifecycle,
+        new Promise<void>(resolve => setTimeout(resolve, 10_000)),
+      ]);
+      this.store.touchActivity(input.runId);
+      if (!compactionEnded) {
+        logDebug(TAG, `Run ${input.runId}: compact response ok, no compaction_end observed (${Date.now() - started}ms)`);
+      }
+      if (!result.summary && !result.firstKeptEntryId) {
+        return { ...base, status: "failed", message: "Pi returned an empty compaction result" };
+      }
+      return {
+        ...base,
+        status: "completed",
+        tokensBefore: result.tokensBefore,
+        tokensAfter: result.estimatedTokensAfter,
+        message: "Native compaction completed",
+      };
+    } catch (err) {
+      const code = err instanceof PiRpcError ? err.code : "unknown";
+      if (code === "process_exit" || code === "process_error" || code === "closed") {
+        return { ...base, status: "failed", message: "Pi process exited during compaction" };
+      }
+      if (code === "timeout") {
+        return { ...base, status: "failed", message: "Compaction timed out" };
+      }
+      return { ...base, status: "failed", message: `Compaction failed: ${boundedError(err)}` };
+    }
+  }
+
   async checkWallClock(runId: string): Promise<boolean> {
     const owned = this.live.get(runId);
     if (!owned) return false;
@@ -552,4 +646,10 @@ export class PiExecutor {
     }
     this.live.clear();
   }
+}
+
+/** Bounded, content-free error text (never raw RPC frame content). */
+function boundedError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.slice(0, 300);
 }

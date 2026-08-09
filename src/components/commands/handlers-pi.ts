@@ -114,6 +114,42 @@ export async function handlePiCancel(text: string, ctx: CommandContext): Promise
   }
 }
 
+export async function handlePiCompact(text: string, ctx: CommandContext): Promise<boolean> {
+  try {
+    const svc = getService(ctx);
+    const args = text.replace(/^\/pi\s+compact\s*/i, "").trim();
+    const parts = args.match(/^(\S+)(?:\s+(.+))?$/);
+    if (!parts) { await ctx.reply("Usage: /pi compact <runId> [instructions]"); return true; }
+    const runId = parts[1]!;
+    const instructions = parts[2]?.trim() || undefined;
+    const view = svc.get(runId, { userId: ctx.userId });
+    const result = await svc.compact(runId, instructions, { userId: ctx.userId });
+    const savings = result.tokensBefore && result.tokensAfter
+      ? ` (${Math.round((1 - result.tokensAfter / result.tokensBefore) * 100)}% smaller)`
+      : "";
+    switch (result.status) {
+      case "completed":
+        await ctx.reply(`Pi compaction complete for \`${runId}\` [gen ${view.generation}]${savings}.`);
+        break;
+      case "nothing_to_compact":
+        await ctx.reply(`Nothing to compact for \`${runId}\`.`);
+        break;
+      case "busy":
+        await ctx.reply(`Pi run \`${runId}\` is busy (already compacting or streaming a turn).`);
+        break;
+      case "stale":
+        await ctx.reply(`Stale generation for \`${runId}\` — the run changed since the request.`);
+        break;
+      default:
+        await ctx.reply(`Pi compaction failed: ${result.message.slice(0, 200)}`);
+    }
+    return true;
+  } catch (err) {
+    await ctx.reply(`❌ ${err instanceof Error ? err.message : String(err)}`);
+    return true;
+  }
+}
+
 export async function handlePiResume(text: string, ctx: CommandContext): Promise<boolean> {
   try {
     const svc = getService(ctx);

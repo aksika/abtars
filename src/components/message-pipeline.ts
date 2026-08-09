@@ -611,6 +611,30 @@ export async function handleInboundMessage(
       });
     }
 
+    // --- #1406: automatic durable compaction, scheduled once after the
+    // assistant row is durably recorded. Fire-and-forget: it must never delay
+    // or revoke the already delivered response. Deduplication happens in the
+    // control service and the daemon's generation CAS. No timer or heartbeat
+    // entry is added. ---
+    if (deps.memoryRuntime?.state === "ready"
+      && durableContextIntent?.mode === "durable"
+      && typeof durableContextIntent.beforeMessageId === "number") {
+      const { getSessionControlService } = await import("./session-control/instance.js");
+      const sessionControl = getSessionControlService();
+      if (sessionControl) {
+        const { logAndSwallow } = await import("./log-and-swallow.js");
+        sessionControl.execute(
+          {
+            kind: "durable_conversation",
+            principalId: userId,
+            sessionId: activeSessionId,
+            beforeMessageId: durableContextIntent.beforeMessageId,
+          },
+          { kind: "compact", reason: "automatic" },
+        ).catch(err => logAndSwallow(TAG, "automatic compaction", err));
+      }
+    }
+
     // --- TTS for voice notes ---
     if (isVoice && ttsConfig && !pSession.fullMode && adapter.sendVoice) {
       try {

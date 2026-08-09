@@ -261,6 +261,12 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/effort (alias /thinking) — Reasoning effort (off/low/medium/high/xhigh) + show/hide thinking",
     "/kanban — Kanban board",
     "/tribe — Peer status (Orc + enrolled peers)",
+    "/pi run --workspace <alias> <goal> — Start a Pi coding run",
+    "/pi status <runId> — Pi run status",
+    "/pi steer <runId> <text> — Steer a Pi run",
+    "/pi compact <runId> [instructions] — Native Pi compaction of a coding run",
+    "/pi cancel <runId> — Cancel a Pi run",
+    "/pi resume <runId> — Resume a Pi run",
   ];
   if (ctx.platform === "telegram") {
     cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");

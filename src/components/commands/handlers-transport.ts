@@ -36,7 +36,7 @@ export async function handleNewReset(text: string, ctx: CommandContext): Promise
   return true;
 }
 
-export async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleCompact(text: string, ctx: CommandContext): Promise<boolean> {
   try {
     // #1022: compaction only for A/C session types (hard requirement).
     const { isCompactable } = await import("../spin-types.js");
@@ -44,16 +44,57 @@ export async function handleCompact(_text: string, ctx: CommandContext): Promise
       await ctx.reply("Compaction not available for this session.");
       return true;
     }
-    // #1527: a read-only durable context provider is NOT a compaction
-    // orchestrator. Maintenance support is never inferred from it; until
-    // #1406 lands, compaction remains unavailable.
-    await ctx.reply("Compaction maintenance is unavailable on this transport (#1406).");
+    // #1406: exact durable target through the backend-neutral control plane.
+    const { getSessionControlService } = await import("../session-control/instance.js");
+    const service = getSessionControlService();
+    if (!service) {
+      await ctx.reply("Compaction is unavailable (control service not initialized).");
+      return true;
+    }
+    const instructions = text.replace(/^\/compact\b/i, "").trim();
+    if (Buffer.byteLength(instructions, "utf-8") > MAX_COMPACT_INSTRUCTIONS_BYTES) {
+      await ctx.reply(`Custom instructions exceed ${MAX_COMPACT_INSTRUCTIONS_BYTES} bytes.`);
+      return true;
+    }
+    const result = await service.execute(
+      { kind: "durable_conversation", principalId: ctx.userId, sessionId: ctx.sessionKey },
+      { kind: "compact", reason: "manual", customInstructions: instructions || undefined },
+    );
+    await ctx.reply(formatCompactReply(result));
   } catch (err) {
     logError(TAG, "Manual compaction failed", err);
     await ctx.reply("Compaction failed.");
   }
   return true;
 }
+
+/** Bounded, platform-neutral reply for a session-control result. */
+export function formatCompactReply(result: {
+  status: string;
+  message: string;
+  tokensBefore?: number;
+  tokensAfter?: number;
+}): string {
+  const savings = result.tokensBefore && result.tokensAfter
+    ? ` (${Math.round((1 - result.tokensAfter / result.tokensBefore) * 100)}% smaller)`
+    : "";
+  switch (result.status) {
+    case "completed":
+      return `Compaction complete${savings}.`;
+    case "nothing_to_compact":
+      return "Nothing to compact — history is within budget.";
+    case "busy":
+      return "Compaction is already in progress — try again shortly.";
+    case "stale":
+      return "Compaction skipped — a newer checkpoint was committed first.";
+    case "unsupported":
+      return "Compaction is not supported for this session.";
+    default:
+      return `Compaction failed: ${result.message.slice(0, 200)}`;
+  }
+}
+
+const MAX_COMPACT_INSTRUCTIONS_BYTES = 4_000;
 
 export async function handleEmergencyAlias(_text: string, ctx: CommandContext): Promise<boolean> {
   return handleModels("/model emergency", ctx);

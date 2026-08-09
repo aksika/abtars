@@ -13,6 +13,16 @@ const TAG = "pi-service";
 
 export type Principal = { userId: string };
 
+/** #1406: bounded terminal result of native Pi run compaction. */
+export interface CompactionControlResult {
+  status: "completed" | "nothing_to_compact" | "busy" | "unsupported" | "stale" | "failed";
+  targetKind: "local_pi_run";
+  tokensBefore?: number;
+  tokensAfter?: number;
+  generation?: number;
+  message: string;
+}
+
 export interface PiRunIdempotency {
   clientId: string;
   operation: string;
@@ -154,6 +164,29 @@ export class PiRunService {
     const ok = await this.deps.executor.cancel(runId);
     if (!ok) throw new Error(`Failed to cancel run ${runId}`);
     return this.deps.store.toView(this.deps.store.get(runId)!, caller.userId);
+  }
+
+  /**
+   * #1406: native compaction of a locally supervised Pi-owned run. Ownership,
+   * active state, and the current generation are resolved here; the executor
+   * revalidates generation and live process state before any write.
+   */
+  async compact(runId: string, customInstructions: string | undefined, caller: Principal): Promise<CompactionControlResult> {
+    const base = { targetKind: "local_pi_run" as const, message: "" };
+    const run = this.deps.store.get(runId);
+    if (!run) return { ...base, status: "failed", message: `Run ${runId} not found` };
+    if (run.ownerPrincipalId !== caller.userId) {
+      return { ...base, status: "failed", message: `Run ${runId} belongs to a different principal` };
+    }
+    if (!["starting", "running", "awaiting_input"].includes(run.status)) {
+      return { ...base, status: "failed", message: `Run ${runId} is not active (status: ${run.status})` };
+    }
+    return this.deps.executor.compactOwnedRun({
+      runId,
+      ownerPrincipalId: caller.userId,
+      expectedGeneration: run.executionGeneration,
+      customInstructions,
+    });
   }
 
   async resume(runId: string, caller: Principal): Promise<PiRunRef> {

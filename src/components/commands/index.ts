@@ -21,7 +21,7 @@ import {
 import { handleSession } from "./session-handler.js";
 import {
   handlePiRun, handlePiStatus, handlePiList, handlePiReply,
-  handlePiSteer, handlePiCancel, handlePiResume,
+  handlePiSteer, handlePiCancel, handlePiResume, handlePiCompact,
 } from "./handlers-pi.js";
 
 // ── Exact-match commands ────────────────────────────────────────────────────
@@ -93,4 +93,5 @@ registerPrefix("/pi list", handlePiList);
 registerPrefix("/pi reply ", handlePiReply);
 registerPrefix("/pi steer ", handlePiSteer);
 registerPrefix("/pi cancel ", handlePiCancel);
+registerPrefix("/pi compact ", handlePiCompact);
 registerPrefix("/pi resume ", handlePiResume);

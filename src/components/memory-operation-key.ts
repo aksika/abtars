@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export type MemoryMutationFamily = "inbound" | "assistant" | "feedback";
+export type MemoryMutationFamily = "inbound" | "assistant" | "feedback" | "compact";
 
 const KEY_PREFIX = "abtars-mem-v1";
 const MAX_KEY_LENGTH = 128;

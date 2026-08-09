@@ -15,6 +15,7 @@ import { phaseHeartbeat } from "./boot/phase-heartbeat.js";
 import { phaseSleep } from "./boot/phase-sleep.js";
 import { phaseDashboard } from "./boot/phase-dashboard.js";
 import { phaseAgentApi } from "./boot/phase-agent-api.js";
+import { phaseSessionControl } from "./boot/phase-session-control.js";
 import { phaseShutdown } from "./boot/phase-shutdown.js";
 
 /**
@@ -123,6 +124,7 @@ export const BOOT_PHASES = [
   phaseSleep,
   phaseDashboard,
   phaseAgentApi,
+  phaseSessionControl,
   phaseShutdown,
 ] as const;
 

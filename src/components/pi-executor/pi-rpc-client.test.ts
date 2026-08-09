@@ -271,6 +271,65 @@ describe("SupervisedPiRpcClient", () => {
     });
   });
 
+  describe("compact (#1406)", () => {
+    beforeEach(async () => {
+      await client.launch("/usr/bin/pi", [], "/ws", {});
+    });
+
+    it("sends the official compact command and normalizes the response", async () => {
+      const compactPromise = client.compact();
+      const writeData = child.stdin.write.mock.calls.find(
+        (call: unknown[]) => String(call[0]).includes('"compact"'),
+      ) as unknown as [string];
+      expect(writeData).toBeDefined();
+      const frame = JSON.parse(writeData[0]);
+      expect(frame.type).toBe("compact");
+      expect(frame.id).toBeTruthy();
+
+      child.stdout.write(JSON.stringify({
+        type: "response",
+        id: frame.id,
+        command: "compact",
+        success: true,
+        data: { summary: "done", firstKeptEntryId: "e-1", tokensBefore: 1000, estimatedTokensAfter: 120 },
+      }) + "\n");
+      const result = await compactPromise;
+      expect(result).toEqual({ summary: "done", firstKeptEntryId: "e-1", tokensBefore: 1000, estimatedTokensAfter: 120 });
+    });
+
+    it("passes bounded custom instructions through the command", async () => {
+      const compactPromise = client.compact("focus on the plan section");
+      const writeData = child.stdin.write.mock.calls.find(
+        (call: unknown[]) => String(call[0]).includes('"compact"'),
+      ) as unknown as [string];
+      const frame = JSON.parse(writeData[0]);
+      expect(frame.customInstructions).toBe("focus on the plan section");
+      child.stdout.write(JSON.stringify({
+        type: "response", id: frame.id, command: "compact", success: true,
+        data: { summary: "s", firstKeptEntryId: "e", tokensBefore: 5 },
+      }) + "\n");
+      await compactPromise;
+    });
+
+    it("rejects on Pi error responses (never a false success)", async () => {
+      const compactPromise = client.compact();
+      const writeData = child.stdin.write.mock.calls.find(
+        (call: unknown[]) => String(call[0]).includes('"compact"'),
+      ) as unknown as [string];
+      const frame = JSON.parse(writeData[0]);
+      child.stdout.write(JSON.stringify({
+        type: "response", id: frame.id, command: "compact", success: false, error: "context too large",
+      }) + "\n");
+      await expect(compactPromise).rejects.toThrow("context too large");
+    });
+
+    it("rejects on process exit during compact", async () => {
+      const compactPromise = client.compact();
+      child.emit("exit", 1, null);
+      await expect(compactPromise).rejects.toMatchObject({ code: "process_exit" });
+    });
+  });
+
   describe("close and cleanup", () => {
     beforeEach(async () => {
       await client.launch("/usr/bin/pi", [], "/ws", {});

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { logDebug, logWarn, logError } from "../logger.js";
+import { JsonlReader } from "./jsonl-reader.js";
 import type {
   RpcCommand, RpcResponse, RpcExtensionUIRequest, RpcExtensionUIResponse,
   RpcEventListener, ExtensionError,
@@ -46,9 +46,18 @@ interface PendingEntry {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/** Normalized terminal result of the official Pi `compact` RPC operation. */
+export interface NormalizedPiCompactionResult {
+  summary: string;
+  firstKeptEntryId: string;
+  tokensBefore: number;
+  estimatedTokensAfter?: number;
+}
+
 export class SupervisedPiRpcClient {
   private child: ChildProcess | null = null;
-  private rl: ReturnType<typeof createInterface> | null = null;
+  private jsonl: JsonlReader | null = null;
+  private readonly stdoutHandler = (chunk: Buffer) => { this.jsonl?.push(chunk); };
   private stderrBuf = "";
   private readonly pending = new Map<string, PendingEntry>();
   private readonly eventListeners = new Set<EventListener>();
@@ -91,8 +100,14 @@ export class SupervisedPiRpcClient {
       if (!this._closed) this._rejectAll(new PiRpcError("process_error", err.message));
     });
 
-    this.rl = createInterface({ input: this.child.stdout!, crlfDelay: Infinity });
-    this.rl.on("line", (line: string) => this._onLine(line));
+    // #1406: strict LF-only JSONL framing (Pi contract). The reader enforces
+    // the byte bound while accumulating, strips one trailing CR, preserves
+    // U+2028/U+2029 inside JSON strings, and recovers after oversized frames.
+    this.jsonl = new JsonlReader({
+      onRecord: (record) => this._onLine(record),
+      onDiscarded: (reason, bytes) => logWarn(TAG, `Dropped RPC frame: reason=${reason} bytes=${bytes}`),
+    }, MAX_RPC_LINE_BYTES);
+    this.child.stdout!.on("data", this.stdoutHandler);
 
     this.child.stderr!.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf-8");
@@ -105,13 +120,14 @@ export class SupervisedPiRpcClient {
     this.child.stdin!.on("error", () => {});
   }
 
-  async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean }> {
+  async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean }> {
     const result = await this.send({ type: "get_state" });
     const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
     return {
       sessionId: (data?.sessionId as string) ?? "",
       sessionFile: data?.sessionFile as string | undefined,
       isStreaming: (data?.isStreaming as boolean) ?? false,
+      isCompacting: (data?.isCompacting as boolean) ?? false,
     };
   }
 
@@ -185,6 +201,25 @@ export class SupervisedPiRpcClient {
     return { cancelled: (data?.cancelled as boolean) ?? false };
   }
 
+  /**
+   * #1406: official native Pi RPC compaction. Resolves on the correlated
+   * `compact` response (never on the stdin write); the caller correlates
+   * compaction lifecycle events for terminal truth.
+   */
+  async compact(customInstructions?: string): Promise<NormalizedPiCompactionResult> {
+    const command: RpcCommand = customInstructions
+      ? { type: "compact", customInstructions }
+      : { type: "compact" };
+    const result = await this.send(command);
+    const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
+    return {
+      summary: typeof data?.summary === "string" ? data.summary : "",
+      firstKeptEntryId: typeof data?.firstKeptEntryId === "string" ? data.firstKeptEntryId : "",
+      tokensBefore: typeof data?.tokensBefore === "number" ? data.tokensBefore : 0,
+      estimatedTokensAfter: typeof data?.estimatedTokensAfter === "number" ? data.estimatedTokensAfter : undefined,
+    };
+  }
+
   subscribe(listener: EventListener): () => void {
     this.eventListeners.add(listener);
     return () => this.eventListeners.delete(listener);
@@ -200,7 +235,12 @@ export class SupervisedPiRpcClient {
     this._closed = true;
     this._fireTermination({ kind: "exit", code: null, signal: null });
     this._rejectAll(new PiRpcError("closed", "Pi RPC client closed"));
-    if (this.rl) { this.rl.close(); this.rl = null; }
+    // Deterministic listener/buffer cleanup (#1406): detach the stdout
+    // handler and flush the JSONL reader exactly once.
+    if (this.child?.stdout) {
+      this.child.stdout.off("data", this.stdoutHandler);
+    }
+    if (this.jsonl) { this.jsonl.flush(); this.jsonl = null; }
     if (this.child && !this.child.killed) {
       try { this.child.stdin?.end(); } catch { }
       const { pid } = this.child;
@@ -241,15 +281,13 @@ export class SupervisedPiRpcClient {
   }
 
   private _onLine(line: string): void {
-    if (Buffer.byteLength(line, "utf-8") > MAX_RPC_LINE_BYTES) {
-      logWarn(TAG, `Oversized RPC line (${Buffer.byteLength(line, "utf-8")} bytes) — dropping`);
-      return;
-    }
+    // Bounds are enforced by the JsonlReader before delivery (#1406).
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(line) as Record<string, unknown>;
     } catch {
-      logWarn(TAG, `Malformed RPC line: ${line.slice(0, 200)}`);
+      // #1406: malformed frames are dropped without exposing frame content.
+      logWarn(TAG, `Malformed RPC frame — dropping (${Buffer.byteLength(line, "utf-8")} bytes)`);
       return;
     }
 

@@ -5,7 +5,17 @@
 import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import type { CompactionEvent } from "abmind";
+/**
+ * Compaction metric event (#1406). Previously imported from the deleted
+ * abmind ContextOrchestrator; the shape is now owned locally and fed by the
+ * session-control telemetry sink.
+ */
+export interface CompactionMetricEvent {
+  level: "started" | "skipped" | "completed" | "failed";
+  durationMs: number;
+  savingsPct?: number;
+  failureReason?: string;
+}
 
 const RING_SIZE = 100;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -62,7 +72,7 @@ export function recordCronDepth(depth: number): void {
  * (audit trail). Skipped passes are audit-only — they do no work, so they don't
  * enter the latency/savings/call aggregates.
  */
-export function recordCompaction(event: CompactionEvent): void {
+export function recordCompaction(event: CompactionMetricEvent): void {
   if (metricsPath) {
     try { appendFileSync(metricsPath, JSON.stringify({ type: "compaction", ...event }) + "\n"); }
     catch { /* non-fatal */ }
@@ -70,8 +80,10 @@ export function recordCompaction(event: CompactionEvent): void {
   if (event.level === "skipped") return;
   recordLatency("compaction", event.durationMs);
   recordCall("compaction", event.level !== "failed" && !event.failureReason);
-  if (compactionSavings.length >= RING_SIZE) compactionSavings.shift();
-  compactionSavings.push(event.savingsPct);
+  if (event.savingsPct != null && Number.isFinite(event.savingsPct)) {
+    if (compactionSavings.length >= RING_SIZE) compactionSavings.shift();
+    compactionSavings.push(event.savingsPct);
+  }
 }
 
 function percentile(sorted: number[], pct: number): number {
