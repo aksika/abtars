@@ -13,6 +13,16 @@ import { openaiError } from "./openai-compat-translate.js";
 import { handleModels as v1HandleModels, handleModel as v1HandleModel, handleEmbeddings as v1HandleEmbeddings, writeResult } from "./openai-compat-routes.js";
 import type { ValidatedTlsIdentity } from "./peer-transport/tls-identity.js";
 import { isLoopbackAddress } from "../utils/net.js";
+import {
+  dispatchAgentApiRequest, pathMatcher,
+} from "./agent-api-router.js";
+import type {
+  AgentApiRoute, AgentApiDispatcherDeps, AgentApiRouteContext,
+} from "./agent-api-router.js";
+import {
+  handleOrcSpawn, handleOrcStatus, handleOrcCancel, handleOrcDelegate, handleKanbanCreate,
+} from "./agent-api-local-routes.js";
+import type { AgentApiLocalRouteDeps } from "./agent-api-local-routes.js";
 
 const TAG = "agent-api";
 const MAX_TRAFFIC_LOG = 50;
@@ -142,6 +152,9 @@ export class AgentApiServer {
   private peerHelpService: import("./peer-help/service.js").PeerHelpService | null = null;
   /** Rate-limit for /v1/enroll-ws: IP → last attempt timestamp (ms). */
   private enrollRateLimit = new Map<string, number>();
+  /** #1557 — Declarative production route registry + dispatcher security deps. */
+  private routes: AgentApiRoute[];
+  private routerDeps: AgentApiDispatcherDeps;
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
     this.memoryRuntime = deps.memoryRuntime;
@@ -149,12 +162,242 @@ export class AgentApiServer {
     void deps.piExecutorService; // kept for compat
     this.a2aAdapter = deps.a2aAdapter;
 
+    // #1557 — Production route registry + dispatcher security primitives.
+    this.routerDeps = {
+      verifyBodylessPeer: (req, res) => this.authenticateBodylessPeer(req, res),
+      authenticatePeerBody: (req, res, options) => this.authenticatePeerBody(req, res, { maxBodyBytes: options.maxBytes, rateLimited: options.rateLimited }),
+      requireLoopback: (req, res) => this.requireLoopback(req, res),
+      readBodyBounded,
+    };
+    this.routes = this.buildRouteRegistry();
+
     // HTTPS-only: validated TLS material is a required dependency (#1305)
     this.server = createServer({
       key: deps.tls.key,
       cert: deps.tls.cert,
       minVersion: "TLSv1.3",
-    }, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
+    }, (req: IncomingMessage, res: ServerResponse) => { void this.handle(req, res); });
+  }
+
+  /**
+   * #1557 — Declarative production route table. One entry per documented
+   * endpoint: method, anchored matcher, auth policy, body policy, handler.
+   * Static routes are registered before overlapping parameter routes.
+   */
+  private buildRouteRegistry(): AgentApiRoute[] {
+    const localDeps: AgentApiLocalRouteDeps = {
+      getRequesterContributionService: () => this.requesterContributionService,
+    };
+    const peer = (rateLimited?: boolean) => ({ kind: "peer", ...(rateLimited ? { rateLimited } : {}) }) as const;
+
+    return [
+      {
+        id: "models.list",
+        method: "GET",
+        match: pathMatcher("/v1/models"),
+        auth: peer(),
+        body: { kind: "none" },
+        handler: (ctx) => { writeResult(ctx.res, v1HandleModels()); },
+      },
+      {
+        id: "agent-card.get",
+        method: "GET",
+        match: pathMatcher("/v1/agent-card"),
+        auth: peer(),
+        body: { kind: "none" },
+        handler: (ctx) => this.handleAgentCard(ctx),
+      },
+      {
+        id: "models.get",
+        method: "GET",
+        match: pathMatcher("/v1/models/:id"),
+        auth: peer(),
+        body: { kind: "none" },
+        handler: (ctx) => { writeResult(ctx.res, v1HandleModel(ctx.params["id"]!)); },
+      },
+      {
+        id: "chat.completions",
+        method: "POST",
+        match: pathMatcher("/v1/chat/completions"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: async (ctx) => {
+          const ip = normalizeIp(ctx.req.socket.remoteAddress ?? "");
+          const hopHeader = ctx.req.headers["x-peer-hops"];
+          const hopValue = typeof hopHeader === "string" ? parseInt(hopHeader, 10) : null;
+          const sessionId = (ctx.req.headers["x-session-id"] as string) || "default";
+          await this.handleV1ChatCompletions(ctx.body, ctx.res, ctx.caller!, ip, hopValue, sessionId);
+        },
+      },
+      {
+        id: "embeddings.create",
+        method: "POST",
+        match: pathMatcher("/v1/embeddings"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleV1Embeddings(ctx.body, ctx.res),
+      },
+      {
+        id: "help.requests.create",
+        method: "POST",
+        match: pathMatcher("/v1/help/requests"),
+        auth: peer(true),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: async (ctx) => {
+          if (!this.peerHelpService) { ctx.res.writeHead(503).end("Help service not available"); return; }
+          const response = await this.peerHelpService.handleHelpRequest(ctx.caller!, ctx.body);
+          ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+        },
+      },
+      {
+        id: "help.requests.status",
+        method: "GET",
+        match: pathMatcher("/v1/help/requests/:requestId"),
+        auth: peer(),
+        body: { kind: "none" },
+        handler: async (ctx) => {
+          if (!this.peerHelpService) { ctx.res.writeHead(503).end("Help service not available"); return; }
+          const response = await this.peerHelpService.handleHelpStatus(ctx.caller!, {
+            version: 1,
+            request_id: ctx.params["requestId"]!,
+            contribution_ref: ctx.query["contribution_ref"] ?? "",
+          });
+          ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+        },
+      },
+      {
+        id: "help.requests.withdraw",
+        method: "POST",
+        match: pathMatcher("/v1/help/requests/:requestId/withdraw"),
+        auth: peer(true),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: async (ctx) => {
+          if (!this.peerHelpService) { ctx.res.writeHead(503).end("Help service not available"); return; }
+          const response = await this.peerHelpService.handleHelpWithdraw(ctx.caller!, ctx.body);
+          ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+        },
+      },
+      {
+        id: "help.events.create",
+        method: "POST",
+        match: pathMatcher("/v1/help/events"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: async (ctx) => {
+          if (!this.peerHelpService) { ctx.res.writeHead(503).end("Help service not available"); return; }
+          const response = await this.peerHelpService.handleContributionEvent(ctx.caller!, ctx.body);
+          ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+        },
+      },
+      {
+        id: "task.messages.push",
+        method: "POST",
+        // Numeric card IDs only, anchored (preserves the historical \d+ shape).
+        match: (t) => {
+          const m = /^\/v1\/tasks\/(\d+)\/messages$/.exec(t.pathname);
+          return m ? { cardId: m[1]! } : false;
+        },
+        auth: peer(true),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleChannelPush(ctx.body, ctx.res, ctx.caller!, Number(ctx.params["cardId"])),
+      },
+      {
+        id: "task.messages.pull",
+        method: "GET",
+        match: (t) => {
+          const m = /^\/v1\/tasks\/(\d+)\/messages$/.exec(t.pathname);
+          return m ? { cardId: m[1]! } : false;
+        },
+        auth: peer(),
+        body: { kind: "none" },
+        handler: (ctx) => this.handleChannelPull(ctx.query, ctx.res, Number(ctx.params["cardId"])),
+      },
+      {
+        id: "callbacks.create",
+        method: "POST",
+        match: pathMatcher("/v1/callbacks"),
+        auth: peer(true),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleV1Callback(ctx.body, ctx.res, ctx.caller!),
+      },
+      {
+        id: "pi-events.push",
+        method: "POST",
+        match: pathMatcher("/v1/pi-events/push"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleRemotePiEventPush(ctx.body, ctx.res, ctx.caller!),
+      },
+      {
+        id: "pi-runs.events.acknowledge",
+        method: "POST",
+        match: pathMatcher("/v1/pi-runs/:runId/events/acknowledge"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleRemotePiEventsAck(ctx.body, ctx.res, ctx.caller!, ctx.params["runId"]!),
+      },
+      {
+        id: "pi-runs.events.list",
+        method: "GET",
+        match: pathMatcher("/v1/pi-runs/:runId/events"),
+        auth: peer(),
+        body: { kind: "none" },
+        handler: (ctx) => this.handleRemotePiEventsList(ctx, ctx.caller!, ctx.params["runId"]!),
+      },
+      {
+        id: "pi-runs.control",
+        method: "POST",
+        match: pathMatcher("/v1/pi-runs/:runId/control"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleRemotePiControl(ctx.body, ctx.res, ctx.caller!),
+      },
+      {
+        id: "orc.spawn",
+        method: "POST",
+        match: pathMatcher("/v1/orc/spawn"),
+        auth: { kind: "loopback" },
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => handleOrcSpawn(ctx.body, ctx.res, localDeps),
+      },
+      {
+        id: "orc.status",
+        method: "GET",
+        match: pathMatcher("/v1/orc/status"),
+        auth: { kind: "loopback" },
+        body: { kind: "none" },
+        handler: (ctx) => handleOrcStatus(ctx.res, localDeps),
+      },
+      {
+        id: "orc.cancel",
+        method: "POST",
+        match: pathMatcher("/v1/orc/cancel"),
+        auth: { kind: "loopback" },
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => handleOrcCancel(ctx.body, ctx.res, localDeps),
+      },
+      {
+        id: "orc.delegate",
+        method: "POST",
+        match: pathMatcher("/v1/orc/delegate"),
+        auth: { kind: "loopback" },
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => handleOrcDelegate(ctx.body, ctx.res, localDeps),
+      },
+      {
+        id: "kanban.create",
+        method: "POST",
+        match: pathMatcher("/v1/kanban"),
+        auth: { kind: "loopback" },
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => handleKanbanCreate(ctx.body, ctx.res, localDeps),
+      },
+    ];
+  }
+
+  /** #1557 — Production route objects, as inspected by the policy contract test. */
+  getRoutes(): readonly AgentApiRoute[] {
+    return this.routes;
   }
 
   /** #1433 — Wire the PeerHelpService for WSS/HTTPS help request handling. */
@@ -445,6 +688,23 @@ export class AgentApiServer {
     ws.on("error", onEnrollmentError);
   }
 
+  /** #898 — GET /v1/agent-card: live capabilities + health. */
+  private handleAgentCard(ctx: AgentApiRouteContext): void {
+    const { getLocalCapabilities } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
+    const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+    const { loadavg, cpus } = require("node:os") as typeof import("node:os");
+    const config = loadPeerConfig();
+    const load = Math.round(Math.min(1, loadavg()[0]! / (cpus().length || 1)) * 100) / 100;
+    ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+      name: config.self.name,
+      version: process.env["npm_package_version"] ?? "?",
+      capabilities: getLocalCapabilities(),
+      load,
+      max_sessions: parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10),
+      status: "ready",
+    }));
+  }
+
   getTrafficLog(): TrafficEntry[] {
     return this.trafficLog;
   }
@@ -454,296 +714,10 @@ export class AgentApiServer {
     if (this.trafficLog.length > MAX_TRAFFIC_LOG) this.trafficLog.shift();
   }
 
-  /** #1402 — Wrap an async handler so uncaught errors always produce a 500. */
-  private handleAsync(
-    _req: IncomingMessage, res: ServerResponse, fn: () => Promise<void>,
-  ): void {
-    fn().catch((err) => {
-      logWarn(TAG, `Route error: ${err instanceof Error ? err.message : String(err)}`);
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" })
-          .end(JSON.stringify(openaiError("Internal server error", "server_error")));
-      }
-    });
-  }
-
-  private handle(req: IncomingMessage, res: ServerResponse): void {
-
-    const url = req.url ?? "";
-    const method = req.method ?? "";
-
-    // ── /v1/* routes (#373) ───────────────────────────────────────────────
-    if (url === "/v1/models" && method === "GET") {
-      if (this.authenticateBodylessPeer(req, res) === null) return;
-      writeResult(res, v1HandleModels());
-      return;
-    }
-    // #898 — GET /v1/agent-card: live capabilities + health
-    if (url === "/v1/agent-card" && method === "GET") {
-      if (this.authenticateBodylessPeer(req, res) === null) return;
-      const { getLocalCapabilities } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
-      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-      const { loadavg, cpus } = require("node:os") as typeof import("node:os");
-      const config = loadPeerConfig();
-      const load = Math.round(Math.min(1, loadavg()[0]! / (cpus().length || 1)) * 100) / 100;
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-        name: config.self.name,
-        version: process.env["npm_package_version"] ?? "?",
-        capabilities: getLocalCapabilities(),
-        load,
-        max_sessions: parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10),
-        status: "ready",
-      }));
-      return;
-    }
-    if (url.startsWith("/v1/models/") && method === "GET") {
-      if (this.authenticateBodylessPeer(req, res) === null) return;
-      const id = decodeURIComponent(url.slice("/v1/models/".length));
-      writeResult(res, v1HandleModel(id));
-      return;
-    }
-    if (url === "/v1/chat/completions" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-        if (!auth) return;
-        const ip = normalizeIp(req.socket.remoteAddress ?? "");
-        const hopHeader = req.headers["x-peer-hops"];
-        const hopValue = typeof hopHeader === "string" ? parseInt(hopHeader, 10) : null;
-        const sessionId = (req.headers["x-session-id"] as string) || "default";
-        const body = JSON.parse(auth.rawBody);
-        await this.handleV1ChatCompletions(body, res, auth.caller, ip, hopValue, sessionId);
-      });
-      return;
-    }
-    if (url === "/v1/embeddings" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-        if (!auth) return;
-        const body = JSON.parse(auth.rawBody);
-        await this.handleV1Embeddings(body, res);
-      });
-      return;
-    }
-    // #1433 — Peer help routes (replaces old /v1/tasks delegation)
-    if (url === "/v1/help/requests" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
-        if (!auth) return;
-        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
-        const body = JSON.parse(auth.rawBody);
-        const response = await this.peerHelpService.handleHelpRequest(auth.caller, body);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
-      });
-      return;
-    }
-    // GET /v1/help/requests/:requestId?contribution_ref=... — check help status
-    const helpStatusMatch = url.match(/^\/v1\/help\/requests\/([^/?]+)/);
-    if (helpStatusMatch && method === "GET") {
-      const caller = this.authenticateBodylessPeer(req, res);
-      if (caller === null) return;
-      this.handleAsync(req, res, async () => {
-        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
-        const requestId = helpStatusMatch[1]!;
-        const contributionRef = new URL(url, `https://${req.headers.host ?? "localhost"}`).searchParams.get("contribution_ref") ?? "";
-        const response = await this.peerHelpService!.handleHelpStatus(caller, { version: 1, request_id: requestId, contribution_ref: contributionRef });
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
-      });
-      return;
-    }
-    // POST /v1/help/requests/:requestId/withdraw — withdraw help
-    const helpWithdrawMatch = url.match(/^\/v1\/help\/requests\/([^/]+)\/withdraw/);
-    if (helpWithdrawMatch && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
-        if (!auth) return;
-        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
-        const body = JSON.parse(auth.rawBody);
-        const response = await this.peerHelpService.handleHelpWithdraw(auth.caller, body);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
-      });
-      return;
-    }
-    // POST /v1/help/events — contribution event delivery
-    if (url === "/v1/help/events" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-        if (!auth) return;
-        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
-        const body = JSON.parse(auth.rawBody);
-        const response = await this.peerHelpService.handleContributionEvent(auth.caller, body);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
-      });
-      return;
-    }
-
-    // #949 — POST /v1/tasks/:cardId/messages: remote peer pushes channel message
-    // #949 — GET /v1/tasks/:cardId/messages?since=: pull catch-up
-    const msgMatch = url.match(/^\/v1\/tasks\/(\d+)\/messages/);
-    if (msgMatch && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
-        if (!auth) return;
-        const body = JSON.parse(auth.rawBody);
-        await this.handleChannelPush(body, res, auth.caller, Number(msgMatch[1]));
-      });
-      return;
-    }
-    if (msgMatch && method === "GET") {
-      if (this.authenticateBodylessPeer(req, res) === null) return;
-      this.handleChannelPull(url, res, Number(msgMatch[1]));
-      return;
-    }
-
-    // #675 — POST /v1/callbacks: peer pushes task result back
-    if (url === "/v1/callbacks" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
-        if (!auth) return;
-        const body = JSON.parse(auth.rawBody);
-        await this.handleV1Callback(body, res, auth.caller);
-      });
-      return;
-    }
-
-    // #1358 — Remote Pi lifecycle and control routes
-    // POST /v1/pi-events/push — owner pushes lifecycle event to origin
-    if (url === "/v1/pi-events/push" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-        if (!auth) return;
-        await this.handleRemotePiEventPush(JSON.parse(auth.rawBody), res, auth.caller);
-      });
-      return;
-    }
-    // GET /v1/pi-runs/:runId/events — origin pulls catch-up events from owner
-    // POST /v1/pi-runs/:runId/events/acknowledge — origin acknowledges events to owner
-    // POST /v1/pi-runs/:runId/control — origin sends control command to owner
-    const piRunMatch = url.match(/^\/v1\/pi-runs\/([^/]+)\/(events|control)(?:\/(acknowledge))?$/);
-    if (piRunMatch) {
-      const runId = piRunMatch[1]!;
-      const subPath = piRunMatch[2]!;
-      const action = piRunMatch[3];
-      if (subPath === "events" && action === "acknowledge" && method === "POST") {
-        this.handleAsync(req, res, async () => {
-          const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-          if (!auth) return;
-          await this.handleRemotePiEventsAck(JSON.parse(auth.rawBody), res, auth.caller, runId);
-        });
-        return;
-      }
-      if (subPath === "events" && !action && method === "GET") {
-        const caller = this.authenticateBodylessPeer(req, res);
-        if (caller === null) return;
-        this.handleRemotePiEventsList(url, res, caller, runId);
-        return;
-      }
-      if (subPath === "control" && !action && method === "POST") {
-        this.handleAsync(req, res, async () => {
-          const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-          if (!auth) return;
-          await this.handleRemotePiControl(JSON.parse(auth.rawBody), res, auth.caller);
-        });
-        return;
-      }
-    }
-
-    // #1011 — Orc worker management (local CLI only — see requireLoopback)
-    if (url.startsWith("/v1/orc/")) {
-      if (!this.requireLoopback(req, res)) return;
-      this.handleOrcRoute(url, method, req, res);
-      return;
-    }
-
-    // #955 — Kanban card creation (local CLI only, uses shared createDispatchableCard)
-    if (url === "/v1/kanban" && method === "POST") {
-      if (!this.requireLoopback(req, res)) return;
-      this.handleAsync(req, res, async () => {
-        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
-        const { createDispatchableCard } = await import("./tasks/kanban-board.js");
-        const result = createDispatchableCard({
-          type: body.type,
-          title: body.title,
-          goal: body.goal,
-          source: body.source || "cli",
-          priority: body.priority,
-          labels: body.labels,
-          deliveryMode: body.delivery_mode,
-          chatId: body.chat_id,
-        });
-        if ("error" in result) {
-          res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: result.error }));
-        } else {
-          res.writeHead(201, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, card_id: result.cardId, status: result.status }));
-        }
-      });
-      return;
-    }
-
-    res.writeHead(404).end();
-  }
-
-  private async handleOrcRoute(url: string, method: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    try {
-      const { getOrcTools } = await import("./transport/orc-tools.js");
-      if (url === "/v1/orc/spawn" && method === "POST") {
-        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
-        const tool = getOrcTools().find(t => t.name === "spawn_worker");
-        const result = await tool!.execute(body);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
-        return;
-      }
-      if (url === "/v1/orc/status" && method === "GET") {
-        const tool = getOrcTools().find(t => t.name === "check_workers");
-        const result = await tool!.execute({});
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
-        return;
-      }
-      if (url === "/v1/orc/cancel" && method === "POST") {
-        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
-        const tool = getOrcTools().find(t => t.name === "cancel_worker");
-        const result = await tool!.execute(body);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
-        return;
-      }
-      if (url === "/v1/orc/delegate" && method === "POST") {
-        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
-        const { peer, goal, title } = body as { peer?: string; goal?: string; title?: string; request_id?: string };
-        if (!peer || !goal) { res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: "peer and goal required" })); return; }
-        const requestId = typeof body.request_id === "string" && body.request_id.length > 0 ? body.request_id : `orc_${Date.now()}`;
-        // #1618: the CLI delegate route now runs the full requester lifecycle —
-        // durable root + supervision + contribution proxy + ledger before any
-        // network I/O, with the shared RequesterContributionService.
-        const { RequesterContributionService } = await import("./peer-help/requester-contribution-service.js");
-        const service = this.requesterContributionService ?? new RequesterContributionService();
-        const result = await service.delegate({
-          peer,
-          request: {
-            version: 1,
-            request_id: requestId,
-            created_at: new Date().toISOString(),
-            expires_at: new Date(Date.now() + 300_000).toISOString(),
-            goal,
-            priority: (body.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW") ?? "MEDIUM",
-            required_capabilities: [],
-          },
-          binding: { kind: "create_cli_project", title: title ?? `[delegate:${peer}] ${goal.slice(0, 80)}`, goal },
-        });
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-          ok: true,
-          decision: result.decision,
-          project_card_id: result.projectCardId,
-          proxy_card_id: result.proxyCardId,
-          request_id: result.requestId,
-          contribution_ref: result.contributionRef,
-          reason_code: result.response?.reason_code,
-          reason: result.response?.reason,
-        }));
-        return;
-      }
-      res.writeHead(404).end();
-    } catch (err) {
-      res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-    }
+  /** #1557 — handle() is now pure dispatcher delegation. Authentication and
+   *  body policy are enforced by the declared route table, never by handlers. */
+  private handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    return dispatchAgentApiRequest(this.routes, this.routerDeps, req, res);
   }
 
   /**
@@ -1031,10 +1005,8 @@ export class AgentApiServer {
   }
 
   /** #949 — GET /v1/tasks/:cardId/messages?since=: pull messages for catch-up. */
-  private handleChannelPull(url: string, res: ServerResponse, cardId: number): void {
-    const sinceMatch = url.match(/[?&]since=([^&]+)/);
-    const sinceRaw = sinceMatch?.[1];
-    const since = sinceRaw ? decodeURIComponent(sinceRaw) : "1970-01-01";
+  private handleChannelPull(query: Record<string, string>, res: ServerResponse, cardId: number): void {
+    const since = query["since"] ?? "1970-01-01";
     const { channelGetSince } = require("./tasks/kanban-channel.js") as typeof import("./tasks/kanban-channel.js");
     const messages = channelGetSince(cardId, since);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ messages }));
@@ -1062,22 +1034,22 @@ export class AgentApiServer {
   }
 
   /** GET /v1/pi-runs/:runId/events — origin pulls catch-up events from owner. */
-  private handleRemotePiEventsList(url: string, res: ServerResponse, caller: string, runId: string): void {
-    const afterMatch = url.match(/[?&]after_sequence=([^&]+)/);
-    const limitMatch = url.match(/[?&]limit=([^&]+)/);
+  private handleRemotePiEventsList(ctx: AgentApiRouteContext, caller: string, runId: string): void {
+    const afterRaw = ctx.query["after_sequence"];
+    const limitRaw = ctx.query["limit"];
     const { getRemotePiDelivery } = require("./peer-transport/remote-pi-registry.js") as typeof import("./peer-transport/remote-pi-registry.js");
     const delivery = getRemotePiDelivery();
     if (!delivery) {
-      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi delivery not available" }));
+      ctx.res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi delivery not available" }));
       return;
     }
-    const after_sequence = afterMatch ? parseInt(afterMatch[1]!, 10) : 0;
-    const limit = limitMatch ? parseInt(limitMatch[1]!, 10) : 100;
+    const after_sequence = afterRaw !== undefined ? parseInt(afterRaw, 10) : 0;
+    const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : 100;
     delivery.listEvents({ version: 1, run_id: runId, after_sequence, limit }, caller).then(result => {
       if ("error" in result) {
-        res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: result.error }));
+        ctx.res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: result.error }));
       } else {
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
+        ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
       }
     });
   }

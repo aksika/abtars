@@ -160,28 +160,26 @@ describe("AgentApiServer", () => {
     });
 
     /**
-     * The cases above prove the guard decides correctly; these prove the two
-     * routes actually consult it. A real HTTPS client cannot present a remote
-     * source address from a test, so the request is driven through the real
-     * route chain in handle() with a synthetic socket instead of a mock guard.
+     * The cases above prove the guard decides correctly; these prove the
+     * routes actually consult it at the real dispatcher boundary (#1557).
+     * A real HTTPS client cannot present a remote source address from a
+     * test, so the request is driven through the real route registry with a
+     * synthetic socket. `on()` throws if the body is read — proving the
+     * loopback guard runs before any body consumption or handler dispatch.
      */
     describe.each([
-      ["GET", "/v1/orc/status"],
-      ["POST", "/v1/orc/spawn"],
-      ["POST", "/v1/kanban"],
-    ])("%s %s", (method, url) => {
-      it("is refused for a remote caller before any handler runs", () => {
+      ["GET", "/v1/orc/status", "none"],
+      ["POST", "/v1/orc/spawn", "json"],
+      ["POST", "/v1/kanban", "json"],
+    ])("%s %s", (method, url, bodyPolicy) => {
+      it("is refused for a remote caller before any body read or handler runs", async () => {
         const written: { status?: number; body?: string } = {};
-        let dispatched = false;
-        // If the guard is missing, these run and flip the flag.
-        (server as any).handleOrcRoute = () => { dispatched = true; };
-        (server as any).handleAsync = () => { dispatched = true; };
-
         const req = {
           url, method,
           headers: {},
           socket: { remoteAddress: "100.82.167.127" },
-          on() { return this; },
+          on() { throw new Error("body was read before loopback guard"); },
+          resume() {},
         } as any;
         const res = {
           writeHead(status: number) { written.status = status; return this; },
@@ -189,11 +187,109 @@ describe("AgentApiServer", () => {
           headersSent: false,
         } as any;
 
-        (server as any).handle(req, res);
+        await (server as any).handle(req, res);
 
         expect(written.status).toBe(401);
-        expect(dispatched).toBe(false);
+        expect(written.body).toContain("loopback only");
+        if (bodyPolicy === "json") {
+          // The guard must run before the body is consumed. If the guard
+          // vanished, on() would have thrown and the 401 would never arrive.
+          expect(written.status).toBe(401);
+        }
       });
+    });
+  });
+
+  /**
+   * #1557 — Policy contract for the production route registry. This matrix is
+   * a security assertion: every endpoint's method, auth, body, and rate-limit
+   * policy must match exactly. Adding or changing a route requires a visible
+   * update here. Fails on undeclared routes and on any auth:"none" route.
+   */
+  describe("production route policy contract (#1557)", () => {
+    interface ExpectedRoute {
+      id: string;
+      method: "GET" | "POST";
+      path: string;
+      params: Record<string, string>;
+      auth: "peer" | "loopback" | "none";
+      rateLimited?: boolean;
+      body: "none" | "json";
+    }
+
+    const EXPECTED: ExpectedRoute[] = [
+      { id: "models.list", method: "GET", path: "/v1/models", params: {}, auth: "peer", body: "none" },
+      { id: "agent-card.get", method: "GET", path: "/v1/agent-card", params: {}, auth: "peer", body: "none" },
+      { id: "models.get", method: "GET", path: "/v1/models/m1", params: { id: "m1" }, auth: "peer", body: "none" },
+      { id: "chat.completions", method: "POST", path: "/v1/chat/completions", params: {}, auth: "peer", body: "json" },
+      { id: "embeddings.create", method: "POST", path: "/v1/embeddings", params: {}, auth: "peer", body: "json" },
+      { id: "help.requests.create", method: "POST", path: "/v1/help/requests", params: {}, auth: "peer", rateLimited: true, body: "json" },
+      { id: "help.requests.status", method: "GET", path: "/v1/help/requests/r1", params: { requestId: "r1" }, auth: "peer", body: "none" },
+      { id: "help.requests.withdraw", method: "POST", path: "/v1/help/requests/r1/withdraw", params: { requestId: "r1" }, auth: "peer", rateLimited: true, body: "json" },
+      { id: "help.events.create", method: "POST", path: "/v1/help/events", params: {}, auth: "peer", body: "json" },
+      { id: "task.messages.push", method: "POST", path: "/v1/tasks/42/messages", params: { cardId: "42" }, auth: "peer", rateLimited: true, body: "json" },
+      { id: "task.messages.pull", method: "GET", path: "/v1/tasks/42/messages", params: { cardId: "42" }, auth: "peer", body: "none" },
+      { id: "callbacks.create", method: "POST", path: "/v1/callbacks", params: {}, auth: "peer", rateLimited: true, body: "json" },
+      { id: "pi-events.push", method: "POST", path: "/v1/pi-events/push", params: {}, auth: "peer", body: "json" },
+      { id: "pi-runs.events.acknowledge", method: "POST", path: "/v1/pi-runs/r1/events/acknowledge", params: { runId: "r1" }, auth: "peer", body: "json" },
+      { id: "pi-runs.events.list", method: "GET", path: "/v1/pi-runs/r1/events", params: { runId: "r1" }, auth: "peer", body: "none" },
+      { id: "pi-runs.control", method: "POST", path: "/v1/pi-runs/r1/control", params: { runId: "r1" }, auth: "peer", body: "json" },
+      { id: "orc.spawn", method: "POST", path: "/v1/orc/spawn", params: {}, auth: "loopback", body: "json" },
+      { id: "orc.status", method: "GET", path: "/v1/orc/status", params: {}, auth: "loopback", body: "none" },
+      { id: "orc.cancel", method: "POST", path: "/v1/orc/cancel", params: {}, auth: "loopback", body: "json" },
+      { id: "orc.delegate", method: "POST", path: "/v1/orc/delegate", params: {}, auth: "loopback", body: "json" },
+      { id: "kanban.create", method: "POST", path: "/v1/kanban", params: {}, auth: "loopback", body: "json" },
+    ];
+
+    function targetFor(e: ExpectedRoute) {
+      const [pathname] = e.path.split("?");
+      return { pathname, query: {} };
+    }
+
+    it("every registry route is declared and matches its expected policy exactly", () => {
+      server = new AgentApiServer({ ...makeConfig(), tls: makeTestTls(tmpDir) });
+      const routes = server.getRoutes();
+
+      for (const route of routes) {
+        const expected = EXPECTED.find(e => e.id === route.id);
+        expect(expected, `route '${route.id}' is not declared in the policy matrix`).toBeDefined();
+        expect(route.method).toBe(expected!.method);
+        expect(route.body.kind).toBe(expected!.body);
+        if (route.auth.kind === "peer") {
+          expect(route.auth.rateLimited ?? false).toBe(expected!.rateLimited ?? false);
+        } else {
+          expect(route.auth.kind).toBe(expected!.auth);
+          expect(expected!.rateLimited).toBeUndefined();
+        }
+        const matched = route.match(targetFor(expected!));
+        expect(matched, `route '${route.id}' must match its documented path`).not.toBe(false);
+        expect(matched).toEqual(expected!.params);
+      }
+    });
+
+    it("every declared policy is present in the registry (no silently missing routes)", () => {
+      server = new AgentApiServer({ ...makeConfig(), tls: makeTestTls(tmpDir) });
+      const ids = new Set(server.getRoutes().map(r => r.id));
+      for (const e of EXPECTED) {
+        expect(ids.has(e.id), `expected route '${e.id}' is missing from the registry`).toBe(true);
+      }
+    });
+
+    it("no route may use unauthenticated auth (allowlist is empty)", () => {
+      server = new AgentApiServer({ ...makeConfig(), tls: makeTestTls(tmpDir) });
+      for (const route of server.getRoutes()) {
+        expect(route.auth.kind).not.toBe("none");
+      }
+    });
+
+    it("matchers reject undocumented extra path segments", () => {
+      server = new AgentApiServer({ ...makeConfig(), tls: makeTestTls(tmpDir) });
+      const routes = server.getRoutes();
+      for (const e of EXPECTED) {
+        const route = routes.find(r => r.id === e.id)!;
+        const withExtra = e.path + "/extra";
+        expect(route.match({ pathname: withExtra, query: {} }), `route '${e.id}' accepted extra segment`).toBe(false);
+      }
     });
   });
 
