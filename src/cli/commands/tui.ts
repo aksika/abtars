@@ -34,7 +34,7 @@ import {
   type TuiClientFrame,
   type TuiServerFrame,
 } from "../../platforms/tui/tui-protocol.js";
-import { TuiApp, type TuiPresentationModules } from "./tui-ui.js";
+import { TuiApp, identityEditorTheme, type TuiPresentationModules } from "./tui-ui.js";
 
 /** Pretty stderr writer (no colorful emoji per abtars.md). */
 function stderr(line: string): void {
@@ -202,11 +202,14 @@ export async function tui(args: string[]): Promise<number> {
     stderr(`Warning: ${pinWarning ?? `Pi ${piResult.installation.version} above pin ${PI_COMPATIBILITY.pinnedRange}`}`);
   }
 
-  // Build the TUI.
+  // Build the TUI. The editor MUST be constructed with a functional theme:
+  // pi-tui renders with theme.borderColor, and the Loader in TuiApp's
+  // constructor triggers an early render — an `{}` theme crashes the first
+  // paint (#1612 regression on the live client). The shell adds the editor
+  // to the tree exactly once in TuiApp._buildShell.
   const terminal = new modules.tui.ProcessTerminal();
   const ui = new modules.tui.TUI(terminal, true);   // showHardwareCursor=true
-  const editor = new modules.tui.Editor(ui, {} as import("@earendil-works/pi-tui").EditorTheme);
-  ui.addChild(editor);
+  const editor = new modules.tui.Editor(ui, identityEditorTheme());
 
   // Connect.
   let decoder: FrameDecoder<TuiServerFrame> | null = null;

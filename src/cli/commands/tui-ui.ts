@@ -101,8 +101,12 @@ function boundText(text: string, maxBytes: number): string {
   return res;
 }
 
-/** Monochrome editor theme (border + select list) for the abtars shell. */
-function identityEditorTheme(): import("@earendil-works/pi-tui").EditorTheme {
+/** Monochrome editor theme (border + select list) for the abtars shell.
+ *  Must be passed at Editor construction — the editor renders with
+ *  `theme.borderColor` and any render before the shell build crashes if it
+ *  is undefined (#1612 regression: Loader construction triggers an early
+ *  render). */
+export function identityEditorTheme(): import("@earendil-works/pi-tui").EditorTheme {
   const passthrough = (s: string): string => s;
   return {
     borderColor: passthrough,
@@ -248,7 +252,6 @@ export class TuiApp {
   private readonly _onRenderError: (err: Error) => void;
 
   private _markdownTheme: import("@earendil-works/pi-tui").MarkdownTheme;
-  private _editorTheme: import("@earendil-works/pi-tui").EditorTheme;
   private _busy: import("@earendil-works/pi-tui").Loader;
 
   private _headerText: import("@earendil-works/pi-tui").Text | null = null;
@@ -286,11 +289,6 @@ export class TuiApp {
 
     this._m.codingAgent.initTheme();
     this._markdownTheme = this._m.codingAgent.getMarkdownTheme();
-    // The pinned line does not export a native editor theme via the public
-    // export map (getEditorTheme is not a root export at 0.83.0), so the
-    // editor keeps an abtars-owned identity theme (R2.5: "where the public
-    // API supports them").
-    this._editorTheme = identityEditorTheme();
 
     this._busy = new this._m.tui.Loader(
       this._ui,
@@ -530,8 +528,8 @@ export class TuiApp {
     this._ui.addChild(this._editor);
     this._ui.addChild(footer);
 
-    // Native editor theme from the loaded presentation package (R2.5).
-    this._editor.borderColor = this._editorTheme.borderColor;
+    // The editor was constructed with a functional theme (identityEditorTheme
+    // in tui.ts) — borderColor is never undefined at any render.
     this._ui.setFocus(this._editor);
   }
 

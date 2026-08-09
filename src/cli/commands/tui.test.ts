@@ -14,7 +14,7 @@ import {
   parseAttachMode,
   consumeServerFrames,
 } from "./tui.js";
-import { formatRuntimeStatus } from "./tui-ui.js";
+import { formatRuntimeStatus, identityEditorTheme } from "./tui-ui.js";
 import {
   createFrameDecoder,
   encodeFrame,
@@ -150,6 +150,26 @@ describe("Text.setText (#1423)", () => {
     const linesAfter = text.render(80);
     expect(linesAfter.join("")).toContain("new content");
     expect(linesAfter.join("")).not.toContain("old");
+  });
+});
+
+// ── #1612: live-client crash regression (Molty `abtars tui` first paint) ──
+
+describe("identityEditorTheme (#1612)", () => {
+  it("constructs the real pi-tui Editor with a functional borderColor", () => {
+    const terminal = new piTui.ProcessTerminal();
+    const ui = new piTui.TUI(terminal, true);
+    const editor = new piTui.Editor(ui, identityEditorTheme());
+    expect(typeof editor.borderColor).toBe("function");
+    expect(editor.borderColor("─")).toBe("─");
+  });
+
+  it("renders the editor without throwing at any width", () => {
+    const terminal = new piTui.ProcessTerminal();
+    const ui = new piTui.TUI(terminal, true);
+    const editor = new piTui.Editor(ui, identityEditorTheme());
+    expect(() => editor.render(40)).not.toThrow();
+    expect(() => editor.render(10)).not.toThrow();
   });
 });
 
