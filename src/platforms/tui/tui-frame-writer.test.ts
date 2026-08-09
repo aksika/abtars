@@ -157,6 +157,52 @@ describe("TuiFrameWriter — oversized frame bounding", () => {
     expect(term).toBeDefined();
     writer.close();
   });
+
+  it("preserves execution identity when bounding a message frame", () => {
+    const { writer, prime } = makeWriter({ maxFrameBytes: 80 });
+    prime();
+    const big = "x".repeat(1000);
+    writer.enqueue({ t: "message", role: "assistant", markdown: big, executionId: "e9" });
+    const msg = writer.queuedFrameList.find((f) => f.t === "message") as Extract<TuiServerFrame, { t: "message" }>;
+    expect(msg).toBeDefined();
+    expect(msg.executionId).toBe("e9");
+    writer.close();
+  });
+
+  it("preserves execution identity when bounding a chunk frame", () => {
+    const { writer, prime } = makeWriter({ maxFrameBytes: 80 });
+    prime();
+    writer.enqueue({ t: "chunk", id: "s1", executionId: "e1", delta: "y".repeat(1000) });
+    const chunk = writer.queuedFrameList.find((f) => f.t === "chunk") as Extract<TuiServerFrame, { t: "chunk" }>;
+    expect(chunk?.executionId).toBe("e1");
+    writer.close();
+  });
+
+  it("writer-generated truncation terminal carries the remembered execution ID", () => {
+    const { writer, socket, prime } = makeWriter({ maxFrameBytes: 80 });
+    prime();
+    writer.enqueue({ t: "stream-start", id: "s1", executionId: "e1" });
+    writer.enqueue({ t: "chunk", id: "s1", executionId: "e1", delta: "y".repeat(1000) });
+    expect(writer.truncatedStreamCount).toBe(1);
+    const term = writer.queuedFrameList.find(
+      (f) => f.t === "chunk-end" && (f as any).reason === "truncated",
+    ) as Extract<TuiServerFrame, { t: "chunk-end" }> | undefined;
+    expect(term?.executionId).toBe("e1");
+    writer.close();
+  });
+
+  it("clearAttachment forgets stream identity so later truncation is uncorrelated", () => {
+    const { writer, prime } = makeWriter({ maxFrameBytes: 80 });
+    prime();
+    writer.enqueue({ t: "stream-start", id: "s1", executionId: "e1" });
+    writer.clearAttachment();
+    writer.enqueue({ t: "chunk", id: "s1", delta: "y".repeat(1000) });
+    const term = writer.queuedFrameList.find(
+      (f) => f.t === "chunk-end" && (f as any).reason === "truncated",
+    ) as Extract<TuiServerFrame, { t: "chunk-end" }> | undefined;
+    expect(term?.executionId).toBeUndefined();
+    writer.close();
+  });
 });
 
 describe("TuiFrameWriter — coalescing", () => {
@@ -212,6 +258,32 @@ describe("TuiFrameWriter — coalescing", () => {
     const acts = writer.queuedFrameList.filter((f) => f.t === "activity");
     expect(acts.length).toBe(1);
     expect((acts[0] as any).event.title).toBe("v2");
+    writer.close();
+  });
+
+  it("coalesces same-stream stream-starts, keeping the newest execution identity", () => {
+    const { writer, prime } = makeWriter();
+    prime();
+    writer.enqueue({ t: "stream-start", id: "s1", executionId: "e1" });
+    writer.enqueue({ t: "stream-start", id: "s1", executionId: "e1" });
+    writer.enqueue({ t: "stream-start", id: "s2", executionId: "e2" });
+    const starts = writer.queuedFrameList.filter((f) => f.t === "stream-start");
+    expect(starts.length).toBe(2);
+    expect(starts.filter((s) => (s as any).id === "s1").length).toBe(1);
+    writer.close();
+  });
+
+  it("evicts stream-start before status when the queue saturates", () => {
+    const { writer, prime } = makeWriter({ maxFrames: 2, maxBytes: 400, maxFrameBytes: 200 });
+    prime();
+    writer.enqueue({ t: "stream-start", id: "s1", executionId: "e1" });  // queued (1)
+    writer.enqueue({ t: "status", status: { sessionId: "x", revision: 1 } as any }); // queued (2) full
+    // A terminal frame forces eviction of lowest-priority data.
+    writer.enqueue({ t: "message", role: "assistant", markdown: "final" });
+    const q = writer.queuedFrameList;
+    expect(q.some((f) => f.t === "message")).toBe(true);
+    expect(q.some((f) => f.t === "stream-start")).toBe(false); // dropped first
+    expect(q.some((f) => f.t === "status")).toBe(true);
     writer.close();
   });
 

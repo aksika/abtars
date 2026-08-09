@@ -996,6 +996,63 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     conn.destroy();
   });
 
+  it("#1612: output-feed events emit correlated stream frames (start/delta/tool/end)", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin();
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
+
+    feed.publish({ type: "start", sessionId: sid, executionId: "e1", streamId: "st1" });
+    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "Hello " });
+    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "world" });
+    feed.publish({ type: "tool-start", sessionId: sid, executionId: "e1", streamId: "st1", name: "search" });
+    feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    const starts = frames.filter((f) => f.t === "stream-start");
+    expect(starts.length).toBe(1);
+    expect(starts[0]).toMatchObject({ id: "st1", executionId: "e1" });
+
+    const chunks = frames.filter((f) => f.t === "chunk");
+    expect(chunks.length).toBe(2);
+    for (const c of chunks) expect((c as any).executionId).toBe("e1");
+
+    const tools = frames.filter((f) => f.t === "tool-start");
+    expect(tools.length).toBe(1);
+    expect(tools[0]).toMatchObject({ id: "st1", executionId: "e1", name: "search" });
+
+    const ends = frames.filter((f) => f.t === "chunk-end");
+    expect(ends.length).toBe(1);
+    expect(ends[0]).toMatchObject({ id: "st1", executionId: "e1", reason: "complete" });
+
+    conn.destroy();
+  });
+
+  it("#1612: the whole message frame carries the delivery execution ID when correlated", async () => {
+    const mockSpin = makeMockSpin();
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath,
+    });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
+
+    await adapter.sendMessage("tui:local", "whole-result", {
+      deliveryCorrelation: { sessionId: sid, executionId: "e42", kind: "final_assistant" },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const msgs = frames.filter((f) => f.t === "message");
+    expect(msgs.length).toBe(1);
+    expect(msgs[0]).toMatchObject({ role: "assistant", markdown: "whole-result", executionId: "e42" });
+
+    conn.destroy();
+  });
+
   it("suppresses the duplicate whole-result when streaming was observed", async () => {
     const feed = new SessionOutputFeed();
     const mockSpin = makeMockSpin();

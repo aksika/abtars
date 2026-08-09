@@ -40,17 +40,26 @@ export type PiInstallationState =
 export type PiModulePackage =
   | "@earendil-works/pi-ai"
   | "@earendil-works/pi-tui"
-  | "@earendil-works/pi-agent-core";
+  | "@earendil-works/pi-agent-core"
+  | "@earendil-works/pi-coding-agent";
 
 export interface PiModuleSpecifier {
   package: PiModulePackage;
   subpath?: string;
 }
 
-const PACKAGE_TO_MODULE_KEY: Record<PiModulePackage, keyof PiInstallation["moduleRoots"]> = {
+/**
+ * The coding-agent package IS the discovered installation root
+ * (`installation.packageRoot`), so it resolves through a different base than
+ * the nested packages. Everything else uses `moduleRoots`.
+ */
+type PiModuleBase = keyof PiInstallation["moduleRoots"] | "packageRoot";
+
+const PACKAGE_TO_MODULE_KEY: Record<PiModulePackage, PiModuleBase> = {
   "@earendil-works/pi-ai": "ai",
   "@earendil-works/pi-tui": "tui",
   "@earendil-works/pi-agent-core": "agentCore",
+  "@earendil-works/pi-coding-agent": "packageRoot",
 };
 
 function resolveExportTarget(pkgRoot: string, target: string, pkgLabel: string): URL {
@@ -92,8 +101,10 @@ function resolveExportTarget(pkgRoot: string, target: string, pkgLabel: string):
  * to the same containment and regular-file validation as an export-map target.
  */
 export function resolvePiModuleUrl(installation: PiInstallation, specifier: PiModuleSpecifier): URL {
-  const key = PACKAGE_TO_MODULE_KEY[specifier.package];
-  const pkgRoot = installation.moduleRoots[key];
+  const base = PACKAGE_TO_MODULE_KEY[specifier.package];
+  const pkgRoot = base === "packageRoot"
+    ? installation.packageRoot
+    : installation.moduleRoots[base];
   const pkgJsonPath = join(pkgRoot, "package.json");
   if (!existsSync(pkgJsonPath)) {
     throw new Error(`${specifier.package}: package.json not found at ${pkgRoot}`);

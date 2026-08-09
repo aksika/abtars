@@ -69,4 +69,55 @@ describe("tui startup — pi-tui load failure (#1441)", () => {
     expect(exitCode).toBe(1);
     expect(stderrOutput.some(s => s.includes("pi-tui") || s.includes("TUI") || s.includes("Reinstall"))).toBe(true);
   });
+
+  it("fails clearly when a required pi-coding-agent export is missing (#1612)", async () => {
+    vi.mocked(resolvePiInstallation).mockReturnValue({
+      state: "compatible",
+      installation: {
+        executable: "/usr/bin/pi",
+        packageRoot: "/usr/lib/pi-coding-agent",
+        version: "0.83.0",
+        source: "path",
+        pinStatus: "at-pin",
+        moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },
+      },
+    });
+    vi.mocked(loadPiModule).mockImplementation(async (_installation, spec) => {
+      if (spec.package === "@earendil-works/pi-tui") {
+        return {
+          ProcessTerminal: class {}, TUI: class {}, Container: class {},
+          Editor: class {}, Text: class {}, Markdown: class {},
+          Loader: class {}, matchesKey: () => false,
+        };
+      }
+      // coding-agent without UserMessageComponent — must fail pre-ready.
+      return { initTheme: () => {}, getMarkdownTheme: () => ({}) };
+    });
+
+    const exitCode = await tui([]);
+
+    expect(exitCode).toBe(1);
+    expect(stderrOutput.some(s => s.includes("UserMessageComponent"))).toBe(true);
+    expect(stderrOutput.some(s => s.includes("Reinstall"))).toBe(true);
+  });
+
+  it("does not silently fall back when the coding-agent package root fails to resolve (#1612)", async () => {
+    vi.mocked(resolvePiInstallation).mockReturnValue({
+      state: "compatible",
+      installation: {
+        executable: "/usr/bin/pi",
+        packageRoot: "/usr/lib/pi-coding-agent",
+        version: "0.83.0",
+        source: "path",
+        pinStatus: "at-pin",
+        moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },
+      },
+    });
+    vi.mocked(loadPiModule).mockRejectedValue(new Error("@earendil-works/pi-coding-agent: no executable export target found"));
+
+    const exitCode = await tui([]);
+
+    expect(exitCode).toBe(1);
+    expect(stderrOutput.some(s => s.includes("pi-coding-agent"))).toBe(true);
+  });
 });

@@ -178,10 +178,10 @@ describe("resolveExecutableFromPath", () => {
   });
 });
 
-function makeInstallation(aiRoot: string, tuiRoot: string, agentCoreRoot: string): PiInstallation {
+function makeInstallation(aiRoot: string, tuiRoot: string, agentCoreRoot: string, packageRoot = "/usr/lib/pi-coding-agent"): PiInstallation {
   return {
     executable: "/usr/bin/pi",
-    packageRoot: "/usr/lib/pi-coding-agent",
+    packageRoot,
     version: "0.83.0",
     source: "path",
     pinStatus: "at-pin",
@@ -279,6 +279,81 @@ describe("resolvePiModuleUrl", () => {
     const installation = makeInstallation(fixture(), tuiRoot, fixture());
     const url = resolvePiModuleUrl(installation, { package: "@earendil-works/pi-tui" });
     expect(fileURLToPath(url)).toBe(join(tuiRoot, "dist", "index.js"));
+  });
+
+  // ── #1612: coding-agent resolves from packageRoot (the discovered install) ──
+
+  it("resolves the coding-agent root from packageRoot through its export map", () => {
+    const root = fixture();
+    const packageRoot = join(root, "pi-coding-agent");
+    mkdirSync(join(packageRoot, "dist"), { recursive: true });
+    writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-coding-agent", type: "module",
+      exports: { ".": { import: "./dist/index.js" } },
+    }));
+    writeFileSync(join(packageRoot, "dist", "index.js"), "export const initTheme = () => {};\n");
+    const installation = makeInstallation(fixture(), fixture(), fixture(), packageRoot);
+    const url = resolvePiModuleUrl(installation, { package: "@earendil-works/pi-coding-agent" });
+    expect(fileURLToPath(url)).toBe(join(packageRoot, "dist", "index.js"));
+  });
+
+  it("rejects a coding-agent root whose package.json name mismatches", () => {
+    const root = fixture();
+    const packageRoot = join(root, "pi-coding-agent");
+    mkdirSync(join(packageRoot, "dist"), { recursive: true });
+    writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-coding-agent-old",
+      exports: { ".": { import: "./dist/index.js" } },
+    }));
+    const installation = makeInstallation(fixture(), fixture(), fixture(), packageRoot);
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-coding-agent" }))
+      .toThrow(/name mismatch/);
+  });
+
+  it("rejects a coding-agent export target missing from the package root", () => {
+    const root = fixture();
+    const packageRoot = join(root, "pi-coding-agent");
+    mkdirSync(packageRoot, { recursive: true });
+    writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-coding-agent",
+      exports: { ".": { import: "./dist/missing.js" } },
+    }));
+    const installation = makeInstallation(fixture(), fixture(), fixture(), packageRoot);
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-coding-agent" }))
+      .toThrow(/does not resolve to an existing file/);
+  });
+
+  it("rejects a coding-agent export target that escapes the package root", () => {
+    const root = fixture();
+    const externalRoot = fixture();
+    const escapedTarget = join(externalRoot, "evil.js");
+    writeFileSync(escapedTarget, "export const x = 1;\n");
+    const packageRoot = join(root, "pi-coding-agent");
+    mkdirSync(join(packageRoot, "dist"), { recursive: true });
+    symlinkSync(escapedTarget, join(packageRoot, "dist", "evil.js"));
+    writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-coding-agent",
+      exports: { ".": { import: "./dist/evil.js" } },
+    }));
+    const installation = makeInstallation(fixture(), fixture(), fixture(), packageRoot);
+    expect(() => resolvePiModuleUrl(installation, { package: "@earendil-works/pi-coding-agent" }))
+      .toThrow(/escapes package root/);
+  });
+
+  it("keeps the coding-agent root independent of nested module roots", () => {
+    // The nested roots are irrelevant for coding-agent resolution — it uses
+    // packageRoot even when the nested modules exist elsewhere.
+    const root = fixture();
+    const packageRoot = join(root, "pi-coding-agent");
+    mkdirSync(join(packageRoot, "dist"), { recursive: true });
+    writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+      name: "@earendil-works/pi-coding-agent",
+      exports: { ".": { import: "./dist/index.js" } },
+    }));
+    writeFileSync(join(packageRoot, "dist", "index.js"), "export const x = 1;\n");
+    const installation = makeInstallation(fixture(), fixture(), fixture(), packageRoot);
+    const url = resolvePiModuleUrl(installation, { package: "@earendil-works/pi-coding-agent" });
+    expect(fileURLToPath(url)).toBe(join(packageRoot, "dist", "index.js"));
   });
 
   it("rejects when package.json name does not match specifier", () => {

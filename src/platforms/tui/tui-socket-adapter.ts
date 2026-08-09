@@ -238,7 +238,10 @@ export class TuiSocketAdapter implements PlatformAdapter {
     // complete streamed text matches the delivered text.
     const correlation = _opts?.deliveryCorrelation;
     if (this.shouldSuppressWholeResult(text, correlation)) return;
-    this._push({ t: "message", role: "assistant", markdown: text });
+    // #1612: copy the delivery execution ID so the client can reconcile the
+    // whole result with its streamed rows. Internal wire metadata — never
+    // rendered.
+    this._push({ t: "message", role: "assistant", markdown: text, executionId: correlation?.executionId });
     this._pushStatus();
     return undefined;
   }
@@ -736,8 +739,9 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
       switch (event.type) {
         case "delta": {
-          // Enqueue and check acceptance
-          const result = this._push({ t: "chunk", id: event.streamId, delta: event.text });
+          // #1612: carry stream/execution identity on every delta.
+          const frame: TuiServerFrame = { t: "chunk", id: event.streamId, executionId, delta: event.text };
+          const result = this._push(frame);
           const accepted = result !== "dropped";
           if (executionId) {
             this.observeStreamStart(executionId, event.streamId);
@@ -746,10 +750,10 @@ export class TuiSocketAdapter implements PlatformAdapter {
           break;
         }
         case "tool-start":
-          this._push({ t: "tool-start", id: event.streamId, name: event.name });
+          this._push({ t: "tool-start", id: event.streamId, executionId, name: event.name });
           break;
         case "end": {
-          this._push({ t: "chunk-end", id: event.streamId, reason: event.reason });
+          this._push({ t: "chunk-end", id: event.streamId, executionId, reason: event.reason });
           if (executionId) {
             this.observeStreamStart(executionId, event.streamId);
             this.observeStreamEnd(executionId, event.streamId, event.reason);
@@ -757,6 +761,9 @@ export class TuiSocketAdapter implements PlatformAdapter {
           break;
         }
         case "start": {
+          // #1612: a visible stream start lets the client show a bounded
+          // busy indicator before the first chunk arrives.
+          this._push({ t: "stream-start", id: event.streamId, executionId });
           if (executionId) {
             this.observeStreamStart(executionId, event.streamId);
           }

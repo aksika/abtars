@@ -5,8 +5,9 @@
  * pi-tui's start() is not idempotent — a second call registers a second stdin
  * data listener and every keystroke is processed twice.
  *
- * The client is run end-to-end against a fake socket and a fake pi-tui module;
- * the honest observable proxy for the pi-tui-side double-listener is the
+ * #1612: the client loads TWO public module surfaces (pi-tui + pi-coding-agent)
+ * and constructs the TuiApp render shell; the fake modules below provide both.
+ * The honest observable proxy for the pi-tui-side double-listener is the
  * call count on `TUI.start()`.
  */
 
@@ -38,7 +39,7 @@ import { encodeFrame } from "../../platforms/tui/tui-protocol.js";
 import { resolvePiInstallation, loadPiModule } from "../../components/pi-installation.js";
 import { tui } from "./tui.js";
 
-function fakePiTui() {
+function fakeModules() {
   const ui = {
     addChild: vi.fn(),
     setFocus: vi.fn(),
@@ -48,8 +49,6 @@ function fakePiTui() {
     stop: vi.fn(),
   };
   const editor = { onSubmit: null as null | ((text: string) => void) };
-  const log = { addChild: vi.fn() };
-  const footer = { setText: vi.fn() };
   const terminal = { columns: 80, rows: 24 };
 
   class ProcessTerminal {
@@ -66,30 +65,60 @@ function fakePiTui() {
     stop = ui.stop;
   }
   class Container {
-    addChild = log.addChild;
+    addChild = vi.fn();
+    removeChild = vi.fn();
+    clear = vi.fn();
   }
   class Editor {
-    constructor(public ui: unknown, public theme: unknown) {}
+    constructor(public tuiInstance: unknown, public theme: unknown) {}
     set onSubmit(fn: ((text: string) => void) | null) { editor.onSubmit = fn; }
     get onSubmit() { return editor.onSubmit; }
   }
   class Text {
     constructor(public content: string, public x: number, public y: number) {}
-    setText = footer.setText;
+    setText = vi.fn();
   }
   class Markdown {
     constructor(public body: string, public x: number, public y: number, public theme: unknown, public style: unknown) {}
+    render = (w: number): string[] => [this.body];
+  }
+  class Loader {
+    start = vi.fn();
+    stop = vi.fn();
+    setMessage = vi.fn();
+    constructor(public ui: unknown, public a: unknown, public b: unknown, public message?: string, public indicator?: unknown) {}
   }
   const matchesKey = (data: string, key: string): boolean => data === `\x03${key}`;
 
-  return { ui, editor, log, footer, terminal, pi: { ProcessTerminal, TUI, Container, Editor, Text, Markdown, matchesKey } };
+  const pi = { ProcessTerminal, TUI, Container, Editor, Text, Markdown, Loader, matchesKey };
+
+  class UserMessageComponent extends Container {
+    constructor(public text: string, public theme: unknown, public pad?: number) { super(); }
+  }
+  class AssistantMessageComponent extends Container {
+    updateContent = vi.fn();
+    constructor(public message?: unknown, public hideThinking?: boolean, public theme?: unknown, public label?: string, public pad?: number) { super(); }
+  }
+  class DynamicBorder {
+    constructor(public color?: (s: string) => string) {}
+    render = (w: number): string[] => ["─"];
+  }
+  const codingAgent = {
+    initTheme: vi.fn(),
+    getMarkdownTheme: vi.fn(() => ({})),
+    UserMessageComponent,
+    AssistantMessageComponent,
+    DynamicBorder,
+  };
+
+  return { ui, editor, terminal, pi, codingAgent };
 }
 
-describe("tui client — repeated ready frames (#1570)", () => {
-  let h: ReturnType<typeof fakePiTui>;
+describe("tui client — repeated ready frames (#1570 + #1612)", () => {
+  let h: ReturnType<typeof fakeModules>;
 
   beforeEach(() => {
-    h = fakePiTui();
+    h = fakeModules();
     vi.mocked(resolvePiInstallation).mockReturnValue({
       state: "compatible",
       installation: {
@@ -101,7 +130,9 @@ describe("tui client — repeated ready frames (#1570)", () => {
         moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },
       },
     });
-    vi.mocked(loadPiModule).mockResolvedValue(h.pi);
+    vi.mocked(loadPiModule).mockImplementation(async (_installation, spec) => {
+      return spec.package === "@earendil-works/pi-tui" ? h.pi : h.codingAgent;
+    });
     vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
   });
 

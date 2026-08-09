@@ -1,5 +1,5 @@
 /**
- * tui.ts — `abtars tui` client command (#1315).
+ * tui.ts — `abtars tui` client command (#1315, #1612).
  *
  * Foreground terminal client that connects to the bridge's TUI socket
  * (~/.abtars/tui.sock), owns the PTY in raw mode, and renders via pi-tui.
@@ -9,12 +9,12 @@
  *   - `error` frame AFTER `ready`  → clean detach (new-attach-wins) → exit 0
  *   - socket `close` (normal)      → restore terminal → exit 0
  *
- * v1: whole-message `message` frames only. `chunk`/`chunk-end` are reserved
- * for #1319 (live mirroring) — never sent in v1.
- *
- * Pi-tui is loaded lazily from the one official Pi installation discovered
- * by `resolvePiInstallation()` (#1438), via the async ESM export-map loader
- * `loadPiModule()` (#1441). Single install surface, daemon never imports it.
+ * #1612: the client loads the low-level `@earendil-works/pi-tui` module from
+ * the discovered installation's `moduleRoots.tui` AND the public presentation
+ * package `@earendil-works/pi-coding-agent` from `packageRoot`, both via the
+ * async ESM export-map loader `loadPiModule()`. Rendering lives in `tui-ui.ts`
+ * (`TuiApp`); this command owns the socket, PTY, signals, and exit semantics.
+ * The bridge/daemon never imports either Pi package.
  */
 
 import { existsSync } from "node:fs";
@@ -34,7 +34,7 @@ import {
   type TuiClientFrame,
   type TuiServerFrame,
 } from "../../platforms/tui/tui-protocol.js";
-import type { TuiRuntimeStatus, TuiUsageSnapshot } from "../../platforms/tui/runtime-status.js";
+import { TuiApp, type TuiPresentationModules } from "./tui-ui.js";
 
 /** Pretty stderr writer (no colorful emoji per abtars.md). */
 function stderr(line: string): void {
@@ -107,123 +107,9 @@ export function parseAttachMode(args: string[]): TuiAttachMode {
   return { kind: "resume" };
 }
 
-// ── #1333: Markdown theme + message construction ────────────────────
-
-/** Roles passed to `appendMessage` and the message factory. */
-export type MessageRole = "user" | "assistant" | "system";
-
-/** Identity function reused across every theme key. */
-const passthrough = (text: string): string => text;
-
-/**
- * Complete no-op Markdown theme for pi-tui ~0.83.
- *
- * Every key that `Markdown.render()` may invoke is present as the identity
- * function so a non-trivial response (bold, list, quote, hr, italic, etc.)
- * does not throw. Exported for direct contract testing — see tui.test.ts.
- */
-export const TUI_MARKDOWN_THEME: import("@earendil-works/pi-tui").MarkdownTheme = {
-  heading: passthrough,
-  link: passthrough,
-  linkUrl: passthrough,
-  code: passthrough,
-  codeBlock: passthrough,
-  codeBlockBorder: passthrough,
-  quote: passthrough,
-  quoteBorder: passthrough,
-  hr: passthrough,
-  listBullet: passthrough,
-  bold: passthrough,
-  italic: passthrough,
-  strikethrough: passthrough,
-  underline: passthrough,
-};
-
-/**
- * Build a pi-tui `Markdown` component for a given role and content.
- * For "user" we wrap the text in a dim ANSI `> ` prefix so locally
- * echoed input stays visible after the editor clears on submit.
- * Throws if the underlying Markdown constructor throws — callers
- * are expected to wrap the call in the render error boundary.
- */
-export function createMarkdownMessage(
-  pit: Pick<typeof import("@earendil-works/pi-tui"), "Markdown">,
-  role: MessageRole,
-  markdown: string,
-): import("@earendil-works/pi-tui").Markdown {
-  const style: import("@earendil-works/pi-tui").DefaultTextStyle = {};
-  const body = role === "user" ? `\u001b[2m> ${markdown}\u001b[0m` : markdown;
-  return new pit.Markdown(body, 0, 0, TUI_MARKDOWN_THEME, style);
-}
-
-function formatTokens(value: number): string {
-  if (value < 1000) return String(value);
-  if (value < 10000) return `${(value / 1000).toFixed(1)}k`;
-  if (value < 1_000_000) return `${Math.round(value / 1000)}k`;
-  if (value < 10_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  return `${Math.round(value / 1_000_000)}M`;
-}
-
-function formatUsage(usage?: TuiUsageSnapshot): string[] {
-  if (!usage) return [];
-  const parts = [`↑${formatTokens(usage.input)}`, `↓${formatTokens(usage.output)}`];
-  if (usage.cacheRead !== undefined) parts.push(`R${formatTokens(usage.cacheRead)}`);
-  if (usage.cacheWrite !== undefined) parts.push(`W${formatTokens(usage.cacheWrite)}`);
-  if (usage.cacheHitPercent !== undefined) parts.push(`CH${usage.cacheHitPercent.toFixed(1)}%`);
-  return parts;
-}
-
-/** Pure, width-aware footer formatting; unknown metrics are never shown as zero. */
-export function formatRuntimeStatus(status: TuiRuntimeStatus, width: number): string {
-  const ctx = status.contextPercent !== undefined
-    ? `${status.contextPercent.toFixed(1)}%/${status.contextWindow !== undefined ? formatTokens(status.contextWindow) : "?"}`
-    : `?/${status.contextWindow !== undefined ? formatTokens(status.contextWindow) : "?"}`;
-  const left = [...formatUsage(status.sessionUsage ?? status.lastTurnUsage), `${ctx}${status.autoCompaction ? " (auto)" : ""}`];
-  const model = status.model ?? "model ?";
-  const provider = status.provider ? `(${status.provider}) ` : "";
-  const reasoning = status.reasoning ? ` • ${status.reasoning}` : "";
-  const right = `${provider}${model}${reasoning}`;
-  const raw = `${left.join(" ")}    ${right}`.trim();
-  if (width <= 0 || raw.length <= width) return raw;
-  if (width <= right.length) return right.slice(0, Math.max(0, width - 1)) + (width > 0 ? "…" : "");
-  return raw.slice(0, Math.max(0, width - 1)) + "…";
-}
-
-/**
- * Testable seam for the server-frame render path. If `frame.t` is not
- * "message" the call is a no-op. Otherwise the Markdown is constructed
- * inside a try/catch and any throw routes through `onRenderError` so
- * the TUI client can recover (terminal restore + stderr + exit 1) instead
- * of becoming an uncaught exception.
- */
-/**
- * #1339: Pure description of a `chunk-end` terminal frame for the client UI.
- * Returns the system message to render, or `null` if the frame carries no
- * user-visible truncation marker (e.g. a normal `complete` end).
- */
-export function describeChunkEnd(frame: TuiServerFrame): string | null {
-  if (frame.t !== "chunk-end") return null;
-  if (frame.reason === "truncated") {
-    return "[output truncated — connect a live terminal for the full stream]";
-  }
-  return null;
-}
-
-export function processMessageFrame(
-  pit: Pick<typeof import("@earendil-works/pi-tui"), "Markdown">,
-  frame: TuiServerFrame,
-  onRenderError: (err: Error) => void,
-):
-  | { ok: true; component: import("@earendil-works/pi-tui").Markdown | null }
-  | { ok: false } {
-  if (frame.t !== "message") return { ok: true, component: null };
-  try {
-    const component = createMarkdownMessage(pit, frame.role, frame.markdown);
-    return { ok: true, component };
-  } catch (err) {
-    onRenderError(err instanceof Error ? err : new Error(String(err)));
-    return { ok: false };
-  }
+/** Pure predicate: does `text` request a local TUI exit? */
+export function isTuiExitCommand(text: string): boolean {
+  return text.trim().toLowerCase() === "/exit";
 }
 
 /**
@@ -239,11 +125,6 @@ export function consumeServerFrames(
     if (!isServerFrame(frame)) continue;
     onFrame(frame);
   }
-}
-
-/** Pure predicate: does `text` request a local TUI exit? */
-export function isTuiExitCommand(text: string): boolean {
-  return text.trim().toLowerCase() === "/exit";
 }
 
 /** Entry point for the `abtars tui` subcommand. */
@@ -276,16 +157,37 @@ export async function tui(args: string[]): Promise<number> {
     return 1;
   }
 
+  // #1612: load BOTH public module surfaces before TUI.start(). A missing
+  // required export is a bounded pre-ready startup failure — never a silent
+  // fallback to the old no-op theme.
   const tuiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-tui" };
-  let pit: typeof import("@earendil-works/pi-tui");
+  const codingAgentSpec: PiModuleSpecifier = { package: "@earendil-works/pi-coding-agent" };
+  let modules: TuiPresentationModules;
   try {
-    const mod = await loadPiModule<Record<string, unknown>>(piResult.installation, tuiSpec);
-    const required = ["ProcessTerminal", "TUI", "Container", "Editor", "Text", "Markdown", "matchesKey"] as const;
-    const missing = required.filter(name => typeof mod[name] !== "function");
-    if (missing.length > 0) {
-      throw new Error(`pi-tui: missing required export(s): ${missing.join(", ")}`);
+    const [rawPit, rawCodingAgent] = await Promise.all([
+      loadPiModule<Record<string, unknown>>(piResult.installation, tuiSpec),
+      loadPiModule<Record<string, unknown>>(piResult.installation, codingAgentSpec),
+    ]);
+
+    const requiredTui = ["ProcessTerminal", "TUI", "Container", "Editor", "Text", "Markdown", "Loader", "matchesKey"] as const;
+    const missingTui = requiredTui.filter(name => typeof rawPit[name] !== "function");
+    if (missingTui.length > 0) {
+      throw new Error(`pi-tui: missing required export(s): ${missingTui.join(", ")}`);
     }
-    pit = mod as unknown as typeof import("@earendil-works/pi-tui");
+
+    const requiredCodingAgent = [
+      "initTheme", "getMarkdownTheme",
+      "UserMessageComponent", "AssistantMessageComponent", "DynamicBorder",
+    ] as const;
+    const missingCodingAgent = requiredCodingAgent.filter(name => typeof rawCodingAgent[name] !== "function");
+    if (missingCodingAgent.length > 0) {
+      throw new Error(`pi-coding-agent: missing required export(s): ${missingCodingAgent.join(", ")}`);
+    }
+
+    modules = {
+      tui: rawPit as unknown as TuiPresentationModules["tui"],
+      codingAgent: rawCodingAgent as unknown as TuiPresentationModules["codingAgent"],
+    };
   } catch (err) {
     stderr(
       `Pi TUI could not be loaded: ${err instanceof Error ? err.message : String(err)}\n` +
@@ -301,40 +203,18 @@ export async function tui(args: string[]): Promise<number> {
   }
 
   // Build the TUI.
-  const terminal = new pit.ProcessTerminal();
-  const ui = new pit.TUI(terminal, true);     // showHardwareCursor=true
-  const log = new pit.Container();
-  // Minimal editor theme — border only. pi-tui requires EditorTheme.
-  const editorTheme: import("@earendil-works/pi-tui").EditorTheme = {
-    borderColor: (s: string) => s,
-    selectList: {
-      selectedPrefix: (s: string) => s,
-      selectedText: (s: string) => s,
-      description: (s: string) => s,
-      scrollInfo: (s: string) => s,
-      noMatch: (s: string) => s,
-    },
-  };
-  const editor = new pit.Editor(ui, editorTheme);
-  const footer = new pit.Text("", 0, 0);
-  ui.addChild(log);
+  const terminal = new modules.tui.ProcessTerminal();
+  const ui = new modules.tui.TUI(terminal, true);   // showHardwareCursor=true
+  const editor = new modules.tui.Editor(ui, {} as import("@earendil-works/pi-tui").EditorTheme);
   ui.addChild(editor);
-  ui.addChild(footer);
-  ui.setFocus(editor);
 
   // Connect.
-  const conn = net.createConnection(socketPath);
-  const decoder = createFrameDecoder<TuiServerFrame>({
-    onFatal: (error) => {
-      process.stderr.write(`Protocol error: ${error.message}\n`);
-      stop(1);
-    },
-  });
+  let decoder: FrameDecoder<TuiServerFrame> | null = null;
+  let conn: net.Socket | null = null;
+  let app: TuiApp | null = null;
   let ready = false;             // pre-`ready` errors = startup failure (exit 1)
   let shouldExitCode: number | null = null;
   let stopping = false;
-  let latestStatus: TuiRuntimeStatus | undefined;
-  let currentSessionId: string | null = null;  // #1361: tracked from ready frame
   // #1570: the bridge emits a fresh `ready` per attachment change (commitAttachment,
   // #1533 rebind). pi-tui's TUI.start() is NOT idempotent — it registers a new stdin
   // data listener per call, so repeated start() doubles every keystroke. Start the
@@ -354,9 +234,10 @@ export async function tui(args: string[]): Promise<number> {
     if (stopping) return;
     stopping = true;
     shouldExitCode = code;
+    app?.dispose();
     try { ui.stop(); } catch { /* best effort */ }
-    decoder.close();
-    try { conn.destroy(); } catch { /* best effort */ }
+    decoder?.close();
+    try { conn?.destroy(); } catch { /* best effort */ }
     resolveStopped();
     // Defer the actual exit to the next tick so any in-flight renders finish.
     setImmediate(() => process.exit(code));
@@ -370,8 +251,39 @@ export async function tui(args: string[]): Promise<number> {
   }
   process.once("exit", () => {
     try { ui.stop(); } catch { /* best effort */ }
-    decoder.close();
+    decoder?.close();
   });
+
+  try {
+    decoder = createFrameDecoder<TuiServerFrame>({
+      onFatal: (error) => {
+        process.stderr.write(`Protocol error: ${error.message}\n`);
+        stop(1);
+      },
+    });
+    conn = net.createConnection(socketPath);
+    app = new TuiApp({
+      modules,
+      terminal,
+      ui,
+      editor,
+      // #1612/#1333: render error boundary — restore terminal, bounded stderr
+      // diagnostic, exit 1. Never an uncaught exception.
+      onRenderError: (err: Error) => {
+        try { ui.stop(); } catch { /* best effort */ }
+        decoder?.close();
+        try { conn?.destroy(); } catch { /* best effort */ }
+        process.stderr.write(`TUI render error: ${err.message}\n`);
+        stop(1);
+      },
+    });
+  } catch (err) {
+    // Component construction failed before TUI.start() — bounded pre-ready
+    // failure with terminal restore and exit 1 (design R1.4/R5.5).
+    try { ui.stop(); } catch { /* best effort */ }
+    process.stderr.write(`TUI render error: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  }
 
   conn.on("connect", () => {
     const attach: TuiClientFrame = {
@@ -380,7 +292,7 @@ export async function tui(args: string[]): Promise<number> {
       cols: terminal.columns,
       rows: terminal.rows,
     };
-    conn.write(encodeFrame(attach));
+    conn!.write(encodeFrame(attach));
   });
 
   conn.on("data", (buf: Buffer) => {
@@ -402,23 +314,10 @@ export async function tui(args: string[]): Promise<number> {
     stop(0);
   });
 
-  // ── #1333: render error boundary ──────────────────────────────────
-  // Stop the client when a Markdown render fails. Idempotent — reuses
-  // the existing `stop()` lifecycle so terminal cleanup runs exactly once.
-  // Prints a concise stderr line AFTER ui.stop() so the message is not
-  // hidden behind the terminal's restore escape sequences.
-  const stopForRenderError = (err: Error): void => {
-    try { ui.stop(); } catch { /* best effort */ }
-    decoder.close();
-    try { conn.destroy(); } catch { /* best effort */ }
-    process.stderr.write(`TUI render error: ${err.message}\n`);
-    stop(1);
-  };
-
   // Input handling — Ctrl-C / Ctrl-D → detach+exit. Editor onSubmit → input frame.
   ui.addInputListener((data: string) => {
-    if (pit.matchesKey(data, "ctrl+c") || pit.matchesKey(data, "ctrl+d")) {
-      conn.end();
+    if (modules.tui.matchesKey(data, "ctrl+c") || modules.tui.matchesKey(data, "ctrl+d")) {
+      conn!.end();
       stop(0);
       return { consume: true };
     }
@@ -430,31 +329,32 @@ export async function tui(args: string[]): Promise<number> {
     if (text.length === 0) return;
     // #1369: /exit is a local command — exit the client, don't touch the wire.
     if (isTuiExitCommand(text)) {
-      conn.end();
+      conn!.end();
       stop(0);
       return;
     }
-    appendMessage("user", text);
+    app!.submitUserText(text);
     // #1361: Detect /steer prefix in every attach mode and send a steer frame
+    const currentSessionId = app!.sessionId;
     if (text.startsWith("/steer ")) {
       const body = text.slice("/steer ".length).trim();
       if (body && currentSessionId) {
-        conn.write(encodeFrame({ t: "steer", sessionId: currentSessionId, instructionId: `client_${Date.now()}`, text: body }));
+        conn!.write(encodeFrame({ t: "steer", sessionId: currentSessionId, instructionId: `client_${Date.now()}`, text: body }));
         return;
       }
     }
-    conn.write(encodeFrame({ t: "input", text }));
+    conn!.write(encodeFrame({ t: "input", text }));
   };
 
   function handleServerFrame(frame: TuiServerFrame): void {
     switch (frame.t) {
       case "ready":
         ready = true;
-        currentSessionId = frame.sessionId;
         if (!uiStarted) {
           uiStarted = true;
           ui.start();
         }
+        app!.handleFrame(frame);
         return;
       case "error":
         if (!ready) {
@@ -464,44 +364,9 @@ export async function tui(args: string[]): Promise<number> {
           stop(0);
         }
         return;
-      case "message":
-        appendMessage(frame.role, frame.markdown);
+      default:
+        app!.handleFrame(frame);
         return;
-      case "status":
-        if (latestStatus && frame.status.revision <= latestStatus.revision) return;
-        latestStatus = frame.status;
-        footer.setText(formatRuntimeStatus(frame.status, terminal.columns));
-        ui.requestRender();
-        return;
-      case "chunk":
-        return;
-      case "chunk-end": {
-        const marker = describeChunkEnd(frame);
-        if (marker) appendMessage("system", marker);
-        return;
-      }
-      case "typing":
-        return;
-      case "steer-ack":
-        // #1332: Render steer acknowledgement in the message log
-        const label = frame.status === "queued" ? "Steer queued" : `Steer ${frame.status}`;
-        appendMessage("system", `${label}: ${frame.message}`);
-        return;
-    }
-  }
-
-  function appendMessage(role: MessageRole, markdown: string): void {
-    // #1333: any failure during Markdown construction or addChild is
-    // contained here so a renderer regression (e.g. a future pi-tui theme
-    // method we forgot) cannot crash the whole client. On error we route
-    // through `stopForRenderError` which restores the terminal, prints
-    // a concise stderr line, and exits 1.
-    try {
-      const md = createMarkdownMessage(pit, role, markdown);
-      log.addChild(md);
-      ui.requestRender();
-    } catch (err) {
-      stopForRenderError(err instanceof Error ? err : new Error(String(err)));
     }
   }
 

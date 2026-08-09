@@ -127,15 +127,23 @@ export class TuiAcceptanceClient {
     // the streamed text matches exactly. A stream completion therefore needs
     // a short settle window to prefer an eventual message frame (tool rounds
     // deliver one; plain turns usually do not).
+    //
+    // #1612: stream-start/tool-start progress frames are presentation-only;
+    // they are consumed here so they cannot accumulate in the frame queue.
     let streamText = "";
     const result = await waitFor<TuiMessage>(
       async () => {
-        const frame = this.nextFrame((x) => x.t === "message" || x.t === "chunk" || x.t === "chunk-end" || x.t === "error");
+        const frame = this.nextFrame(
+          (x) => x.t === "message" || x.t === "chunk" || x.t === "chunk-end"
+            || x.t === "stream-start" || x.t === "error",
+        );
         if (process.env["PI_E2E_DEBUG_FRAMES"] === "1") {
           console.error(`[awaitMessage] queue=${this.frameQueue.length} frame=${frame ? JSON.stringify(frame).slice(0, 120) : "none"}`);
         }
         if (!frame) return undefined;
         switch (frame.t) {
+          case "stream-start":
+            return undefined;
           case "message":
             // The pipeline emits transient tool-status messages ("🔧 ...")
             // before the final answer; they are not the reply.
