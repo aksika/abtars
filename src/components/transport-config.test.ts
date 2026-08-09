@@ -545,9 +545,9 @@ describe("cleanDemotedModels", () => {
 });
 
 describe("computeCostDisplay (#1614)", () => {
-  it("renders $/1M with 2 decimals, zero-padded", () => {
-    expect(computeCostDisplay({ input: 0.14, output: 0.28 })).toEqual({ inputPer1M: "0.14", outputPer1M: "0.28" });
-    expect(computeCostDisplay({ input: 0.4, output: 1.2 })).toEqual({ inputPer1M: "0.40", outputPer1M: "1.20" });
+  it("renders $/1M with 2 decimals, zero-padded (per-token input)", () => {
+    expect(computeCostDisplay({ input: 0.14 / 1_000_000, output: 0.28 / 1_000_000 })).toEqual({ inputPer1M: "0.14", outputPer1M: "0.28" });
+    expect(computeCostDisplay({ input: 0.4 / 1_000_000, output: 1.2 / 1_000_000 })).toEqual({ inputPer1M: "0.40", outputPer1M: "1.20" });
     expect(computeCostDisplay({ input: 0, output: 0 })).toEqual({ inputPer1M: "0.00", outputPer1M: "0.00" });
   });
 });
