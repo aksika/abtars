@@ -84,7 +84,7 @@ describe("#1354 — provider schema whitelist", () => {
 });
 
 describe("#1354 — serializer boundary", () => {
-  it("serializeTransportConfig drops raw credential fields", () => {
+  it("serializeTransportConfig rejects raw credential fields", () => {
     const dirty = {
       ...SAFE,
       providers: {
@@ -96,12 +96,21 @@ describe("#1354 — serializer boundary", () => {
         },
       },
     } as unknown as Parameters<typeof serializeTransportConfig>[0];
-    const out = serializeTransportConfig(dirty);
-    expect(out).not.toContain(SENTINEL);
-    const parsed = JSON.parse(out);
-    expect(parsed.providers.openrouter.apiKey).toBeUndefined();
-    expect(parsed.providers.openrouter.token).toBeUndefined();
-    expect(parsed.providers.openrouter.apiKeyEnv).toBe("OPENROUTER_API_KEY");
+    expect(() => serializeTransportConfig(dirty)).toThrow(/invalid transport config/i);
+  });
+
+  it("rejects raw credential fields outside provider entries", () => {
+    const cases = [
+      { apiKey: SENTINEL },
+      { routes: { "pi-ai": { agents: { main: { model: "m", provider: "openrouter", apiKey: SENTINEL } }, fallbacks: [] } } },
+      { healthPolicy: { credential: SENTINEL } },
+    ];
+    for (const extra of cases) {
+      const r = validateTransportConfig({ ...SAFE, ...extra } as unknown as Record<string, unknown>);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.issues.some(i => i.code === "plaintext_secret_field")).toBe(true);
+      expect(JSON.stringify(r)).not.toContain(SENTINEL);
+    }
   });
 });
 
@@ -151,6 +160,22 @@ describe("#1354 — writer + backup safety", () => {
     expect(backup.maxTurns).toBeUndefined();
   });
 
+  it("canonicalizes validated snapshots before backing them up", () => {
+    // JSON.parse keeps only the last duplicate key, so validating this raw
+    // document alone would incorrectly treat it as safe while the bytes
+    // still contain a credential.
+    const duplicateKeyConfig = [
+      '{"schemaVersion":3,"activeRoute":"pi-ai","routes":', JSON.stringify(SAFE.routes),
+      ',"providers":{"openrouter":{"transport":"api","apiKeyEnv":"OPENROUTER_API_KEY","apiKey":"', SENTINEL,
+      '"}},"providers":', JSON.stringify(SAFE.providers), '}',
+    ].join("");
+    writeFileSync(join(CONFIG_DIR, "transport.json"), duplicateKeyConfig);
+    const r = writeTransportConfig(SAFE as unknown as Parameters<typeof writeTransportConfig>[0], "canonicalize duplicate keys");
+    expect(r.ok).toBe(true);
+    const all = fileNames().map(f => readFileSync(join(CONFIG_DIR, f), "utf-8")).join("\n");
+    expect(all).not.toContain(SENTINEL);
+  });
+
   it("restorePrevious refuses an unsafe backup", () => {
     writeFileSync(join(CONFIG_DIR, "transport.json"), JSON.stringify(SAFE));
     writeFileSync(join(CONFIG_DIR, "transport.old.json"), JSON.stringify({
@@ -163,6 +188,20 @@ describe("#1354 — writer + backup safety", () => {
     // primary untouched
     const primary = JSON.parse(readFileSync(join(CONFIG_DIR, "transport.json"), "utf-8"));
     expect(primary.providers.openrouter.apiKey).toBeUndefined();
+  });
+
+  it("canonicalizes a validated backup before restoring it", () => {
+    const duplicateKeyBackup = [
+      '{"schemaVersion":3,"activeRoute":"pi-ai","routes":', JSON.stringify(SAFE.routes),
+      ',"providers":{"openrouter":{"transport":"api","apiKeyEnv":"OPENROUTER_API_KEY","apiKey":"', SENTINEL,
+      '"}},"providers":', JSON.stringify(SAFE.providers), '}',
+    ].join("");
+    writeFileSync(join(CONFIG_DIR, "transport.json"), JSON.stringify(SAFE));
+    writeFileSync(join(CONFIG_DIR, "transport.old.json"), duplicateKeyBackup);
+    const r = restorePrevious();
+    expect(r.ok).toBe(true);
+    const all = fileNames().map(f => readFileSync(join(CONFIG_DIR, f), "utf-8")).join("\n");
+    expect(all).not.toContain(SENTINEL);
   });
 
   it("sentinel invariant: no primary/temp/backup file ever contains the sentinel", () => {

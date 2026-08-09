@@ -98,8 +98,8 @@ describe('onboard command (non-interactive)', () => {
     expect(env).toMatch(/DEFAULT_MODEL=google\/gemini-2\.5-flash/);
     expect(env).not.toMatch(/DISCORD_A2A_CHANNEL_ID=/);
     // Secrets go to secret/ dir
-    const token = await readFile(join(fakeHome, 'secret', 'TELEGRAM_BOT_TOKEN'), 'utf-8');
-    expect(token).toBe('123:secret');
+    const { readSecret } = await import('../../components/secrets.js');
+    expect(readSecret('TELEGRAM_BOT_TOKEN')).toBe('123:secret');
   });
 
   it('writes a valid v3 route for a provider not present in the seed defaults', async () => {
@@ -123,8 +123,9 @@ describe('onboard command (non-interactive)', () => {
     expect((transport.providers as Record<string, unknown>).openai).toEqual(expect.objectContaining({ transport: 'api' }));
   });
 
-  it('preserves operator-added lines in .env', async () => {
-    // Seed existing .env with a custom line.
+  it('migrates credential-shaped operator lines and preserves non-secret lines', async () => {
+    // Credential-shaped assignments are migrated by the same policy used at
+    // boot; only non-secret operator settings remain in .env.
     await writeFile(join(fakeHome, 'config', '.env'), 'CUSTOM_OPERATOR_KEY=x\nOTHER=y\n');
     const code = await onboard({
       nonInteractive: true,
@@ -140,10 +141,11 @@ describe('onboard command (non-interactive)', () => {
     });
     expect(code).toBe(0);
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
-    expect(env).toContain('CUSTOM_OPERATOR_KEY=x');
+    expect(env).not.toContain('CUSTOM_OPERATOR_KEY=x');
     expect(env).toContain('OTHER=y');
-    const token = await readFile(join(fakeHome, 'secret', 'TELEGRAM_BOT_TOKEN'), 'utf-8');
-    expect(token).toBe('999:aa');
+    const { readSecret } = await import('../../components/secrets.js');
+    expect(readSecret('CUSTOM_OPERATOR_KEY')).toBe('x');
+    expect(readSecret('TELEGRAM_BOT_TOKEN')).toBe('999:aa');
   });
 
   it('overwrites owned keys but not custom ones on re-run', async () => {
@@ -191,7 +193,7 @@ describe('onboard command (non-interactive)', () => {
     expect(code).toBe(0);
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
     expect(env).toMatch(/DEFAULT_MODEL=minimax\/minimax-m2\.5:cloud/);
-    const token = await readFile(join(fakeHome, 'secret', 'TELEGRAM_BOT_TOKEN'), 'utf-8');
-    expect(token).toBe('2:b');
+    const { readSecret } = await import('../../components/secrets.js');
+    expect(readSecret('TELEGRAM_BOT_TOKEN')).toBe('2:b');
   });
 });

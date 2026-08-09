@@ -122,12 +122,14 @@ interface SchedulerDoubles {
   injectedReminders: string[];
   pausedNotifications: string[];
   spawnedCommands: string[];
+  dispatchedGoals: string[];
 }
 
 let doubles: SchedulerDoubles;
 
 function fakeAgentRunner(request: import("../../components/spin-types.js").SpinRequest): Promise<{ cardId: number; result: string }> {
   const entryId = (request.title ?? "").toLowerCase().replace(/\s+/g, "-");
+  doubles.dispatchedGoals.push(request.goal ?? "");
   if (entryId === "flaky-task" && doubles.providerFailures > 0) {
     doubles.providerFailures--;
     const err = new Error("provider transient outage") as Error & { code?: string };
@@ -316,7 +318,7 @@ beforeEach(async () => {
   doubles = {
     providerFailures: 0, providerErrors: [], admissionRejections: 0,
     sleepCycleCalls: 0, sentMessages: [], sentDocuments: [], injectedReminders: [],
-    pausedNotifications: [], spawnedCommands: [],
+    pausedNotifications: [], spawnedCommands: [], dispatchedGoals: [],
   };
   vi.mocked(child_process.spawn).mockImplementation(((
     _file: string,
@@ -471,6 +473,12 @@ describe("#1520 scheduler E2E — journey 4: one-shot T announcement", () => {
     const ev = events("announce-task");
     expect(ev).toHaveLength(1);
     expect(ev[0]!.outcome).toBe("success");
+
+    // #1610: the dispatched prompt carries the delivery contract — the model
+    // is told its final response is the automatically delivered payload.
+    expect(doubles.dispatchedGoals).toHaveLength(1);
+    expect(doubles.dispatchedGoals[0]).toContain("[DELIVERY CONTRACT]");
+    expect(doubles.dispatchedGoals[0]).toContain("automatically delivered");
 
     // #1610: durable history separates the user payload from operational detail.
     expect(ev[0]!.deliveryText).toBe(ANNOUNCE_GREETING);

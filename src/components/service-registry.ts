@@ -18,7 +18,7 @@ export interface ServiceInstance {
 }
 
 export interface ServiceFactory {
-  /** Whether required config (tokens, etc.) is present in .env */
+  /** Whether required configuration (including secret-store credentials) is present. */
   configured: boolean;
   /** Create and wire the service. Called on start(). */
   create(): Promise<ServiceInstance>;

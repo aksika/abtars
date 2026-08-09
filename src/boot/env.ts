@@ -22,7 +22,7 @@
 import { config as loadDotenv } from "dotenv";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
-import { readFileSync, existsSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { atomicWriteSync } from "../components/atomic-write.js";
 
 const home = process.env["ABTARS_HOME"] ?? resolve(homedir(), ".abtars");
@@ -38,18 +38,18 @@ loadDotenv({ path: resolve(process.cwd(), ".env"), override: false });
 //   2. atomically rewrite the source files
 //   3. drop file-loaded process.env values for anything that could not
 //      complete safely — while leaving pre-dotenv (operator) values alone
-const secretDir = resolve(home, "secret");
-const ENV_FILES = [
+const ENV_FILES = [...new Set([
   resolve(home, "config", ".env"),
   resolve(home, "config", ".env.skills"),
-];
+  resolve(process.cwd(), ".env"),
+])];
 
 // WEB_AUTH is intentionally stored in .env by the dashboard setup (#1354
 // explicit exception): it is not an API/provider credential, must not be
 // migrated, and keeps its SKIP_ENCRYPT handling below.
 const MIGRATION_SKIP_KEYS = new Set(["WEB_AUTH"]);
 
-import { compareSecret, writeSecretCompatible } from "../components/secrets.js";
+import { compareSecret, writeSecretCompatible, listSafeSecretFiles, loadSecretForBoot } from "../components/secrets.js";
 import { runSecretMigration, isSecretEnvName } from "./env-secret-migration.js";
 import type { SecretIO } from "./env-secret-migration.js";
 
@@ -62,9 +62,25 @@ function runMigration(): string[] {
   // Returns the keys whose file-loaded values must NOT be usable this boot:
   // rejected keys (conflict/unsafe) and committed-but-not-cleaned keys.
   const suppressed: string[] = [];
-  const inputs = ENV_FILES
-    .filter(p => existsSync(p))
-    .map(p => ({ path: p, content: readFileSync(p, "utf-8") }));
+  const inputs: Array<{ path: string; content: string }> = [];
+  let inputReadFailed = false;
+  for (const path of ENV_FILES) {
+    if (!existsSync(path)) continue;
+    try {
+      inputs.push({ path, content: readFileSync(path, "utf-8") });
+    } catch {
+      // dotenv may already have loaded values before a concurrent permission
+      // or filesystem failure. Suppress all file-loaded credential names below
+      // rather than allowing an unreadable source to remain authoritative.
+      inputReadFailed = true;
+      process.stderr.write(`[env] Cannot inspect ${path.split("/").pop() ?? "environment file"} — credential values from files are disabled this boot\n`);
+    }
+  }
+  if (inputReadFailed) {
+    for (const key of Object.keys(process.env)) {
+      if (isSecretEnvName(key) && !MIGRATION_SKIP_KEYS.has(key) && !preEnvKeys.has(key)) suppressed.push(key);
+    }
+  }
   if (inputs.length === 0) return suppressed;
 
   let result;
@@ -126,46 +142,14 @@ function runMigration(): string[] {
 
 const suppressedKeys = runMigration();
 
-// Load secrets from ~/.abtars/secret/ — decrypt + auto-encrypt plaintext + load into process.env
-import { loadKey, deriveKey, encrypt, decrypt, validateKey } from "../utils/crypto.js";
-
 export function reloadSecrets(): void {
-  if (!existsSync(secretDir)) return;
-
-  const keyFile = resolve(home, "config", "abtars.key");
-  const master = loadKey(keyFile);
-  const purposeKey = master ? deriveKey(master) : null;
-
-  if (purposeKey && !validateKey(keyFile, purposeKey)) {
-    process.stderr.write(`[env] ⚠ abtars.key failed verification — secrets will not be decrypted (wrong passphrase?)\n`);
-    return;
-  }
-
-  const SKIP_ENCRYPT = new Set(["WEB_AUTH"]);
-
-  for (const file of readdirSync(secretDir)) {
-    const fullPath = resolve(secretDir, file);
-    if (!statSync(fullPath).isFile()) continue;
-    const raw = readFileSync(fullPath, "utf-8").trim();
-    if (!raw) continue;
-
-    let value: string | null;
-    if (raw.startsWith("ENC:")) {
-      if (!purposeKey) continue;
-      value = decrypt(raw, purposeKey);
-      if (!value) {
-        process.stderr.write(`[env] ⚠ Failed to decrypt secret/${file} — skipping (wrong key?)\n`);
-        continue;
-      }
-    } else {
-      value = raw;
-      if (purposeKey && !SKIP_ENCRYPT.has(file)) {
-        const encrypted = encrypt(value, purposeKey);
-        try { writeFileSync(fullPath, encrypted, { mode: 0o600 }); } catch { /* leave plaintext */ }
-      }
-    }
-
-    if (!file.includes(".")) {
+  // The secrets policy layer performs lstat/ownership/mode checks and the
+  // atomic plaintext→ENC upgrade. Never walk the directory with statSync:
+  // that would follow a symlink planted in secret/.
+  for (const file of listSafeSecretFiles()) {
+    if (file.includes(".")) continue;
+    const value = loadSecretForBoot(file, { skipEncrypt: file === "WEB_AUTH" });
+    if (value !== undefined) {
       // #1354 R2.5: values that existed before dotenv loading (launchd /
       // shell / service-manager overrides) are never replaced by secrets.
       if (!preEnvKeys.has(file)) process.env[file] = value;

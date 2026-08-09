@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, mkdtempSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, mkdtempSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -148,6 +148,19 @@ describe("boot/env.ts — #1354 migration", () => {
     expect(readFileSync(join(CONFIG_DIR, ".env"), "utf-8")).not.toContain("sk-plaintext-1234567890");
     expect(stderr).toContain("Existing secret");
     expect(stderr).not.toContain("sk-plaintext-1234567890");
+  });
+
+  it("does not follow a symlinked secret file", () => {
+    const outside = join(TEST_HOME, "outside-secret");
+    writeFileSync(outside, "sk-outside-1234567890");
+    try {
+      symlinkSync(outside, join(SECRET_DIR, "OPENAI_API_KEY"));
+    } catch {
+      return; // symlinks unavailable on this platform
+    }
+    const { stdout } = run(["OPENAI_API_KEY"]);
+    expect(JSON.parse(stdout.trim())).toEqual({ OPENAI_API_KEY: null });
+    expect(readFileSync(outside, "utf-8")).toBe("sk-outside-1234567890");
   });
 
   it("keeps WEB_AUTH in .env untouched (documented exception)", () => {

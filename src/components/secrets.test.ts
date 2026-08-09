@@ -23,7 +23,7 @@ vi.mock("../utils/crypto.js", async (importOriginal) => {
   };
 });
 
-const { readSecret, writeSecret, writeSecretCompatible, compareSecret, initSecretsKey, clearSecretCache, ensureSecretDir, secretFilePath } = await import("./secrets.js");
+const { readSecret, loadSecretForBoot, writeSecret, writeSecretCompatible, compareSecret, initSecretsKey, clearSecretCache, ensureSecretDir, secretFilePath } = await import("./secrets.js");
 
 describe("secrets.ts — encryption (#598)", () => {
   beforeEach(() => {
@@ -54,6 +54,13 @@ describe("secrets.ts — encryption (#598)", () => {
     writeFileSync(join(SECRETS_DIR, "PLAIN"), "plain-value");
     const val = readSecret("PLAIN");
     expect(val).toBe("plain-value");
+  });
+
+  it("boot loader upgrades plaintext even after a normal read cached it", () => {
+    writeFileSync(join(SECRETS_DIR, "BOOT_PLAIN"), "plain-value");
+    expect(readSecret("BOOT_PLAIN")).toBe("plain-value");
+    expect(loadSecretForBoot("BOOT_PLAIN")).toBe("plain-value");
+    expect(readFileSync(join(SECRETS_DIR, "BOOT_PLAIN"), "utf-8").startsWith("ENC:")).toBe(true);
   });
 
   it("readSecret returns undefined for missing files", () => {

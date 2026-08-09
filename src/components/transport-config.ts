@@ -117,7 +117,8 @@ export type TransportConfigIssueCode =
   | "provider_route_incompatible"
   | "acp_provider_mismatch"
   | "plaintext_secret_field"
-  | "invalid_provider_field";
+  | "invalid_provider_field"
+  | "invalid_config_field";
 
 export interface TransportConfigIssue {
   code: TransportConfigIssueCode;
@@ -152,6 +153,19 @@ export const PROVIDER_ALLOWED_FIELDS = new Set([
   "defaults",
 ]);
 
+const TRANSPORT_ALLOWED_FIELDS = new Set([
+  "schemaVersion",
+  "activeRoute",
+  "routes",
+  "providers",
+  "transportDefaults",
+  "maxTurns",
+  "maxToolRounds",
+  "maxFallbackToolRounds",
+  "hailMary",
+  "healthPolicy",
+]);
+
 const PROVIDER_SECRET_FIELDS = new Set([
   "apikey", "api_key", "token", "secret", "password", "passwd",
   "auth", "authorization", "credential", "credentials",
@@ -169,6 +183,34 @@ export function isSecretLikeField(field: string): boolean {
   return /key|token|secret|password|passwd|auth|credential/i.test(field);
 }
 
+/**
+ * Catch raw credential-bearing keys in nested sections that are not provider
+ * entries (for example a malicious `routes.pi-ai.agents.main.apiKey`).
+ * Tuning fields such as `authFill`/`authSticky` do not end in `auth` and are
+ * therefore not mistaken for credentials.
+ */
+function isNestedRawSecretField(field: string): boolean {
+  return /(?:key|token|secret|password|passwd|authorization|credential|credentials|access[_-]?key(?:id)?|client[_-]?secret|refresh[_-]?token|auth)$/i.test(field);
+}
+
+function collectNestedRawSecretFields(value: unknown, path: string, issues: TransportConfigIssue[], seen = new WeakSet<object>()): void {
+  if (value === null || typeof value !== "object") return;
+  const object = value as Record<string, unknown>;
+  if (seen.has(object)) return;
+  seen.add(object);
+  for (const [field, child] of Object.entries(object)) {
+    const childPath = path ? `${path}.${field}` : field;
+    if (field !== "apiKeyEnv" && isNestedRawSecretField(field) && !issues.some(i => i.code === "plaintext_secret_field" && i.path === childPath)) {
+      issues.push({
+        code: "plaintext_secret_field",
+        path: childPath,
+        message: `Raw credential field "${field}" is not allowed in transport configuration — reference a secret via apiKeyEnv`,
+      });
+    }
+    collectNestedRawSecretFields(child, childPath, issues, seen);
+  }
+}
+
 /** #1354: valid environment-variable name for apiKeyEnv references. */
 export function isValidApiKeyEnv(name: unknown): name is string {
   return typeof name === "string" && /^[A-Z_][A-Z0-9_]*$/.test(name);
@@ -176,13 +218,16 @@ export function isValidApiKeyEnv(name: unknown): name is string {
 
 /**
  * #1354: normalize a provider entry through the schema allowlist.
- * Raw secret fields and unknown fields are dropped — the candidate was
- * already validated, so this only guarantees serialization is whitelisted.
+ * Invalid fields are rejected; the candidate must already have passed the
+ * validator before serialization is allowed.
  */
 export function normalizeProviderEntry(raw: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const field of PROVIDER_ALLOWED_FIELDS) {
-    if (field in raw) out[field] = raw[field];
+  for (const field of Object.keys(raw)) {
+    if (!PROVIDER_ALLOWED_FIELDS.has(field)) {
+      throw new Error(`Cannot serialize provider entry with unsupported field "${field}"`);
+    }
+    out[field] = raw[field];
   }
   return out;
 }
@@ -195,7 +240,11 @@ export function normalizeProviderEntry(raw: Record<string, unknown>): Record<str
  * files through this path.
  */
 export function serializeTransportConfig(config: TransportConfig): string {
-  const copy = JSON.parse(JSON.stringify(config)) as TransportConfig;
+  const validation = validateTransportConfig(config);
+  if (!validation.ok) {
+    throw new Error(`Cannot serialize invalid transport config (${validation.issues.map(i => i.code).join(", ")})`);
+  }
+  const copy = JSON.parse(JSON.stringify(validation.config)) as TransportConfig;
   for (const [name, entry] of Object.entries(copy.providers)) {
     (copy.providers as Record<string, unknown>)[name] = normalizeProviderEntry(entry as Record<string, unknown>);
   }
@@ -234,6 +283,17 @@ export function validateTransportConfig(input: unknown): TransportValidationResu
   }
   const tc = input as Record<string, unknown>;
 
+  for (const field of Object.keys(tc)) {
+    if (TRANSPORT_ALLOWED_FIELDS.has(field)) continue;
+    issues.push({
+      code: isNestedRawSecretField(field) ? "plaintext_secret_field" : "invalid_config_field",
+      path: field,
+      message: isNestedRawSecretField(field)
+        ? `Raw credential field "${field}" is not allowed in transport configuration — reference a secret via apiKeyEnv`
+        : `Unknown transport config field "${field}" — configuration is schema-whitelisted`,
+    });
+  }
+
   // schemaVersion required, must be 3
   if (tc.schemaVersion == null) {
     issues.push({ code: "missing_field", path: "schemaVersion", message: "schemaVersion is required" });
@@ -264,6 +324,11 @@ export function validateTransportConfig(input: unknown): TransportValidationResu
   const providers = config.providers;
   const activeRoute = config.activeRoute;
 
+  // Provider validation below catches its own fields; this second pass covers
+  // route assignments and other nested objects before any serializer can see
+  // them. It records paths only and never includes candidate values.
+  collectNestedRawSecretFields(tc, "", issues);
+
   // #1354: schema-whitelist provider entries — raw secret fields are rejected,
   // unknown fields are rejected, and apiKeyEnv must be a valid env-var name.
   for (const [provName, entry] of Object.entries(providers)) {
@@ -275,11 +340,14 @@ export function validateTransportConfig(input: unknown): TransportValidationResu
     for (const field of Object.keys(entryRecord)) {
       if (PROVIDER_ALLOWED_FIELDS.has(field)) continue;
       if (isSecretLikeField(field)) {
-        issues.push({
-          code: "plaintext_secret_field",
-          path: `providers.${provName}.${field}`,
-          message: `Provider "${provName}" contains raw credential field "${field}" — remove it and reference a secret via apiKeyEnv`,
-        });
+        const path = `providers.${provName}.${field}`;
+        if (!issues.some(i => i.code === "plaintext_secret_field" && i.path === path)) {
+          issues.push({
+            code: "plaintext_secret_field",
+            path,
+            message: `Provider "${provName}" contains raw credential field "${field}" — remove it and reference a secret via apiKeyEnv`,
+          });
+        }
       } else {
         issues.push({
           code: "invalid_provider_field",
@@ -923,6 +991,7 @@ export function writeTransportConfig(candidate: TransportConfig, reason: string)
 
   // Read current primary bytes for backup (before any mutation)
   let currentBytes: string | null = null;
+  let currentCanonical: string | null = null;
   try { currentBytes = readFileSync(p, "utf-8"); } catch { /* no existing primary */ }
 
   // #1354: unsafe existing content (raw credential fields) must never enter
@@ -934,6 +1003,10 @@ export function writeTransportConfig(candidate: TransportConfig, reason: string)
       const currentParsed = JSON.parse(currentBytes) as Record<string, unknown>;
       const currentVr = validateTransportConfig(currentParsed);
       currentSafe = currentVr.ok;
+      if (currentVr.ok) {
+        try { currentCanonical = serializeTransportConfig(currentVr.config); }
+        catch { currentSafe = false; }
+      }
       if (!currentVr.ok && currentVr.issues.some(i => i.code === "plaintext_secret_field")) {
         logWarn(TAG, `Existing transport.json contains raw credential fields — replacing it without backing up unsafe content`);
       }
@@ -956,20 +1029,26 @@ export function writeTransportConfig(candidate: TransportConfig, reason: string)
   // #1354: never snapshot unsafe bytes (legacy backups may contain raw
   // credential fields — they must never re-enter temp/rollback files).
   let oldBackupSafe = false;
+  let oldBackupCanonical: string | null = null;
   if (oldBackupExists) {
     try {
-      oldBackupSafe = validateTransportConfig(JSON.parse(readFileSync(oldPath, "utf-8")) as Record<string, unknown>).ok;
+      const oldVr = validateTransportConfig(JSON.parse(readFileSync(oldPath, "utf-8")) as Record<string, unknown>);
+      oldBackupSafe = oldVr.ok;
+      if (oldVr.ok) {
+        try { oldBackupCanonical = serializeTransportConfig(oldVr.config); }
+        catch { oldBackupSafe = false; }
+      }
     } catch { oldBackupSafe = false; }
   }
   try {
     if (oldBackupExists && oldBackupSafe) {
-      writeFileSync(rollbackOldTmp, readFileSync(oldPath, "utf-8"), "utf-8");
+      writeFileSync(rollbackOldTmp, oldBackupCanonical!, "utf-8");
     }
     writeFileSync(tmp, content, "utf-8");
 
     if (currentBytes !== null && currentSafe) {
-      writeFileSync(oldTmp, currentBytes, "utf-8");
-      writeFileSync(rollbackPrimaryTmp, currentBytes, "utf-8");
+      writeFileSync(oldTmp, currentCanonical!, "utf-8");
+      writeFileSync(rollbackPrimaryTmp, currentCanonical!, "utf-8");
     }
 
     renameSync(tmp, p);
@@ -1074,19 +1153,31 @@ export function restorePrevious(): { ok: boolean; error?: string } {
     if (!vr.ok) {
       return { ok: false, error: `Backup config is invalid — cannot restore. Issues: ${vr.issues.map(i => i.message).join("; ")}` };
     }
+    // Re-serialize the parsed, validated object. Copying raw backup bytes
+    // would allow duplicate JSON keys to smuggle a rejected credential into
+    // the restored primary even though JSON.parse saw only the last key.
+    const oldCanonical = serializeTransportConfig(vr.config);
     // #1354: the previous active config becomes the new backup after the
     // swap — if it contains raw credential fields it must never be written
     // to the backup. In that case the old backup is dropped instead.
     let currentSafe = true;
-    try { currentSafe = validateTransportConfig(JSON.parse(current) as Record<string, unknown>).ok; } catch { currentSafe = false; }
+    let currentCanonical: string | null = null;
+    try {
+      const currentVr = validateTransportConfig(JSON.parse(current) as Record<string, unknown>);
+      currentSafe = currentVr.ok;
+      if (currentVr.ok) {
+        try { currentCanonical = serializeTransportConfig(currentVr.config); }
+        catch { currentSafe = false; }
+      }
+    } catch { currentSafe = false; }
     // Snapshot both files before swapping so a failed second rename can roll
     // the first rename back as well.
-    writeFileSync(tmp, old, "utf-8");
+    writeFileSync(tmp, oldCanonical, "utf-8");
     if (currentSafe) {
-      writeFileSync(oldTmp, current, "utf-8");
-      writeFileSync(rollbackActiveTmp, current, "utf-8");
+      writeFileSync(oldTmp, currentCanonical!, "utf-8");
+      writeFileSync(rollbackActiveTmp, currentCanonical!, "utf-8");
     }
-    writeFileSync(rollbackOldTmp, old, "utf-8");
+    writeFileSync(rollbackOldTmp, oldCanonical, "utf-8");
     renameSync(tmp, activePath);
     activeCommitted = true;
     if (currentSafe) {
@@ -1141,25 +1232,37 @@ export function resetToDefaults(): boolean {
     // backup (raw credential fields) must never enter a backup or temp file.
     oldBackupExists = existsSync(oldPath);
     let oldBackupSafe = false;
+    let oldBackupCanonical: string | null = null;
     if (oldBackupExists) {
       try {
-        oldBackupSafe = validateTransportConfig(JSON.parse(readFileSync(oldPath, "utf-8")) as Record<string, unknown>).ok;
+        const oldVr = validateTransportConfig(JSON.parse(readFileSync(oldPath, "utf-8")) as Record<string, unknown>);
+        oldBackupSafe = oldVr.ok;
+        if (oldVr.ok) {
+          try { oldBackupCanonical = serializeTransportConfig(oldVr.config); }
+          catch { oldBackupSafe = false; }
+        }
       } catch { oldBackupSafe = false; }
     }
     let currentSafe = true;
+    let currentCanonical: string | null = null;
     if (existsSync(activePath)) {
       currentBytes = readFileSync(activePath, "utf-8");
       try {
-        currentSafe = validateTransportConfig(JSON.parse(currentBytes) as Record<string, unknown>).ok;
+        const currentVr = validateTransportConfig(JSON.parse(currentBytes) as Record<string, unknown>);
+        currentSafe = currentVr.ok;
+        if (currentVr.ok) {
+          try { currentCanonical = serializeTransportConfig(currentVr.config); }
+          catch { currentSafe = false; }
+        }
         if (!currentSafe) {
           logWarn(TAG, `Existing transport.json contains raw credential fields — resetting without backing it up`);
         }
       } catch { currentSafe = false; }
     }
-    if (oldBackupExists && oldBackupSafe) writeFileSync(rollbackOldTmp, readFileSync(oldPath, "utf-8"), "utf-8");
+    if (oldBackupExists && oldBackupSafe) writeFileSync(rollbackOldTmp, oldBackupCanonical!, "utf-8");
     if (currentBytes !== null && currentSafe) {
-      writeFileSync(oldTmp, currentBytes, "utf-8");
-      writeFileSync(rollbackActiveTmp, currentBytes, "utf-8");
+      writeFileSync(oldTmp, currentCanonical!, "utf-8");
+      writeFileSync(rollbackActiveTmp, currentCanonical!, "utf-8");
     }
     writeFileSync(tmp, serializeTransportConfig(vr.config), "utf-8");
     renameSync(tmp, activePath);

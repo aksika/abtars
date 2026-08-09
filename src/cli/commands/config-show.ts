@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 
 
-const SECRET_PATTERNS = ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD"];
+const SECRET_PATTERNS = ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD", "API_ID", "AUTH"];
 
 function isSecret(name: string): boolean {
   return SECRET_PATTERNS.some(p => name.includes(p));

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, lstatSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 
@@ -118,11 +118,22 @@ async function probeSecurity(): Promise<ProbeResult> {
 
   let permIssues = 0;
   const secretDir = join(home, "secret");
-  if (existsSync(secretDir)) {
-    for (const f of readdirSync(secretDir)) {
-      const st = statSync(join(secretDir, f));
-      if (st.isFile() && (st.mode & 0o777) !== 0o600) permIssues++;
+  try {
+    const dirStat = lstatSync(secretDir);
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+      permIssues++;
+    } else {
+      for (const f of readdirSync(secretDir)) {
+        const st = lstatSync(join(secretDir, f));
+        if (st.isSymbolicLink() || !st.isFile() ||
+            (typeof process.getuid === "function" && st.uid !== process.getuid()) ||
+            (st.mode & 0o777) !== 0o600) permIssues++;
+      }
     }
+  } catch (err) {
+    // A missing secret directory is a valid pre-onboarding state; any other
+    // lstat/readdir failure is an unsafe/inaccessible store.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") permIssues++;
   }
 
   const parts = [mode];
