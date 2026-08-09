@@ -272,6 +272,7 @@ export class TuiApp {
   private readonly _executionOrder: string[] = [];
 
   private _busyActive = false;
+  private _busyInTree = false;
   private _toolLabel: string | null = null;
 
   /** Activity sequence guards (#1319 semantics). */
@@ -523,11 +524,13 @@ export class TuiApp {
 
     this._ui.addChild(header);
     this._ui.addChild(activity);
-    this._ui.addChild(this._busy);
     this._ui.addChild(transcript);
     this._ui.addChild(this._editor);
     this._ui.addChild(footer);
 
+    // The busy loader is only added while a stream/tool is active — the
+    // Loader renders its message unconditionally, so it must not sit in the
+    // tree when idle (#1612: permanent "- Working" row).
     // The editor was constructed with a functional theme (identityEditorTheme
     // in tui.ts) — borderColor is never undefined at any render.
     this._ui.setFocus(this._editor);
@@ -672,11 +675,23 @@ export class TuiApp {
       if (this._busyActive) return;
       this._busyActive = true;
       this._busy.setMessage(this._toolLabel || "Working");
+      if (!this._busyInTree && this._transcript) {
+        // Insert the loader between the activity region and the transcript:
+        // header, activity, busy, transcript, editor, footer.
+        this._ui.removeChild(this._transcript);
+        this._ui.addChild(this._busy);
+        this._ui.addChild(this._transcript);
+        this._busyInTree = true;
+      }
       try { this._busy.start(); } catch { /* best effort */ }
     } else {
       if (!this._busyActive) return;
       this._busyActive = false;
       try { this._busy.stop(); } catch { /* best effort */ }
+      if (this._busyInTree) {
+        try { this._ui.removeChild(this._busy); } catch { /* best effort */ }
+        this._busyInTree = false;
+      }
     }
   }
 
@@ -706,5 +721,4 @@ export class TuiApp {
       this._transcript?.clear();
       this._footer?.setText("");
     } catch { /* best effort */ }
-  }
-}
+  }}

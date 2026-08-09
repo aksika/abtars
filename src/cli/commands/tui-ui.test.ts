@@ -148,9 +148,19 @@ function makeHarness(options?: Partial<TuiAppOptions>): Harness {
   return { app, ui, terminal, loader, renderErrors };
 }
 
-/** Children of the transcript region (4th child of the TUI root). */
+/** The transcript region: the container holding message rows. */
+function transcriptContainer(h: Harness): FakeContainer {
+  const found = h.ui.children.find((child) => {
+    if (!(child instanceof FakeContainer)) return false;
+    return child.children.some(
+      (k) => k instanceof FakeUserMessage || k instanceof FakeAssistantMessage || k instanceof FakeMarkdown,
+    );
+  });
+  return (found as FakeContainer | undefined) ?? new FakeContainer();
+}
+
 function transcriptChildren(h: Harness): unknown[] {
-  return (h.ui.children[3] as FakeContainer).children;
+  return transcriptContainer(h).children;
 }
 
 function assistantRows(h: Harness): FakeAssistantMessage[] {
@@ -161,12 +171,18 @@ function systemRows(h: Harness): FakeMarkdown[] {
   return transcriptChildren(h).filter((c) => c instanceof FakeMarkdown) as FakeMarkdown[];
 }
 
+/** The activity region: the non-empty container of plain Text rows. */
 function activityChildren(h: Harness): FakeText[] {
-  return (h.ui.children[1] as FakeContainer).children as FakeText[];
+  const found = h.ui.children.find((child) => {
+    if (!(child instanceof FakeContainer)) return false;
+    return child.children.length > 0 && child.children.every((k) => k instanceof FakeText);
+  });
+  return ((found as FakeContainer | undefined)?.children ?? []) as FakeText[];
 }
 
+/** The footer: the only direct-child Text of the TUI root. */
 function footerText(h: Harness): FakeText {
-  return h.ui.children[5] as FakeText;
+  return h.ui.children.find((child) => child instanceof FakeText) as FakeText;
 }
 
 const ready = (sessionLabel = "Main #1", sessionId = "s1"): TuiServerFrame => ({ t: "ready", sessionLabel, sessionId });
@@ -179,7 +195,7 @@ describe("TuiApp — shell construction (#1612)", () => {
   it("builds separate regions and requests native user/assistant components", () => {
     const h = makeHarness();
     h.app.resetForReady("Main #1", "s1");
-    expect(h.ui.children.length).toBe(6); // header, activity, busy, transcript, editor, footer
+    expect(h.ui.children.length).toBe(5); // header, activity, transcript, editor, footer (loader is transient)
     expect(h.ui.setFocus).toHaveBeenCalledTimes(1);
     expect(h.loader.stop).toHaveBeenCalled(); // idle on startup
 
@@ -188,6 +204,17 @@ describe("TuiApp — shell construction (#1612)", () => {
     expect(rows.length).toBe(1);
     expect(rows[0]).toBeInstanceOf(FakeUserMessage);
     expect((rows[0] as FakeUserMessage).text).toBe("hello world");
+  });
+
+  it("adds the busy loader only while busy and removes it when idle", () => {
+    const h = makeHarness();
+    h.app.resetForReady("Main #1", "s1");
+    expect(h.ui.children.length).toBe(5);
+    h.app.handleFrame({ t: "stream-start", id: "st1", executionId: "e1" });
+    expect(h.ui.children.length).toBe(6); // loader joined the tree
+    expect(h.loader.start).toHaveBeenCalled();
+    h.app.handleFrame({ t: "chunk-end", id: "st1", executionId: "e1", reason: "complete" });
+    expect(h.ui.children.length).toBe(5); // loader removed when idle
   });
 });
 
