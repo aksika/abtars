@@ -99,6 +99,7 @@ export class ProjectReviewValidator {
     const requiredOutputIds = new Set(
       caseSnapshot.root_contract.required_outputs.filter(o => o.required).map(o => o.id),
     );
+    const rootOutputIds = new Set(caseSnapshot.root_contract.required_outputs.map(o => o.id));
     const decisionOutputIds = new Set(decision.outputs.map(o => o.output_id));
 
     for (const oid of requiredOutputIds) {
@@ -112,7 +113,15 @@ export class ProjectReviewValidator {
     }
 
     const validDispositions: readonly string[] = OUTPUT_DISPOSITIONS;
+    const seenOutputIds = new Set<string>();
     for (const o of decision.outputs) {
+      if (seenOutputIds.has(o.output_id)) {
+        errors.push(error("duplicate_id", `$.outputs[${o.output_id}]`, `duplicate disposition for output "${o.output_id}"`));
+      }
+      seenOutputIds.add(o.output_id);
+      if (!rootOutputIds.has(o.output_id)) {
+        errors.push(error("bad_reference", `$.outputs[${o.output_id}]`, `unknown output id "${o.output_id}"`));
+      }
       if (!validDispositions.includes(o.disposition)) {
         errors.push(error("type_error", `$.outputs[${o.output_id}].disposition`, `invalid disposition "${o.disposition}" — legal values: ${OUTPUT_DISPOSITIONS.join(", ")}`));
       }

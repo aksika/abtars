@@ -200,6 +200,21 @@ describe("narrowReviewProjectArgs (#1620)", () => {
     if (!result.ok) expect(result.issues.some(i => i.path === "$.repair.items")).toBe(true);
   });
 
+  it("rejects null optional fields instead of treating them as omitted", () => {
+    const result = narrowReviewProjectArgs({
+      ...validRaw,
+      action: "blocked",
+      blocker: {
+        blocker_class: "external_dependency",
+        affected_criterion_ids: ["c1"],
+        exhausted_failures: null,
+        what_was_attempted: "tried",
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.issues.some(i => i.path === "$.blocker.exhausted_failures")).toBe(true);
+  });
+
   it("tolerates numeric-string ids from wrappers that stringify", () => {
     const result = narrowReviewProjectArgs({ ...validRaw, project_card_id: "42", project_generation: "1" });
     expect(result.ok).toBe(true);

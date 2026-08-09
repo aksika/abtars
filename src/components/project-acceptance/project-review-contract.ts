@@ -315,6 +315,16 @@ function narrowStringArray(value: unknown, path: string, issues: ValidationIssue
   return out;
 }
 
+function narrowOptionalString(value: unknown, path: string, fallback: string, issues: ValidationIssue[]): string {
+  if (value === undefined) return fallback;
+  return narrowString(value, path, issues) ?? fallback;
+}
+
+function narrowOptionalStringArray(value: unknown, path: string, issues: ValidationIssue[]): string[] {
+  if (value === undefined) return [];
+  return narrowStringArray(value, path, issues);
+}
+
 /**
  * Narrow an enum field structurally: a non-string value is a payload defect;
  * membership in `legal` is intentionally deferred to the semantic validator,
@@ -348,8 +358,8 @@ function narrowRepairItem(raw: Record<string, unknown>, path: string, issues: Va
   const affected = narrowStringArray(raw.affected_criterion_ids, `${path}.affected_criterion_ids`, issues);
   const requiredEvidence = narrowString(raw.required_evidence, `${path}.required_evidence`, issues);
   const strategy = narrowString(raw.strategy, `${path}.strategy`, issues);
-  const doNotRepeat = narrowStringArray(raw.do_not_repeat ?? [], `${path}.do_not_repeat`, issues);
-  const capabilities = narrowStringArray(raw.capabilities ?? [], `${path}.capabilities`, issues);
+  const doNotRepeat = narrowOptionalStringArray(raw.do_not_repeat, `${path}.do_not_repeat`, issues);
+  const capabilities = narrowOptionalStringArray(raw.capabilities, `${path}.capabilities`, issues);
   let maxAttempts: number | undefined;
   let maxTokens: number | undefined;
   if (raw.budget !== undefined) {
@@ -484,10 +494,10 @@ export function narrowReviewProjectArgs(raw: Record<string, unknown>): NarrowRes
       blocker = {
         blocker_class: narrowString(blockerRaw.blocker_class, "$.blocker.blocker_class", issues) ?? "",
         affected_criterion_ids: narrowStringArray(blockerRaw.affected_criterion_ids, "$.blocker.affected_criterion_ids", issues),
-        exhausted_failures: narrowStringArray(blockerRaw.exhausted_failures ?? [], "$.blocker.exhausted_failures", issues),
-        contradiction_evidence: narrowStringArray(blockerRaw.contradiction_evidence ?? [], "$.blocker.contradiction_evidence", issues),
+        exhausted_failures: narrowOptionalStringArray(blockerRaw.exhausted_failures, "$.blocker.exhausted_failures", issues),
+        contradiction_evidence: narrowOptionalStringArray(blockerRaw.contradiction_evidence, "$.blocker.contradiction_evidence", issues),
         what_was_attempted: narrowString(blockerRaw.what_was_attempted, "$.blocker.what_was_attempted", issues) ?? "",
-        unblock_conditions: narrowString(blockerRaw.unblock_conditions ?? "", "$.blocker.unblock_conditions", issues) ?? "",
+        unblock_conditions: narrowOptionalString(blockerRaw.unblock_conditions, "$.blocker.unblock_conditions", "", issues),
       };
     }
   }
@@ -499,8 +509,8 @@ export function narrowReviewProjectArgs(raw: Record<string, unknown>): NarrowRes
       inputRequest = {
         question: narrowString(inputRaw.question, "$.input_request.question", issues) ?? "",
         affected_criterion_ids: narrowStringArray(inputRaw.affected_criterion_ids, "$.input_request.affected_criterion_ids", issues),
-        expected_response_kind: narrowString(inputRaw.expected_response_kind ?? "text", "$.input_request.expected_response_kind", issues) ?? "text",
-        context: narrowString(inputRaw.context ?? "", "$.input_request.context", issues) ?? "",
+        expected_response_kind: narrowOptionalString(inputRaw.expected_response_kind, "$.input_request.expected_response_kind", "text", issues),
+        context: narrowOptionalString(inputRaw.context, "$.input_request.context", "", issues),
       };
     }
   }

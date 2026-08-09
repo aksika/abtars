@@ -154,7 +154,7 @@ describe("ProjectReviewValidator", () => {
     });
 
     it("rejects unknown review case", () => {
-      const { pid, snapshot } = setupCase();
+      const { pid, snapshot, caseId } = setupCase();
       const decision = makeValidDecision(pid, { review_case_id: "nonexistent" });
       const errors = validator.validateDecision(decision, snapshot);
       expect(errors.some(e => e.tag === "bad_reference")).toBe(true);
@@ -327,6 +327,17 @@ describe("ProjectReviewValidator", () => {
       }, id);
       const errors = validator.validateDecision(decision, snapshot);
       expect(errors).toHaveLength(0);
+    });
+
+    it("rejects an output disposition for an id absent from the immutable contract", () => {
+      const { pid, snapshot, caseId } = setupCase();
+      const decision = makeValidDecision(pid, {
+        outputs: [
+          { output_id: "invented-output", disposition: "present", evidence_ids: [] },
+        ],
+      }, caseId);
+      const issues = validator.validateDecision(decision, snapshot);
+      expect(issues.some(i => i.tag === "bad_reference" && i.path.includes("invented-output"))).toBe(true);
     });
 
     it("#1605 rejects an optional gap accepted without a rationale", () => {

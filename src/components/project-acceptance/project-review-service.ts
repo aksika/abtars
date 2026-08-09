@@ -195,9 +195,16 @@ export class ProjectReviewService {
       return { kind: "invalid", errors: [`review case "${decision.review_case_id}" is ${caseRow.status}, not open`], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
     }
 
-    const caseSnapshot = JSON.parse(caseRow.case_json) as ReviewCaseSnapshot;
-    if (!caseSnapshot) {
+    let caseSnapshot: ReviewCaseSnapshot;
+    try {
+      caseSnapshot = JSON.parse(caseRow.case_json) as ReviewCaseSnapshot;
+    } catch {
       return { kind: "invalid", errors: ["failed to parse case snapshot"], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
+    }
+    if (!caseSnapshot || caseSnapshot.schema_version !== 1 ||
+        caseSnapshot.project_card_id !== caseRow.project_card_id ||
+        caseSnapshot.generation !== caseRow.generation) {
+      return { kind: "invalid", errors: ["review case snapshot is structurally invalid"], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
     }
 
     // Validate the decision
@@ -206,34 +213,51 @@ export class ProjectReviewService {
     const warnings = issues.filter(i => i.severity === "warn");
 
     if (errors.length > 0) {
-      // Track invalid proposals. A settled request (already terminal) must
-      // never be counted again or settle a second terminal decision.
-      const { total, requestId, settled } = this.store.incrementInvalidProposals(decision.review_case_id);
-      if (!settled && total >= MAX_INVALID_PROPOSALS && requestId) {
-        const cardId = decision.project_card_id;
-        // #1620: exhaustion is review-protocol failure, not a semantic
-        // verdict on the project's criteria. The blocker and every
-        // projection state that no valid review decision was produced.
-        const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-        const summary = `Project blocked after ${total} invalid proposals: review protocol exhausted before a valid decision`;
-        const peerEvent = buildPeerTerminalEvent(cardId, decisionId, "failed", summary, caseSnapshot);
-        const exhaustionDecision = {
-          action: "blocked",
-          blocker_class: REVIEW_PROTOCOL_EXHAUSTED,
-          invalid_proposals: total,
-          reason: "review protocol exhausted before a valid semantic decision",
+      // A foreign project/generation is a stale or misbound invocation, not a
+      // proposal for this case. Fail closed without spending this case's
+      // correction budget; the Orc tool performs the same check before calling
+      // the service, but the service must remain safe for direct callers too.
+      if (decision.project_card_id !== caseRow.project_card_id || decision.project_generation !== caseRow.generation) {
+        return {
+          kind: "invalid",
+          errors: errors.map(e => `[${e.path}] ${e.message}`),
+          issues: errors,
+          invalidProposalCount: 0,
+          remainingAttempts: MAX_INVALID_PROPOSALS,
         };
-        const { decisionId: settledId } = this.store.settleBlocked(cardId, decision.review_case_id, exhaustionDecision, REVIEW_PROTOCOL_EXHAUSTED, peerEvent, decisionId);
-        this.store.markReviewRequestSettled(requestId);
+      }
+
+      // Track and, at the threshold, settle in one SQLite transaction. A
+      // concurrent duplicate therefore cannot increment after the winning
+      // fifth proposal has already terminalized the case.
+      const cardId = caseRow.project_card_id;
+      const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
+      const summary = `Project blocked after ${MAX_INVALID_PROPOSALS} invalid proposals: review_protocol_exhausted; no valid semantic decision was produced`;
+      const peerEvent = buildPeerTerminalEvent(cardId, decisionId, "failed", summary, caseSnapshot);
+      const exhaustionDecision = {
+        action: "blocked",
+        blocker_class: REVIEW_PROTOCOL_EXHAUSTED,
+        reason: "review protocol exhausted before a valid semantic decision",
+      };
+      const record = this.store.recordInvalidProposal(
+        cardId,
+        decision.review_case_id,
+        MAX_INVALID_PROPOSALS,
+        { ...exhaustionDecision, invalid_proposals: MAX_INVALID_PROPOSALS },
+        REVIEW_PROTOCOL_EXHAUSTED,
+        peerEvent,
+        decisionId,
+      );
+      if (record.kind === "blocked") {
         try { nerve.fire("card:failed", cardId); } catch {}
         return {
           kind: "blocked_invalid",
-          decisionId: settledId,
+          decisionId: record.decisionId,
           summary,
-          invalidProposalCount: total,
+          invalidProposalCount: record.total,
         };
       }
-      const count = total;
+      const count = record.total;
       return {
         kind: "invalid",
         errors: errors.map(e => `[${e.path}] ${e.message}`),

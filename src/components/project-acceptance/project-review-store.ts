@@ -115,6 +115,11 @@ export interface ReviewDecisionRow {
   created_at: string;
 }
 
+export type InvalidProposalRecord =
+  | { kind: "counted"; total: number; requestId: string }
+  | { kind: "blocked"; total: number; requestId: string; decisionId: string }
+  | { kind: "ignored"; total: number; requestId: string };
+
 // ── Action types (used by Kanban projection) ──────────────────────────────────
 
 export type KanbanProjection = "running" | "failed" | "done";
@@ -467,27 +472,87 @@ export class ProjectReviewStore {
   }
 
   /**
-   * #1620: atomic single-statement invalid-proposal increment, guarded by the
-   * request row's live status. Returns the authoritative post-increment count
-   * plus the request id. `settled: true` means the request was already
-   * terminal (or vanished) — the caller must not settle again, and the
-   * increment must not be double-counted by concurrent duplicates: SQLite
-   * serializes the UPDATE itself, and a settled request row can never be
-   * re-incremented.
+   * #1620: retain the old counter helper for callers that only need to record
+   * an invalid proposal. The review service uses recordInvalidProposal below so
+   * the fifth increment and terminal settlement share one SQLite transaction.
    */
   incrementInvalidProposals(caseId: string): { total: number; requestId: string; settled: boolean } {
-    const now = new Date().toISOString();
-    const result = this.db.prepare(`
-      UPDATE project_review_requests
-         SET invalid_proposals = invalid_proposals + 1, updated_at = ?
-       WHERE review_case_id = ? AND status IN ('pending','dispatched')
-    `).run(now, caseId);
-    if (result.changes !== 1) {
-      return { total: 0, requestId: "", settled: true };
+    return this.db.transaction(() => {
+      const now = new Date().toISOString();
+      const result = this.db.prepare(`
+        UPDATE project_review_requests
+           SET invalid_proposals = invalid_proposals + 1, updated_at = ?
+         WHERE review_case_id = ? AND status IN ('pending','dispatched')
+      `).run(now, caseId);
+      if (result.changes !== 1) {
+        return { total: 0, requestId: "", settled: true };
+      }
+      const row = this.db.prepare(`SELECT id, invalid_proposals FROM project_review_requests WHERE review_case_id = ?`).get(caseId) as { id: string; invalid_proposals: number } | undefined;
+      if (!row) return { total: 0, requestId: "", settled: true };
+      return { total: row.invalid_proposals, requestId: row.id, settled: false };
+    });
+  }
+
+  /**
+   * Record one semantic validation error and, when it is the fifth error,
+   * settle the review as protocol-exhausted in the same transaction. The
+   * request and case ownership predicates prevent a foreign/stale decision
+   * from consuming another project's budget. SQLite serializes competing
+   * calls, so only the transaction that changes the count to the threshold
+   * can create the terminal decision and outbox row.
+   */
+  recordInvalidProposal(
+    cardId: number,
+    reviewCaseId: string,
+    maxInvalidProposals: number,
+    decision: unknown,
+    blockerClass: string,
+    peerEvent: { peer: string; payload: unknown } | undefined,
+    decisionId: string,
+  ): InvalidProposalRecord {
+    const result = this.db.transaction((): InvalidProposalRecord => {
+      const request = this.db.prepare(`
+        SELECT id, project_card_id, invalid_proposals, status
+        FROM project_review_requests WHERE review_case_id = ?
+      `).get(reviewCaseId) as { id: string; project_card_id: number; invalid_proposals: number; status: string } | undefined;
+      const reviewCase = this.db.prepare(`
+        SELECT project_card_id, status FROM project_review_cases WHERE id = ?
+      `).get(reviewCaseId) as { project_card_id: number; status: ReviewCaseStatus } | undefined;
+
+      if (!request || !reviewCase || request.project_card_id !== cardId || reviewCase.project_card_id !== cardId ||
+          (request.status !== "pending" && request.status !== "dispatched") || reviewCase.status !== "open") {
+        return { kind: "ignored", total: request?.invalid_proposals ?? 0, requestId: request?.id ?? "" };
+      }
+
+      const now = new Date().toISOString();
+      if (request.invalid_proposals >= maxInvalidProposals) {
+        this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, peerEvent, decisionId, now);
+        return { kind: "blocked", total: request.invalid_proposals, requestId: request.id, decisionId };
+      }
+      const incremented = this.db.prepare(`
+        UPDATE project_review_requests
+           SET invalid_proposals = invalid_proposals + 1, updated_at = ?
+         WHERE id = ? AND project_card_id = ? AND status IN ('pending','dispatched')
+           AND invalid_proposals < ?
+      `).run(now, request.id, cardId, maxInvalidProposals);
+      if (incremented.changes !== 1) {
+        const current = this.db.prepare(`SELECT invalid_proposals FROM project_review_requests WHERE id = ?`).get(request.id) as { invalid_proposals: number } | undefined;
+        return { kind: "ignored", total: current?.invalid_proposals ?? request.invalid_proposals, requestId: request.id };
+      }
+
+      const updated = this.db.prepare(`SELECT invalid_proposals FROM project_review_requests WHERE id = ?`).get(request.id) as { invalid_proposals: number };
+      if (updated.invalid_proposals < maxInvalidProposals) {
+        return { kind: "counted", total: updated.invalid_proposals, requestId: request.id };
+      }
+
+      this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, peerEvent, decisionId, now);
+      return { kind: "blocked", total: updated.invalid_proposals, requestId: request.id, decisionId };
+    });
+
+    if (result.kind === "blocked") {
+      logSwarmTrace({ event: "project_blocked", project: cardId, reviewCase: reviewCaseId, decision: result.decisionId, reason: blockerClass });
     }
-    const row = this.db.prepare(`SELECT id, invalid_proposals FROM project_review_requests WHERE review_case_id = ?`).get(caseId) as { id: string; invalid_proposals: number } | undefined;
-    if (!row) return { total: 0, requestId: "", settled: true };
-    return { total: row.invalid_proposals, requestId: row.id, settled: false };
+    return result;
   }
 
   getReviewRequestByCaseId(reviewCaseId: string): { id: string; status: string } | undefined {
@@ -700,59 +765,69 @@ export class ProjectReviewStore {
     decisionId?: string,
   ): { decisionId: string } {
     const settledId = decisionId ?? `rd_block_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const decisionDigest = `sd_blk_${cardId}_${reviewCaseId}_${Date.now()}`;
     const now = new Date().toISOString();
 
-    this.db.transaction(() => {
-      this.db.prepare(`
-        INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(settledId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
-
-      const state = this.db.prepare(`
-        UPDATE project_supervision SET state = 'blocked', blocked_reason = ?, accepted_decision_id = ?, updated_at = ?
-        WHERE project_card_id = ? AND state NOT IN ('accepted', 'blocked')
-      `).run(blockerClass, settledId, now, cardId);
-      if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
-
-      // #1590: through the transition helper inside this transaction. The
-      // service layer fires card:failed after commit, so emit is disabled.
-      kanbanTransition({
-        cardId,
-        from: ["running"],
-        to: projectStateToKanban("blocked"),
-        actor: "project_acceptance",
-        reason: "project blocked",
-        fields: { error: `blocked: ${blockerClass}`.slice(0, 1000), completed_at: sqliteNow() },
-        emit: false,
-      }, this.db);
-
-      this.db.prepare(`
-        UPDATE project_review_cases SET status = 'superseded', superseded_at = ? WHERE id = ? AND status = 'open'
-      `).run(now, reviewCaseId);
-      this.db.prepare(`
-        UPDATE project_review_requests SET status = 'settled', updated_at = ?
-        WHERE review_case_id = ? AND status IN ('pending', 'dispatched')
-      `).run(now, reviewCaseId);
-
-      // #1618: a failed terminal event row lands in the same transaction that
-      // wins the blocked settlement — duplicate settlement cannot create a
-      // second row (outbox is UNIQUE per project_card_id).
-      if (peerEvent) {
-        const payload = peerEvent.payload && typeof peerEvent.payload === "object"
-          ? { ...(peerEvent.payload as Record<string, unknown>), acceptance_id: settledId }
-          : peerEvent.payload;
-        this.db.prepare(`
-          INSERT OR IGNORE INTO project_acceptance_outbox
-            (id, project_card_id, peer, payload_json, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(`ao_${settledId}`, cardId, peerEvent.peer, JSON.stringify(payload), now, now);
-      }
-    });
+    this.db.transaction(() => this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, peerEvent, settledId, now));
 
     logSwarmTrace({ event: "project_blocked", project: cardId, reviewCase: reviewCaseId, decision: settledId, reason: blockerClass });
 
     return { decisionId: settledId };
+  }
+
+  private settleBlockedInTransaction(
+    cardId: number,
+    reviewCaseId: string,
+    decision: unknown,
+    blockerClass: string,
+    peerEvent: { peer: string; payload: unknown } | undefined,
+    settledId: string,
+    now: string,
+  ): void {
+    const decisionDigest = `sd_blk_${cardId}_${reviewCaseId}_${Date.now()}`;
+    this.db.prepare(`
+      INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(settledId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
+
+    const state = this.db.prepare(`
+      UPDATE project_supervision SET state = 'blocked', blocked_reason = ?, accepted_decision_id = ?, updated_at = ?
+      WHERE project_card_id = ? AND state NOT IN ('accepted', 'blocked')
+    `).run(blockerClass, settledId, now, cardId);
+    if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
+
+    // #1590: through the transition helper inside this transaction. The
+    // service layer fires card:failed after commit, so emit is disabled.
+    kanbanTransition({
+      cardId,
+      from: ["running"],
+      to: projectStateToKanban("blocked"),
+      actor: "project_acceptance",
+      reason: "project blocked",
+      fields: { error: `blocked: ${blockerClass}`.slice(0, 1000), completed_at: sqliteNow() },
+      emit: false,
+    }, this.db);
+
+    this.db.prepare(`
+      UPDATE project_review_cases SET status = 'superseded', superseded_at = ? WHERE id = ? AND status = 'open'
+    `).run(now, reviewCaseId);
+    this.db.prepare(`
+      UPDATE project_review_requests SET status = 'settled', updated_at = ?
+      WHERE review_case_id = ? AND status IN ('pending', 'dispatched')
+    `).run(now, reviewCaseId);
+
+    // #1618: a failed terminal event row lands in the same transaction that
+    // wins the blocked settlement — duplicate settlement cannot create a
+    // second row (outbox is UNIQUE per project_card_id).
+    if (peerEvent) {
+      const payload = peerEvent.payload && typeof peerEvent.payload === "object"
+        ? { ...(peerEvent.payload as Record<string, unknown>), acceptance_id: settledId }
+        : peerEvent.payload;
+      this.db.prepare(`
+        INSERT OR IGNORE INTO project_acceptance_outbox
+          (id, project_card_id, peer, payload_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(`ao_${settledId}`, cardId, peerEvent.peer, JSON.stringify(payload), now, now);
+    }
   }
 
   /** Atomically persist a repair decision, advance its generation, and close the review turn. */

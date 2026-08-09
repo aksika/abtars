@@ -398,4 +398,28 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
     expect(result.brief.uncovered_criteria).toEqual(["c_gap"]);
     expect(result.brief.peer_claims[0]!.card_id).toBe(2001);
   });
+
+  it("projects child metadata without exposing an embedded Worker result envelope", async () => {
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { projectReviewBrief } = await import("./project-review-case.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const snapshot = makeProjectionSnapshot() as unknown as {
+      child_summaries: Array<Record<string, unknown>>;
+    } & Record<string, unknown>;
+    snapshot.child_summaries = [{
+      ...snapshot.child_summaries[0],
+      result: {
+        checks: [{ argv: ["cat", "/private/path"], stdout_excerpt: "secret" }],
+        worker_report: { summary: "raw Worker prose" },
+      },
+    }];
+    const { id } = store.insertReviewCase(7717, 2, 1, snapshot, "digest_brief_5");
+
+    const result = projectReviewBrief(id, store);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.brief.children[0]).not.toHaveProperty("result");
+    expect(JSON.stringify(result.brief)).not.toContain("/private/path");
+    expect(JSON.stringify(result.brief)).not.toContain("raw Worker prose");
+  });
 });

@@ -153,9 +153,19 @@ function legacyOrcDispatch(goal: string, cardId: number): void {
 }
 
 function legacyOrcReviewDispatch(projectId: number, generation: number, caseId: string, requestId: string): void {
+  // #1620: review_project is run-bound. If the durable coordinator was not
+  // initialized when this legacy path was entered, initialize it here rather
+  // than starting an unbound Spin turn that can never use the review tool.
+  const coordinator = getOrCreateOrcCoordinator();
+  if (!coordinator) {
+    logWarn(TAG, `Failed to dispatch Orc review for project ${projectId}: durable Orc coordinator unavailable`);
+    return;
+  }
   try {
-    spin.dispatch({ type: "O", goal: `Review project #${projectId}: first read the immutable case with get_project_review_case (project_card_id=${projectId}, project_generation=${generation}, review_case_id=${caseId}), then submit exactly one review_project decision using its legal_values and compatible evidence ids.`, source: "agent", cardId: projectId, settlementOwner: "spin" });
-    try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch {}
+    const result = coordinator.scheduleReview(projectId, generation, caseId);
+    if (result.kind === "claimed" || result.kind === "idempotent") {
+      try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch {}
+    }
   } catch (err) {
     logWarn(TAG, `Failed to dispatch Orc review — ${err instanceof Error ? err.message : String(err)}`);
   }

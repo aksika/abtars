@@ -392,6 +392,15 @@ export class ReviewCaseAssembler {
 // Worker or peer tables, and never from free-form prose that could drift from
 // the validator's enums.
 
+export interface ProjectReviewChildBriefV1 {
+  card_id: number;
+  contract_id: string;
+  outcome: string;
+  criterion_statuses: Array<{ criterion_id: string; status: string }>;
+  attempts: number;
+  executor_kind: string;
+}
+
 export interface ProjectReviewBriefV1 {
   schema_version: 1;
   project_card_id: number;
@@ -414,7 +423,7 @@ export interface ProjectReviewBriefV1 {
   }>;
   outputs: Array<{ output_id: string; description: string; kind: string; required: boolean }>;
   contradictions: ContradictionCandidate[];
-  children: ReviewCaseSnapshot["child_summaries"];
+  children: ProjectReviewChildBriefV1[];
   /** #1433/#1493: peer claims are claims, never requester-observed evidence. */
   peer_claims: ReviewCaseSnapshot["peer_contributions"];
   uncovered_criteria: string[];
@@ -455,7 +464,8 @@ export function projectReviewBrief(
   } catch {
     return { ok: false, error: "review case snapshot is unparseable" };
   }
-  if (!snapshot || snapshot.schema_version !== 1 || snapshot.project_card_id === undefined) {
+  if (!snapshot || snapshot.schema_version !== 1 || snapshot.project_card_id === undefined ||
+      snapshot.project_card_id !== row.project_card_id || snapshot.generation !== row.generation) {
     return { ok: false, error: "review case snapshot is structurally invalid" };
   }
 
@@ -485,6 +495,42 @@ export function projectReviewBrief(
     required: o.required,
   }));
 
+  // The immutable assembler keeps the full redacted Worker envelope on the
+  // stored snapshot for local evidence derivation. It is not part of the
+  // decision-ready child summary: project only the metadata fields declared by
+  // the brief so raw checks, argv/cwd, artifacts, and Worker prose never cross
+  // the Orc review tool boundary.
+  const children: ProjectReviewChildBriefV1[] = snapshot.child_summaries.map(child => ({
+    card_id: child.card_id,
+    contract_id: child.contract_id,
+    outcome: truncateProse(child.outcome, 64),
+    criterion_statuses: child.criterion_statuses.map(status => ({
+      criterion_id: status.criterion_id,
+      status: truncateProse(status.status, 64),
+    })),
+    attempts: child.attempts,
+    executor_kind: truncateProse(child.executor_kind, 64),
+  }));
+
+  const contradictions: ContradictionCandidate[] = snapshot.contradiction_candidates.map(candidate => ({
+    id: candidate.id,
+    affected_criterion_ids: [...candidate.affected_criterion_ids],
+    description: truncateProse(candidate.description, BRIEF_DESCRIPTION_MAX),
+    evidence_ids: [...candidate.evidence_ids],
+    sources: [...candidate.sources],
+  }));
+
+  // Peer rows are explicitly claims. Preserve their stored references and
+  // bound their prose/metadata before exposing them to the provider.
+  const peerClaims: ProjectReviewBriefV1["peer_claims"] = snapshot.peer_contributions.map(claim => ({
+    card_id: claim.card_id,
+    peer: truncateProse(claim.peer, 128),
+    outcome: truncateProse(claim.outcome, 64),
+    projection_summary: truncateProse(claim.projection_summary, 200),
+    root_criteria: [...claim.root_criteria],
+    provenance: truncateProse(claim.provenance, 1000),
+  }));
+
   const decisionSkeleton = {
     project_card_id: snapshot.project_card_id,
     project_generation: snapshot.generation,
@@ -512,9 +558,9 @@ export function projectReviewBrief(
       goal: truncateProse(snapshot.root_contract.goal, BRIEF_GOAL_MAX),
       criteria,
       outputs,
-      contradictions: snapshot.contradiction_candidates,
-      children: snapshot.child_summaries,
-      peer_claims: snapshot.peer_contributions,
+      contradictions,
+      children,
+      peer_claims: peerClaims,
       uncovered_criteria: [...snapshot.uncovered_criteria],
       budgets: snapshot.budgets,
       legal_values: {

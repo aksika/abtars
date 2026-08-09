@@ -578,8 +578,11 @@ function stringValue(value: unknown): string {
 }
 
 function numberValue(value: unknown): number | null {
-  if (typeof value === "number" && Number.isSafeInteger(value)) return value;
-  if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    const parsed = Number(value.trim());
+    if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  }
   return null;
 }
 
@@ -619,6 +622,12 @@ const getProjectReviewCaseTool: ToolDefinition = {
 
       const supervision = store.getSupervision(explicitProjectId);
       if (!supervision) return JSON.stringify({ error: "No project supervision state found. Is this a supervised project?" });
+      if (typeof bound.projectGeneration === "number" && bound.projectGeneration !== supervision.generation) {
+        return JSON.stringify({ error: `Bound project generation ${bound.projectGeneration} is stale; current generation is ${supervision.generation}` });
+      }
+      if (supervision.state !== "review_ready" && supervision.state !== "review_requested" && supervision.state !== "reviewing") {
+        return JSON.stringify({ error: `Project is in state "${supervision.state}", not ready for review` });
+      }
 
       const openCase = store.getReviewCase(reviewCaseId);
       if (!openCase) return JSON.stringify({ error: `Review case "${reviewCaseId}" not found` });
@@ -668,6 +677,9 @@ const reviewProjectTool: ToolDefinition = {
       const store = new ProjectReviewStore();
       const supervision = store.getSupervision(projectCardId);
       if (!supervision) return JSON.stringify({ error: "No project supervision state found. Is this a supervised project?" });
+      if (typeof bound.projectGeneration === "number" && bound.projectGeneration !== supervision.generation) {
+        return JSON.stringify({ error: `Bound project generation ${bound.projectGeneration} is stale; current generation is ${supervision.generation}` });
+      }
       if (supervision.generation !== projectGeneration) return JSON.stringify({ error: `Project generation mismatch: expected ${supervision.generation}, got ${projectGeneration}` });
       if (supervision.state !== "review_ready" && supervision.state !== "review_requested" && supervision.state !== "reviewing") return JSON.stringify({ error: `Project is in state "${supervision.state}", not ready for review` });
 
