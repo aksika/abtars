@@ -179,8 +179,12 @@ export class PeerHelpStore {
 
       // #1618: admit the receiver-owned project in the same transaction so the
       // peer root is supervised from birth — no window where the card exists
-      // without its awaiting_contract supervision row.
-      this.admission?.ensureAwaitingContract(cardId);
+      // without its awaiting_contract supervision row. Generic admission must
+      // fail closed if production wiring omitted the supervision port.
+      if (!this.admission) throw new Error("receiver project admission unavailable");
+      if (!this.admission.ensureAwaitingContract(cardId)) {
+        throw new Error(`failed to admit receiver project ${cardId}`);
+      }
 
       this.db.prepare(
         `UPDATE peer_help_requests

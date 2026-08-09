@@ -133,6 +133,40 @@ describe("ContributionStore", () => {
       expect((harness.raw.prepare("SELECT COUNT(*) AS n FROM kanban_board").get() as any).n).toBe(1);
       expect((harness.raw.prepare("SELECT status, type, parent_id FROM kanban_board").get() as any)).toEqual({ status: "running", type: "contribution", parent_id: 100 });
     });
+
+    it("rebinds a reused proxy to the fallback peer and request", () => {
+      harness.raw.exec(`CREATE TABLE kanban_board (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT, source TEXT, source_id TEXT, priority TEXT, status TEXT,
+        type TEXT, goal TEXT, notes TEXT, parent_id INTEGER,
+        delivery_mode TEXT, source_peer TEXT
+      )`);
+      const first = store.reserveProxy({
+        peer: "peer1", requestId: "req_first", requestHash: "hash_first",
+        projectCardId: 100, title: "first help", goal: "do help", priority: "HIGH",
+        sourcePeer: "peer1", proxyCardId: undefined,
+        notes: { request_id: "req_first", outcome: "pending" },
+      });
+      expect(first.proxyCardId).toBeGreaterThan(0);
+      store.transitionToNonStarted("peer1", "req_first", "declined");
+      expect(store.detachProxy("peer1", "req_first")).toBe(true);
+
+      const fallback = store.reserveProxy({
+        peer: "peer2", requestId: "req_second", requestHash: "hash_second",
+        projectCardId: 100, title: "fallback help", goal: "do help", priority: "HIGH",
+        sourcePeer: "peer2", proxyCardId: first.proxyCardId,
+        notes: { request_id: "req_second", outcome: "pending" },
+      });
+      expect(fallback.status).toBe("new");
+      expect(fallback.proxyCardId).toBe(first.proxyCardId);
+      expect(harness.raw.prepare("SELECT source, source_id, source_peer, parent_id, notes FROM kanban_board WHERE id = ?").get(first.proxyCardId) as any).toMatchObject({
+        source: "peer",
+        source_id: "req_second",
+        source_peer: "peer2",
+        parent_id: 100,
+      });
+      expect((harness.raw.prepare("SELECT notes FROM kanban_board WHERE id = ?").get(first.proxyCardId) as any).notes).toContain("req_second");
+    });
   });
 
   describe("state transitions", () => {

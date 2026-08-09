@@ -191,6 +191,14 @@ describe("RequesterContributionService", () => {
     expect(result.decision).toBe("declined");
     const ledger = db.prepare("SELECT state FROM peer_contributions WHERE peer = 'molty'").get() as any;
     expect(ledger.state).toBe("declined");
+
+    const replay = await env.service.delegate({
+      peer: "molty",
+      request: makeRequest(),
+      binding: { kind: "create_cli_project", title: "delegate x", goal: "g" },
+    });
+    expect(replay.decision).toBe("declined");
+    expect(env.sends).toHaveLength(1);
   });
 
   it("transport failure projects unknown and a replay never resends", async () => {

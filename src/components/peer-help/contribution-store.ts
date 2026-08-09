@@ -78,8 +78,9 @@ interface Db {
 interface KanbanBoard {
   kanbanGetCard(id: number): { id: number; status: string; result_summary?: string | null; error?: string | null } | undefined;
   kanbanUpdate(id: number, updates: Record<string, unknown>): void;
-  kanbanComplete(id: number, result: string | null, summary: string): void;
-  kanbanFail(id: number, error: string): void;
+  kanbanComplete(id: number, result: string | null, summary: string, emit?: boolean): void;
+  kanbanFail(id: number, error: string, emit?: boolean): void;
+  onTerminalCommitted?(event: "card:done" | "card:failed", cardId: number): void;
 }
 
 export interface ProxyReservation {
@@ -189,6 +190,21 @@ export class ContributionStore {
       ).lastInsertRowid);
       if (!proxyCardId) throw new Error("Failed to create contribution proxy");
 
+      // A fallback attempt deliberately reuses the first proxy card. Rebind
+      // its durable routing identity in the same transaction as the new
+      // ledger row; otherwise review assembly and operator views continue to
+      // attribute the card to the declined peer/request.
+      if (input.proxyCardId !== undefined) {
+        this.db.prepare(
+          `UPDATE kanban_board
+           SET title = ?, source = 'peer', source_id = ?, priority = ?, goal = ?, notes = ?, parent_id = ?, source_peer = ?
+           WHERE id = ?`
+        ).run(
+          input.title, input.requestId, normalizedPriority, input.goal, notes,
+          input.projectCardId, input.sourcePeer, input.proxyCardId,
+        );
+      }
+
       if (existing) {
         this.db.prepare(
           `UPDATE peer_contributions SET proxy_card_id = ?, updated_at = datetime('now')
@@ -269,53 +285,62 @@ export class ContributionStore {
   }
 
   applyEvent(peer: string, event: PeerContributionEventV1, payloadDigest: string, projectionJson: string | null): "applied" | "duplicate" | "conflict" | "rejected" {
-    const row = this.db.prepare(
-      "SELECT state, contribution_ref, last_sequence, terminal_event_id, terminal_digest, proxy_card_id FROM peer_contributions WHERE peer = ? AND request_id = ?",
-    ).get(peer, event.request_id) as Pick<ContributionRow, "state" | "contribution_ref" | "last_sequence" | "terminal_event_id" | "terminal_digest" | "proxy_card_id"> | undefined;
-
-    if (!row) return "rejected";
-    if (row.contribution_ref !== event.contribution_ref) return "rejected";
     if ((event.kind === "completed" || event.kind === "failed") && !projectionJson) return "rejected";
 
-    if (row.state === "completed" || row.state === "failed") {
-      if (row.terminal_event_id === event.event_id && row.terminal_digest === payloadDigest) return "duplicate";
-      try { console.warn(`[contribution-store] conflict: terminal event for settled contribution ${peer}/${event.request_id}`); } catch {}
-      return "conflict";
-    }
+    let proxyCardId: number | null = null;
+    let terminalEvent: "card:done" | "card:failed" | undefined;
 
-    const existingEvent = this.db.prepare(
-      "SELECT request_id, contribution_ref, sequence, payload_digest FROM peer_contribution_events WHERE peer = ? AND event_id = ?",
-    ).get(peer, event.event_id) as Pick<EventRow, "request_id" | "contribution_ref" | "sequence" | "payload_digest"> | undefined;
+    const result = this.db.transaction<"applied" | "duplicate" | "conflict" | "rejected">(() => {
+      // Re-read the contribution inside the write transaction. The previous
+      // implementation read this row before opening the transaction, allowing
+      // two bridge processes to both pass first-terminal-wins and let the later
+      // terminal event overwrite the earlier one.
+      const row = this.db.prepare(
+        "SELECT state, contribution_ref, last_sequence, terminal_event_id, terminal_digest, proxy_card_id FROM peer_contributions WHERE peer = ? AND request_id = ?",
+      ).get(peer, event.request_id) as Pick<ContributionRow, "state" | "contribution_ref" | "last_sequence" | "terminal_event_id" | "terminal_digest" | "proxy_card_id"> | undefined;
 
-    if (existingEvent) {
-      return existingEvent.request_id === event.request_id &&
-        existingEvent.contribution_ref === event.contribution_ref &&
-        existingEvent.sequence === event.sequence &&
-        existingEvent.payload_digest === payloadDigest ? "duplicate" : "conflict";
-    }
+      if (!row) return "rejected";
+      if (row.contribution_ref !== event.contribution_ref) return "rejected";
 
-    if (event.sequence <= row.last_sequence) {
-      try { console.warn(`[contribution-store] reorder: sequence ${event.sequence} <= last ${row.last_sequence} for ${peer}/${event.request_id} — rejecting`); } catch {}
-      return "conflict";
-    }
+      if (row.state === "completed" || row.state === "failed") {
+        if (row.terminal_event_id === event.event_id && row.terminal_digest === payloadDigest) return "duplicate";
+        try { console.warn(`[contribution-store] conflict: terminal event for settled contribution ${peer}/${event.request_id}`); } catch {}
+        return "conflict";
+      }
 
-    const proxyCardId = row.proxy_card_id;
+      const existingEvent = this.db.prepare(
+        "SELECT request_id, contribution_ref, sequence, payload_digest FROM peer_contribution_events WHERE peer = ? AND event_id = ?",
+      ).get(peer, event.event_id) as Pick<EventRow, "request_id" | "contribution_ref" | "sequence" | "payload_digest"> | undefined;
 
-    this.db.transaction(() => {
+      if (existingEvent) {
+        return existingEvent.request_id === event.request_id &&
+          existingEvent.contribution_ref === event.contribution_ref &&
+          existingEvent.sequence === event.sequence &&
+          existingEvent.payload_digest === payloadDigest ? "duplicate" : "conflict";
+      }
+
+      if (event.sequence <= row.last_sequence) {
+        try { console.warn(`[contribution-store] reorder: sequence ${event.sequence} <= last ${row.last_sequence} for ${peer}/${event.request_id} — rejecting`); } catch {}
+        return "conflict";
+      }
+
+      proxyCardId = row.proxy_card_id;
       if (event.kind === "completed" || event.kind === "failed") {
-        this.db.prepare(
+        const update = this.db.prepare(
           `UPDATE peer_contributions SET state = ?, last_sequence = ?, terminal_event_id = ?, terminal_digest = ?, projection_json = ?, updated_at = datetime('now')
-           WHERE peer = ? AND request_id = ?`,
+           WHERE peer = ? AND request_id = ? AND state NOT IN ('completed', 'failed') AND last_sequence = ?`,
         ).run(
           event.kind === "completed" ? "completed" : "failed",
           event.sequence, event.event_id, payloadDigest, projectionJson,
-          peer, event.request_id,
+          peer, event.request_id, row.last_sequence,
         );
+        if (update.changes !== 1) return "conflict";
       } else {
-        this.db.prepare(
+        const update = this.db.prepare(
           `UPDATE peer_contributions SET state = 'running', last_sequence = ?, updated_at = datetime('now')
-           WHERE peer = ? AND request_id = ?`,
-        ).run(event.sequence, peer, event.request_id);
+           WHERE peer = ? AND request_id = ? AND state NOT IN ('completed', 'failed') AND last_sequence = ?`,
+        ).run(event.sequence, peer, event.request_id, row.last_sequence);
+        if (update.changes !== 1) return "conflict";
       }
 
       this.db.prepare(
@@ -329,9 +354,11 @@ export class ContributionStore {
       // authority; the card notes are a bounded operator view.
       if ((event.kind === "completed" || event.kind === "failed") && proxyCardId) {
         if (event.kind === "completed") {
-          this.kanban.kanbanComplete(proxyCardId, null, event.summary?.slice(0, 1000) ?? "contribution completed");
+          this.kanban.kanbanComplete(proxyCardId, null, event.summary?.slice(0, 1000) ?? "contribution completed", false);
+          terminalEvent = "card:done";
         } else {
-          this.kanban.kanbanFail(proxyCardId, "contribution failed");
+          this.kanban.kanbanFail(proxyCardId, "contribution failed", false);
+          terminalEvent = "card:failed";
         }
         const notes = {
           outcome: event.kind,
@@ -343,7 +370,18 @@ export class ContributionStore {
         };
         this.kanban.kanbanUpdate(proxyCardId, { notes: JSON.stringify(notes) });
       }
+
+      return "applied";
     });
+
+    if (result !== "applied") return result;
+
+    // The ledger, event row, proxy transition, and operator projection are
+    // committed before any consumer is woken. A Nerve callback is optional so
+    // isolated stores and tests can use their own parent wake boundary.
+    if (terminalEvent && proxyCardId) {
+      try { this.kanban.onTerminalCommitted?.(terminalEvent, proxyCardId); } catch { /* committed state remains authoritative */ }
+    }
 
     return "applied";
   }

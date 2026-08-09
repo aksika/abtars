@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const mockKanbanEnqueue = vi.fn(() => 42);
 const mockKanbanUpdate = vi.fn();
+const mockKanbanFail = vi.fn();
 const mockAskHelp = vi.fn();
 const mockGetHelpStatus = vi.fn();
 const mockWithdrawHelp = vi.fn();
@@ -19,7 +20,7 @@ const mockDb: any = { prepare: () => ({ run: () => ({ changes: 1 }), get: () => 
 vi.mock("../tasks/kanban-board.js", () => ({
   kanbanEnqueue: (...args: unknown[]) => mockKanbanEnqueue(...args),
   kanbanUpdate: (...args: unknown[]) => mockKanbanUpdate(...args),
-  kanbanFail: vi.fn(),
+  kanbanFail: (...args: unknown[]) => mockKanbanFail(...args),
   kanbanRunning: vi.fn(),
   kanbanGetCard: () => undefined,
   requireTaskDatabase: () => mockDb,
@@ -187,6 +188,19 @@ describe("peer_ask_help", () => {
     expect(mockAskHelp).toHaveBeenCalledTimes(1);
   });
 
+  it("terminalizes an auto-selected decline when no fallback peer remains", async () => {
+    mockGetConnectedPeers.mockReturnValue(["kp"]);
+    mockHasAllCapabilities.mockReturnValue(true);
+    mockAskHelp.mockResolvedValue({
+      version: 1, request_id: "req-last", decision: "declined", reason_code: "policy_denied",
+    });
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "do something", requires: ["docker"], request_id: "req-last",
+    }));
+    expect(result.decision).toBe("declined");
+    expect(mockKanbanFail).toHaveBeenCalledWith(42, "peer help declined");
+  });
+
   it("creates a project-linked non-dispatchable contribution proxy", async () => {
     mockAskHelp.mockResolvedValue({
       version: 1, request_id: "req-card", decision: "accepted", contribution_ref: "help_xyz",
@@ -231,6 +245,20 @@ describe("peer_ask_help", () => {
     expect(result.decision).toBe("accepted");
     expect(mockAskHelp.mock.calls[0]?.[0]).toBe("alpha");
     expect(mockAskHelp.mock.calls[1]?.[0]).toBe("beta");
+  });
+
+  it("keeps the reused proxy recoverable when fallback transport is ambiguous", async () => {
+    mockGetConnectedPeers.mockReturnValue(["peer1", "peer2"]);
+    mockHasAllCapabilities.mockReturnValue(true);
+    mockAskHelp
+      .mockResolvedValueOnce({ version: 1, request_id: "req-unknown", decision: "declined" })
+      .mockRejectedValueOnce(new Error("connection lost"));
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "do something", requires: ["docker"], request_id: "req-unknown",
+    }));
+    expect(result.outcome).toBe("unknown");
+    expect(result.fallback).toBe(true);
+    expect(mockKanbanFail).not.toHaveBeenCalled();
   });
 });
 

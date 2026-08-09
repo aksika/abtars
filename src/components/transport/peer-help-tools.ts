@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "./tool-registry.js";
 import type { PeerHelpRequestV1 } from "../peer-help/contract.js";
-import { canonicalContributionHash } from "../peer-help/contract.js";
 import { ContributionStore } from "../peer-help/contribution-store.js";
+import { RequesterContributionService } from "../peer-help/requester-contribution-service.js";
 import { getPeerTransport } from "../peer-transport/index.js";
 import { kanbanUpdate, kanbanFail, kanbanGetCard, requireTaskDatabase } from "../tasks/kanban-board.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
@@ -148,7 +148,6 @@ export const peerAskHelpTool: ToolDefinition = {
       return JSON.stringify({ error: "No peer specified and none auto-selected" });
     }
 
-    const transport = getPeerTransport();
     const expiresAt = new Date(Date.now() + 300_000).toISOString();
     const request: PeerHelpRequestV1 = {
       version: 1,
@@ -178,74 +177,47 @@ export const peerAskHelpTool: ToolDefinition = {
         if (invalid.length > 0) return JSON.stringify({ error: `root_criteria not found in project #${activeOrc}: ${invalid.join(", ")}` });
       }
 
-      const requestHash = canonicalContributionHash(request, activeOrc, rootCriteria);
-      const contributionStore = getContributionStore();
-
-      const reserveResult = contributionStore.reserveProxy({
-        peer,
-        requestId,
-        requestHash,
-        projectCardId: activeOrc,
-        title: `[help:${peer}] ${goal.slice(0, 80)}`,
-        goal,
-        priority: priority ?? "MEDIUM",
-        sourcePeer: peer,
-        proxyCardId: undefined,
-        notes: {
-          peer,
-          goal,
-          requires: deduped,
-          root_criteria: rootCriteria,
-          executor: executor ?? "agent",
-          request_id: requestId,
-          outcome: "pending",
-        },
+      const contributionService = new RequesterContributionService({
+        contributionStore: getContributionStore(),
+        askHelp: (selectedPeer, selectedRequest) => getPeerTransport().askHelp(selectedPeer, selectedRequest),
+        kanbanUpdate,
+        kanbanFail,
       });
-      if (reserveResult.status === "conflict") {
-        return JSON.stringify({ error: `Request ${requestId} to ${peer} conflicts with an existing contribution with different parameters` });
-      }
-      const contributionRef = reserveResult.contributionRef ?? `help_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-      localCardId = reserveResult.proxyCardId;
+      const allowFallback = !args.peer && deduped.length > 0;
+      const result = await contributionService.delegate({
+        peer,
+        request,
+        binding: { kind: "existing", projectCardId: activeOrc, rootCriteria },
+        // Keep the proxy reusable while the auto-selection fallback is still
+        // eligible. The final selected-peer outcome terminalizes it.
+        ...(allowFallback ? { terminalizeNonStarted: false } : {}),
+      });
+      localCardId = result.proxyCardId;
       activeContributionPeer = peer;
       activeContributionRequestId = requestId;
       if (!localCardId) return JSON.stringify({ error: "Failed to persist help request", request_id: requestId });
-
-      const response = await transport.askHelp(peer, request);
-
-      if (response.decision === "accepted") {
-        const acceptedRef = response.contribution_ref ?? contributionRef;
-        if (!contributionStore.adoptContributionRef(peer, requestId, acceptedRef)) {
-          return JSON.stringify({ error: "Accepted response has a conflicting contribution reference", request_id: requestId, local_card_id: localCardId });
-        }
-        contributionStore.transitionToAccepted(peer, requestId);
-        const notes: Record<string, unknown> = {
-          peer, goal, requires: deduped, root_criteria: rootCriteria,
-          parent_project_id: activeOrc ?? undefined,
-          executor: executor ?? "agent", request_id: requestId,
-          outcome: "accepted", contribution_ref: acceptedRef,
-        };
-        if (response.remote_run_id) notes.remote_run_id = response.remote_run_id;
-        if (response.remote_card_id !== undefined) notes.remote_card_id = response.remote_card_id;
-        if (response.remote_generation !== undefined) notes.remote_generation = response.remote_generation;
-        if (response.remote_session_id) notes.remote_session_id = response.remote_session_id;
-        kanbanUpdate(localCardId, { notes: JSON.stringify(notes) });
-        logInfo(TAG, `Help accepted by ${peer}: ref=${acceptedRef}`);
+      if (result.decision === "accepted") {
+        const response = result.response;
         return JSON.stringify({
           ok: true, local_card_id: localCardId, peer, decision: "accepted",
-          contribution_ref: acceptedRef, request_id: requestId,
-          remote_run_id: response.remote_run_id,
-          remote_card_id: response.remote_card_id,
-          remote_generation: response.remote_generation,
-          remote_session_id: response.remote_session_id,
+          contribution_ref: result.contributionRef, request_id: result.requestId,
+          remote_run_id: response?.remote_run_id,
+          remote_card_id: response?.remote_card_id,
+          remote_generation: response?.remote_generation,
+          remote_session_id: response?.remote_session_id,
         });
       }
 
-      contributionStore.transitionToNonStarted(peer, requestId, response.decision as any);
-      const notes = { peer, goal, requires: deduped, root_criteria: rootCriteria, parent_project_id: activeOrc ?? undefined, executor: executor ?? "agent", request_id: requestId, outcome: response.decision, contribution_ref: contributionRef };
-      kanbanUpdate(localCardId, { notes: JSON.stringify(notes) });
-      logInfo(TAG, `Help ${response.decision} by ${peer}${response.reason ? `: ${response.reason}` : ""}`);
+      if (result.decision === "unknown" && result.error) {
+        return JSON.stringify({
+          error: `peer_ask_help failed: ${result.error}`,
+          outcome: "unknown",
+          request_id: result.requestId,
+          local_card_id: result.proxyCardId,
+        });
+      }
 
-      if (response.decision === "declined" && !args.peer && deduped.length > 0) {
+      if (result.decision === "declined" && !args.peer && deduped.length > 0) {
         const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
         const { hasAllCapabilities } = await import("../peer-transport/peer-inventory.js");
         const connected = getPeerWsBroker().getConnectedPeers().filter(p => p !== peer);
@@ -255,56 +227,46 @@ export const peerAskHelpTool: ToolDefinition = {
         if (nextCandidate) {
           const newRequestId = randomUUID();
           const fallbackRequest: PeerHelpRequestV1 = { ...request, request_id: newRequestId };
+          const contributionStore = getContributionStore();
           contributionStore.detachProxy(peer, requestId);
-          const fallbackHash = canonicalContributionHash(fallbackRequest, activeOrc, rootCriteria);
-          const fallbackReservation = contributionStore.reserveProxy({
-            peer: nextCandidate,
-            requestId: newRequestId,
-            requestHash: fallbackHash,
-            projectCardId: activeOrc,
-            proxyCardId: localCardId,
-            title: `[help:${nextCandidate}] ${goal.slice(0, 80)}`,
-            goal,
-            priority: priority ?? "MEDIUM",
-            sourcePeer: nextCandidate,
-            notes: {
-              peer: nextCandidate,
-              goal,
-              requires: deduped,
-              root_criteria: rootCriteria,
-              parent_project_id: activeOrc ?? undefined,
-              executor: executor ?? "agent",
-              request_id: newRequestId,
-              outcome: "pending",
-            },
-          });
-          if (fallbackReservation.status === "conflict") throw new Error("Fallback contribution reservation conflicted");
           activeContributionPeer = nextCandidate;
           activeContributionRequestId = newRequestId;
-          const fallbackResponse = await transport.askHelp(nextCandidate, fallbackRequest);
-          const fallbackRef = fallbackReservation.contributionRef ?? `help_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-          const fallbackNotes = { peer: nextCandidate, goal, requires: deduped, root_criteria: rootCriteria, parent_project_id: activeOrc ?? undefined, executor: executor ?? "agent", request_id: newRequestId, outcome: fallbackResponse.decision, contribution_ref: fallbackResponse.contribution_ref ?? fallbackRef };
-          if (fallbackResponse.decision === "accepted") {
-            const acceptedFallbackRef = fallbackResponse.contribution_ref ?? fallbackRef;
-            if (!contributionStore.adoptContributionRef(nextCandidate, newRequestId, acceptedFallbackRef)) throw new Error("Fallback response has a conflicting contribution reference");
-            contributionStore.transitionToAccepted(nextCandidate, newRequestId);
-            kanbanUpdate(localCardId, { notes: JSON.stringify(fallbackNotes) });
+          const fallbackResult = await contributionService.delegate({
+            peer: nextCandidate,
+            request: fallbackRequest,
+            binding: { kind: "existing", projectCardId: activeOrc, rootCriteria },
+            proxyCardId: localCardId,
+          });
+          if (fallbackResult.decision === "accepted") {
             return JSON.stringify({
               ok: true, local_card_id: localCardId, peer: nextCandidate, decision: "accepted",
-              contribution_ref: acceptedFallbackRef, request_id: newRequestId,
+              contribution_ref: fallbackResult.contributionRef, request_id: newRequestId,
               fallback: true,
             });
           }
-          contributionStore.transitionToNonStarted(nextCandidate, newRequestId, fallbackResponse.decision as any);
-          kanbanUpdate(localCardId, { notes: JSON.stringify(fallbackNotes) });
+          if (fallbackResult.decision === "unknown") {
+            return JSON.stringify({
+              error: fallbackResult.error ? `peer_ask_help failed: ${fallbackResult.error}` : "peer_ask_help outcome unknown",
+              outcome: "unknown",
+              request_id: fallbackResult.requestId,
+              local_card_id: fallbackResult.proxyCardId,
+              peer: nextCandidate,
+              fallback: true,
+            });
+          }
         }
       }
 
-      kanbanFail(localCardId, `peer help ${response.decision}`);
+      // The first auto-selected attempt was kept reusable while fallback was
+      // possible. If no fallback accepted, settle declined/deferred outcomes
+      // now; unknown transport outcomes remain recoverable and must stay live.
+      if (allowFallback && (result.decision === "declined" || result.decision === "deferred")) {
+        kanbanFail(localCardId, `peer help ${result.decision}`);
+      }
 
       return JSON.stringify({
-        ok: true, local_card_id: localCardId, peer, decision: response.decision,
-        reason_code: response.reason_code, reason: response.reason, request_id: requestId,
+        ok: true, local_card_id: localCardId, peer, decision: result.decision,
+        reason_code: result.response?.reason_code, reason: result.response?.reason, request_id: requestId,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

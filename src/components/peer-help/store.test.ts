@@ -88,7 +88,8 @@ async function makeStore(admission?: unknown) {
   };
   const reviewStore = new ProjectReviewStore(wrapped as any);
   const realAdmission = { ensureAwaitingContract: (id: number) => reviewStore.ensureAwaitingContract(id) };
-  const store = new PeerHelpStore(wrapped as any, kanban as any, nerve as any, (admission ?? realAdmission) as any);
+  const configuredAdmission = admission === null ? undefined : admission ?? realAdmission;
+  const store = new PeerHelpStore(wrapped as any, kanban as any, nerve as any, configuredAdmission as any);
   return { store, nerve };
 }
 
@@ -250,6 +251,21 @@ describe("PeerHelpStore", () => {
       expect(sups.cnt).toBe(0);
       const req = db.prepare("SELECT state FROM peer_help_requests WHERE origin_peer = ? AND request_id = ?").get("kp", "req1") as any;
       expect(req.state).toBe("pending");
+      expect(nerve.fired).toHaveLength(0);
+    });
+
+    it("fails closed when generic admission has no supervision wiring", async () => {
+      const { store, nerve } = await makeStore(null);
+      store.reserve("kp", "req1", "hash1");
+
+      expect(() => store.acceptGeneric(
+        { originPeer: "kp", requestId: "req1", requestHash: "hash1" },
+        { goal: "do x", title: "[help:kp] do x", sourcePeer: "kp", sourceId: "req1", deliveryMode: "silent" },
+        { version: 1, request_id: "req1", decision: "accepted", contribution_ref: "help_abc" },
+      )).toThrow(/admission unavailable/);
+
+      expect((db.prepare("SELECT COUNT(*) AS cnt FROM kanban_board").get() as any).cnt).toBe(0);
+      expect((db.prepare("SELECT state FROM peer_help_requests WHERE origin_peer = 'kp' AND request_id = 'req1'").get() as any).state).toBe("pending");
       expect(nerve.fired).toHaveLength(0);
     });
 

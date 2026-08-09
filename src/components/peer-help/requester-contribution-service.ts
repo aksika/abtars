@@ -9,7 +9,7 @@ import type { PeerHelpRequestV1, PeerHelpResponseV1 } from "./contract.js";
 import { canonicalContributionHash } from "./contract.js";
 import { ContributionStore } from "./contribution-store.js";
 import { getPeerTransport } from "../peer-transport/index.js";
-import { requireTaskDatabase, kanbanGetCard, kanbanUpdate } from "../tasks/kanban-board.js";
+import { requireTaskDatabase, kanbanGetCard, kanbanUpdate, kanbanFail } from "../tasks/kanban-board.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { requestReconcileForProject } from "../reconciler.js";
 import { logInfo, logWarn } from "../logger.js";
@@ -20,7 +20,7 @@ import { randomUUID } from "node:crypto";
 export type ContributionDecision = "accepted" | "declined" | "deferred" | "unknown";
 
 export type ProjectBinding =
-  | { kind: "existing"; projectCardId: number; rootCriteria: string[] }
+  | { kind: "existing"; projectCardId: number | null; rootCriteria: string[] }
   | { kind: "create_cli_project"; title: string; goal: string };
 
 export interface DelegateContributionInput {
@@ -29,15 +29,18 @@ export interface DelegateContributionInput {
   binding: ProjectBinding;
   /** Fallback reuse: rebind an existing proxy card to a new peer/request. */
   proxyCardId?: number;
+  /** Keep a proxy reusable while an adapter still has fallback candidates. */
+  terminalizeNonStarted?: boolean;
 }
 
 export interface DelegateContributionResult {
   decision: ContributionDecision;
-  projectCardId: number;
+  projectCardId: number | null;
   proxyCardId: number;
   requestId: string;
   contributionRef: string;
   response?: PeerHelpResponseV1;
+  error?: string;
 }
 
 export interface AskHelpPort {
@@ -97,7 +100,7 @@ export class RequesterContributionService {
     this.askHelp = deps.askHelp ?? (async (peer, request) => getPeerTransport().askHelp(peer, request));
     this.wakeProject = deps.wakeProject ?? requestReconcileForProject;
     this.kanbanUpdate = deps.kanbanUpdate ?? kanbanUpdate;
-    this.kanbanFail = deps.kanbanFail ?? (() => {});
+    this.kanbanFail = deps.kanbanFail ?? kanbanFail;
   }
 
   getContributionStore(): ContributionStore {
@@ -111,7 +114,7 @@ export class RequesterContributionService {
    * recoverable, never a second request or automatic remote execution.
    */
   async delegate(input: DelegateContributionInput): Promise<DelegateContributionResult> {
-    let projectCardId: number;
+    let projectCardId: number | null;
     let rootCriteria: string[];
     let title: string;
     if (input.binding.kind === "create_cli_project") {
@@ -167,8 +170,15 @@ export class RequesterContributionService {
       const existing = this.contributionStore.getContribution(input.peer, input.request.request_id);
       if (existing && existing.state !== "pending") {
         logInfo(TAG, `replay of ${existing.state} request ${input.request.request_id} to ${input.peer} — no resend`);
+        const decision: ContributionDecision = existing.state === "accepted" || existing.state === "running" || existing.state === "completed"
+          ? "accepted"
+          : existing.state === "declined"
+            ? "declined"
+            : existing.state === "deferred"
+              ? "deferred"
+              : "unknown";
         return {
-          decision: existing.state === "accepted" || existing.state === "running" || existing.state === "completed" ? "accepted" : "unknown",
+          decision,
           projectCardId,
           proxyCardId,
           requestId: input.request.request_id,
@@ -194,6 +204,7 @@ export class RequesterContributionService {
         proxyCardId,
         requestId: input.request.request_id,
         contributionRef,
+        error: message,
       };
     }
 
@@ -243,8 +254,10 @@ export class RequesterContributionService {
       outcome: decision,
       contribution_ref: contributionRef,
     };
-    this.    kanbanUpdate(proxyCardId, { notes: JSON.stringify(notes) });
-    this.kanbanFail(proxyCardId, `peer help ${decision}`);
+    this.kanbanUpdate(proxyCardId, { notes: JSON.stringify(notes) });
+    if (input.terminalizeNonStarted !== false) {
+      this.kanbanFail(proxyCardId, `peer help ${decision}`);
+    }
     logInfo(TAG, `help ${decision} by ${input.peer}${response.reason ? `: ${response.reason}` : ""}`);
     return {
       decision,

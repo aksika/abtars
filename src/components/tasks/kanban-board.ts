@@ -582,7 +582,7 @@ function notifyKanbanDueChanged(): void {
   } catch { /* hook failures must never break board writes */ }
 }
 
-export function kanbanComplete(id: number, resultPath: string | null, summary: string): void {
+export function kanbanComplete(id: number, resultPath: string | null, summary: string, emit = true): void {
   // #1590: from includes `queued` because task-run-settler completes one-shot
   // K/T cards that were enqueued but never dispatched (system-task runner
   // path) — verified against production callers, not just the matrix.
@@ -594,6 +594,7 @@ export function kanbanComplete(id: number, resultPath: string | null, summary: s
       result_summary: summary.slice(0, 4000),
       completed_at: sqliteNow(),
     },
+    emit,
   });
   // #1590: preserve the pre-CAS debug log for the already-settled case.
   if (outcome.kind === "no_op" && (outcome.observed === "done" || outcome.observed === "delivering" || outcome.observed === "delivered")) {
@@ -601,7 +602,7 @@ export function kanbanComplete(id: number, resultPath: string | null, summary: s
   }
 }
 
-export function kanbanFail(id: number, error: string): void {
+export function kanbanFail(id: number, error: string, emit = true): void {
   // #1590: `done` is included because task-run-settler fails an accepted
   // project card when artifact validation later detects a stale artifact
   // (verified against the scheduled-project integration flow).
@@ -609,6 +610,7 @@ export function kanbanFail(id: number, error: string): void {
     cardId: id, from: ["queued", "running", "done"], to: "failed", actor: "settle_failed",
     reason: "settlement failed",
     fields: { error: error.slice(0, 1000), completed_at: sqliteNow() },
+    emit,
   });
 }
 

@@ -80,6 +80,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         const { PeerHelpService } = await import("../components/peer-help/service.js");
         const { PeerHelpStore } = await import("../components/peer-help/store.js");
         const { ContributionStore } = await import("../components/peer-help/contribution-store.js");
+        const { RequesterContributionService } = await import("../components/peer-help/requester-contribution-service.js");
         const { ProjectReviewStore } = await import("../components/project-acceptance/project-review-store.js");
         const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
         const { nerve } = await import("../components/nerve.js");
@@ -93,8 +94,22 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
           nerve,
           { ensureAwaitingContract: (projectCardId) => reviewStore.ensureAwaitingContract(projectCardId) },
         );
+        const contributionStore = new ContributionStore(db, {
+          kanbanGetCard,
+          kanbanUpdate,
+          kanbanComplete,
+          kanbanFail,
+          onTerminalCommitted: (event, cardId) => nerve.fire(event, cardId),
+        });
         const helpService = new PeerHelpService(store, () => getLocalCapabilities());
-        helpService.setContributionStore(new ContributionStore(db, { kanbanGetCard, kanbanUpdate, kanbanComplete, kanbanFail }));
+        helpService.setContributionStore(contributionStore);
+        agentApiServer.setRequesterContributionService(new RequesterContributionService({
+          taskDb: db,
+          contributionStore,
+          reviewStore,
+          kanbanUpdate,
+          kanbanFail,
+        }));
 
         // #1357: Wire Pi executor handler for typed Pi delegation requests
         helpService.setPiHandler(async (originPeer, request, _admission) => {
