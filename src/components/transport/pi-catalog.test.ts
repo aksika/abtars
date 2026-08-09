@@ -64,7 +64,8 @@ describe("resolveModelMeta (C1)", () => {
   it("returns pi metadata (source=pi) when resolvable", () => {
     const m = fakeModel({ contextWindow: 200000, maxTokens: 12000, cost: { input: 0.6, output: 2.2, cacheRead: 0.1, cacheWrite: 3 } });
     const out = resolveModelMeta("glm-4.6", "zai", fakeModels({ list: [m] }));
-    expect(out).toEqual({ contextWindow: 200000, maxOutput: 12000, cost: { input: 0.6, output: 2.2 }, source: "pi" });
+    // #1614: pi rates are $/1M; resolveModelMeta normalizes to $/token.
+    expect(out).toEqual({ contextWindow: 200000, maxOutput: 12000, cost: { input: 0.6 / 1_000_000, output: 2.2 / 1_000_000 }, source: "pi" });
   });
 });
 
@@ -99,7 +100,16 @@ describe("modelsForProviderSync (C5 picker)", () => {
     }));
     const out = modelsForProviderSync("zai");
     expect(out?.map(m => m.id)).toEqual(["glm-4.6", "glm-4.5"]);
-    expect(out?.[0]?.cost).toEqual({ input: 0.6, output: 2.2 });
+    expect(out?.[0]?.cost).toEqual({ input: 0.6 / 1_000_000, output: 2.2 / 1_000_000 });
+  });
+  it("normalizes pi $/1M rates to $/token — the ModelCost contract (#1614)", () => {
+    // deepseek-v4-flash on opencode-go: $0.14/1M input, $0.28/1M output.
+    _setWarmedForTest(fakeModels({
+      list: [fakeModel({ id: "deepseek-v4-flash", provider: "opencode-go", cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 } })],
+    }));
+    const out = modelsForProviderSync("opencode-go");
+    expect(out?.[0]?.cost.input).toBe(0.14 / 1_000_000);
+    expect(out?.[0]?.cost.output).toBe(0.28 / 1_000_000);
   });
   it("returns null for an unmapped provider or cold cache", () => {
     _setWarmedForTest(fakeModels());
