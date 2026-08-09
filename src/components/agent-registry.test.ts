@@ -12,6 +12,10 @@ const mockLoadTransport = vi.hoisted(() => vi.fn());
 const mockGetEnvFallback = vi.hoisted(() => vi.fn());
 const mockResolveAgent = vi.hoisted(() => vi.fn());
 const mockRouteAssignments = vi.hoisted(() => vi.fn());
+const mockAcpTransport = vi.hoisted(() => vi.fn(function AcpTransportMock() {
+  return { initialize: vi.fn().mockResolvedValue(undefined) };
+}));
+const mockLoadAndValidateConfig = vi.hoisted(() => vi.fn().mockResolvedValue({ transport: { agentCliPath: "/usr/bin/kiro-cli", workingDir: "/tmp/work" } }));
 
 vi.mock("./transport-config.js", () => ({
   loadTransport: mockLoadTransport,
@@ -23,6 +27,9 @@ vi.mock("./transport-config.js", () => ({
 vi.mock("./env-schema.js", () => ({
   getEnv: () => ({ getApiKey: () => "test-key" }),
 }));
+
+vi.mock("./transport/acp-transport.js", () => ({ AcpTransport: mockAcpTransport }));
+vi.mock("./config.js", () => ({ loadAndValidateConfig: mockLoadAndValidateConfig }));
 
 const { createSubagentTransport } = await import("./agent-registry.js");
 const { PiCoreTransport } = await import("./transport/pi-core-transport.js");
@@ -165,16 +172,23 @@ describe("createSubagentTransport — configured-only candidate policy (#1611)",
     const { transport } = await createSubagentTransport("task", undefined, INHERITED_MAIN, undefined, undefined);
     expect(candidatesOf(transport).length).toBeGreaterThan(1);
   });
-});
 
-/*
- * TEST DEFICIENCY (2026-08-09):
- * Missing: ACP-path proof that configured-only attempts exactly the configured
- * model during initialization with healthy fallback models present.
- * Reason deferred: ACP construction requires a real agent CLI binary; no
- * deterministic local fixture exists for it.
- * Future verification: a production-shaped sleep run against the ACP transport
- * observing a single model in `modelsToTry` (agent-registry ACP branch) — the
- * branch is a one-line exclusion gated by the same candidatePolicy value
- * covered by the Pi tests above.
- */
+  it("ACP configured-only initializes only the configured model", async () => {
+    mockResolveAgent.mockImplementation((agentName: string) => {
+      if (agentName === "dreamy") {
+        return {
+          ...dreamyAgent(),
+          provider: { transport: "acp", cli: "/usr/bin/kiro-cli" },
+        };
+      }
+      if (agentName === "main") return mainAgent();
+      return null;
+    });
+
+    const { model } = await createSubagentTransport("sleep", undefined, INHERITED_MAIN, undefined, undefined, "configured-only");
+
+    expect(model).toBe("dreamy-model");
+    expect(mockAcpTransport).toHaveBeenCalledTimes(1);
+    expect(mockAcpTransport.mock.calls[0]![2]).toMatchObject({ model: "dreamy-model" });
+  });
+});

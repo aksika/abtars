@@ -85,11 +85,12 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     await settleTicks();
 
     expect(spin).toHaveBeenCalledTimes(1);
-    const spinOpts = spin.mock.calls[0]![0] as { timeoutMs: number; deadlineAt: number; candidatePolicy: string };
+    const spinOpts = spin.mock.calls[0]![0] as { timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: string };
     // #1611: the provider window is the broker deadline minus 30s cleanup headroom.
     expect(spinOpts.timeoutMs).toBeGreaterThan(85_000);
     expect(spinOpts.timeoutMs).toBeLessThanOrEqual(90_000);
     expect(spinOpts.deadlineAt).toBeGreaterThan(Date.now());
+    expect(spinOpts.providerInactivityTimeoutMs).toBe(spinOpts.timeoutMs);
     expect(spinOpts.candidatePolicy, "sleep must never inherit a fallback chain").toBe("configured-only");
     expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "done");
   });
@@ -282,6 +283,46 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
   });
 
+  it("#1611: a hanging fail RPC cannot keep the local pump alive", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
+    try {
+      const client = makeFakeClient();
+      client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+      client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+      client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
+      client.sleep.runtime.fail.mockReturnValue(new Promise(() => {}));
+      const spin = vi.fn().mockRejectedValue(new Error("provider down"));
+      const quarantineSession = vi.fn();
+
+      const handle = createSleepHandle({
+        client,
+        memoryEnabled: true,
+        onComplete: vi.fn(),
+        onCycleEnd: vi.fn(),
+        sessionManager: { spin },
+        bufferSystemEvent: vi.fn(),
+        quarantineSession,
+        allocateSleepSession: () => "d-night-1",
+      });
+      handle.startScheduled();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_failed");
+      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed");
+
+      // Failure settlement is capped at the reserved 30s cleanup window,
+      // rather than waiting for the whole logical 120s completion deadline.
+      await vi.advanceTimersByTimeAsync(30_001);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
+      expect(handle.isActive).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("#1611: a late completed result (invalid_completion) stops the pump — no later completion is polled", async () => {
     const client = makeFakeClient();
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
@@ -304,6 +345,65 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "late");
     // #1611: nothing authorizes polling for another completion after a
     // non-ok settlement.
+    expect(spin).toHaveBeenCalledTimes(1);
+    expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
+    expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
+  });
+
+  it("#1611: a completion RPC error quarantines the exact session and fails the lease", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
+    client.sleep.runtime.complete.mockRejectedValue(new Error("daemon connection lost"));
+    client.sleep.runtime.fail.mockResolvedValue({ status: "ok" });
+    const spin = vi.fn().mockResolvedValue({ result: "served", sessionId: "s1" });
+    const quarantineSession = vi.fn();
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+      quarantineSession,
+      allocateSleepSession: () => "d-night-1",
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_failed");
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed");
+    expect(spin).toHaveBeenCalledTimes(1);
+    expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
+    expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
+  });
+
+  it("#1611: an invalid completion quarantines the exact session before stopping", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
+    client.sleep.runtime.complete.mockResolvedValue({ status: "invalid_completion" });
+    const spin = vi.fn().mockResolvedValue({ result: "late", sessionId: "s1" });
+    const quarantineSession = vi.fn();
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+      quarantineSession,
+      allocateSleepSession: () => "d-night-1",
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_failed");
+    expect(client.sleep.runtime.fail).not.toHaveBeenCalled();
     expect(spin).toHaveBeenCalledTimes(1);
     expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");

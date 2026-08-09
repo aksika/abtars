@@ -54,10 +54,10 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
       return sessionManager.allocateDreamySession(name).id;
     },
     sessionManager: {
-      spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; candidatePolicy: "configured-only"; await: boolean }) => {
+      spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; await: boolean }) => {
         // #1611: the pump's absolute provider deadline and configured-only
         // candidate policy flow through to the transport construction.
-        return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, deadlineAt: opts.deadlineAt, candidatePolicy: opts.candidatePolicy, settlementOwner: "spin", await: true });
+        return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, deadlineAt: opts.deadlineAt, providerInactivityTimeoutMs: opts.providerInactivityTimeoutMs, candidatePolicy: opts.candidatePolicy, settlementOwner: "spin", await: true });
       },
     },
     // #1611: narrow exact-session quarantine — the capability never sees the

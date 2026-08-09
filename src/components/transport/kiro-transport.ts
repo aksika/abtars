@@ -28,6 +28,10 @@ export interface PromptRequestContext {
   executionId?: string;
   /** #1506: caller-owned absolute execution deadline. */
   deadlineAt?: number;
+  /** #1611: maximum provider silence for this call. When omitted, transports
+   * retain their normal default. Dreamy supplies its remaining provider window
+   * so a long logical step is not clipped by the unrelated 180s default. */
+  providerInactivityTimeoutMs?: number;
   /**
    * #1338: call-local observer for live TUI output mirroring. Set by Spin per
    * model call/round; transports invoke it alongside existing transport-wide

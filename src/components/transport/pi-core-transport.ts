@@ -320,7 +320,7 @@ export class PiCoreTransport implements IKiroTransport {
         executionId,
         telemetry: context?.executionTelemetry,
         deadlineAt,
-        providerInactivityTimeoutMs: 180_000,
+        providerInactivityTimeoutMs: context?.providerInactivityTimeoutMs ?? 180_000,
         onCandidateCommitted: (candidate) => {
           const successful: CandidateSpec = {
             model: candidate.model,

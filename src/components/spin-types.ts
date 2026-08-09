@@ -280,6 +280,8 @@ export interface SpinSessionSpec {
   timeoutMs?: number;
   /** #1506: absolute deadline owned by the scheduled caller. */
   deadlineAt?: number;
+  /** #1611: provider silence allowance for the current logical sleep step. */
+  providerInactivityTimeoutMs?: number;
   /** Control-plane cancellation for bounded background provider work. */
   signal?: AbortSignal;
   /** #1611: candidate-selection policy for the persistent transport.

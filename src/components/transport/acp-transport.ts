@@ -326,7 +326,7 @@ export class AcpTransport implements IKiroTransport {
     }
   }
 
-  private _pendingPrompt?: { sessionKey: string; message: string; resolve: (r: string) => void; reject: (e: Error) => void };
+  private _pendingPrompt?: { sessionKey: string; message: string; context?: PromptRequestContext; resolve: (r: string) => void; reject: (e: Error) => void };
   private _processDeadRetries = 0;
 
   /**
@@ -354,7 +354,7 @@ export class AcpTransport implements IKiroTransport {
     if (this.sm.state !== "idle") {
       logWarn(this.tag, `Concurrent prompt while ${this.sm.state} — queuing for after completion`);
       return new Promise<string>((resolve, reject) => {
-        this._pendingPrompt = { sessionKey, message, resolve, reject };
+        this._pendingPrompt = { sessionKey, message, context, resolve, reject };
       });
     }
 
@@ -381,7 +381,7 @@ export class AcpTransport implements IKiroTransport {
     let usedSid = sessionId;
     try {
       // #160: track in-flight so child-exit can reject immediately
-      const result = await this.trackInFlight("prompt", sessionId, () => this.promptWithRetry(sessionId, message));
+      const result = await this.trackInFlight("prompt", sessionId, () => this.promptWithRetry(sessionId, message, 2, context));
       usedSid = result.sessionId;
 
       // #1564: a session-expiry retry inside promptWithRetry rotates to a new
@@ -444,7 +444,7 @@ export class AcpTransport implements IKiroTransport {
     const pending = this._pendingPrompt;
     this._pendingPrompt = undefined;
     logInfo(this.tag, `Draining queued prompt`);
-    this.sendPrompt(pending.sessionKey, pending.message)
+    this.sendPrompt(pending.sessionKey, pending.message, undefined, pending.context)
       .then(r => pending.resolve(r))
       .catch(e => pending.reject(e instanceof Error ? e : new Error(String(e))));
   }
@@ -485,7 +485,7 @@ export class AcpTransport implements IKiroTransport {
     }
   }
 
-  private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string; sessionId: string }> {
+  private async promptWithRetry(sessionId: string, message: string, maxRetries = 2, context?: PromptRequestContext): Promise<{ stopReason: string; sessionId: string }> {
     let sid = sessionId;
 
     // #924: raw mode — use raw client directly
@@ -507,7 +507,9 @@ export class AcpTransport implements IKiroTransport {
         let timeoutTimer: ReturnType<typeof setInterval> | undefined;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutTimer = setInterval(() => {
-            if (Date.now() - this.lastContentAt > this._promptTimeoutMs) {
+            const inactivityMs = context?.providerInactivityTimeoutMs ?? this._promptTimeoutMs;
+            if ((context?.deadlineAt !== undefined && Date.now() >= context.deadlineAt)
+              || Date.now() - this.lastContentAt > inactivityMs) {
               clearInterval(timeoutTimer);
               reject(new Error("Bridge prompt timeout — model unresponsive"));
             }
@@ -536,7 +538,7 @@ export class AcpTransport implements IKiroTransport {
           this.sessions.clear();
           await this.initialize();
           sid = await this.getOrCreateSession(this.lastSessionKey);
-          return this.promptWithRetry(sid, message, 0);
+          return this.promptWithRetry(sid, message, 0, context);
         }
 
         if (code === -32603 && msg.includes("No session found")) {

@@ -96,6 +96,33 @@ describe("AcpTransport", () => {
       (transport as any)._pendingPrompt.reject(new Error("test cleanup"));
       await promise.catch(() => {});
     });
+
+    it("uses the caller's provider inactivity allowance for sleep deadlines", async () => {
+      vi.useFakeTimers();
+      try {
+        (transport as any).sm = {
+          state: "idle",
+          startPrompt: vi.fn(),
+          promptCompleted: vi.fn(),
+        };
+        (transport as any).sessions.set("key-1", "sess-timeout");
+        (transport as any).client = {
+          prompt: vi.fn().mockReturnValue(new Promise(() => {})),
+        };
+
+        const prompt = transport.sendPrompt("key-1", "sleep", undefined, {
+          providerInactivityTimeoutMs: 10_000,
+          deadlineAt: Date.now() + 60_000,
+        });
+        const rejected = expect(prompt).rejects.toThrow("Bridge prompt timeout");
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(15_000);
+
+        await rejected;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("handleSessionUpdate", () => {

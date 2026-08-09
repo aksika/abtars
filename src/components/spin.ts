@@ -691,6 +691,7 @@ export class Spin {
         directContextTurn: spec.directContextTurn,
         executionScope: spec.executionScope,
         deadlineAt: spec.deadlineAt,
+        providerInactivityTimeoutMs: spec.providerInactivityTimeoutMs,
         orcContext: session.orcContext,
         executionTelemetry,
         // #1527: Spin forwards its own provider reference (late-bound holder

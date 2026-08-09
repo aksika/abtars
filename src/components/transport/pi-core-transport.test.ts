@@ -15,6 +15,9 @@ import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage, AgentMessage } f
 import type { ModelCandidate } from "./model-candidates.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
 
+const mockCreatePiStreamFn = vi.hoisted(() => vi.fn(() => vi.fn()));
+
+vi.mock("./pi-stream-fn.js", () => ({ createPiStreamFn: mockCreatePiStreamFn }));
 vi.mock("../pi-installation.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../pi-installation.js")>();
   return {
@@ -168,6 +171,21 @@ describe("PiCoreTransport", () => {
     await expect(promise).rejects.toThrow(PiCoreContractError);
     // activeHost should be null after failure
     expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
+  });
+
+  it("forwards the caller's provider inactivity allowance to Pi", async () => {
+    mockCreatePiStreamFn.mockClear();
+    const t = makeTransport();
+    await t.initialize();
+    const promise = t.sendPrompt("sess_1", "sleep", undefined, {
+      deadlineAt: Date.now() + 600_000,
+      providerInactivityTimeoutMs: 570_000,
+    });
+    await expect(promise).rejects.toThrow(PiCoreContractError);
+    expect(mockCreatePiStreamFn).toHaveBeenCalledWith(expect.objectContaining({
+      deadlineAt: expect.any(Number),
+      providerInactivityTimeoutMs: 570_000,
+    }));
   });
 
   it("setSystemPrompt updates config", () => {

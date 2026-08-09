@@ -29,7 +29,7 @@ export interface SleepOpts {
    * first provider generation allocate a second, unnamed sibling session.
    */
   allocateSleepSession?: (name: string) => string | undefined;
-  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: boolean }) => Promise<{ result?: string; sessionId?: string }> };
+  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: boolean }) => Promise<{ result?: string; sessionId?: string }> };
   /**
    * #1611: narrow exact-session quarantine callback. Fences the session by
    * exact id, cancels the active execution, releases the persistent
@@ -144,6 +144,26 @@ async function runWithAbsoluteDeadline<T>(spin: Promise<T>, remainingMs: number)
   });
 }
 
+/** Run a local/RPC operation without allowing settlement to outlive the
+ * caller-owned absolute deadline. The operation is started even when the
+ * deadline has already elapsed, but its result is deliberately ignored. */
+async function runUntilDeadline<T>(operation: () => Promise<T> | T, deadlineAt: number): Promise<DeadlineRaceResult<T>> {
+  const operationPromise = Promise.resolve().then(operation);
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    void operationPromise.catch(() => {});
+    return { kind: "timed_out" };
+  }
+  return runWithAbsoluteDeadline(operationPromise, remainingMs);
+}
+
+/** Settlement is allowed to use the logical deadline, but never more than the
+ * reserved cleanup window. This keeps a dead broker from holding the local
+ * sleep pump for an entire logical step after the provider has failed. */
+function settlementDeadlineAt(logicalDeadlineAt: number): number {
+  return Math.min(logicalDeadlineAt, Date.now() + SLEEP_PROVIDER_CLEANUP_HEADROOM_MS);
+}
+
 export function createSleepHandle(opts: SleepOpts): SleepHandle {
   const { client } = opts;
   let running = false;
@@ -151,6 +171,21 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
   let currentRunId: string | null = null;
   let abortController = new AbortController();
   let nightSessionId: string | undefined;
+
+  /** Fence and request exact-session quarantine synchronously. The callback is
+   * local lifecycle work; do not let an optional async implementation delay
+   * broker failure settlement or cycle shutdown. */
+  function quarantineCurrentSession(reason: string): void {
+    const sessionId = nightSessionId;
+    if (!sessionId) return;
+    try {
+      const pending = opts.quarantineSession?.(sessionId, reason);
+      if (pending && typeof (pending as Promise<void>).catch === "function") {
+        void (pending as Promise<void>).catch(() => {});
+      }
+    } catch { /* local termination still proceeds */ }
+    nightSessionId = undefined;
+  }
 
   function cleanup(): void {
     running = false;
@@ -161,10 +196,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     // freshly named session sat idle.
     // #1611: a healthy named Dreamy session is finalized exactly once at cycle
     // end (idempotent — a failed run already quarantined it in the pump).
-    if (nightSessionId) {
-      try { void opts.quarantineSession?.(nightSessionId, "cycle_end"); } catch { /* best effort */ }
-    }
-    nightSessionId = undefined;
+    quarantineCurrentSession("cycle_end");
     writeSleepStatus("awake");
   }
 
@@ -177,16 +209,21 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
    */
   async function terminateOnFailure(
     leaseId: string,
-    req: { completionId: string; runId: string; stepId: string },
+    req: { completionId: string; runId: string; stepId: string; deadline: number },
     code: "provider_timeout" | "provider_failed",
     detail: string,
   ): Promise<void> {
     logWarn("sleep", `Sleep provider failure (run=${req.runId} step=${req.stepId} lease=${leaseId}): ${detail} — quarantining session, failing completion ${code}, stopping sleep`);
-    if (nightSessionId) {
-      try { await opts.quarantineSession?.(nightSessionId, code); } catch { /* local termination must win */ }
+    // Fence first, then give the broker failure RPC only the remaining
+    // absolute deadline. A dead daemon must not keep the local pump alive.
+    quarantineCurrentSession(code);
+    const failResult = await runUntilDeadline(
+      () => client.sleep.runtime.fail(leaseId, req.completionId, code),
+      settlementDeadlineAt(req.deadline),
+    );
+    if (failResult.kind !== "settled") {
+      logWarn("sleep", `Runtime failure settlement did not complete before the deadline (run=${req.runId} step=${req.stepId})`);
     }
-    try { await client.sleep.runtime.fail(leaseId, req.completionId, code); } catch { /* best effort — local termination still proceeds */ }
-    nightSessionId = undefined;
   }
 
   async function providerPump(): Promise<void> {
@@ -244,6 +281,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
               sessionId: nightSessionId,
               timeoutMs: providerRemainingMs,
               deadlineAt: providerDeadlineAt,
+              providerInactivityTimeoutMs: providerRemainingMs,
               candidatePolicy: "configured-only",
               settlementOwner: "spin",
               await: true,
@@ -273,11 +311,24 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           break;
         }
 
-        const completeResult = await client.sleep.runtime.complete(ownedLeaseId, req.completionId, spinResult.value.result);
-        if (completeResult.status !== "ok") {
+        const completeResult = await runUntilDeadline(
+          () => client.sleep.runtime.complete(ownedLeaseId!, req.completionId, spinResult.value.result!),
+          settlementDeadlineAt(req.deadline),
+        );
+        if (completeResult.kind === "timed_out") {
+          await terminateOnFailure(ownedLeaseId, req, "provider_timeout", "completion settlement reached the broker deadline");
+          break;
+        }
+        if (completeResult.kind === "failed") {
+          await terminateOnFailure(ownedLeaseId, req, "provider_failed", completeResult.error.message);
+          break;
+        }
+        if (completeResult.value.status !== "ok") {
           // #1611: ok, invalid_completion, or a fail-RPC error all lead to
           // pump shutdown — nothing authorizes polling for another completion.
-          logWarn("sleep", `Completion rejected (${completeResult.status}) for ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) — stopping sleep`);
+          const code = Date.now() >= req.deadline ? "provider_timeout" : "provider_failed";
+          quarantineCurrentSession(code);
+          logWarn("sleep", `Completion rejected (${completeResult.value.status}) for ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) — quarantining session and stopping sleep`);
           break;
         }
       }
