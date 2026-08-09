@@ -82,7 +82,7 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
 
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 /** @internal Used only by SubagentRuntime. Do not call directly. */
-export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, lastSuccessfulMain?: CandidateSpec | null, contextProvider?: import("./transport/pi-core-context.js").DurableContextProviderHolder, memoryToolDeps?: import("./memory-store-quota.js").MemoryToolDependenciesHolder): Promise<{ transport: IKiroTransport; model: string }> {
+export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, lastSuccessfulMain?: CandidateSpec | null, contextProvider?: import("./transport/pi-core-context.js").DurableContextProviderHolder, memoryToolDeps?: import("./memory-store-quota.js").MemoryToolDependenciesHolder, candidatePolicy: import("./spin-types.js").CandidatePolicy = "fallback-chain"): Promise<{ transport: IKiroTransport; model: string }> {
   const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
   const tc = loadTransport();
   const agentName = SUBAGENT_TO_AGENT[role];
@@ -107,41 +107,48 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       thinking: agent.provider.thinking, source: "primary",
     };
 
-    const mainAgent = tc ? resolveAgent("main", tc) : null;
-    const configuredMainSpec: CandidateSpec | null = mainAgent
-      ? {
-        model: mainAgent.model,
-        provider: mainAgent.providerName,
-        endpoint: mainAgent.provider.endpoint ?? primaryEndpoint,
-        maxContext: mainAgent.contextWindow,
-        apiFormat: mainAgent.provider.apiFormat,
-        thinking: mainAgent.provider.thinking,
+    // #1611: configured-only transports never inherit Main or route fallbacks —
+    // the candidate set is exactly the configured Dreamy candidate.
+    let candidates: ModelCandidate[];
+    if (candidatePolicy === "configured-only") {
+      candidates = [configured];
+    } else {
+      const mainAgent = tc ? resolveAgent("main", tc) : null;
+      const configuredMainSpec: CandidateSpec | null = mainAgent
+        ? {
+          model: mainAgent.model,
+          provider: mainAgent.providerName,
+          endpoint: mainAgent.provider.endpoint ?? primaryEndpoint,
+          maxContext: mainAgent.contextWindow,
+          apiFormat: mainAgent.provider.apiFormat,
+          thinking: mainAgent.provider.thinking,
+        }
+        : null;
+      const inheritedSpec = lastSuccessfulMain ?? configuredMainSpec;
+      let inheritedCandidate: ModelCandidate | null = null;
+      if (inheritedSpec) {
+        const inheritedProvider = tc?.providers[inheritedSpec.provider];
+        inheritedCandidate = {
+          model: inheritedSpec.model, provider: inheritedSpec.provider, endpoint: inheritedSpec.endpoint,
+          apiKey: inheritedProvider?.apiKeyEnv ? getEnv().getApiKey(inheritedProvider.apiKeyEnv) : apiKey,
+          maxContext: inheritedSpec.maxContext, apiFormat: inheritedSpec.apiFormat,
+          thinking: inheritedSpec.thinking, source: "inherited_chain",
+        };
       }
-      : null;
-    const inheritedSpec = lastSuccessfulMain ?? configuredMainSpec;
-    let inheritedCandidate: ModelCandidate | null = null;
-    if (inheritedSpec) {
-      const inheritedProvider = tc?.providers[inheritedSpec.provider];
-      inheritedCandidate = {
-        model: inheritedSpec.model, provider: inheritedSpec.provider, endpoint: inheritedSpec.endpoint,
-        apiKey: inheritedProvider?.apiKeyEnv ? getEnv().getApiKey(inheritedProvider.apiKeyEnv) : apiKey,
-        maxContext: inheritedSpec.maxContext, apiFormat: inheritedSpec.apiFormat,
-        thinking: inheritedSpec.thinking, source: "inherited_chain",
-      };
+
+      const ra = tc ? (await import("./transport-config.js")).routeAssignments(tc) : null;
+      const fallbackCandidates: ModelCandidate[] = (ra?.fallbacks ?? []).map(fb => {
+        const fbProvider = tc!.providers[fb.provider];
+        return {
+          model: fb.model, provider: fb.provider, endpoint: fbProvider?.endpoint ?? primaryEndpoint,
+          apiKey: fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey,
+          maxContext: mainAgent?.contextWindow ?? agent.contextWindow, apiFormat: fbProvider?.apiFormat,
+          thinking: fbProvider?.thinking, source: "agent_fallback",
+        };
+      });
+
+      candidates = buildCandidates({ role: "specialist", configured, lastSuccessfulMain: inheritedCandidate, fallbacks: fallbackCandidates });
     }
-
-    const ra = tc ? (await import("./transport-config.js")).routeAssignments(tc) : null;
-    const fallbackCandidates: ModelCandidate[] = (ra?.fallbacks ?? []).map(fb => {
-      const fbProvider = tc!.providers[fb.provider];
-      return {
-        model: fb.model, provider: fb.provider, endpoint: fbProvider?.endpoint ?? primaryEndpoint,
-        apiKey: fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey,
-        maxContext: mainAgent?.contextWindow ?? agent.contextWindow, apiFormat: fbProvider?.apiFormat,
-        thinking: fbProvider?.thinking, source: "agent_fallback",
-      };
-    });
-
-    const candidates = buildCandidates({ role: "specialist", configured, lastSuccessfulMain: inheritedCandidate, fallbacks: fallbackCandidates });
 
     const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
 
@@ -163,11 +170,15 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     return { transport, model: agent.model };
   }
 
-  // ACP path — try configured model, then route-local fallbacks on failure
+  // ACP path — try configured model, then route-local fallbacks on failure.
+  // #1611: configured-only attempts exactly the configured model during
+  // initialization — no fallback models, no silent substitution.
   const { loadAndValidateConfig } = await import("./config.js");
   const config = await loadAndValidateConfig();
   const ra = tc ? (await import("./transport-config.js")).routeAssignments(tc) : null;
-  const fallbackModels = (ra?.fallbacks ?? []).map(f => f.model).filter(m => m !== agent.model);
+  const fallbackModels = candidatePolicy === "configured-only"
+    ? []
+    : (ra?.fallbacks ?? []).map(f => f.model).filter(m => m !== agent.model);
   const modelsToTry = [agent.model, ...fallbackModels];
 
   for (let i = 0; i < modelsToTry.length; i++) {

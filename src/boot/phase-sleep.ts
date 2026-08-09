@@ -2,6 +2,7 @@ import { resetAllCtxStarts } from "./ctx-start.js";
 import { logInfo, logWarn } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { getSystemTaskRegistry, type SystemTaskContext } from "../components/tasks/system-task-registry.js";
+import { getMasterUserId } from "../components/master-user.js";
 
 function registerUnavailableHandler(reason: string): void {
   const registry = getSystemTaskRegistry();
@@ -53,9 +54,17 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
       return sessionManager.allocateDreamySession(name).id;
     },
     sessionManager: {
-      spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; await: boolean }) => {
-        return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, settlementOwner: "spin", await: true });
+      spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; candidatePolicy: "configured-only"; await: boolean }) => {
+        // #1611: the pump's absolute provider deadline and configured-only
+        // candidate policy flow through to the transport construction.
+        return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, deadlineAt: opts.deadlineAt, candidatePolicy: opts.candidatePolicy, settlementOwner: "spin", await: true });
       },
+    },
+    // #1611: narrow exact-session quarantine — the capability never sees the
+    // full Spin manager. Idempotent; cancels the active execution, releases
+    // the persistent transport, and marks the named D session ended.
+    quarantineSession: (sessionId: string, reason: string) => {
+      sessionManager.finalizeExactSession(sessionId, getMasterUserId(), reason);
     },
     bufferSystemEvent: async (report: string) => {
       const { bufferSystemEvent } = await import("../components/system-event-buffer.js");

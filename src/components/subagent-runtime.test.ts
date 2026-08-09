@@ -176,7 +176,7 @@ describe("SubagentRuntime shared registry", () => {
     const { createSubagentTransport } = await import("./agent-registry.js");
     // #1527: the late-bound durable context provider holder is the 4th arg;
     // #1552: the memory-tool deps holder is the 5th.
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, { current: null }, { current: null });
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, { current: null }, { current: null }, undefined);
   });
 
   it("forwards the composed durable context provider holder to lazy transports (#1527)", async () => {
@@ -194,6 +194,24 @@ describe("SubagentRuntime shared registry", () => {
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, holder, memoryDepsHolder);
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, holder, memoryDepsHolder, undefined);
+  });
+
+  it("#1611: a persistent session rejects conflicting candidate-policy reuse — never broadens configured-only", async () => {
+    vi.clearAllMocks();
+    mockSendPrompt.mockResolvedValue("response text");
+    const runtime = new SubagentRuntime();
+    const s1 = await runtime.session("dreamy", undefined, { candidatePolicy: "configured-only" });
+    expect(s1.isReady).toBe(true);
+    // Same policy reuses the cached transport.
+    const s2 = await runtime.session("dreamy", undefined, { candidatePolicy: "configured-only" });
+    expect(s2.isReady).toBe(true);
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(1);
+
+    await expect(
+      runtime.session("dreamy", undefined, { candidatePolicy: "fallback-chain" }),
+    ).rejects.toThrow(/conflicting reuse/);
+    expect(createSubagentTransport, "the cached transport must not be recreated").toHaveBeenCalledTimes(1);
   });
 });

@@ -12,6 +12,16 @@ import { logError } from "./logger.js";
 export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H" | "K";
 
 /**
+ * #1611: provider-neutral candidate-selection policy for a session's
+ * transport. `configured-only` restricts the persistent transport to the
+ * configured candidate — no inherited Main candidate, no route fallback, no
+ * second ACP model — and must be applied during transport construction (ACP
+ * can fall back during initialization). The policy is immutable per attached
+ * session; reusing a session with a conflicting policy fails closed.
+ */
+export type CandidatePolicy = "fallback-chain" | "configured-only";
+
+/**
  * #1529: explicit durable-context intent carried from prompt construction
  * through Spin to the transport. Replaces the ambiguous optional cursor:
  * `not_required` means durable memory is not required (ephemeral execution is
@@ -185,6 +195,9 @@ export interface ManagedSession {
   // #1332/#1361: Cooperative steering queue for any active execution
   instructionQueue: QueuedSessionInstruction[];
   activeExecutionId?: string;
+  /** #1611: immutable candidate policy of the attached transport, recorded on
+   *  first attachment. Conflicting reuse fails closed. */
+  candidatePolicy?: CandidatePolicy;
   /** #1502 §7: execution control bound to the active run, so killSession /
    *  endSession / shutdown can cancel the underlying execution without the
    *  caller being in scope. Set by spin() from spec.executionControl. */
@@ -267,6 +280,9 @@ export interface SpinSessionSpec {
   timeoutMs?: number;
   /** #1506: absolute deadline owned by the scheduled caller. */
   deadlineAt?: number;
+  /** #1611: candidate-selection policy for the persistent transport.
+   *  Defaults to `fallback-chain`; sleep sets `configured-only`. */
+  candidatePolicy?: CandidatePolicy;
   maxToolRounds?: number; // #1283: per-task circuit breaker override
 
   // Delivery (continuation / pipeline)

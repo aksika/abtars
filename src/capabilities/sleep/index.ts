@@ -29,7 +29,15 @@ export interface SleepOpts {
    * first provider generation allocate a second, unnamed sibling session.
    */
   allocateSleepSession?: (name: string) => string | undefined;
-  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; settlementOwner: "spin" | "caller"; await: boolean }) => Promise<{ result?: string; sessionId?: string }> };
+  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: boolean }) => Promise<{ result?: string; sessionId?: string }> };
+  /**
+   * #1611: narrow exact-session quarantine callback. Fences the session by
+   * exact id, cancels the active execution, releases the persistent
+   * transport, and marks it ended. Idempotent; never awaits the provider.
+   * The reason is the stable terminal label ("provider_timeout" /
+   * "provider_failed" / "cycle_end").
+   */
+  quarantineSession?: (sessionId: string, reason: string) => void | Promise<void>;
   bufferSystemEvent: (report: string) => void | Promise<void>;
 }
 
@@ -94,6 +102,14 @@ const NEXT_RPC_RETRY_LIMIT = 10;
 const NEXT_RPC_RETRY_DELAY_MS = 3000;
 
 /**
+ * #1611: reserved before the logical step deadline for exact-session
+ * quarantine, broker failure settlement, and run shutdown. Mirrors the
+ * contract value owned by abmind (sleep/step-deadlines.ts) — abtars cannot
+ * import abmind at runtime.
+ */
+const SLEEP_PROVIDER_CLEANUP_HEADROOM_MS = 30_000;
+
+/**
  * #1517: bounds the provider pump's await on the model transport by the
  * broker's absolute completion deadline. The transport receives the remaining
  * bound and should abort at it; when it ignores cancellation, this race still
@@ -143,8 +159,34 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     // #1538: the cycle's D identity does not outlive the cycle. A retained id
     // would make the next cycle pump into a reaped session while its own
     // freshly named session sat idle.
+    // #1611: a healthy named Dreamy session is finalized exactly once at cycle
+    // end (idempotent — a failed run already quarantined it in the pump).
+    if (nightSessionId) {
+      try { void opts.quarantineSession?.(nightSessionId, "cycle_end"); } catch { /* best effort */ }
+    }
     nightSessionId = undefined;
     writeSleepStatus("awake");
+  }
+
+  /**
+   * #1611: terminal provider-failure sequence. Quarantines the exact Dreamy
+   * session, fails the pending broker completion once with a stable code,
+   * clears the cycle's session id, and stops the pump — regardless of the
+   * fail RPC outcome. No later completion is polled and no replacement
+   * session is allocated.
+   */
+  async function terminateOnFailure(
+    leaseId: string,
+    req: { completionId: string; runId: string; stepId: string },
+    code: "provider_timeout" | "provider_failed",
+    detail: string,
+  ): Promise<void> {
+    logWarn("sleep", `Sleep provider failure (run=${req.runId} step=${req.stepId} lease=${leaseId}): ${detail} — quarantining session, failing completion ${code}, stopping sleep`);
+    if (nightSessionId) {
+      try { await opts.quarantineSession?.(nightSessionId, code); } catch { /* local termination must win */ }
+    }
+    try { await client.sleep.runtime.fail(leaseId, req.completionId, code); } catch { /* best effort — local termination still proceeds */ }
+    nightSessionId = undefined;
   }
 
   async function providerPump(): Promise<void> {
@@ -183,72 +225,60 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         const req = nextResult.completionRequest;
         if (!req) continue;
 
-        const remainingMs = req.deadline - Date.now();
-        if (remainingMs <= 0) {
-          // #1603: a completion past its own deadline fails only that
-          // completion. invalid_completion means the broker's deadline timer
-          // already settled it — the lease is still ours, so keep serving.
-          logWarn("sleep", `Completion ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) already past its deadline — failing the completion, continuing`);
-          const failResult = await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "completion_deadline_expired").catch(() => undefined);
-          if (failResult && (failResult.status === "ok" || failResult.status === "invalid_completion")) continue;
+        // #1611: the provider executes inside the broker deadline minus the
+        // 30s cleanup headroom reserved for quarantine, failure settlement,
+        // and run shutdown.
+        const providerDeadlineAt = req.deadline - SLEEP_PROVIDER_CLEANUP_HEADROOM_MS;
+        const providerRemainingMs = providerDeadlineAt - Date.now();
+        if (providerRemainingMs <= 0) {
+          await terminateOnFailure(ownedLeaseId, req, "provider_timeout", "provider window already exhausted");
           break;
         }
 
+        let spinResult: DeadlineRaceResult<{ result?: string; sessionId?: string }>;
         try {
-          const spinResult = await runWithAbsoluteDeadline(
+          spinResult = await runWithAbsoluteDeadline(
             opts.sessionManager.spin({
               type: "D",
               prompt: req.prompt,
               sessionId: nightSessionId,
-              timeoutMs: remainingMs,
+              timeoutMs: providerRemainingMs,
+              deadlineAt: providerDeadlineAt,
+              candidatePolicy: "configured-only",
               settlementOwner: "spin",
               await: true,
             }),
-            remainingMs,
+            providerRemainingMs,
           );
-          if (spinResult.kind === "timed_out") {
-            // #1603: the model exceeded this completion's deadline — the
-            // broker settles it as a per-step failure and the cycle continues.
-            logWarn("sleep", `Completion ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) deadline reached while awaiting the model — failing the completion, continuing`);
-            const failResult = await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "completion_deadline_expired").catch(() => undefined);
-            if (failResult && (failResult.status === "ok" || failResult.status === "invalid_completion")) continue;
-            break;
-          }
-          if (spinResult.kind === "failed") {
-            logWarn("sleep", `Model completion failed (run=${req.runId} step=${req.stepId}): ${spinResult.error.message}`);
-            let failResult: { status: string } | undefined;
-            try {
-              failResult = await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "model_error");
-            } catch { /* best effort */ }
-            if (!failResult || failResult.status !== "ok") {
-              logWarn("sleep", `Provider fail rejected (${failResult?.status ?? "error"}) for completion ${req.completionId} — closing provider pump`);
-              break;
-            }
-            continue;
-          }
-          if (spinResult.value.sessionId && !nightSessionId) nightSessionId = spinResult.value.sessionId;
-
-          const completeResult = await client.sleep.runtime.complete(ownedLeaseId, req.completionId, spinResult.value.result ?? "");
-          if (completeResult.status !== "ok") {
-            if (completeResult.status === "invalid_completion") {
-              // #1603: the broker's deadline timer already settled this
-              // completion; the lease survives, so keep serving the run.
-              logWarn("sleep", `Completion rejected (${completeResult.status}) for ${req.completionId} — continuing`);
-              continue;
-            }
-            logWarn("sleep", `Completion rejected (${completeResult.status}) for ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) — closing provider pump`);
-            break;
-          }
         } catch (err) {
-          logWarn("sleep", `Model completion failed (run=${req.runId} step=${req.stepId}): ${(err as Error).message}`);
-          let failResult: { status: string } | undefined;
-          try {
-            failResult = await client.sleep.runtime.fail(ownedLeaseId, req.completionId, "model_error");
-          } catch { /* best effort */ }
-          if (!failResult || failResult.status !== "ok") {
-            logWarn("sleep", `Provider fail rejected (${failResult?.status ?? "error"}) for completion ${req.completionId} — closing provider pump`);
-            break;
-          }
+          // spin() itself rejected before/while opening the transport —
+          // terminal for the logical step.
+          await terminateOnFailure(ownedLeaseId, req, "provider_failed", (err as Error).message);
+          break;
+        }
+        if (spinResult.kind === "timed_out") {
+          await terminateOnFailure(ownedLeaseId, req, "provider_timeout", "deadline reached while awaiting the model");
+          break;
+        }
+        if (spinResult.kind === "failed") {
+          await terminateOnFailure(ownedLeaseId, req, "provider_failed", spinResult.error.message);
+          break;
+        }
+        if (spinResult.value.sessionId && !nightSessionId) nightSessionId = spinResult.value.sessionId;
+        if (!spinResult.value.result) {
+          // #1611: a transport terminal error with no valid semantic result
+          // must reject the completion — never complete(""), which would look
+          // like a domain retry and hide the provider failure.
+          await terminateOnFailure(ownedLeaseId, req, "provider_failed", "spin settled without a semantic result");
+          break;
+        }
+
+        const completeResult = await client.sleep.runtime.complete(ownedLeaseId, req.completionId, spinResult.value.result);
+        if (completeResult.status !== "ok") {
+          // #1611: ok, invalid_completion, or a fail-RPC error all lead to
+          // pump shutdown — nothing authorizes polling for another completion.
+          logWarn("sleep", `Completion rejected (${completeResult.status}) for ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) — stopping sleep`);
+          break;
         }
       }
     } catch (err) {

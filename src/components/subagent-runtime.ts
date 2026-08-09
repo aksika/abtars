@@ -68,6 +68,8 @@ interface CachedAgent {
   transport: IKiroTransport;
   model: string;
   sessionKey: string;
+  /** #1611: immutable candidate policy captured at transport creation. */
+  candidatePolicy?: import("./spin-types.js").CandidatePolicy;
 }
 
 const DEFAULT_SESSION: Record<AgentName, "fresh" | "reuse"> = {
@@ -267,9 +269,16 @@ export class SubagentRuntime {
   }
 
   /** Get a persistent session handle for multi-turn callers. */
-  async session(agent: AgentName, key?: string): Promise<AgentSession> {
+  async session(agent: AgentName, key?: string, opts?: { candidatePolicy?: import("./spin-types.js").CandidatePolicy }): Promise<AgentSession> {
     const cacheKey = key ? `${agent}:${key}` : agent;
-    const cached = this.cache.get(cacheKey) ?? await this.createAgent(agent, undefined, cacheKey);
+    const cached = this.cache.get(cacheKey) ?? await this.createAgent(agent, undefined, cacheKey, opts?.candidatePolicy);
+    // #1611: the candidate policy is immutable per attached transport. A
+    // conflicting request fails closed — it must never silently broaden a
+    // configured-only session into a fallback chain.
+    const policy = opts?.candidatePolicy;
+    if (policy && cached.candidatePolicy && cached.candidatePolicy !== policy) {
+      throw new Error(`Session ${cacheKey} is attached with candidate policy ${cached.candidatePolicy}; refusing conflicting reuse (${policy})`);
+    }
     return {
       sendPrompt: (sessionKey: string, prompt: string) => cached.transport.sendPrompt(sessionKey, prompt),
       destroy: async () => {
@@ -341,7 +350,7 @@ export class SubagentRuntime {
     return true;
   }
 
-  private async createAgent(agent: AgentName, sessionType?: import("./spin-types.js").SessionType, cacheKey?: string): Promise<CachedAgent> {
+  private async createAgent(agent: AgentName, sessionType?: import("./spin-types.js").SessionType, cacheKey?: string, candidatePolicy?: import("./spin-types.js").CandidatePolicy): Promise<CachedAgent> {
     const typeMap: Partial<Record<AgentName, import("./spin-types.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
     const resolvedType = sessionType || typeMap[agent];
     const sandboxTypes = new Set(["B", "C", "W"]);
@@ -359,7 +368,9 @@ export class SubagentRuntime {
     // #1418: pass the complete last-successful Main candidate (secret-free tuple)
     // into specialist construction so fallback ordering reuses the exact Main
     // candidate that last produced a non-empty response.
-    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain, this._contextProvider, this._memoryToolDeps);
+    // #1611: configured-only restricts transport construction to the configured
+    // candidate — applied before the first Dreamy prompt, never after the fact.
+    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain, this._contextProvider, this._memoryToolDeps, candidatePolicy);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
     // External ACP keeps its own agent label; embedded Pi uses this label when
@@ -381,7 +392,7 @@ export class SubagentRuntime {
     }
 
     const sessionKey = `system:${cacheKey ?? agent}`;
-    const entry: CachedAgent = { transport, model, sessionKey };
+    const entry: CachedAgent = { transport, model, sessionKey, candidatePolicy };
     this.cache.set(cacheKey ?? agent, entry);
     return entry;
   }

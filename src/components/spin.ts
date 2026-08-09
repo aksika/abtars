@@ -185,14 +185,18 @@ export class Spin {
    * #1432: End an exact session by ID with ownership check, without session
    * switching or A reconciliation (the skill manager owns K transport
    * lifecycle; A must never be deactivated or recreated by K cleanup).
+   * #1611: the reason is a stable terminal label supplied by the caller
+   * (e.g. "provider_timeout" for sleep quarantine). It must not await the
+   * provider iterator — the transport release is fire-and-forget and the
+   * session is marked ended immediately.
    * Returns false when the session is missing or owned by another user.
    */
-  finalizeExactSession(sessionId: string, expectedUserId: string): boolean {
+  finalizeExactSession(sessionId: string, expectedUserId: string, reason = "skill_ended"): boolean {
     const session = this.sessions.getById(sessionId);
     if (!session || session.userId !== expectedUserId) return false;
     if (session.status !== "ended") {
       cancelSessionExecution(session, "session_end");
-      this.finalizeSession(session, "skill_ended");
+      this.finalizeSession(session, reason);
     }
     return true;
   }
@@ -547,6 +551,10 @@ export class Spin {
 
     // #1332: Assign execution generation for steering continuity
     session.activeExecutionId = `${session.id}_${stepIndex}_${Date.now()}`;
+    // #1611: capture the immutable execution ID before any await. A
+    // quarantined/ended or superseded generation must never settle late:
+    // finishSpin/failSpin fence against this captured value.
+    const capturedExecutionId = session.activeExecutionId;
     // #1502 §7: attach the caller-supplied execution control to the session so
     // killSession/endSession/shutdown can reach it without knowing the caller.
     // #1540: the supervisor binds at most one active generation per session —
@@ -609,6 +617,13 @@ export class Spin {
     //       (O/T/B/D/H) until bridge restart. (#1274)
     const started = Date.now();
     try {
+      // #1611: the candidate policy is immutable per attached session —
+      // reusing a session with a conflicting policy fails closed, whether or
+      // not the transport is already attached.
+      const requestedPolicy = spec.candidatePolicy ?? "fallback-chain";
+      if (session.candidatePolicy && session.candidatePolicy !== requestedPolicy) {
+        throw new Error(`Session ${session.id} is attached with candidate policy ${session.candidatePolicy}; refusing conflicting reuse (${requestedPolicy})`);
+      }
       // #1480: bind the durable run before any decorator, tool, or provider work.
       // A failed/stale bind must never start a model turn under an unowned project.
       if (spec.type === "O" && spec.orcContext) {
@@ -633,12 +648,13 @@ export class Spin {
         // #1432: reattachment honors the selected executionAgent recorded at
         // allocation (K) so a resumed session keeps its model configuration.
         const attachAgent = session.executionAgent ?? agent;
-        const agentSession = await this.runtime.session(attachAgent, profile.resolution === "active" ? userId : undefined);
+        const agentSession = await this.runtime.session(attachAgent, profile.resolution === "active" ? userId : undefined, { candidatePolicy: requestedPolicy });
         sessionTransport = agentSession.transport as IKiroTransport;
         session.transport = sessionTransport;
         session.transportOwner = "runtime";
         session.releaseTransport = () => agentSession.destroy();
         session.executionAgent = attachAgent;
+        session.candidatePolicy = requestedPolicy;
         session.status = "ready";
       }
 
@@ -860,25 +876,25 @@ export class Spin {
         executeWithSteering().then(r => {
           const telemetryUsage = executionTelemetry.snapshot();
           executionTelemetry.close();
-          return this.finishSpin(spec, profile, session, cardId, stepIndex, started, r, terminate, telemetryUsage);
+          return this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, r, terminate, telemetryUsage);
         }).catch(e => {
           const telemetryUsage = executionTelemetry.snapshot();
           executionTelemetry.close();
-          this.failSpin(spec, profile, session, cardId, stepIndex, started, e, terminate, telemetryUsage);
+          this.failSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, e, terminate, telemetryUsage);
         });
         return { sessionId: session.id, cardId };
       }
       const result = await executeWithSteering();
       const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();
-      await this.finishSpin(spec, profile, session, cardId, stepIndex, started, result, terminate, telemetryUsage);
+      await this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, result, terminate, telemetryUsage);
       return { sessionId: session.id, cardId, result };
     } catch (err) {
       const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();
       // Covers: pre-exec throws (steps 4-6) AND awaited execution failures (step 7).
       // failSpin calls markDone + drainQueued — concurrency slot always released.
-      await this.failSpin(spec, profile, session, cardId, stepIndex, started, err, terminate, telemetryUsage);
+      await this.failSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, err, terminate, telemetryUsage);
       if (spec.await) {
         // #1502: surface the cardId on rejection so caller-owned settlers (the
         // scheduled-task runner) can fail the Kanban card. Under caller ownership
@@ -973,12 +989,27 @@ export class Spin {
     };
   }
 
+  /**
+   * #1611: late-result fence. True when the session ended or the generation no
+   * longer owns activeExecutionId — its result must not write memory, run
+   * hooks, clear association, fire callbacks, or terminate anything.
+   */
+  private isStaleCompletion(session: ManagedSession, capturedExecutionId: string): boolean {
+    return session.status === "ended" || session.activeExecutionId !== capturedExecutionId;
+  }
+
   private async finishSpin(
-    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession,
+    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession, capturedExecutionId: string,
     cardId: number | undefined, stepIndex: number, started: number, result: string,
     terminate: "call" | "response" | "external",
     telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
   ): Promise<void> {
+    // #1611: a quarantined/superseded generation is inert — a late provider
+    // settlement must not mutate session state, memory, hooks, or cards.
+    if (this.isStaleCompletion(session, capturedExecutionId)) {
+      logInfo(TAG, `Ignoring late completion for ${session.id} (${capturedExecutionId}) — session ended or generation superseded`);
+      return;
+    }
     // #1444: prefer telemetry scope aggregate (spans all tool rounds + continuations),
     // then transport lastUsage(), then runtime fallback.
     const status = (session.transport as { getRuntimeStatus?: () => { lastTurnUsage?: RuntimeUsageSnapshot } } | undefined)?.getRuntimeStatus?.();
@@ -1144,11 +1175,17 @@ export class Spin {
   }
 
   private async failSpin(
-    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession,
+    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession, capturedExecutionId: string,
     cardId: number | undefined, stepIndex: number, started: number, err: unknown,
     terminate: "call" | "response" | "external",
     telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
   ): Promise<void> {
+    // #1611: a quarantined/superseded generation is inert — its failure must
+    // not mutate session state, memory, hooks, or cards.
+    if (this.isStaleCompletion(session, capturedExecutionId)) {
+      logInfo(TAG, `Ignoring late failure for ${session.id} (${capturedExecutionId}) — session ended or generation superseded`);
+      return;
+    }
     // #1332: Expire remaining queued instructions when execution fails
     if (session.instructionQueue.length > 0) expireInstructions(session, "execution_failed");
 

@@ -65,7 +65,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     vi.clearAllMocks();
   });
 
-  it("derives the model timeout from the broker's remaining absolute deadline", async () => {
+  it("derives the model timeout from the broker deadline minus cleanup headroom, and forces configured-only", async () => {
     const client = makeFakeClient();
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
@@ -85,20 +85,23 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     await settleTicks();
 
     expect(spin).toHaveBeenCalledTimes(1);
-    const spinOpts = spin.mock.calls[0]![0] as { timeoutMs: number };
-    expect(spinOpts.timeoutMs).toBeGreaterThan(5000);
-    expect(spinOpts.timeoutMs).toBeLessThanOrEqual(120_000);
+    const spinOpts = spin.mock.calls[0]![0] as { timeoutMs: number; deadlineAt: number; candidatePolicy: string };
+    // #1611: the provider window is the broker deadline minus 30s cleanup headroom.
+    expect(spinOpts.timeoutMs).toBeGreaterThan(85_000);
+    expect(spinOpts.timeoutMs).toBeLessThanOrEqual(90_000);
+    expect(spinOpts.deadlineAt).toBeGreaterThan(Date.now());
+    expect(spinOpts.candidatePolicy, "sleep must never inherit a fallback chain").toBe("configured-only");
     expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "done");
   });
 
-  it("does not grant an already expired request a fresh execution window — the completion is failed, the pump keeps serving", async () => {
+  it("does not grant an already expired provider window a fresh execution — terminal, no later completion", async () => {
     const client = makeFakeClient();
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(-5000), makeRequest(120_000)));
     client.sleep.runtime.fail.mockResolvedValue({ status: "ok" });
-    client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
-    const spin = vi.fn().mockResolvedValue({ result: "next", sessionId: "s1" });
+    const spin = vi.fn();
+    const quarantineSession = vi.fn();
 
     const handle = createSleepHandle({
       client,
@@ -107,36 +110,36 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      quarantineSession,
     });
     handle.startScheduled();
     await settleTicks();
 
-    expect(spin).toHaveBeenCalledTimes(1);
-    expect(spin.mock.calls[0]![0]).toMatchObject({ prompt: "prompt" });
-    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "completion_deadline_expired");
-    // The expired completion cost only itself — the next request is served.
-    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "next");
+    // #1611: no spin starts, the completion is failed once with the stable
+    // provider_timeout code, and the pump terminates — the next request is
+    // never served.
+    expect(spin).not.toHaveBeenCalled();
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout");
+    expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
+    expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
   });
 
-  it("#1603: a timed-out completion fails that completion only — the pump continues and serves the next request", async () => {
+  it("#1611: a hanging model generation is terminal — quarantine, provider_timeout, no next step, pump closed", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
     try {
       const client = makeFakeClient();
       client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
       client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
-      // Each request's deadline is computed at serve time (fresh fake clock).
       client.sleep.runtime.next.mockImplementation(() => {
         const r = makeRequest(100_000);
         if (client.sleep.runtime.next.mock.calls.length === 1) return Promise.resolve(r);
-        if (client.sleep.runtime.next.mock.calls.length === 2) return Promise.resolve(r);
         return Promise.resolve({ status: "lease_expired" });
       });
-      client.sleep.runtime.fail.mockResolvedValue({ status: "invalid_completion" });
+      client.sleep.runtime.fail.mockResolvedValue({ status: "ok" });
       client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
-      const spin = vi.fn()
-        .mockReturnValueOnce(new Promise(() => {})) // hangs → deadline
-        .mockResolvedValueOnce({ result: "second", sessionId: "s1" });
+      const spin = vi.fn().mockReturnValue(new Promise(() => {})); // hangs
+      const quarantineSession = vi.fn();
 
       const handle = createSleepHandle({
         client,
@@ -145,25 +148,88 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
         onCycleEnd: vi.fn(),
         sessionManager: { spin },
         bufferSystemEvent: vi.fn(),
+        quarantineSession,
+        allocateSleepSession: () => "d-night-1",
       });
       handle.startScheduled();
       await vi.advanceTimersByTimeAsync(0);
 
-      await vi.advanceTimersByTimeAsync(100_000);
+      // The provider cutoff (deadline - 30s headroom) fires while the
+      // transport still hangs: quarantine once, fail once, stop the pump.
+      await vi.advanceTimersByTimeAsync(70_000);
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "completion_deadline_expired");
-      // invalid_completion from the broker's deadline settle keeps the lease —
-      // the pump must serve the next request, not close after the first.
-      expect(spin).toHaveBeenCalledTimes(2);
-      expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "second");
-      expect(client.sleep.runtime.next).toHaveBeenCalledTimes(3); // 2 requests + terminal poll
+      expect(spin).toHaveBeenCalledTimes(1);
+      expect(quarantineSession).toHaveBeenCalledTimes(1);
+      expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_timeout");
+      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout");
+      expect(client.sleep.runtime.complete, "a timed-out generation must never complete a broker request").not.toHaveBeenCalled();
+      expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
+      expect(handle.isActive).toBe(false);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("#1603: the pump exits on invalid_lease after a deadline — the lease is genuinely gone", async () => {
+  it("#1611: an early provider rejection is terminal — quarantine, provider_failed, no complete(\"\")", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
+    client.sleep.runtime.fail.mockResolvedValue({ status: "ok" });
+    client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
+    const spin = vi.fn().mockRejectedValue(new Error("transport init failed"));
+    const quarantineSession = vi.fn();
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+      quarantineSession,
+      allocateSleepSession: () => "d-night-1",
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect(spin).toHaveBeenCalledTimes(1);
+    expect(quarantineSession).toHaveBeenCalledTimes(1);
+    expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_failed");
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed");
+    expect(client.sleep.runtime.complete, "a rejected generation must never settle as complete('')").not.toHaveBeenCalled();
+    expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
+  });
+
+  it("#1611: a spin settling without a semantic result is a provider failure, never complete(\"\")", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
+    client.sleep.runtime.fail.mockResolvedValue({ status: "ok" });
+    const spin = vi.fn().mockResolvedValue({ sessionId: "s1" }); // no result
+    const quarantineSession = vi.fn();
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+      quarantineSession,
+      allocateSleepSession: () => "d-night-1",
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed");
+    expect(client.sleep.runtime.complete).not.toHaveBeenCalled();
+    expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
+  });
+
+  it("#1611: the pump exits on invalid_lease after a deadline — the lease is genuinely gone", async () => {
     const client = makeFakeClient();
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
@@ -183,8 +249,62 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     await settleTicks();
 
     expect(spin).not.toHaveBeenCalled();
-    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "completion_deadline_expired");
-    // invalid_lease means we lost the lease — the pump must terminate.
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout");
+    // Even a rejected fail RPC cannot keep the pump alive — it terminates.
+    expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
+    expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
+  });
+
+  it("#1611: a fail-RPC error still terminates the pump locally after a provider rejection", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
+    client.sleep.runtime.fail.mockRejectedValue(new Error("daemon gone"));
+    const spin = vi.fn().mockRejectedValue(new Error("provider down"));
+    const quarantineSession = vi.fn();
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+      quarantineSession,
+      allocateSleepSession: () => "d-night-1",
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect(quarantineSession, "quarantine happens locally before settlement").toHaveBeenCalledTimes(1);
+    expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
+    expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
+  });
+
+  it("#1611: a late completed result (invalid_completion) stops the pump — no later completion is polled", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
+    client.sleep.runtime.complete.mockResolvedValue({ status: "invalid_completion" });
+    const spin = vi.fn().mockResolvedValue({ result: "late", sessionId: "s1" });
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "late");
+    // #1611: nothing authorizes polling for another completion after a
+    // non-ok settlement.
+    expect(spin).toHaveBeenCalledTimes(1);
     expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
   });
@@ -257,65 +377,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     }
   });
 
-  it("#1603: a late completed result (invalid_completion) fails that completion only — the pump continues, then exits on lease expiry", async () => {
-    const client = makeFakeClient();
-    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
-    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
-    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
-    client.sleep.runtime.complete.mockResolvedValue({ status: "invalid_completion" });
-    const spin = vi.fn().mockResolvedValue({ result: "late", sessionId: "s1" });
-
-    const handle = createSleepHandle({
-      client,
-      memoryEnabled: true,
-      onComplete: vi.fn(),
-      onCycleEnd: vi.fn(),
-      sessionManager: { spin },
-      bufferSystemEvent: vi.fn(),
-    });
-    handle.startScheduled();
-    await settleTicks();
-
-    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "late");
-    // The broker's deadline settle already owned this completion — the lease
-    // survives and the pump serves the next request before lease expiry.
-    expect(spin).toHaveBeenCalledTimes(2);
-    expect(client.sleep.runtime.complete).toHaveBeenCalledTimes(2);
-    // One best-effort close once the lease actually expires.
-    expect(client.sleep.runtime.close).toHaveBeenCalledTimes(1);
-    expect(client.sleep.runtime.next).toHaveBeenCalledTimes(3); // 2 requests + terminal poll
-  });
-
-  it("keeps polling after an accepted fail() but exits when fail() is rejected", async () => {
-    const client = makeFakeClient();
-    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
-    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
-    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
-    client.sleep.runtime.fail
-      .mockResolvedValueOnce({ status: "ok" })
-      .mockResolvedValue({ status: "invalid_lease" });
-    const spin = vi.fn()
-      .mockRejectedValueOnce(new Error("provider down"))
-      .mockResolvedValue({ result: "ok", sessionId: "s2" });
-
-    const handle = createSleepHandle({
-      client,
-      memoryEnabled: true,
-      onComplete: vi.fn(),
-      onCycleEnd: vi.fn(),
-      sessionManager: { spin },
-      bufferSystemEvent: vi.fn(),
-    });
-    handle.startScheduled();
-    await settleTicks();
-
-    expect(spin).toHaveBeenCalledTimes(2);
-    // Second fail() was rejected → the pump terminates instead of polling again.
-    expect(client.sleep.runtime.next).toHaveBeenCalledTimes(2);
-    expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
-  });
-
-  it("contains a transport that ignores cancellation: deadline race ends the pump and frees the handle", async () => {
+  it("#1611: a late completed result after quarantine is inert — the fence settles nothing (transport ignores cancellation)", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
     const client = makeFakeClient();
@@ -323,7 +385,12 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(100_000)));
     client.sleep.runtime.fail.mockResolvedValue({ status: "invalid_lease" });
-    const spin = vi.fn().mockReturnValue(new Promise(() => {}));
+    // The spin promise resolves AFTER the provider deadline (a transport that
+    // ignores cancellation): the race must win, quarantine must run, and the
+    // late result must never reach the broker.
+    let resolveLate!: (v: { result: string; sessionId: string }) => void;
+    const spin = vi.fn().mockReturnValue(new Promise<{ result: string; sessionId: string }>(r => { resolveLate = r; }));
+    const quarantineSession = vi.fn();
 
     const handle = createSleepHandle({
       client,
@@ -332,18 +399,28 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      quarantineSession,
+      allocateSleepSession: () => "d-night-1",
     });
     handle.startScheduled();
     await vi.advanceTimersByTimeAsync(0);
     expect(handle.isActive).toBe(true);
 
-    // The deadline fires while the transport is still hanging.
-    await vi.advanceTimersByTimeAsync(100_000);
+    // The provider cutoff fires while the transport is still hanging.
+    await vi.advanceTimersByTimeAsync(70_000);
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "completion_deadline_expired");
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout");
+    expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_timeout");
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
     expect(handle.isActive).toBe(false);
+
+    // The transport finally settles late — the broker is never told.
+    resolveLate({ result: "late result", sessionId: "d-night-1" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.sleep.runtime.complete, "a late provider result must not complete a broker request").not.toHaveBeenCalled();
+    expect(client.sleep.runtime.fail).toHaveBeenCalledTimes(1);
+    expect(quarantineSession, "quarantine is idempotent — exactly one call").toHaveBeenCalledTimes(1);
 
     // A later cycle can open a fresh lease and serve a new request.
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-2" });
@@ -440,5 +517,93 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
 
     expect((spin.mock.calls[2]![0] as { sessionId?: string }).sessionId).toBeUndefined();
     expect((spin.mock.calls[3]![0] as { sessionId?: string }).sessionId).toBe("d-night-2");
+  });
+
+  it("#1611 journey: a hanging configured candidate is quarantined exactly once through the REAL Spin — no fallback, no later step, late result inert", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
+    try {
+      const { Spin } = await import("../../components/spin.js");
+      const { setUserRegistryOverride } = await import("../../components/user-registry.js");
+      const spin = new Spin();
+      const master = { userId: "aksika", role: "master" as const, maxClass: 3, tools: ["all"], platforms: { telegram: 111 } };
+      setUserRegistryOverride({
+        users: [master],
+        byPlatformId: new Map([["telegram:111", master]]),
+        byUserId: new Map([["aksika", master]]),
+      });
+      let allocatedId = "";
+
+      // The configured Dreamy transport hangs and ignores cancellation.
+      let resolveLate!: (v: string) => void;
+      const transport = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        sendPrompt: vi.fn().mockReturnValue(new Promise<string>(r => { resolveLate = r; })),
+        resetSession: vi.fn().mockResolvedValue(undefined),
+        sendInterrupt: vi.fn().mockResolvedValue(undefined),
+        destroy: vi.fn(),
+        get isReady() { return true; },
+        get contextPercent() { return -1; },
+        get answerOnly() { return ""; },
+        get toolCallsSucceeded() { return 0; },
+        get intermediateDeliveredText() { return ""; },
+      } as any;
+      const runtime = {
+        session: vi.fn().mockResolvedValue({
+          sendPrompt: transport.sendPrompt,
+          destroy: vi.fn(),
+          get isReady() { return true; },
+          get transport() { return transport; },
+        }),
+      };
+      spin.setRuntime(runtime as any);
+      const memory = { recordMessage: vi.fn() };
+      spin.setMemory(memory as any);
+
+      const client = makeFakeClient();
+      client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+      client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+      client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(100_000)));
+      client.sleep.runtime.fail.mockResolvedValue({ status: "ok" });
+      client.sleep.events.mockResolvedValue({ runId: "run-1", events: [], nextSeq: 1, gap: false, terminal: true });
+      client.sleep.status.mockResolvedValue({ state: "terminal", last: { runId: "run-1", status: "failed", resumable: true, completedSteps: 0, failedSteps: 1 } });
+
+      const handle = createSleepHandle({
+        client,
+        memoryEnabled: true,
+        onComplete: vi.fn(),
+        onCycleEnd: vi.fn(),
+        sessionManager: {
+          spin: async (opts: any) => spin.spin({ type: opts.type, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, deadlineAt: opts.deadlineAt, candidatePolicy: opts.candidatePolicy, settlementOwner: "spin", await: true }),
+        },
+        quarantineSession: (sid, reason) => { spin.finalizeExactSession(sid, "aksika", reason); },
+        allocateSleepSession: (name) => { allocatedId = spin.allocateDreamySession(name).id; return allocatedId; },
+        bufferSystemEvent: vi.fn(),
+      });
+      handle.startScheduled();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The provider cutoff (broker deadline - 30s headroom) fires while the
+      // real Spin awaits the hanging transport.
+      await vi.advanceTimersByTimeAsync(70_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The ended session is pruned from listAllSessions — look it up by id.
+      const session = spin.getSessionById(allocatedId);
+      expect(runtime.session, "exactly one configured-only transport attempt — no fallback").toHaveBeenCalledTimes(1);
+      expect(runtime.session.mock.calls[0]![2]).toEqual({ candidatePolicy: "configured-only" });
+      expect(session.status, "the exact Dreamy session is quarantined").toBe("ended");
+      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout");
+      expect(client.sleep.runtime.complete).not.toHaveBeenCalled();
+      expect(handle.isActive).toBe(false);
+
+      // The transport settles late — the real Spin fence must keep it inert.
+      resolveLate("late provider result");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(memory.recordMessage, "a late result must not write memory through the fence").not.toHaveBeenCalled();
+      setUserRegistryOverride(null);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
