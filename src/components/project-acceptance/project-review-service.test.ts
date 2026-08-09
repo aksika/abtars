@@ -50,6 +50,10 @@ describe("ProjectReviewService — full outcome matrix", () => {
     const s = new ProjectReviewStore();
     s.insertContract(contract);
     s.initializeSupervision(cardId, contract.id, "executing");
+    // #1626: settlement requires a live kanban card — the real projection must
+    // apply from a legal live status inside the settlement transaction.
+    s.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, goal, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', ?, datetime('now'), datetime('now'))`)
+      .run(cardId, "svc project", "task", "svc goal");
     const snapshot: ReviewCaseSnapshot = {
       schema_version: 1 as const,
       project_card_id: cardId,

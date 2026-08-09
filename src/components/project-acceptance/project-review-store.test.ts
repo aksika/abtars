@@ -58,6 +58,13 @@ describe("ProjectReviewStore", () => {
     return { store: s, contract: c, cardId: c.project_card_id };
   }
 
+  /** Real kanban_board row so settlement's mandatory Kanban CAS can apply. */
+  function insertKanbanCard(s: ProjectReviewStore, cardId: number, status: string, extra: Record<string, string | number | null> = {}): void {
+    const cols = ["id", "title", "source", "status", "type", "goal", "created_at", "updated_at", ...Object.keys(extra)];
+    const vals: unknown[] = [cardId, `p${cardId}`, "agent", status, "O", "goal", new Date().toISOString().replace("T", " ").slice(0, 19), new Date().toISOString().replace("T", " ").slice(0, 19), ...Object.values(extra)];
+    s.db.prepare(`INSERT INTO kanban_board (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...vals);
+  }
+
   describe("root contracts", () => {
     it("inserts and retrieves a contract", () => {
       const c = makeContract();
@@ -115,6 +122,7 @@ describe("ProjectReviewStore", () => {
       expect(s.hasActiveProjectSupervision(cid)).toBe(true);
       s.stateTransition(cid, ["executing"], "review_ready");
       expect(s.hasActiveProjectSupervision(cid)).toBe(true);
+      insertKanbanCard(s, cid, "running");
       s.settleBlocked(cid, "case-b", { action: "blocked", reason: "x" }, "blocker");
       expect(s.hasActiveProjectSupervision(cid)).toBe(false);
     });
@@ -122,6 +130,7 @@ describe("ProjectReviewStore", () => {
     it("hasActiveProjectSupervision: accepted supervision is not an active owner", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
+      insertKanbanCard(s, cid, "running");
       s.settleAcceptance(cid, "case-a", { action: "accept", synthesis: "ok" }, "ok");
       expect(s.hasActiveProjectSupervision(cid)).toBe(false);
     });
@@ -393,6 +402,7 @@ describe("ProjectReviewStore", () => {
     it("settleAcceptance with a peer event creates exactly one completed outbox row", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
+      insertKanbanCard(s, cid, "running");
       const caseId = `case-accept-${cid}`;
       const event = { peer: "kp", payload: { event_id: `accept_1_${cid}`, kind: "completed", request_id: "r1", contribution_ref: "c1" } };
       s.settleAcceptance(cid, caseId, { action: "accept", synthesis: "ok" }, "ok", event, `rd_settle_${cid}`);
@@ -408,6 +418,7 @@ describe("ProjectReviewStore", () => {
     it("settleBlocked with a peer event creates a FAILED row and never a completed one", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
+      insertKanbanCard(s, cid, "running");
       const caseId = `case-block-${cid}`;
       const event = { peer: "kp", payload: { event_id: `fail_1_${cid}`, kind: "failed", request_id: "r1", contribution_ref: "c1", summary: "blocked: blocker" } };
       s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker", event, `rd_block_${cid}`);
@@ -422,6 +433,7 @@ describe("ProjectReviewStore", () => {
     it("duplicate settlement cannot create a second outbox row", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
+      insertKanbanCard(s, cid, "running");
       const caseId = `case-dup-${cid}`;
       const event = { peer: "kp", payload: { kind: "completed", request_id: "r1", contribution_ref: "c1" } };
       s.settleAcceptance(cid, caseId, { action: "accept", synthesis: "ok" }, "ok", event, `rd_dup_${cid}`);
@@ -434,6 +446,7 @@ describe("ProjectReviewStore", () => {
     it("rollback on a decision conflict leaves no outbox row", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
+      insertKanbanCard(s, cid, "running");
       const caseId = `case-roll-${cid}`;
       const event = { peer: "kp", payload: { kind: "failed", request_id: "r1", contribution_ref: "c1" } };
       s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker", event, `rd_roll_${cid}`);
@@ -443,6 +456,109 @@ describe("ProjectReviewStore", () => {
 
       const rows = s.db.prepare("SELECT COUNT(*) as cnt FROM project_acceptance_outbox WHERE project_card_id = ?").get(cid) as any;
       expect(rows.cnt).toBe(1);
+    });
+  });
+
+  describe("#1626 queued-root terminal settlement", () => {
+    const future = (): string => new Date(Date.now() + 60_000).toISOString().replace("T", " ").slice(0, 19);
+
+    function setupQueuedProject(status: "queued" | "running", extra: Record<string, string | number | null> = {}) {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      insertKanbanCard(s, cid, status, extra);
+      s.stateTransition(cid, ["executing"], "reviewing");
+      const { id: caseId } = s.insertReviewCase(cid, 1, 1, { v: 1 }, "digest");
+      s.insertReviewRequest(cid, caseId, 1);
+      return { store: s, cardId: cid, caseId };
+    }
+
+    it("queued acceptance terminalizes the card to done with synthesis, cleared stale fields, and one journal row", () => {
+      const { store: s, cardId, caseId } = setupQueuedProject("queued", { error: "stale failed-turn", next_retry_at: future(), retry_count: 2 });
+      const event = { peer: "kp", payload: { kind: "completed", request_id: "r1", contribution_ref: "c1" } };
+
+      s.settleAcceptance(cardId, caseId, { action: "accept", synthesis: "ok" }, "synthesis text", event, `rd_settle_${cardId}`);
+
+      const card = s.db.prepare("SELECT status, result_summary, error, next_retry_at, completed_at FROM kanban_board WHERE id = ?").get(cardId) as any;
+      expect(card.status).toBe("done");
+      expect(card.result_summary).toBe("synthesis text");
+      expect(card.error).toBeNull();
+      expect(card.next_retry_at).toBeNull();
+      expect(card.completed_at).toBeTruthy();
+
+      const journal = s.db.prepare("SELECT from_status, to_status, actor FROM kanban_card_transitions WHERE card_id = ?").all(cardId) as any[];
+      expect(journal).toHaveLength(1);
+      expect(journal[0]).toEqual({ from_status: "queued", to_status: "done", actor: "project_acceptance" });
+
+      expect(s.getSupervision(cardId)!.state).toBe("accepted");
+      expect(s.getReviewCase(caseId)!.status).toBe("accepted");
+      expect(s.getReviewRequestByCaseId(caseId)!.status).toBe("settled");
+      const outbox = s.db.prepare("SELECT COUNT(*) as cnt FROM project_acceptance_outbox WHERE project_card_id = ?").get(cardId) as any;
+      expect(outbox.cnt).toBe(1);
+    });
+
+    it("queued blocking terminalizes the card to failed with the blocker error and clears the retry date", () => {
+      const { store: s, cardId, caseId } = setupQueuedProject("queued", { next_retry_at: future(), retry_count: 1 });
+      const event = { peer: "kp", payload: { kind: "failed", request_id: "r1", contribution_ref: "c1" } };
+
+      s.settleBlocked(cardId, caseId, { action: "blocked", reason: "x" }, "blocker", event, `rd_block_${cardId}`);
+
+      const card = s.db.prepare("SELECT status, error, next_retry_at, completed_at FROM kanban_board WHERE id = ?").get(cardId) as any;
+      expect(card.status).toBe("failed");
+      expect(card.error).toBe("blocked: blocker");
+      expect(card.next_retry_at).toBeNull();
+      expect(card.completed_at).toBeTruthy();
+
+      const journal = s.db.prepare("SELECT from_status, to_status, actor FROM kanban_card_transitions WHERE card_id = ?").all(cardId) as any[];
+      expect(journal).toHaveLength(1);
+      expect(journal[0]).toEqual({ from_status: "queued", to_status: "failed", actor: "project_acceptance" });
+
+      expect(s.getSupervision(cardId)!.state).toBe("blocked");
+      expect(s.getReviewCase(caseId)!.status).toBe("superseded");
+      expect(s.getReviewRequestByCaseId(caseId)!.status).toBe("settled");
+      const outbox = s.db.prepare("SELECT COUNT(*) as cnt FROM project_acceptance_outbox WHERE project_card_id = ?").get(cardId) as any;
+      expect(outbox.cnt).toBe(1);
+    });
+
+    it("running settlement is unchanged and still terminalizes", () => {
+      const { store: s, cardId, caseId } = setupQueuedProject("running", { error: "stale", next_retry_at: future() });
+      s.settleAcceptance(cardId, caseId, { action: "accept", synthesis: "ok" }, "synthesis text");
+      const card = s.db.prepare("SELECT status, result_summary, error, next_retry_at FROM kanban_board WHERE id = ?").get(cardId) as any;
+      expect(card.status).toBe("done");
+      expect(card.result_summary).toBe("synthesis text");
+      expect(card.error).toBeNull();
+      expect(card.next_retry_at).toBeNull();
+    });
+
+    it("settlement on an already-terminal card throws and rolls back the whole transaction", () => {
+      const { store: s, cardId, caseId } = setupQueuedProject("queued");
+      // card escapes to done outside settlement (e.g. a concurrent writer)
+      s.db.prepare("UPDATE kanban_board SET status = 'done', updated_at = datetime('now') WHERE id = ?").run(cardId);
+      const event = { peer: "kp", payload: { kind: "completed", request_id: "r1", contribution_ref: "c1" } };
+
+      expect(() => s.settleAcceptance(cardId, caseId, { action: "accept", synthesis: "ok" }, "syn", event, `rd_lost_${cardId}`))
+        .toThrow(/kanban settlement lost: observed done/);
+
+      expect(s.hasDecisionForCase(caseId)).toBe(false);
+      expect(s.getSupervision(cardId)!.state).toBe("reviewing");
+      expect(s.getReviewCase(caseId)!.status).toBe("open");
+      expect(s.getReviewRequestByCaseId(caseId)!.status).toBe("pending");
+      const outbox = s.db.prepare("SELECT COUNT(*) as cnt FROM project_acceptance_outbox WHERE project_card_id = ?").get(cardId) as any;
+      expect(outbox.cnt).toBe(0);
+    });
+
+    it("settlement on a missing card throws and leaves no trace", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      const { id: caseId } = s.insertReviewCase(cid, 1, 1, { v: 1 }, "digest");
+      s.insertReviewRequest(cid, caseId, 1);
+      // no kanban_board row at all
+      expect(() => s.settleAcceptance(cid, caseId, { action: "accept", synthesis: "ok" }, "syn", undefined, `rd_missing_${cid}`))
+        .toThrow(/kanban settlement lost: observed missing/);
+
+      expect(s.hasDecisionForCase(caseId)).toBe(false);
+      expect(s.getSupervision(cid)!.state).toBe("executing");
+      expect(s.getReviewCase(caseId)!.status).toBe("open");
+      expect(s.getReviewRequestByCaseId(caseId)!.status).toBe("pending");
     });
   });
 });

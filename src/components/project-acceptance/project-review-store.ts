@@ -714,15 +714,30 @@ export class ProjectReviewStore {
       // Update kanban card via projectStateToKanban mapping — #1590: through
       // the transition helper inside this transaction. The service layer fires
       // card:done after commit, so emit is disabled here.
-      kanbanTransition({
+      // #1626: a coordinator-owned root may still be `queued` (retry backoff)
+      // while its durable review supervision is live; settlement must
+      // terminalize from either legal live status. Only `applied` is success —
+      // `done` is not in the from-set, so a missing/already-terminal card
+      // yields `no_op` and throws, rolling back every settlement write.
+      const outcome = kanbanTransition({
         cardId,
-        from: ["running"],
+        from: ["queued", "running"],
         to: projectStateToKanban("accepted"),
         actor: "project_acceptance",
         reason: "project accepted",
-        fields: { result_summary: synthesis.slice(0, 4000), completed_at: sqliteNow() },
+        fields: {
+          result_summary: synthesis.slice(0, 4000),
+          completed_at: sqliteNow(),
+          error: null,
+          next_retry_at: null,
+        },
         emit: false,
       }, this.db);
+      if (outcome.kind !== "applied") {
+        throw new Error(
+          `project ${cardId} kanban settlement lost: observed ${outcome.observed ?? "missing"}`,
+        );
+      }
 
       // Close the case and request in the same transaction as acceptance. If
       // settlement fails, the open case remains retryable instead of being
@@ -797,15 +812,27 @@ export class ProjectReviewStore {
 
     // #1590: through the transition helper inside this transaction. The
     // service layer fires card:failed after commit, so emit is disabled.
-    kanbanTransition({
+    // #1626: settle from either legal live status (queued|running) and require
+    // the CAS to apply — `failed` is not in the from-set, so a lost CAS or
+    // missing/already-terminal card throws and rolls back the whole settlement.
+    const outcome = kanbanTransition({
       cardId,
-      from: ["running"],
+      from: ["queued", "running"],
       to: projectStateToKanban("blocked"),
       actor: "project_acceptance",
       reason: "project blocked",
-      fields: { error: `blocked: ${blockerClass}`.slice(0, 1000), completed_at: sqliteNow() },
+      fields: {
+        error: `blocked: ${blockerClass}`.slice(0, 1000),
+        completed_at: sqliteNow(),
+        next_retry_at: null,
+      },
       emit: false,
     }, this.db);
+    if (outcome.kind !== "applied") {
+      throw new Error(
+        `project ${cardId} kanban settlement lost: observed ${outcome.observed ?? "missing"}`,
+      );
+    }
 
     this.db.prepare(`
       UPDATE project_review_cases SET status = 'superseded', superseded_at = ? WHERE id = ? AND status = 'open'

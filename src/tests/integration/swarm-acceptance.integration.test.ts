@@ -116,7 +116,9 @@ async function initDb(): Promise<void> {
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT, max_tokens INTEGER, tokens_used INTEGER,
     delivery_mode TEXT DEFAULT 'deliver',
-    source_peer TEXT
+    source_peer TEXT,
+    retry_count INTEGER DEFAULT 0,
+    next_retry_at TEXT
   )`);
   _overrideDb = {
     prepare(sql: string) {
@@ -324,7 +326,9 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
     expect(Number(running.cnt)).toBe(3);
   });
 
-  it("all-terminal children trigger ReviewCaseAssembler with real structured results and Orc dispatch", async () => {
+  it("all-terminal children trigger ReviewCaseAssembler with real structured results and one durable Orc review claim", async () => {
+    const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
+    installFakeCoordinator(claims);
     const { projectId, childIds } = await createProject();
     const store = new WorkerSupervisionStore();
     for (let i = 0; i < childIds.length; i++) {
@@ -347,9 +351,14 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
     const supervision = reviewStore.getSupervision(projectId) as any;
     expect(supervision.state).toBe("review_requested");
 
-    expect(dispatchMock).toHaveBeenCalledWith(
+    // #1625: review dispatch is coordinator-owned after 0b4504a9 — one
+    // durable scheduleReview claim, never the legacy spin.dispatch path.
+    expect(claims.filter(c => c.kind === "review" && c.pid === projectId)).toHaveLength(1);
+    expect(dispatchMock).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "O", cardId: projectId }),
     );
+
+    mod.setOrcCoordinator(null);
   });
 
   it("duplicate reconcile pass does not create duplicate review case (exactly-once)", async () => {
@@ -434,6 +443,91 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
     await flush();
     const orcDispatchesAfterAcceptance = dispatchMock.mock.calls.filter((c: any) => c[0]?.type === "O");
     expect(orcDispatchesAfterAcceptance.length).toBeLessThanOrEqual(1);
+  });
+
+  it("#1626: queued root with retry backoff settles through the real review service", async () => {
+    const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
+    installFakeCoordinator(claims);
+    const { projectId, childIds } = await createProject();
+    const store = new WorkerSupervisionStore();
+    for (let i = 0; i < childIds.length; i++) {
+      const cId = await setupChildContract(store, childIds[i]!, projectId, `c${i + 1}`);
+      await completeChild(store, childIds[i]!, cId, `c${i + 1}`);
+    }
+
+    mod.requestReconcile(projectId);
+    await flush();
+
+    const reviewStore = new ProjectReviewStore();
+    const openCase = reviewStore.getLatestOpenCase(projectId);
+    expect(openCase).toBeDefined();
+    const supervision = reviewStore.getSupervision(projectId) as any;
+    expect(supervision.state).toBe("review_requested");
+
+    // Production-observed state (#1389): the coordinator claimed the review
+    // turn, then the retry backoff returned the card to queued with a stale
+    // execution error and a future next_retry_at. Both the authoritative DB
+    // row and the in-memory dispatch map mirror the live state.
+    const future = new Date(Date.now() + 60_000).toISOString().replace(/Z$/, "").replace("T", " ").slice(0, 19);
+    reviewStore.db.prepare(`
+      UPDATE kanban_board SET status = 'queued', error = 'stale failed-turn',
+        next_retry_at = ?, retry_count = 2, updated_at = datetime('now') WHERE id = ?
+    `).run(future, projectId);
+    const mapCard = cards.get(projectId);
+    if (mapCard) { mapCard.status = "queued"; mapCard.error = "stale failed-turn"; }
+
+    const assembler = new ReviewCaseAssembler();
+    const snapshot = await assembler.assembleCase(projectId, supervision.generation, supervision.review_round);
+    expect("error" in snapshot).toBe(false);
+    const snap = snapshot as any;
+
+    const svc = new ProjectReviewService();
+    const criterionVerdicts = snap.criterion_inputs.map((ci: any) => ({
+      criterion_id: ci.criterion_id,
+      verdict: "satisfied" as const,
+      evidence_ids: ci.observed_evidence_ids.length > 0 ? [ci.observed_evidence_ids[0]!] : [],
+      rationale: `evidence: ${ci.observed_evidence_ids.join(",")}`,
+    }));
+    const decision: import("../../components/project-acceptance/project-review-validator.js").ProjectReviewDecisionV1 = {
+      schema_version: 1, id: `d_${projectId}`, project_card_id: projectId,
+      review_case_id: (openCase as any).id, project_generation: supervision.generation,
+      action: "accept",
+      criteria: criterionVerdicts,
+      outputs: [{ output_id: "out", disposition: "present", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      authored_at: new Date().toISOString(),
+      synthesis: "All three workers completed",
+    };
+
+    const result = svc.processDecision(decision);
+    expect(result.kind).toBe("accepted");
+
+    // Terminal projection: the queued card becomes done with the bounded
+    // synthesis, cleared stale error and retry backoff, and a completion stamp.
+    const kanbanRow = reviewStore.db.prepare(
+      "SELECT status, result_summary, error, next_retry_at, completed_at FROM kanban_board WHERE id = ?",
+    ).get(projectId) as any;
+    expect(kanbanRow.status).toBe("done");
+    expect(kanbanRow.result_summary).toContain("completed");
+    expect(kanbanRow.error).toBeNull();
+    expect(kanbanRow.next_retry_at).toBeNull();
+    expect(kanbanRow.completed_at).toBeTruthy();
+
+    const journal = reviewStore.db.prepare(
+      "SELECT from_status, to_status, actor FROM kanban_card_transitions WHERE card_id = ?",
+    ).all(projectId) as any[];
+    expect(journal).toEqual([{ from_status: "queued", to_status: "done", actor: "project_acceptance" }]);
+
+    // Durable review state is terminal in the same transaction.
+    expect(reviewStore.getSupervision(projectId)!.state).toBe("accepted");
+    expect(reviewStore.getReviewCase((openCase as any).id)!.status).toBe("accepted");
+    expect(reviewStore.getReviewRequestByCaseId((openCase as any).id)!.status).toBe("settled");
+
+    // No legacy Orc dispatch for the review turn.
+    expect(dispatchMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "O", cardId: projectId }));
+
+    mod.setOrcCoordinator(null);
   });
 });
 

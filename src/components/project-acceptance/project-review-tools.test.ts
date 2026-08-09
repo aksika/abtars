@@ -86,6 +86,10 @@ function makeDelegatedSnapshot(pid: number): ReviewCaseSnapshot {
 async function setupCase(pid: number, snapshot: ReviewCaseSnapshot, contract: Record<string, unknown>): Promise<{ pid: number; caseId: string }> {
   store.insertContract(contract as never);
   store.initializeSupervision(pid, String(contract.id), "executing");
+  // #1626: settlement requires a live kanban card — the real projection must
+  // apply from a legal live status inside the settlement transaction.
+  store.db.prepare(`INSERT INTO kanban_board (id, title, source, status, type, goal, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', ?, datetime('now'), datetime('now'))`)
+    .run(pid, "tools project", "task", "tools goal");
   const { id } = store.insertReviewCase(pid, 1, 1, snapshot, `digest_${pid}`);
   store.insertReviewRequest(pid, id, 1);
   store.stateTransition(pid, ["executing"], "review_requested");

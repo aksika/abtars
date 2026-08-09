@@ -468,7 +468,7 @@ describe("Reconciler — #1411 domain guard", () => {
       expect(kanbanFailMock).not.toHaveBeenCalled();
     });
 
-      it("supervised project with all-terminal children transitions to review_ready and dispatches Orc", async () => {
+      it("supervised project with all-terminal children transitions to review_ready and claims one durable Orc review", async () => {
       // reviewStoreMock is already fresh from beforeEach
       reviewStoreMock.contractExists.mockReturnValue(true);
       reviewStoreMock.getSupervision.mockReturnValue({
@@ -497,14 +497,29 @@ describe("Reconciler — #1411 domain guard", () => {
         { ...makeCard({ id: 3, status: "done", type: "W" }), parent_id: 1 },
       ]);
 
+      // #1625: review dispatch is coordinator-owned after 0b4504a9 — install a
+      // deterministic fake and assert the durable scheduleReview claim.
+      const reviewClaims: Array<[number, number, string]> = [];
+      mod.setOrcCoordinator({
+        scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+        scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+        scheduleReview: (projectCardId: number, projectGeneration: number, reviewCaseId: string) => {
+          reviewClaims.push([projectCardId, projectGeneration, reviewCaseId]);
+          return { kind: "claimed" as const, context: { runId: `or_review_${projectCardId}`, projectCardId } };
+        },
+      } as never);
+
       mod.requestReconcile(1);
       await flush();
 
       expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
       expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["review_ready"], "review_requested");
       expect(reviewStoreMock.insertReviewRequest).toHaveBeenCalledWith(1, "rc_test_1", 1);
-      expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "O", cardId: 1 }));
+      expect(reviewClaims).toEqual([[1, 1, "rc_test_1"]]);
+      expect(dispatchMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "O", cardId: 1 }));
       expect(kanbanCompleteMock).not.toHaveBeenCalled();
+
+      mod.setOrcCoordinator(null);
     });
 
     it("project with all-terminal children but no contract does not auto-complete (legacy removed)", async () => {
