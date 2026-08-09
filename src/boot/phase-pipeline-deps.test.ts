@@ -6,7 +6,7 @@
  * of letting durable requests degrade to suffix-only answers.
  */
 import { describe, it, expect, vi } from "vitest";
-import { createBootCtx } from "./context.js";
+import { clearMemoryToolDependencies, createBootCtx } from "./context.js";
 import { phasePipelineDeps, buildFailureNotification, buildShaFailurePrompt } from "./phase-pipeline-deps.js";
 import { makeTaskFailure } from "../components/tasks/task-failure.js";
 
@@ -32,6 +32,27 @@ function memoryState(state: "ready" | "disabled" | "unavailable", supportsDurabl
 }
 
 describe("phasePipelineDeps #1527", () => {
+  it("clears the holder before closing the old quota", () => {
+    const ctx = createBootCtx();
+    const order: string[] = [];
+
+    ctx.memoryToolDependencies.current = {
+      runtime: {} as never,
+      quota: {} as never,
+    };
+    ctx.memoryStoreQuota = {
+      close: () => {
+        order.push(ctx.memoryToolDependencies.current === null ? "cleared" : "stale");
+      },
+    } as never;
+
+    clearMemoryToolDependencies(ctx);
+
+    expect(order).toEqual(["cleared"]);
+    expect(ctx.memoryToolDependencies.current).toBeNull();
+    expect(ctx.memoryStoreQuota).toBeNull();
+  });
+
   it("refuses a memory-enabled Pi route without the durable-context capability", async () => {
     const ctx = createBootCtx({
       transport: fakePiTransport(),

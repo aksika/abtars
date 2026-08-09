@@ -152,6 +152,20 @@ export interface BootCtx {
 }
 
 /**
+ * Detach memory tools before closing their quota ledger.
+ *
+ * Transports keep the holder by reference, so clearing it first makes any
+ * late tool execution fail closed instead of observing a closed quota.
+ */
+export function clearMemoryToolDependencies(
+  ctx: Pick<BootCtx, "memoryToolDependencies" | "memoryStoreQuota">,
+): void {
+  ctx.memoryToolDependencies.current = null;
+  ctx.memoryStoreQuota?.close();
+  ctx.memoryStoreQuota = null;
+}
+
+/**
  * Construct a BootCtx with defaults. Test callers pass `overrides` to
  * populate specific fields before invoking a phase in isolation.
  *

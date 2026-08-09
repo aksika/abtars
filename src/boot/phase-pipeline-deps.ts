@@ -25,7 +25,7 @@ import { formatTaskFailureDetail, formatTaskFailureRootCause } from "../componen
 import type { TaskFailureDiagnosticV1 } from "../components/tasks/task-failure.js";
 import { loadTransport, resolveAgent } from "../components/transport-config.js";
 import { updateCtxStart } from "./ctx-start.js";
-import type { BootCtx, PhaseResult } from "./context.js";
+import { clearMemoryToolDependencies, type BootCtx, type PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 
 import { getEnv } from "../components/env-schema.js";
@@ -253,7 +253,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // from a prior boot is closed first; tool turns always read the current
   // holder, so a null holder after shutdown fails closed with
   // private_write_unavailable.
-  if (ctx.memoryStoreQuota) ctx.memoryStoreQuota.close();
+  clearMemoryToolDependencies(ctx);
   const { MemoryStoreQuota } = await import("../components/memory-store-quota.js");
   const quota = new MemoryStoreQuota();
   ctx.memoryStoreQuota = quota;
