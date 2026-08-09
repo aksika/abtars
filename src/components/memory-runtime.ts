@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import type { AbmindClientLike, AbmindPrivateMemoryLike, AbmindRouteSnapshotV1Like } from "./abmind-client-contract.js";
+import type {
+  AbmindClientLike,
+  AbmindPrivateMemoryLike,
+  AbmindRouteSnapshotV1Like,
+  SleepStatusLike,
+} from "./abmind-client-contract.js";
 
 import { logWarn } from "./logger.js";
 import type { MemoryMutationFamily } from "./memory-operation-key.js";
@@ -309,6 +314,8 @@ export interface AbtarsMemoryRuntime {
   assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult>;
   getRecentConversation(input: RecentConversationInput): Promise<RecentConversationResult>;
   getStatus(input?: RuntimeStatusInput): Promise<RuntimeStatusResult>;
+  /** Read daemon-owned sleep lifecycle state for operator status commands. */
+  getSleepStatus(): Promise<SleepStatusLike>;
   getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult>;
   recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult>;
   embed(input: EmbeddingInput): Promise<EmbeddingResult>;
@@ -488,6 +495,10 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         dbSizeBytes: typeof stats["dbSizeBytes"] === "number" ? stats["dbSizeBytes"] : 0,
         rejectedByScanner: typeof stats["rejectedByScanner"] === "number" ? stats["rejectedByScanner"] : 0,
       };
+    },
+
+    async getSleepStatus(): Promise<SleepStatusLike> {
+      return await client.sleep.status();
     },
 
     async getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult> {
@@ -670,6 +681,7 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
     getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0 }; },
+    getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
@@ -698,6 +710,7 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
     getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0 }; },
+    getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },

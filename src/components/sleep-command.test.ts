@@ -49,7 +49,20 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     },
     config: { agentTransport: "acp", workingDir: "/tmp", discordA2aEnabled: false },
     startedAt: Date.now(),
-    memory: null,
+    memoryRuntime: {
+      state: "ready",
+      getSleepStatus: vi.fn().mockResolvedValue({
+        state: "terminal",
+        last: {
+          attemptedAt: 1_000,
+          finishedAt: 2_000,
+          status: "failed",
+          resumable: true,
+          completedSteps: 5,
+          failedSteps: 1,
+        },
+      }),
+    } as unknown as CommandContext["memoryRuntime"],
     memoryConfig: { memoryEnabled: true, memoryDir: "/tmp/mem" },
     nlmConfig: { enabled: false },
     codingMode: { has: vi.fn().mockReturnValue(false), start: vi.fn(), stop: vi.fn(), getTransport: vi.fn() } as unknown as CodingMode,
@@ -72,13 +85,16 @@ describe("/sleep commands", () => {
     bridgeLock.readBridgeLockField.mockReturnValue(null);
   });
 
-  it("/sleep shows status with last cycle info", async () => {
+  it("/sleep renders daemon last-cycle status", async () => {
     const ctx = makeCtx();
     const handled = await handleCommand("/sleep", ctx);
     expect(handled).toBe(true);
     const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
     expect(reply).toContain("Sleep status");
     expect(reply).toContain("Awake");
+    expect(reply).toContain("Last cycle:");
+    expect(reply).toContain("failed (5 completed, 1 failed; resumable)");
+    expect(reply).not.toContain("owner-side sleep status is available through the daemon");
     expect(reply).toContain("/sleep resume");
     expect(reply).toContain("/sleep now");
   });

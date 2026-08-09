@@ -2,6 +2,8 @@ import { logInfo } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { readEntry } from "../tasks/task-store.js";
+import { localDateTime } from "../../utils/local-time.js";
+import type { SleepStatusLike, SleepStatusLastLike } from "../abmind-client-contract.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd";
@@ -14,9 +16,31 @@ function readSleepSchedule(): string {
   } catch (err) { logAndSwallow(TAG, "readSleepSchedule", err); return "(unknown)"; }
 }
 
+async function readDaemonSleepStatus(ctx: CommandContext): Promise<SleepStatusLike | null> {
+  if (ctx.memoryRuntime.state !== "ready") return null;
+  try {
+    return await ctx.memoryRuntime.getSleepStatus();
+  } catch (err) {
+    logAndSwallow(TAG, "readSleepStatus", err);
+    return null;
+  }
+}
+
+function formatLastCycle(status: SleepStatusLike | null): string {
+  const last: SleepStatusLastLike | undefined = status?.last;
+  if (!status) return "(daemon unavailable)";
+  if (!last) return "(none recorded)";
+
+  const timestamp = last.finishedAt ?? last.attemptedAt;
+  const when = Number.isFinite(timestamp) ? localDateTime(new Date(timestamp)) : "unknown time";
+  const resumable = last.resumable ? "; resumable" : "";
+  return `${when} — ${last.status} (${last.completedSteps} completed, ${last.failedSteps} failed${resumable})`;
+}
+
 export async function handleSleep(_text: string, ctx: CommandContext): Promise<boolean> {
   const sleepStatus = readBridgeLockField<string>("sleepStatus") ?? "awake";
   const progress = ctx.sleepProgress?.();
+  const daemonStatus = await readDaemonSleepStatus(ctx);
 
   const lines: string[] = ["😴 Sleep status"];
   let stateLabel: string;
@@ -28,7 +52,7 @@ export async function handleSleep(_text: string, ctx: CommandContext): Promise<b
     stateLabel = "👋 Awake";
   }
   lines.push(`  State: ${stateLabel}`);
-  lines.push("  Last cycle: owner-side sleep status is available through the daemon");
+  lines.push(`  Last cycle: ${formatLastCycle(daemonStatus)}`);
   lines.push(`  Schedule: ${readSleepSchedule()} (tasks.json sleep-cycle)`);
   lines.push("");
   lines.push("/sleep resume — retry failed steps");
