@@ -169,6 +169,24 @@ function makeEnvelope(childId: number, contractId: string, rootCriterionId: stri
   };
 }
 
+/** #1618: supervised roots claim through the Orc coordinator, not legacy dispatch. */
+function installFakeCoordinator(claims: Array<{ kind: string; pid: number; goal?: string }>) {
+  mod.setOrcCoordinator({
+    scheduleContractAuthoring: (pid: number) => {
+      claims.push({ kind: "authoring", pid });
+      return { kind: "claimed" as const, context: { runId: `or_${pid}_fake`, projectCardId: pid } };
+    },
+    scheduleScheduledProject: (pid: number, goal: string) => {
+      claims.push({ kind: "coverage", pid, goal });
+      return { kind: "claimed" as const, context: { runId: `or_${pid}_fake`, projectCardId: pid } };
+    },
+    scheduleReview: (pid: number) => {
+      claims.push({ kind: "review", pid });
+      return { kind: "claimed" as const, context: { runId: `or_${pid}_rev`, projectCardId: pid } };
+    },
+  } as never);
+}
+
 async function createProject(): Promise<{ projectId: number; childIds: number[] }> {
   const projectId = nextCardId++;
   const now = new Date().toISOString().replace(/Z$/, "");
@@ -453,6 +471,8 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
   }
 
   it("partial coverage dispatches exactly one coverage round and stays executing, spawn-eligible", async () => {
+    const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
+    installFakeCoordinator(claims);
     const { projectId } = await createGapProject();
     const reviewStore = new ProjectReviewStore();
 
@@ -464,11 +484,13 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
     expect(sup.coverage_rounds).toBe(1);
     expect(JSON.parse(sup.coverage_uncovered_ids!)).toEqual(["c3"]);
     expect(reviewStore.getLatestOpenCase(projectId)).toBeUndefined();
-    const coverageDispatches = dispatchMock.mock.calls.filter((c: any) => c[0]?.goal?.includes("[COVERAGE GAP]"));
-    expect(coverageDispatches.length).toBe(1);
+    const coverageClaims = claims.filter((c: any) => c.goal?.includes("[COVERAGE GAP]"));
+    expect(coverageClaims.length).toBe(1);
   });
 
   it("identical signature with grace not elapsed: no second dispatch, no settle (tight loop)", async () => {
+    const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
+    installFakeCoordinator(claims);
     const { projectId } = await createGapProject();
     const reviewStore = new ProjectReviewStore();
 
@@ -480,8 +502,8 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
     const sup = reviewStore.getSupervision(projectId)!;
     expect(sup.state).toBe("executing");
     expect(sup.coverage_rounds).toBe(1);
-    const coverageDispatches = dispatchMock.mock.calls.filter((c: any) => c[0]?.goal?.includes("[COVERAGE GAP]"));
-    expect(coverageDispatches.length).toBe(1);
+    const coverageClaims = claims.filter((c: any) => c.goal?.includes("[COVERAGE GAP]"));
+    expect(coverageClaims.length).toBe(1);
   });
 
   it("identical signature with grace elapsed proceeds to review with the persisted gap (no terminal block)", async () => {
@@ -910,6 +932,8 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
   });
 
   it("terminal event completes contribution proxy card and wakes Reconciler", async () => {
+    const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
+    installFakeCoordinator(claims);
     const projectId = createScenarioProject();
     setupContribution(projectId);
 
@@ -928,9 +952,9 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
 
     await flush();
 
-    expect(dispatchMock).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "O", cardId: projectId }),
-    );
+    // the supervised root is claimed by the Orc coordinator (coverage or
+    // review) — never legacy-dispatched (#1618)
+    expect(claims.some(c => c.pid === projectId)).toBe(true);
   });
 
   it("review case assembler includes peer_contributions with root_criteria and provenance", async () => {
@@ -966,9 +990,11 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
   });
 
   it("duplicate terminal event is idempotent (no duplicate reconcile)", async () => {
+    const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
+    installFakeCoordinator(claims);
     const projectId = createScenarioProject();
     setupContribution(projectId);
-    dispatchMock.mockClear();
+    claims.length = 0;
 
     const event = makeContributionEvent();
     const first = await peerHelpService.handleContributionEvent("molty", event);
@@ -984,11 +1010,14 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
 
     await flush();
 
-    const orcDispatches = dispatchMock.mock.calls.filter((c: any) => c[0]?.type === "O");
-    expect(orcDispatches.length).toBe(1);
+    // exactly one coordinator claim for the project — the duplicate event
+    // never wakes a second claim
+    expect(claims.filter(c => c.pid === projectId)).toHaveLength(1);
   });
 
   it("declined contribution state is set and proxy card fails cleanly", async () => {
+    const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
+    installFakeCoordinator(claims);
     const projectId = createScenarioProject();
     const result = contributionStore.reserveProxy({
       peer: "molty",
