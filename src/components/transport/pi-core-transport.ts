@@ -1,4 +1,4 @@
-import { logDebug, logInfo } from "../logger.js";
+import { logDebug, logInfo, logWarn } from "../logger.js";
 import type { IKiroTransport, PromptRequestContext, RuntimeUsageSnapshot, RuntimeStatusSnapshot } from "./kiro-transport.js";
 import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
 import type { ModelHealthRegistry } from "./model-health-registry.js";
@@ -11,7 +11,7 @@ import type { PiCoreToolContext } from "./pi-core-tools.js";
 import { createPiExecutionSafetyController } from "./pi-core-safety.js";
 import type { SandboxPolicy } from "../tool-sandbox.js";
 import type { AgentMessage } from "./pi-core-types.js";
-import { createCurrentTurnMessage } from "./pi-core-types.js";
+import { createCurrentTurnMessage, PiCoreContractError } from "./pi-core-types.js";
 import type { OutputObserver } from "../session-output-feed.js";
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import { buildPiModel, pickPiApi } from "./pi-ai-adapter.js";
@@ -437,8 +437,28 @@ export class PiCoreTransport implements IKiroTransport {
         await host.start(loaded);
         // #1506: waitForSettlement() awaits only logical terminal latch.
         // Deadline enforcement belongs to the scheduled runner via signalCancel.
-        await host.waitForSettlement();
+        // #1622: the typed reason distinguishes normal completion from a Pi
+        // lifecycle contract violation (prompt returned with no agent_end).
+        const terminalReason = await host.waitForSettlement();
         slot.settled = true;
+
+        // #1622: a resolved prompt without a terminal agent_end is a Pi
+        // contract violation — the turn never actually settled. Lead with the
+        // contract error before any response/tool/provider outcome selection;
+        // never report this as a successful empty answer. A prior tool failure
+        // is retained as supporting cause only.
+        if (terminalReason === "prompt_completed_without_agent_end") {
+          logWarn(TAG, `sendPrompt: prompt completed without agent_end (${executionId}) — contract error`);
+          throw new PiCoreContractError(
+            "pi-agent-core prompt completed without agent_end",
+            {
+              missingCapability: "agent_end settlement",
+              cause: this._lastToolFailure
+                ? new PiCoreToolExecutionError(this._lastToolFailure)
+                : undefined,
+            },
+          );
+        }
 
         if (context?.executionTelemetry) {
           const snap = context.executionTelemetry.snapshot();

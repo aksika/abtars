@@ -14,6 +14,15 @@ const TAG = "pi-core-host";
 
 export type PiCoreHostState = "created" | "running" | "aborting" | "settling" | "settled";
 
+/** #1622: typed terminal outcome of a Pi execution generation. */
+export type PiCoreTerminalReason =
+  | "agent_end"
+  | "cancelled"
+  | "agent_construct_failure"
+  | "context_projection_failure"
+  | "prompt_failure"
+  | "prompt_completed_without_agent_end";
+
 export interface PiCoreExecutionHostOptions {
   executionId: string;
   sessionId: string;
@@ -52,9 +61,9 @@ export class PiCoreExecutionHost {
   private unsub: (() => void) | null = null;
   private settled = false;
   private _cleanupPromise: Promise<"complete" | "timed_out"> = Promise.resolve("complete");
-  private _terminalResolve: ((value: string) => void) | null = null;
+  private _terminalResolve: ((value: PiCoreTerminalReason) => void) | null = null;
   private _lastUsage: { input: number; output: number; cacheRead?: number; cacheWrite?: number } | null = null;
-  readonly terminalPromise: Promise<string>;
+  readonly terminalPromise: Promise<PiCoreTerminalReason>;
   private outstandingLeases: Map<string, OutstandingLease> = new Map();
   private opts: PiCoreExecutionHostOptions;
   private outputObserver?: OutputObserver;
@@ -224,6 +233,15 @@ export class PiCoreExecutionHost {
         logWarn(TAG, `Initial prompt failed: ${err instanceof Error ? err.message : String(err)}`);
         this.beginSettle("prompt_failure");
       }
+      // #1622: prompt() returned without a terminal event while the host still
+      // runs. Pi's own promise contract claims the run is complete; settle
+      // exactly once instead of leaving the terminal latch pending forever.
+      // Cancellation and real agent_end that win first are observed as a
+      // non-running state here and leave the earlier reason intact.
+      if (this.state === "running") {
+        logWarn(TAG, `Prompt completed without agent_end for execution ${this.executionId} gen=${this._generation}`);
+        this.beginSettle("prompt_completed_without_agent_end");
+      }
     }
   }
 
@@ -348,13 +366,13 @@ export class PiCoreExecutionHost {
   }
 
   /** Logical terminalization — one-shot latch that waitForSettlement() resolves. */
-  private terminalResolve(reason: string): void {
+  private terminalResolve(reason: PiCoreTerminalReason): void {
     if (this.settled) return;
     this._terminalResolve?.(reason);
     this._terminalResolve = null;
   }
 
-  private beginSettle(reason: string): void {
+  private beginSettle(reason: PiCoreTerminalReason): void {
     if (this.state === "settling" || this.state === "settled") return;
     this.state = "settling";
     this.terminalResolve(reason);
@@ -362,7 +380,7 @@ export class PiCoreExecutionHost {
     this.settle(reason);
   }
 
-  private settle(reason?: string): void {
+  private settle(reason?: PiCoreTerminalReason): void {
     if (this.settled) return;
     this.settled = true;
     this.state = "settled";
@@ -530,9 +548,11 @@ export class PiCoreExecutionHost {
 
   /** #1506: Await ONLY logical terminalization, not cleanup/waitForIdle.
    *  This resolves as soon as cancel, agent_end, or a terminal event claims
-   *  the terminal latch — cleanup continues independently. */
-  async waitForSettlement(): Promise<void> {
-    await this.terminalPromise;
+   *  the terminal latch — cleanup continues independently. #1622: resolves
+   *  with the typed terminal reason so the transport can distinguish normal
+   *  completion, cancellation, and a Pi contract violation. */
+  async waitForSettlement(): Promise<PiCoreTerminalReason> {
+    return this.terminalPromise;
   }
 
   get isRunning(): boolean {
