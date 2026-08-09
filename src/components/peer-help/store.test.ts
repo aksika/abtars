@@ -69,7 +69,22 @@ async function makeStore() {
   const { PeerHelpStore } = await import("./store.js");
   const nerve = makeNerve();
   const kanban = makeKanban();
-  const store = new PeerHelpStore(db as any, kanban as any, nerve as any);
+  // Production wires PeerHelpStore with requireTaskDatabase() — a wrapper whose
+  // transaction(fn) executes immediately and returns the value. Mirror that
+  // here so tests exercise the same semantics as the deployed bridge (#1616).
+  const wrapped = {
+    prepare: (sql: string) => {
+      const stmt = db.prepare(sql);
+      return {
+        run: (...p: unknown[]) => stmt.run(...p),
+        get: (...p: unknown[]) => stmt.get(...p) as Record<string, unknown> | undefined,
+        all: (...p: unknown[]) => stmt.all(...p) as Record<string, unknown>[],
+      };
+    },
+    exec: (sql: string) => db.exec(sql),
+    transaction: <T>(fn: () => T): T => db.transaction(fn)(),
+  };
+  const store = new PeerHelpStore(wrapped as any, kanban as any, nerve as any);
   return { store, nerve };
 }
 

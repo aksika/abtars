@@ -54,12 +54,22 @@ interface NerveEmitter {
   fire(event: "card:queued" | "card:running" | "card:done" | "card:failed" | "card:delivered", cardId: number): void;
 }
 
+interface Db {
+  prepare(sql: string): {
+    run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+    get(...params: unknown[]): Record<string, unknown> | undefined;
+    all(...params: unknown[]): Record<string, unknown>[];
+  };
+  exec(sql: string): void;
+  transaction<T>(fn: () => T): T;
+}
+
 export class PeerHelpStore {
-  private db: import("better-sqlite3").Database;
+  private db: Db;
   private kanban: KanbanBoard;
   private nerve: NerveEmitter;
 
-  constructor(db: import("better-sqlite3").Database, kanban: KanbanBoard, nerve: NerveEmitter) {
+  constructor(db: Db, kanban: KanbanBoard, nerve: NerveEmitter) {
     this.db = db;
     this.kanban = kanban;
     this.nerve = nerve;
@@ -167,7 +177,7 @@ export class PeerHelpStore {
       ).run(contributionRef, cardId, JSON.stringify(response), reservation.originPeer, reservation.requestId);
 
       return cardId;
-    })();
+    });
 
     // Fire only after commit — a rolled-back transaction must not notify consumers.
     this.nerve.fire("card:queued", result);
@@ -195,7 +205,7 @@ export class PeerHelpStore {
          SET state = 'accepted', contribution_ref = ?, local_run_id = ?, response_json = ?, updated_at = datetime('now')
          WHERE origin_peer = ? AND request_id = ?`
       ).run(contributionRef, runId, JSON.stringify(response), reservation.originPeer, reservation.requestId);
-    })();
+    });
   }
 
   completeDecision(reservation: { originPeer: string; requestId: string }, decision: HelpDecision, response: PeerHelpResponseV1): void {
