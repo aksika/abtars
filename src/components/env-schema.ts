@@ -256,16 +256,19 @@ export function getEnv(): Readonly<EnvConfig> {
   return _G.__abtarsEnv!;
 }
 
-/** Sanitized config dump — masks API keys/tokens, shows everything else. For /status. */
+/**
+ * Sanitized config dump — presence-only for credentials, plain values for
+ * everything else. For /status. (#1354: never a value or fragment of a
+ * credential — not even a masked prefix.)
+ */
 export function envDump(): Record<string, string> {
   const env = getEnv();
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     if (typeof value === "function") continue;
     const strVal = value == null ? "(not set)" : String(value);
-    // Mask anything that looks like a secret
-    if (/token|key|secret|password/i.test(key) && strVal.length > 4) {
-      result[key] = strVal.slice(0, 4) + "…" + strVal.slice(-2);
+    if (/token|key|secret|password|_api_id/i.test(key)) {
+      result[key] = value == null ? "(not set)" : "(set)";
     } else {
       result[key] = strVal;
     }

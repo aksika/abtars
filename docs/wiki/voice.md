@@ -11,8 +11,16 @@ Provider: Groq Whisper (`whisper-large-v3-turbo`).
 ```bash
 # ~/.abtars/config/.env
 STT_ENABLED=true
-GROQ_API_KEY=<secret>
 ```
+
+Store the Groq API key in the secrets vault (never in `.env`):
+
+```bash
+echo -n "gsk-..." > ~/.abtars/secret/GROQ_API_KEY
+chmod 600 ~/.abtars/secret/GROQ_API_KEY
+```
+
+Then restart the bridge (`abtars stop --force && abtars start`). The key is encrypted at rest and loaded into `process.env.GROQ_API_KEY` at boot.
 
 ### Flow
 

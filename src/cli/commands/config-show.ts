@@ -29,7 +29,8 @@ export async function configShow(): Promise<number> {
     if (eq < 1) continue;
     const key = trimmed.slice(0, eq);
     const val = trimmed.slice(eq + 1);
-    const display = isSecret(key) && val.length > 4 ? val.slice(0, 4) + "****" : val;
+    // #1354: credentials are presence-only — never print values or fragments.
+    const display = isSecret(key) ? (val.trim() ? "(set)" : "(not set)") : val;
     process.stdout.write(`${key}=${display}\n`);
   }
   return 0;

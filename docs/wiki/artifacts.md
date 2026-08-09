@@ -38,15 +38,23 @@ For larger files — binaries, datasets, reports. Uses any S3-compatible storage
 
 ### Configuration
 
-Add to `~/.abtars/config/.env`:
+Add the endpoint and bucket settings to `~/.abtars/config/.env`:
 
 ```bash
 ARTIFACT_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
-ARTIFACT_S3_KEY=<access-key>
-ARTIFACT_S3_SECRET=<secret>
 ARTIFACT_S3_BUCKET=abtars-artifacts
 ARTIFACT_S3_REGION=auto
 ```
+
+The S3 credentials are secrets — store them in the secrets vault, not `.env`:
+
+```bash
+echo -n "<access-key>" > ~/.abtars/secret/ARTIFACT_S3_KEY
+echo -n "<secret>"     > ~/.abtars/secret/ARTIFACT_S3_SECRET
+chmod 600 ~/.abtars/secret/ARTIFACT_S3_KEY ~/.abtars/secret/ARTIFACT_S3_SECRET
+```
+
+They are encrypted at rest and loaded into `process.env` at boot.
 
 Tools (`artifact_push`, `artifact_pull`) appear automatically after restart when endpoint is configured.
 

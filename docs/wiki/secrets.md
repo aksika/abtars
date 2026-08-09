@@ -32,6 +32,17 @@ On restart, the file is automatically encrypted. The plaintext value is availabl
 
 > **Full process restart required.** Secrets load at process boot (module init). The Telegram `/restart` command reinits the pipeline in-process but does NOT reload secrets. Always use `abtars stop --force && abtars start` (or the watchdog restart) for new keys.
 
+## Never store credentials in .env
+
+`~/.abtars/secret/<ENV_NAME>` is the **only** place API keys and provider credentials belong. Do not write them to `~/.abtars/config/.env`, `.env.skills`, or any other plaintext file.
+
+- Credential-shaped variables (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_ID`) found in `.env` / `.env.skills` are migrated to `secret/` on boot and removed from the plaintext file.
+- If the same key already exists in `secret/` with a different value, the stored value wins, the plaintext copy is removed, and a redacted conflict warning is issued. **Rotate the value** — if the plaintext was written by an operator, it was exposed on disk and must be treated as compromised.
+- Conflicting plaintext values with no stored secret are **not** resolved automatically: the affected provider is disabled for that boot and a rotation is required.
+- `WEB_AUTH` is the one documented exception — it lives in `.env` and is managed by the dashboard setup.
+
+The migration exists to recover misconfiguration, not as a workflow. Write keys directly to `secret/`.
+
 ## Adding a new provider
 
 1. Write the API key:
@@ -70,13 +81,13 @@ On restart, the file is automatically encrypted. The plaintext value is availabl
    /model nvidia/nemotron-3-ultra-550b-a55b
    ```
 
-The `apiKeyEnv` field tells the bridge which filename in `~/.abtars/secret/` to read. The filename must match exactly (no extension).
+The `apiKeyEnv` field tells the bridge which filename in `~/.abtars/secret/` to read. The filename must match exactly (no extension). Raw secret fields (`apiKey`, `token`, `secret`, `password`, ...) are **rejected** in `transport.json` — the schema is whitelisted and credentials are only ever referenced by environment-variable name.
 
 ## Don't put keys in .env
 
-The bridge auto-migrates secrets from `.env` to `secret/` on boot (keys ending in `_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`, `_API_ID`). This works but adds confusion — the key disappears from `.env` and appears encrypted in `secret/`. Write directly to `secret/` to skip the migration step.
+Credential-shaped assignments in `.env` / `.env.skills` (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_ID`) are auto-migrated to `secret/` on boot. The key disappears from the plaintext file and appears encrypted in `secret/`. This is a recovery path for misconfiguration — write directly to `secret/` to skip the migration step.
 
-If you already put a key in `.env`, the next boot migrates it automatically. No action needed.
+If a plaintext key was ever present in `.env`, treat it as compromised and rotate it: the plaintext value sat on disk unencrypted.
 
 ## What makes it a vault
 

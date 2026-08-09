@@ -19,10 +19,11 @@
       "additionalProperties": {
         "type": "object",
         "required": ["transport"],
+        "additionalProperties": false,
         "properties": {
-          "transport": { "type": "string", "enum": ["api", "acp"] },
+          "transport": { "type": "string", "enum": ["api", "acp", "tmux"] },
           "endpoint": { "type": "string" },
-          "apiKeyEnv": { "type": "string" },
+          "apiKeyEnv": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
           "cli": { "type": "string" },
           "apiFormat": { "type": "string", "enum": ["chat", "responses", "anthropic"] },
           "thinking": { "type": "object" },

@@ -322,7 +322,7 @@ describe("#367 — validateProviderReady", () => {
       expect(result.reason).toContain("OPENROUTER_API_KEY");
       expect(result.reason).toContain("openrouter");
       expect(result.fix).toContain("OPENROUTER_API_KEY");
-      expect(result.fix).toContain(".env");
+      expect(result.fix).toContain("~/.abtars/secret/");
     });
 
     it("treats empty string as missing", () => {

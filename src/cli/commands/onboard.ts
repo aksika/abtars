@@ -279,8 +279,8 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     providerApiKey = String(v ?? '').trim() || existing?.providerApiKey || '';
   }
 
-  // Summary
-  const mask = (s: string): string => s ? (s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-4)}` : '***') : '(skipped)';
+  // Summary — #1354: credentials are presence-only, never values or fragments.
+  const presence = (s: string): string => (s ? "(set)" : "(not set)");
   const lines = [
     '',
     '── Summary ──',
@@ -288,11 +288,11 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     `  Install mode:        ${installMode}`,
     `  Security:            ${securityMode}`,
     `  Telegram chat ID:    ${String(telegramChatId ?? '') || '(skipped)'}`,
-    `  Telegram token:      ${mask(String(telegramToken ?? ''))}`,
-    `  Discord bot token:   ${mask(String(discordBotToken ?? ''))}`,
+    `  Telegram token:      ${presence(String(telegramToken ?? ''))}`,
+    `  Discord bot token:   ${presence(String(discordBotToken ?? ''))}`,
     `  Provider:            ${defaultProvider}`,
     `  Main model:          ${modelStr}`,
-    `  ${apiKeyEnv}:        ${mask(providerApiKey)}`,
+    `  ${apiKeyEnv}:        ${presence(providerApiKey)}`,
     '',
   ];
   process.stdout.write(lines.join('\n'));
@@ -554,7 +554,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       if (check.ok) {
         process.stdout.write(`✓ API key valid (${answers.defaultModel} available)\n`);
       } else {
-        process.stderr.write(`⚠ API key validation failed: ${check.message}\n  Continuing — fix key in ~/.abtars/config/.env or secret/ later.\n`);
+        process.stderr.write(`⚠ API key validation failed: ${check.message}\n  Continuing — fix key in ~/.abtars/secret/ later.\n`);
       }
     }
   } else {
@@ -656,14 +656,21 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     }
 
     // Validate the full config before persisting — catch any schema violation early
-    const { validateTransportConfig } = await import("../../components/transport-config.js");
+    const { validateTransportConfig, writeTransportConfig } = await import("../../components/transport-config.js");
     const vr = validateTransportConfig(tc);
     if (!vr.ok) {
       process.stdout.write(`❌ Invalid transport config generated: ${vr.issues.map(i => i.message).join("; ")}\n`);
       process.stdout.write("Fix your selections and try again.\n");
       return 5;
     } else {
-      await writeFile(transportPath, JSON.stringify(vr.config, null, 2) + '\n', { mode: 0o600 });
+      // #1354: persist through the validated transport writer (the single
+      // serialization boundary) — never stringify the raw candidate directly.
+      const wr = writeTransportConfig(vr.config, "onboard setup");
+      if (!wr.ok) {
+        process.stdout.write(`❌ Invalid transport config generated: ${wr.issues.map(i => i.reason).join("; ")}\n`);
+        process.stdout.write("Fix your selections and try again.\n");
+        return 5;
+      }
       process.stdout.write(`✓ transport.json → ${transportPath}\n`);
     }
   }

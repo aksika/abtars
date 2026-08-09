@@ -81,7 +81,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const hasDiscordToken = discordToken.length > 20;
 
   if (!hasTelegramToken && !hasDiscordToken) {
-    logError("config", "No platform configured — set TELEGRAM_BOT_TOKEN or DISCORD_BOT_TOKEN in config/.env (run abtars onboard)");
+    logError("config", "No platform configured — set TELEGRAM_BOT_TOKEN or DISCORD_BOT_TOKEN in ~/.abtars/secret/ (run abtars onboard)");
   }
 
   // --- User IDs (from users.json, fallback to MAIN_CHAT_ID for TG only) ---

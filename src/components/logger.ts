@@ -136,16 +136,18 @@ function formatLine(level: string, tag: string, msg: string): string {
 /** LOW: operational milestones — startup, connections, errors */
 export function logInfo(tag: string, msg: string): void {
   if (!shouldLog("low")) return;
-  const line = formatLine("info", tag, msg);
-  if (process.stdout.isTTY) console.log(`[${tag}] ${msg}`);
+  const safe = redactSecrets(msg);
+  const line = formatLine("info", tag, safe);
+  if (process.stdout.isTTY) console.log(`[${tag}] ${safe}`);
   writeToFile(line);
 }
 
 /** LOW: warnings */
 export function logWarn(tag: string, msg: string): void {
   if (!shouldLog("low")) return;
-  const line = formatLine("warn", tag, msg);
-  if (process.stdout.isTTY) console.warn(`[${tag}] ${msg}`);
+  const safe = redactSecrets(msg);
+  const line = formatLine("warn", tag, safe);
+  if (process.stdout.isTTY) console.warn(`[${tag}] ${safe}`);
   writeToFile(line);
 }
 
@@ -154,24 +156,27 @@ export function logError(tag: string, msg: string, err?: unknown): void {
   if (!shouldLog("low")) return;
   const errStr = err instanceof Error ? err.message : (typeof err === "object" && err !== null ? JSON.stringify(err) : String(err ?? ""));
   const fullMsg = errStr ? `${msg} — ${errStr}` : msg;
-  const line = formatLine("error", tag, fullMsg);
-  if (err) { if (process.stdout.isTTY) console.error(`[${tag}] ${msg}`, err); }
-  else { if (process.stdout.isTTY) console.error(`[${tag}] ${msg}`); }
+  const safe = redactSecrets(fullMsg);
+  const line = formatLine("error", tag, safe);
+  if (err) { if (process.stdout.isTTY) console.error(`[${tag}] ${redactSecrets(msg)}`, redactSecrets(String(err))); }
+  else { if (process.stdout.isTTY) console.error(`[${tag}] ${safe}`); }
   writeToFile(line);
 }
 
 /** DEBUG: message content, full payloads, verbose tracing */
 export function logDebug(tag: string, msg: string): void {
   if (!shouldLog("debug")) return;
-  const line = formatLine("debug", tag, msg);
-  if (process.stdout.isTTY) console.log(`[${tag}] ${msg}`);
+  const safe = redactSecrets(msg);
+  const line = formatLine("debug", tag, safe);
+  if (process.stdout.isTTY) console.log(`[${tag}] ${safe}`);
   writeToFile(line);
 }
 
 /** TRACE: debug + anomaly diagnostics (swallowed errors, catch-block traces) */
 export function logTrace(tag: string, msg: string): void {
   if (!shouldLog("trace")) return;
-  const line = formatLine("trace", tag, msg);
-  if (process.stdout.isTTY) console.log(`[${tag}] ${msg}`);
+  const safe = redactSecrets(msg);
+  const line = formatLine("trace", tag, safe);
+  if (process.stdout.isTTY) console.log(`[${tag}] ${safe}`);
   writeToFile(line);
 }
