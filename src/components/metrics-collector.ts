@@ -15,6 +15,8 @@ export interface CompactionMetricEvent {
   durationMs: number;
   savingsPct?: number;
   failureReason?: string;
+  provider?: string;
+  model?: string;
 }
 
 const RING_SIZE = 100;

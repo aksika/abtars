@@ -617,8 +617,20 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
   return self;
 }
 
-/** Normalize an unknown prepare response; malformed values become busy/failed
- *  never a fake ready candidate. */
+const COMPACTION_CANDIDATE_MAX_BYTES = 240_000;
+const COMPACTION_BUDGET_MIN_TOKENS = 2_000;
+const COMPACTION_BUDGET_MAX_TOKENS = 12_000;
+
+function safeInteger(value: unknown, field: string, opts: { min: number; max?: number }): number {
+  if (!Number.isSafeInteger(value) || (value as number) < opts.min || (opts.max !== undefined && (value as number) > opts.max)) {
+    throw new Error(`Compaction response field ${field} is malformed`);
+  }
+  return value as number;
+}
+
+/** Normalize an unknown prepare response. Every candidate proof field is
+ * required and bounded; malformed values must fail closed, never become a
+ * fake ready candidate through defaults. */
 function normalizePrepareResult(value: unknown): PrepareConversationCompactionResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Compaction prepare returned a non-object response");
@@ -631,20 +643,45 @@ function normalizePrepareResult(value: unknown): PrepareConversationCompactionRe
     const c = record["candidate"] as Record<string, unknown> | null | undefined;
     if (!c || typeof c !== "object" || Array.isArray(c)) throw new Error("Compaction prepare candidate malformed");
     if (typeof c["serializedTurns"] !== "string") throw new Error("Compaction prepare candidate has no serialized source");
+    if (Buffer.byteLength(c["serializedTurns"], "utf-8") > COMPACTION_CANDIDATE_MAX_BYTES) {
+      throw new Error("Compaction prepare candidate source is too large");
+    }
+    if (c["version"] !== 1) throw new Error("Compaction prepare candidate version is unsupported");
+    const expectedGeneration = safeInteger(c["expectedGeneration"], "expectedGeneration", { min: 0 });
+    const previousCheckpointId = c["previousCheckpointId"] === null
+      ? null
+      : safeInteger(c["previousCheckpointId"], "previousCheckpointId", { min: 1 });
+    const sourceMessageStart = safeInteger(c["sourceMessageStart"], "sourceMessageStart", { min: 1 });
+    const sourceMessageEnd = safeInteger(c["sourceMessageEnd"], "sourceMessageEnd", { min: sourceMessageStart });
+    const firstKeptMessageId = safeInteger(c["firstKeptMessageId"], "firstKeptMessageId", { min: sourceMessageEnd + 1 });
+    if (typeof c["sourceDigest"] !== "string" || !/^[0-9a-f]{16}$/.test(c["sourceDigest"])) {
+      throw new Error("Compaction prepare candidate digest is malformed");
+    }
+    const sourceTokenCount = safeInteger(c["sourceTokenCount"], "sourceTokenCount", { min: 1 });
+    if (sourceTokenCount !== Math.ceil(c["serializedTurns"].length / 4)) {
+      throw new Error("Compaction prepare candidate token estimate is inconsistent");
+    }
+    const sourceDigest = createHash("sha256").update(c["serializedTurns"], "utf-8").digest("hex").slice(0, 16);
+    if (sourceDigest !== c["sourceDigest"]) throw new Error("Compaction prepare candidate digest is inconsistent");
+    if (typeof c["priorCheckpoint"] !== "string") throw new Error("Compaction prepare prior checkpoint is malformed");
+    const summaryTokenBudget = safeInteger(c["summaryTokenBudget"], "summaryTokenBudget", {
+      min: COMPACTION_BUDGET_MIN_TOKENS,
+      max: COMPACTION_BUDGET_MAX_TOKENS,
+    });
     return {
       status: "ready",
       candidate: {
         version: 1,
-        expectedGeneration: typeof c["expectedGeneration"] === "number" ? c["expectedGeneration"] : 0,
-        previousCheckpointId: typeof c["previousCheckpointId"] === "number" ? c["previousCheckpointId"] : null,
-        sourceMessageStart: typeof c["sourceMessageStart"] === "number" ? c["sourceMessageStart"] : 0,
-        sourceMessageEnd: typeof c["sourceMessageEnd"] === "number" ? c["sourceMessageEnd"] : 0,
-        firstKeptMessageId: typeof c["firstKeptMessageId"] === "number" ? c["firstKeptMessageId"] : 0,
-        sourceDigest: typeof c["sourceDigest"] === "string" ? c["sourceDigest"] : "",
-        sourceTokenCount: typeof c["sourceTokenCount"] === "number" ? c["sourceTokenCount"] : 0,
+        expectedGeneration,
+        previousCheckpointId,
+        sourceMessageStart,
+        sourceMessageEnd,
+        firstKeptMessageId,
+        sourceDigest,
+        sourceTokenCount,
         serializedTurns: c["serializedTurns"],
-        priorCheckpoint: typeof c["priorCheckpoint"] === "string" ? c["priorCheckpoint"] : "",
-        summaryTokenBudget: typeof c["summaryTokenBudget"] === "number" ? c["summaryTokenBudget"] : 2000,
+        priorCheckpoint: c["priorCheckpoint"],
+        summaryTokenBudget,
       },
     };
   }
@@ -658,8 +695,8 @@ function normalizeCommitResult(value: unknown): CommitConversationCompactionResu
   const record = value as Record<string, unknown>;
   const status = record["status"];
   if (status === "committed") {
-    const checkpointId = typeof record["checkpointId"] === "number" ? record["checkpointId"] : 0;
-    const generation = typeof record["generation"] === "number" ? record["generation"] : 0;
+    const checkpointId = safeInteger(record["checkpointId"], "checkpointId", { min: 1 });
+    const generation = safeInteger(record["generation"], "generation", { min: 1 });
     return { status: "committed", checkpointId, generation };
   }
   if (status === "stale") return { status: "stale" };

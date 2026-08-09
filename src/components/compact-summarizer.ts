@@ -97,6 +97,7 @@ export function createCompactionSummarizer(spin: Spin): ConversationCompactionSu
           prompt,
           type: "S",
           timeoutMs: COMPACTION_CALL_TIMEOUT_MS,
+          signal: input.signal,
         }).then(
           (text) => {
             if (settled) return;

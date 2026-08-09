@@ -280,6 +280,8 @@ export interface SpinSessionSpec {
   timeoutMs?: number;
   /** #1506: absolute deadline owned by the scheduled caller. */
   deadlineAt?: number;
+  /** Control-plane cancellation for bounded background provider work. */
+  signal?: AbortSignal;
   /** #1611: candidate-selection policy for the persistent transport.
    *  Defaults to `fallback-chain`; sleep sets `configured-only`. */
   candidatePolicy?: CandidatePolicy;
@@ -367,6 +369,8 @@ export interface DispatchBackgroundOptions {
   type?: SessionType;      // default "S" (ephemeral one-shot)
   agent?: import("./subagent-runtime.js").AgentName;  // override the profile agent
   timeoutMs?: number;
+  /** Abort the provider execution and settle the one-shot caller. */
+  signal?: AbortSignal;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

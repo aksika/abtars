@@ -91,7 +91,7 @@ export function formatCompactReply(result: {
     case "unsupported":
       return "Compaction is not supported for this session.";
     default:
-      return `Compaction failed: ${result.message.slice(0, 200)}`;
+      return "Compaction failed.";
   }
 }
 

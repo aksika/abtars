@@ -44,6 +44,8 @@ export interface SessionControlResult {
   tokensBefore?: number;
   tokensAfter?: number;
   generation?: number;
+  provider?: string;
+  model?: string;
   message: string;
 }
 

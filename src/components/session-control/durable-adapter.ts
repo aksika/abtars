@@ -118,6 +118,8 @@ export class DurableConversationCompactionAdapter
         tokensBefore: candidate.sourceTokenCount,
         tokensAfter: Math.ceil(summary.text.length / 4),
         generation: commit.generation,
+        provider: summary.provider ?? undefined,
+        model: summary.model ?? undefined,
         message: `Checkpoint ${commit.checkpointId} committed (generation ${commit.generation})`,
       };
     }

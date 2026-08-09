@@ -89,7 +89,7 @@ describe("handleCompact #1406", () => {
     expect(formatCompactReply({ status: "stale", message: "" })).toContain("newer checkpoint");
     expect(formatCompactReply({ status: "busy", message: "" })).toContain("already in progress");
     expect(formatCompactReply({ status: "unsupported", message: "" })).toContain("not supported");
-    expect(formatCompactReply({ status: "failed", message: "secret detail" })).toContain("secret detail");
+    expect(formatCompactReply({ status: "failed", message: "secret detail" })).toBe("Compaction failed.");
   });
 
   it("never forwards slash text as a model prompt for unsupported targets", async () => {

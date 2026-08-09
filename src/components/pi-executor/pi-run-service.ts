@@ -171,20 +171,31 @@ export class PiRunService {
    * active state, and the current generation are resolved here; the executor
    * revalidates generation and live process state before any write.
    */
-  async compact(runId: string, customInstructions: string | undefined, caller: Principal): Promise<CompactionControlResult> {
+  async compact(
+    runId: string,
+    customInstructions: string | undefined,
+    caller: Principal,
+    expectedGeneration?: number,
+  ): Promise<CompactionControlResult> {
     const base = { targetKind: "local_pi_run" as const, message: "" };
     const run = this.deps.store.get(runId);
     if (!run) return { ...base, status: "failed", message: `Run ${runId} not found` };
     if (run.ownerPrincipalId !== caller.userId) {
       return { ...base, status: "failed", message: `Run ${runId} belongs to a different principal` };
     }
-    if (!["starting", "running", "awaiting_input"].includes(run.status)) {
+    if (expectedGeneration !== undefined && run.executionGeneration !== expectedGeneration) {
+      return { ...base, status: "stale", message: "Run generation changed since the request was resolved" };
+    }
+    if (run.status !== "running") {
+      if (run.status === "starting" || run.status === "awaiting_input" || run.status === "cancelling") {
+        return { ...base, status: "busy", message: `Run is ${run.status}` };
+      }
       return { ...base, status: "failed", message: `Run ${runId} is not active (status: ${run.status})` };
     }
     return this.deps.executor.compactOwnedRun({
       runId,
       ownerPrincipalId: caller.userId,
-      expectedGeneration: run.executionGeneration,
+      expectedGeneration: expectedGeneration ?? run.executionGeneration,
       customInstructions,
     });
   }

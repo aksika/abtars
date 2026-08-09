@@ -30,6 +30,17 @@ async function retrySend<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   }
   throw new Error("unreachable");
 }
+
+/** A compaction trigger is eligible only after the assistant row has a
+ * durable identity. `attemptMemoryMutation` intentionally swallows write
+ * failures, so callers must inspect its result rather than infer success from
+ * the absence of a thrown exception. */
+function hasDurableMessageId(
+  result: { ok: true; value: unknown } | { ok: false },
+): boolean {
+  if (!result.ok || !result.value || typeof result.value !== "object") return false;
+  return "id" in result.value && typeof (result.value as { id?: unknown }).id === "number";
+}
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import type { IdleSave } from "./idle-save.js";
@@ -276,6 +287,7 @@ export async function handleInboundMessage(
   let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;
   let toolElapsedTimer: ReturnType<typeof setInterval> | undefined;
   let streamMsgId: number | string | undefined; // tool indicator message (editable)
+  let assistantDurablyRecorded = false;
   try {
     busyEntry.busy = true;
 
@@ -517,15 +529,18 @@ export async function handleInboundMessage(
         const timestamp = Date.now();
         const deliveryId = deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`;
         const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
-        await attemptMemoryMutation({
+        const writeResult = await attemptMemoryMutation({
           phase: "after_delivery",
           family: "assistant",
           operationKey,
           run: () => deps.memoryRuntime!.recordMessage({ role: "assistant", content: userResponse, timestamp, userId, sessionId: activeSessionId }, operationKey),
         });
+        assistantDurablyRecorded = hasDurableMessageId(writeResult);
       }
       // #1406: automatic durable compaction also applies to simple delivery.
-      scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
+      if (assistantDurablyRecorded) {
+        scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
+      }
       if (isVoice && ttsConfig && adapter.sendVoice) {
         try {
           const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
@@ -602,7 +617,7 @@ export async function handleInboundMessage(
       const timestamp = Date.now();
       const deliveryId = lastSentMsgId != null ? String(lastSentMsgId) : (deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`);
       const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
-      await attemptMemoryMutation({
+      const writeResult = await attemptMemoryMutation({
         phase: "after_delivery",
         family: "assistant",
         operationKey,
@@ -612,6 +627,7 @@ export async function handleInboundMessage(
           platformMessageId: lastSentMsgId != null ? String(lastSentMsgId) : undefined,
         }, operationKey),
       });
+      assistantDurablyRecorded = hasDurableMessageId(writeResult);
     }
 
     // --- #1406: automatic durable compaction, scheduled once after the
@@ -619,7 +635,9 @@ export async function handleInboundMessage(
     // or revoke the already delivered response. Deduplication happens in the
     // control service and the daemon's generation CAS. No timer or heartbeat
     // entry is added. ---
-    scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
+    if (assistantDurablyRecorded) {
+      scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
+    }
 
     // --- TTS for voice notes ---
     if (isVoice && ttsConfig && !pSession.fullMode && adapter.sendVoice) {

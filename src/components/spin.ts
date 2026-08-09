@@ -496,6 +496,7 @@ export class Spin {
 
   async spin(spec: SpinSessionSpec): Promise<SpinResult> {
     if (!this.runtime) throw new Error("Spin: runtime not set");
+    if (spec.signal?.aborted) throw new Error("Execution cancelled");
     const profile = profileFor(spec.type);
 
     // #1327: defensive against an unknown SessionType. A kanban card with
@@ -758,7 +759,20 @@ export class Spin {
       // Persistent sessions wrap the existing session transport; one-shot sessions
       // open a fresh RuntimeExecution handle keyed by session.id.
       const resolveDriver = async (): Promise<SpinExecutionDriver> => {
+        const bindAbort = (transport: IKiroTransport): (() => void) => {
+          const signal = spec.signal;
+          if (!signal) return () => {};
+          const onAbort = () => {
+            void transport.sendInterrupt("Execution cancelled").catch(err => {
+              logAndSwallow(TAG, "background cancellation", err);
+            });
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
+          return () => signal.removeEventListener("abort", onAbort);
+        };
         if (sessionTransport) {
+          const unbindAbort = bindAbort(sessionTransport);
           return {
             send: (msg, img, ctx) => observe(sessionTransport!, session.id, msg, img, {
               ...(ctx ?? {}),
@@ -767,7 +781,7 @@ export class Spin {
             steer: typeof sessionTransport.steer === "function"
               ? (content, lease) => sessionTransport!.steer!(content, lease)
               : undefined,
-            close: async () => {},
+            close: async () => { unbindAbort(); },
             ephemeral: false,
           };
         }
@@ -784,6 +798,7 @@ export class Spin {
         session.transport = sessionTransport;
         session.transportOwner = "runtime";
         session.releaseTransport = () => executor.close();
+        const unbindAbort = bindAbort(sessionTransport);
         return {
           send: async (msg, img, ctx) => {
             const enrichedContext = {
@@ -810,6 +825,7 @@ export class Spin {
             ? (content, lease) => sessionTransport!.steer!(content, lease)
             : undefined,
           close: async () => {
+            unbindAbort();
             await executor.close();
             sessionTransport = undefined;
           },
@@ -817,6 +833,26 @@ export class Spin {
         };
       };
       const executeWithSteering = async (): Promise<string> => {
+        const send = async (
+          driver: SpinExecutionDriver,
+          msg: string,
+          img?: { mime: string; base64: string },
+          ctx?: import("./transport/kiro-transport.js").PromptRequestContext,
+        ): Promise<string> => {
+          const signal = spec.signal;
+          if (!signal) return driver.send(msg, img, ctx);
+          if (signal.aborted) throw new Error("Execution cancelled");
+          let onAbort: (() => void) | undefined;
+          const cancelled = new Promise<never>((_, reject) => {
+            onAbort = () => reject(new Error("Execution cancelled"));
+            signal.addEventListener("abort", onAbort!, { once: true });
+          });
+          try {
+            return await Promise.race([driver.send(msg, img, ctx), cancelled]);
+          } finally {
+            if (onAbort) signal.removeEventListener("abort", onAbort);
+          }
+        };
         const driver = await resolveDriver();
         // #1531: for a native-steering driver, subscribe BEFORE opening
         // steering acceptance so a same-tick steer.queued is never missed.
@@ -830,7 +866,7 @@ export class Spin {
             // while the send is in flight; its result never replaces the send
             // result and a steering-only failure never replaces the send error.
             try {
-              const result = (await driver.send(prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
+              const result = (await send(driver, prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
               await pump.settle();
               return result;
             } catch (sendErr) {
@@ -840,14 +876,14 @@ export class Spin {
           }
           // Sequential path (ACP/tmux): no in-process agent queue; instructions
           // queued during the send are drained as post-send continuations.
-          let result = (await driver.send(prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
+          let result = (await send(driver, prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
           for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
             const batch = leaseInstructions(session, "steer");
             if (!batch) { session.steeringAccepting = false; break; }
             try {
               const steeringPrompt = renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]);
               markDelivered(batch);
-              result = (await driver.send(steeringPrompt, undefined, {
+              result = (await send(driver, steeringPrompt, undefined, {
                 userId: spec.userId ?? userId,
                 // #1552: every context Spin builds carries the trusted type.
                 sessionType: sessionType(session),
@@ -1291,6 +1327,7 @@ export class Spin {
       type: opts.type ?? "S",
       prompt: opts.prompt,
       timeoutMs: opts.timeoutMs,
+      signal: opts.signal,
       agent: opts.agent,
       settlementOwner: "spin",
       await: true,

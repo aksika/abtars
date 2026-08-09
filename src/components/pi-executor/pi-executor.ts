@@ -368,9 +368,12 @@ export class PiExecutor {
       return { ...base, status: "failed", message: "Run is settling" };
     }
     const run = this.store.get(input.runId);
-    if (!run || !["running", "awaiting_input"].includes(run.status)) {
-      // Idle states are compactable; starting/cancelling/terminal are not.
-      return { ...base, status: run?.status === "starting" ? "busy" : "failed", message: `Run is ${run?.status ?? "unknown"}` };
+    if (!run || run.status !== "running") {
+      // Native Pi compaction is valid only between turns. Awaiting-input,
+      // starting, cancelling, and terminal states are not safe compaction
+      // boundaries.
+      const busy = run?.status === "starting" || run?.status === "awaiting_input" || run?.status === "cancelling";
+      return { ...base, status: busy ? "busy" : "failed", message: `Run is ${run?.status ?? "unknown"}` };
     }
     if (run.ownerPrincipalId !== input.ownerPrincipalId) {
       return { ...base, status: "failed", message: "Run belongs to a different principal" };

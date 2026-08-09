@@ -42,6 +42,6 @@ export class LocalPiRunCompactionAdapter
     }
     return this.deps.piService.compact(target.runId, request.customInstructions, {
       userId: target.principalId,
-    });
+    }, target.generation);
   }
 }

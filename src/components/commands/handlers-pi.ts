@@ -127,8 +127,20 @@ export async function handlePiCompact(text: string, ctx: CommandContext): Promis
       await ctx.reply(`Custom instructions exceed ${MAX_COMPACT_INSTRUCTIONS_BYTES} bytes.`);
       return true;
     }
+    // #1406: local Pi runs use the same backend-neutral control plane as
+    // durable conversations. Resolve the owner-scoped generation before
+    // dispatch so the adapter can reject a stale request without guessing.
     const view = svc.get(runId, { userId: ctx.userId });
-    const result = await svc.compact(runId, instructions, { userId: ctx.userId });
+    const { getSessionControlService } = await import("../session-control/instance.js");
+    const control = getSessionControlService();
+    if (!control) {
+      await ctx.reply("Pi compaction is unavailable (control service not initialized).");
+      return true;
+    }
+    const result = await control.execute(
+      { kind: "local_pi_run", principalId: ctx.userId, runId, generation: view.generation },
+      { kind: "compact", reason: "manual", customInstructions: instructions },
+    );
     const savings = result.tokensBefore && result.tokensAfter
       ? ` (${Math.round((1 - result.tokensAfter / result.tokensBefore) * 100)}% smaller)`
       : "";
@@ -146,11 +158,11 @@ export async function handlePiCompact(text: string, ctx: CommandContext): Promis
         await ctx.reply(`Stale generation for \`${runId}\` — the run changed since the request.`);
         break;
       default:
-        await ctx.reply(`Pi compaction failed: ${result.message.slice(0, 200)}`);
+        await ctx.reply("Pi compaction failed.");
     }
     return true;
   } catch (err) {
-    await ctx.reply(`❌ ${err instanceof Error ? err.message : String(err)}`);
+    await ctx.reply("Pi compaction failed.");
     return true;
   }
 }

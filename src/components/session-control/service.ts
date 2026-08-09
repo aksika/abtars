@@ -63,9 +63,8 @@ export class SessionControlService {
       try {
         const result = await adapter.execute(target, request);
         return this.finish(result, request, startedAt);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return this.finish({ status: "failed", targetKind: target.kind, message }, request, startedAt);
+      } catch {
+        return this.finish({ status: "failed", targetKind: target.kind, message: "Session control operation failed" }, request, startedAt);
       } finally {
         this.autoInFlight.delete(dedupeKey);
       }
@@ -74,9 +73,8 @@ export class SessionControlService {
     try {
       const result = await adapter.execute(target, request);
       return this.finish(result, request, startedAt);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return this.finish({ status: "failed", targetKind: target.kind, message }, request, startedAt);
+    } catch {
+      return this.finish({ status: "failed", targetKind: target.kind, message: "Session control operation failed" }, request, startedAt);
     }
   }
 
@@ -106,6 +104,8 @@ export class SessionControlService {
         result.tokensBefore && result.tokensAfter
           ? Math.round((1 - result.tokensAfter / result.tokensBefore) * 100)
           : undefined,
+      provider: result.provider,
+      model: result.model,
       durationMs,
     };
     logInfo(TAG, `compaction ${event.targetKind} reason=${event.reason} status=${event.status}${event.generation !== undefined ? ` gen=${event.generation}` : ""}${event.tokensBefore !== undefined ? ` before=${event.tokensBefore} after=${event.tokensAfter ?? "?"} savings=${event.savingsPct ?? "?"}%` : ""} duration=${durationMs}ms`);

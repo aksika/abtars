@@ -29,6 +29,8 @@ export async function phaseSessionControl(ctx: BootCtx): Promise<PhaseResult> {
           : "skipped",
         durationMs: event.durationMs,
         savingsPct: event.savingsPct,
+        provider: event.provider,
+        model: event.model,
         failureReason: event.status === "failed" ? "control_failed" : undefined,
       });
     },
@@ -37,15 +39,17 @@ export async function phaseSessionControl(ctx: BootCtx): Promise<PhaseResult> {
   // Durable conversation compaction needs the daemon-backed runtime plus the
   // provider summarizer. The adapter self-gates per call; registering it even
   // with a degraded runtime keeps the target resolvable.
+  const summarizer = createCompactionSummarizer(spinInstance);
+  service.register(new DurableConversationCompactionAdapter({
+    runtime: ctx.memoryRuntime,
+    summarizer,
+  }));
   if (ctx.memoryRuntime.state === "ready") {
-    const summarizer = createCompactionSummarizer(spinInstance);
-    service.register(new DurableConversationCompactionAdapter({
-      runtime: ctx.memoryRuntime,
-      summarizer,
-    }));
     logInfo(TAG, "Durable conversation compaction adapter registered");
   } else {
-    logWarn(TAG, `Durable compaction unavailable (memory state: ${ctx.memoryRuntime.state})`);
+    // The runtime may recover after WSS renegotiation. Keep the target
+    // registered so capability checks begin succeeding without a reboot.
+    logWarn(TAG, `Durable compaction registered but unavailable (memory state: ${ctx.memoryRuntime.state})`);
   }
 
   // Locally supervised Pi-owned coding runs (native RPC compaction).
