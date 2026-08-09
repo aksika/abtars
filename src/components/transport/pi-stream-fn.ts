@@ -12,6 +12,9 @@ import { logDebug } from "../logger.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { candidateKey } from "./model-candidates.js";
+import { classifyError, type ErrorKind } from "./model-health-registry.js";
+import { parseErrorStatus, parseRetryAfter } from "./transport-utils.js";
+import type { ProviderTerminalFailure } from "./provider-failure.js";
 import type { ExecutionTelemetryScope, ProviderCallTerminal } from "../execution-telemetry.js";
 import type { StreamFn } from "./pi-core-types.js";
 import { buildPiModel, pickPiApi, createPiAiAssistantStream } from "./pi-ai-adapter.js";
@@ -39,6 +42,9 @@ export interface AbtarsPiStreamFnOptions {
   providerInactivityTimeoutMs?: number;
   /** #1506: Absolute deadline epoch ms — inactivity timeout is capped by remaining. */
   deadlineAt?: number;
+  /** #1297: execution-local terminal-failure channel. Fired once when the
+   *  fallback loop exhausts with every candidate sticky credit-failed. */
+  onTerminalFailure?: (failure: ProviderTerminalFailure) => void;
 }
 
 function zeroUsage(): Usage {
@@ -106,6 +112,15 @@ function isIdempotencyConflict(err: unknown): boolean {
       ? (err as { errorMessage: string }).errorMessage ?? ""
       : "";
   return msg.toLowerCase().includes("idempotency_conflict");
+}
+
+/** #1297: classify a provider attempt failure through the existing model-health
+ *  classifier. Status/message interpretation stays at the adapter boundary —
+ *  downstream consumers never match provider error strings. */
+function classifyAttemptError(err: unknown): { kind: ErrorKind; retryAfterMs?: number } {
+  const status = parseErrorStatus(err);
+  const msg = err instanceof Error ? err.message : String(err);
+  return { kind: classifyError(status, msg), retryAfterMs: parseRetryAfter(err) };
 }
 
 function isOpenAiCompatible(api: Api): boolean {
@@ -251,9 +266,11 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
       const orderedCandidates = firstSelected
         ? [firstSelected, ...options.policy.candidates.filter((candidate) => candidate !== firstSelected)]
         : [];
+      let attemptedCandidateCount = 0;
       for (const candidate of orderedCandidates) {
         const selected = options.policy.selectModel();
         if (!selected || selected !== candidate) continue;
+        attemptedCandidateCount++;
         if (signal.aborted) {
           yield terminalError(model, "aborted", "Execution cancelled");
           return;
@@ -298,15 +315,17 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           // "no candidates" instead of reaching the provider. Genuine
           // failures — and inactivity stalls, which the fallback chain needs
           // to skip — still poison via poisonCandidate().
-          const poisonCandidate = (): void => {
-            options.policy.recordError(candidate, "transient");
+          // #1297: the actual classification (credits, auth, rate_limit,
+          // transient, ...) is recorded, not an unconditional transient.
+          const poisonCandidate = (kind: ErrorKind = "transient", retryAfterMs?: number): void => {
+            options.policy.recordError(candidate, kind, retryAfterMs);
             options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
             // A provider failure is a fallback event, not a successful-turn
             // rotation event. Healthy candidates from the prior rotation
             // cycle must be eligible for recovery.
             options.policy.rotationExcludedKeys.clear();
           };
-          const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage): void => {
+          const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage, kind?: ErrorKind, retryAfterMs?: number): void => {
             if (telemetryEnded) return;
             telemetryEnded = true;
             endTelemetry(handle, {
@@ -320,7 +339,7 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
             if (result === "success") {
               options.policy.recordSuccess(candidate);
             } else if (result !== "aborted") {
-              poisonCandidate();
+              poisonCandidate(kind, retryAfterMs);
             }
           };
 
@@ -371,7 +390,8 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
                   break;
                 }
                 if (failed) {
-                  finishAttempt(event.type === "error" && event.reason === "aborted" ? "aborted" : "failure", terminal);
+                  const classified = classifyAttemptError(terminal?.errorMessage ?? "");
+                  finishAttempt(event.type === "error" && event.reason === "aborted" ? "aborted" : "failure", terminal, classified.kind, classified.retryAfterMs);
                   break;
                 }
                 finishAttempt("success", terminal);
@@ -384,9 +404,10 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
               if (attemptCommitted && isTerminal(event)) {
                 const result = terminalResult(event);
                 const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
+                const classified = classifyAttemptError(terminal?.errorMessage ?? "");
                 finishAttempt(failed
                   ? (event.type === "error" && event.reason === "aborted" ? "aborted" : "failure")
-                  : "success", terminal);
+                  : "success", terminal, failed ? classified.kind : undefined, failed ? classified.retryAfterMs : undefined);
                 return;
               }
             }
@@ -427,7 +448,8 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
               retried = true;
               continue;
             }
-            finishAttempt(signal.aborted ? "aborted" : "failure");
+            const classified = classifyAttemptError(err);
+            finishAttempt(signal.aborted ? "aborted" : "failure", undefined, classified.kind, classified.retryAfterMs);
             if (attemptCommitted) {
               yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream failed after output began");
               return;
@@ -446,6 +468,18 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
         }
       }
 
+      // #1297: the strict all-candidates credit predicate is evaluated only at
+      // true exhaustion — never after the first credit failure and never when a
+      // viable candidate remains. Candidates skipped this call because shared
+      // health already marks them credit-failed are included by the predicate.
+      if (!signal.aborted && options.policy.allCandidatesCreditFailed()) {
+        options.onTerminalFailure?.({
+          code: "credits_exhausted",
+          retryable: false,
+          attemptedCandidates: attemptedCandidateCount,
+          message: "All model candidates are blocked by provider credit exhaustion",
+        });
+      }
       yield terminalError(model, signal.aborted ? "aborted" : "error", signal.aborted ? "Execution cancelled" : "All model candidates failed");
     };
     return wrapEventStream(outer(), () => assistantMessage(model, [], signal.aborted ? "aborted" : "error", signal.aborted ? "Execution cancelled" : "All model candidates failed"));

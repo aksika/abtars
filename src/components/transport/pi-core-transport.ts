@@ -18,6 +18,8 @@ import { buildPiModel, pickPiApi } from "./pi-ai-adapter.js";
 import { candidateKey } from "./model-candidates.js";
 import { PiCoreToolExecutionError, buildTerminalDiagnostic } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
+import { ProviderExecutionError } from "./provider-failure.js";
+import type { ProviderTerminalFailure } from "./provider-failure.js";
 
 const TAG = "pi-core-transport";
 
@@ -232,6 +234,9 @@ export class PiCoreTransport implements IKiroTransport {
       this._intermediateText = "";
       this._toolCallsSucceeded = 0;
       this._lastToolFailure = null;
+      // #1297: terminal-failure state is allocated per execution — a previous
+      // request's credit failure can never contaminate a later request.
+      const executionState: { terminalFailure: ProviderTerminalFailure | null } = { terminalFailure: null };
 
       // #1529: fail closed when durable context is required but unavailable.
       // The intent is computed in prompt construction; an omitted intent means
@@ -333,6 +338,10 @@ export class PiCoreTransport implements IKiroTransport {
           this.lastSuccessfulCandidate = successful;
           this.onLastSuccessfulChanged?.(successful);
           logDebug(TAG, `Candidate committed: ${candidate.model}`);
+        },
+        onTerminalFailure: (failure) => {
+          executionState.terminalFailure = failure;
+          logDebug(TAG, `sendPrompt: terminal provider failure ${failure.code} (${failure.attemptedCandidates} candidates attempted)`);
         },
       });
 
@@ -455,6 +464,15 @@ export class PiCoreTransport implements IKiroTransport {
         if (this._lastToolFailure) {
           logInfo(TAG, `sendPrompt: empty response with terminal tool failure — throwing diagnostic`);
           throw new PiCoreToolExecutionError(this._lastToolFailure);
+        }
+
+        // #1297: a committed successful output and a terminal tool failure
+        // already took precedence; only now does a typed terminal provider
+        // failure surface as a non-retryable error. No typed failure → current
+        // generic empty-response behavior.
+        if (executionState.terminalFailure) {
+          logInfo(TAG, `sendPrompt: throwing ProviderExecutionError (${executionState.terminalFailure.code})`);
+          throw new ProviderExecutionError(executionState.terminalFailure);
         }
 
         logDebug(TAG, `sendPrompt: empty response with no tool failure — returning ""`);

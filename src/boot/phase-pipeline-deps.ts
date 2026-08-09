@@ -31,9 +31,21 @@ import type { PipelineDeps } from "../components/message-pipeline.js";
 import { getEnv } from "../components/env-schema.js";
 import { unavailable } from "../capabilities/sleep/index.js";
 
+/** #1297: credit exhaustion cannot be self-healed — SHA must stop before any
+ *  state read/write. Identified by exact structured fields, never message text. */
+export function skipSelfHealForDiagnostic(diagnostic: TaskFailureDiagnosticV1): boolean {
+  return diagnostic.category === "execution" && diagnostic.code === "credits_exhausted";
+}
+
 /** #1588: operator failure notification — category/code + lane breakdown. */
 export function buildFailureNotification(entryId: string, diagnostic: TaskFailureDiagnosticV1): string {
-  return `[warn] ${formatTaskLabel(entryId)} failed - ${diagnostic.category}/${diagnostic.code}\n${formatTaskFailureDetail(diagnostic)}`;
+  // #1297: credit exhaustion is actionable, not self-healable — the operator
+  // notification carries the remediation ask.
+  const base = `[warn] ${formatTaskLabel(entryId)} failed - ${diagnostic.category}/${diagnostic.code}\n${formatTaskFailureDetail(diagnostic)}`;
+  if (skipSelfHealForDiagnostic(diagnostic)) {
+    return `${base}\nRequires human intervention: restore provider credits, then run /models reset.`;
+  }
+  return base;
 }
 
 /** #1588: self-healer prompt — structured root cause, bounded remediation, FORBIDDEN block. */
@@ -81,6 +93,15 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     const label = formatTaskLabel(entryId);
     if (ctx.telegramAdapter) {
       ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), buildFailureNotification(entryId, diagnostic));
+    }
+    // #1297: credit exhaustion cannot be self-healed by any code change. The
+    // one actionable operator notification above is sent, then this guard
+    // returns BEFORE any SHA state read/write — daily-attempt accounting,
+    // cooldown/pending handling, the self-healer notification, and the S
+    // session spin. A skipped credit failure must not consume SHA quota.
+    if (skipSelfHealForDiagnostic(diagnostic)) {
+      logInfo("main", `Skip self-heal for "${entryId}" — credits_exhausted requires human intervention`);
+      return;
     }
     // Three-state SHA guard (#719). The operator notification above is still
     // emitted for every settled failure; this guard only serializes SHA work.

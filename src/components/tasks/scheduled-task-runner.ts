@@ -8,6 +8,7 @@ import type { TaskToolRegistry } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
 import { SupervisedProjectFailure } from "./scheduled-project-runner.js";
+import { isProviderExecutionError } from "../transport/provider-failure.js";
 import { createExecutionScope } from "./task-package.js";
 import type { ExecutionControl, ExecutionSupervisor } from "../execution-control.js";
 import { SpinDispatchAdmissionError } from "../spin-types.js";
@@ -319,6 +320,19 @@ export class ScheduledTaskRunner {
           logTaskDebug("task_admission_deferred", { task: entry.id }, `code=${error.code}`);
           return { status: "deferred", safeDetail: error.message };
         }
+        // #1297: a typed terminal provider failure (credits_exhausted) maps to
+        // its exact diagnostic with retryability none — no retry decision, no
+        // retry timestamp. The failure policy then performs ordinary failed-run
+        // settlement. Never classified as a transient model_error.
+        if (isProviderExecutionError(error)) {
+          const failure = error.failure;
+          settleRunOnce({
+            entry, run: reservation, outcome: "failed",
+            diagnostic: makeTaskFailure("execution", failure.code, "executing", failure.message, "none"),
+            detail: failure.message, cardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure,
+          });
+          return { status: "failed", safeDetail: failure.message, ...(cardId !== undefined ? { cardId } : {}) };
+        }
         // Structured transient classification: a stable error code (or an
         // explicit retryable flag) on the boundary error selects the policy's
         // one-delayed-retry branch; nothing is inferred from message text.
@@ -408,6 +422,18 @@ export class ScheduledTaskRunner {
         return { status: "success", safeDetail: settlementDetail, cardId: boardId };
       }
     } catch (err) {
+      // #1297: a typed terminal provider failure reaching the outer runner
+      // guard keeps its exact diagnostic instead of degrading to model_error.
+      if (isProviderExecutionError(err)) {
+        const failure = err.failure;
+        logWarn(TAG, `Runner error for task=${entry.id}: ${failure.message}`);
+        settleRunOnce({
+          entry, run: reservation, outcome: "failed",
+          diagnostic: makeTaskFailure("execution", failure.code, "executing", failure.message, "none"),
+          detail: failure.message, cardId: reservation.cardId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: factNow(),
+        });
+        return { status: "failed", safeDetail: failure.message };
+      }
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `Runner error for task=${entry.id}: ${msg}`);
       settleRunOnce({

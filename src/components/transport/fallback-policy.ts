@@ -65,6 +65,18 @@ export class FallbackPolicy {
     });
   }
 
+  /**
+   * #1297: strict all-candidates credit-failure predicate. True only when the
+   * candidate list is non-empty AND every member is sticky credit-failed in the
+   * shared health registry — including candidates skipped during this call
+   * because they were already poisoned. Mixed failure kinds, empty lists, and
+   * any viable candidate all return false.
+   */
+  allCandidatesCreditFailed(): boolean {
+    if (this.candidates.length === 0) return false;
+    return this.candidates.every((c) => this.registry.isCreditFailed(c.model, c.endpoint));
+  }
+
   recordSuccess(candidate: ModelCandidate): void {
     this.registry.recordSuccess(candidate.model, candidate.endpoint);
   }

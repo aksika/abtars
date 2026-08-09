@@ -59,3 +59,54 @@ describe("FallbackPolicy", () => {
     expect(reg.getBucketLevel(c.model, c.endpoint)).toBeGreaterThan(0); // level doesn't reset, just consecutive
   });
 });
+
+describe("FallbackPolicy allCandidatesCreditFailed (#1297)", () => {
+  let reg: ModelHealthRegistry;
+  let candidates: ModelCandidate[];
+
+  beforeEach(() => {
+    reg = new ModelHealthRegistry({ leakPerMinute: 0 });
+    candidates = makeCandidates();
+  });
+
+  it("returns true when every candidate is sticky credit-failed", () => {
+    const policy = new FallbackPolicy(candidates, reg);
+    for (const cand of candidates) reg.recordError(cand.model, cand.endpoint, "credits");
+    expect(policy.allCandidatesCreditFailed()).toBe(true);
+  });
+
+  it("returns false for a mix of credit and non-credit failures", () => {
+    const policy = new FallbackPolicy(candidates, reg);
+    reg.recordError(candidates[0]!.model, candidates[0]!.endpoint, "credits");
+    reg.recordError(candidates[1]!.model, candidates[1]!.endpoint, "transient");
+    reg.recordError(candidates[2]!.model, candidates[2]!.endpoint, "credits");
+    expect(policy.allCandidatesCreditFailed()).toBe(false);
+  });
+
+  it("returns false when the list is empty", () => {
+    const policy = new FallbackPolicy([], reg);
+    expect(policy.allCandidatesCreditFailed()).toBe(false);
+  });
+
+  it("returns false when one candidate is viable", () => {
+    const policy = new FallbackPolicy(candidates, reg);
+    reg.recordError(candidates[0]!.model, candidates[0]!.endpoint, "credits");
+    reg.recordError(candidates[1]!.model, candidates[1]!.endpoint, "credits");
+    expect(policy.allCandidatesCreditFailed()).toBe(false);
+  });
+
+  it("returns false when the same model is credit-failed on one endpoint only", () => {
+    const policy = new FallbackPolicy(candidates, reg);
+    reg.recordError("kimi", "ep1", "credits");
+    reg.recordError("nemotron", "ep1", "credits");
+    expect(policy.allCandidatesCreditFailed()).toBe(false); // gemini-flash@ep2 still viable
+  });
+
+  it("clears to false after resetAll", () => {
+    const policy = new FallbackPolicy(candidates, reg);
+    for (const cand of candidates) reg.recordError(cand.model, cand.endpoint, "credits");
+    expect(policy.allCandidatesCreditFailed()).toBe(true);
+    reg.resetAll();
+    expect(policy.allCandidatesCreditFailed()).toBe(false);
+  });
+});

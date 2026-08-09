@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { clearMemoryToolDependencies, createBootCtx } from "./context.js";
-import { phasePipelineDeps, buildFailureNotification, buildShaFailurePrompt } from "./phase-pipeline-deps.js";
+import { phasePipelineDeps, buildFailureNotification, buildShaFailurePrompt, skipSelfHealForDiagnostic } from "./phase-pipeline-deps.js";
 import { makeTaskFailure } from "../components/tasks/task-failure.js";
 
 function fakePiTransport() {
@@ -147,5 +147,31 @@ describe("failure cascade payloads (#1588)", () => {
   it("a pending failure list is preserved in the SHA prompt", () => {
     const text = buildShaFailurePrompt("daily-ai", diagnostic, "\nAlso failed recently: finance-daily");
     expect(text).toContain("Also failed recently: finance-daily");
+  });
+});
+
+describe("failure cascade credits guard (#1297)", () => {
+  const credits = makeTaskFailure("execution", "credits_exhausted", "executing", "All model candidates are blocked by provider credit exhaustion", "none");
+  const other = makeTaskFailure("execution", "model_error", "executing", "provider down", "none");
+
+  it("skipSelfHealForDiagnostic is true only for execution/credits_exhausted", () => {
+    expect(skipSelfHealForDiagnostic(credits)).toBe(true);
+    expect(skipSelfHealForDiagnostic(other)).toBe(false);
+    // KNOWN_CODES scopes codes per category, so a mis-categorized match is
+    // impossible by construction — the guard matches exact structured fields.
+    expect(skipSelfHealForDiagnostic(makeTaskFailure("execution", "process_exit", "executing", "x", "none"))).toBe(false);
+  });
+
+  it("the single operator notification is enriched with the remediation ask for credits", () => {
+    const text = buildFailureNotification("daily-ai", credits);
+    expect(text).toContain("execution/credits_exhausted");
+    expect(text).toContain("Requires human intervention: restore provider credits, then run /models reset.");
+    // Exactly one notification payload — the remediation is part of it, not a second message.
+    expect(text.match(/\[warn\]/g)).toHaveLength(1);
+  });
+
+  it("non-credit failures keep the unchanged notification", () => {
+    const text = buildFailureNotification("daily-ai", other);
+    expect(text).not.toContain("Requires human intervention");
   });
 });

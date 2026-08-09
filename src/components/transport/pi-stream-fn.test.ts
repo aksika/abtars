@@ -602,4 +602,142 @@ describe("createPiStreamFn", () => {
     // The candidate IS excluded after the recovery attempt fails (one recordError)
     expect(policy.excludedKeys.size).toBe(1);
   });
+
+  // ── Error classification (#1297) ───────────────────────────────────────────
+
+  it.each([
+    "402: {\"error\":{\"message\":\"insufficient credits for this model\"}}",
+    "OpenAI API error (402): Insufficient Credits for this model",
+  ])("records credits (not transient) for Pi-AI 402 format: %s", async (message) => {
+    const attemptFactory = vi.fn().mockRejectedValue(new Error(message));
+    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(true);
+    expect(policy.excludedKeys.has("test-model@https://api.test/v1")).toBe(true);
+  });
+
+  it("records credits for a terminal error event with a 402 credits message", async () => {
+    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
+      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "API error 402: credits exhausted", usage: { input: 0, output: 0 } } },
+    ]));
+    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(true);
+  });
+
+  it("records transient (not credits) for a 500 error", async () => {
+    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500: server failure"));
+    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
+    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBeGreaterThan(0);
+  });
+
+  it("propagates retry-after metadata into the registry cooldown", async () => {
+    vi.useFakeTimers();
+    const attemptFactory = vi.fn().mockRejectedValue(new Error('API error 429: rate limited {"retry_after": 60}'));
+    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(registry.shouldSkip("test-model", "https://api.test/v1")).toBe(true);
+    vi.advanceTimersByTime(61_000);
+    // Cooldown expired — bucket alone (0.5) is below the skip threshold.
+    expect(registry.shouldSkip("test-model", "https://api.test/v1")).toBe(false);
+    vi.useRealTimers();
+  });
+
+  // ── Terminal credit failure callback (#1297) ───────────────────────────────
+
+  it("reports credits_exhausted when every candidate (including pre-poisoned) is credit-failed", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const exhaustionPolicy = new FallbackPolicy([first, second], registry);
+    // Pre-poison both in shared health — the stream never even attempts them.
+    registry.recordError("first", "https://first/v1", "credits");
+    registry.recordError("second", "https://second/v1", "credits");
+
+    const onTerminalFailure = vi.fn();
+    const attemptFactory = vi.fn();
+    const streamFn = createPiStreamFn({
+      policy: exhaustionPolicy, executionId: "exec_1",
+      createPiAiAttempt: attemptFactory, onTerminalFailure,
+    });
+    const events: any[] = [];
+    for await (const ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) events.push(ev);
+
+    expect(attemptFactory).not.toHaveBeenCalled();
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "credits_exhausted",
+      retryable: false,
+      attemptedCandidates: 0,
+    }));
+    expect(events.some((e) => e.type === "error")).toBe(true);
+  });
+
+  it("reports credits_exhausted when the last viable candidate fails with credits", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const exhaustionPolicy = new FallbackPolicy([first, second], registry);
+    registry.recordError("first", "https://first/v1", "credits"); // pre-poisoned
+
+    const onTerminalFailure = vi.fn();
+    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 402: out of credits"));
+    const streamFn = createPiStreamFn({
+      policy: exhaustionPolicy, executionId: "exec_1",
+      createPiAiAttempt: attemptFactory, onTerminalFailure,
+    });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
+    expect(attemptFactory.mock.calls[0]?.[0]).toMatchObject({ model: "second" });
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "credits_exhausted",
+      attemptedCandidates: 1,
+    }));
+  });
+
+  it("does NOT report credits_exhausted for a mix of credit and transient failures", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const mixedPolicy = new FallbackPolicy([first, second], registry);
+    registry.recordError("first", "https://first/v1", "credits"); // pre-poisoned
+
+    const onTerminalFailure = vi.fn();
+    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500: server failure"));
+    const streamFn = createPiStreamFn({
+      policy: mixedPolicy, executionId: "exec_1",
+      createPiAiAttempt: attemptFactory, onTerminalFailure,
+    });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(onTerminalFailure).not.toHaveBeenCalled();
+  });
+
+  it("attempts a viable fallback and never reports credits_exhausted when one candidate succeeds", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const recoveryPolicy = new FallbackPolicy([first, second], registry);
+    registry.recordError("first", "https://first/v1", "credits"); // pre-poisoned
+
+    const onTerminalFailure = vi.fn();
+    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
+      { type: "text_delta", contentIndex: 0, delta: "recovered" },
+      { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 1, output: 1 } } },
+    ]));
+    const streamFn = createPiStreamFn({
+      policy: recoveryPolicy, executionId: "exec_1",
+      createPiAiAttempt: attemptFactory, onTerminalFailure,
+    });
+    const events: any[] = [];
+    for await (const ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) events.push(ev);
+
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
+    expect(attemptFactory.mock.calls[0]?.[0]).toMatchObject({ model: "second" });
+    expect(events.some((e) => e.type === "text_delta" && e.delta === "recovered")).toBe(true);
+    expect(onTerminalFailure).not.toHaveBeenCalled();
+  });
 });

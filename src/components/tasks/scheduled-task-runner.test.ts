@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { ScheduledTaskRunner } from "./scheduled-task-runner.js";
 import { settleRunOnce } from "./task-run-settler.js";
+import { ProviderExecutionError } from "../transport/provider-failure.js";
 
 vi.mock("./task-state-store.js", () => ({
   updateActiveRun: vi.fn(),
@@ -462,5 +463,68 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
       detail: LONG_RESULT.slice(0, 200),
     }));
     expect(outcome.safeDetail).toBe(LONG_RESULT.slice(0, 200));
+  });
+});
+
+describe("ScheduledTaskRunner #1297 credits_exhausted mapping", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedSettle.mockClear();
+  });
+
+  it("maps ProviderExecutionError to execution/credits_exhausted with retryability none", async () => {
+    const agentRunner = vi.fn(async () => {
+      throw new ProviderExecutionError({
+        code: "credits_exhausted",
+        retryable: false,
+        attemptedCandidates: 2,
+        message: "All model candidates are blocked by provider credit exhaustion",
+      });
+    });
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("credits-runner"), makeReservation("credits-runner"));
+
+    expect(outcome.status).toBe("failed");
+    expect(outcome.safeDetail).toBe("All model candidates are blocked by provider credit exhaustion");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      diagnostic: expect.objectContaining({
+        category: "execution",
+        code: "credits_exhausted",
+        retryability: "none",
+      }),
+    }));
+  });
+
+  it("never sets a retry timestamp or retry state for credits_exhausted", async () => {
+    const agentRunner = vi.fn(async () => {
+      throw new ProviderExecutionError({
+        code: "credits_exhausted",
+        retryable: false,
+        attemptedCandidates: 1,
+        message: "All model candidates are blocked by provider credit exhaustion",
+      });
+    });
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("credits-noretry"), makeReservation("credits-noretry"));
+
+    expect(outcome.status).toBe("failed");
+    const settleCall = mockedSettle.mock.calls[0]![0] as Record<string, unknown>;
+    expect(settleCall["retryAt"]).toBeUndefined();
+    expect((settleCall["diagnostic"] as { retryability: string }).retryability).toBe("none");
+  });
+
+  it("keeps generic mapping for ordinary model errors (no typed provider failure)", async () => {
+    const agentRunner = vi.fn(async () => {
+      throw new Error("generic provider outage");
+    });
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("credits-generic"), makeReservation("credits-generic"));
+
+    expect(outcome.status).toBe("failed");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      diagnostic: expect.objectContaining({ code: "model_error" }),
+    }));
   });
 });
