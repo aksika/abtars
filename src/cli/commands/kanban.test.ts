@@ -19,6 +19,7 @@ describe("kanban CLI against the HTTPS Agent API (#1621)", () => {
   let tmpDir: string;
   let server: Server;
   let requests: Array<{ method: string; url: string; body: Record<string, unknown> }>;
+  let stdoutSpy: ReturnType<typeof vi.spyOn> | undefined;
   const originalReject = process.env["NODE_TLS_REJECT_UNAUTHORIZED"];
 
   beforeEach(async () => {
@@ -59,6 +60,8 @@ describe("kanban CLI against the HTTPS Agent API (#1621)", () => {
   });
 
   afterEach(async () => {
+    stdoutSpy?.mockRestore();
+    stdoutSpy = undefined;
     process.env.HOME = originalHome;
     if (originalReject === undefined) {
       delete process.env["NODE_TLS_REJECT_UNAUTHORIZED"];
@@ -72,7 +75,7 @@ describe("kanban CLI against the HTTPS Agent API (#1621)", () => {
   it("posts the card over HTTPS and restores TLS verification", async () => {
     const { kanban } = await import("./kanban.js");
     const output: string[] = [];
-    const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
+    stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
       output.push(String(chunk));
       return true;
     }) as typeof process.stdout.write);
@@ -85,7 +88,6 @@ describe("kanban CLI against the HTTPS Agent API (#1621)", () => {
       "--priority", "HIGH",
       "--delivery-mode", "notify",
     ]);
-    write.mockRestore();
 
     expect(code).toBe(0);
     expect(output.join("")).toContain("+ Card #42 created (queued)");
