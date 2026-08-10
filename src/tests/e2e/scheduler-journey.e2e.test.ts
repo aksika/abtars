@@ -528,12 +528,13 @@ describe("#1520 scheduler E2E — journey 5: multi-agent one-shot through the in
   });
 });
 
-describe("#1520 scheduler E2E — journey 6: transient failure, retry, pause, restart, resume, success", () => {
-  it("retries once per group, pauses after three failed groups, resumes atomically, succeeds", async () => {
+describe("#1520/#1609 scheduler E2E — journey 6: transient failure, retry, pause, restart, resume, success", () => {
+  it("retries once per group, pauses after five failed groups, resumes atomically, succeeds", async () => {
     const queue = await makeQueue();
     // Each group: attempt 1 transient → retry; attempt 2 transient → count.
-    doubles.providerFailures = 6;
-    for (let group = 0; group < 3; group++) {
+    // #1609: the counted threshold rose from 3 to 5 consecutive failed groups.
+    doubles.providerFailures = 10;
+    for (let group = 0; group < 5; group++) {
       forceDue("flaky-task");
       await runTick(queue);
       forceDue("flaky-task");
@@ -541,11 +542,11 @@ describe("#1520 scheduler E2E — journey 6: transient failure, retry, pause, re
     }
 
     const ev = events("flaky-task");
-    if (ev.length !== 6) console.error("FLAKY:", JSON.stringify(ev));
-    expect(ev).toHaveLength(6);
-    expect(ev.filter(e => e.outcome === "failed")).toHaveLength(6);
+    if (ev.length !== 10) console.error("FLAKY:", JSON.stringify(ev));
+    expect(ev).toHaveLength(10);
+    expect(ev.filter(e => e.outcome === "failed")).toHaveLength(10);
     const state = stateStore.readState("flaky-task")!;
-    expect(state.consecutiveFailures).toBe(3);
+    expect(state.consecutiveFailures).toBe(5);
     expect(state.autoPaused).toBe(true);
     expect(state.pausedAt).toBeDefined();
     expect(state.lastIncident?.category).toBe("execution");
@@ -576,6 +577,96 @@ describe("#1520 scheduler E2E — journey 6: transient failure, retry, pause, re
     const ev2 = events("flaky-task");
     expect(ev2[0]!.outcome).toBe("success");
     expect(stateStore.readState("flaky-task")!.consecutiveFailures).toBe(0);
+  });
+});
+
+describe("#1609 scheduler E2E — journey 11: bounded automatic recovery (cooldown, resume, cap)", () => {
+  it("no early resume; one atomic resume at cooldown expiry schedules the future run; cap escalates", async () => {
+    const { setPausedRecoveryHook } = await import("../../components/tasks/task-checker.js");
+    const recoveryEvents: Array<{ kind: string; entryId: string }> = [];
+    const unsub = (() => {
+      setPausedRecoveryHook(e => recoveryEvents.push(e));
+      return () => setPausedRecoveryHook(null);
+    })();
+
+    try {
+      const queue = await makeQueue();
+      const pauseTask = (): number => {
+        const pausedAt = Date.now();
+        stateStore.updateState("flaky-task", { autoPaused: true, pausedAt });
+        return pausedAt;
+      };
+
+      // Five failed groups pause the task (same shape as journey 6).
+      doubles.providerFailures = 10;
+      for (let group = 0; group < 5; group++) {
+        forceDue("flaky-task");
+        await runTick(queue);
+        forceDue("flaky-task");
+        await runTick(queue);
+      }
+      expect(stateStore.readState("flaky-task")!.autoPaused).toBe(true);
+
+      // No early resume: a heartbeat evaluation inside the cooldown leaves the
+      // task paused and reserves nothing.
+      const before = events("flaky-task").length;
+      await runTick(queue);
+      const during = stateStore.readState("flaky-task")!;
+      expect(during.autoPaused).toBe(true);
+      expect(during.autoResumeCount).toBe(0);
+      expect(events("flaky-task")).toHaveLength(before);
+
+      // Cooldown expiry: rewriting pausedAt to the past simulates the 12-hour
+      // boundary; the checker performs exactly ONE atomic resume through the
+      // service and schedules the next FUTURE occurrence — no run reservation
+      // in the same heartbeat.
+      stateStore.updateState("flaky-task", { pausedAt: Date.now() - 13 * 3600_000 });
+      const beforeTick = events("flaky-task").length;
+      await runTick(queue);
+      const resumed = stateStore.readState("flaky-task")!;
+      expect(resumed.autoPaused).toBe(false);
+      expect(resumed.pausedAt).toBeUndefined();
+      expect(resumed.consecutiveFailures).toBe(0);
+      expect(resumed.autoResumeCount).toBe(1);
+      expect(resumed.nextRunAt!).toBeGreaterThan(Date.now());
+      expect(events("flaky-task")).toHaveLength(beforeTick);
+      expect(recoveryEvents).toContainEqual(expect.objectContaining({ kind: "resumed", entryId: "flaky-task", nextRunAt: expect.any(Number) }));
+
+      // A later successful run resets the episode counter.
+      doubles.providerFailures = 0;
+      forceDue("flaky-task");
+      await runTick(queue);
+      expect(stateStore.readState("flaky-task")!.autoResumeCount).toBe(0);
+
+      // Cap exhaustion: three more expired cooldowns consume the three
+      // remaining automatic resumes; the fourth expiry escalates and stays
+      // paused.
+      for (let cycle = 0; cycle < 3; cycle++) {
+        pauseTask();
+        stateStore.updateState("flaky-task", { pausedAt: Date.now() - 13 * 3600_000 });
+        await runTick(queue);
+      }
+      const count = stateStore.readState("flaky-task")!.autoResumeCount;
+      expect(count).toBe(3);
+
+      // The escalation shares the durable WARN claim, so simulate the quiet
+      // window (no warning recorded in the previous 5 minutes).
+      pauseTask();
+      stateStore.updateState("flaky-task", { pausedAt: Date.now() - 13 * 3600_000, lastPauseWarnAt: Date.now() - 6 * 60_000 });
+      await runTick(queue);
+      const capped = stateStore.readState("flaky-task")!;
+      expect(capped.autoPaused).toBe(true);
+      expect(capped.autoResumeCount).toBe(3);
+      expect(recoveryEvents).toContainEqual({ kind: "cap_exhausted", entryId: "flaky-task" });
+
+      // Manual resume is the operator escape hatch after cap exhaustion.
+      expect(service.resumeAutoPaused("flaky-task", taskStore.readEntries())).toBe("resumed");
+      const manual = stateStore.readState("flaky-task")!;
+      expect(manual.autoPaused).toBe(false);
+      expect(manual.autoResumeCount).toBe(3);
+    } finally {
+      unsub();
+    }
   });
 });
 

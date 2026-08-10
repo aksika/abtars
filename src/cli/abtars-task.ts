@@ -1,6 +1,6 @@
 import { localISO } from "../utils/local-time.js";
 import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "../components/tasks/task-store.js";
-import { readState, updateState, setAutoPaused, removeState } from "../components/tasks/task-state-store.js";
+import { readState, updateState, removeState } from "../components/tasks/task-state-store.js";
 import { recentRuns } from "../components/tasks/task-history-store.js";
 import { validateTaskId, type ScheduledTask, type SystemTaskAction, SYSTEM_ACTIONS } from "../components/tasks/task-types.js";
 
@@ -154,9 +154,14 @@ function remove(id: string): void {
 }
 
 function pause(id: string): void {
-  const entry = dbReadEntries().find(e => e.id === id);
+  const entries = dbReadEntries();
+  const entry = entries.find(e => e.id === id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
-  setAutoPaused(id, true);
+  // #1609: one service operation for CLI, chat, and dashboard pause — it
+  // refreshes pausedAt to now so an already-paused task gets a fresh
+  // 12-hour cooldown.
+  const { pauseTask } = require("../components/tasks/task-service.js") as typeof import("../components/tasks/task-service.js");
+  pauseTask(id, entries);
   console.log(JSON.stringify({ ok: true, action: "paused", id }));
 }
 

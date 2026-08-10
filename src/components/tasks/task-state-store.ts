@@ -80,6 +80,12 @@ export interface TaskRuntimeState {
   lastIncident?: TaskFailureDiagnosticV1;
   /** #1520: when the task auto-paused (epoch ms). */
   pausedAt?: number;
+  /** #1609: automatic resumes since the last successful run; 0 after success.
+   * Not a lifetime counter. */
+  autoResumeCount: number;
+  /** #1609: durable admission time of the last paused-task WARN record —
+   * the per-hour warning ceiling survives process restarts. */
+  lastPauseWarnAt?: number;
   /** #1520: bounded admission deferral for the current occurrence. */
   deferredAdmission?: DeferredAdmission;
 }
@@ -120,6 +126,8 @@ type TaskRow = Record<string, unknown> & {
   consecutive_deferrals: number;
   auto_paused: number;
   paused_at: number | null;
+  auto_resume_count: number;
+  last_pause_warn_at: number | null;
   prior_failure: string | null;
   last_incident_json: string | null;
   deferred_admission_json: string | null;
@@ -169,6 +177,8 @@ function taskStateFromRow(row: TaskRow): TaskRuntimeState {
     consecutiveFailures: row.consecutive_failures,
     consecutiveDeferrals: row.consecutive_deferrals,
     autoPaused: row.auto_paused === 1,
+    autoResumeCount: row.auto_resume_count,
+    ...(row.last_pause_warn_at !== null ? { lastPauseWarnAt: row.last_pause_warn_at } : {}),
     ...(row.prior_failure !== null ? { priorFailure: row.prior_failure } : {}),
     ...(row.paused_at !== null ? { pausedAt: row.paused_at } : {}),
     ...(parseJson<TaskFailureDiagnosticV1>(row.last_incident_json) !== undefined ? { lastIncident: parseJson<TaskFailureDiagnosticV1>(row.last_incident_json) } : {}),
@@ -233,6 +243,8 @@ function statePatchColumns(update: Partial<TaskRuntimeState>): { sets: string[];
   if ("consecutiveDeferrals" in update) put("consecutive_deferrals", update.consecutiveDeferrals);
   if ("autoPaused" in update) put("auto_paused", update.autoPaused ? 1 : 0);
   if ("pausedAt" in update) put("paused_at", update.pausedAt ?? null);
+  if ("autoResumeCount" in update) put("auto_resume_count", update.autoResumeCount);
+  if ("lastPauseWarnAt" in update) put("last_pause_warn_at", update.lastPauseWarnAt ?? null);
   if ("priorFailure" in update) put("prior_failure", update.priorFailure ?? null);
   if ("lastIncident" in update) put("last_incident_json", update.lastIncident === undefined ? null : JSON.stringify(update.lastIncident));
   if ("deferredAdmission" in update) put("deferred_admission_json", update.deferredAdmission === undefined ? null : JSON.stringify(update.deferredAdmission));
@@ -289,17 +301,13 @@ export function initializeState(entries: ScheduledTask[]): void {
         changed = true;
         continue;
       }
-      // #1520 Task 6: repair impossible legacy combinations. Auto-paused without
-      // a pausedAt marker or a failure reason is incoherent — clear it and
-      // record a synthesized incident; never silently erase a valid incident.
-      if (existing.auto_paused === 1 && (existing.consecutive_failures ?? 0) === 0) {
-        logInfo(TAG, `Self-repair: clearing incoherent autoPaused for "${id}" (zero failures)`);
-        const incident = existing.last_incident_json
-          ? existing.last_incident_json
-          : JSON.stringify({ version: 1, category: "definition", code: "state_repaired", phase: "settling", message: "auto-pause cleared: incoherent legacy state (zero failures)", retryability: "permanent", occurredAt: Date.now() });
-        db.prepare("UPDATE task_state SET auto_paused = 0, paused_at = NULL, last_incident_json = ? WHERE task_id = ?").run(incident, id);
-        changed = true;
-      } else if (existing.auto_paused === 1 && existing.paused_at === null) {
+      // #1520 Task 6 / #1609: repair impossible legacy combinations. The only
+      // incoherent pause is one without a pause timestamp. A zero-failure
+      // pause is now LEGITIMATE (explicit pause starts a fresh 12-hour
+      // cooldown and must survive restart), so it is never cleared; a missing
+      // timestamp is backfilled so the bounded recovery policy can start its
+      // cooldown. Never silently erase a valid incident.
+      if (existing.auto_paused === 1 && existing.paused_at === null) {
         db.prepare("UPDATE task_state SET paused_at = ? WHERE task_id = ?").run(Date.now(), id);
         logInfo(TAG, `Self-repair: backfilled pausedAt for "${id}"`);
         changed = true;
@@ -473,13 +481,77 @@ export function resetDeferrals(taskId: string): void {
 export function setAutoPaused(taskId: string, paused: boolean): void {
   try {
     const db = requireTaskDatabase();
-    // Pausing preserves an existing pausedAt (re-pause is idempotent);
-    // unpausing clears it — matching the old whole-file spread semantics.
-    db.prepare("UPDATE task_state SET auto_paused = ?, paused_at = CASE WHEN ? THEN COALESCE(paused_at, ?) ELSE NULL END WHERE task_id = ?")
+    // #1609: an explicit pause always refreshes pausedAt to now — a re-pause
+    // starts a fresh 12-hour cooldown even when the task was already paused.
+    // Unpausing clears the pause marker.
+    db.prepare("UPDATE task_state SET auto_paused = ?, paused_at = CASE WHEN ? THEN ? ELSE NULL END WHERE task_id = ?")
       .run(paused ? 1 : 0, paused ? 1 : 0, paused ? Date.now() : 0, taskId);
     notifyTaskDueChanged();
   } catch (err) {
     logAndSwallow(TAG, "setAutoPaused", err, "warn");
+  }
+}
+
+/**
+ * #1609: the single conditional automatic-resume transition. Eligibility is
+ * decided by the caller against a fresh read; this SQL predicate is the
+ * mandatory race guard: still paused, pause timestamp unchanged, no active
+ * run reservation, and the episode cap not exhausted. Only a won CAS clears
+ * the pause and increments the durable episode count atomically.
+ */
+export function claimAutoResume(
+  taskId: string,
+  opts: { pausedAt: number; nextRunAt: number | null; completed: boolean; maxResumes: number },
+): "won" | "lost" {
+  try {
+    const db = requireTaskDatabase();
+    const outcome = cas(db,
+      `UPDATE task_state SET
+         auto_paused = 0,
+         paused_at = NULL,
+         consecutive_failures = 0,
+         consecutive_deferrals = 0,
+         auto_resume_count = auto_resume_count + 1,
+         retrying = 0,
+         retry_at = NULL,
+         retry_group_id = NULL,
+         retry_attempt = NULL,
+         prior_failure = NULL,
+         deferred_admission_json = NULL,
+         next_run_at = ?,
+         completed = ?
+       WHERE task_id = ?
+         AND auto_paused = 1
+         AND paused_at = ?
+         AND auto_resume_count < ?
+         AND NOT EXISTS (SELECT 1 FROM task_runs WHERE task_id = ? AND finished_at IS NULL)`,
+      opts.nextRunAt, opts.completed ? 1 : 0, taskId, opts.pausedAt, opts.maxResumes, taskId);
+    if (outcome === "won") notifyTaskDueChanged();
+    return outcome;
+  } catch (err) {
+    logAndSwallow(TAG, "claimAutoResume", err, "warn");
+    return "lost";
+  }
+}
+
+/**
+ * #1609: durable, idempotent admission of a paused-task WARN record. The
+ * claim lands only when the previous admission is older than the minimum
+ * interval, so at most 12 WARN records per task per rolling hour survive
+ * process restarts. A lost claim means the record is rate-limited.
+ */
+export function claimPauseWarn(taskId: string, now: number, minIntervalMs: number): boolean {
+  try {
+    const db = requireTaskDatabase();
+    const outcome = cas(db,
+      `UPDATE task_state SET last_pause_warn_at = ?
+       WHERE task_id = ?
+         AND (last_pause_warn_at IS NULL OR ? - last_pause_warn_at >= ?)`,
+      now, taskId, now, minIntervalMs);
+    return outcome === "won";
+  } catch (err) {
+    logAndSwallow(TAG, "claimPauseWarn", err, "warn");
+    return false;
   }
 }
 

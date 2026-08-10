@@ -33,7 +33,7 @@ export interface ScheduledTaskRunOutcome {
 }
 
 export type AgentTaskRunner = (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string }>;
-export type TaskPausedCallback = (chatId: number, title: string, reason: string) => void;
+export type TaskPausedCallback = (chatId: number, title: string, reason: string, notice: import("./task-run-settler.js").PauseNotice) => void;
 export type TaskFailureCallback = (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
 export type { ScheduledProjectRequest, ScheduledProjectRunner } from "./scheduled-project-runner.js";
 
@@ -45,7 +45,7 @@ function resolveDefaultExecutions(): ExecutionSupervisor {
 export class ScheduledTaskRunner {
   private readonly agentRunner?: AgentTaskRunner;
   private readonly projectRunner?: import("./scheduled-project-runner.js").ScheduledProjectRunner;
-  private readonly onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+  private readonly onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1, notice: import("./task-run-settler.js").PauseNotice) => void;
   private readonly onFailure?: TaskFailureCallback;
   private readonly executions: ExecutionSupervisor;
 
@@ -60,9 +60,9 @@ export class ScheduledTaskRunner {
     // #1520: pause notification emitted once by the shared settler on the
     // false→true transition, keeping operator presentation in one place.
     if (opts?.onTaskPaused) {
-      this.onPaused = (entryId, diagnostic) => {
+      this.onPaused = (entryId, diagnostic, notice) => {
         const entry = readTaskEntries().find((e: ScheduledTask) => e.id === entryId);
-        opts.onTaskPaused?.(parseInt(entry?.chatId ?? "0", 10), formatTaskLabel(entryId), `paused: ${diagnostic.category}/${diagnostic.code}: ${diagnostic.message.slice(0, 150)}`);
+        opts.onTaskPaused?.(parseInt(entry?.chatId ?? "0", 10), formatTaskLabel(entryId), `paused: ${diagnostic.category}/${diagnostic.code}: ${diagnostic.message.slice(0, 150)}`, notice);
       };
     }
   }

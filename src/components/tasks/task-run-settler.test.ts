@@ -93,19 +93,64 @@ const CASES: SettleCase[] = [
     },
   },
   {
-    // Guard against over-correcting #1525 into "manual and scheduled both skip
-    // pause": a scheduled failure at the 3-streak threshold still auto-pauses.
-    name: "a scheduled failure at the streak threshold still auto-pauses",
+    // #1609: the escaped production regression — a short transient streak must
+    // not pause. Failures 1-4 keep the task runnable; only the fifth pauses.
+    name: "a scheduled failure at streak 4 stays runnable (#1609)",
+    trigger: "schedule",
+    runId: "run-sched-streak4",
+    seed: { consecutiveFailures: 3, nextRunAt: SEED_NEXT_RUN },
+    outcome: "failed",
+    makeDiagnostic: () => failure.makeTaskFailure("execution", "model_error", "executing", "provider down", "none"),
+    expectState: (s) => {
+      expect(s.activeRun).toBeUndefined();
+      expect(s.autoPaused).toBe(false);
+      expect(s.pausedAt).toBeUndefined();
+      expect(s.consecutiveFailures).toBe(4);
+      expect(s.nextRunAt).toBeTypeOf("number");
+    },
+  },
+  {
+    name: "a scheduled failure at the 5-streak threshold still auto-pauses (#1609)",
     trigger: "schedule",
     runId: "run-sched-threshold",
-    seed: { consecutiveFailures: 2, nextRunAt: SEED_NEXT_RUN },
+    seed: { consecutiveFailures: 4, nextRunAt: SEED_NEXT_RUN },
     outcome: "failed",
     makeDiagnostic: () => failure.makeTaskFailure("execution", "model_error", "executing", "provider down", "none"),
     expectState: (s) => {
       expect(s.activeRun).toBeUndefined();
       expect(s.autoPaused).toBe(true);
       expect(s.pausedAt).toBeTypeOf("number");
-      expect(s.consecutiveFailures).toBe(3);
+      expect(s.consecutiveFailures).toBe(5);
+    },
+  },
+  {
+    // #1609: dependency faults count toward the threshold instead of pausing
+    // on their first failed group; the transient retry is retained.
+    name: "a permanent dependency fault counts without pausing immediately (#1609)",
+    trigger: "schedule",
+    runId: "run-sched-dependency",
+    seed: { consecutiveFailures: 1, nextRunAt: SEED_NEXT_RUN },
+    outcome: "failed",
+    makeDiagnostic: () => failure.makeTaskFailure("dependency", "executable_missing", "preflight", "adapter missing", "permanent"),
+    expectState: (s) => {
+      expect(s.activeRun).toBeUndefined();
+      expect(s.autoPaused).toBe(false);
+      expect(s.consecutiveFailures).toBe(2);
+    },
+  },
+  {
+    // #1609: retained permanent classes still pause on their first counted group.
+    name: "an unevidenceable contract still pauses on the first failed group (#1609)",
+    trigger: "schedule",
+    runId: "run-sched-contract",
+    seed: { consecutiveFailures: 0, nextRunAt: SEED_NEXT_RUN },
+    outcome: "failed",
+    makeDiagnostic: () => failure.makeTaskFailure("supervision", "contract_uncovered", "executing", "root criteria without a mapped child contract", "none"),
+    expectState: (s) => {
+      expect(s.activeRun).toBeUndefined();
+      expect(s.autoPaused).toBe(true);
+      expect(s.pausedAt).toBeTypeOf("number");
+      expect(s.consecutiveFailures).toBe(1);
     },
   },
   {
@@ -404,6 +449,42 @@ describe("settleRunOnce failure cascade (#1588)", () => {
       onFailure: (_entryId, diagnostic) => calls.push(diagnostic.category + "/" + diagnostic.code),
     });
     expect(calls).toEqual(["supervision/lane_timed_out"]);
+  });
+});
+
+describe("settleRunOnce recovery episode reset (#1609)", () => {
+  function reserve(runId: string): import("./task-state-store.js").ActiveTaskRun {
+    const reserved = store.reserveRun(ENTRY.id, {
+      runId,
+      groupId: "g-episode",
+      attempt: 1,
+      trigger: "schedule",
+      occurrenceAt: OCCURRENCE_AT,
+      deadlineAt: DEADLINE_AT,
+    });
+    if (!reserved.ok) throw new Error("reserveRun failed");
+    return reserved.run;
+  }
+
+  it("a successful run resets the automatic-resume episode counter", () => {
+    store.updateState(ENTRY.id, { autoResumeCount: 2, consecutiveFailures: 2 });
+    const run = reserve("episode-reset");
+    settle.settleRunOnce({ entry: ENTRY, run, outcome: "success" });
+    const state = store.readState(ENTRY.id)!;
+    expect(state.autoResumeCount).toBe(0);
+    expect(state.consecutiveFailures).toBe(0);
+  });
+
+  it("a failed run keeps the episode counter intact", () => {
+    store.updateState(ENTRY.id, { autoResumeCount: 2, consecutiveFailures: 0 });
+    const run = reserve("episode-keep");
+    settle.settleRunOnce({
+      entry: ENTRY, run, outcome: "failed",
+      diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "boom", "none"),
+    });
+    const state = store.readState(ENTRY.id)!;
+    expect(state.autoResumeCount).toBe(2);
+    expect(state.consecutiveFailures).toBe(1);
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { checkCron, readPendingReminders, clearPendingReminders } from "./task-checker.js";
+import { checkCron, readPendingReminders, clearPendingReminders, setPausedRecoveryHook } from "./task-checker.js";
 import { ScheduledRunCoordinator } from "./scheduled-run-coordinator.js";
 import { createRunDeadlineSource, CANCELLATION_GRACE_MS } from "./due-sources.js";
 import * as taskStore from "./task-store.js";
@@ -38,7 +38,16 @@ vi.mock("./task-state-store.js", () => ({
   settleActiveRun: vi.fn(),
   setRunOutcome: vi.fn(),
   getRunOwner: vi.fn(),
+  // #1609: durable paused-task WARN claims ride the checker evaluation.
+  claimPauseWarn: vi.fn(() => true),
 }));
+
+// #1609: the checker delegates cooldown/cap decisions to the service.
+vi.mock("./task-service.js", () => ({
+  autoResumeIfDue: vi.fn(() => "cooling_down"),
+}));
+
+const serviceMod = await import("./task-service.js");
 
 vi.mock("./task-history-store.js", () => ({
   todaySuccessCount: vi.fn(() => 0),
@@ -140,6 +149,78 @@ describe("checkCron", () => {
 
     expect(checkCron()).toHaveLength(1);
     expect(stateStore.advanceNextRun).not.toHaveBeenCalled();
+  });
+
+  describe("auto-pause recovery on the heartbeat (#1609)", () => {
+    function pausedState(overrides: Record<string, unknown> = {}): any {
+      return {
+        nextRunAt: Date.now() + 60_000,
+        consecutiveFailures: 5,
+        consecutiveDeferrals: 0,
+        autoPaused: true,
+        pausedAt: Date.now() - 1,
+        autoResumeCount: 0,
+        ...overrides,
+      };
+    }
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      vi.mocked(taskStore.readEntries).mockReturnValue([makeTask()]);
+    });
+
+    it("does not reserve a run in the same heartbeat as an automatic resume", () => {
+      vi.mocked(stateStore.readState).mockReturnValue(pausedState());
+      vi.mocked(serviceMod.autoResumeIfDue).mockReturnValue("resumed");
+      const events: any[] = [];
+      const unsub = (() => {
+        setPausedRecoveryHook(e => events.push(e));
+        return () => setPausedRecoveryHook(null);
+      })();
+      try {
+        expect(checkCron()).toEqual([]);
+      } finally {
+        unsub();
+      }
+      expect(stateStore.reserveRun).not.toHaveBeenCalled();
+      expect(events).toEqual([{ kind: "resumed", entryId: "t1", nextRunAt: expect.any(Number) }]);
+    });
+
+    it("escalates when the automatic-resume cap is exhausted and stays paused", () => {
+      vi.mocked(stateStore.readState).mockReturnValue(pausedState({ autoResumeCount: 3 }));
+      vi.mocked(serviceMod.autoResumeIfDue).mockReturnValue("cap_exhausted");
+      const events: any[] = [];
+      const unsub = (() => {
+        setPausedRecoveryHook(e => events.push(e));
+        return () => setPausedRecoveryHook(null);
+      })();
+      try {
+        expect(checkCron()).toEqual([]);
+      } finally {
+        unsub();
+      }
+      expect(stateStore.reserveRun).not.toHaveBeenCalled();
+      expect(stateStore.claimPauseWarn).toHaveBeenCalledWith("t1", expect.any(Number), expect.any(Number));
+      expect(events).toEqual([{ kind: "cap_exhausted", entryId: "t1" }]);
+    });
+
+    it("within the cooldown it only consults the durable WARN claim — no state transition", () => {
+      vi.mocked(stateStore.readState).mockReturnValue(pausedState());
+      vi.mocked(serviceMod.autoResumeIfDue).mockReturnValue("cooling_down");
+      expect(checkCron()).toEqual([]);
+      expect(stateStore.claimPauseWarn).toHaveBeenCalledWith("t1", expect.any(Number), expect.any(Number));
+      expect(stateStore.updateState).not.toHaveBeenCalled();
+      expect(stateStore.reserveRun).not.toHaveBeenCalled();
+    });
+
+    it("a denied WARN claim suppresses the operator warning without touching state", () => {
+      vi.mocked(stateStore.readState).mockReturnValue(pausedState());
+      vi.mocked(serviceMod.autoResumeIfDue).mockReturnValue("cooling_down");
+      vi.mocked(stateStore.claimPauseWarn).mockReturnValue(false);
+      expect(checkCron()).toEqual([]);
+      expect(stateStore.claimPauseWarn).toHaveBeenCalled();
+      expect(stateStore.reserveRun).not.toHaveBeenCalled();
+    });
   });
 });
 

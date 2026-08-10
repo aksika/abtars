@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 describe("initializeState legacy repair", () => {
-  it("preserves a valid incident while clearing incoherent auto-pause", () => {
+  it("#1609 preserves a legitimate zero-failure explicit pause and its incident", () => {
     writeFileSync(join(home, "tasks", "task-state.json"), JSON.stringify({
       task: {
         nextRunAt: null,
@@ -45,8 +45,30 @@ describe("initializeState legacy repair", () => {
     }]);
 
     const repaired = store.readState("task")!;
-    expect(repaired.autoPaused).toBe(false);
+    expect(repaired.autoPaused).toBe(true);
+    expect(repaired.pausedAt).toBe(123);
     expect(repaired.lastIncident?.code).toBe("model_error");
+  });
+
+  it("#1609 backfills a missing pause timestamp instead of clearing the pause", () => {
+    writeFileSync(join(home, "tasks", "task-state.json"), JSON.stringify({
+      task: {
+        nextRunAt: null,
+        consecutiveFailures: 3,
+        consecutiveDeferrals: 0,
+        autoPaused: true,
+        pausedAt: null,
+      },
+    }));
+
+    store.initializeState([{
+      id: "task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
+      delivery: "silent", enabled: true, priority: "medium", at: new Date().toISOString(),
+    }]);
+
+    const repaired = store.readState("task")!;
+    expect(repaired.autoPaused).toBe(true);
+    expect(repaired.pausedAt).toBeTypeOf("number");
   });
 });
 
@@ -148,5 +170,125 @@ describe("requestRunTerminal #1539 durable terminal request", () => {
   it("returns stale for an unknown run ID", () => {
     seedRun("run-x");
     expect(store.requestRunTerminal("task", "nope", { kind: "cancelled", requestedAt: 1, reason: "x" })).toBe("stale");
+  });
+});
+
+describe("claimAutoResume #1609 conditional recovery transition", () => {
+  function seedPaused(pausedAt: number, overrides: Partial<import("./task-state-store.js").TaskRuntimeState> = {}): void {
+    store.updateState("task", {
+      autoPaused: true,
+      pausedAt,
+      consecutiveFailures: 5,
+      autoResumeCount: 0,
+      ...overrides,
+    });
+  }
+
+  const CLAIM = { nextRunAt: Date.now() + 3_600_000, completed: false, maxResumes: 3 };
+
+  it("wins only when paused with an unchanged pause timestamp and no active run", () => {
+    const pausedAt = Date.now() - 1;
+    seedPaused(pausedAt);
+    expect(store.claimAutoResume("task", { ...CLAIM, pausedAt })).toBe("won");
+    const state = store.readState("task")!;
+    expect(state.autoPaused).toBe(false);
+    expect(state.pausedAt).toBeUndefined();
+    expect(state.consecutiveFailures).toBe(0);
+    expect(state.autoResumeCount).toBe(1);
+  });
+
+  it("loses against a stale pause timestamp (fresh re-pause wins the race)", () => {
+    const pausedAt = Date.now() - 1;
+    seedPaused(pausedAt);
+    expect(store.claimAutoResume("task", { ...CLAIM, pausedAt: pausedAt - 5000 })).toBe("lost");
+    expect(store.readState("task")!.autoPaused).toBe(true);
+    expect(store.readState("task")!.autoResumeCount).toBe(0);
+  });
+
+  it("loses while an active run reservation exists", () => {
+    const pausedAt = Date.now() - 1;
+    seedPaused(pausedAt);
+    const reserved = store.reserveRun("task", {
+      runId: "pause-active", groupId: "g", attempt: 1, trigger: "schedule",
+      occurrenceAt: Date.now(), deadlineAt: Date.now() + 60_000,
+    });
+    expect(reserved.ok).toBe(true);
+    expect(store.claimAutoResume("task", { ...CLAIM, pausedAt })).toBe("lost");
+    expect(store.readState("task")!.autoPaused).toBe(true);
+  });
+
+  it("loses once the episode cap is exhausted and survives re-runs", () => {
+    const pausedAt = Date.now() - 1;
+    seedPaused(pausedAt, { autoResumeCount: 3 });
+    expect(store.claimAutoResume("task", { ...CLAIM, pausedAt })).toBe("lost");
+    expect(store.readState("task")!.autoPaused).toBe(true);
+    expect(store.readState("task")!.autoResumeCount).toBe(3);
+  });
+
+  it("increments the durable episode count atomically with clearing the pause", () => {
+    const pausedAt = Date.now() - 1;
+    seedPaused(pausedAt, { autoResumeCount: 2 });
+    expect(store.claimAutoResume("task", { ...CLAIM, pausedAt })).toBe("won");
+    const state = store.readState("task")!;
+    expect(state.autoPaused).toBe(false);
+    expect(state.autoResumeCount).toBe(3);
+  });
+
+  it("keeps the durable count across a simulated restart (store reopen)", () => {
+    const pausedAt = Date.now() - 1;
+    seedPaused(pausedAt, { autoResumeCount: 2 });
+    expect(store.claimAutoResume("task", { ...CLAIM, pausedAt })).toBe("won");
+    // Reopen the module against the same home dir — state survives.
+    const reopened = (() => {
+      vi.resetModules();
+      return import("./task-state-store.js");
+    })();
+    return reopened.then(reopened => {
+      const state = reopened.readState("task")!;
+      expect(state.autoResumeCount).toBe(3);
+      expect(state.autoPaused).toBe(false);
+    });
+  });
+});
+
+describe("claimPauseWarn #1609 durable per-hour warning ceiling", () => {
+  function seedPaused(pausedAt: number, lastWarnAt?: number): void {
+    store.updateState("task", {
+      autoPaused: true,
+      pausedAt,
+      autoResumeCount: 0,
+      ...(lastWarnAt !== undefined ? { lastPauseWarnAt: lastWarnAt } : {}),
+    });
+  }
+
+  const INTERVAL = 5 * 60_000;
+
+  it("admits the first warning and rejects a second within the interval", () => {
+    seedPaused(Date.now() - 1);
+    const now = Date.now();
+    expect(store.claimPauseWarn("task", now, INTERVAL)).toBe(true);
+    expect(store.claimPauseWarn("task", now + 60_000, INTERVAL)).toBe(false);
+  });
+
+  it("admits again once the interval has elapsed", () => {
+    const now = Date.now();
+    seedPaused(now - 1, now - INTERVAL);
+    expect(store.claimPauseWarn("task", now, INTERVAL)).toBe(true);
+    expect(store.readState("task")!.lastPauseWarnAt).toBe(now);
+  });
+
+  it("enforces the ceiling across a simulated restart", () => {
+    const now = Date.now();
+    seedPaused(now - 1, now - INTERVAL);
+    expect(store.claimPauseWarn("task", now, INTERVAL)).toBe(true);
+    const reopened = (() => {
+      vi.resetModules();
+      return import("./task-state-store.js");
+    })();
+    return reopened.then(reopened => {
+      // The durable admission time survived the restart, so the next attempt
+      // within the interval is still rejected.
+      expect(reopened.claimPauseWarn("task", now + 30_000, INTERVAL)).toBe(false);
+    });
   });
 });

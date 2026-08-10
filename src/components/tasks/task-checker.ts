@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn, logTrace } from "../logger.js";
 import { readEntries as dbReadEntries } from "./task-store.js";
-import { advanceNextRun, createRunId, readState, reserveRun } from "./task-state-store.js";
+import { advanceNextRun, claimPauseWarn, createRunId, readState, reserveRun } from "./task-state-store.js";
 import { todaySuccessCount } from "./task-history-store.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { runCeilingMs, type ScheduledTask } from "./task-types.js";
 import type { ActiveTaskRun } from "./task-state-store.js";
+import { PAUSED_WARN_INTERVAL_MS } from "./task-failure.js";
+import { autoResumeIfDue } from "./task-service.js";
 
 const TAG = "cron-checker";
 const memoryDir = (): string => join(abtarsHome(), "state");
@@ -16,15 +18,31 @@ const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
 
 // #1502: the heartbeat evaluates schedules on every tick, so never-fires-again
 // skip warnings (auto_paused / no_state) must be rate-limited per task or they
-// replace one silence bug with a log flood. One warn per task per hour.
-const SKIP_WARN_INTERVAL_MS = 60 * 60 * 1000;
-const _skipWarnLimiter = new Map<string, number>();
-function shouldWarnSkip(taskId: string): boolean {
+// replace one silence bug with a log flood. Paused tasks use the DURABLE
+// 12-per-hour claim in task_state (survives restarts); no_state has no row to
+// claim, so its in-memory one-per-hour limiter remains.
+const NO_STATE_WARN_INTERVAL_MS = 60 * 60 * 1000;
+const _noStateWarnLimiter = new Map<string, number>();
+function shouldWarnNoState(taskId: string): boolean {
   const now = Date.now();
-  const last = _skipWarnLimiter.get(taskId) ?? 0;
-  if (now - last < SKIP_WARN_INTERVAL_MS) return false;
-  _skipWarnLimiter.set(taskId, now);
+  const last = _noStateWarnLimiter.get(taskId) ?? 0;
+  if (now - last < NO_STATE_WARN_INTERVAL_MS) return false;
+  _noStateWarnLimiter.set(taskId, now);
   return true;
+}
+
+/**
+ * #1609: operator-visible recovery events emitted from the heartbeat path.
+ * Wired once in boot; the transition has already committed before the hook
+ * runs, and a hook failure is isolated/logged — it never undoes state.
+ */
+export type PausedRecoveryEvent =
+  | { kind: "resumed"; entryId: string; nextRunAt?: number }
+  | { kind: "cap_exhausted"; entryId: string };
+
+let pausedRecoveryHook: ((event: PausedRecoveryEvent) => void) | null = null;
+export function setPausedRecoveryHook(hook: ((event: PausedRecoveryEvent) => void) | null): void {
+  pausedRecoveryHook = hook;
 }
 
 export type ScheduleReason =
@@ -152,10 +170,48 @@ export function checkCron(): ReservedTask[] {
       } else {
         dueTasks.push({ entry, run: reservation.run });
       }
-    } else if (decision.reason === "auto_paused" || decision.reason === "no_state") {
-      if (shouldWarnSkip(entry.id)) {
-        const resumeCmd = decision.reason === "auto_paused" ? ` — resume: /task resume ${entry.id}` : "";
-        logWarn(TAG, `Schedule skip for "${entry.id}": reason=${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}${resumeCmd}`);
+    } else if (decision.reason === "auto_paused") {
+      // #1609: evaluate the durable cooldown/cap through the service. No new
+      // timer or heartbeat task — this rides the existing checker evaluation.
+      const resume = autoResumeIfDue(entry.id, [entry]);
+      if (resume === "resumed") {
+        // The conditional transition committed one atomic resume. Do NOT
+        // reserve a run in this same heartbeat; the next evaluation reads the
+        // freshly computed future schedule normally.
+        const nextState = readState(entry.id);
+        logInfo(TAG, `Auto-resumed "${entry.id}" after cooldown — next run scheduled`);
+        try {
+          pausedRecoveryHook?.({ kind: "resumed", entryId: entry.id, nextRunAt: nextState?.nextRunAt ?? undefined });
+        } catch (err) {
+          logAndSwallow(TAG, "pausedRecoveryHook (resumed)", err);
+        }
+        continue;
+      }
+      if (resume === "cap_exhausted") {
+        // Durable, idempotent escalation: admitted only when the per-task
+        // WARN claim lands (at most 12/hour, survives restarts).
+        const now = Date.now();
+        if (claimPauseWarn(entry.id, now, PAUSED_WARN_INTERVAL_MS)) {
+          logWarn(TAG, `Pause cap exhausted for "${entry.id}" — remains paused until manual resume (/task resume ${entry.id})`);
+          try {
+            pausedRecoveryHook?.({ kind: "cap_exhausted", entryId: entry.id });
+          } catch (err) {
+            logAndSwallow(TAG, "pausedRecoveryHook (cap_exhausted)", err);
+          }
+        } else {
+          logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=auto_paused cap_exhausted (escalation rate-limited)`);
+        }
+        continue;
+      }
+      const now = Date.now();
+      if (claimPauseWarn(entry.id, now, PAUSED_WARN_INTERVAL_MS)) {
+        logWarn(TAG, `Schedule skip for "${entry.id}": reason=auto_paused (${resume}${decision.detail ? `, ${decision.detail}` : ""}) — resume: /task resume ${entry.id}`);
+      } else {
+        logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=auto_paused (warn rate-limited)`);
+      }
+    } else if (decision.reason === "no_state") {
+      if (shouldWarnNoState(entry.id)) {
+        logWarn(TAG, `Schedule skip for "${entry.id}": reason=no_state${decision.detail ? ` (${decision.detail})` : ""}`);
       } else {
         logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=${decision.reason} (warn rate-limited)`);
       }

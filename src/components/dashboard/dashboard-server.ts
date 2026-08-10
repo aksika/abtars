@@ -397,14 +397,17 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
 
 import { readEntry as cronReadEntry } from "../tasks/task-store.js";
 import { readEntries as cronReadEntries } from "../tasks/task-store.js";
-import { setAutoPaused } from "../tasks/task-state-store.js";
 
 function handleCronAction(id: string, action: string): { ok: boolean; error?: string } {
   const entry = cronReadEntry(id);
   if (!entry) return { ok: false, error: `Entry ${id} not found` };
 
   if (action === "pause") {
-    setAutoPaused(id, true);
+    // #1609: one service operation for dashboard, chat, and CLI pause — it
+    // refreshes pausedAt to now so an already-paused task gets a fresh
+    // 12-hour cooldown.
+    const { pauseTask } = require("../tasks/task-service.js") as typeof import("../tasks/task-service.js");
+    pauseTask(id, cronReadEntries());
   } else if (action === "resume") {
     // #1520: one service operation for dashboard, chat, and CLI resume.
     const { resumeAutoPaused } = require("../tasks/task-service.js") as typeof import("../tasks/task-service.js");

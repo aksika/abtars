@@ -3,7 +3,7 @@ import { nextRunFromSchedule, settleActiveRun, setRunOutcome, readState } from "
 import { appendRunOnce, type TaskRunEvent } from "./task-history-store.js";
 import { kanbanAttachResult, kanbanComplete, kanbanFail, kanbanSetDeliveryReady } from "./kanban-board.js";
 import { logTaskDebug } from "./task-log-ctx.js";
-import { makeTaskFailure, decideFailurePolicy, formatTaskFailure } from "./task-failure.js";
+import { makeTaskFailure, decideFailurePolicy, formatTaskFailure, AUTO_PAUSE_FAILURE_THRESHOLD, AUTO_RESUME_COOLDOWN_MS } from "./task-failure.js";
 import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 import type { ScheduledTask } from "./task-types.js";
 import type { ActiveTaskRun, DeferredAdmission, RunTerminalRequest, TaskRunPhase, TaskRuntimeState } from "./task-state-store.js";
@@ -22,6 +22,17 @@ function sanitizeText(text: string | undefined, bound: number): string | undefin
 }
 
 export type TerminalOutcome = TaskOutcome;
+
+/** #1609: structured operator notice for the pause transition notification. */
+export interface PauseNotice {
+  taskId: string;
+  category: string;
+  code: string;
+  failures: number;
+  pausedAt: number;
+  resumeAfterMs: number;
+  resumeCommand: string;
+}
 
 export type SettleResult = "settled" | "late" | "duplicate";
 
@@ -48,7 +59,7 @@ export interface SettleOptions {
   /** Accepted O projects are already done; attach a validated artifact instead of completing again. */
   attachResult?: boolean;
   /** Pause notification, emitted once per false→true transition. */
-  onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+  onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1, notice: PauseNotice) => void;
   /**
    * #1588: failure cascade, fired exactly once per settled failed/timed_out
    * run — after the append-once write and the cleared reservation check, so
@@ -215,7 +226,15 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
   const nowPaused = patch.autoPaused === true;
   if (nowPaused && !wasPaused) {
     logWarn(TAG, `Auto-paused "${entry.id}" — ${formatTaskFailure(diagnostic)}`);
-    onPaused?.(entry.id, diagnostic);
+    onPaused?.(entry.id, diagnostic, {
+      taskId: entry.id,
+      category: diagnostic.category,
+      code: diagnostic.code,
+      failures: patch.consecutiveFailures ?? state.consecutiveFailures,
+      pausedAt: patch.pausedAt ?? finishedAt,
+      resumeAfterMs: AUTO_RESUME_COOLDOWN_MS,
+      resumeCommand: `/task resume ${entry.id}`,
+    });
   }
 
   // #1588: exactly-once failure cascade. Fired only after both guards above —
@@ -342,6 +361,9 @@ function computeStatePatch(
       priorFailure: undefined,
       consecutiveFailures: 0,
       consecutiveDeferrals: 0,
+      // #1609: only a successful run resets the recovery episode; a failed
+      // run must keep the automatic-resume cap intact.
+      autoResumeCount: 0,
       deferredAdmission: undefined,
     };
   }
@@ -450,7 +472,11 @@ function failurePatch(
   pauseNow: boolean,
 ): Partial<TaskRuntimeState> {
   const failCount = (state.consecutiveFailures ?? 0) + 1;
-  const pause = pauseNow || failCount >= 3;
+  // #1609: raise the counted threshold from 3 to 5 consecutive failed run
+  // groups; a success between failures resets the streak. Immediate-pause
+  // classes (definition, permanent routing, unevidenceable contract) still
+  // pause on their first counted group via pauseNow.
+  const pause = pauseNow || failCount >= AUTO_PAUSE_FAILURE_THRESHOLD;
   return {
     lastFinishedAt: finishedAt,
     lastIncident: diagnostic,

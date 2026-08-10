@@ -15,9 +15,13 @@ describe("#1520 failure policy matrix", () => {
     { name: "admission type_busy defers", d: diag("admission", "type_busy", "transient"), expected: { action: "defer" } },
     { name: "admission model_cooldown defers", d: diag("admission", "model_cooldown", "transient"), expected: { action: "defer" } },
     { name: "admission executor_unavailable defers", d: diag("admission", "executor_unavailable", "transient"), expected: { action: "defer" } },
-    // permanent definition/dependency/routing fault → no retry, auto-pause immediately
+    // #1609: dependency faults are availability signals — transient faults
+    // retry once, everything else counts toward the threshold instead of
+    // pausing immediately. The retained immediate-pause classes are
+    // definition, permanent routing, and unevidenceable contract.
     { name: "permanent definition pauses immediately", d: diag("definition", "required_executable_missing", "permanent"), expected: { action: "count", pauseNow: true } },
-    { name: "permanent dependency pauses immediately", d: diag("dependency", "executable_missing", "permanent"), expected: { action: "count", pauseNow: true } },
+    { name: "permanent dependency counts, does not pause", d: diag("dependency", "executable_missing", "permanent"), expected: { action: "count", pauseNow: false } },
+    { name: "non-transient dependency counts, does not pause", d: diag("dependency", "probe_failed", "none"), expected: { action: "count", pauseNow: false } },
     { name: "permanent routing pauses immediately", d: diag("routing", "peer_not_enrolled", "permanent"), expected: { action: "count", pauseNow: true } },
     // transient dependency/execution/validation → one delayed retry in the same run group
     { name: "transient dependency retries", d: diag("dependency", "probe_failed", "transient"), expected: { action: "retry" } },

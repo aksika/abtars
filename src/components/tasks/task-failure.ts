@@ -20,6 +20,17 @@ export type TaskFailureCategory =
 
 export type TaskFailureRetryability = "permanent" | "transient" | "none";
 
+/** #1609: counted failed run groups before a scheduled task auto-pauses. */
+export const AUTO_PAUSE_FAILURE_THRESHOLD = 5;
+/** #1609: automatic resume cooldown after any pause (epoch ms). */
+export const AUTO_RESUME_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+/** #1609: at most this many automatic resumes in one uninterrupted failure episode. */
+export const MAX_AUTO_RESUMES_PER_EPISODE = 3;
+/** #1609: paused-task WARN ceiling per task per rolling hour. */
+export const PAUSED_WARN_LIMIT_PER_HOUR = 12;
+/** #1609: minimum admitted interval between paused-task WARN records. */
+export const PAUSED_WARN_INTERVAL_MS = (60 * 60 * 1000) / PAUSED_WARN_LIMIT_PER_HOUR;
+
 export interface TaskFailureLaneFact {
   readonly cardId: number;
   readonly contractId: string;
@@ -295,8 +306,11 @@ export function decideFailurePolicy(diagnostic: TaskFailureDiagnosticV1): Failur
     case "routing":
       return { action: "count", pauseNow: diagnostic.retryability === "permanent" };
     case "dependency":
+      // #1609: a dependency fault is a transient availability signal — even a
+      // non-transient one counts toward the threshold instead of pausing
+      // immediately. The existing transient retry is retained unchanged.
       if (diagnostic.retryability === "transient") return { action: "retry" };
-      return { action: "count", pauseNow: true };
+      return { action: "count", pauseNow: false };
     case "execution":
     case "validation":
       if (diagnostic.retryability === "transient") return { action: "retry" };

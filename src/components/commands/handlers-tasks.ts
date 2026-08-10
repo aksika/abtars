@@ -167,8 +167,17 @@ export async function handleTaskPause(text: string, ctx: CommandContext): Promis
   const id = match[3]!.trim();
   try {
     if (action === "pause") {
-      const { setAutoPaused } = await import("../tasks/task-state-store.js");
-      setAutoPaused(id, true);
+      // #1609: one service operation for chat, CLI, and dashboard pause — it
+      // refreshes pausedAt to now so an already-paused task gets a fresh
+      // 12-hour cooldown.
+      const { pauseTask } = await import("../tasks/task-service.js");
+      const { readEntry } = await import("../tasks/task-store.js");
+      const entry = readEntry(id);
+      if (!entry) {
+        await ctx.reply(`No task found for: ${id}`);
+        return true;
+      }
+      pauseTask(id, [entry]);
       await ctx.reply(`Paused: ${id}`);
       return true;
     }

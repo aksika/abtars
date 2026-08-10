@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS task_state (
   consecutive_deferrals  INTEGER NOT NULL DEFAULT 0,
   auto_paused            INTEGER NOT NULL DEFAULT 0,
   paused_at              INTEGER,
+  auto_resume_count      INTEGER NOT NULL DEFAULT 0,
+  last_pause_warn_at     INTEGER,
   prior_failure          TEXT,
   last_incident_json     TEXT,
   deferred_admission_json TEXT
@@ -126,6 +128,10 @@ interface LegacyState {
  */
 export function initTaskStateSchema(db: TaskStateDb): void {
   db.exec(TASK_STATE_DDL);
+  // #1609: safe-to-re-run ALTER migrations for databases created before the
+  // bounded-recovery columns existed (SQLite errors silently when present).
+  try { db.exec(`ALTER TABLE task_state ADD COLUMN auto_resume_count INTEGER NOT NULL DEFAULT 0`); } catch { /* already present */ }
+  try { db.exec(`ALTER TABLE task_state ADD COLUMN last_pause_warn_at INTEGER`); } catch { /* already present */ }
   const p = statePath();
   if (!existsSync(p)) return;
 

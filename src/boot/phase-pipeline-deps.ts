@@ -145,11 +145,38 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       }
     })();
   };
-  const onTaskPaused = (chatId: number, title: string, _reason: string): void => {
+  const onTaskPaused = (chatId: number, _title: string, _reason: string, notice: import("../components/tasks/task-run-settler.js").PauseNotice): void => {
     if (!ctx.telegramAdapter) return;
-    const msg = `"${title}" auto-paused.\nResume with: /task resume <id>`;
+    // #1609: the pause notice carries the exact operator facts — task id,
+    // diagnostic category/code, failure count, pause time, 12-hour recovery
+    // window, and the resume command.
+    const at = new Date(notice.pausedAt).toISOString();
+    const recoverAt = new Date(notice.pausedAt + notice.resumeAfterMs).toISOString();
+    const msg = `[warn] Task "${notice.taskId}" auto-paused.\n` +
+      `Cause: ${notice.category}/${notice.code}\n` +
+      `Failures: ${notice.failures}\n` +
+      `Paused at: ${at}\n` +
+      `Auto-resume eligible: ${recoverAt}\n` +
+      `Resume now: ${notice.resumeCommand}`;
     ctx.telegramAdapter.sendNotification(String(chatId), msg);
   };
+
+  // #1609: automatic-resume and cap-escalation notifications ride the
+  // existing coordinator composition — one notifier, wired once in boot. The
+  // state transition commits before the hook runs; delivery failure is
+  // fire-and-forget and never undoes the committed transition.
+  const { setPausedRecoveryHook } = await import("../components/tasks/task-checker.js");
+  setPausedRecoveryHook((event) => {
+    if (!ctx.telegramAdapter) return;
+    const entry = cronReadEntry(event.entryId);
+    const chatId = entry?.chatId ?? String(getEnv().mainChatId);
+    if (event.kind === "resumed") {
+      const at = event.nextRunAt ? new Date(event.nextRunAt).toISOString() : "next scheduled occurrence";
+      ctx.telegramAdapter.sendNotification(chatId, `[info] Task "${event.entryId}" auto-resumed after cooldown — next run: ${at}`);
+    } else {
+      ctx.telegramAdapter.sendNotification(chatId, `[warn] Task "${event.entryId}" remains paused — automatic resume cap reached. Manual action: /task resume ${event.entryId}`);
+    }
+  });
 
   // #1540: the coordinator shares the facade's single execution supervisor —
   // never a second live registry — so scheduled agent runs and the worker
