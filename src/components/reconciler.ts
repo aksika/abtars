@@ -250,6 +250,13 @@ function scheduleContractAuthoringOrSettle(projectId: number): AuthoringSchedule
     logWarn(TAG, `Project ${projectId}: authoring claim busy (run ${result.activeRunId}) — deferring; the ownership-released event will re-wake`);
     return { kind: "deferred", reason: "busy", activeRunId: result.activeRunId };
   }
+  if (result.kind === "conflict") {
+    // #1546 R3: a conflict is never a direct settle signal. Nothing owns the
+    // project and nothing was claimed — report unavailable so no promotion
+    // happens; the next wake (or the boot sweep) re-reads durable state.
+    logWarn(TAG, `Project ${projectId}: authoring claim conflicted (${result.reason}) — no promotion, no settlement`);
+    return { kind: "unavailable" };
+  }
   return result.kind === "claimed" ? { kind: "claimed" } : { kind: "idempotent" };
 }
 

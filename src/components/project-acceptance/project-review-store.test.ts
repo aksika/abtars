@@ -443,6 +443,43 @@ describe("ProjectReviewStore", () => {
       expect(rows.cnt).toBe(1);
     });
 
+    // #1630 Task 2 verify: an explicitly supplied rich peerEvent always wins
+    // over auto-derivation — its projection evidence must survive untouched.
+    it("an explicit rich peerEvent is not overwritten by auto-derivation and its evidence survives", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      insertKanbanCard(s, cid, "running");
+      const caseId = `case-rich-${cid}`;
+      const event = {
+        peer: "kp",
+        payload: {
+          version: 1,
+          event_id: `fail_rich_${cid}`,
+          kind: "failed",
+          request_id: "r1",
+          contribution_ref: "c1",
+          summary: "explicit rich summary",
+          projection: {
+            schema_version: 1,
+            outcome: "failed",
+            summary: "explicit rich projection",
+            evidence: [{ id: "e1", kind: "check", summary: "observed", observed_by: "kp" }],
+            artifacts: [],
+            provenance: { receiver_peer: "kp", receiver_project_ref: "project_1", acceptance_id: "rd_rich", accepted_at: new Date().toISOString() },
+          },
+        },
+      };
+      s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "rich_blocker", event, `rd_rich_${cid}`);
+
+      const rows = s.db.prepare("SELECT payload_json FROM project_acceptance_outbox WHERE project_card_id = ?").all(cid) as any[];
+      expect(rows).toHaveLength(1);
+      const payload = JSON.parse(rows[0]!.payload_json) as any;
+      expect(payload.summary).toBe("explicit rich summary");
+      expect(payload.projection.summary).toBe("explicit rich projection");
+      expect(payload.projection.evidence).toEqual([{ id: "e1", kind: "check", summary: "observed", observed_by: "kp" }]);
+      expect(payload.acceptance_id).toBe(`rd_rich_${cid}`);
+    });
+
     it("rollback on a decision conflict leaves no outbox row", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;

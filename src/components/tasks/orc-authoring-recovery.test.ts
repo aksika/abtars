@@ -17,6 +17,7 @@ vi.mock("../spin.js", () => ({
 
 let TEST_HOME: string;
 let kanban: typeof import("./kanban-board.js");
+let requireTaskDatabase: typeof import("./kanban-board.js").requireTaskDatabase;
 let reviewStoreMod: typeof import("../project-acceptance/project-review-store.js");
 let reconciler: typeof import("../reconciler.js");
 let runStoreMod: typeof import("../orc-project/orc-project-run-store.js");
@@ -34,6 +35,7 @@ beforeEach(async () => {
     peers: {},
   }));
   kanban = await import("./kanban-board.js");
+  requireTaskDatabase = (await import("./kanban-board.js")).requireTaskDatabase;
   reviewStoreMod = await import("../project-acceptance/project-review-store.js");
   reconciler = await import("../reconciler.js");
   runStoreMod = await import("../orc-project/orc-project-run-store.js");
@@ -300,10 +302,34 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
     const store = new reviewStoreMod.ProjectReviewStore();
     const outbox = store.getPendingAcceptanceOutbox(100).filter(r => r.project_card_id === rootId);
     expect(outbox).toHaveLength(1);
-    const { parseContributionEvent } = await import("../peer-help/contract.js");
+    const { parseContributionEvent, contributionEventDigest } = await import("../peer-help/contract.js");
+    const { ContributionStore } = await import("../peer-help/contribution-store.js");
     const parsed = parseContributionEvent(JSON.parse(outbox[0]!.payload_json));
     expect(parsed.ok).toBe(true); // #1630 auto-derived a requester-valid event
-    if (parsed.ok) expect(parsed.value.kind).toBe("failed");
+    if (!parsed.ok) return;
+    expect(parsed.value.kind).toBe("failed");
+
+    // #1628 Task 7 verify (updated): the payload must be accepted by the
+    // requester — assert applyEvent returns "applied", not merely non-null.
+    const contributions = new ContributionStore(requireTaskDatabase(), {
+      kanbanGetCard: () => undefined,
+      kanbanUpdate: () => {},
+      kanbanComplete: () => {},
+      kanbanFail: () => {},
+    } as never);
+    const reserve = contributions.reserve("kp", "req_peer_1", "hash_peer_1", null, null, null);
+    expect(reserve.status).toBe("new");
+    contributions.adoptContributionRef("kp", "req_peer_1", "ref_peer_1");
+    expect(contributions.transitionToAccepted("kp", "req_peer_1")).toBe(true);
+
+    const applied = contributions.applyEvent(
+      "kp",
+      parsed.value,
+      contributionEventDigest(parsed.value),
+      JSON.stringify(parsed.value.projection),
+    );
+    expect(applied).toBe("applied");
+    expect(contributions.getContribution("kp", "req_peer_1")!.state).toBe("failed");
   });
 
   it("happy path: a persisted contract proceeds normally regardless of the attempt count", async () => {
@@ -337,18 +363,65 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
     expect(kanban.kanbanGetCard(rootId)!.status).not.toBe("failed");
   });
 
-  it("negative: accepted/blocked supervision is never reawakened into authoring", async () => {
+  it("negative: accepted/blocked/reviewing supervision is never reawakened into authoring", async () => {
     const acceptedId = await seedProject({ cardStatus: "running", state: "accepted" });
     const blockedId = await seedProject({ cardStatus: "running", state: "blocked" });
+    // #1628 Task 8: a reviewing project with a contract must not enter the
+    // contract-authoring branch — no authoring claim goal, no exhaustion
+    // settlement. (#1516 continuations reuse the contract_authoring intent
+    // kind but carry the resume goal; the branch itself is what is forbidden.)
+    const reviewingId = await seedProject({ cardStatus: "running", state: "reviewing" });
+    const reviewStore = new reviewStoreMod.ProjectReviewStore();
+    reviewStore.insertContract({
+      schema_version: 1,
+      id: `ct_review_${reviewingId}`,
+      digest: `dg_${reviewingId}`,
+      project_card_id: reviewingId,
+      goal: "supervised work",
+      criteria: [{ id: "c1", description: "goal met", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: {},
+      provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+    reconciler.setOrcCoordinator(makeCoordinator(async () => {}));
     const runStore = new runStoreMod.OrcProjectRunStore();
 
     reconciler.requestReconcile(acceptedId);
     reconciler.requestReconcile(blockedId);
+    reconciler.requestReconcile(reviewingId);
     await flush();
     await flush();
 
-    expect(runStore.getLiveRuns()).toHaveLength(0);
     expect(runStore.getRunsForProject(acceptedId)).toHaveLength(0);
     expect(runStore.getRunsForProject(blockedId)).toHaveLength(0);
+    const supervision = reviewStore.getSupervision(reviewingId)!;
+    expect(supervision.state).toBe("reviewing");
+    expect(supervision.blocked_reason).toBeNull();
+    expect(kanban.kanbanGetCard(reviewingId)!.status).toBe("running");
+  });
+
+  it("a conflicted authoring claim never promotes and never settles", async () => {
+    // A peer root without an authenticated source peer cannot derive an
+    // origin — scheduleContractAuthoring conflicts with origin_invalid.
+    const rootId = await seedProject({ cardStatus: "queued", source: "peer", sourcePeer: undefined });
+    reconciler.setOrcCoordinator(new coordinatorMod.OrcProjectCoordinator({
+      ownerPeer: "kp",
+      ownerInstanceId: "inst-test",
+      getRootIdentity: () => ({ source: "peer", sourcePeer: null }),
+      startPort: async () => {},
+    }));
+    const runStore = new runStoreMod.OrcProjectRunStore();
+
+    reconciler.requestReconcile(rootId);
+    await flush();
+    await flush();
+
+    // nothing was claimed (no run row), nothing was settled (still awaiting
+    // contract), and the card was not promoted by a phantom "idempotent".
+    expect(runStore.getRunsForProject(rootId)).toHaveLength(0);
+    const supervision = new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)!;
+    expect(supervision.state).toBe("awaiting_contract");
+    expect(supervision.blocked_reason).toBeNull();
   });
 });
