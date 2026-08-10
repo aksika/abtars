@@ -1687,11 +1687,18 @@ export class Spin {
  */
 export function resolveToolAuthorizationMode(cardId: number | undefined): import("./action-gate.js").ToolAuthorizationMode {
   if (cardId === undefined) return "interactive";
-  const rootId = resolveRootId(cardId);
-  if (rootId === undefined) return "interactive";
-  return kanbanGetCard(rootId)?.source === "task"
-    ? "unattended-task"
-    : "interactive";
+  try {
+    const rootId = resolveRootId(cardId);
+    if (rootId === undefined) return "interactive";
+    return kanbanGetCard(rootId)?.source === "task"
+      ? "unattended-task"
+      : "interactive";
+  } catch (err) {
+    // A provenance read failure must never turn into unattended authority or
+    // escape before Spin's execution try/catch. Fail closed for this run.
+    logWarn(TAG, `Unable to resolve tool authorization provenance for card ${cardId}: ${err instanceof Error ? err.message : String(err)}`);
+    return "interactive";
+  }
 }
 
 /**

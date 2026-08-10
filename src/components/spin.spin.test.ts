@@ -1042,6 +1042,14 @@ describe("spin() — #1629 tool authorization provenance", () => {
     expect(contexts[0]?.authorizationMode).toBe("interactive");
   });
 
+  it("provenance resolver failure → interactive (fails closed)", async () => {
+    const contexts = captureRuntime();
+    resolveRootImpl = () => { throw new Error("kanban read failed"); };
+    const cardId = kanbanEnqueue("unreadable card", "task");
+    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+  });
+
   it("unknown root source → interactive", async () => {
     const contexts = captureRuntime();
     const cardId = kanbanEnqueue("peer work", "peer");
