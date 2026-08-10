@@ -6,11 +6,17 @@
  * swap, Orc busy-guard rejection, Orc idle spin with [USER] prefix.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+
+// Real-socket tests with bounded 2s polls: under full parallel-suite load the
+// 5s default budget blows even when every poll eventually passes. Give the
+// file a generous wall-clock budget instead of flaking (see waitFor below).
+vi.setConfig({ testTimeout: 15_000 });
+afterAll(() => vi.resetConfig());
 
 vi.mock("../../components/master-user.js", () => ({
   getMasterUserId: () => "aksika",

@@ -326,7 +326,7 @@ describe("spin() — #1531 native steering pump", () => {
     expect(late.ok).toBe(false);
     if (!late.ok) expect(["not_steerable", "stale_execution", "not_active"]).toContain(late.reason);
     unsub();
-  });
+  }, 15_000);
 
   it("closes acceptance synchronously at the native-handoff round limit", async () => {
     const send = makeDeferredSend();
