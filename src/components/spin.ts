@@ -857,7 +857,10 @@ export class Spin {
         const driver = await resolveDriver();
         // #1531: for a native-steering driver, subscribe BEFORE opening
         // steering acceptance so a same-tick steer.queued is never missed.
-        const pump = driver.steer ? this.createNativeSteeringPump(session, driver) : null;
+        // The initial send promise is created first so the pump can observe
+        // send settlement synchronously (see #1627 race note in the pump).
+        const sendPromise = send(driver, prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext);
+        const pump = driver.steer ? this.createNativeSteeringPump(session, driver, sendPromise) : null;
         if (!pump) session.steeringAccepting = true;
         try {
           if (pump) {
@@ -867,7 +870,7 @@ export class Spin {
             // while the send is in flight; its result never replaces the send
             // result and a steering-only failure never replaces the send error.
             try {
-              const result = (await send(driver, prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
+              const result = (await sendPromise) || "(no output)";
               await pump.settle();
               return result;
             } catch (sendErr) {
@@ -877,7 +880,7 @@ export class Spin {
           }
           // Sequential path (ACP/tmux): no in-process agent queue; instructions
           // queued during the send are drained as post-send continuations.
-          let result = (await send(driver, prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext)) || "(no output)";
+          let result = (await sendPromise) || "(no output)";
           for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
             const batch = leaseInstructions(session, "steer");
             if (!batch) { session.steeringAccepting = false; break; }
@@ -957,13 +960,30 @@ export class Spin {
    * synchronous `steer.queued` event, and async functions execute through
    * their first await during the callback so the transport claims the active
    * host before the queue operation returns.
+   *
+   * #1627: the pump observes send settlement through `sendPromise` and races
+   * every handoff against it. The microtask race that wedged a settled turn:
+   * after an in-flight steer's ack, the drain loop could lease the next
+   * instruction and start a new handoff BEFORE `settle()` (queued behind the
+   * send's resolution chain) set `closing` — leaving `settle()` awaiting a
+   * handoff whose ack never arrives. Racing the handoff against a send-settled
+   * signal closes that window deterministically: once the send settles, an
+   * in-flight handoff is abandoned and its batch terminalized exactly once,
+   * and no new handoff starts.
    */
-  private createNativeSteeringPump(session: ManagedSession, driver: SpinExecutionDriver): { settle: () => Promise<void> } {
+  private createNativeSteeringPump(session: ManagedSession, driver: SpinExecutionDriver, sendPromise: Promise<unknown>): { settle: () => Promise<void> } {
     const executionId = session.activeExecutionId ?? "";
     let activeLease: import("./spin-types.js").InstructionLease | null = null;
     let closing = false;
     let rounds = 0;
     let pumpPromise: Promise<void> | null = null;
+    let sendSettled = false;
+    let markSendSettled!: () => void;
+    const sendSettledSignal = new Promise<void>((resolve) => { markSendSettled = resolve; });
+    sendPromise.then(
+      () => { sendSettled = true; markSendSettled(); },
+      () => { sendSettled = true; markSendSettled(); },
+    );
 
     const drain = async (): Promise<void> => {
       while (!closing) {
@@ -973,6 +993,7 @@ export class Spin {
           if (session.instructionQueue.length > 0) expireInstructions(session, "round_limit");
           return;
         }
+        if (sendSettled) return;          // #1627: no new handoffs after the send settles
         const batch = leaseInstructions(session, "steer");
         if (!batch) return;
         rounds++;
@@ -980,18 +1001,41 @@ export class Spin {
         activeLease = batch;
         try {
           const steeringPrompt = renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]);
-          await driver.steer!(steeringPrompt, batch);
-        } catch (steerErr) {
-          // A steering-only failure publishes its acknowledgement and stays
-          // logged, but must never replace the send result/error. The lease is
-          // terminal once delivered; before delivery it is restored so closing
-          // or round-limit cleanup can expire it exactly once.
-          if (batch.instructions.some((i) => i.state === "delivered")) {
-            failAfterDelivery(batch, session, "steer_failed");
-          } else {
-            restoreBeforeDelivery(batch);
+          // #1627: race the handoff against send settlement. When the send
+          // settles while a handoff is in flight, the handoff is abandoned and
+          // the batch terminalized exactly once — settle() must never wait on
+          // an ack that cannot arrive.
+          let handoffError: unknown = null;
+          const outcome = await Promise.race([
+            driver.steer!(steeringPrompt, batch).then(
+              () => "handoff" as const,
+              (err: unknown) => { handoffError = err; return "handoff" as const; },
+            ),
+            sendSettledSignal.then(() => "send-settled" as const),
+          ]);
+          if (outcome === "send-settled") {
+            // Send settled while this handoff was in flight — abandon it. A
+            // delivered lease fails (delivery already left the queue); an
+            // undelivered lease returns to the queue so settle()'s expiry
+            // publishes the terminal event exactly once.
+            if (batch.instructions.some((i) => i.state === "delivered")) {
+              failAfterDelivery(batch, session, "execution_ended");
+            } else {
+              restoreBeforeDelivery(batch);
+            }
+            logWarn(TAG, `Native steering round ${rounds} abandoned — send settled before ack`);
+          } else if (handoffError != null) {
+            // A steering-only failure publishes its acknowledgement and stays
+            // logged, but must never replace the send result/error. The lease
+            // is terminal once delivered; before delivery it is restored so
+            // closing or round-limit cleanup can expire it exactly once.
+            if (batch.instructions.some((i) => i.state === "delivered")) {
+              failAfterDelivery(batch, session, "steer_failed");
+            } else {
+              restoreBeforeDelivery(batch);
+            }
+            logWarn(TAG, `Native steering round ${rounds} failed: ${handoffError instanceof Error ? handoffError.message : String(handoffError)}`);
           }
-          logWarn(TAG, `Native steering round ${rounds} failed: ${steerErr instanceof Error ? steerErr.message : String(steerErr)}`);
         } finally {
           activeLease = null;
         }
