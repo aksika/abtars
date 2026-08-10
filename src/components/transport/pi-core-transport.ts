@@ -141,7 +141,12 @@ export class PiCoreTransport implements IKiroTransport {
     this.requestedEffort = primary?.thinking?.style === "effort"
       ? primary.thinking.default
       : "off";
-    this.effectiveEffort = this.requestedEffort;
+    // The configured default is subject to the same Pi capability clamp as a
+    // live `/effort` change. Without this, status can claim xhigh before the
+    // first turn even though the initial model will actually run at high.
+    this.effectiveEffort = primary
+      ? resolveCandidateModel(primary, this.requestedEffort, false).effective
+      : this.requestedEffort;
   }
 
   get isReady(): boolean { return this._isReady; }
@@ -200,6 +205,7 @@ export class PiCoreTransport implements IKiroTransport {
     if (endpoint) primary.endpoint = endpoint;
     if (maxContext) primary.maxContext = maxContext;
     this.policy = new FallbackPolicy(this.config.candidates, this.healthRegistry);
+    this.effectiveEffort = resolveCandidateModel(primary, this.requestedEffort, false).effective;
   }
 
   setTimeoutOverride(ms: number | null): void { this.timeoutOverrideMs = ms; }

@@ -195,6 +195,34 @@ describe("AcpTransport", () => {
 
       expect(cb).toHaveBeenCalledWith("streaming...");
     });
+
+    it("delivers pre-tool text before the tool callback and excludes thinking from the answer", async () => {
+      const sessionId = "sess-segment";
+      const segment = vi.fn().mockResolvedValue(undefined);
+      const deltas: Array<{ kind: string; text: string }> = [];
+      transport.onSegmentBreak = segment;
+      transport.onOutputDelta = (event) => deltas.push(event);
+      (transport as any).responseChunks.set(sessionId, []);
+      (transport as any).segmentOffsets.set(sessionId, 0);
+      (transport as any).sm = { state: "prompting", toolStarted: vi.fn() };
+
+      await (transport as any).handleSessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "thinking", text: "private" } },
+      });
+      await (transport as any).handleSessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "before tool" } },
+      });
+      await (transport as any).handleSessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "tool_call", title: "search", status: "running" },
+      });
+
+      expect((transport as any).responseChunks.get(sessionId)).toEqual(["before tool"]);
+      expect(segment).toHaveBeenCalledWith("before tool");
+      expect(deltas).toEqual([{ kind: "thinking", text: "private" }, { kind: "text", text: "before tool" }]);
+    });
   });
 
   describe("handlePermission", () => {

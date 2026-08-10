@@ -450,7 +450,7 @@ export class TuiApp {
 
   private _handleAssistantMessage(markdown: string, executionId?: string): void {
     // #1619: correlated whole result. When the execution's streams completed
-    // with all text delivered (exact text match), the native rows — including
+    // with all text delivered (exact text or streamed-prefix/suffix match), the native rows — including
     // thinking blocks — stay and the redundant whole result is dropped.
     // On truncation/error/mismatch the whole result is the correctness
     // fallback and replaces the streamed rows (design R3.5).
@@ -462,7 +462,11 @@ export class TuiApp {
           return s !== undefined && s.ended && (s.reason === undefined || s.reason === "complete");
         });
         const streamedText = exec.streamIds.map((id) => this._streams.get(id)?.text ?? "").join("");
-        if (allComplete && streamedText && normalizeComparison(streamedText) === normalizeComparison(markdown)) {
+        const normalizedStream = normalizeComparison(streamedText);
+        const normalizedWhole = normalizeComparison(markdown);
+        const wholeIsStreamed = normalizedStream === normalizedWhole
+          || (normalizedStream.length > normalizedWhole.length && normalizedStream.endsWith(normalizedWhole));
+        if (allComplete && streamedText && wholeIsStreamed) {
           this._releaseExecution(executionId);
           this._clearBusyIfIdle();
           this._ui.requestRender();

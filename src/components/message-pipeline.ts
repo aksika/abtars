@@ -455,6 +455,10 @@ export async function handleInboundMessage(
     // the text and the adapter-side ledger reconciles the terminal result.
     if (msg.platform !== "tui") {
       transport.onSegmentBreak = async (text: string) => {
+        // Thinking can end without a following text delta (for example when
+        // the provider emits the complete assistant message at once). Ensure
+        // its progress block is visible before the semantic pre-tool text.
+        await incremental?.flushBeforeSemantics();
         const clean = sanitizeOutbound(text);
         if (!clean) return;
         if (streamMsgId && adapter.editMessage) {
@@ -541,7 +545,7 @@ export async function handleInboundMessage(
     let reconciledResponse = pSession.fullMode ? response : (cleanAnswer || response);
     if (incremental) {
       const reconciled = incremental.reconcileTerminal(reconciledResponse);
-      incremental.end();
+      await incremental.end();
       reconciledResponse = reconciled;
     }
     const rawResponse = reconciledResponse;
@@ -819,7 +823,7 @@ export async function handleInboundMessage(
     transport.onToolCallStart = undefined;
     transport.onSegmentBreak = undefined;
     transport.onOutputDelta = undefined;
-    incremental?.dispose();
+    await incremental?.dispose();
     releaseBusy(pSession, (m, a) => handleInboundMessage(m, a, deps));
     idleSave.reset(activeSessionId, chatId);
   }

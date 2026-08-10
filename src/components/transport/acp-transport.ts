@@ -74,6 +74,10 @@ export class AcpTransport implements IKiroTransport {
   private client: ClientSideConnection | null = null;
   private sessions = new Map<string, string>(); // sessionKey → acpSessionId
   private responseChunks = new Map<string, string[]>(); // sessionId → chunks
+  /** Raw text length already offered as a pre-tool semantic segment. */
+  private segmentOffsets = new Map<string, number>();
+  /** Preserve event order when the raw ACP callback cannot await us. */
+  private updateChains = new Map<string, Promise<void>>();
   /** #1338: acpSessionId → call-local output observer (removed in finally). */
   private outputObservers = new Map<string, OutputObserver | undefined>();
   private lastContextPercent = -1;
@@ -86,6 +90,8 @@ export class AcpTransport implements IKiroTransport {
   /** Optional callback for streaming intermediate responses. */
   onIntermediateResponse?: (text: string) => void;
   onToolCallStart?: (toolName: string) => void;
+  /** #1619: awaited pre-tool semantic text delivery. */
+  onSegmentBreak?: (text: string) => void | Promise<void>;
   /** #1619: typed live output deltas (ACP emits text; thinking when present). */
   onOutputDelta?: (event: import("./kiro-transport.js").OutputDelta) => void;
   /** Fired on reinit — pipeline uses this to flush stale queues. */
@@ -179,7 +185,7 @@ export class AcpTransport implements IKiroTransport {
       this._rawClient = new AcpRawClient(this.cliPath, args, cleanEnv, this.workingDir, (method, params) => {
         logDebug(this.tag, `[ext] ${method}`);
         if (method === "session/update") {
-          this.handleSessionUpdate(params as any);
+          void this.enqueueSessionUpdate(params as any);
         }
       });
       this._rawClient.spawn();
@@ -275,7 +281,7 @@ export class AcpTransport implements IKiroTransport {
     this.client = new ClientSideConnection(
       () => ({
         sessionUpdate: async (params: SessionNotification) => {
-          this.handleSessionUpdate(params);
+          await this.enqueueSessionUpdate(params);
         },
         requestPermission: async (params: RequestPermissionRequest) => {
           return this.handlePermission(params);
@@ -363,6 +369,7 @@ export class AcpTransport implements IKiroTransport {
     this._toolCallsSucceeded = 0;
     const sessionId = await this.getOrCreateSession(sessionKey);
     this.responseChunks.set(sessionId, []);
+    this.segmentOffsets.set(sessionId, 0);
     // #1550: bind the caller's live-output observer for this session so the
     // agent_message_chunk / tool_call mirrors below actually reach the feed.
     // Cleared in the finally block alongside responseChunks.
@@ -395,7 +402,14 @@ export class AcpTransport implements IKiroTransport {
           ...(this.responseChunks.get(usedSid) ?? []),
         ]);
         this.responseChunks.delete(sessionId);
+        this.segmentOffsets.set(usedSid, this.segmentOffsets.get(sessionId) ?? 0);
+        this.segmentOffsets.delete(sessionId);
       }
+
+      // Raw ACP dispatch is callback-based, so the prompt can resolve just
+      // before its last queued update. Drain that queue before collecting the
+      // terminal text and before the pipeline can clear its callbacks.
+      await this.updateChains.get(usedSid);
 
       logDebug(this.tag, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
       logTrace(this.tag, `Model: ${this.modelId ?? "unknown"}`);
@@ -405,12 +419,14 @@ export class AcpTransport implements IKiroTransport {
       if (this._modelNotFound) {
         this._modelNotFound = false;
         this.responseChunks.delete(usedSid);
+        this.segmentOffsets.delete(usedSid);
         const model = this.modelId ?? "unknown";
         throw new ModelNotFoundError(`Model "${model}" not available — kiro-cli fell back to generic agent`);
       }
 
       const chunks = this.responseChunks.get(usedSid) ?? [];
       this.responseChunks.delete(usedSid);
+      this.segmentOffsets.delete(usedSid);
       return chunks.join("") || "(no response)";
     } finally {
       // #1338: drop the observer association so late events from a completed
@@ -553,6 +569,7 @@ export class AcpTransport implements IKiroTransport {
             // notification handler keys by the id the server reports, so the
             // retry turn would otherwise be dropped.
             this.responseChunks.set(sid, []);
+            this.segmentOffsets.set(sid, 0);
             // #1564: the #1550 live-output observer follows the rotated session
             // so deltas during the retry turn still reach the feed.
             const observer = this.outputObservers.get(sessionId);
@@ -565,6 +582,7 @@ export class AcpTransport implements IKiroTransport {
         } else if (code === -32603 && attempt < maxRetries) {
           logWarn(this.tag, `Transient error (code ${code}), retry ${attempt + 1}/${maxRetries}`);
           this.responseChunks.set(sessionId, []); // reset chunks for retry
+          this.segmentOffsets.set(sessionId, 0);
           await new Promise(r => setTimeout(r, 2000));
           continue;
         }
@@ -662,7 +680,23 @@ export class AcpTransport implements IKiroTransport {
     return { route: "acp", model: this.getModel(), contextPercent: this.contextPercent >= 0 ? this.contextPercent : undefined };
   }
 
-  private handleSessionUpdate(params: SessionNotification): void {
+  private enqueueSessionUpdate(params: SessionNotification): Promise<void> {
+    const sessionId = params.sessionId;
+    const previous = this.updateChains.get(sessionId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() => this.handleSessionUpdate(params))
+      .catch((err) => {
+        logWarn(this.tag, `ACP session update failed (isolated): ${err instanceof Error ? err.message : String(err)}`);
+      });
+    this.updateChains.set(sessionId, current);
+    void current.finally(() => {
+      if (this.updateChains.get(sessionId) === current) this.updateChains.delete(sessionId);
+    }).catch(() => {});
+    return current;
+  }
+
+  private async handleSessionUpdate(params: SessionNotification): Promise<void> {
     const update = params.update;
     if (!("sessionUpdate" in update)) return;
 
@@ -690,8 +724,6 @@ export class AcpTransport implements IKiroTransport {
           this.onOutputDelta?.({ kind: "text", text });
         } else if ((content as { type?: string })?.type === "thinking") {
           const text = (content as { text?: string }).text ?? "";
-          const chunks = this.responseChunks.get(sessionId);
-          if (chunks) chunks.push(`\n[thinking] ${text}\n`);
           this.lastActivityAt = Date.now();
           // NOT updating lastContentAt — thinking is keepalive, not content
           // #1619: ACP-emitted thinking is forwarded typed, never fabricated.
@@ -701,6 +733,20 @@ export class AcpTransport implements IKiroTransport {
       }
       case "tool_call": {
         logDebug(this.tag, `[tool] ${update.title} (${update.status})`);
+        const chunks = this.responseChunks.get(sessionId);
+        const aggregate = chunks?.join("") ?? "";
+        const offset = this.segmentOffsets?.get(sessionId) ?? 0;
+        const segment = aggregate.slice(offset);
+        if (segment && this.onSegmentBreak) {
+          try {
+            await this.onSegmentBreak(segment);
+            this.segmentOffsets.set(sessionId, aggregate.length);
+          } catch (err) {
+            // Interim delivery is isolated from the ACP turn; the terminal
+            // response remains the authoritative fallback.
+            logWarn(this.tag, `Pre-tool segment delivery failed (isolated): ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         this.lastActivityAt = Date.now();
         this.lastContentAt = Date.now();
         this.toolMeta = { title: update.title ?? "unknown", startedAt: Date.now() }; this.sm.toolStarted();

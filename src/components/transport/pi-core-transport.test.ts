@@ -433,6 +433,19 @@ describe("#1619 reasoning effort (session-scoped)", () => {
     expect(withConfig.getRuntimeStatus().reasoning).toBe("medium");
   });
 
+  it("clamps an effort-style configured default before the first turn", () => {
+    const registry = new ModelHealthRegistry();
+    const withConfig = new PiCoreTransport({
+      role: "main",
+      systemPrompt: "",
+      candidates: [{ ...makeCandidates()[0]!, thinking: { style: "effort", default: "xhigh" } }],
+      healthRegistry: registry,
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+    });
+    expect(withConfig.getRuntimeStatus().reasoning).toBe("high");
+    expect(withConfig.getRuntimeStatus().reasoningRequested).toBe("xhigh");
+  });
+
   it("setReasoningEffort stores requested and reports the Pi-clamped effective value", () => {
     const t = makeTransport();
     const state = t.setReasoningEffort("high");

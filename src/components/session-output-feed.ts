@@ -7,8 +7,8 @@
  * exactly the session currently selected by `/session N` or `--orc`.
  *
  * Payloads are bounded at event boundaries. Thinking, prompts, tool
- * arguments/results, and secrets are never published here — only `text`
- * deltas, bounded tool-start names, and terminal markers.
+ * arguments/results, and secrets are never published here — only typed
+ * text/thinking deltas, bounded tool-start names, and terminal markers.
  */
 
 import { logWarn } from "./logger.js";
@@ -52,6 +52,15 @@ function truncateUtf8(s: string, maxBytes: number): string {
   return res;
 }
 
+/** Strip terminal controls before a delta reaches the socket/TUI boundary. */
+function stripControls(text: string): string {
+  return text
+    .replace(/\u001b\]\d+;\u0007/g, "")
+    .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, "");
+}
+
 let _streamCounter = 0;
 function makeStreamId(): string {
   _streamCounter = (_streamCounter + 1) >>> 0;
@@ -77,7 +86,7 @@ export class SessionOutputObserver implements OutputObserver {
     // #1619: thinking is no longer filtered here — the typed kind rides the
     // event so the TUI can render ordered thinking/text content natively.
     // Bounds and control stripping still apply to both kinds.
-    const text = truncateUtf8(event.text, MAX_DELTA_BYTES);
+    const text = truncateUtf8(stripControls(event.text), MAX_DELTA_BYTES);
     if (!text) return;
     this._feed.publish({ type: "delta", kind: event.kind, ...this._ids, streamId: this.streamId, text });
   }

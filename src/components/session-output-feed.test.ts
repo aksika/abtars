@@ -91,6 +91,17 @@ describe("SessionOutputObserver", () => {
     expect(deltas[1]).toMatchObject({ kind: "text", text: "visible" });
   });
 
+  it("strips terminal controls before publishing typed deltas", () => {
+    const feed = new SessionOutputFeed();
+    const deltas: string[] = [];
+    feed.subscribe({ sessionId: SID }, (e) => {
+      if (e.type === "delta") deltas.push(e.text);
+    });
+    const obs = createOutputObserver(feed, { sessionId: SID, executionId: EID });
+    obs.onDelta({ kind: "thinking", text: "\u001b[31mred\u001b[0m\u0007" });
+    expect(deltas).toEqual(["red"]);
+  });
+
   it("bounds delta and tool name payloads", () => {
     const feed = new SessionOutputFeed();
     let lastDelta = "";

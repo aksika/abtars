@@ -142,6 +142,17 @@ describe("IncrementalBlockDeliveryController", () => {
     controller.dispose();
   });
 
+  it("preserves failed segment order across multiple tool rounds", () => {
+    vi.useFakeTimers();
+    const { controller } = makeHarness();
+    controller.segmentFailed("First tool round.");
+    controller.segmentFailed("Second tool round.");
+    expect(controller.reconcileTerminal("Final answer.")).toBe(
+      "First tool round.\n\nSecond tool round.\n\nFinal answer.",
+    );
+    controller.dispose();
+  });
+
   it("does not duplicate a failed segment already present in the terminal", () => {
     vi.useFakeTimers();
     const { controller } = makeHarness();
@@ -165,12 +176,44 @@ describe("IncrementalBlockDeliveryController", () => {
     vi.useFakeTimers();
     const { controller, sent } = makeHarness();
     controller.accept({ kind: "thinking", text: "last thoughts" });
-    controller.end();
-    await vi.advanceTimersByTimeAsync(0);
+    await controller.end();
     expect(sent.length).toBe(1);
     expect(controller.timerActive).toBe(false);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(sent.length).toBe(1);
+  });
+
+  it("awaits in-flight sends and keeps later thinking in order", async () => {
+    vi.useFakeTimers();
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstStartedPromise = new Promise<void>((resolve) => { firstStarted = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const { controller, sent } = makeHarness({
+      sendBlock: async (text) => {
+        sent.push(text);
+        if (sent.length === 1) {
+          firstStarted();
+          await firstGate;
+        }
+      },
+    });
+
+    controller.accept({ kind: "thinking", text: "first" });
+    const firstFlush = controller.flush();
+    await firstStartedPromise;
+    controller.accept({ kind: "thinking", text: "second" });
+    const ending = controller.end();
+    expect(sent).toEqual([`${THINKING_BLOCK_PREFIX}first`]);
+
+    releaseFirst();
+    await firstFlush;
+    await ending;
+    expect(sent).toEqual([
+      `${THINKING_BLOCK_PREFIX}first`,
+      `${THINKING_BLOCK_PREFIX}second`,
+    ]);
+    await controller.dispose();
   });
 
   it("dispose() stops the timer and drops pending progress", async () => {

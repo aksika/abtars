@@ -59,7 +59,8 @@ export class IncrementalBlockDeliveryController {
   private _pendingThinking = "";
   private _timer: ReturnType<typeof setInterval> | null = null;
   private _disposed = false;
-  private _flushing = false;
+  /** All progress sends, including sends queued while another is in flight. */
+  private _inflight: Promise<void> = Promise.resolve();
 
   /** Sanitized text segments delivered successfully pre-tool. */
   private readonly _successfulSegments: string[] = [];
@@ -91,7 +92,7 @@ export class IncrementalBlockDeliveryController {
       return;
     }
     if (this._pendingThinking) {
-      this.flush();
+      void this.flush();
     }
   }
 
@@ -108,32 +109,41 @@ export class IncrementalBlockDeliveryController {
   }
 
   /** Flush pending thinking (bounded); called by the timer and boundaries. */
-  flush(): void {
-    if (this._disposed || this._flushing) return;
+  flush(): Promise<void> {
+    if (this._disposed) return Promise.resolve();
     const pending = this._pendingThinking;
-    if (!pending) return;
-    this._pendingThinking = "";
-    this._flushing = true;
-    const clean = this._sanitize(pending);
-    void this._deliverBlock(clean);
+    if (pending) {
+      this._pendingThinking = "";
+      const clean = this._sanitize(pending);
+      // Queue behind any earlier block. A timer tick or a size boundary can
+      // arrive while the adapter is still sending the previous block; those
+      // later thoughts must not be dropped or reorder the visible stream.
+      const delivery = this._inflight.then(() => this._deliverBlock(clean));
+      this._inflight = delivery.catch(() => {});
+    }
+    return this._inflight;
   }
 
   /** Flush on thinking→text transition and before semantic segments. */
-  flushBeforeSemantics(): void {
-    this.flush();
+  async flushBeforeSemantics(): Promise<void> {
+    await this.flush();
   }
 
   /** Turn end: flush remaining thinking and stop the bounded timer. */
-  end(): void {
-    this.flush();
+  async end(): Promise<void> {
     this._stopTimer();
+    // A send may still be in flight while the final provider event arrives;
+    // keep draining until the synchronous producer has no pending thoughts.
+    while (this._pendingThinking) await this.flush();
+    await this._inflight;
   }
 
   /** Stop the flush timer and drop any pending progress. Idempotent. */
-  dispose(): void {
+  async dispose(): Promise<void> {
     this._stopTimer();
     this._disposed = true;
     this._pendingThinking = "";
+    await this._inflight;
   }
 
   /**
@@ -158,13 +168,14 @@ export class IncrementalBlockDeliveryController {
         text = text.slice(s.length).trimStart();
       }
     }
+    const missingFailed: string[] = [];
     for (const segment of this._failedSegments) {
       const s = this._sanitize(segment);
       if (!s) continue;
-      if (text.includes(s)) continue;
-      text = text ? `${s}\n\n${text}` : s;
+      if (text.includes(s) || missingFailed.includes(s)) continue;
+      missingFailed.push(s);
     }
-    return text.trim();
+    return [...missingFailed, text].filter(Boolean).join("\n\n").trim();
   }
 
   /** Test-facing: buffered thinking (not yet flushed). */
@@ -178,7 +189,7 @@ export class IncrementalBlockDeliveryController {
 
   private _maybeFlushBySize(): void {
     if (Buffer.byteLength(this._pendingThinking, "utf8") >= this._maxBlockBytes) {
-      this.flush();
+      void this.flush();
     }
   }
 
@@ -189,10 +200,6 @@ export class IncrementalBlockDeliveryController {
       .map((c) => this._sanitize(c))
       .filter((c) => c.length > 0)
       .map((c) => THINKING_BLOCK_PREFIX + c);
-    if (chain.length === 0) {
-      this._flushing = false;
-      return Promise.resolve();
-    }
     return chain
       .reduce<Promise<void>>(
         (acc, block) => acc.then(async () => {
@@ -204,15 +211,14 @@ export class IncrementalBlockDeliveryController {
         }),
         Promise.resolve(),
       )
-      .then(() => { this._flushing = false; })
-      .catch(() => { this._flushing = false; });
+      .catch(() => {});
   }
 
   private _startTimer(): void {
     if (this._timer !== null || this._disposed) return;
     this._timer = setInterval(() => {
       if (this._disposed) return;
-      this.flush();
+      void this.flush();
     }, this._flushIntervalMs);
     // Never keep the process alive for progress blocks.
     if (typeof (this._timer as { unref?: () => void }).unref === "function") {
