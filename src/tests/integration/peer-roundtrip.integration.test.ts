@@ -25,28 +25,13 @@ vi.mock("../../components/peer-config.js", () => ({
   }),
 }));
 
+// #1631: real production board schema + transition CAS, so the fixture can
+// never drift from the production DDL again.
+import { ensureKanbanBoardSchema, kanbanTransition } from "../../components/tasks/kanban-board.js";
+
 async function getDbCtor(): Promise<any> {
   const mod = await import("../../utils/lazy-require.js");
   return mod.resolveNativeDep("better-sqlite3");
-}
-
-function makeKanbanSchema(db: Db): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS kanban_board (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT,
-      priority TEXT NOT NULL DEFAULT 'MEDIUM',
-      status TEXT NOT NULL DEFAULT 'queued',
-      type TEXT, notes TEXT, goal TEXT,
-      result_summary TEXT, result_path TEXT, error TEXT,
-      parent_id INTEGER, blocked_by TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      completed_at TEXT, max_tokens INTEGER, tokens_used INTEGER,
-      delivery_mode TEXT DEFAULT 'deliver',
-      source_peer TEXT, delivery_attempts INTEGER DEFAULT 0
-    )
-  `);
 }
 
 interface Side {
@@ -107,8 +92,11 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     const DbCtor = await getDbCtor();
     const rawReceiver = new DbCtor(":memory:");
     const rawRequester = new DbCtor(":memory:");
-    makeKanbanSchema(rawReceiver);
-    makeKanbanSchema(rawRequester);
+    // #1631: the shared production schema helper — the hand-copied fixture
+    // had drifted (missing next_retry_at broke settlement) and can never
+    // drift again.
+    ensureKanbanBoardSchema(rawReceiver);
+    ensureKanbanBoardSchema(rawRequester);
     receiver = makeSide("molty", rawReceiver);
     requester = makeSide("kp", rawRequester);
     delivered = [];
@@ -241,8 +229,19 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     expect(receiver.nerve.fired.filter(e => e.event === "card:queued")).toHaveLength(1);
 
     // 3. Receiver execution completes (model/Spin doubled) and the terminal
-    //    decision is settled through the REAL settlement API.
-    receiver.db.prepare(`UPDATE kanban_board SET status = 'done' WHERE id = ?`).run(receiverCard.id);
+    //    decision is settled through the REAL settlement API. The live root
+    //    is dispatched through the real transition CAS — settlement alone
+    //    owns the terminal running -> done transition (#1631: the previous
+    //    raw queued -> done write masked the stale-fixture defect).
+    const dispatch = kanbanTransition({
+      cardId: receiverCard.id,
+      from: ["queued"],
+      to: "running",
+      actor: "dispatch",
+      reason: "receiver execution started",
+      emit: false,
+    }, receiver.taskDb);
+    expect(dispatch.kind).toBe("applied");
     const decisionId = `rd_settle_${receiverCard.id}_t1`;
     reviewStore.settleAcceptance(
       receiverCard.id, `case_${receiverCard.id}`, { action: "accept", synthesis: "peer finished" },

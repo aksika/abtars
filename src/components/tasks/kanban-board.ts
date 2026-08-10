@@ -89,16 +89,17 @@ export interface KanbanCard {
 let _db: SqliteDb | null = null;
 let _dbAttempted = false;
 
-function db(): SqliteDb | null {
-  if (_dbAttempted) return _db;
-  _dbAttempted = true;
-  const dir = join(abtarsHome(), "kanban");
-  mkdirSync(dir, { recursive: true });
-  try {
-    const Database = resolveNativeDep("better-sqlite3");
-    _db = new Database(join(dir, "kanban.db")) as SqliteDb;
-    _db.pragma("journal_mode = WAL");
-    _db.exec(`CREATE TABLE IF NOT EXISTS kanban_board (
+/**
+ * #1631: the production kanban_board bootstrap, extracted so test fixtures can
+ * mirror the real schema without opening the production database. Owns exactly
+ * the board CREATE statement and the idempotent ALTER migrations, verbatim
+ * from the original db() open path. Performs only `exec` on the caller's
+ * database — never calls db()/requireTaskDatabase() and never resolves a
+ * native dependency. Transition-journal and task-state initialization stay in
+ * db(); they are not board schema.
+ */
+export function ensureKanbanBoardSchema(database: { exec(sql: string): void }): void {
+  database.exec(`CREATE TABLE IF NOT EXISTS kanban_board (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
       source TEXT NOT NULL,
@@ -123,23 +124,37 @@ function db(): SqliteDb | null {
       delivered_at TEXT
     )`);
     // Migrations — safe to re-run (silently skip if column exists)
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_tokens INTEGER`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_cost REAL`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN progress TEXT`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_mode TEXT DEFAULT 'deliver'`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN retry_count INTEGER DEFAULT 0`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN source_peer TEXT`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN goal TEXT`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_claimed_at TEXT`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_result TEXT CHECK(delivery_result IS NULL OR delivery_result IN ('sent','definitely_not_sent','unknown'))`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_receipt TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_tokens INTEGER`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_cost REAL`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN progress TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_mode TEXT DEFAULT 'deliver'`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN retry_count INTEGER DEFAULT 0`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN source_peer TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN goal TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_claimed_at TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_result TEXT CHECK(delivery_result IS NULL OR delivery_result IN ('sent','definitely_not_sent','unknown'))`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_receipt TEXT`); } catch {}
     // #1516: durable per-project agent cap (scheduled orchestration policy)
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_agents INTEGER`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_agents INTEGER`); } catch {}
     // #1516: project acceptance happens before scheduled artifact validation.
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_ready INTEGER NOT NULL DEFAULT 1`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_ready INTEGER NOT NULL DEFAULT 1`); } catch {}
+}
+
+function db(): SqliteDb | null {
+  if (_dbAttempted) return _db;
+  _dbAttempted = true;
+  const dir = join(abtarsHome(), "kanban");
+  mkdirSync(dir, { recursive: true });
+  try {
+    const Database = resolveNativeDep("better-sqlite3");
+    _db = new Database(join(dir, "kanban.db")) as SqliteDb;
+    _db.pragma("journal_mode = WAL");
+    // #1631: production board schema via the shared helper (verbatim DDL +
+    // migrations moved here from the inline block).
+    ensureKanbanBoardSchema(_db);
     // #1590: append-only status-transition journal (same transaction as the CAS).
     _db.exec(`CREATE TABLE IF NOT EXISTS kanban_card_transitions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
