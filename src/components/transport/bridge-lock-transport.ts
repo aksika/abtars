@@ -43,7 +43,7 @@ export function updateBridgeLockField(key: string, value: unknown): void {
     const lock = JSON.parse(readFileSync(p, "utf-8"));
     lock[key] = value;
     atomicWriteSync(p, JSON.stringify(lock));
-  } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
+  } catch (err) { logAndSwallow("bridge_lock_transport", `updateBridgeLockField(${key}) on ${p}`, err); }
 }
 
 /** Read a field from bridge.lock. Returns null if missing/unreadable. */
@@ -119,7 +119,13 @@ export function initBridgeLock(opts: { pid: number; startedAt: number; version: 
       sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(),
       startReason: opts.startReason ?? "unknown", bootType,
     }));
-  } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
+  } catch (err) {
+    // #1632: a bridge running without a lock has no L1→L3 watchdog lifeline —
+    // the watchdog reads bridge.lock to decide whether this process is alive.
+    // This failure caused a full-afternoon outage while logging nothing
+    // identifiable, so it is reported at error level, never as a trace line.
+    logAndSwallow("bridge_lock_transport", `initBridgeLock on ${p}`, err, "error");
+  }
   return prev;
 }
 
