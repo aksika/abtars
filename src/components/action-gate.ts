@@ -36,6 +36,19 @@ export interface AuthRequest {
 
 export type NotifyFn = (text: string, buttons: Array<{ text: string; data: string }>) => Promise<void>;
 
+/**
+ * #1629: trusted tool-authorization mode derived by Spin from durable Kanban
+ * provenance. `unattended-task` is only ever set by bridge code for execution
+ * whose durable root card has `source === "task"`; every other path fails
+ * closed to `interactive`. The model can never supply or override it.
+ */
+export type ToolAuthorizationMode = "interactive" | "unattended-task";
+
+export interface AuthRequestOptions {
+  /** Defaults to interactive behavior when omitted or invalid. */
+  mode?: ToolAuthorizationMode;
+}
+
 export class ActionGate {
   private tokens = new Map<string, AuthToken>();
   private pending = new Map<string, AuthRequest>();
@@ -69,9 +82,13 @@ export class ActionGate {
   /**
    * Request authorization for a privileged action.
    * Returns true if granted, false if denied/timed out.
+   *
+   * #1629: persistent rules always take precedence. Only when no rule matches
+   * may the unattended-task fallback auto-allow — and only for `bash-auth`.
+   * The fallback never notifies and never enqueues a pending request.
    */
-  async requestAuth(category: string, detail: string): Promise<boolean> {
-    // Check persistent rules first
+  async requestAuth(category: string, detail: string, options: AuthRequestOptions = {}): Promise<boolean> {
+    // Check persistent rules first — they outrank every fallback
     const rule = this.checkRules(category, detail);
     if (rule === "allow") {
       this.audit(category, detail, "allowed-by-rule");
@@ -80,6 +97,13 @@ export class ActionGate {
     if (rule === "deny") {
       this.audit(category, detail, "denied-by-rule");
       return false;
+    }
+
+    // #1629: unattended scheduled-task execution — no rule, bash only.
+    // Audit evidence is preserved; no pending request, no notification.
+    if (category === "bash-auth" && options.mode === "unattended-task") {
+      this.audit(category, detail, "allowed-unattended-task");
+      return true;
     }
 
     // No rule — ask master via Telegram

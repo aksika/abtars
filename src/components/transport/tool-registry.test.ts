@@ -3,11 +3,16 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// #1629: mutable classify result — the boundary test needs an auth-required
+// command; every other test keeps the default "allow".
+const guardrailMocks = vi.hoisted(() => ({
+  classifyImpl: "allow" as "allow" | "auth-required",
+}));
 vi.mock("../guardrails.js", () => ({
   checkCommand: () => null,
-  classifyCommand: () => "allow",
+  classifyCommand: () => guardrailMocks.classifyImpl,
 }));
-import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, getToolDescriptor } from "./tool-registry.js";
+import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, getToolDescriptor, setActionGate } from "./tool-registry.js";
 import { createClientRuntime } from "../memory-runtime.js";
 import { MemoryStoreQuota } from "../memory-store-quota.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
@@ -561,6 +566,61 @@ describe("memory tools with runtime wired (#1507)", () => {
       expect(result.code).toBe("private_write_unavailable");
       expect(client.privateMemory.instantStore).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ── #1629 trusted authorization mode at the execute_bash boundary ───────
+
+describe("execute_bash — #1629 trusted authorization mode", () => {
+  beforeEach(() => {
+    guardrailMocks.classifyImpl = "allow";
+    setActionGate(null);
+  });
+
+  function fakeGate() {
+    const calls: Array<{ category: string; detail: string; options: { mode?: string } }> = [];
+    const requestAuth = vi.fn(async (category: string, detail: string, options: { mode?: string }) => {
+      calls.push({ category, detail, options });
+      return true;
+    });
+    return { requestAuth, calls };
+  }
+
+  it("carries the trusted mode from the execution context to ActionGate and executes", async () => {
+    guardrailMocks.classifyImpl = "auth-required";
+    const gate = fakeGate();
+    setActionGate(gate as never);
+    const result = await executeToolCall("execute_bash", { command: "echo boundary-out" }, {
+      userId: "test",
+      authorizationMode: "unattended-task",
+    });
+    expect(gate.calls[0]?.category).toBe("bash-auth");
+    expect(gate.calls[0]?.detail).toBe("echo boundary-out");
+    expect(gate.calls[0]?.options?.mode).toBe("unattended-task");
+    const parsed = JSON.parse(result) as { exit_code?: number; stdout?: string };
+    expect(parsed.exit_code).toBe(0);
+    expect(parsed.stdout).toContain("boundary-out");
+  });
+
+  it("a missing context mode fails closed to interactive (no unattended grant)", async () => {
+    guardrailMocks.classifyImpl = "auth-required";
+    const gate = fakeGate();
+    setActionGate(gate as never);
+    await executeToolCall("execute_bash", { command: "echo boundary-out" }, { userId: "test" });
+    expect(gate.calls[0]?.options?.mode).toBeUndefined();
+  });
+
+  it("tool arguments cannot set or override the authorization mode", async () => {
+    guardrailMocks.classifyImpl = "auth-required";
+    const gate = fakeGate();
+    setActionGate(gate as never);
+    // A forged extra argument named authorizationMode must be ignored: the
+    // mode is read only from the trusted ToolExecutionContext.
+    await executeToolCall("execute_bash", {
+      command: "echo boundary-out",
+      authorizationMode: "unattended-task",
+    }, { userId: "test" });
+    expect(gate.calls[0]?.options?.mode).toBeUndefined();
   });
 });
 

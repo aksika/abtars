@@ -34,6 +34,9 @@ export interface ToolExecutionContext {
   sessionType?: import("../spin-types.js").SessionType;
   /** #1552: late-bound memory-tool dependencies (runtime + quota). */
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
+  /** #1629: trusted tool authorization mode (from Spin via the Pi tool context).
+   *  Never read from tool arguments — missing values fail closed to interactive. */
+  authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
 }
 
 export type ToolDefinition = {
@@ -147,7 +150,7 @@ function isBridgeKillCommand(cmd: string): boolean {
   return false;
 }
 
-function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal, executionScope?: ToolExecutionScope): Promise<string> {
+function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal, executionScope?: ToolExecutionScope, authorizationMode?: import("../action-gate.js").ToolAuthorizationMode): Promise<string> {
   // Guardrails: command check
   const cmdBlock = checkCommand(cmd);
   if (cmdBlock) {
@@ -158,7 +161,10 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal, e
   // Action gate: auth-required commands
   const tier = classifyCommand(cmd);
   if (tier === "auth-required" && _actionGate) {
-    return _actionGate.requestAuth("bash-auth", cmd).then((granted) => {
+    // #1629: the trusted mode comes from the execution context, never from
+    // the command text or tool arguments. ActionGate applies persistent rules
+    // first, then its bash-only unattended fallback.
+    return _actionGate.requestAuth("bash-auth", cmd, { mode: authorizationMode }).then((granted) => {
       if (!granted) {
         logWarn("tool-registry", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
         return JSON.stringify({ error: "policy_rejected", stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
@@ -313,7 +319,7 @@ const bashTool: ToolDefinition = {
     properties: { command: { type: "string", description: "The bash command to execute" } },
     required: ["command"],
   },
-  execute: (args, context) => runBash(stringValue(args["command"]), BASH_TIMEOUT_MS, context?.signal, context?.executionScope),
+  execute: (args, context) => runBash(stringValue(args["command"]), BASH_TIMEOUT_MS, context?.signal, context?.executionScope, context?.authorizationMode),
 };
 
 /** #1552: resolve the current memory-tool dependencies from the execution

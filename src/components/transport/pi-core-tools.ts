@@ -29,6 +29,8 @@ export interface PiCoreToolContext {
   sessionType?: import("../spin-types.js").SessionType;
   /** #1552: late-bound memory-tool dependencies (runtime + quota holder). */
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
+  /** #1629: trusted tool authorization mode (from Spin via the transport). */
+  authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
 }
 
 function adaptParameters(params: Record<string, unknown>): Record<string, unknown> {
@@ -125,6 +127,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
           orcContext: context.orcContext,
           sessionType: context.sessionType,
           memoryToolDeps: context.memoryToolDeps,
+          authorizationMode: context.authorizationMode,
         });
 
         const diag = parseToolResultToDiagnostic(result, context.executionId, def.name);

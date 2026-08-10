@@ -80,6 +80,21 @@ vi.mock("./tasks/kanban-channel.js", () => ({
 let _nextId = 1;
 interface MockCard { id: number; title: string; source: string; status: string; type: string; [key: string]: unknown; }
 const _cards = new Map<number, MockCard>();
+// #1629: configurable root resolution — defaults to identity (card is its own
+// root). Provenance tests install a parent-chain walker or a failure stub.
+let resolveRootImpl: ((id: number) => number | undefined) | null = null;
+function walkToRoot(id: number): number | undefined {
+  const seen = new Set<number>();
+  let current: number | undefined = id;
+  while (current !== undefined) {
+    if (seen.has(current)) return undefined; // cycle
+    seen.add(current);
+    const card = _cards.get(current);
+    if (!card || card.parent_id === undefined) return current;
+    current = card.parent_id as number;
+  }
+  return undefined;
+}
 vi.mock("./tasks/kanban-board.js", () => ({
   kanbanEnqueue: (title: string, source: string) => {
     const id = _nextId++;
@@ -101,7 +116,7 @@ vi.mock("./tasks/kanban-board.js", () => ({
   },
   kanbanGetCard: (id: number) => _cards.get(id) ?? null,
   isUnblocked: () => true,
-  resolveRootId: (id: number) => id,
+  resolveRootId: (id: number) => resolveRootImpl ? resolveRootImpl(id) : id,
   resolveActiveDescendants: () => [],
   resolveRecentDirectChildren: () => [],
   kanbanGetChildren: () => [],
@@ -950,6 +965,97 @@ describe("spin(spec) — unified session API (#1271)", () => {
         spin.dispatchAwait({ type: "W", goal: "overflow", source: "user" }),
       ).rejects.toThrow(/System busy/);
     });
+  });
+});
+
+// ── #1629 trusted tool-authorization provenance ─────────────────────────
+
+describe("spin() — #1629 tool authorization provenance", () => {
+  let spin1629: Spin;
+
+  beforeEach(() => {
+    spin1629 = new Spin();
+    resolveRootImpl = null;
+    setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
+  });
+
+  function captureRuntime() {
+    const contexts: Array<any> = [];
+    const runtime = makeRuntime({
+      sendPromptImpl: async (_key: string, _prompt: string, _image?: { mime: string; base64: string }, ctx?: any) => {
+        contexts.push(ctx);
+        return "ok";
+      },
+    });
+    spin1629.setRuntime(runtime as any);
+    return contexts;
+  }
+
+  it("task-sourced root card → unattended-task on the prompt context", async () => {
+    const contexts = captureRuntime();
+    const cardId = kanbanEnqueue("scheduled direct task", "task");
+    const r = await spin1629.spin({ type: "T", cardId, prompt: "run it", source: "task", await: true, userId: "aksika", platform: "background" });
+    expect(r.result).toBe("ok");
+    expect(contexts[0]?.authorizationMode).toBe("unattended-task");
+  });
+
+  it("agent-sourced Worker child under a task-sourced project root → unattended-task", async () => {
+    const contexts = captureRuntime();
+    resolveRootImpl = walkToRoot;
+    const rootId = kanbanEnqueue("daily-ai project", "task");
+    const workerId = kanbanEnqueue("lane 3", "agent");
+    _cards.get(workerId)!.parent_id = rootId;
+    const r = await spin1629.spin({ type: "W", cardId: workerId, prompt: "run lane", await: true, userId: "aksika", platform: "background" });
+    expect(r.result).toBe("ok");
+    expect(contexts[0]?.authorizationMode).toBe("unattended-task");
+  });
+
+  it("user/agent-sourced roots → interactive", async () => {
+    const contexts = captureRuntime();
+    const agentCard = kanbanEnqueue("manual agent work", "agent");
+    await spin1629.spin({ type: "T", cardId: agentCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    const userCard = kanbanEnqueue("manual user work", "user");
+    await spin1629.spin({ type: "T", cardId: userCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+    expect(contexts[1]?.authorizationMode).toBe("interactive");
+  });
+
+  it("no card (prompt-only spin) → interactive", async () => {
+    const contexts = captureRuntime();
+    await spin1629.spin({ type: "S", prompt: "one-shot", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+  });
+
+  it("missing root card → interactive (fails closed)", async () => {
+    const contexts = captureRuntime();
+    const cardId = kanbanEnqueue("ghost card", "task");
+    _cards.delete(cardId); // root unreadable
+    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+  });
+
+  it("unreadable/cyclic ancestry → interactive (fails closed)", async () => {
+    const contexts = captureRuntime();
+    resolveRootImpl = () => undefined;
+    const cardId = kanbanEnqueue("cyclic card", "task");
+    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+  });
+
+  it("unknown root source → interactive", async () => {
+    const contexts = captureRuntime();
+    const cardId = kanbanEnqueue("peer work", "peer");
+    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+  });
+
+  it("a reused session recomputes the mode from the current card, never retaining the prior value", async () => {
+    const contexts = captureRuntime();
+    const first = await spin1629.spin({ type: "D", goal: "step one", source: "task", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("unattended-task");
+    const second = await spin1629.spin({ type: "D", sessionId: first.sessionId, goal: "step two", source: "user", await: true, userId: "aksika", platform: "background" });
+    expect(second.sessionId).toBe(first.sessionId); // same reused session
+    expect(contexts[1]?.authorizationMode).toBe("interactive");
   });
 });
 

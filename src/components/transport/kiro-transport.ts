@@ -51,6 +51,10 @@ export interface PromptRequestContext {
   contextProvider?: PiDurableContextProvider;
   /** #1480: Orc invocation context for durable project ownership fencing. */
   orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  /** #1629: trusted authorization mode derived by Spin from durable Kanban
+   *  provenance. Optional so callers outside Spin fail closed at the
+   *  ActionGate default; production Spin executions always set it. */
+  authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
 }
 
 export interface RuntimeUsageSnapshot {

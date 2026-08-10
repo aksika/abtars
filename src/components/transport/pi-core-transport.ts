@@ -359,6 +359,8 @@ export class PiCoreTransport implements IKiroTransport {
         orcContext: context?.orcContext,
         sessionType: context?.sessionType,
         memoryToolDeps: this._memoryToolDeps,
+        // #1629: trusted per-execution tool authorization mode.
+        authorizationMode: context?.authorizationMode,
       };
       const tools = createPiAgentTools(toolContext);
 

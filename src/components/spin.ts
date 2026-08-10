@@ -597,6 +597,14 @@ export class Spin {
       kanbanRunning(cardId);
     }
 
+    // #1629: derive the trusted authorization mode from durable Kanban
+    // provenance for THIS execution. Resolving through the parent chain makes
+    // a task-sourced scheduled-project root cover Orc and Worker descendants
+    // whose own cards are agent-sourced; missing/cyclic/unreadable ancestry
+    // fails closed to interactive. The mode lives only on the contexts built
+    // below — never on the reusable session.
+    const authorizationMode = resolveToolAuthorizationMode(cardId);
+
     // #1319: Track card association and publish execution.started for Orc
     if (cardId !== undefined && spec.type === "O") {
       session.activeCardId = cardId;
@@ -697,6 +705,8 @@ export class Spin {
         // #1527: Spin forwards its own provider reference (late-bound holder
         // populated by boot composition), never a scraped transport property.
         contextProvider: this.contextProvider.current ?? undefined,
+        // #1629: trusted per-execution tool authorization mode.
+        authorizationMode,
       };
       const leaseEmitter = spec.attemptId && spec.executionControl?.generation !== undefined
         ? new ExecutorProgressEmitter()
@@ -893,6 +903,9 @@ export class Spin {
                 sessionType: sessionType(session),
                 executionTelemetry,
                 orcContext: session.orcContext,
+                // #1629: steering continuations belong to the same execution
+                // and inherit its trusted authorization mode.
+                authorizationMode,
               })) || "(no output)";
               markConsumed(batch, session);
             } catch (steerErr) {
@@ -1662,6 +1675,23 @@ export class Spin {
   getRunningCount(type: SessionType): number {
     return this.executions.runningCount(type);
   }
+}
+
+/**
+ * #1629: Resolve the trusted tool-authorization mode for the current Spin
+ * execution from durable Kanban provenance. Only a successfully read durable
+ * root with `source === "task"` selects `unattended-task`; missing cards,
+ * unreadable/cyclic/deep ancestry, missing or unknown source all fail closed
+ * to `interactive`. The result is per execution and never stored on the
+ * reusable session.
+ */
+export function resolveToolAuthorizationMode(cardId: number | undefined): import("./action-gate.js").ToolAuthorizationMode {
+  if (cardId === undefined) return "interactive";
+  const rootId = resolveRootId(cardId);
+  if (rootId === undefined) return "interactive";
+  return kanbanGetCard(rootId)?.source === "task"
+    ? "unattended-task"
+    : "interactive";
 }
 
 /**
