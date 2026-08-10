@@ -9,6 +9,7 @@ const mockPiRunStore = vi.hoisted(() => vi.fn(function (_opts: unknown) {
   return {
     generateId: vi.fn(() => "test-run-id"),
     recoverNonterminal: vi.fn(() => ({ interrupted: 0, queuedCardIds: [] })),
+    setRemoteEventEmitter: vi.fn(),
   };
 }));
 const mockPiExecutor = vi.hoisted(() => vi.fn(function () {

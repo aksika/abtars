@@ -575,19 +575,24 @@ export class PiExecutor {
     if (dialogMethods.has(method)) {
       const owned = this.live.get(runId);
       if (!owned) return;
+      // #1358 review — the "ui" progress row is stored BEFORE the
+      // awaiting_input transition so the in-transaction event emitter can
+      // attach title/prompt/options to the public projection. A stray row on
+      // a rejected request is harmless: the next accepted request writes a
+      // newer row, and the projection reads the latest one.
+      this.store.addProgress(runId, "ui", JSON.stringify({
+        requestId: request.id,
+        type: method,
+        title: (request as any).title,
+        description: (request as any).message ?? (request as any).placeholder ?? (request as any).prefill,
+        options: (request as any).options,
+        defaultValue: (request as any).defaultValue,
+        filePattern: undefined,
+      }));
       const result = this.store.setPendingUi({
         runId, generation: owned.generation, requestId: request.id, requestType: method as PiPendingRequestType,
       });
       if (result.ok) {
-        this.store.addProgress(runId, "ui", JSON.stringify({
-          requestId: request.id,
-          type: method,
-          title: (request as any).title,
-          description: (request as any).message ?? (request as any).placeholder ?? (request as any).prefill,
-          options: (request as any).options,
-          defaultValue: (request as any).defaultValue,
-          filePattern: undefined,
-        }));
         this._fireTransition(runId, "running", "awaiting_input");
       } else {
         logWarn(TAG, `UI request rejected for ${runId} (gen=${owned.generation}, req=${request.id}): ${result.reason}`);

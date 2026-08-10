@@ -441,14 +441,14 @@ export class RemotePiControlHandler {
     try {
       await this.deps.service.resume(request.run_id, principal);
       const resumedRun = this.deps.store.get(request.run_id)!;
-      if (this.deps.eventProducer) {
-        await this.deps.eventProducer.produceResumed({
-          run: resumedRun,
-          newGeneration: resumedRun.executionGeneration,
-          originPeer: authenticatedPeer.peerName,
-          originRequestId: resumedRun.originRequestId ?? resumedRun.originChatId ?? resumedRun.id,
-        });
-      }
+      // #1358 review — the `resumed` fact is emitted by
+      // PiRunStore.queueResumeGeneration inside the generation-bump
+      // transaction (mechanism A); do not produce it here after commit.
+      // Trigger opportunistic push so the origin sees it promptly.
+      try {
+        const { getRemotePiDelivery } = await import("./remote-pi-registry.js");
+        getRemotePiDelivery()?.pushEvents(request.run_id, authenticatedPeer.peerName).catch(() => {});
+      } catch { /* best effort */ }
       const projection = this._buildPublicProjection(resumedRun);
       return {
         version: 1,

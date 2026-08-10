@@ -17,7 +17,9 @@ const TAG = "remote-pi-origin-projection";
  */
 export interface RemotePiOriginProjection {
   run_id: string;
-  card_id: number;
+  /** Owner-local card ID — opaque display/correlation value, never a key on
+   * the origin side. Resolved by (owner_peer, origin_request_id, run_id). */
+  remote_card_id: number;
   origin_request_id: string;
   owner_peer: string;
   latest_sequence: number;
@@ -96,7 +98,7 @@ export class SqliteProjectionStore implements ProjectionStore {
   private _migrate(): void {
     this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_origin_projections (
       run_id TEXT PRIMARY KEY,
-      card_id INTEGER NOT NULL,
+      remote_card_id INTEGER NOT NULL,
       origin_request_id TEXT NOT NULL,
       owner_peer TEXT NOT NULL,
       latest_sequence INTEGER NOT NULL DEFAULT 0,
@@ -114,8 +116,13 @@ export class SqliteProjectionStore implements ProjectionStore {
       last_command_outcome_json TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`);
+    // #1358 review — namespacing: rename any legacy bare `card_id` column and
+    // DROP the index over the remote numeric card ID. The remote card ID is
+    // host-local to the owner and must never be an origin-side key, index,
+    // join column, or lookup.
+    try { this.db.exec(`ALTER TABLE remote_pi_origin_projections RENAME COLUMN card_id TO remote_card_id`); } catch { /* column already renamed */ }
+    this.db.exec(`DROP INDEX IF EXISTS idx_remote_projections_card`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_projections_owner ON remote_pi_origin_projections(owner_peer)`);
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_projections_card ON remote_pi_origin_projections(card_id)`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_origin_events (
       run_id TEXT NOT NULL,
       sequence INTEGER NOT NULL,
@@ -131,14 +138,14 @@ export class SqliteProjectionStore implements ProjectionStore {
   upsertProjection(projection: RemotePiOriginProjection): void {
     this.db.prepare(`
       INSERT OR REPLACE INTO remote_pi_origin_projections
-        (run_id, card_id, origin_request_id, owner_peer, latest_sequence, acknowledged_sequence,
+        (run_id, remote_card_id, origin_request_id, owner_peer, latest_sequence, acknowledged_sequence,
          latest_generation, latest_status, last_activity_at, pending_input_json, result_summary,
          error_summary, usage_json, changed_files_summary, resume_capability, delivery_json,
          last_command_outcome_json, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `).run(
       projection.run_id,
-      projection.card_id,
+      projection.remote_card_id,
       projection.origin_request_id,
       projection.owner_peer,
       projection.latest_sequence,
@@ -192,7 +199,7 @@ export class SqliteProjectionStore implements ProjectionStore {
   private _rowToProjection(row: Record<string, unknown>): RemotePiOriginProjection {
     return {
       run_id: row.run_id as string,
-      card_id: row.card_id as number,
+      remote_card_id: row.remote_card_id as number,
       origin_request_id: row.origin_request_id as string,
       owner_peer: row.owner_peer as string,
       latest_sequence: row.latest_sequence as number,
@@ -427,7 +434,7 @@ export class RemotePiOriginReducer {
   private _initializeProjection(event: RemotePiEventV1): RemotePiOriginProjection {
     return {
       run_id: event.run_id,
-      card_id: event.card_id,
+      remote_card_id: event.remote_card_id,
       origin_request_id: event.origin_request_id,
       owner_peer: event.origin_peer,
       latest_sequence: event.sequence,

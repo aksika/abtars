@@ -16,6 +16,29 @@ export interface TaskTickResult {
 }
 
 /**
+ * #1358 review — Round-robin peer selection for `remote-pi-drain`.
+ *
+ * Pure helper so the budget contract is unit-testable: at most `maxPeers`
+ * peers per tick, starting from the persisted cursor and wrapping around the
+ * connected set, so no peer starves behind a noisy one. Returns the peers to
+ * touch and the next cursor value (persisted for the following tick).
+ */
+export function selectDrainPeers(
+  connectedPeers: readonly string[],
+  cursor: number,
+  maxPeers: number,
+): { peers: string[]; nextCursor: number } {
+  if (connectedPeers.length === 0) return { peers: [], nextCursor: cursor };
+  const startIdx = cursor % connectedPeers.length;
+  const peers: string[] = [];
+  for (let i = 0; i < Math.min(connectedPeers.length, maxPeers); i++) {
+    const peer = connectedPeers[(startIdx + i) % connectedPeers.length];
+    if (peer) peers.push(peer);
+  }
+  return { peers, nextCursor: startIdx + peers.length };
+}
+
+/**
  * #1520: the tier-3 scheduled-task tick body, exposed as an injected callable
  * used by both production (heartbeat) and the production-shaped E2E harness.
  * Due discovery/reservation, queue execution, settlement, and delivery are
@@ -180,12 +203,22 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     });
   }).catch(err => logAndSwallow(TAG, "reconciler", err));
 
-  // #1358: Drain unacknowledged remote Pi events for all connected peers
-  // on each heartbeat tick. This is the reconciliation mechanism: events
-  // that were produced but couldn't be pushed (origin offline, transient
-  // WS failure) are retried here. No independent timer — reuses heartbeat.
-  // The delivery manager is resolved lazily inside execute() so this task
-  // survives boot-order races where phasePiExecutor hasn't run yet.
+  // #1358 review — Drain unacknowledged remote Pi events for connected peers
+  // on each heartbeat tick, under the declared DRAIN_BUDGET (spec #1358
+  // "Heartbeat budget requirements", separately approved):
+  //   - absolute 5s per-tick wall-clock budget measured from task entry;
+  //   - at most 4 peers touched per tick, round-robin over a persisted peer
+  //     cursor so no peer starves behind a noisy one;
+  //   - per-peer isolation: a hung peer consumes only its own share (5s
+  //     request timeout clamped to the remaining tick budget);
+  //   - at most one drain in flight per peer — overlapping ticks are skipped;
+  //   - never throws out of execute(); leftover backlog resumes next tick;
+  //   - `bridge.lock.lastHeartbeat` is updated by HeartbeatSystem at the top
+  //     of every tick, before this task runs, so a hung drain cannot starve
+  //     the L3 staleness check.
+  // Events are produced atomically with their transitions (mechanism A), so
+  // this task only re-drives delivery of already-persisted events — it never
+  // fabricates facts from current run state.
   heartbeat.registerTask({
     name: "remote-pi-drain",
     execute: async () => {
@@ -193,17 +226,36 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
         const { getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
         const delivery = getRemotePiDelivery();
         if (!delivery || typeof delivery.drainPeer !== "function") return { state: "idle" };
-        const { getRemotePiProducer } = await import("../components/peer-transport/remote-pi-registry.js");
-        await getRemotePiProducer()?.recoverMissingEvents();
+        const { DRAIN_BUDGET } = await import("../components/peer-transport/remote-pi-delivery.js");
         const { getPeerWsBroker } = await import("../components/peer-transport/peer-ws-broker.js");
         const broker = getPeerWsBroker();
         const connectedPeers = broker.getConnectedPeers();
-        for (const peer of connectedPeers) {
+        if (connectedPeers.length === 0) return { state: "idle" };
+
+        const deadline = Date.now() + DRAIN_BUDGET.tickWallClockMs;
+        // Round-robin over a persisted peer cursor (survives restarts).
+        const { peers: selectedPeers, nextCursor } = selectDrainPeers(
+          connectedPeers,
+          delivery.getDrainCursor(),
+          DRAIN_BUDGET.maxPeersPerTick,
+        );
+        let touched = 0;
+        for (const peer of selectedPeers) {
+          if (Date.now() >= deadline) break;
           try {
-            await delivery.drainPeer(peer);
+            await delivery.drainPeer(peer, {
+              deadlineMs: deadline,
+              maxRunsPerPeer: DRAIN_BUDGET.maxRunsPerPeerPerTick,
+              maxEventsPerRun: DRAIN_BUDGET.maxEventsPerRunPerTick,
+              requestTimeoutMs: DRAIN_BUDGET.requestTimeoutMs,
+            });
           } catch { /* isolated — one peer failure does not block others */ }
+          touched++;
         }
-        return { state: "ran" as const };
+        delivery.setDrainCursor(nextCursor);
+        return touched > 0
+          ? { state: "ran" as const, detail: `${touched}/${connectedPeers.length} peer(s) drained` }
+          : { state: "idle" as const };
       } catch {
         return { state: "idle" };
       }

@@ -12,6 +12,31 @@ export interface PiRunStoreDeps {
   db: TaskDatabase;
 }
 
+/**
+ * #1358 review — In-transaction lifecycle event emission seam (mechanism A).
+ *
+ * The store calls `emitTransitionInTx` INSIDE the same transaction that
+ * applies a public run transition, for delegated runs (origin_peer set).
+ * If the transaction aborts, neither the transition nor the event exists;
+ * if it commits, the event is durable before the caller can observe the
+ * transition. This is the durability contract of spec #1358: snapshot
+ * scanning is projection repair only and is never the event-durability
+ * mechanism.
+ *
+ * The callback must be synchronous and must not open its own transaction
+ * (it runs inside the caller's). It may read run state through the store —
+ * the same connection sees the transaction's uncommitted writes.
+ */
+export interface RemotePiTransitionEmitter {
+  emitTransitionInTx(input: {
+    runId: string;
+    fromStatus: string | undefined;
+    toStatus: string;
+    /** Set when the transition bumps execution_generation (resume). */
+    newGeneration?: number;
+  }): void;
+}
+
 // #1393 — Input for atomic card+run creation.
 export interface CreatePiRunInput {
   runId: string;
@@ -63,11 +88,21 @@ export type PiResumeCommit =
 
 export class PiRunStore {
   private readonly db: TaskDatabase;
+  private remoteEmitter: RemotePiTransitionEmitter | null = null;
 
   constructor(deps: PiRunStoreDeps) {
     this.db = deps.db;
     this.migrate();
     ensureRequestLedgerSchema(this.db);
+  }
+
+  /**
+   * #1358 review — Wire the in-transaction lifecycle event emitter (the
+   * RemotePiEventProducer). Must be called before any delegated run
+   * transitions; boot wires it right after construction.
+   */
+  setRemoteEventEmitter(emitter: RemotePiTransitionEmitter): void {
+    this.remoteEmitter = emitter;
   }
 
   private migrate(): void {
@@ -120,10 +155,12 @@ export class PiRunStore {
     )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_progress_run_id ON pi_run_progress(run_id)`);
 
-    // #1358 — Remote Pi lifecycle event outbox
+    // #1358 — Remote Pi lifecycle event outbox. The card identifier is the
+    // OWNER's local Pi card, namespaced as remote_card_id so it can never be
+    // mistaken for an origin-side local card reference.
     this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_events (
       run_id TEXT NOT NULL,
-      card_id INTEGER NOT NULL,
+      remote_card_id INTEGER NOT NULL,
       generation INTEGER NOT NULL,
       sequence INTEGER NOT NULL,
       event_id TEXT NOT NULL UNIQUE,
@@ -137,8 +174,19 @@ export class PiRunStore {
       acknowledged_at TEXT,
       PRIMARY KEY (run_id, sequence)
     )`);
+    // Migration for databases created before the namespacing fix (#1358 review):
+    // the owner-local card column is renamed so no bare `card_id` survives on
+    // the event path.
+    try { this.db.exec(`ALTER TABLE remote_pi_events RENAME COLUMN card_id TO remote_card_id`); } catch { /* column already named correctly */ }
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_events_origin_peer ON remote_pi_events(origin_peer)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_events_acknowledged ON remote_pi_events(acknowledged_at) WHERE acknowledged_at IS NULL`);
+
+    // #1358 — Persisted round-robin drain cursor for the remote-pi-drain
+    // heartbeat task (no peer starves behind a noisy one; survives restarts).
+    this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_drain_state (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`);
 
     // #1358 — Remote Pi command ledger for idempotency
     this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_commands (
@@ -191,6 +239,22 @@ export class PiRunStore {
         input.sessionId,
         input.modelProvider ?? null, input.modelId ?? null, input.thinking ?? null,
       );
+
+      // #1358 review — mechanism A: creation facts (accepted, queued) commit
+      // in the same transaction as the run row for delegated runs. A crash
+      // before commit creates neither the run nor the events.
+      if (this.remoteEmitter && input.originPeer) {
+        this.remoteEmitter.emitTransitionInTx({
+          runId: input.runId,
+          fromStatus: undefined,
+          toStatus: "accepted",
+        });
+        this.remoteEmitter.emitTransitionInTx({
+          runId: input.runId,
+          fromStatus: undefined,
+          toStatus: "queued",
+        });
+      }
 
       if (!input.idempotency) return { runId: input.runId, cardId, sessionId: input.sessionId };
 
@@ -267,8 +331,29 @@ export class PiRunStore {
       if (updates.resumeCapability !== undefined) { setClauses.push(`resume_capability = ?`); params.push(updates.resumeCapability); }
     }
     params.push(id, ...fromArr);
-    const result = this.db.prepare(`UPDATE pi_runs SET ${setClauses.join(", ")} WHERE id = ? AND status IN (${fromArr.map(() => "?").join(",")})`).run(...params);
-    return result.changes > 0;
+    // #1358 review — mechanism A: the transition and its outbox event commit
+    // together. If the event append fails, the transition rolls back with it.
+    const fn = (): boolean => {
+      // Read the current generation so a `resumed` fact is emitted only for a
+      // REAL generation bump, never for a same-value executionGeneration set.
+      const preGen = updates?.executionGeneration !== undefined
+        ? (this.db.prepare(`SELECT execution_generation FROM pi_runs WHERE id = ?`).get(id) as { execution_generation: number } | undefined)?.execution_generation
+        : undefined;
+      const result = this.db.prepare(`UPDATE pi_runs SET ${setClauses.join(", ")} WHERE id = ? AND status IN (${fromArr.map(() => "?").join(",")})`).run(...params);
+      if (result.changes > 0 && this.remoteEmitter) {
+        this.remoteEmitter.emitTransitionInTx({
+          runId: id,
+          fromStatus: fromArr.length === 1 ? fromArr[0] : undefined,
+          toStatus,
+          newGeneration:
+            updates?.executionGeneration !== undefined && preGen !== updates.executionGeneration
+              ? updates.executionGeneration
+              : undefined,
+        });
+      }
+      return result.changes > 0;
+    };
+    return this.db.transaction(fn);
   }
 
   /**
@@ -311,6 +396,17 @@ export class PiRunStore {
       ).run(...runParams, input.runId, input.generation, ...input.expectedStatuses);
 
       if (runResult.changes === 0) return { committed: false, reason: "wrong_status" };
+
+      // #1358 review — mechanism A: terminal transition and its outbox event
+      // commit in this same transaction. Emitted after the run UPDATE so the
+      // projection builder reads the settled fields.
+      if (this.remoteEmitter) {
+        this.remoteEmitter.emitTransitionInTx({
+          runId: input.runId,
+          fromStatus: row.status as string,
+          toStatus: input.outcome,
+        });
+      }
 
       // Update linked kanban card — #1590: through the single transition
       // helper, inside the same transaction. Events fire at the executor
@@ -386,6 +482,16 @@ export class PiRunStore {
     `).run(input.requestId, input.generation, input.runId, input.generation, input.requestId);
 
     if (changed.changes === 0) return { claimed: false, reason: "already_consumed" };
+
+    // #1358 review — mechanism A: awaiting_input → running (input_cleared)
+    // commits with its outbox event.
+    if (this.remoteEmitter) {
+      this.remoteEmitter.emitTransitionInTx({
+        runId: input.runId,
+        fromStatus: "awaiting_input",
+        toStatus: "running",
+      });
+    }
     return { claimed: true, requestType: row.pending_request_type as PiPendingRequestType };
   }
 
@@ -413,6 +519,14 @@ export class PiRunStore {
         AND last_ui_reply_request_id = ?
         AND last_ui_reply_outcome = 'claimed'
     `).run(input.requestId, input.requestType, input.runId, input.generation, input.requestId);
+    if (result.changes > 0 && this.remoteEmitter) {
+      // #1358 review — mechanism A: running → awaiting_input (restored claim).
+      this.remoteEmitter.emitTransitionInTx({
+        runId: input.runId,
+        fromStatus: "running",
+        toStatus: "awaiting_input",
+      });
+    }
     return result.changes > 0;
   }
 
@@ -470,6 +584,15 @@ export class PiRunStore {
         AND (last_ui_reply_request_id IS NULL OR last_ui_reply_request_id != ?)
     `).run(input.requestId, input.requestType, input.runId, input.generation, input.requestId);
     if (changed.changes === 0) return { ok: false, reason: "wrong_status" };
+    // #1358 review — mechanism A: running → awaiting_input (dialog enter)
+    // commits with its outbox event.
+    if (this.remoteEmitter) {
+      this.remoteEmitter.emitTransitionInTx({
+        runId: input.runId,
+        fromStatus: "running",
+        toStatus: "awaiting_input",
+      });
+    }
     return { ok: true };
   }
 
@@ -486,6 +609,10 @@ export class PiRunStore {
    * event producer to attach title/prompt/options to the awaiting_input
    * public projection. Returns the parsed JSON object or null if no UI
    * request is currently active.
+   *
+   * The executor writes the "ui" progress row BEFORE entering awaiting_input
+   * (see `_onUiRequest`), so the latest row always describes the active
+   * request when the in-transaction emitter reads it.
    */
   getLatestUiRequest(runId: string): Record<string, unknown> | null {
     const row = this.db.prepare(
@@ -540,6 +667,16 @@ export class PiRunStore {
         return { claimed: false, reason: "card_mismatch" };
       }
 
+      // #1358 review — mechanism A: queued → starting commits with its
+      // outbox event.
+      if (this.remoteEmitter) {
+        this.remoteEmitter.emitTransitionInTx({
+          runId,
+          fromStatus: "queued",
+          toStatus: "starting",
+        });
+      }
+
       return { claimed: true, runId, generation: gen };
     });
   }
@@ -568,7 +705,7 @@ export class PiRunStore {
       const newGen = input.expectedGeneration + 1;
 
       // Update run
-      this.db.prepare(`
+      const runResult = this.db.prepare(`
         UPDATE pi_runs
         SET status = 'queued',
             execution_generation = ?,
@@ -600,6 +737,18 @@ export class PiRunStore {
         fields: { completed_at: null, error: null, result_summary: null },
         emit: false,
       }, this.db);
+
+      // #1358 review — mechanism A: the generation bump and its `resumed`
+      // fact commit together. The origin may advance generations only through
+      // this authenticated fact, so it must never be lost to a crash.
+      if (runResult.changes > 0 && this.remoteEmitter) {
+        this.remoteEmitter.emitTransitionInTx({
+          runId: input.runId,
+          fromStatus: row.status as string,
+          toStatus: "queued",
+          newGeneration: newGen,
+        });
+      }
 
       return { committed: true, runId: input.runId, newGeneration: newGen, cardId };
     });
@@ -649,6 +798,14 @@ export class PiRunStore {
             fields: { error: "interrupted by bridge restart" },
             emit: false,
           }, this.db);
+          // #1358 review — mechanism A: boot interruption is a public
+          // transition; its `interrupted` fact commits with the status change
+          // so the origin sees it (and can later resume) after a restart.
+          if (this.remoteEmitter) {
+            this.remoteEmitter.emitTransitionInTx({
+              runId, fromStatus: status, toStatus: "interrupted",
+            });
+          }
           interrupted++;
         }
       }
@@ -777,6 +934,26 @@ export class PiRunStore {
     projectionJson: string;
     computeFields: (sequence: number) => { eventId: string; contentSha256: string };
   }): { sequence: number; idempotent: boolean } {
+    return this.db.transaction(() => this.appendEventAutoInTx(input));
+  }
+
+  /**
+   * #1358 review — Same append logic as `appendEventAuto` but WITHOUT opening
+   * a transaction: intended to run inside the caller's transition transaction
+   * (mechanism A). Sequence allocation reads MAX within the same transaction,
+   * so a rollback releases the reservation too.
+   */
+  appendEventAutoInTx(input: {
+    runId: string;
+    cardId: number;
+    generation: number;
+    originPeer: string;
+    originRequestId: string;
+    kind: string;
+    occurredAt: string;
+    projectionJson: string;
+    computeFields: (sequence: number) => { eventId: string; contentSha256: string };
+  }): { sequence: number; idempotent: boolean } {
     const fn = (): { sequence: number; idempotent: boolean } => {
       // Step 1: read MAX inside the transaction. SQLite serializes writes, so
       // the MAX we read here is stable until our transaction commits.
@@ -795,7 +972,7 @@ export class PiRunStore {
       try {
         this.db.prepare(`
           INSERT INTO remote_pi_events
-            (run_id, card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at)
+            (run_id, remote_card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `).run(
           input.runId, input.cardId, input.generation, sequence, eventId,
@@ -823,7 +1000,7 @@ export class PiRunStore {
         throw err;
       }
     };
-    return this.db.transaction(fn);
+    return fn();
   }
 
   /**
@@ -846,7 +1023,7 @@ export class PiRunStore {
     try {
       this.db.prepare(`
         INSERT INTO remote_pi_events
-          (run_id, card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at)
+          (run_id, remote_card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `).run(
         input.runId,
@@ -884,7 +1061,7 @@ export class PiRunStore {
    */
   getEventsAfter(input: { runId: string; afterSequence: number; limit: number }): Array<{
     run_id: string;
-    card_id: number;
+    remote_card_id: number;
     generation: number;
     sequence: number;
     event_id: string;
@@ -898,7 +1075,7 @@ export class PiRunStore {
     acknowledged_at: string | null;
   }> {
     return this.db.prepare(`
-      SELECT run_id, card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at, acknowledged_at
+      SELECT run_id, remote_card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at, acknowledged_at
       FROM remote_pi_events
       WHERE run_id = ? AND sequence > ?
       ORDER BY sequence ASC
@@ -911,7 +1088,7 @@ export class PiRunStore {
    */
   getUnacknowledgedEvents(runId: string, limit: number): Array<{
     run_id: string;
-    card_id: number;
+    remote_card_id: number;
     generation: number;
     sequence: number;
     event_id: string;
@@ -924,7 +1101,7 @@ export class PiRunStore {
     created_at: string;
   }> {
     return this.db.prepare(`
-      SELECT run_id, card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at
+      SELECT run_id, remote_card_id, generation, sequence, event_id, content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at, created_at
       FROM remote_pi_events
       WHERE run_id = ? AND acknowledged_at IS NULL
       ORDER BY sequence ASC
@@ -1170,6 +1347,25 @@ export class PiRunStore {
       JOIN pi_runs r ON e.run_id = r.id
       WHERE e.acknowledged_at IS NULL
     `).all() as Array<{ run_id: string; origin_peer: string }>;
+  }
+
+  /**
+   * #1358 review — Persisted round-robin drain cursor for remote-pi-drain.
+   * Survives restarts so no peer starves behind a noisy one.
+   */
+  getDrainCursor(): number {
+    const row = this.db.prepare(
+      `SELECT value FROM remote_pi_drain_state WHERE key = 'peer_cursor'`
+    ).get() as { value: string } | undefined;
+    const parsed = row ? Number(row.value) : 0;
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  }
+
+  setDrainCursor(value: number): void {
+    this.db.prepare(`
+      INSERT INTO remote_pi_drain_state (key, value) VALUES ('peer_cursor', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(String(value));
   }
 
   /**

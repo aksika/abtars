@@ -35,12 +35,12 @@ import type { TaskDatabase } from "../tasks/kanban-board.js";
 
 /** Build a valid event envelope with correct hash. */
 function buildEvent(partial: Partial<RemotePiEventV1> & Pick<RemotePiEventV1, "run_id" | "sequence" | "kind" | "origin_peer" | "origin_request_id">): RemotePiEventV1 {
-  const card_id = partial.card_id ?? 42;
+  const remote_card_id = partial.remote_card_id ?? 42;
   const generation = partial.generation ?? 1;
   const occurred_at = partial.occurred_at ?? new Date().toISOString();
   const event_id = deriveEventId(partial.run_id, partial.sequence);
   const projection = partial.projection ?? { status: "running", generation, last_activity_at: occurred_at };
-  const { content_sha256, ...rest } = { ...partial, version: 1 as const, event_id, card_id, generation, occurred_at, projection };
+  const { content_sha256, ...rest } = { ...partial, version: 1 as const, event_id, remote_card_id, generation, occurred_at, projection };
   const hash = computeEventHash(rest);
   return { ...rest, content_sha256: hash };
 }
@@ -159,8 +159,8 @@ describe("Remote Pi Integration (#1358)", () => {
       expect(() => validateEventV1(event)).toThrow("Content hash mismatch");
     });
 
-    it("should reject event with card_id 0", () => {
-      const event = buildEvent({ run_id: "run-abc", sequence: 1, kind: "accepted", origin_peer: "origin-peer", origin_request_id: "req-123", card_id: 0 });
+    it("should reject event with remote_card_id 0", () => {
+      const event = buildEvent({ run_id: "run-abc", sequence: 1, kind: "accepted", origin_peer: "origin-peer", origin_request_id: "req-123", remote_card_id: 0 });
       expect(() => validateEventV1(event)).toThrow("invalid identifiers");
     });
 
@@ -256,7 +256,7 @@ describe("Remote Pi Integration (#1358)", () => {
       expect(projection.usage).toEqual({ input_tokens: 100, output_tokens: 200 });
     });
 
-    it("should produce valid events with correct card_id and hash", async () => {
+    it("should produce valid events with correct remote_card_id and hash", async () => {
       const run = createMockRun({ status: "running" });
       const result = await producer.produceEvent({
         run, kind: "progress", originPeer: "origin-peer", originRequestId: "req-1",
@@ -267,7 +267,7 @@ describe("Remote Pi Integration (#1358)", () => {
       const events = store.getEventsAfter({ runId: run.id, afterSequence: 0, limit: 1 });
       const envelope = producer.buildEventEnvelope(events[0]);
       expect(() => validateEventV1(envelope)).not.toThrow();
-      expect(envelope.card_id).toBe(42);
+      expect(envelope.remote_card_id).toBe(42);
     });
 
     it("should skip events for runs without origin_peer", async () => {
@@ -1128,6 +1128,261 @@ describe("Remote Pi Integration (#1358)", () => {
       const r3b = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", e3);
       expect(r3b.success).toBe(true);
       expect(r3b.sequence).toBe(3);
+    });
+  });
+
+  // ── 2026-08-10 review invariants: mechanism A, namespacing, drain budget ─
+
+  describe("Review invariant #1: transition/outbox atomicity (mechanism A)", () => {
+    beforeEach(() => {
+      // Wire the in-transaction emitter so every public transition appends
+      // its outbox event in the SAME transaction.
+      store.setRemoteEventEmitter(producer);
+    });
+
+    const createDelegatedRun = (runId: string) => {
+      store.createPiCardAndRun({
+        runId, sessionId: randomUUID(),
+        title: "Pi: test", goal: "test", workspaceAlias: "test-ws",
+        ownerPrincipalId: "peer:origin-peer", origin: "peer",
+        originPeer: "origin-peer",
+      });
+      return store.get(runId)!;
+    };
+
+    const kindsFor = (runId: string): string[] =>
+      store.getEventsAfter({ runId, afterSequence: 0, limit: 100 }).map(e => e.kind);
+
+    it("creation commits accepted + queued inside the creation transaction", () => {
+      const runId = "atomic-create-" + randomUUID().slice(0, 6);
+      createDelegatedRun(runId);
+      expect(kindsFor(runId)).toEqual(["accepted", "queued"]);
+    });
+
+    it("emits the transient fact chain exactly once, in order: awaiting_input → input_cleared → interrupted → resumed", () => {
+      const runId = "atomic-chain-" + randomUUID().slice(0, 6);
+      const run = createDelegatedRun(runId);
+
+      // queued → starting → running
+      expect(store.casTransition(runId, "queued", "starting")).toBe(true);
+      expect(store.casTransition(runId, "starting", "running")).toBe(true);
+
+      // running → awaiting_input (dialog enter)
+      expect(store.setPendingUi({ runId, generation: 1, requestId: "req-9", requestType: "select" }).ok).toBe(true);
+      expect(store.get(runId)!.status).toBe("awaiting_input");
+
+      // awaiting_input → running (reply accepted → input_cleared)
+      const claim = store.claimPendingUi({ runId, generation: 1, requestId: "req-9" });
+      expect(claim.claimed).toBe(true);
+
+      // running → interrupted (shutdown / cancellation path)
+      expect(store.casTransition(runId, "running", "interrupted")).toBe(true);
+
+      // interrupted → queued with generation bump (approved resume)
+      const resume = store.queueResumeGeneration({
+        runId, expectedGeneration: 1, newSessionId: "s2", sessionFile: "/tmp/x.json",
+      });
+      expect(resume.committed).toBe(true);
+      expect(resume.newGeneration).toBe(2);
+
+      // Every transient fact is durable in order; none can be reconstructed
+      // from a snapshot of current run state, so they must be in the outbox.
+      expect(kindsFor(runId)).toEqual([
+        "accepted", "queued", "starting", "running", "awaiting_input",
+        "input_cleared", "interrupted", "resumed",
+      ]);
+      // Resumed event carries the new generation.
+      const resumedEvent = store.getEventsAfter({ runId, afterSequence: 0, limit: 100 }).find(e => e.kind === "resumed")!;
+      const resumedProjection = JSON.parse(resumedEvent.projection_json) as { generation: number; status: string };
+      expect(resumedProjection.generation).toBe(2);
+      expect(resumedProjection.status).toBe("queued");
+      void run;
+    });
+
+    it("settleTerminal commits the terminal event with the transition", () => {
+      const runId = "atomic-term-" + randomUUID().slice(0, 6);
+      createDelegatedRun(runId);
+      expect(store.casTransition(runId, "queued", "starting")).toBe(true);
+      expect(store.casTransition(runId, "starting", "running")).toBe(true);
+
+      const settlement = store.settleTerminal({
+        runId, generation: 1, expectedStatuses: ["running"],
+        outcome: "completed",
+        metadata: { resultSummary: "done!", usageJson: JSON.stringify({ total_tokens: 10 }) },
+      });
+      expect(settlement.committed).toBe(true);
+
+      const kinds = kindsFor(runId);
+      expect(kinds[kinds.length - 1]).toBe("completed");
+      const terminal = store.getEventsAfter({ runId, afterSequence: 0, limit: 100 }).find(e => e.kind === "completed")!;
+      const proj = JSON.parse(terminal.projection_json) as { result_summary: string; usage: { total_tokens: number } };
+      expect(proj.result_summary).toBe("done!");
+      expect(proj.usage.total_tokens).toBe(10);
+    });
+
+    it("aborts the transition when the event append fails (crash-injection proof)", () => {
+      const runId = "atomic-abort-" + randomUUID().slice(0, 6);
+      createDelegatedRun(runId);
+      expect(store.casTransition(runId, "queued", "starting")).toBe(true);
+      expect(store.casTransition(runId, "starting", "running")).toBe(true);
+
+      // Inject a failing append: the transition transaction must roll back
+      // entirely — neither the status change nor any event may survive.
+      store.setRemoteEventEmitter({ emitTransitionInTx: () => { throw new Error("injected append failure"); } });
+      expect(() => store.casTransition(runId, "running", "interrupted")).toThrow("injected append failure");
+      expect(store.get(runId)!.status).toBe("running");
+      expect(kindsFor(runId)).not.toContain("interrupted");
+    });
+
+    it("aborts run creation when the creation events cannot be appended", () => {
+      store.setRemoteEventEmitter({ emitTransitionInTx: () => { throw new Error("injected append failure"); } });
+      const runId = "atomic-abort-create-" + randomUUID().slice(0, 6);
+      expect(() => createDelegatedRun(runId)).toThrow("injected append failure");
+      expect(store.get(runId)).toBeNull();
+    });
+  });
+
+  describe("Review invariant #4: identifier namespace separation", () => {
+    it("never serializes a bare card_id on the event path", () => {
+      const runId = "ns-" + randomUUID().slice(0, 6);
+      store.setRemoteEventEmitter(producer);
+      store.createPiCardAndRun({
+        runId, sessionId: randomUUID(),
+        title: "Pi: test", goal: "test", workspaceAlias: "test-ws",
+        ownerPrincipalId: "peer:origin-peer", origin: "peer",
+        originPeer: "origin-peer",
+      });
+      const events = store.getEventsAfter({ runId, afterSequence: 0, limit: 100 });
+      for (const row of events) {
+        expect(Object.keys(row)).not.toContain("card_id");
+        const envelope = producer.buildEventEnvelope(row);
+        expect(Object.keys(envelope)).not.toContain("card_id");
+        expect(envelope.remote_card_id).toBeGreaterThan(0);
+      }
+    });
+
+    it("origin projection store has no index or key over the remote card ID", () => {
+      const projection = new SqliteProjectionStore(taskDb);
+      void projection;
+      const indexes = (taskDb.prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'remote_pi_origin_projections'`
+      ).all() as Array<{ name: string }>);
+      expect(indexes.map(i => i.name)).not.toContain("idx_remote_projections_card");
+      // A remote card ID colliding with an unrelated local card ID cannot
+      // corrupt a projection: lookups are keyed by run_id, never by the ID.
+      const runId = "ns-collide-" + randomUUID().slice(0, 6);
+      store.createPiCardAndRun({
+        runId, sessionId: randomUUID(),
+        title: "Pi: test", goal: "test", workspaceAlias: "test-ws",
+        ownerPrincipalId: "peer:origin-peer", origin: "peer",
+        originPeer: "origin-peer",
+      });
+      const run = store.get(runId)!;
+      const event = {
+        version: 1 as const,
+        event_id: deriveEventId(runId, 1),
+        origin_peer: "origin-peer",
+        origin_request_id: "req-ns",
+        run_id: runId,
+        remote_card_id: run.cardId,
+        generation: 1,
+        sequence: 1,
+        kind: "accepted" as const,
+        occurred_at: new Date().toISOString(),
+        projection: { status: "queued", generation: 1, last_activity_at: new Date().toISOString() },
+      };
+      const hash = computeEventHash(event);
+      const fullEvent = { ...event, content_sha256: hash };
+      const reducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb));
+      expect(reducer.reduce(fullEvent)).toBe(true);
+      // Another run whose remote_card_id equals a local card ID cannot be
+      // bound to that card: the projection row is keyed by run_id only.
+      const projectionRow = (taskDb.prepare(
+        `SELECT run_id, remote_card_id FROM remote_pi_origin_projections WHERE run_id = ?`
+      ).get(runId));
+      expect(projectionRow).toEqual({ run_id: runId, remote_card_id: run.cardId });
+    });
+  });
+
+  describe("Review invariant #2: remote-pi-drain budget", () => {
+    it("caps runs drained per peer per pass", async () => {
+      const sent: string[] = [];
+      const mockRoute = {
+        hasRoute: () => true,
+        sendPush: vi.fn((_peer: string, method: string, payload: { run_id: string }) => { sent.push(payload.run_id); return true; }),
+        requestConnection: vi.fn(),
+      };
+      deliveryManager.setRouteInterface(mockRoute);
+
+      for (let i = 0; i < 3; i++) {
+        const runId = `budget-r${i}-${randomUUID().slice(0, 4)}`;
+        store.createPiCardAndRun({
+          runId, sessionId: randomUUID(),
+          title: "Pi: test", goal: "test", workspaceAlias: "test-ws",
+          ownerPrincipalId: "peer:origin-peer", origin: "peer",
+          originPeer: "origin-peer",
+        });
+        const ev = buildEvent({ run_id: runId, sequence: 1, kind: "progress", origin_peer: "origin-peer", origin_request_id: "req" });
+        store.appendEvent({
+          runId, cardId: 42, generation: 1, sequence: 1,
+          eventId: ev.event_id, contentSha256: ev.content_sha256,
+          originPeer: "origin-peer", originRequestId: "req", kind: "progress",
+          occurredAt: ev.occurred_at, projectionJson: JSON.stringify(ev.projection),
+        });
+      }
+
+      await deliveryManager.drainPeer("origin-peer", { maxRunsPerPeer: 2, deadlineMs: Date.now() + 5000 });
+      // 3 runs exist but the cap is 2 → only 2 runs pushed.
+      expect(new Set(sent).size).toBe(2);
+    });
+
+    it("honors the deadline: nothing is pushed after expiry", async () => {
+      const sent: string[] = [];
+      const mockRoute = {
+        hasRoute: () => true,
+        sendPush: vi.fn((_peer: string, _method: string, payload: { run_id: string }) => { sent.push(payload.run_id); return true; }),
+        requestConnection: vi.fn(),
+      };
+      deliveryManager.setRouteInterface(mockRoute);
+      const runId = "budget-deadline-" + randomUUID().slice(0, 4);
+      store.createPiCardAndRun({
+        runId, sessionId: randomUUID(),
+        title: "Pi: test", goal: "test", workspaceAlias: "test-ws",
+        ownerPrincipalId: "peer:origin-peer", origin: "peer",
+        originPeer: "origin-peer",
+      });
+      const ev = buildEvent({ run_id: runId, sequence: 1, kind: "progress", origin_peer: "origin-peer", origin_request_id: "req" });
+      store.appendEvent({
+        runId, cardId: 42, generation: 1, sequence: 1,
+        eventId: ev.event_id, contentSha256: ev.content_sha256,
+        originPeer: "origin-peer", originRequestId: "req", kind: "progress",
+        occurredAt: ev.occurred_at, projectionJson: JSON.stringify(ev.projection),
+      });
+
+      await deliveryManager.drainPeer("origin-peer", { deadlineMs: Date.now() - 1 });
+      expect(sent).toHaveLength(0);
+    });
+
+    it("persists the round-robin cursor across delivery-manager restarts", () => {
+      deliveryManager.setDrainCursor(3);
+      expect(deliveryManager.getDrainCursor()).toBe(3);
+      // A new manager over the same store sees the same cursor.
+      const fresh = new RemotePiDeliveryManager({ store, eventProducer: producer, localPeerName: "origin-peer" });
+      expect(fresh.getDrainCursor()).toBe(3);
+    });
+
+    it("skips an overlapping drain instead of queueing it", async () => {
+      const mockRoute = {
+        hasRoute: () => true,
+        sendPush: vi.fn(() => { return true; }),
+        requestConnection: vi.fn(),
+      };
+      deliveryManager.setRouteInterface(mockRoute);
+      const p1 = deliveryManager.drainPeer("origin-peer");
+      // Second call while the first is in flight must not await the first.
+      const p2 = deliveryManager.drainPeer("origin-peer");
+      await Promise.all([p1, p2]);
+      expect((deliveryManager as any).drainInFlight.size).toBe(0);
     });
   });
 });

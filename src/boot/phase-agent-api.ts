@@ -169,16 +169,11 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
               requestId: request.request_id,
               requestHash,
             });
-            // #1358: persist creation facts in the owner outbox before the
-            // delegation response is returned.
-            const { getRemotePiProducer, getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
-            const producer = getRemotePiProducer();
-            const createdRun = piService.store.get(result.runId);
-            if (producer && createdRun) {
-              await producer.produceEvent({ run: createdRun, kind: "accepted", originPeer, originRequestId: request.request_id });
-              await producer.produceEvent({ run: createdRun, kind: "queued", originPeer, originRequestId: request.request_id });
-              getRemotePiDelivery()?.pushEvents(result.runId, originPeer).catch(() => {});
-            }
+            // #1358 review — creation facts (accepted, queued) are emitted by
+            // PiRunStore.createPiCardAndRun inside the same transaction as the
+            // run row (mechanism A). Here we only trigger opportunistic push.
+            const { getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
+            getRemotePiDelivery()?.pushEvents(result.runId, originPeer).catch(() => {});
             return { ok: true, runId: result.runId, cardId: result.cardId, generation: result.generation, sessionId: result.sessionId };
           } catch (err) {
             return { ok: false, error: err instanceof Error ? err.message : String(err) };

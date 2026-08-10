@@ -81,8 +81,7 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const eventProducer = new RemotePiEventProducer({ store });
   const deliveryManager = new RemotePiDeliveryManager({ store, eventProducer, localPeerName });
   const controlHandler = new RemotePiControlHandler({ store, service, eventProducer });
-  const originReducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb), (projection, event) => {
-    // #1358: keep the single #1357 origin card as the user-visible projection.
+  const originReducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb), (projection, event) => {    // #1358: keep the single #1357 origin card as the user-visible projection.
     // Kanban has no interrupted/awaiting-input states, so those remain active.
     // On `resumed` the producer sends run.status="queued", so the projection
     // re-asserts `queued` — not `running` as an earlier draft assumed.
@@ -91,7 +90,7 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
       : ["failed", "cancelled"].includes(projection.latest_status)
         ? "failed"
         : projection.latest_status === "queued" ? "queued" : "running";
-    // The event card_id is the owner's Pi card. Resolve the origin-side
+    // The event's remote_card_id is the owner's Pi card. Resolve the origin-side
     // delegation card by the durable remote run reference instead of ever
     // mutating the owner's card ID in this process.
     const localCard = (taskDb.prepare(`SELECT id, notes FROM kanban_board WHERE source = 'peer'`).all() as Array<{ id: number; notes?: string | null }>).find((row) => {
@@ -137,22 +136,19 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
 
   setRemotePiComponents({ eventProducer, delivery: deliveryManager, controlHandler, originReducer });
 
-  // Wire the PiExecutor transition hook to produce lifecycle events.
-  // Only runs for delegated runs (origin_peer set).
+  // #1358 review — mechanism A: the store emits lifecycle events inside the
+  // SAME transaction as each public run transition (see pi-run-store.ts
+  // transition methods). The transition hooks below therefore only trigger
+  // opportunistic WSS push — they never produce events after commit, because
+  // a crash between commit and append would lose the event, and snapshot
+  // scanning is not a durability mechanism.
+  store.setRemoteEventEmitter(eventProducer);
+
+  // Wire the PiExecutor transition hook to trigger delivery only.
   executor.onTransition((runId, _fromStatus, _toStatus) => {
     const run = store.get(runId);
     if (!run || !run.originPeer) return; // not a delegated run
-    eventProducer.produceFromTransition({
-      run,
-      previousStatus: _fromStatus,
-      originPeer: run.originPeer,
-      originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
-    }).then(() => {
-      // Attempt immediate WS push after producing
-      deliveryManager.pushEvents(runId, run.originPeer!).catch(() => {});
-    }).catch(err => {
-      logError(TAG, `Failed to produce lifecycle event for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    deliveryManager.pushEvents(runId, run.originPeer!).catch(() => {});
   });
 
   executor.onProgress((runId, progressPayload) => {
