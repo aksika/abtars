@@ -5,6 +5,30 @@ export type OrcRunState =
   | "released"
   | "superseded";
 
+// ── #1628: bounded contract-authoring policy ──────────────────────────────────
+
+/** Max started authoring turns per project generation before terminal settlement. */
+export const MAX_STARTED_CONTRACT_AUTHORING_TURNS = 3;
+/** Max consecutive pre-start authoring failures before terminal settlement. */
+export const MAX_CONSECUTIVE_UNSTARTABLE_AUTHORING_TURNS = 3;
+/** Minimum interval between authoring claims for one project generation. */
+export const MIN_AUTHORING_CLAIM_INTERVAL_MS = 5_000;
+
+/**
+ * #1628: in-process fact published after every committed Orc ownership
+ * relinquishment (release/supersede). The reconciler wakes the affected
+ * project from it; the boot sweep remains the durability floor.
+ */
+export interface OrcOwnershipReleasedV1 {
+  readonly version: 1;
+  readonly projectCardId: number;
+  readonly runId: string;
+  readonly intentKind: OrcIntentKind;
+  readonly outcome: OrcRunOutcome;
+  /** True when the run reached the dispatching→running bind. */
+  readonly started: boolean;
+}
+
 export type OrcRunOutcome =
   | "completed"
   | "failed"

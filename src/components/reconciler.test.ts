@@ -11,6 +11,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Mocks ──────────────────────────────────────────────────────────────────────
 
+// #1628: fake run store with zeroed authoring counters — the reconciler's
+// ceilings read through getStore() before every authoring claim.
+function makeFakeRunStore() {
+  return {
+    countStartedAuthoringTurns: () => 0,
+    countConsecutiveUnstartableAuthoringTurns: () => 0,
+    lastAuthoringClaimAt: () => null,
+    lastAuthoringFailureCode: () => null,
+  };
+}
+
 const dispatchMock = vi.fn();
 const spawnChildMock = vi.fn();
 vi.mock("./spin.js", () => ({
@@ -25,6 +36,7 @@ const cascadeFailMock = vi.fn();
 const kanbanFailMock = vi.fn();
 const kanbanCompleteMock = vi.fn();
 const kanbanRunningProjectIdsMock = vi.fn().mockReturnValue([]);
+const kanbanStrandedQueuedProjectIdsMock = vi.fn().mockReturnValue([]);
 const kanbanQueuedDispatchOrderMock = vi.fn().mockReturnValue([]);
 const kanbanPromoteDueRetryMock = vi.fn().mockReturnValue(false);
 vi.mock("./tasks/kanban-board.js", () => ({
@@ -34,6 +46,7 @@ vi.mock("./tasks/kanban-board.js", () => ({
   kanbanGetCard: kanbanGetCardMock,
   kanbanGetChildren: kanbanGetChildrenMock,
   kanbanRunningProjectIds: kanbanRunningProjectIdsMock,
+  kanbanStrandedQueuedProjectIds: kanbanStrandedQueuedProjectIdsMock,
   kanbanQueuedDispatchOrder: kanbanQueuedDispatchOrderMock,
   kanbanPromoteDueRetry: kanbanPromoteDueRetryMock,
   KANBAN_TERMINAL_STATUSES: ["done", "delivered", "failed"],
@@ -501,6 +514,7 @@ describe("Reconciler — #1411 domain guard", () => {
       // deterministic fake and assert the durable scheduleReview claim.
       const reviewClaims: Array<[number, number, string]> = [];
       mod.setOrcCoordinator({
+      getStore: makeFakeRunStore,
         scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
         scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
         scheduleReview: (projectCardId: number, projectGeneration: number, reviewCaseId: string) => {
@@ -588,6 +602,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   function fakeCoordinator(claims: Array<{ projectCardId: number; goal: string }>) {
     mod.setOrcCoordinator({
+      getStore: makeFakeRunStore,
       scheduleContractAuthoring: (projectCardId: number) => {
         claims.push({ projectCardId, goal: "contract_authoring" });
         getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
@@ -687,6 +702,9 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued", type: "O", source: "peer", source_id: "req_1", next_retry_at: null }));
     reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(true);
     reviewStoreMock.contractExists.mockReturnValue(false);
+    // #1628: ensureAwaitingContract creates the row before the claim; the
+    // ceilings read the supervision generation through getStore().
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "awaiting_contract" }));
 
     mod.requestReconcile(1);
     await flush();
@@ -1114,6 +1132,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
   it("classifies reviewing with an open case as review ownership (never a fresh authoring claim)", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
     mod.setOrcCoordinator({
+      getStore: makeFakeRunStore,
       scheduleScheduledProject: (projectCardId: number, goal: string) => {
         claims.push({ projectCardId, goal });
         return { kind: "claimed" as const, context: { runId: "or_1", projectCardId } };
@@ -1172,6 +1191,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
   it("never settles on a busy claim — the existing live run owns the project", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
     mod.setOrcCoordinator({
+      getStore: makeFakeRunStore,
       scheduleScheduledProject: (projectCardId: number, _goal: string) => {
         claims.push({ projectCardId, goal: _goal });
         // busy means a live row exists — the next pass observes it as an owner
@@ -1193,6 +1213,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
     let conflictFirst = true;
     mod.setOrcCoordinator({
+      getStore: makeFakeRunStore,
       scheduleScheduledProject: (projectCardId: number, goal: string) => {
         claims.push({ projectCardId, goal });
         if (conflictFirst) {
@@ -1223,6 +1244,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
   it("does not settle when a conflict re-derive finds an owner", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
     mod.setOrcCoordinator({
+      getStore: makeFakeRunStore,
       scheduleScheduledProject: (projectCardId: number, goal: string) => {
         claims.push({ projectCardId, goal });
         // another writer advanced the project during the claim attempt

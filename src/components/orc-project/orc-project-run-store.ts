@@ -293,6 +293,65 @@ export class OrcProjectRunStore {
     `).all(projectCardId) as unknown as OrcProjectRunRow[];
   }
 
+  // ── #1628: authoring attempt counts ──────────────────────────────────────────
+  // Derived from immutable run rows, scoped to the project generation. No
+  // mutable counter — concurrent wakes can never double-increment.
+
+  /** Authoring turns that reached the dispatching→running bind for this generation. */
+  countStartedAuthoringTurns(projectCardId: number, projectGeneration: number): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM orc_project_runs
+       WHERE project_card_id = ? AND project_generation = ?
+         AND intent_kind = 'contract_authoring'
+         AND started_at IS NOT NULL
+    `).get(projectCardId, projectGeneration) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Consecutive terminal pre-start authoring failures ("consecutive" = newer
+   * than the most recent started turn, so one successful start resets it).
+   * A startPort rejection releases with started_at NULL and must not spin —
+   * this ceiling terminates that loop.
+   */
+  countConsecutiveUnstartableAuthoringTurns(projectCardId: number, projectGeneration: number): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM orc_project_runs
+       WHERE project_card_id = ? AND project_generation = ?
+         AND intent_kind = 'contract_authoring'
+         AND started_at IS NULL
+         AND state IN ('released', 'superseded')
+         AND created_at > COALESCE((
+           SELECT MAX(created_at) FROM orc_project_runs
+            WHERE project_card_id = ? AND project_generation = ?
+              AND intent_kind = 'contract_authoring' AND started_at IS NOT NULL
+         ), '')
+    `).get(projectCardId, projectGeneration, projectCardId, projectGeneration) as { n: number };
+    return row.n;
+  }
+
+  /** failure_code of the most recent terminal authoring run, for requester diagnosis. */
+  lastAuthoringFailureCode(projectCardId: number, projectGeneration: number): string | null {
+    const row = this.db.prepare(`
+      SELECT failure_code FROM orc_project_runs
+       WHERE project_card_id = ? AND project_generation = ?
+         AND intent_kind = 'contract_authoring'
+         AND state IN ('released', 'superseded')
+       ORDER BY created_at DESC LIMIT 1
+    `).get(projectCardId, projectGeneration) as { failure_code: string | null } | undefined;
+    return row?.failure_code ?? null;
+  }
+
+  /** created_at of the most recent authoring run for this generation, or null. */
+  lastAuthoringClaimAt(projectCardId: number, projectGeneration: number): string | null {
+    const row = this.db.prepare(`
+      SELECT MAX(created_at) AS at FROM orc_project_runs
+       WHERE project_card_id = ? AND project_generation = ?
+         AND intent_kind = 'contract_authoring'
+    `).get(projectCardId, projectGeneration) as { at: string | null };
+    return row.at;
+  }
+
   withCurrentRun<T>(context: OrcInvocationContextV1, fn: (row: OrcProjectRunRow) => T): { ok: true; value: T } | { ok: false; reason: string } {
     const validation = this.validateCurrentContext(context);
     if (!validation.ok) return { ok: false as const, reason: validation.reason };

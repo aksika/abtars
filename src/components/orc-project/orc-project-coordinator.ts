@@ -4,9 +4,11 @@ import type {
   OrcOriginKind,
   OrcRunClaimResult,
   OrcClaimInput,
+  OrcOwnershipReleasedV1,
 } from "./orc-project-contracts.js";
 import { readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { logInfo, logWarn } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 
 const TAG = "orc-coordinator";
 
@@ -38,6 +40,7 @@ export class OrcProjectCoordinator {
   private readonly ownerPeer: string;
   private readonly ownerInstanceId: string;
   private readonly getRootIdentity: (projectCardId: number) => OrcRootIdentity;
+  private readonly ownershipListeners = new Set<(event: OrcOwnershipReleasedV1) => void>();
 
   constructor(deps: OrcCoordinatorDeps) {
     this.store = deps.store ?? new OrcProjectRunStore();
@@ -45,6 +48,58 @@ export class OrcProjectCoordinator {
     this.ownerPeer = deps.ownerPeer;
     this.ownerInstanceId = deps.ownerInstanceId ?? readBridgeLockField<string>("instanceId") ?? "unknown";
     this.getRootIdentity = deps.getRootIdentity ?? defaultRootIdentity;
+  }
+
+  /**
+   * #1628: subscribe to the in-process ownership-released fact. Returns an
+   * unsubscribe function. Dispatch is fail-isolated: a throwing listener is
+   * logged and never affects the relinquishment result.
+   */
+  onOwnershipReleased(listener: (event: OrcOwnershipReleasedV1) => void): () => void {
+    this.ownershipListeners.add(listener);
+    return () => { this.ownershipListeners.delete(listener); };
+  }
+
+  private publishOwnershipReleased(event: OrcOwnershipReleasedV1): void {
+    for (const listener of [...this.ownershipListeners]) {
+      try {
+        listener(event);
+      } catch (err) {
+        logAndSwallow(TAG, "ownership-released listener", err);
+      }
+    }
+  }
+
+  /**
+   * #1628: every committed relinquishment funnels through here so the
+   * ownership-released event is published AFTER the CAS applies, never inside
+   * the transaction. A lost CAS (or an unknown run) publishes nothing.
+   */
+  private relinquish(
+    runId: string,
+    how: "release" | "supersede",
+    outcome: import("./orc-project-contracts.js").OrcRunOutcome,
+    context?: OrcInvocationContextV1,
+  ): boolean {
+    const row = this.store.getRun(runId); // read BEFORE the CAS
+    const applied = how === "release"
+      ? this.store.release(context!, outcome)
+      : this.store.supersede(runId, outcome);
+    if (!applied || !row) return applied;
+    this.publishOwnershipReleased({
+      version: 1,
+      projectCardId: row.project_card_id,
+      runId,
+      intentKind: row.intent_kind,
+      outcome,
+      started: row.started_at !== null,
+    });
+    return true;
+  }
+
+  /** #1628: public release entry point — publishes the ownership-released event. */
+  releaseOwnedRun(context: OrcInvocationContextV1, outcome: import("./orc-project-contracts.js").OrcRunOutcome): boolean {
+    return this.relinquish(context.runId, "release", outcome, context);
   }
 
   /**
@@ -158,7 +213,10 @@ export class OrcProjectCoordinator {
           const context = buildContextForRun(promotedRun);
           this.startPort(context, goal).catch((err) => {
             logWarn(TAG, `Orc start port failed for run ${promoted}: ${err instanceof Error ? err.message : String(err)}`);
-            this.store.release(buildContextForRun(promotedRun), "failed");
+            // #1628: through the funnel so the ownership-released event wakes
+            // the project — the release is the recovery signal, not the
+            // scheduler's next opportunistic scan.
+            this.releaseOwnedRun(buildContextForRun(promotedRun), "failed");
             this.store.pump();
           });
         }
@@ -168,8 +226,14 @@ export class OrcProjectCoordinator {
     return result;
   }
 
-  /** Boot recovery: scan live runs, supersede stale ones, reschedule actionable intents. */
-  bootRecovery(): void {
+  /**
+   * Boot recovery: scan live runs, supersede stale ones, reschedule actionable
+   * intents. #1628: returns the deduped, ordered project card IDs whose runs
+   * were superseded so the caller can wake them AFTER its listeners are
+   * registered — the event path alone cannot cover boot-time supersession.
+   */
+  bootRecovery(): number[] {
+    const affected = new Set<number>();
     const runs = this.store.getLiveRuns();
     for (const run of runs) {
       const sup = this.store.db.prepare(`
@@ -178,26 +242,30 @@ export class OrcProjectCoordinator {
 
       if (!sup || sup.state === "accepted" || sup.state === "blocked") {
         logInfo(TAG, `Boot recovery: superseding run ${run.id} — project ${run.project_card_id} is terminal`);
-        this.store.supersede(run.id, "project_terminal");
+        this.relinquish(run.id, "supersede", "project_terminal");
+        affected.add(run.project_card_id);
         continue;
       }
 
       if (sup.generation !== run.project_generation) {
         logInfo(TAG, `Boot recovery: superseding run ${run.id} — project generation changed (${run.project_generation} → ${sup.generation})`);
-        this.store.supersede(run.id, "generation_changed");
+        this.relinquish(run.id, "supersede", "generation_changed");
+        affected.add(run.project_card_id);
         continue;
       }
 
       if (run.owner_instance_id !== this.ownerInstanceId) {
         logInfo(TAG, `Boot recovery: superseding run ${run.id} — foreign instance (${run.owner_instance_id})`);
-        this.store.supersede(run.id, "stale");
+        this.relinquish(run.id, "supersede", "stale");
+        affected.add(run.project_card_id);
         continue;
       }
 
       if (run.state === "dispatching" || run.state === "running") {
         if (!run.session_id || !run.execution_id) {
           logInfo(TAG, `Boot recovery: releasing impossible run ${run.id} — no session/execution`);
-          this.store.supersede(run.id, "stale");
+          this.relinquish(run.id, "supersede", "stale");
+          affected.add(run.project_card_id);
           continue;
         }
         logInfo(TAG, `Boot recovery: keeping live run ${run.id} (${run.state}) for project ${run.project_card_id}`);
@@ -208,6 +276,8 @@ export class OrcProjectCoordinator {
     if (promoted) {
       logInfo(TAG, `Boot recovery: promoted run ${promoted} after recovery`);
     }
+
+    return [...affected].sort((a, b) => a - b);
   }
 
   getStore(): OrcProjectRunStore {

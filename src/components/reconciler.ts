@@ -2,7 +2,7 @@ import { nerve } from "./nerve.js";
 import { spin } from "./spin.js";
 import {
   kanbanFail,
-  kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds,
+  kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds, kanbanStrandedQueuedProjectIds,
   kanbanQueuedDispatchOrder, kanbanPromoteDueRetry, kanbanTransition, sqliteNow, KANBAN_TERMINAL_STATUSES,
   isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
@@ -67,9 +67,21 @@ export function requestShutdown(): void {
   _shutdownRequested = true;
 }
 
-import type { OrcProjectCoordinator } from "./orc-project/orc-project-coordinator.js";
+import { OrcProjectCoordinator } from "./orc-project/orc-project-coordinator.js";
+import { loadPeerConfig } from "./peer-config.js";
+
+import {
+  MAX_STARTED_CONTRACT_AUTHORING_TURNS,
+  MAX_CONSECUTIVE_UNSTARTABLE_AUTHORING_TURNS,
+  MIN_AUTHORING_CLAIM_INTERVAL_MS,
+} from "./orc-project/orc-project-contracts.js";
 
 let _orcCoordinator: OrcProjectCoordinator | null = null;
+
+// #1628: project IDs whose Orc runs were superseded by boot recovery. Woken
+// in startReconciler AFTER listener registration — the event path cannot
+// cover boot-time supersession because listeners do not exist yet.
+let _bootRecoveredProjectIds: number[] = [];
 
 // #1604 R2: coverage-round bounds. MAX_COVERAGE_ROUNDS is the absolute ceiling
 // on coverage turns; COVERAGE_ROUND_GRACE_MS bounds only the non-scheduled
@@ -93,9 +105,7 @@ export function getOrcCoordinator(): OrcProjectCoordinator | null {
 export function getOrCreateOrcCoordinator(): OrcProjectCoordinator | null {
   if (_orcCoordinator) return _orcCoordinator;
   try {
-    const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
     const peerName = loadPeerConfig().self.name;
-    const { OrcProjectCoordinator } = require("./orc-project/orc-project-coordinator.js") as typeof import("./orc-project/orc-project-coordinator.js");
     _orcCoordinator = new OrcProjectCoordinator({
       ownerPeer: peerName,
       startPort: async (context, goal) => {
@@ -111,7 +121,9 @@ export function getOrCreateOrcCoordinator(): OrcProjectCoordinator | null {
       },
     });
     logInfo(TAG, "Orc coordinator initialized");
-    _orcCoordinator.bootRecovery();
+    // #1628: store the boot-recovery result; the wake happens in
+    // startReconciler after the listeners are registered.
+    _bootRecoveredProjectIds = _orcCoordinator.bootRecovery();
   } catch (err) {
     logWarn(TAG, `Failed to initialize Orc coordinator: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -172,20 +184,96 @@ function legacyOrcReviewDispatch(projectId: number, generation: number, caseId: 
   }
 }
 
-function scheduleContractAuthoringOrSettle(projectId: number): boolean {
+// #1628: discriminated scheduling result — the boolean collapse was exactly
+// how the original dropped (busy) claim went unobserved.
+type AuthoringScheduleResult =
+  | { kind: "claimed" }
+  | { kind: "idempotent" }
+  | { kind: "deferred"; reason: "busy" | "claim_interval"; activeRunId?: string }
+  | { kind: "settled"; blockerClass: string }
+  | { kind: "unavailable" };
+
+const CONTRACT_AUTHORING_EXHAUSTED = "contract_authoring_exhausted";
+const CONTRACT_AUTHORING_UNSTARTABLE = "contract_authoring_unstartable";
+
+/**
+ * #1628: schedule a contract-authoring turn or settle the project terminally.
+ * Decision order: unavailable coordinator → started-turn ceiling →
+ * consecutive-unstartable ceiling → minimum claim interval → claim.
+ * Returns a discriminated result so callers can distinguish a deferred
+ * (busy) claim from an owned one.
+ */
+function scheduleContractAuthoringOrSettle(projectId: number): AuthoringScheduleResult {
   if (!_orcCoordinator) {
     logWarn(TAG, `Project ${projectId}: Orc coordinator unavailable while authoring contract — settling as last resort`);
     settleProjectLastResort(projectId);
-    return false;
+    return { kind: "unavailable" };
+  }
+
+  const reviewStore = new ProjectReviewStore();
+  const runStore = _orcCoordinator.getStore();
+  const supervision = reviewStore.getSupervision(projectId);
+  if (!supervision) {
+    logWarn(TAG, `Project ${projectId}: no supervision while authoring contract — settling as last resort`);
+    settleProjectLastResort(projectId);
+    return { kind: "unavailable" };
+  }
+  const generation = supervision.generation;
+
+  const startedTurns = runStore.countStartedAuthoringTurns(projectId, generation);
+  if (startedTurns >= MAX_STARTED_CONTRACT_AUTHORING_TURNS) {
+    logWarn(TAG, `Project ${projectId}: ${startedTurns} started authoring turns — settling ${CONTRACT_AUTHORING_EXHAUSTED}`);
+    settleAuthoringExhausted(projectId, reviewStore, runStore, CONTRACT_AUTHORING_EXHAUSTED);
+    return { kind: "settled", blockerClass: CONTRACT_AUTHORING_EXHAUSTED };
+  }
+
+  const unstartableTurns = runStore.countConsecutiveUnstartableAuthoringTurns(projectId, generation);
+  if (unstartableTurns >= MAX_CONSECUTIVE_UNSTARTABLE_AUTHORING_TURNS) {
+    logWarn(TAG, `Project ${projectId}: ${unstartableTurns} consecutive pre-start failures — settling ${CONTRACT_AUTHORING_UNSTARTABLE}`);
+    settleAuthoringExhausted(projectId, reviewStore, runStore, CONTRACT_AUTHORING_UNSTARTABLE);
+    return { kind: "settled", blockerClass: CONTRACT_AUTHORING_UNSTARTABLE };
+  }
+
+  const lastClaimAt = runStore.lastAuthoringClaimAt(projectId, generation);
+  if (lastClaimAt && Date.now() - Date.parse(lastClaimAt) < MIN_AUTHORING_CLAIM_INTERVAL_MS) {
+    logWarn(TAG, `Project ${projectId}: authoring claim within interval — deferring (last claim ${lastClaimAt})`);
+    return { kind: "deferred", reason: "claim_interval" };
   }
 
   const result = _orcCoordinator.scheduleContractAuthoring(projectId);
   if (result.kind === "not_actionable") {
     logWarn(TAG, `Project ${projectId}: contract-authoring claim not actionable (${result.reason}) — settling as last resort`);
     settleProjectLastResort(projectId);
-    return false;
+    return { kind: "unavailable" };
   }
-  return true;
+  if (result.kind === "busy") {
+    logWarn(TAG, `Project ${projectId}: authoring claim busy (run ${result.activeRunId}) — deferring; the ownership-released event will re-wake`);
+    return { kind: "deferred", reason: "busy", activeRunId: result.activeRunId };
+  }
+  return result.kind === "claimed" ? { kind: "claimed" } : { kind: "idempotent" };
+}
+
+/**
+ * #1628: terminal settlement for authoring exhaustion. Passes NO peerEvent —
+ * #1630's auto-derivation inside settleBlockedInTransaction builds the
+ * requester-valid failed terminal event for peer-origin roots.
+ */
+function settleAuthoringExhausted(
+  projectId: number,
+  reviewStore: ProjectReviewStore,
+  runStore: OrcProjectRunStore,
+  blockerClass: string,
+): void {
+  const supervision = reviewStore.getSupervision(projectId);
+  const generation = supervision?.generation ?? 1;
+  const failureReason = runStore.lastAuthoringFailureCode(projectId, generation);
+  reviewStore.settleBlocked(
+    projectId,
+    "contract_authoring",
+    { action: "blocked", reason: `${blockerClass}: ${failureReason ?? "no contract produced"}` },
+    blockerClass,
+  );
+  try { nerve.fire("card:failed", projectId); } catch {}
 }
 
 // ── Keyed scheduler (per-card reconciliation) ────────────────────────────────
@@ -908,7 +996,7 @@ async function reconcileProject(projectId: number): Promise<void> {
       logInfo(TAG, `Project ${projectId}: awaiting contract — dispatching Orc authoring turn`);
       if (isScheduledRootIdentity(project)) {
         const owned = scheduleContractAuthoringOrSettle(projectId);
-        if (project.status === "queued" && owned) kanbanPromoteDueRetry(projectId);
+        if (project.status === "queued" && (owned.kind === "claimed" || owned.kind === "idempotent")) kanbanPromoteDueRetry(projectId);
       } else if (isSupervisedRootIdentity(project)) {
         // #1618: peer/CLI supervised roots use the same durable Orc coordinator.
         scheduleContractAuthoringOrSettle(projectId);
@@ -919,7 +1007,7 @@ async function reconcileProject(projectId: number): Promise<void> {
       logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
       if (isScheduledRootIdentity(project)) {
         const owned = scheduleContractAuthoringOrSettle(projectId);
-        if (project.status === "queued" && owned) kanbanPromoteDueRetry(projectId);
+        if (project.status === "queued" && (owned.kind === "claimed" || owned.kind === "idempotent")) kanbanPromoteDueRetry(projectId);
       } else if (isSupervisedRootIdentity(project)) {
         // #1618: peer/CLI supervised roots use the same durable Orc coordinator.
         scheduleContractAuthoringOrSettle(projectId);
@@ -947,7 +1035,7 @@ async function reconcileProject(projectId: number): Promise<void> {
     logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
     if (isScheduledRootIdentity(project)) {
       const owned = scheduleContractAuthoringOrSettle(projectId);
-      if (project.status === "queued" && owned) kanbanPromoteDueRetry(projectId);
+      if (project.status === "queued" && (owned.kind === "claimed" || owned.kind === "idempotent")) kanbanPromoteDueRetry(projectId);
     } else if (isSupervisedRootIdentity(project)) {
       // #1618: peer/CLI supervised roots use the same durable Orc coordinator.
       scheduleContractAuthoringOrSettle(projectId);
@@ -1461,7 +1549,12 @@ export function retryPendingReviewRequests(): number {
 }
 
 export function scanActiveProjects(): number {
-  const projectIds = kanbanRunningProjectIds();
+  // #1628: union running roots with stranded queued roots — a queued root
+  // with no live Orc run (project 63's state) is otherwise never rediscovered.
+  const projectIds = [...new Set([
+    ...kanbanRunningProjectIds(),
+    ...kanbanStrandedQueuedProjectIds(),
+  ])].sort((a, b) => a - b);
   for (const projectId of projectIds) wakeCard(projectId);
   return projectIds.length;
 }
@@ -1500,6 +1593,21 @@ export function startReconciler(): void {
   nerve.on("card:queued", (cardId: number) => requestReconcileForProject(cardId));
   nerve.on("card:done", (cardId: number) => requestReconcileForProject(cardId));
   nerve.on("card:failed", (cardId: number) => requestReconcileForProject(cardId));
+
+  // #1628: event-owned Orc recovery. Every committed ownership relinquishment
+  // wakes its project, so a failed authoring turn, a turn that completed
+  // without a contract, a startPort failure, or an in-process supersession is
+  // re-claimed without depending on card:queued ordering.
+  _orcCoordinator?.onOwnershipReleased((event) => {
+    if (event.intentKind !== "contract_authoring") { requestReconcile(event.projectCardId); return; }
+    requestReconcileForProject(event.projectCardId);
+  });
+
+  // #1628: boot handoff — wake the projects whose runs boot recovery
+  // superseded, now that the listeners above exist.
+  for (const projectId of _bootRecoveredProjectIds) requestReconcileForProject(projectId);
+  _bootRecoveredProjectIds = [];
+
   const count = scanActiveProjects();
 
   logInfo(TAG, `Reconciler started — recovered ${count} running project(s)`);

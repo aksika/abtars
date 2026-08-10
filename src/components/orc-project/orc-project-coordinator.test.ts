@@ -186,3 +186,88 @@ describe("OrcProjectCoordinator origin derivation (#1618)", () => {
     expect(localEgress.allowed).toBe(true);
   });
 });
+
+// ── #1628: ownership-released event ───────────────────────────────────────────
+
+describe("OrcProjectCoordinator ownership-released event (#1628)", () => {
+  it("publishes exactly one event per applied release, with correct fields", () => {
+    const h = makeHarness();
+    seedProject(h.store, 7);
+    const events: import("./orc-project-contracts.js").OrcOwnershipReleasedV1[] = [];
+    const off = h.coordinator.onOwnershipReleased((e) => events.push(e));
+
+    const claim = h.coordinator.scheduleContractAuthoring(7);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+
+    expect(h.coordinator.releaseOwnedRun(claim.context, "failed")).toBe(true);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      version: 1,
+      projectCardId: 7,
+      runId: claim.context.runId,
+      intentKind: "contract_authoring",
+      outcome: "failed",
+      started: false,
+    });
+
+    off();
+    expect(h.coordinator.releaseOwnedRun(claim.context, "completed")).toBe(false); // already released
+    expect(events).toHaveLength(1); // lost CAS publishes nothing
+  });
+
+  it("publishes started=true for a run that reached the running bind", () => {
+    const h = makeHarness();
+    seedProject(h.store, 8);
+    const events: import("./orc-project-contracts.js").OrcOwnershipReleasedV1[] = [];
+    h.coordinator.onOwnershipReleased((e) => events.push(e));
+
+    const claim = h.coordinator.scheduleContractAuthoring(8);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    const bind = h.store.bindExecution(claim.context, "sess_8", "exec_8");
+    expect(bind.ok).toBe(true);
+    // spin rebuilds the session context with the bound session/execution IDs
+    const boundContext = { ...claim.context, sessionId: "sess_8", executionId: "exec_8" };
+
+    expect(h.coordinator.releaseOwnedRun(boundContext, "completed")).toBe(true);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.started).toBe(true);
+  });
+
+  it("publishes through the boot-recovery supersede path and returns affected project IDs", () => {
+    const h = makeHarness();
+    seedProject(h.store, 9);
+    const events: import("./orc-project-contracts.js").OrcOwnershipReleasedV1[] = [];
+    h.coordinator.onOwnershipReleased((e) => events.push(e));
+
+    // a live run owned by a foreign instance
+    const foreign = h.store.claimIntent(
+      { projectCardId: 9, intentKind: "contract_authoring", originKind: "local", cardSource: "agent", sourcePeer: null },
+      "other-peer", "other-instance",
+    );
+    expect(foreign.kind).toBe("claimed");
+
+    const affected = h.coordinator.bootRecovery();
+    expect(affected).toEqual([9]);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.outcome).toBe("stale");
+    const row = h.store.getRun(foreign.kind === "claimed" ? foreign.context.runId : "");
+    expect(row?.state).toBe("superseded");
+  });
+
+  it("a throwing listener is fail-isolated and never changes the release result", () => {
+    const h = makeHarness();
+    seedProject(h.store, 10);
+    const events: import("./orc-project-contracts.js").OrcOwnershipReleasedV1[] = [];
+    h.coordinator.onOwnershipReleased(() => { throw new Error("listener boom"); });
+    h.coordinator.onOwnershipReleased((e) => events.push(e));
+
+    const claim = h.coordinator.scheduleContractAuthoring(10);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+
+    expect(h.coordinator.releaseOwnedRun(claim.context, "failed")).toBe(true);
+    expect(events).toHaveLength(1); // the second listener still ran
+  });
+});

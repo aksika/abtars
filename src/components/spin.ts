@@ -1252,8 +1252,16 @@ export class Spin {
     // #1480: Release Orc run after successful turn
     if (session.orcContext) {
       try {
-        const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-        new OrcProjectRunStore().release(session.orcContext, "completed");
+        const { getOrCreateOrcCoordinator } = await import("./reconciler.js");
+        const coordinator = getOrCreateOrcCoordinator();
+        if (coordinator) {
+          coordinator.releaseOwnedRun(session.orcContext, "completed");
+        } else {
+          // #1628: coordinator unavailable — fall back to the direct store
+          // release; the boot sweep remains the recovery floor.
+          const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+          new OrcProjectRunStore().release(session.orcContext, "completed");
+        }
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
     }
 
@@ -1348,8 +1356,16 @@ export class Spin {
     // #1480: Release Orc run after failed turn
     if (session.orcContext) {
       try {
-        const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-        new OrcProjectRunStore().release(session.orcContext, "failed");
+        const { getOrCreateOrcCoordinator } = await import("./reconciler.js");
+        const coordinator = getOrCreateOrcCoordinator();
+        if (coordinator) {
+          coordinator.releaseOwnedRun(session.orcContext, "failed");
+        } else {
+          // #1628: coordinator unavailable — fall back to the direct store
+          // release; the boot sweep remains the recovery floor.
+          const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+          new OrcProjectRunStore().release(session.orcContext, "failed");
+        }
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
     }
 

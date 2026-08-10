@@ -958,6 +958,40 @@ export function kanbanRunningProjectIds(): number[] {
 }
 
 /**
+ * #1628: stranded Orc roots — a live Kanban status with non-terminal
+ * supervision and no live Orc run. The durability floor for a project whose
+ * ownership relinquishment committed but whose recovery event was lost (e.g.
+ * a crash between the release commit and the publish), or whose root was
+ * queued with no run ever claimed. Project 63's exact state.
+ *
+ * Best-effort: the joined supervision/run tables are created lazily by their
+ * owning stores; a boot that has not constructed them yet yields no strandings.
+ */
+export function kanbanStrandedQueuedProjectIds(): number[] {
+  const d = dbOrNull();
+  if (!d) return [];
+  try {
+    return d.prepare(`
+      SELECT k.id AS project_card_id
+        FROM kanban_board k
+        JOIN project_supervision s ON s.project_card_id = k.id
+       WHERE k.type = 'O'
+         AND k.status IN ('queued', 'running')
+         AND s.state NOT IN ('accepted', 'blocked')
+         AND NOT EXISTS (
+           SELECT 1 FROM orc_project_runs r
+            WHERE r.project_card_id = k.id
+              AND r.state IN ('scheduled', 'dispatching', 'running')
+         )
+       ORDER BY k.id
+    `).all().map((row: Record<string, unknown>) => Number(row.project_card_id));
+  } catch (err) {
+    logDebug("kanban", `stranded-project sweep unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
+}
+
+/**
  * #1510: Return queued cards in effective dispatch order (priority/age promotion).
  * Uses SQLite epoch arithmetic for deterministic ordering. Excludes cards whose
  * next_retry_at is still in the future. Accepts explicit `now` for testing.

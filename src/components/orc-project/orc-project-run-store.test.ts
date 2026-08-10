@@ -203,3 +203,83 @@ describe("OrcProjectRunStore", () => {
     expect(store.getRun(claim.context.runId)?.state).toBe("running");
   });
 });
+
+// ── #1628: authoring attempt counts ───────────────────────────────────────────
+
+describe("OrcProjectRunStore authoring counts (#1628)", () => {
+  function seedAuthoringRun(store: typeof OrcProjectRunStoreType extends new (...args: never[]) => infer _I ? OrcProjectRunStoreType : never, cardId: number, generation: number, opts: { started?: boolean; state?: string; createdAt?: string; intent?: string; outcome?: string; ownershipGeneration?: number } = {}): string {
+    const now = new Date().toISOString();
+    const runId = `or_count_${cardId}_${Math.random().toString(36).slice(2, 10)}`;
+    const ownershipGeneration = opts.ownershipGeneration ?? Math.floor(Math.random() * 1_000_000) + 1;
+    store.db.prepare(`
+      INSERT INTO orc_project_runs
+        (id, intent_key, intent_kind, intent_ref, project_card_id,
+         project_generation, ownership_generation, owner_peer, owner_instance_id,
+         origin_kind, origin_peer, state, outcome, failure_code, created_at, started_at, released_at, updated_at)
+      VALUES (?, ?, 'contract_authoring', NULL, ?, ?, ?, 'kp', 'inst', 'local', NULL, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      runId,
+      `contract:${cardId}:${generation}`,
+      cardId, generation, ownershipGeneration,
+      opts.state ?? "released",
+      opts.outcome ?? "failed",
+      null,
+      opts.createdAt ?? now,
+      opts.started ? now : null,
+      opts.started ? now : null,
+      now,
+    );
+    return runId;
+  }
+
+  it("counts only started authoring turns for the given generation", () => {
+    const store = new OrcProjectRunStoreType();
+    ensureSupervisionTable(store);
+    seedProject(store, 21);
+    seedAuthoringRun(store, 21, 1, { started: true });   // counts
+    seedAuthoringRun(store, 21, 1, { started: true });   // counts
+    seedAuthoringRun(store, 21, 1, { started: false });  // pre-start, does not
+    seedAuthoringRun(store, 21, 2, { started: true });   // other generation
+    expect(store.countStartedAuthoringTurns(21, 1)).toBe(2);
+    expect(store.countStartedAuthoringTurns(21, 2)).toBe(1);
+  });
+
+  it("counts consecutive unstartable turns and resets after a started turn", () => {
+    const store = new OrcProjectRunStoreType();
+    ensureSupervisionTable(store);
+    seedProject(store, 22);
+    // two pre-start failures, then a started turn, then two more pre-start failures
+    const base = Date.now();
+    seedAuthoringRun(store, 22, 1, { started: false, createdAt: new Date(base - 40_000).toISOString() });
+    seedAuthoringRun(store, 22, 1, { started: false, createdAt: new Date(base - 30_000).toISOString() });
+    seedAuthoringRun(store, 22, 1, { started: true, createdAt: new Date(base - 20_000).toISOString() });
+    seedAuthoringRun(store, 22, 1, { started: false, createdAt: new Date(base - 10_000).toISOString() });
+    seedAuthoringRun(store, 22, 1, { started: false, createdAt: new Date(base).toISOString() });
+    expect(store.countConsecutiveUnstartableAuthoringTurns(22, 1)).toBe(2);
+    expect(store.countStartedAuthoringTurns(22, 1)).toBe(1);
+  });
+
+  it("isolates counts per project generation", () => {
+    const store = new OrcProjectRunStoreType();
+    ensureSupervisionTable(store);
+    seedProject(store, 23);
+    seedAuthoringRun(store, 23, 1, { started: true });
+    seedAuthoringRun(store, 23, 2, { started: true });
+    seedAuthoringRun(store, 23, 2, { started: true });
+    expect(store.countStartedAuthoringTurns(23, 1)).toBe(1);
+    expect(store.countStartedAuthoringTurns(23, 2)).toBe(2);
+  });
+
+  it("exposes the last authoring failure code and latest claim timestamp", () => {
+    const store = new OrcProjectRunStoreType();
+    ensureSupervisionTable(store);
+    seedProject(store, 24);
+    const later = new Date(Date.now() + 60_000).toISOString();
+    seedAuthoringRun(store, 24, 1, { started: false, createdAt: later });
+    store.db.prepare(`UPDATE orc_project_runs SET failure_code = 'start_port_rejected' WHERE created_at = ?`).run(later);
+    expect(store.lastAuthoringFailureCode(24, 1)).toBe("start_port_rejected");
+    expect(store.lastAuthoringClaimAt(24, 1)).toBe(later);
+    expect(store.lastAuthoringFailureCode(24, 2)).toBeNull();
+    expect(store.lastAuthoringClaimAt(24, 2)).toBeNull();
+  });
+});

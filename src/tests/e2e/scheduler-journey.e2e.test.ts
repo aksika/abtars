@@ -799,6 +799,18 @@ describe("#1539 scheduler E2E — journey 10: due-time retry wake with no unrela
   it("dispatches a deferred occurrence at its durable retryAt through the wake scheduler alone", async () => {
     vi.useFakeTimers();
     try {
+      // #1628: the Orc coordinator now initializes in-process, so a shared
+      // * * * * * fixture (project-task, gate-script) becoming due mid-journey
+      // would admit a real supervised project into the scheduled lane and
+      // starve sys-sleep's retry. This journey's premise is "no unrelated
+      // event" — disable the other fixtures so the scheduler arms exactly at
+      // the deferred retryAt (also removes the minute-boundary race).
+      const onlySysSleep = taskStore.readEntries().map(e =>
+        e.id === "sys-sleep" ? e : { ...e, enabled: false },
+      );
+      writeFileSync(join(TEST_HOME, "tasks", "tasks.json"), JSON.stringify(onlySysSleep, null, 2));
+      stateStore.initializeState(taskStore.readEntries());
+
       const { queue, coordinator } = await makeQueueWithCoordinator();
       const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
       scheduler.register(dueSourcesMod.createTaskAdmissionSource(() => tick.runTaskTick(makeTickCtx(queue))));
