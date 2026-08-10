@@ -29,6 +29,14 @@ export const CONTRADICTION_DISPOSITIONS = [
   "inconclusive",
 ] as const;
 
+// ── Stable blocker classes (#1630) ────────────────────────────────────────────
+// Stable identifiers stored in project_supervision.blocked_reason — never a
+// sentence. The human-readable explanation lives in the decision payload's
+// `reason`, not in the class column.
+
+export const INVALID_CONTRACT_PROPOSALS_EXHAUSTED = "invalid_contract_proposals_exhausted";
+export const REVIEW_REQUEST_ABANDONED = "review_request_abandoned";
+
 export type ProjectReviewAction = (typeof REVIEW_ACTIONS)[number];
 export type CriterionVerdict = (typeof CRITERION_VERDICTS)[number];
 export type OutputDisposition = (typeof OUTPUT_DISPOSITIONS)[number];

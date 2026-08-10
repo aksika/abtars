@@ -8,7 +8,7 @@
 import type { ToolDefinition, ToolExecutionContext } from "./tool-registry.js";
 import { logInfo } from "../logger.js";
 import { logSwarmTrace } from "../swarm-trace.js";
-import { REVIEW_PROJECT_PARAMETERS } from "../project-acceptance/project-review-contract.js";
+import { REVIEW_PROJECT_PARAMETERS, INVALID_CONTRACT_PROPOSALS_EXHAUSTED } from "../project-acceptance/project-review-contract.js";
 
 const TAG = "orc-tools";
 
@@ -526,7 +526,7 @@ const defineProjectContractTool: ToolDefinition = {
           const attempts = (row?.invalid_contract_proposals ?? 0) + 1;
           store.db.prepare(`UPDATE project_supervision SET invalid_contract_proposals = ? WHERE project_card_id = ?`).run(attempts, cardId);
           if (attempts >= MAX_INVALID_CONTRACT_PROPOSALS) {
-            store.settleBlocked(cardId, "contract_admission", { action: "blocked", reason: "Invalid contract proposals exhausted" }, "Invalid contract proposals exhausted");
+            store.settleBlocked(cardId, "contract_admission", { action: "blocked", reason: "Invalid contract proposals exhausted" }, INVALID_CONTRACT_PROPOSALS_EXHAUSTED);
             return `✗ Project blocked after ${attempts} invalid proposals.\n${errs}`;
           }
         }

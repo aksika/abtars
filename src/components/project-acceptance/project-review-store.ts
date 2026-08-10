@@ -1,6 +1,8 @@
-import { requireTaskDatabase, kanbanTransition, sqliteNow, type TaskDatabase } from "../tasks/kanban-board.js";
+import { requireTaskDatabase, kanbanTransition, kanbanGetCard, sqliteNow, type TaskDatabase } from "../tasks/kanban-board.js";
 import type { ProjectAcceptanceContract } from "./project-contract.js";
 import { logSwarmTrace } from "../swarm-trace.js";
+import { logDebug } from "../logger.js";
+import { buildPeerTerminalEvent } from "./peer-terminal-event.js";
 
 // ── Project supervision states ────────────────────────────────────────────────
 
@@ -845,15 +847,35 @@ export class ProjectReviewStore {
     // #1618: a failed terminal event row lands in the same transaction that
     // wins the blocked settlement — duplicate settlement cannot create a
     // second row (outbox is UNIQUE per project_card_id).
-    if (peerEvent) {
-      const payload = peerEvent.payload && typeof peerEvent.payload === "object"
-        ? { ...(peerEvent.payload as Record<string, unknown>), acceptance_id: settledId }
-        : peerEvent.payload;
+    // #1630: auto-derive the failed terminal event when the caller did not
+    // supply one, so a blocked peer-origin root always terminates the
+    // requester's contribution. An explicitly supplied rich event always wins.
+    let effectivePeerEvent = peerEvent;
+    if (!effectivePeerEvent) {
+      effectivePeerEvent = buildPeerTerminalEvent({
+        cardId,
+        decisionId: settledId,
+        kind: "failed",
+        summary: `Project blocked: ${blockerClass}`,
+        failureReason: typeof (decision as { reason?: unknown })?.reason === "string"
+          ? (decision as { reason: string }).reason
+          : undefined,
+      });
+      if (!effectivePeerEvent) {
+        if (kanbanGetCard(cardId)?.source_peer) {
+          logDebug("project-review-store", `auto-derived terminal event unavailable for peer project ${cardId}`);
+        }
+      }
+    }
+    if (effectivePeerEvent) {
+      const payload = effectivePeerEvent.payload && typeof effectivePeerEvent.payload === "object"
+        ? { ...(effectivePeerEvent.payload as Record<string, unknown>), acceptance_id: settledId }
+        : effectivePeerEvent.payload;
       this.db.prepare(`
         INSERT OR IGNORE INTO project_acceptance_outbox
           (id, project_card_id, peer, payload_json, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run(`ao_${settledId}`, cardId, peerEvent.peer, JSON.stringify(payload), now, now);
+      `).run(`ao_${settledId}`, cardId, effectivePeerEvent.peer, JSON.stringify(payload), now, now);
     }
   }
 

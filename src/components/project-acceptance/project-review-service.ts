@@ -2,7 +2,7 @@ import { ProjectReviewStore } from "./project-review-store.js";
 import { ProjectReviewValidator, type ProjectReviewDecisionV1 } from "./project-review-validator.js";
 import type { ValidationIssue } from "./project-review-contract.js";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
-import type { ContributionProjectionV1 } from "../peer-help/contract.js";
+import { buildPeerTerminalEvent } from "./peer-terminal-event.js";
 import { nerve } from "../nerve.js";
 import { randomUUID } from "node:crypto";
 
@@ -10,78 +10,6 @@ const MAX_INVALID_PROPOSALS = 5;
 
 /** #1620: stable blocker class for protocol exhaustion — review failed, criteria were not semantically evaluated. */
 export const REVIEW_PROTOCOL_EXHAUSTED = "review_protocol_exhausted";
-
-function buildPeerTerminalEvent(cardId: number, decisionId: string, kind: "completed" | "failed", summary: string, caseSnapshot?: ReviewCaseSnapshot, failureReason?: string): { peer: string; payload: unknown } | undefined {
-  try {
-    const { kanbanGetCard } = require("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
-    const card = kanbanGetCard(cardId);
-    if (!card?.source_peer || !card.notes) return undefined;
-    const notes = JSON.parse(card.notes) as Record<string, unknown>;
-    const requestId = typeof notes.request_id === "string" ? notes.request_id : undefined;
-    const contributionRef = typeof notes.contribution_ref === "string" ? notes.contribution_ref : undefined;
-    if (!requestId || !contributionRef) return undefined;
-
-    // #1618: the projection's receiver_peer must be the RECEIVER's own logical
-    // name (the sender of this event). The requester's reducer compares it
-    // against the sender's name as it knows it — card.source_peer is the
-    // requester's name and would always mismatch on a real two-node topology.
-    let receiverPeer = card.source_peer;
-    try {
-      const { loadPeerConfig } = require("../peer-config.js") as typeof import("../peer-config.js");
-      receiverPeer = loadPeerConfig().self.name;
-    } catch { /* keep source_peer fallback */ }
-
-    const projection: ContributionProjectionV1 | undefined = caseSnapshot && buildTerminalProjection(caseSnapshot, receiverPeer, decisionId, summary, kind, failureReason);
-    const eventId = `${kind === "completed" ? "accept" : "fail"}_${requestId}_${contributionRef}_${decisionId.replace(/[^a-zA-Z0-9]/g, "_")}`.slice(0, 128);
-
-    return {
-      peer: card.source_peer,
-      payload: {
-        version: 1,
-        event_id: eventId,
-        sequence: 0,
-        request_id: requestId,
-        contribution_ref: contributionRef,
-        kind,
-        occurred_at: new Date().toISOString(),
-        summary: summary.slice(0, 1000),
-        projection,
-      },
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function buildTerminalProjection(snapshot: ReviewCaseSnapshot, receiverPeer: string, decisionId: string, summary: string, kind: "completed" | "failed", failureReason?: string): ContributionProjectionV1 {
-  const MAX_EVIDENCE_ITEMS = 20;
-  const MAX_EVIDENCE_ID_LENGTH = 128;
-  const evidence: Array<{ id: string; kind: string; summary: string; observed_by: string }> = [];
-  if (kind === "completed") {
-    for (const ci of snapshot.criterion_inputs) {
-      for (const eid of ci.observed_evidence_ids.slice(0, MAX_EVIDENCE_ITEMS)) {
-        evidence.push({ id: eid.slice(0, MAX_EVIDENCE_ID_LENGTH), kind: "check", summary: "observed", observed_by: receiverPeer.slice(0, 64) });
-      }
-      for (const eid of ci.artifact_observation_ids.slice(0, MAX_EVIDENCE_ITEMS)) {
-        evidence.push({ id: eid.slice(0, MAX_EVIDENCE_ID_LENGTH), kind: "artifact", summary: "present", observed_by: receiverPeer.slice(0, 64) });
-      }
-    }
-  }
-  const failureSuffix = kind === "failed" && failureReason ? `\nReason: ${failureReason}` : "";
-  return {
-    schema_version: 1,
-    outcome: kind,
-    summary: (summary + failureSuffix).slice(0, 1000),
-    evidence: evidence.slice(0, MAX_EVIDENCE_ITEMS),
-    artifacts: [],
-    provenance: {
-      receiver_peer: receiverPeer,
-      receiver_project_ref: snapshot.root_contract?.id?.slice(0, 128) ?? `project_${snapshot.project_card_id}`,
-      acceptance_id: decisionId,
-      accepted_at: new Date().toISOString(),
-    },
-  };
-}
 
 export async function drainAcceptanceOutbox(): Promise<number> {
   const store = new ProjectReviewStore();
@@ -233,7 +161,7 @@ export class ProjectReviewService {
       const cardId = caseRow.project_card_id;
       const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
       const summary = `Project blocked after ${MAX_INVALID_PROPOSALS} invalid proposals: review_protocol_exhausted; no valid semantic decision was produced`;
-      const peerEvent = buildPeerTerminalEvent(cardId, decisionId, "failed", summary, caseSnapshot);
+      const peerEvent = buildPeerTerminalEvent({ cardId, decisionId, kind: "failed", summary, evidenceSource: caseSnapshot });
       const exhaustionDecision = {
         action: "blocked",
         blocker_class: REVIEW_PROTOCOL_EXHAUSTED,
@@ -277,7 +205,7 @@ export class ProjectReviewService {
         const deliveredSynthesis = renderAcceptedSynthesis(decision, caseSnapshot);
         // Atomic settlement: decision + supervision + kanban in one transaction
         const acceptanceId = `rd_settle_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-        const peerEvent = buildPeerTerminalEvent(cardId, acceptanceId, "completed", deliveredSynthesis, caseSnapshot);
+        const peerEvent = buildPeerTerminalEvent({ cardId, decisionId: acceptanceId, kind: "completed", summary: deliveredSynthesis, evidenceSource: caseSnapshot });
         const { decisionId } = this.store.settleAcceptance(
           cardId,
           decision.review_case_id,
@@ -324,7 +252,7 @@ export class ProjectReviewService {
         // #1618: a blocked receiver settlement emits a FAILED terminal event —
         // never false success — in the same transaction as the settlement.
         const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-        const peerEvent = buildPeerTerminalEvent(cardId, decisionId, "failed", `Project blocked: ${blocker.blocker_class}`, caseSnapshot);
+        const peerEvent = buildPeerTerminalEvent({ cardId, decisionId, kind: "failed", summary: `Project blocked: ${blocker.blocker_class}`, evidenceSource: caseSnapshot });
         // Atomic settlement: decision + supervision + kanban in one transaction
         const { decisionId: settledId } = this.store.settleBlocked(
           cardId,

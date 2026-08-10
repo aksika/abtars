@@ -21,6 +21,7 @@ import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js
 import { readProjectCriterionCoverage, coverageSignature } from "./project-acceptance/project-criterion-coverage.js";
 import { delegatedCriterionIds } from "./project-acceptance/project-contract.js";
 import { OrcProjectRunStore } from "./orc-project/orc-project-run-store.js";
+import { REVIEW_REQUEST_ABANDONED } from "./project-acceptance/project-review-contract.js";
 import { readEntries } from "./tasks/task-store.js";
 import { readState } from "./tasks/task-state-store.js";
 import { settleRunOnce } from "./tasks/task-run-settler.js";
@@ -689,7 +690,7 @@ async function handleReviewState(projectId: number, supervision: ProjectSupervis
     scheduleOrcReview(projectId, supervision.generation, openCase.id, existingReq.id);
   } else if (existingReq.status === "abandoned") {
     logWarn(TAG, `Project ${projectId}: review request abandoned — settling blocked`);
-    reviewStore.settleBlocked(projectId, openCase.id, { action: "blocked", reason: "Review request abandoned (attempts/deadline)" }, "Review abandoned");
+    reviewStore.settleBlocked(projectId, openCase.id, { action: "blocked", reason: "Review request abandoned (attempts/deadline)" }, REVIEW_REQUEST_ABANDONED);
     try { nerve.fire("card:failed", projectId); } catch {}
   }
 }
