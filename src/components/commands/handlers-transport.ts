@@ -6,6 +6,16 @@ import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../compact-summarizer.js";
 
 const TAG = "cmd";
 
+/**
+ * #1619: resolve the transport attached to the session the command runs in.
+ * The attached session's own transport is authoritative; the bridge-global
+ * transport is only a fallback when the session has none.
+ */
+export function resolveAttachedTransport(ctx: CommandContext): import("./types.js").CommandContext["transport"] {
+  const session = ctx.sessionManager?.getSessionById?.(ctx.sessionKey);
+  return session?.transport ?? ctx.transport;
+}
+
 export async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
   const isResetDefault = text.trim().toLowerCase() === "/reset default";
 
@@ -61,6 +71,11 @@ export async function handleCompact(text: string, ctx: CommandContext): Promise<
       { kind: "durable_conversation", principalId: ctx.userId, sessionId: ctx.sessionKey },
       { kind: "compact", reason: "manual", customInstructions: instructions || undefined },
     );
+    // #1619: a completed durable compaction invalidates the attached
+    // transport's measured context usage so stale fill is never shown again.
+    if (result.status === "completed") {
+      resolveAttachedTransport(ctx).invalidateContextUsage?.();
+    }
     await ctx.reply(formatCompactReply(result));
   } catch (err) {
     logError(TAG, "Manual compaction failed", err);
@@ -333,19 +348,25 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
   // /models (no arg) — merged status: model + transport + agents
   // #1416: live snapshot from getRuntimeStatus() — shared formatter.
+  // #1619: the ATTACHED session transport is authoritative; the configured
+  // route is only a fallback. Context renders as ?/<window> when unknown.
   const { resolveRuntimeStatus, formatRuntimeRoute } = await import("../transport/runtime-status.js");
-  const liveStatus = resolveRuntimeStatus(ctx.transport as any, {
+  const attached = resolveAttachedTransport(ctx);
+  const liveStatus = resolveRuntimeStatus(attached as any, {
     route: tc?.activeRoute,
     provider: prof?.providerName,
     model: prof?.model,
   });
-  const ctxPct = ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a";
-  const statusMark = ctx.transport.isReady ? "✓" : "✗";
+  const windowText = liveStatus.contextWindow !== undefined ? String(liveStatus.contextWindow) : "?";
+  const ctxText = liveStatus.contextPercent !== undefined && liveStatus.contextPercent >= 0
+    ? `${Math.round(liveStatus.contextPercent * 10) / 10}%/${windowText}`
+    : `?/${windowText}`;
+  const statusMark = attached.isReady ? "✓" : "✗";
 
   const lines = [
     `🔌 Transport: ${formatRuntimeRoute(liveStatus)} ${statusMark}`,
     `Model: ${liveStatus.model ?? currentModel}`,
-    `Context: ${ctxPct}`,
+    `Context: ${ctxText}`,
     "",
     "Agents:",
   ];
@@ -368,8 +389,8 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   if (ra?.fallbacks?.length) {
     lines.push(`\nFallback chain: ${ra.fallbacks.map(f => f.model).join(" → ")}`);
   }
-  // #1386: Show effective candidate order from the transport's policy
-  const transport = ctx.transport as unknown as { policy?: { candidates: Array<{ model: string; endpoint: string; source: string }> } };
+  // #1386: Show effective candidate order from the attached transport's policy
+  const transport = attached as unknown as { policy?: { candidates: Array<{ model: string; endpoint: string; source: string }> } };
   if (transport.policy?.candidates && transport.policy.candidates.length > 1) {
     const { formatCandidateChain } = await import("../transport/model-candidates.js");
     lines.push(`\nEffective chain:\n${formatCandidateChain(transport.policy.candidates as any)}`);
@@ -384,25 +405,49 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
 // #1276: /effort (primary) + /thinking (alias). Both names route here via
 // registerExact in commands/index.ts. The arg regex strips the command word
-// for either name. The level set is pi-ai's verbatim (off|low|medium|high|xhigh)
-// — see #1311 for the transport-side wiring.
+// for either name. The level set is abtars's vocabulary (off|low|medium|high|xhigh).
 //
-// `off` is an effort level, NOT a display-toggle alias. We dropped the prior
-// `on`/`off` display aliases (frees `off` for the effort branch) — bare
-// `/effort` still echoes current state, `/effort show`/`/effort hide` toggle
-// the display only.
+// #1619: /effort mutates the ATTACHED session transport's session-scoped
+// reasoning level and reports the requested/effective pair. `off` is a real
+// reasoning level, never a display toggle. show/hide were removed — display
+// visibility is no longer coupled to effort. A transport without runtime
+// effort support returns an explicit unsupported response.
 export async function handleEffort(text: string, ctx: CommandContext): Promise<boolean> {
   const arg = text.replace(/^\/(?:effort|thinking)\s*/i, "").trim().toLowerCase();
+  const transport = resolveAttachedTransport(ctx);
 
-  if (arg === "show") {
-    await ctx.reply("Reasoning display: on (Pi transport)");
-  } else if (arg === "hide") {
-    await ctx.reply("Reasoning display: off (Pi transport)");
-  } else if (["off", "low", "medium", "high", "xhigh"].includes(arg)) {
-    await ctx.reply(`Reasoning effort: ${arg} (Pi transport)`);
-  } else {
-    await ctx.reply("Reasoning effort via Pi model config. Options: off, low, medium, high, xhigh.");
+  if (["off", "low", "medium", "high", "xhigh"].includes(arg)) {
+    const level = arg as import("../transport/kiro-transport.js").ReasoningEffort;
+    if (typeof transport.setReasoningEffort !== "function") {
+      await ctx.reply("Runtime reasoning effort is not supported by this transport.");
+      return true;
+    }
+    const state = transport.setReasoningEffort(level);
+    if (state.effective !== state.requested) {
+      await ctx.reply(`Reasoning effort: ${state.requested} (effective: ${state.effective})`);
+    } else {
+      await ctx.reply(`Reasoning effort: ${state.effective}`);
+    }
+    return true;
   }
+
+  if (arg) {
+    await ctx.reply("Usage: /effort off|low|medium|high|xhigh");
+    return true;
+  }
+
+  // Bare /effort reports the live effective level from the attached transport.
+  const snapshot = transport.getRuntimeStatus?.();
+  const effective = snapshot?.reasoning && snapshot.reasoning !== "default" ? snapshot.reasoning : undefined;
+  if (effective !== undefined && snapshot) {
+    if (snapshot.reasoningRequested && snapshot.reasoningRequested !== effective) {
+      await ctx.reply(`Reasoning effort: ${snapshot.reasoningRequested} (effective: ${effective})`);
+    } else {
+      await ctx.reply(`Reasoning effort: ${effective}`);
+    }
+    return true;
+  }
+  await ctx.reply("Runtime reasoning effort is not supported by this transport.");
   return true;
 }
 

@@ -86,6 +86,8 @@ export class AcpTransport implements IKiroTransport {
   /** Optional callback for streaming intermediate responses. */
   onIntermediateResponse?: (text: string) => void;
   onToolCallStart?: (toolName: string) => void;
+  /** #1619: typed live output deltas (ACP emits text; thinking when present). */
+  onOutputDelta?: (event: import("./kiro-transport.js").OutputDelta) => void;
   /** Fired on reinit — pipeline uses this to flush stale queues. */
   onReinit?: () => void;
 
@@ -684,12 +686,16 @@ export class AcpTransport implements IKiroTransport {
           }
           // #1338: mirror text deltas to the live output feed.
           this.outputObservers.get(sessionId)?.onDelta?.({ kind: "text", text });
+          // #1619: shared typed delta channel (text only — ACP emits no thinking).
+          this.onOutputDelta?.({ kind: "text", text });
         } else if ((content as { type?: string })?.type === "thinking") {
           const text = (content as { text?: string }).text ?? "";
           const chunks = this.responseChunks.get(sessionId);
           if (chunks) chunks.push(`\n[thinking] ${text}\n`);
           this.lastActivityAt = Date.now();
           // NOT updating lastContentAt — thinking is keepalive, not content
+          // #1619: ACP-emitted thinking is forwarded typed, never fabricated.
+          if (text) this.onOutputDelta?.({ kind: "thinking", text });
         }
         break;
       }

@@ -961,8 +961,8 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
 
     feed.publish({ type: "start", sessionId: sid, executionId: "e1", streamId: "st1" });
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "Hello " });
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "world" });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "Hello " });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "world" });
     feed.publish({ type: "tool-start", sessionId: sid, executionId: "e1", streamId: "st1", name: "search" });
     feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
     await new Promise((r) => setTimeout(r, 40));
@@ -991,8 +991,8 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
     const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
 
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "mine" });
-    feed.publish({ type: "delta", sessionId: "other_session", executionId: "e2", streamId: "st2", text: "theirs" });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "mine" });
+    feed.publish({ type: "delta", kind: "text", sessionId: "other_session", executionId: "e2", streamId: "st2", text: "theirs" });
     await new Promise((r) => setTimeout(r, 40));
 
     const chunks = frames.filter((f) => f.t === "chunk");
@@ -1013,8 +1013,8 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
 
     feed.publish({ type: "start", sessionId: sid, executionId: "e1", streamId: "st1" });
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "Hello " });
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "world" });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "Hello " });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "world" });
     feed.publish({ type: "tool-start", sessionId: sid, executionId: "e1", streamId: "st1", name: "search" });
     feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
     await new Promise((r) => setTimeout(r, 40));
@@ -1073,7 +1073,7 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     // still advance past the attach-time revision.
     const statusesAtAttach = frames.filter((f) => f.t === "status").length;
 
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "streamed" });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "streamed" });
     feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
     await new Promise((r) => setTimeout(r, 30));
 
@@ -1101,7 +1101,7 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
     const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
 
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "streamed" });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "streamed" });
     feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
     await new Promise((r) => setTimeout(r, 30));
 
@@ -1143,8 +1143,8 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     expect(oSid).toBe("1749563282_O_01");
 
     // Output for the now-detached A session must not reach the client.
-    feed.publish({ type: "delta", sessionId: aSid, executionId: "eA", streamId: "stA", text: "old" });
-    feed.publish({ type: "delta", sessionId: oSid, executionId: "eO", streamId: "stO", text: "new" });
+    feed.publish({ type: "delta", kind: "text", sessionId: aSid, executionId: "eA", streamId: "stA", text: "old" });
+    feed.publish({ type: "delta", kind: "text", sessionId: oSid, executionId: "eO", streamId: "stO", text: "new" });
     await new Promise((r) => setTimeout(r, 40));
 
     const chunks = [...first.frames, ...second.frames].filter((f) => f.t === "chunk");
@@ -1214,7 +1214,7 @@ describe("TuiSocketAdapter — #1398 feed isolation", () => {
     await new Promise((r) => setTimeout(r, 50));
 
     // Publish output for A's old session. With the fix it reaches no one.
-    feed.publish({ type: "delta", sessionId: aSessionId, executionId: "e1", streamId: "st1", text: "LEAK" });
+    feed.publish({ type: "delta", kind: "text", sessionId: aSessionId, executionId: "e1", streamId: "st1", text: "LEAK" });
     await new Promise((r) => setTimeout(r, 30));
 
     const hasAttachmentFrame = bFrames.some(

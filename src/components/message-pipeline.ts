@@ -288,6 +288,8 @@ export async function handleInboundMessage(
   let toolElapsedTimer: ReturnType<typeof setInterval> | undefined;
   let streamMsgId: number | string | undefined; // tool indicator message (editable)
   let assistantDurablyRecorded = false;
+  /** #1619: pipeline-owned incremental delivery controller (master/direct, non-TUI). */
+  let incremental: import("./incremental-block-delivery.js").IncrementalBlockDeliveryController | null = null;
   try {
     busyEntry.busy = true;
 
@@ -358,47 +360,12 @@ export async function handleInboundMessage(
     }
 
     // #1271: pipeline main turn goes through spin(spec) (model-call chokepoint).
-    // Streaming/tool callbacks remain pipeline-owned (set on the transport before,
-    // reset in the finally below). spin() sends via the session's own transport.
+    // Streaming/tool callbacks remain pipeline-owned — #1619: they are
+    // installed BEFORE spin() starts the model call, because the early-start
+    // ordering otherwise loses fast first deltas.
     const directContextTurn = currentTurn
       ? { rawUserText: currentTurn.rawText, volatileBlocks: currentTurn.volatileContext }
       : undefined;
-    const responsePromise = deps.sessionManager.spin({
-      type: sessionType(effectiveSession),
-      sessionId: activeSessionId,
-      prompt,
-      imageContent,
-      userId,
-      durableContextIntent,
-      directContextTurn,
-      settlementOwner: "spin",
-      await: true,
-    }).then(r => r.result ?? "");
-    // #1292: the model call is started early to overlap with the setReaction/sendTyping
-    // round-trips below, but is not awaited until later in this try block. Without this
-    // guard, a fast provider-down rejection (403 / all models exhausted) floats as an
-    // unhandled rejection during those awaits and crashes the bridge. Marking the promise
-    // handled here: the real rejection still propagates when `await responsePromise` runs
-    // and is caught by this try/catch, which renders the graceful error to the user.
-    void responsePromise.catch(() => {});
-
-    // --- Typing + reaction ---
-    if (!isVoice && adapter.setReaction && msg.messageId) {
-      await adapter.setReaction(channelId, msg.messageId, "👀");
-    }
-    if (adapter.sendTyping) {
-      await adapter.sendTyping(channelId, msg.threadId);
-      typingInterval = setInterval(() => {
-        adapter.sendTyping!(channelId, msg.threadId).catch(err => logAndSwallow(TAG, "adapter call", err));
-      }, 8000);
-    }
-
-    // --- Typing TTL ---
-    const TYPING_TTL_MS = getEnv().typingTtlMs;
-
-    typingTtlTimer = setTimeout(() => {
-      if (typingInterval) { clearInterval(typingInterval); typingInterval = undefined; }
-    }, TYPING_TTL_MS);
 
     // Per-tool-call progress — show tool name + elapsed time
     let lastToolNotifyAt = 0;
@@ -460,19 +427,94 @@ export async function handleInboundMessage(
       };
     }
 
-    // --- Segment break: deliver pre-tool text immediately ---
-    let fullResponseSegments: string[] = [];
-    transport.onSegmentBreak = (text: string) => {
-      const clean = sanitizeOutbound(text);
-      if (!clean) return;
-      fullResponseSegments.push(clean);
-      if (streamMsgId && adapter.editMessage) {
-        adapter.editMessage(channelId, streamMsgId, clean).catch(err => logAndSwallow(TAG, "adapter call", err));
-      } else {
-        adapter.sendMessage(channelId, clean, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
-      }
-      streamMsgId = undefined;
-    };
+    // --- #1619: bounded master-chat progress blocks (thinking coalescing) ---
+    // Exact eligibility: direct authenticated master turn outside the TUI.
+    // The TUI renders thinking natively through the output feed instead.
+    // The controller itself exists for every non-TUI turn so pre-tool segment
+    // reconciliation protects groups too; only eligible turns feed it typing.
+    const { IncrementalBlockDeliveryController, isIncrementalEligible } = await import("./incremental-block-delivery.js");
+    if (msg.platform !== "tui") {
+      incremental = new IncrementalBlockDeliveryController({
+        sendBlock: async (block) => {
+          await retrySend(() => adapter.sendMessage(channelId, block, { threadId: msg.threadId }));
+        },
+        sanitize: sanitizeOutbound,
+        chunkBound: (text: string) => adapter.chunkResponse(text),
+      });
+    }
+    if (isIncrementalEligible({ role: registry.byUserId.get(userId)?.role, isGroup: msg.isGroup, platform: msg.platform })) {
+      transport.onOutputDelta = (event) => { incremental?.accept(event); };
+    } else {
+      transport.onOutputDelta = undefined;
+    }
+
+    // --- Segment break: deliver pre-tool text immediately, awaited ---
+    // The transport awaits this before tool execution continues; success or
+    // failure is recorded for terminal reconciliation (never lost text).
+    // TUI turns skip segments entirely — the native stream row already shows
+    // the text and the adapter-side ledger reconciles the terminal result.
+    if (msg.platform !== "tui") {
+      transport.onSegmentBreak = async (text: string) => {
+        const clean = sanitizeOutbound(text);
+        if (!clean) return;
+        if (streamMsgId && adapter.editMessage) {
+          try {
+            await adapter.editMessage(channelId, streamMsgId, clean);
+            streamMsgId = undefined;
+            incremental?.segmentDelivered(clean);
+            return;
+          } catch { /* fall through to a fresh send */ }
+        }
+        try {
+          await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
+          streamMsgId = undefined;
+          incremental?.segmentDelivered(clean);
+        } catch (err) {
+          // #1619: interim send failure is content-free and never rejects the turn.
+          logWarn(TAG, `Pre-tool segment delivery failed (content-free): ${err instanceof Error ? err.message : String(err)}`);
+          incremental?.segmentFailed(clean);
+        }
+      };
+    } else {
+      transport.onSegmentBreak = undefined;
+    }
+
+    const responsePromise = deps.sessionManager.spin({
+      type: sessionType(effectiveSession),
+      sessionId: activeSessionId,
+      prompt,
+      imageContent,
+      userId,
+      durableContextIntent,
+      directContextTurn,
+      settlementOwner: "spin",
+      await: true,
+    }).then(r => r.result ?? "");
+    // #1292: the model call is started early to overlap with the setReaction/sendTyping
+    // round-trips below, but is not awaited until later in this try block. Without this
+    // guard, a fast provider-down rejection (403 / all models exhausted) floats as an
+    // unhandled rejection during those awaits and crashes the bridge. Marking the promise
+    // handled here: the real rejection still propagates when `await responsePromise` runs
+    // and is caught by this try/catch, which renders the graceful error to the user.
+    void responsePromise.catch(() => {});
+
+    // --- Typing + reaction ---
+    if (!isVoice && adapter.setReaction && msg.messageId) {
+      await adapter.setReaction(channelId, msg.messageId, "👀");
+    }
+    if (adapter.sendTyping) {
+      await adapter.sendTyping(channelId, msg.threadId);
+      typingInterval = setInterval(() => {
+        adapter.sendTyping!(channelId, msg.threadId).catch(err => logAndSwallow(TAG, "adapter call", err));
+      }, 8000);
+    }
+
+    // --- Typing TTL ---
+    const TYPING_TTL_MS = getEnv().typingTtlMs;
+
+    typingTtlTimer = setTimeout(() => {
+      if (typingInterval) { clearInterval(typingInterval); typingInterval = undefined; }
+    }, TYPING_TTL_MS);
 
     // --- Tool/segment state (used by tool indicators + segment breaks above) ---
     // No edit-in-place streaming timer. Final response delivered as chunks after completion (#583).
@@ -492,7 +534,17 @@ export async function handleInboundMessage(
 
     // --- Extract clean answer ---
     const cleanAnswer = transport.answerOnly;
-    const rawResponse = pSession.fullMode ? response : (cleanAnswer || response);
+    // #1619: reconcile the terminal response with pre-tool segments delivered
+    // incrementally so every user-visible text segment arrives exactly once.
+    // Successful segments are removed only from a matching prefix; failed
+    // segments are retained and merged in. Thinking never participates.
+    let reconciledResponse = pSession.fullMode ? response : (cleanAnswer || response);
+    if (incremental) {
+      const reconciled = incremental.reconcileTerminal(reconciledResponse);
+      incremental.end();
+      reconciledResponse = reconciled;
+    }
+    const rawResponse = reconciledResponse;
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
@@ -766,6 +818,8 @@ export async function handleInboundMessage(
     if (toolElapsedTimer) clearInterval(toolElapsedTimer);
     transport.onToolCallStart = undefined;
     transport.onSegmentBreak = undefined;
+    transport.onOutputDelta = undefined;
+    incremental?.dispose();
     releaseBusy(pSession, (m, a) => handleInboundMessage(m, a, deps));
     idleSave.reset(activeSessionId, chatId);
   }

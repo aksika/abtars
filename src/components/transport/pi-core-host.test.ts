@@ -557,3 +557,134 @@ describe("PiCoreExecutionHost", () => {
     await expect(host.waitForSettlement()).resolves.toBe("cancelled");
   });
 });
+
+describe("#1619 host reasoning/context wiring", () => {
+  const localOpts = {
+    executionId: "exec_1",
+    sessionId: "session_1",
+    initialState: { systemPrompt: "You are a helpful assistant.", model: { id: "test-model" }, messages: [{ role: "user", content: "hello" }] },
+    streamFn: vi.fn() as unknown as StreamFn,
+  };
+
+  function makeCapturingCore(): { loaded: LoadedPiAgentCore; captured: Array<Record<string, unknown>>; resolvePrompt: () => void } {
+    const captured: Array<Record<string, unknown>> = [];
+    let listener: ((e: AgentEvent) => void) | null = null;
+    let resolvePrompt: (() => void) | null = null;
+    const Fake = class {
+      constructor(opts: unknown) {
+        captured.push(opts as Record<string, unknown>);
+      }
+      get isStreaming() { return true; }
+      subscribe = (l: (e: AgentEvent) => void) => { listener = l; return () => { listener = null; }; };
+      prompt = vi.fn(() => new Promise<void>((resolve) => { resolvePrompt = resolve; }));
+      clearAllQueues = vi.fn();
+      abort = vi.fn();
+      waitForIdle = vi.fn(async () => {});
+    } as unknown as PiAgentCoreModule["Agent"];
+    return {
+      loaded: {
+        module: { Agent: Fake } as PiAgentCoreModule,
+        installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.83.0", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
+      },
+      captured,
+      resolvePrompt: () => { resolvePrompt?.(); },
+    };
+  }
+
+  it("carries the clamped thinkingLevel into the Agent initialState", async () => {
+    const { loaded, captured, resolvePrompt } = makeCapturingCore();
+    const host = new PiCoreExecutionHost({
+      ...localOpts,
+      initialState: { ...localOpts.initialState, thinkingLevel: "high" },
+    });
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const initialState = (captured[0] as { initialState?: { thinkingLevel?: string } })?.initialState;
+    expect(initialState?.thinkingLevel).toBe("high");
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("defaults thinkingLevel to off when not supplied", async () => {
+    const { loaded, captured, resolvePrompt } = makeCapturingCore();
+    const host = new PiCoreExecutionHost(localOpts);
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const initialState = (captured[0] as { initialState?: { thinkingLevel?: string } })?.initialState;
+    expect(initialState?.thinkingLevel).toBe("off");
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("#1619: computes context tokens from positive totalTokens", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const host = new PiCoreExecutionHost(localOpts);
+    const startPromise = host.start(makeLoadedPiAgentCore(agent)).catch(() => {});
+    const end: AgentEvent = {
+      type: "agent_end",
+      messages: [
+        { role: "assistant", content: [{ type: "text", text: "hello" }], usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5, totalTokens: 200, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", api: "openai-completions", provider: "x", model: "m", timestamp: 0 } as never,
+      ],
+    };
+    await (host as any).handleEvent(end);
+    expect(host.lastContextTokens).toBe(200);
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("#1619: falls back to the usage sum when totalTokens is zero, and stays null on zero-only usage", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const host = new PiCoreExecutionHost(localOpts);
+    const startPromise = host.start(makeLoadedPiAgentCore(agent)).catch(() => {});
+    const end: AgentEvent = {
+      type: "agent_end",
+      messages: [
+        { role: "assistant", content: [{ type: "text", text: "hello" }], usage: { input: 30, output: 20, cacheRead: 5, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", api: "openai-completions", provider: "x", model: "m", timestamp: 0 } as never,
+      ],
+    };
+    await (host as any).handleEvent(end);
+    expect(host.lastContextTokens).toBe(55);
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("pairs a safety replacement model with a fresh thinking level via the resolver", async () => {
+    const { loaded, captured, resolvePrompt } = makeCapturingCore();
+    const safety = {
+      promptRoundsUsed: 1,
+      maxPromptRounds: 25,
+      incident: null,
+      prepareNextTurn: vi.fn(() => ({ model: { id: "alt-model" } })),
+    };
+    const host = new PiCoreExecutionHost({
+      ...localOpts,
+      safety: safety as never,
+      resolveThinkingLevelForModel: (model: { id: string }) => (model.id === "alt-model" ? "high" : "off"),
+    });
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const agentOpts = captured[0] as { prepareNextTurnWithContext?: (ctx: unknown) => Promise<unknown> };
+    const paired = await agentOpts.prepareNextTurnWithContext!({ context: { messages: [], systemPrompt: "" } });
+    expect(paired).toMatchObject({ model: { id: "alt-model" }, thinkingLevel: "high" });
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("rejects a replacement model when no thinking-level resolver is supplied (contract error)", async () => {
+    const { loaded, captured, resolvePrompt } = makeCapturingCore();
+    const safety = {
+      promptRoundsUsed: 1,
+      maxPromptRounds: 25,
+      incident: null,
+      prepareNextTurn: vi.fn(() => ({ model: { id: "alt-model" } })),
+    };
+    const host = new PiCoreExecutionHost({ ...localOpts, safety: safety as never });
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const agentOpts = captured[0] as { prepareNextTurnWithContext?: (ctx: unknown) => Promise<unknown> };
+    await expect(agentOpts.prepareNextTurnWithContext!({ context: { messages: [], systemPrompt: "" } }))
+      .rejects.toThrow(/requires resolveThinkingLevelForModel/);
+    resolvePrompt();
+    await startPromise;
+  });
+});

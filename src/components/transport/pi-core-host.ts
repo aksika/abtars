@@ -31,6 +31,8 @@ export interface PiCoreExecutionHostOptions {
     model: ModelApi;
     messages: AgentMessage[];
     tools?: import("@earendil-works/pi-agent-core").AgentTool[];
+    /** #1619: clamped effective reasoning level for the initial model. */
+    thinkingLevel?: import("./kiro-transport.js").ReasoningEffort;
   };
   streamFn: StreamFn;
   session?: { instructionQueue: QueuedSessionInstruction[]; id: string };
@@ -39,6 +41,8 @@ export interface PiCoreExecutionHostOptions {
   contextProjection?: PiCoreContextProjection;
   transformOptions?: TransformOptions;
   outputObserver?: OutputObserver;
+  /** #1619: derive the effective thinking level for a replacement model. */
+  resolveThinkingLevelForModel?: (model: ModelApi) => import("./kiro-transport.js").ReasoningEffort;
   onEvent?: (event: AgentEvent) => Promise<void> | void;
 }
 
@@ -63,6 +67,8 @@ export class PiCoreExecutionHost {
   private _cleanupPromise: Promise<"complete" | "timed_out"> = Promise.resolve("complete");
   private _terminalResolve: ((value: PiCoreTerminalReason) => void) | null = null;
   private _lastUsage: { input: number; output: number; cacheRead?: number; cacheWrite?: number } | null = null;
+  /** #1619: current-context tokens from the final valid assistant usage. */
+  private _lastContextTokens: number | null = null;
   readonly terminalPromise: Promise<PiCoreTerminalReason>;
   private outstandingLeases: Map<string, OutstandingLease> = new Map();
   private opts: PiCoreExecutionHostOptions;
@@ -86,6 +92,12 @@ export class PiCoreExecutionHost {
   /** #1612: token usage captured from the terminal assistant message, if the provider reported any. */
   get lastUsage(): { input: number; output: number; cacheRead?: number; cacheWrite?: number } | null {
     return this._lastUsage;
+  }
+
+  /** #1619: current-context tokens from valid terminal assistant usage; null
+   *  when the provider reported none (never fabricated). */
+  get lastContextTokens(): number | null {
+    return this._lastContextTokens;
   }
 
   constructor(opts: PiCoreExecutionHostOptions) {
@@ -164,6 +176,7 @@ export class PiCoreExecutionHost {
         model: this.opts.initialState.model,
         messages: [],
         tools: [...(this.opts.initialState.tools ?? [])],
+        thinkingLevel: this.opts.initialState.thinkingLevel ?? "off",
       },
       streamFn: this.opts.streamFn,
       steeringMode: PI_AGENT_CORE_CONFIG.steeringMode,
@@ -182,7 +195,7 @@ export class PiCoreExecutionHost {
         if (!this.opts.safety) return undefined;
         if (signal?.aborted) return undefined;
         const candidateKey = this.opts.transformOptions?.candidateKeyFn?.() ?? this.executionId;
-        return this.opts.safety.prepareNextTurn({
+        const update = this.opts.safety.prepareNextTurn({
           candidateKey,
           roundsUsed: this.opts.safety.promptRoundsUsed,
           maxRounds: this.opts.safety.maxPromptRounds,
@@ -190,6 +203,19 @@ export class PiCoreExecutionHost {
           context: ctx.context,
           modelForCandidate: this.opts.transformOptions?.candidateModelFn,
         });
+        // #1619: a replacement model without a paired thinking level is a
+        // contract error — the next request must carry a recomputed effective
+        // level, never silently fall back to the previous candidate's.
+        if (update && update.model) {
+          if (!this.opts.resolveThinkingLevelForModel) {
+            throw new Error("PiCoreExecutionHost: replacement model requires resolveThinkingLevelForModel");
+          }
+          return {
+            ...update,
+            thinkingLevel: this.opts.resolveThinkingLevelForModel(update.model),
+          };
+        }
+        return update;
       },
     };
 
@@ -517,6 +543,8 @@ export class PiCoreExecutionHost {
     // the transport can surface it to runtime status / the TUI footer. The
     // provider's usage lives on the assistant message; zero-only usage means
     // the provider reported none and stays null (never fabricated).
+    // #1619: the same valid usage also seeds the current-context token count
+    // (totalTokens preferred; the input+output+cache sum as fallback).
     for (let i = event.messages.length - 1; i >= 0; i--) {
       const msg = event.messages[i];
       if (msg?.role === "assistant" && msg.usage) {
@@ -528,7 +556,11 @@ export class PiCoreExecutionHost {
             cacheRead: u.cacheRead,
             cacheWrite: u.cacheWrite,
           };
-          logDebug(TAG, `Captured usage for execution ${this.executionId}: in=${u.input} out=${u.output}`);
+          const total = u.totalTokens ?? 0;
+          this._lastContextTokens = total > 0
+            ? total
+            : u.input + u.output + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+          logDebug(TAG, `Captured usage for execution ${this.executionId}: in=${u.input} out=${u.output} ctx=${this._lastContextTokens}`);
           break;
         }
       }

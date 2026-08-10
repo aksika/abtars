@@ -14,6 +14,7 @@ import {
   TuiApp,
   formatRuntimeStatus,
   makeAssistantMessage,
+  appendAssistantBlock,
   projectSafeActivity,
   projectActivitySnapshot,
   type TuiPresentationModules,
@@ -234,10 +235,10 @@ describe("TuiApp — stream grouping and final reconciliation (design §3/§4)",
     const h = makeHarness();
     h.app.resetForReady("Main #1", "s1");
     h.app.handleFrame({ t: "stream-start", id: "st1", executionId: "e1" });
-    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", delta: "Hello" });
-    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", delta: " world" });
+    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "Hello" });
+    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: " world" });
     h.app.handleFrame({ t: "tool-start", id: "st1", executionId: "e1", name: "search" });
-    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", delta: "!" });
+    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "!" });
 
     // Still exactly one assistant row (never one per delta).
     expect(assistantRows(h).length).toBe(1);
@@ -247,21 +248,38 @@ describe("TuiApp — stream grouping and final reconciliation (design §3/§4)",
     expect(lastMessage.content[0]!.text).toBe("Hello world!");
 
     h.app.handleFrame({ t: "chunk-end", id: "st1", executionId: "e1", reason: "complete" });
-    // Correlated whole result replaces the streamed row with one final row.
+    // #1619: the correlated whole result exactly matches the completed stream —
+    // the native row (including any thinking blocks) stays; no duplicate row.
     h.app.handleFrame({ t: "message", role: "assistant", markdown: "Hello world!", executionId: "e1" });
 
     const rows = assistantRows(h);
     expect(rows.length).toBe(1);
-    expect(rows[0]!.updateContent.mock.calls.length).toBeLessThanOrEqual(1); // final row is fresh
+    expect(rows[0]!.updateContent.mock.calls.length).toBe(3); // one per chunk — no fresh final row
+    const kept = rows[0]!.updateContent.mock.calls.at(-1)![0] as { content: Array<{ text: string }> };
+    expect(kept.content[0]!.text).toBe("Hello world!");
     // Busy cleared after the execution settles.
     expect(h.loader.stop).toHaveBeenCalled();
+  });
+
+  it("replaces the streamed rows with the whole result when the stream was truncated", () => {
+    const h = makeHarness();
+    h.app.resetForReady("Main #1", "s1");
+    h.app.handleFrame({ t: "stream-start", id: "st1", executionId: "e1" });
+    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "partial" });
+    h.app.handleFrame({ t: "chunk-end", id: "st1", executionId: "e1", reason: "truncated" });
+    // Truncated stream → the whole result is the correctness fallback.
+    h.app.handleFrame({ t: "message", role: "assistant", markdown: "complete answer", executionId: "e1" });
+    const rows = assistantRows(h);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.updateContent.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(rows[0]!.message).toBeDefined();
   });
 
   it("keeps the streamed row visible when the whole result is suppressed (exact-match)", () => {
     const h = makeHarness();
     h.app.resetForReady("Main #1", "s1");
     h.app.handleFrame({ t: "stream-start", id: "st1", executionId: "e1" });
-    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", delta: "streamed" });
+    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "streamed" });
     h.app.handleFrame({ t: "chunk-end", id: "st1", executionId: "e1", reason: "complete" });
     // No message frame arrives (daemon suppression) — the row stays.
     expect(assistantRows(h).length).toBe(1);
@@ -281,10 +299,10 @@ describe("TuiApp — stream grouping and final reconciliation (design §3/§4)",
     h.app.resetForReady("Main #1", "s1");
     // Stream for e1, then 4 more executions evict e1's group (cap = 4).
     h.app.handleFrame({ t: "stream-start", id: "st1", executionId: "e1" });
-    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", delta: "old" });
+    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "old" });
     for (let i = 2; i <= 5; i++) {
       h.app.handleFrame({ t: "stream-start", id: `st${i}`, executionId: `e${i}` });
-      h.app.handleFrame({ t: "chunk", id: `st${i}`, executionId: `e${i}`, delta: `d${i}` });
+      h.app.handleFrame({ t: "chunk", id: `st${i}`, executionId: `e${i}`, kind: "text", delta: `d${i}` });
     }
     // e1's group was evicted — the whole result must still render (not suppressed).
     h.app.handleFrame({ t: "message", role: "assistant", markdown: "authoritative", executionId: "e1" });
@@ -295,7 +313,7 @@ describe("TuiApp — stream grouping and final reconciliation (design §3/§4)",
     const h = makeHarness();
     h.app.resetForReady("Main #1", "s1");
     h.app.handleFrame({ t: "stream-start", id: "st1", executionId: "e1" });
-    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", delta: "partial" });
+    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "partial" });
     h.app.handleFrame({ t: "chunk-end", id: "st1", executionId: "e1", reason: "truncated" });
     const systems = systemRows(h);
     expect(systems.length).toBe(1);
@@ -306,8 +324,8 @@ describe("TuiApp — stream grouping and final reconciliation (design §3/§4)",
   it("creates stream state from a chunk when stream-start was evicted/missing", () => {
     const h = makeHarness();
     h.app.resetForReady("Main #1", "s1");
-    h.app.handleFrame({ t: "chunk", id: "st9", executionId: "e9", delta: "first" });
-    h.app.handleFrame({ t: "chunk", id: "st9", executionId: "e9", delta: " second" });
+    h.app.handleFrame({ t: "chunk", id: "st9", executionId: "e9", kind: "text", delta: "first" });
+    h.app.handleFrame({ t: "chunk", id: "st9", executionId: "e9", kind: "text", delta: " second" });
     expect(assistantRows(h).length).toBe(1);
     const pending = assistantRows(h)[0]!;
     const lastMessage = pending.updateContent.mock.calls.at(-1)![0] as { content: Array<{ text: string }> };
@@ -320,7 +338,7 @@ describe("TuiApp — stream grouping and final reconciliation (design §3/§4)",
     h.app.handleFrame({ t: "typing" });
     expect(h.loader.start).toHaveBeenCalled();
     h.app.handleFrame({ t: "stream-start", id: "st1", executionId: "e1" });
-    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", delta: "x" });
+    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "x" });
     h.app.handleFrame({ t: "chunk-end", id: "st1", executionId: "e1", reason: "complete" });
     expect(h.loader.stop).toHaveBeenCalled();
   });
@@ -433,7 +451,7 @@ describe("TuiApp — lifecycle reset and failure recovery (design §5/§6)", () 
     h.app.resetForReady("Main #1", "s1");
     h.app.submitUserText("hello");
     h.app.handleFrame({ t: "stream-start", id: "st1", executionId: "e1" });
-    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", delta: "x" });
+    h.app.handleFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "x" });
     h.app.handleFrame(status("s1", 1, "m1"));
     h.app.handleFrame({
       t: "activity-snapshot",
@@ -490,12 +508,35 @@ describe("TuiApp — lifecycle reset and failure recovery (design §5/§6)", () 
 
 describe("TuiApp — assistant message factory (design §2.1)", () => {
   it("builds a runtime-valid assistant message with zero usage", () => {
-    const msg = makeAssistantMessage("text", "pending");
+    const msg = makeAssistantMessage([{ type: "text", text: "text" }], "pending");
     expect(msg.role).toBe("assistant");
     expect(msg.content).toEqual([{ type: "text", text: "text" }]);
     expect(msg.stopReason).toBe("pending");
     expect(msg.usage.input).toBe(0);
     // Provider/model metadata must not be copied into transcript content.
     expect(JSON.stringify(msg.content)).not.toContain("provider");
+  });
+
+  it("#1619: maps ordered text/thinking blocks into native content parts", () => {
+    const msg = makeAssistantMessage([
+      { type: "thinking", thinking: "let me think" },
+      { type: "text", text: "answer" },
+    ], "stop");
+    expect(msg.content).toEqual([
+      { type: "thinking", thinking: "let me think" },
+      { type: "text", text: "answer" },
+    ]);
+  });
+
+  it("#1619: appendAssistantBlock merges adjacent same-kind deltas and opens blocks on transitions", () => {
+    const blocks: import("./tui-ui.js").AssistantBlock[] = [];
+    appendAssistantBlock(blocks, "thinking", "a", 1024);
+    appendAssistantBlock(blocks, "thinking", "b", 1024);
+    appendAssistantBlock(blocks, "text", "c", 1024);
+    appendAssistantBlock(blocks, "text", "d", 1024);
+    expect(blocks).toEqual([
+      { type: "thinking", thinking: "ab" },
+      { type: "text", text: "cd" },
+    ]);
   });
 });

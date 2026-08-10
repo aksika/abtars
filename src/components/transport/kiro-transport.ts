@@ -64,6 +64,21 @@ export interface RuntimeUsageSnapshot {
   cacheWrite?: number;
 }
 
+/** #1619: session-scoped reasoning effort vocabulary (abtars subset of Pi's). */
+export type ReasoningEffort = "off" | "low" | "medium" | "high" | "xhigh";
+
+/** #1619: typed stream delta emitted by transports to shared consumers. */
+export interface OutputDelta {
+  kind: "text" | "thinking";
+  text: string;
+}
+
+/** #1619: requested vs Pi-clamped effective reasoning level. */
+export interface ReasoningEffortState {
+  requested: ReasoningEffort;
+  effective: ReasoningEffort;
+}
+
 export interface RuntimeStatusSnapshot {
   route?: import("../transport-config.js").ExecutionRoute;
   provider?: string;
@@ -72,6 +87,8 @@ export interface RuntimeStatusSnapshot {
   contextWindow?: number;
   autoCompaction?: boolean;
   reasoning?: "off" | "low" | "medium" | "high" | "xhigh" | "default";
+  /** #1619: requested level when Pi clamped it to a different effective value. */
+  reasoningRequested?: ReasoningEffort;
   lastTurnUsage?: RuntimeUsageSnapshot;
 }
 
@@ -139,7 +156,21 @@ export interface IKiroTransport {
   onToolCallStart?: (toolName: string) => void;
 
   /** Optional callback fired when pre-tool text should be delivered before tool execution. */
-  onSegmentBreak?: (text: string) => void;
+  onSegmentBreak?: (text: string) => void | Promise<void>;
+
+  /** #1619: typed live output deltas (text + thinking) for shared consumers. */
+  onOutputDelta?: (event: OutputDelta) => void;
+
+  /**
+   * #1619: change the attached session's reasoning effort. Resolves against
+   * the transport's model capability/clamping semantics and returns the
+   * requested/effective pair. Optional: transports without runtime effort
+   * support omit it and commands must report unsupported, never pretend.
+   */
+  setReasoningEffort?(level: ReasoningEffort): ReasoningEffortState;
+
+  /** #1619: invalidate measured context usage (reset/compaction). */
+  invalidateContextUsage?(): void;
 
   /** Transport-specific slash commands (e.g. /usage for kiro, /stats for gemini). */
   readonly transportCommands: string[];

@@ -1105,8 +1105,9 @@ describe("spin() — #1338 output mirroring", () => {
 
     const delta = feed.events.find((e) => e.type === "delta") as Extract<SessionOutputEvent, { type: "delta" }>;
     expect(delta.text).toBe("Hi from model");
-    // thinking never entered the feed
-    expect(feed.events.some((e) => e.type === "delta" && (e as any).text === "secret thought")).toBe(false);
+    // #1619: thinking enters the feed typed (the TUI renders it natively).
+    const thinking = feed.events.find((e) => e.type === "delta" && (e as any).kind === "thinking") as Extract<SessionOutputEvent, { type: "delta" }> | undefined;
+    expect(thinking?.text).toBe("secret thought");
     // end is terminal-complete for the same stream
     const end = feed.events.find((e) => e.type === "end") as Extract<SessionOutputEvent, { type: "end" }>;
     expect(end.reason).toBe("complete");

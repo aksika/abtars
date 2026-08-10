@@ -247,21 +247,30 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     buildInfo = ` (${bi.hash} ${bi.date.slice(0, 10)})`;
   } catch (err) { logAndSwallow("command_handlers", "op", err); }
 
-  let model = "unknown";
-  if ("currentModel" in ctx.transport) {
-    model = (ctx.transport as unknown as { currentModel: string }).currentModel;
-  } else {
-    const { loadTransport, resolveAgent } = await import("../transport-config.js");
-    const tc = loadTransport();
-    const prof = tc ? resolveAgent("main", tc) : null;
-    model = prof?.model ?? "unknown";
+  // #1619: the attached session's live transport is authoritative — the
+  // bridge-global transport and transport.json are only configured fallbacks.
+  const session = ctx.sessionManager?.getSessionById?.(ctx.sessionKey);
+  const attached = session?.transport ?? ctx.transport;
+  const liveStatus = attached.getRuntimeStatus?.() ?? {};
+
+  let model = liveStatus.model ?? "unknown";
+  if (!liveStatus.model) {
+    if ("currentModel" in attached) {
+      model = (attached as unknown as { currentModel: string }).currentModel;
+    } else {
+      const { loadTransport, resolveAgent } = await import("../transport-config.js");
+      const tc = loadTransport();
+      const prof = tc ? resolveAgent("main", tc) : null;
+      model = prof?.model ?? "unknown";
+    }
   }
 
-  const transportStatus = ctx.transport.isReady ? "✓ Connected" : "❌ Disconnected";
+  const transportStatus = attached.isReady ? "✓ Connected" : "❌ Disconnected";
   const uptime = formatUptime(Date.now() - ctx.startedAt);
-  const ctxPct = ctx.transport.contextPercent >= 0
-    ? `${ctx.transport.contextPercent}%`
-    : "n/a";
+  const windowText = liveStatus.contextWindow !== undefined ? String(liveStatus.contextWindow) : "?";
+  const ctxPct = liveStatus.contextPercent !== undefined && liveStatus.contextPercent >= 0
+    ? `${Math.round(liveStatus.contextPercent * 10) / 10}%/${windowText}`
+    : `?/${windowText}`;
   const { getHeartbeatInstance } = await import("../heartbeat-system.js");
   const hb = getHeartbeatInstance();
 
@@ -269,7 +278,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   const { loadTransport: lt, resolveAgent: ra } = await import("../transport-config.js");
   const tc = lt();
   const prof = tc ? ra("main", tc) : null;
-  const provider = prof?.providerName ?? "unknown";
+  const provider = liveStatus.provider ?? prof?.providerName ?? "unknown";
   const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
   const transportLine = `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`;
 
@@ -282,6 +291,11 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     `🤖 Model: ${model}`,
     ...(fallbackModels.length > 0 ? [`   Fallbacks: ${fallbackModels.join(", ")}`] : []),
     `📊 Context window: ${ctxPct}`,
+    ...(liveStatus.reasoning && liveStatus.reasoning !== "default"
+      ? [`🧠 Reasoning effort: ${liveStatus.reasoningRequested && liveStatus.reasoningRequested !== liveStatus.reasoning
+        ? `${liveStatus.reasoningRequested} (effective: ${liveStatus.reasoning})`
+        : liveStatus.reasoning}`]
+      : []),
     `⏱️ Uptime: ${uptime}`,
   ];
   if (hb) {

@@ -5,7 +5,7 @@ import type {
 } from "@earendil-works/pi-ai";
 
 import {
-  pickPiApi, buildPiModel, buildPiContext, resolveReasoning,
+  pickPiApi, buildPiModel, buildPiContext, resolveReasoning, resolveCandidateModel,
   type PiAiCandidate, type PiAiConversation,
 } from "./pi-ai-adapter.js";
 
@@ -147,3 +147,45 @@ describe("buildPiContext", () => {
 });
 
 
+
+// ── resolveCandidateModel (#1619) ──────────────────────────────────────────
+
+describe("resolveCandidateModel", () => {
+  const candidate = {
+    model: "test-model",
+    provider: "test-provider",
+    endpoint: "https://api.test/v1",
+    maxContext: 128000,
+  };
+
+  it("threads the requested effort into the model and reports it", () => {
+    const resolved = resolveCandidateModel(candidate, "high", false);
+    expect(resolved.requested).toBe("high");
+    expect(resolved.effective).toBe("high");
+    expect(resolved.model.reasoning).toBe(true);
+    expect(resolved.model.id).toBe("test-model");
+  });
+
+  it("clamps xhigh against a custom model without thinkingLevelMap.xhigh", () => {
+    const resolved = resolveCandidateModel(candidate, "xhigh", false);
+    expect(resolved.requested).toBe("xhigh");
+    expect(resolved.effective).toBe("high");
+    expect(resolved.model.reasoning).toBe(true);
+  });
+
+  it("off forces model.reasoning false so no reasoning param is emitted", () => {
+    const resolved = resolveCandidateModel(candidate, "off", false);
+    expect(resolved.effective).toBe("off");
+    expect(resolved.model.reasoning).toBe(false);
+  });
+
+  it("an image turn marks the model input text+image", () => {
+    const resolved = resolveCandidateModel(candidate, "high", true);
+    expect(resolved.model.input).toEqual(["text", "image"]);
+  });
+
+  it("carries the candidate context window", () => {
+    const resolved = resolveCandidateModel(candidate, "high", false);
+    expect(resolved.model.contextWindow).toBe(128000);
+  });
+});

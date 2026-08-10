@@ -286,9 +286,15 @@ export class TuiSocketAdapter implements PlatformAdapter {
       if (!stream.ended) return false;
     }
 
-    // Normalized text comparison (CRLF→LF only)
+    // Normalized text comparison (CRLF→LF only). #1619: thinking is never
+    // recorded in the ledger, so a stream with thinking blocks still compares
+    // on text alone. Multi-round transcripts deliver pre-tool segments as
+    // standalone messages — the terminal result is the final text suffix of
+    // the streamed transcript.
     const streamedText = obs.streamOrder.map(id => obs.streams.get(id)!.text).join("");
-    return normalizeComparison(streamedText) === normalizeComparison(text);
+    const normalized = normalizeComparison(streamedText);
+    const whole = normalizeComparison(text);
+    return normalized === whole || (normalized.length > whole.length && normalized.endsWith(whole));
   }
 
   /** #1397: Record a stream start from the output feed. */
@@ -746,12 +752,16 @@ export class TuiSocketAdapter implements PlatformAdapter {
       switch (event.type) {
         case "delta": {
           // #1612: carry stream/execution identity on every delta.
-          const frame: TuiServerFrame = { t: "chunk", id: event.streamId, executionId, delta: event.text };
+          // #1619: typed content rides the frame; the suppression ledger
+          // records only text deltas for final-answer comparison.
+          const frame: TuiServerFrame = { t: "chunk", id: event.streamId, executionId, kind: event.kind, delta: event.text };
           const result = this._push(frame);
           const accepted = result !== "dropped";
           if (executionId) {
             this.observeStreamStart(executionId, event.streamId);
-            this.observeStreamDelta(executionId, event.streamId, event.text, accepted);
+            if (event.kind === "text") {
+              this.observeStreamDelta(executionId, event.streamId, event.text, accepted);
+            }
           }
           break;
         }

@@ -38,18 +38,26 @@ describe("encodeFrame", () => {
     const decoder = createFrameDecoder<TuiServerFrame>();
     const start = decoder.push(Buffer.from(encodeFrame({ t: "stream-start", id: "st1", executionId: "e1" })));
     expect(start).toEqual([{ t: "stream-start", id: "st1", executionId: "e1" }]);
-    const chunk = decoder.push(Buffer.from(encodeFrame({ t: "chunk", id: "st1", executionId: "e1", delta: "hi" })));
-    expect(chunk).toEqual([{ t: "chunk", id: "st1", executionId: "e1", delta: "hi" }]);
+    const chunk = decoder.push(Buffer.from(encodeFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "hi" })));
+    expect(chunk).toEqual([{ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "hi" }]);
     const tool = decoder.push(Buffer.from(encodeFrame({ t: "tool-start", id: "st1", executionId: "e1", name: "read" })));
     expect(tool).toEqual([{ t: "tool-start", id: "st1", executionId: "e1", name: "read" }]);
     const end = decoder.push(Buffer.from(encodeFrame({ t: "chunk-end", id: "st1", executionId: "e1", reason: "complete" })));
     expect(end).toEqual([{ t: "chunk-end", id: "st1", executionId: "e1", reason: "complete" }]);
   });
 
+  it("#1619: round-trips typed thinking/text chunk kinds through the wire", () => {
+    const decoder = createFrameDecoder<TuiServerFrame>();
+    const first = decoder.push(Buffer.from(encodeFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "thinking", delta: "ponder" })));
+    expect(first).toEqual([{ t: "chunk", id: "st1", executionId: "e1", kind: "thinking", delta: "ponder" }]);
+    const second = decoder.push(Buffer.from(encodeFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "answer" })));
+    expect(second).toEqual([{ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "answer" }]);
+  });
+
   it("round-trips an uncorrelated chunk (optional executionId absent)", () => {
     const decoder = createFrameDecoder<TuiServerFrame>();
-    const out = decoder.push(Buffer.from(encodeFrame({ t: "chunk", id: "st1", delta: "x" })));
-    expect(out).toEqual([{ t: "chunk", id: "st1", delta: "x" }]);
+    const out = decoder.push(Buffer.from(encodeFrame({ t: "chunk", id: "st1", kind: "text", delta: "x" })));
+    expect(out).toEqual([{ t: "chunk", id: "st1", kind: "text", delta: "x" }]);
   });
 
   it("round-trips a whole message with a delivery execution ID", () => {

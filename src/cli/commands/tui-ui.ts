@@ -88,6 +88,11 @@ function stripControls(text: string): string {
     .replace(/[\u0000-\u001f\u007f]/g, "");
 }
 
+/** Normalize text for suppression comparison — CRLF→LF only. */
+function normalizeComparison(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
+
 /** UTF-8-safe byte-bounded slice of control-stripped text. */
 function boundText(text: string, maxBytes: number): string {
   let res = "";
@@ -175,19 +180,26 @@ export function projectActivitySnapshot(snapshot: OrcActivitySnapshot): SafeActi
 
 export type AssistantStopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "aborted";
 
+/** #1619: ordered bounded content blocks for native thinking/text rendering. */
+export type AssistantBlock =
+  | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string };
+
 /**
- * Minimal pi-compatible assistant message assembled from wire text. The only
- * place that adapts wire text to Pi's AssistantMessage shape. Usage is
+ * Minimal pi-compatible assistant message assembled from wire content. The
+ * only place that adapts wire blocks to Pi's AssistantMessage shape. Usage is
  * zero/unknown rather than fabricated from the socket; provider/model
  * metadata is never copied into transcript text (design §2.1).
  */
 export function makeAssistantMessage(
-  text: string,
+  blocks: readonly AssistantBlock[],
   stopReason: AssistantStopReason,
 ): import("@earendil-works/pi-ai").AssistantMessage {
   return {
     role: "assistant",
-    content: [{ type: "text", text }],
+    content: blocks.map((b) => b.type === "text"
+      ? { type: "text", text: b.text }
+      : { type: "thinking", thinking: b.thinking }),
     api: "custom",
     provider: "unknown",
     model: "unknown",
@@ -204,11 +216,42 @@ export function makeAssistantMessage(
   };
 }
 
+/** #1619: append a typed delta to an ordered bounded block list. Adjacent
+ *  deltas of the same kind merge into one block; transitions open a new one. */
+export function appendAssistantBlock(
+  blocks: AssistantBlock[],
+  kind: "text" | "thinking",
+  delta: string,
+  maxBlockBytes: number,
+): AssistantBlock[] {
+  if (!delta) return blocks;
+  const last = blocks[blocks.length - 1];
+  if (kind === "text") {
+    const bounded = boundText(delta, maxBlockBytes);
+    if (last && last.type === "text") {
+      last.text = boundText(last.text + bounded, maxBlockBytes);
+    } else {
+      blocks.push({ type: "text", text: bounded });
+    }
+  } else {
+    const bounded = boundText(delta, maxBlockBytes);
+    if (last && last.type === "thinking") {
+      last.thinking = boundText(last.thinking + bounded, maxBlockBytes);
+    } else {
+      blocks.push({ type: "thinking", thinking: bounded });
+    }
+  }
+  return blocks;
+}
+
 // ── Attachment-local stream state (design §2) ────────────────────────────
 
 export interface StreamState {
   id: string;
   executionId?: string;
+  /** #1619: ordered typed content blocks (text/thinking). */
+  blocks: AssistantBlock[];
+  /** Bounded text-only accumulator for whole-result correlation. */
   text: string;
   ended: boolean;
   reason?: "complete" | "error" | "cancelled" | "truncated";
@@ -295,12 +338,12 @@ export class TuiApp {
     // Pi-native colors via public theme functions: accent spinner + muted
     // message (same functions Pi's getSelectListTheme uses).
     const selectListTheme = this._m.codingAgent.getSelectListTheme();
+    // #1619: native Loader defaults (Braille frames) — no custom ASCII frames.
     this._busy = new this._m.tui.Loader(
       this._ui,
       (s: string) => selectListTheme.selectedPrefix(s),
       (s: string) => selectListTheme.description(s),
       "Working",
-      { frames: ["-", "\\", "|", "/"], intervalMs: 80 },
     );
     this._busy.stop();
   }
@@ -348,7 +391,7 @@ export class TuiApp {
           this._handleStreamStart(frame.id, frame.executionId);
           return;
         case "chunk":
-          this._handleChunk(frame.id, frame.executionId, frame.delta);
+          this._handleChunk(frame.id, frame.executionId, frame.kind, frame.delta);
           return;
         case "tool-start":
           this._handleToolStart(frame.name);
@@ -406,11 +449,25 @@ export class TuiApp {
   // ── Frame handlers ─────────────────────────────────────────────────
 
   private _handleAssistantMessage(markdown: string, executionId?: string): void {
-    // Correlated whole result: replace the execution's streamed rows with one
-    // final assistant row (design R3.5). Uncorrelated results always render.
+    // #1619: correlated whole result. When the execution's streams completed
+    // with all text delivered (exact text match), the native rows — including
+    // thinking blocks — stay and the redundant whole result is dropped.
+    // On truncation/error/mismatch the whole result is the correctness
+    // fallback and replaces the streamed rows (design R3.5).
     if (executionId !== undefined) {
       const exec = this._executions.get(executionId);
       if (exec && exec.rows.length > 0) {
+        const allComplete = exec.streamIds.every((id) => {
+          const s = this._streams.get(id);
+          return s !== undefined && s.ended && (s.reason === undefined || s.reason === "complete");
+        });
+        const streamedText = exec.streamIds.map((id) => this._streams.get(id)?.text ?? "").join("");
+        if (allComplete && streamedText && normalizeComparison(streamedText) === normalizeComparison(markdown)) {
+          this._releaseExecution(executionId);
+          this._clearBusyIfIdle();
+          this._ui.requestRender();
+          return;
+        }
         this._removeStreamRows(exec);
         this._releaseExecution(executionId);
         this._appendAssistantRow(markdown, "stop");
@@ -429,14 +486,20 @@ export class TuiApp {
     this._setBusy(true);
   }
 
-  private _handleChunk(id: string, executionId: string | undefined, delta: string): void {
+  private _handleChunk(id: string, executionId: string | undefined, kind: "text" | "thinking", delta: string): void {
     let stream = this._streams.get(id);
     if (!stream) {
       // Missing/evicted stream-start: create state from a correlated chunk.
       stream = this._ensureStream(id, executionId);
     }
     if (stream.ended) return;
-    stream.text = boundText(stream.text + delta, MAX_COMPARISON_BYTES);
+    if (kind === "thinking") {
+      // #1619: thinking never enters the text-only comparison accumulator.
+      appendAssistantBlock(stream.blocks, "thinking", delta, MAX_COMPARISON_BYTES);
+    } else {
+      stream.text = boundText(stream.text + delta, MAX_COMPARISON_BYTES);
+      appendAssistantBlock(stream.blocks, "text", delta, MAX_COMPARISON_BYTES);
+    }
     this._updateStreamRow(stream);
     this._setBusy(true);
     this._ui.requestRender();
@@ -567,8 +630,8 @@ export class TuiApp {
 
   private _appendAssistantRow(text: string, stopReason: AssistantStopReason): void {
     const component = new this._m.codingAgent.AssistantMessageComponent(
-      makeAssistantMessage(text, stopReason),
-      true,
+      makeAssistantMessage([{ type: "text", text: boundText(text, MAX_COMPARISON_BYTES) }], stopReason),
+      false,
       this._markdownTheme,
       undefined,
       1,
@@ -598,7 +661,7 @@ export class TuiApp {
     const existing = this._streams.get(id);
     if (existing) return existing;
 
-    const stream: StreamState = { id, executionId, text: "", ended: false, row: null };
+    const stream: StreamState = { id, executionId, blocks: [], text: "", ended: false, row: null };
     this._streams.set(id, stream);
     stream.row = this._newStreamRow(stream);
 
@@ -640,8 +703,8 @@ export class TuiApp {
 
   private _newStreamRow(_stream: StreamState): unknown {
     const component = new this._m.codingAgent.AssistantMessageComponent(
-      makeAssistantMessage("", "pending"),
-      true,
+      makeAssistantMessage([{ type: "text", text: "" }], "pending"),
+      false,
       this._markdownTheme,
       undefined,
       1,
@@ -653,7 +716,7 @@ export class TuiApp {
   private _updateStreamRow(stream: StreamState): void {
     const row = stream.row as { updateContent?: (m: unknown) => void } | null;
     if (row && typeof row.updateContent === "function") {
-      row.updateContent(makeAssistantMessage(stream.text, "pending"));
+      row.updateContent(makeAssistantMessage(stream.blocks, "pending"));
     }
   }
 

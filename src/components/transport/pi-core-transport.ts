@@ -1,5 +1,5 @@
 import { logDebug, logInfo, logWarn } from "../logger.js";
-import type { IKiroTransport, PromptRequestContext, RuntimeUsageSnapshot, RuntimeStatusSnapshot } from "./kiro-transport.js";
+import type { IKiroTransport, PromptRequestContext, ReasoningEffort, ReasoningEffortState, RuntimeUsageSnapshot, RuntimeStatusSnapshot } from "./kiro-transport.js";
 import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
 import type { ModelHealthRegistry } from "./model-health-registry.js";
 import { FallbackPolicy } from "./fallback-policy.js";
@@ -14,7 +14,7 @@ import type { AgentMessage } from "./pi-core-types.js";
 import { createCurrentTurnMessage, PiCoreContractError } from "./pi-core-types.js";
 import type { OutputObserver } from "../session-output-feed.js";
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
-import { buildPiModel, pickPiApi } from "./pi-ai-adapter.js";
+import { resolveCandidateModel } from "./pi-ai-adapter.js";
 import { candidateKey } from "./model-candidates.js";
 import { PiCoreToolExecutionError, buildTerminalDiagnostic } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
@@ -35,6 +35,14 @@ export function extractAssistantText(content: unknown): string {
     ))
     .map((part) => part.text)
     .join("");
+}
+
+/** #1619: true when an assistant message content array carries a tool call. */
+export function hasToolCallContent(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (part) => typeof part === "object" && part !== null && (part as { type?: unknown }).type === "toolCall",
+  );
 }
 
 export interface PiCoreTransportOptions {
@@ -102,7 +110,20 @@ export class PiCoreTransport implements IKiroTransport {
   onReady?: () => void;
   onIntermediateResponse?: (text: string) => void;
   onToolCallStart?: (toolName: string) => void;
-  onSegmentBreak?: (text: string) => void;
+  onSegmentBreak?: (text: string) => void | Promise<void>;
+  /** #1619: typed live output deltas (text + thinking) for shared consumers. */
+  onOutputDelta?: (event: import("./kiro-transport.js").OutputDelta) => void;
+
+  /** #1619: session-scoped requested reasoning effort (survives reset/fallback). */
+  private requestedEffort: ReasoningEffort;
+  /** #1619: effective level from Pi clamping — the last candidate commit wins. */
+  private effectiveEffort: ReasoningEffort;
+  /** #1619: candidate that actually committed this session (owns live status). */
+  private committedCandidate: CandidateSpec | null = null;
+  /** #1619: context tokens measured from the last valid assistant usage. */
+  private currentContextTokens: number | null = null;
+  /** #1619: context window paired with the committed candidate. */
+  private currentContextWindow: number | null = null;
 
   constructor(opts: PiCoreTransportOptions) {
     this.config = { candidates: opts.candidates, systemPrompt: opts.systemPrompt, role: opts.role };
@@ -114,14 +135,59 @@ export class PiCoreTransport implements IKiroTransport {
     this.maxPromptRounds = opts.maxPromptRounds;
     this.maxCandidateRounds = opts.maxCandidateRounds;
     this.policy = new FallbackPolicy(opts.candidates, opts.healthRegistry);
+    // #1619: baseline from the primary candidate's effort-style config; a
+    // transport without one starts at Pi's truthful headless baseline.
+    const primary = opts.candidates[0];
+    this.requestedEffort = primary?.thinking?.style === "effort"
+      ? primary.thinking.default
+      : "off";
+    this.effectiveEffort = this.requestedEffort;
   }
 
   get isReady(): boolean { return this._isReady; }
-  get contextPercent(): number { return -1; }
+  /** #1619: live measured context percentage (0-100) or -1 when unknown. */
+  get contextPercent(): number {
+    const snapshot = this.getRuntimeStatus();
+    if (snapshot.contextPercent !== undefined && snapshot.contextPercent >= 0) {
+      return Math.round(snapshot.contextPercent * 10) / 10;
+    }
+    return -1;
+  }
   get answerOnly(): string { return this._lastResponse; }
   get toolCallsSucceeded(): number { return this._toolCallsSucceeded; }
   get intermediateDeliveredText(): string { return this._intermediateText; }
   get transportCommands(): string[] { return []; }
+
+  /**
+   * #1619: change the attached session's reasoning effort. Resolves the
+   * request against the primary Pi model's clamping semantics, stores the
+   * effective level, and returns both. Never reaches into an active host, so
+   * an in-flight provider request remains unchanged; the next turn carries it.
+   */
+  setReasoningEffort(level: ReasoningEffort): ReasoningEffortState {
+    this.requestedEffort = level;
+    const primary = this.config.candidates[0];
+    if (!primary) {
+      this.effectiveEffort = level;
+      return { requested: level, effective: level };
+    }
+    const resolved = resolveCandidateModel(primary, level, false);
+    this.effectiveEffort = resolved.effective;
+    return { requested: level, effective: resolved.effective };
+  }
+
+  /** #1619: clear measured context usage (reset/compaction). */
+  invalidateContextUsage(): void {
+    this.currentContextTokens = null;
+  }
+
+  /** #1619: resolve a candidate's model with the session's requested effort. */
+  private resolveModel(
+    candidate: Parameters<typeof resolveCandidateModel>[0],
+    hasImage: boolean,
+  ) {
+    return resolveCandidateModel(candidate, this.requestedEffort, hasImage);
+  }
 
   setSystemPrompt(prompt: string): void {
     this.config.systemPrompt = prompt;
@@ -260,15 +326,7 @@ export class PiCoreTransport implements IKiroTransport {
       const modelForCandidate = (key: string) => {
         const candidate = this.config.candidates.find((item) => candidateKey(item.model, item.endpoint) === key);
         if (!candidate) return undefined;
-        return buildPiModel({
-          model: candidate.model,
-          endpoint: candidate.endpoint,
-          apiKey: candidate.apiKey,
-          apiFormat: candidate.apiFormat,
-          thinking: candidate.thinking,
-          maxOutput: 4096,
-          contextWindow: candidate.maxContext,
-        }, pickPiApi(candidate.apiFormat), Boolean(image), candidate.provider);
+        return this.resolveModel(candidate, Boolean(image)).model;
       };
       const safety = createPiExecutionSafetyController(this.policy, {
         maxPromptRounds: this.maxToolRoundsOverride ?? this.maxPromptRounds,
@@ -304,16 +362,8 @@ export class PiCoreTransport implements IKiroTransport {
       // Build the Pi model
       const first = this.config.candidates[0];
       const piModel = first
-        ? buildPiModel({
-          model: first.model,
-          endpoint: first.endpoint,
-          apiKey: first.apiKey,
-          apiFormat: first.apiFormat,
-          thinking: first.thinking,
-          maxOutput: 4096,
-          contextWindow: first.maxContext,
-        }, pickPiApi(first.apiFormat), Boolean(image), first.provider)
-        : buildPiModel({ model: "unknown", endpoint: "", maxOutput: 4096, contextWindow: 128000 }, pickPiApi(), Boolean(image), "unknown");
+        ? this.resolveModel(first, Boolean(image)).model
+        : resolveCandidateModel({ model: "unknown", endpoint: "", maxContext: 128000, provider: "unknown" }, this.requestedEffort, Boolean(image)).model;
 
       const timeoutOverride = this.timeoutOverrideMs;
       const deadlineAt = context?.deadlineAt
@@ -326,6 +376,7 @@ export class PiCoreTransport implements IKiroTransport {
         telemetry: context?.executionTelemetry,
         deadlineAt,
         providerInactivityTimeoutMs: context?.providerInactivityTimeoutMs ?? 180_000,
+        reasoningEffort: this.requestedEffort,
         onCandidateCommitted: (candidate) => {
           const successful: CandidateSpec = {
             model: candidate.model,
@@ -337,7 +388,14 @@ export class PiCoreTransport implements IKiroTransport {
           };
           this.lastSuccessfulCandidate = successful;
           this.onLastSuccessfulChanged?.(successful);
-          logDebug(TAG, `Candidate committed: ${candidate.model}`);
+          // #1619: the candidate that actually commits owns live provider/model/
+          // window/effective-effort state. Fallback preserves the requested
+          // level, not the prior candidate's clamped effective level.
+          this.committedCandidate = successful;
+          const resolved = this.resolveModel(candidate, Boolean(image));
+          this.effectiveEffort = resolved.effective;
+          this.currentContextWindow = candidate.maxContext;
+          logDebug(TAG, `Candidate committed: ${candidate.model} (effort: ${this.requestedEffort} → ${resolved.effective})`);
         },
         onTerminalFailure: (failure) => {
           executionState.terminalFailure = failure;
@@ -387,6 +445,9 @@ export class PiCoreTransport implements IKiroTransport {
           model: piModel,
           messages: hostMessages,
           tools: tools as unknown as import("@earendil-works/pi-agent-core").AgentTool<any>[],
+          // #1619: the clamped effective level for the initial model; Pi Agent
+          // turns it into the first request's reasoning option.
+          thinkingLevel: this.resolveModel(first ?? { model: "unknown", endpoint: "", maxContext: 128000, provider: "unknown" }, Boolean(image)).effective,
         },
         streamFn,
         session: this.session,
@@ -404,7 +465,21 @@ export class PiCoreTransport implements IKiroTransport {
           candidateModelFn: modelForCandidate,
         },
         outputObserver,
-        onEvent: (event) => {
+        // #1619: pair every safety-selected replacement model with a fresh
+        // effective thinking level derived from the session's requested effort.
+        resolveThinkingLevelForModel: (model) => {
+          const candidate = this.config.candidates.find(
+            (item) => candidateKey(item.model, item.endpoint) === candidateKey(model.id, model.baseUrl ?? model.provider),
+          ) ?? this.config.candidates.find((item) => item.model === model.id);
+          const source = candidate ?? {
+            model: model.id,
+            provider: model.provider ?? "unknown",
+            endpoint: model.baseUrl ?? "",
+            maxContext: this.currentContextWindow ?? this.config.candidates[0]?.maxContext ?? 128000,
+          };
+          return this.resolveModel(source, Boolean(image)).effective;
+        },
+        onEvent: async (event) => {
           if (event.type === "tool_execution_start") {
             this.onToolCallStart?.(event.toolName);
           }
@@ -414,6 +489,18 @@ export class PiCoreTransport implements IKiroTransport {
               const text = extractAssistantText(msg.content);
               responseText = text;
               this._lastResponse = text;
+              // #1619: complete user-visible assistant text before a tool
+              // round is delivered before tool execution continues. Only tool-
+              // carrying messages are semantic segments — awaited so the
+              // platform pipeline can reconcile before the tool status lands.
+              // An interim send failure never rejects the model turn.
+              if (hasToolCallContent(msg.content) && text) {
+                try {
+                  await this.onSegmentBreak?.(text);
+                } catch (err) {
+                  logWarn(TAG, `Segment break delivery failed (isolated): ${err instanceof Error ? err.message : String(err)}`);
+                }
+              }
             }
           }
           if (event.type === "message_update") {
@@ -421,12 +508,15 @@ export class PiCoreTransport implements IKiroTransport {
             if (streamEv?.type === "text_delta" && streamEv.delta) {
               this._intermediateText += streamEv.delta;
               this.onIntermediateResponse?.(streamEv.delta);
+              this.onOutputDelta?.({ kind: "text", text: streamEv.delta });
+            }
+            if (streamEv?.type === "thinking_delta" && streamEv.delta) {
+              this.onOutputDelta?.({ kind: "thinking", text: streamEv.delta });
             }
           }
           if (event.type === "tool_execution_end" && !event.isError) {
             this._toolCallsSucceeded++;
           }
-          return Promise.resolve();
         },
       });
 
@@ -472,6 +562,16 @@ export class PiCoreTransport implements IKiroTransport {
         const hostUsage = host.lastUsage;
         if (hostUsage) {
           this._lastUsage = hostUsage;
+        }
+        // #1619: pair the current-context token measurement with the window of
+        // the candidate that actually committed. Only valid usage counts.
+        const contextTokens = host.lastContextTokens;
+        if (contextTokens !== null && contextTokens > 0) {
+          this.currentContextTokens = contextTokens;
+          this.currentContextWindow = this.committedCandidate?.maxContext
+            ?? this.config.candidates[0]?.maxContext
+            ?? null;
+          logDebug(TAG, `Context usage captured: ${contextTokens} tokens / ${this.currentContextWindow ?? "?"} window`);
         }
 
         // #1595: the terminal cause leads; a prior tool failure is supporting
@@ -519,6 +619,11 @@ export class PiCoreTransport implements IKiroTransport {
 
   async resetSession(_sessionKey: string): Promise<void> {
     this.policy = new FallbackPolicy(this.config.candidates, this.healthRegistry);
+    // #1619: reset/compaction invalidates measured usage; requested effort
+    // survives on the same transport instance.
+    this.currentContextTokens = null;
+    this.currentContextWindow = null;
+    this.committedCandidate = null;
   }
 
   async sendInterrupt(_reason?: string): Promise<void> {
@@ -534,6 +639,9 @@ export class PiCoreTransport implements IKiroTransport {
     }
     this.activeHost = null;
     this._isReady = false;
+    this.committedCandidate = null;
+    this.currentContextTokens = null;
+    this.currentContextWindow = null;
   }
 
   lastUsage(): RuntimeUsageSnapshot | null {
@@ -541,11 +649,26 @@ export class PiCoreTransport implements IKiroTransport {
   }
 
   getRuntimeStatus(): RuntimeStatusSnapshot {
-    return {
+    const live = this.committedCandidate
+      ?? this.config.candidates[0] ?? null;
+    const contextWindow = this.currentContextWindow ?? live?.maxContext ?? undefined;
+    const tokens = this.currentContextTokens;
+    let contextPercent: number | undefined;
+    if (tokens !== null && tokens > 0 && contextWindow !== undefined && contextWindow > 0) {
+      contextPercent = Math.min(100, Math.max(0, (tokens / contextWindow) * 100));
+    }
+    const snapshot: RuntimeStatusSnapshot = {
       route: "pi-ai",
-      provider: this.config.candidates[0]?.provider,
-      model: this.config.candidates[0]?.model,
+      provider: live?.provider,
+      model: live?.model,
+      contextWindow,
+      contextPercent,
+      reasoning: this.effectiveEffort,
       lastTurnUsage: this._lastUsage ?? undefined,
     };
+    if (this.effectiveEffort !== this.requestedEffort) {
+      snapshot.reasoningRequested = this.requestedEffort;
+    }
+    return snapshot;
   }
 }

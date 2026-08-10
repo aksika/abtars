@@ -149,7 +149,7 @@ describe("TuiFrameWriter — oversized frame bounding", () => {
   it("bounds an oversized chunk delta and marks the stream truncated", () => {
     const { writer, socket, prime } = makeWriter({ maxFrameBytes: 80 });
     prime();
-    writer.enqueue({ t: "chunk", id: "s1", delta: "y".repeat(1000) });
+    writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: "y".repeat(1000) });
     expect(writer.truncatedStreamCount).toBe(1);
     const term = writer.queuedFrameList.find(
       (f) => f.t === "chunk-end" && (f as any).reason === "truncated",
@@ -172,7 +172,7 @@ describe("TuiFrameWriter — oversized frame bounding", () => {
   it("preserves execution identity when bounding a chunk frame", () => {
     const { writer, prime } = makeWriter({ maxFrameBytes: 80 });
     prime();
-    writer.enqueue({ t: "chunk", id: "s1", executionId: "e1", delta: "y".repeat(1000) });
+    writer.enqueue({ t: "chunk", id: "s1", executionId: "e1", kind: "text", delta: "y".repeat(1000) });
     const chunk = writer.queuedFrameList.find((f) => f.t === "chunk") as Extract<TuiServerFrame, { t: "chunk" }>;
     expect(chunk?.executionId).toBe("e1");
     writer.close();
@@ -182,7 +182,7 @@ describe("TuiFrameWriter — oversized frame bounding", () => {
     const { writer, socket, prime } = makeWriter({ maxFrameBytes: 80 });
     prime();
     writer.enqueue({ t: "stream-start", id: "s1", executionId: "e1" });
-    writer.enqueue({ t: "chunk", id: "s1", executionId: "e1", delta: "y".repeat(1000) });
+    writer.enqueue({ t: "chunk", id: "s1", executionId: "e1", kind: "text", delta: "y".repeat(1000) });
     expect(writer.truncatedStreamCount).toBe(1);
     const term = writer.queuedFrameList.find(
       (f) => f.t === "chunk-end" && (f as any).reason === "truncated",
@@ -196,7 +196,7 @@ describe("TuiFrameWriter — oversized frame bounding", () => {
     prime();
     writer.enqueue({ t: "stream-start", id: "s1", executionId: "e1" });
     writer.clearAttachment();
-    writer.enqueue({ t: "chunk", id: "s1", delta: "y".repeat(1000) });
+    writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: "y".repeat(1000) });
     const term = writer.queuedFrameList.find(
       (f) => f.t === "chunk-end" && (f as any).reason === "truncated",
     ) as Extract<TuiServerFrame, { t: "chunk-end" }> | undefined;
@@ -240,13 +240,27 @@ describe("TuiFrameWriter — coalescing", () => {
   it("coalesces same-stream chunks and preserves stream identity", () => {
     const { writer, prime } = makeWriter({ maxChunkBytes: 100 });
     prime();
-    writer.enqueue({ t: "chunk", id: "s1", delta: "ab" });
-    writer.enqueue({ t: "chunk", id: "s1", delta: "cd" });
-    writer.enqueue({ t: "chunk", id: "s2", delta: "zz" });
+    writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: "ab" });
+    writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: "cd" });
+    writer.enqueue({ t: "chunk", id: "s2", kind: "text", delta: "zz" });
     const chunks = writer.queuedFrameList.filter((f) => f.t === "chunk") as Array<{ id: string; delta: string }>;
     expect(chunks.length).toBe(2);
     const s1 = chunks.find((c) => c.id === "s1")!;
     expect(s1.delta).toBe("abcd");
+    writer.close();
+  });
+
+  it("#1619: never coalesces thinking and text deltas of the same stream", () => {
+    const { writer, prime } = makeWriter({ maxChunkBytes: 100 });
+    prime();
+    writer.enqueue({ t: "chunk", id: "s1", kind: "thinking", delta: "ponder" });
+    writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: "answer" });
+    writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: " tail" });
+    const chunks = writer.queuedFrameList.filter((f) => f.t === "chunk") as Array<{ id: string; kind: string; delta: string }>;
+    expect(chunks.length).toBe(2);
+    expect(chunks[0]).toMatchObject({ id: "s1", kind: "thinking", delta: "ponder" });
+    // adjacent text deltas coalesce into their own block, preserving order.
+    expect(chunks[1]).toMatchObject({ id: "s1", kind: "text", delta: "answer tail" });
     writer.close();
   });
 
@@ -290,9 +304,9 @@ describe("TuiFrameWriter — coalescing", () => {
   it("caps coalesced chunks at maxChunkBytes and marks the stream truncated", () => {
     const { writer, prime } = makeWriter({ maxChunkBytes: 10 });
     prime();
-    writer.enqueue({ t: "chunk", id: "s1", delta: "12345" });
-    writer.enqueue({ t: "chunk", id: "s1", delta: "67890" }); // combined 10, ok
-    writer.enqueue({ t: "chunk", id: "s1", delta: "MORE" });  // exceeds cap → truncated
+    writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: "12345" });
+    writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: "67890" }); // combined 10, ok
+    writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: "MORE" });  // exceeds cap → truncated
     const s1 = (writer.queuedFrameList.find((f) => f.t === "chunk" && (f as any).id === "s1") as any);
     expect(s1.delta.length).toBeLessThanOrEqual(10);
     expect(writer.truncatedStreamCount).toBe(1);
@@ -339,10 +353,10 @@ describe("TuiFrameWriter — model stream truncation", () => {
     }
     expect(writer.queuedFrames).toBe(10);
     // First delta for s1 is dropped → truncated terminal emitted, stream marked.
-    expect(writer.enqueue({ t: "chunk", id: "s1", delta: "hello" })).toBe("dropped");
+    expect(writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: "hello" })).toBe("dropped");
     expect(writer.truncatedStreamCount).toBe(1);
     // Later deltas for the same stream are rejected, no new terminal.
-    expect(writer.enqueue({ t: "chunk", id: "s1", delta: "world" })).toBe("dropped");
+    expect(writer.enqueue({ t: "chunk", id: "s1", kind: "text", delta: "world" })).toBe("dropped");
     expect(writer.truncatedStreamCount).toBe(1);
     const terms = writer.queuedFrameList.filter(
       (f) => f.t === "chunk-end" && (f as any).reason === "truncated",

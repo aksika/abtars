@@ -78,16 +78,17 @@ describe("SessionOutputObserver", () => {
     expect(sid).toBeTruthy();
   });
 
-  it("excludes thinking deltas from TUI frames", () => {
+  it("publishes thinking deltas with their typed kind in order", () => {
     const feed = new SessionOutputFeed();
-    const received: Array<{ type: string; text?: string }> = [];
+    const received: Array<{ type: string; text?: string; kind?: string }> = [];
     feed.subscribe({ sessionId: SID }, (e) => received.push(e as any));
     const obs = createOutputObserver(feed, { sessionId: SID, executionId: EID });
     obs.onDelta({ kind: "thinking", text: "secret thought" });
     obs.onDelta({ kind: "text", text: "visible" });
     const deltas = received.filter((e) => e.type === "delta");
-    expect(deltas.length).toBe(1);
-    expect(deltas[0]!.text).toBe("visible");
+    expect(deltas.length).toBe(2);
+    expect(deltas[0]).toMatchObject({ kind: "thinking", text: "secret thought" });
+    expect(deltas[1]).toMatchObject({ kind: "text", text: "visible" });
   });
 
   it("bounds delta and tool name payloads", () => {

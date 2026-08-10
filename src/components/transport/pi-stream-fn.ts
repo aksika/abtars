@@ -37,6 +37,10 @@ export interface AbtarsPiStreamFnOptions {
   createPiAiAttempt?: ProviderAttemptFactory;
   onCandidateCommitted?: (candidate: ModelCandidate) => void;
   providerRequestIdFactory?: () => string;
+  /** #1619: session-scoped requested reasoning effort threaded into every
+   *  candidate model build so `model.reasoning` matches the requested level
+   *  regardless of which candidate commits. */
+  reasoningEffort?: import("./kiro-transport.js").ReasoningEffort;
   /** #1506: Max inactivity (no stream event) before candidate is aborted.
    *  Capped by remaining absolute deadline when passed via deadlineAt. */
   providerInactivityTimeoutMs?: number;
@@ -281,7 +285,11 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           Array.isArray(message.content)
             && message.content.some((part) => part.type === "image"),
         );
-        const piModel = buildPiModel({ ...candidate, maxOutput: model.maxTokens }, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);
+        const piModel = buildPiModel({
+          ...candidate,
+          reasoningEffort: options.reasoningEffort,
+          maxOutput: model.maxTokens,
+        }, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);
 
         let attemptCommitted = false;
         let retried = false;

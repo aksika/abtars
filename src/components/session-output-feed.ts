@@ -33,7 +33,7 @@ export interface OutputObserver {
 
 export type SessionOutputEvent =
   | { type: "start"; sessionId: string; executionId: string; streamId: string }
-  | { type: "delta"; sessionId: string; executionId: string; streamId: string; text: string }
+  | { type: "delta"; sessionId: string; executionId: string; streamId: string; kind: SessionOutputStreamKind; text: string }
   | { type: "tool-start"; sessionId: string; executionId: string; streamId: string; name: string }
   | { type: "end"; sessionId: string; executionId: string; streamId: string; reason: SessionOutputEndReason };
 
@@ -74,11 +74,12 @@ export class SessionOutputObserver implements OutputObserver {
 
   onDelta(event: { kind: SessionOutputStreamKind; text: string }): void {
     if (!this._valid || this._ended) return;
-    // Thinking is excluded from TUI frames by design — only `text` streams.
-    if (event.kind !== "text") return;
+    // #1619: thinking is no longer filtered here — the typed kind rides the
+    // event so the TUI can render ordered thinking/text content natively.
+    // Bounds and control stripping still apply to both kinds.
     const text = truncateUtf8(event.text, MAX_DELTA_BYTES);
     if (!text) return;
-    this._feed.publish({ type: "delta", ...this._ids, streamId: this.streamId, text });
+    this._feed.publish({ type: "delta", kind: event.kind, ...this._ids, streamId: this.streamId, text });
   }
 
   onToolStart(event: { name: string }): void {

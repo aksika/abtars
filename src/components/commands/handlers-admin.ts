@@ -258,7 +258,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/restart — Restart bridge",
     "/sleep — Sleep status / /sleep resume / /sleep now",
     "/whoami — Your user info & clearance",
-    "/effort (alias /thinking) — Reasoning effort (off/low/medium/high/xhigh) + show/hide thinking",
+    "/effort (alias /thinking) — Reasoning effort (off/low/medium/high/xhigh)",
     "/kanban — Kanban board",
     "/tribe — Peer status (Orc + enrolled peers)",
     "/pi run --workspace <alias> <goal> — Start a Pi coding run",

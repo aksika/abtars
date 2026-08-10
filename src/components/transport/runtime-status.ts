@@ -23,6 +23,7 @@ export function resolveRuntimeStatus(
   if (live?.contextWindow !== undefined) result.contextWindow = live.contextWindow;
   if (live?.autoCompaction !== undefined) result.autoCompaction = live.autoCompaction;
   if (live?.reasoning !== undefined) result.reasoning = live.reasoning;
+  if (live?.reasoningRequested !== undefined) result.reasoningRequested = live.reasoningRequested;
   if (live?.lastTurnUsage !== undefined) result.lastTurnUsage = live.lastTurnUsage;
   return result;
 }

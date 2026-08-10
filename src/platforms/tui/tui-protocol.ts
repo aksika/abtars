@@ -51,7 +51,7 @@ export type TuiServerFrame =
   | { t: "error"; message: string }                                       // attach/route rejected (fatal)
   | { t: "message"; role: "assistant" | "system"; markdown: string; executionId?: string }  // whole response
   | { t: "stream-start"; id: string; executionId: string }               // #1612: visible stream start
-  | { t: "chunk"; id: string; executionId?: string; delta: string }      // live stream delta
+  | { t: "chunk"; id: string; executionId?: string; kind: "text" | "thinking"; delta: string }  // #1619: typed live delta
   | { t: "chunk-end"; id: string; executionId?: string; reason?: "complete" | "error" | "cancelled" | "truncated" }
   | { t: "tool-start"; id: string; executionId?: string; name: string }  // #1338: bounded tool-start name
   | { t: "typing" }

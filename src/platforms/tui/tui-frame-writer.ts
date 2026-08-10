@@ -334,12 +334,15 @@ export class TuiFrameWriter {
         for (let i = this._queue.length - 1; i >= 0; i--) {
           const q = this._queue[i]!;
           if (q.cls === "chunk" && q.streamId === streamId) {
-            const existing = (q.frame as { delta: string }).delta;
-            const combined = existing + (frame as { delta: string }).delta;
+            // #1619: typed content — only same-kind deltas coalesce; a
+            // thinking→text transition must open a new block in order.
+            const existing = q.frame as { kind?: "text" | "thinking"; delta: string };
+            const incoming = frame as { kind: "text" | "thinking"; delta: string; executionId?: string };
+            if (existing.kind !== incoming.kind) return false;
+            const combined = existing.delta + incoming.delta;
             const capped = truncateUtf8(combined, this._maxChunkBytes);
-            const merged = q.frame as { delta: string; executionId?: string };
+            const merged = q.frame as { kind: "text" | "thinking"; delta: string; executionId?: string };
             merged.delta = capped;
-            const incoming = frame as { executionId?: string };
             if (incoming.executionId !== undefined) merged.executionId = incoming.executionId;
             q.bytes = encodedBytes(q.frame);
             this._queuedBytes = this._queue.reduce((s, x) => s + x.bytes, 0);
@@ -490,7 +493,7 @@ function boundFrame(frame: TuiServerFrame, maxFrameBytes: number, _maxChunkBytes
       case "message":
         return { t: "message", role: frame.role, markdown: truncateUtf8(frame.markdown, budget) + TRUNCATION_MARKER, executionId: frame.executionId };
       case "chunk":
-        return { t: "chunk", id: frame.id, delta: truncateUtf8(frame.delta, budget), executionId: frame.executionId };
+        return { t: "chunk", id: frame.id, kind: frame.kind, delta: truncateUtf8(frame.delta, budget), executionId: frame.executionId };
       case "stream-start":
         return { t: "stream-start", id: frame.id, executionId: frame.executionId };
       case "activity":

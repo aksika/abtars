@@ -43,9 +43,14 @@ import type {
   CreateProviderOptions,
 } from "@earendil-works/pi-ai";
 
+import {
+  clampThinkingLevel,
+} from "@earendil-works/pi-ai";
+
 import { logWarn } from "../logger.js";
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import type { PiModuleSpecifier } from "../pi-installation.js";
+import type { ReasoningEffort } from "./kiro-transport.js";
 
 // Shared message types (moved from deleted conversation-session.ts)
 export type ContentPart =
@@ -197,6 +202,51 @@ export function buildPiModel(candidate: PiAiCandidate, api: Api, hasImage: boole
     contextWindow: candidate.contextWindow ?? 0,
     maxTokens: candidate.maxOutput,
   };
+}
+
+/** #1619: a candidate model plus its requested and Pi-clamped effective levels. */
+export interface ResolvedPiModel {
+  model: Model<Api>;
+  requested: ReasoningEffort;
+  effective: ReasoningEffort;
+}
+
+/**
+ * #1619: resolve a candidate's model with a session-scoped requested effort
+ * threaded through, then clamp the request against Pi's authoritative model
+ * capability semantics (`clampThinkingLevel`). An effective "off" forces
+ * `model.reasoning` false so no reasoning param is emitted. A custom Pi model
+ * without a non-null `thinkingLevelMap.xhigh` never claims xhigh — Pi's
+ * clamped result wins.
+ */
+export function resolveCandidateModel(
+  candidate: {
+    model: string;
+    endpoint: string;
+    apiKey?: string;
+    apiFormat?: ApiFormat;
+    thinking?: PiAiCandidate["thinking"];
+    maxContext: number;
+    provider: string;
+  },
+  requestedEffort: ReasoningEffort,
+  hasImage: boolean,
+): ResolvedPiModel {
+  const piCandidate: PiAiCandidate = {
+    model: candidate.model,
+    endpoint: candidate.endpoint,
+    apiKey: candidate.apiKey,
+    apiFormat: candidate.apiFormat,
+    thinking: candidate.thinking,
+    reasoningEffort: requestedEffort,
+    maxOutput: 4096,
+    contextWindow: candidate.maxContext,
+  };
+  const model = buildPiModel(piCandidate, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);
+  const clamped = clampThinkingLevel(model, requestedEffort);
+  const effective = clamped === "minimal" || clamped === "max" ? ("high" as ReasoningEffort) : (clamped as ReasoningEffort);
+  if (effective === "off") model.reasoning = false;
+  return { model, requested: requestedEffort, effective };
 }
 
 const DATA_URL_RE = /^data:([^;,]+);base64,(.+)$/s;

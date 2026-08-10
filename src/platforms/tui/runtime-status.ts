@@ -15,6 +15,8 @@ export interface TuiRuntimeStatus {
   contextWindow?: number;
   autoCompaction?: boolean;
   reasoning?: RuntimeStatusSnapshot["reasoning"];
+  /** #1619: requested level when Pi clamped it to a different effective value. */
+  reasoningRequested?: RuntimeStatusSnapshot["reasoningRequested"];
   lastTurnUsage?: TuiUsageSnapshot;
   sessionUsage?: TuiUsageSnapshot;
 }
@@ -54,6 +56,7 @@ export function buildTuiRuntimeStatus(session: ManagedSession, revision: number)
     contextWindow: transportStatus.contextWindow,
     autoCompaction: transportStatus.autoCompaction,
     reasoning: transportStatus.reasoning,
+    reasoningRequested: transportStatus.reasoningRequested,
     lastTurnUsage: truthfulUsage(withCacheHit(transportStatus.lastTurnUsage ?? session.lastTurnUsage)),
     sessionUsage: truthfulUsage(withCacheHit(session.sessionUsage)),
   };

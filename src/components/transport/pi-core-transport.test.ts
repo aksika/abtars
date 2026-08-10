@@ -173,6 +173,18 @@ describe("PiCoreTransport", () => {
     expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
   });
 
+  it("#1619: threads the session's requested reasoning effort into the streamFn", async () => {
+    mockCreatePiStreamFn.mockClear();
+    const t = makeTransport();
+    t.setReasoningEffort("high");
+    await t.initialize();
+    const promise = t.sendPrompt("sess_1", "sleep");
+    await expect(promise).rejects.toThrow(PiCoreContractError);
+    expect(mockCreatePiStreamFn).toHaveBeenCalledWith(expect.objectContaining({
+      reasoningEffort: "high",
+    }));
+  });
+
   it("forwards the caller's provider inactivity allowance to Pi", async () => {
     mockCreatePiStreamFn.mockClear();
     const t = makeTransport();
@@ -402,5 +414,97 @@ describe("context projection at transport level", () => {
     expect(result.messages[1]?.content).toEqual([{ type: "text", text: "second" }]);
     expect(result.messages[2]?.role).toBe("user");
     expect(result.messages[2]?.content).toBe("third");
+  });
+});
+
+describe("#1619 reasoning effort (session-scoped)", () => {
+  it("initializes requested effort from effort-style thinking config; off otherwise", () => {
+    const t = makeTransport();
+    const status = t.getRuntimeStatus();
+    expect(status.reasoning).toBe("off");
+    const registry = new ModelHealthRegistry();
+    const withConfig = new PiCoreTransport({
+      role: "main",
+      systemPrompt: "",
+      candidates: [{ ...makeCandidates()[0]!, thinking: { style: "effort", default: "medium" } }],
+      healthRegistry: registry,
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+    });
+    expect(withConfig.getRuntimeStatus().reasoning).toBe("medium");
+  });
+
+  it("setReasoningEffort stores requested and reports the Pi-clamped effective value", () => {
+    const t = makeTransport();
+    const state = t.setReasoningEffort("high");
+    expect(state).toEqual({ requested: "high", effective: "high" });
+  });
+
+  it("clamps xhigh to the custom model's supported maximum (Pi authoritative)", () => {
+    const t = makeTransport();
+    const state = t.setReasoningEffort("xhigh");
+    expect(state.requested).toBe("xhigh");
+    expect(state.effective).toBe("high");
+  });
+
+  it("off is a real level and disables reasoning", () => {
+    const t = makeTransport();
+    const state = t.setReasoningEffort("off");
+    expect(state.effective).toBe("off");
+  });
+
+  it("runtime status publishes effective reasoning and requested when clamped", () => {
+    const t = makeTransport();
+    t.setReasoningEffort("xhigh");
+    const status = t.getRuntimeStatus();
+    expect(status.reasoning).toBe("high");
+    expect(status.reasoningRequested).toBe("xhigh");
+    t.setReasoningEffort("high");
+    const aligned = t.getRuntimeStatus();
+    expect(aligned.reasoningRequested).toBeUndefined();
+  });
+
+  it("resetSession retains requested effort but clears measured context", async () => {
+    const t = makeTransport();
+    t.setReasoningEffort("high");
+    await t.resetSession("s1");
+    expect(t.getRuntimeStatus().reasoning).toBe("high");
+    expect(t.getRuntimeStatus().contextPercent).toBeUndefined();
+  });
+});
+
+describe("#1619 context accounting (truthful)", () => {
+  it("reports unknown percentage with the configured window before valid usage", () => {
+    const t = makeTransport();
+    const status = t.getRuntimeStatus();
+    expect(status.contextPercent).toBeUndefined();
+    expect(status.contextWindow).toBe(128000);
+    expect(t.contextPercent).toBe(-1);
+  });
+
+  it("invalidateContextUsage clears measured tokens only", () => {
+    const t = makeTransport();
+    t.invalidateContextUsage();
+    const status = t.getRuntimeStatus();
+    expect(status.contextPercent).toBeUndefined();
+    expect(status.contextWindow).toBe(128000);
+  });
+
+  it("computes a display-clamped percentage from tokens and the committed window", () => {
+    const t = makeTransport();
+    (t as unknown as { currentContextTokens: number | null }).currentContextTokens = 64000;
+    (t as unknown as { currentContextWindow: number | null }).currentContextWindow = 128000;
+    const status = t.getRuntimeStatus();
+    expect(status.contextPercent).toBe(50);
+    expect(t.contextPercent).toBe(50);
+  });
+});
+
+describe("#1619 typed output deltas and semantic segments", () => {
+  it("hasToolCallContent detects toolCall blocks only", async () => {
+    const { hasToolCallContent } = await import("./pi-core-transport.js");
+    expect(hasToolCallContent([{ type: "text", text: "hi" }])).toBe(false);
+    expect(hasToolCallContent([{ type: "toolCall", id: "t1", name: "search", arguments: {} }])).toBe(true);
+    expect(hasToolCallContent("plain string")).toBe(false);
+    expect(hasToolCallContent(null)).toBe(false);
   });
 });

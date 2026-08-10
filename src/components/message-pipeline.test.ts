@@ -134,6 +134,7 @@ describe("handleInboundMessage", () => {
     // Mock it to wire the describe-block's transport (recreated fresh per test) so
     // ctx.transport and deps.transport resolve to the same object.
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      console.log("ensureSessionTransport: setting transport id=", (transport as any)._id);
       session.transport = transport;
     });
     vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
@@ -438,6 +439,7 @@ describe("citation detection (#1270)", () => {
     abmindReturn = { detectCitations: detectCitationsSpy, renderMemory: vi.fn().mockReturnValue("test memory") };
     const spinMod = await import("./spin.js");
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      console.log("ensureSessionTransport: setting transport id=", (transport as any)._id);
       session.transport = transport;
     });
     vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
@@ -633,5 +635,112 @@ describe("citation detection (#1270)", () => {
       );
       expect(assistantCalls).toHaveLength(0);
     });
+  });
+});
+
+describe("#1619 incremental block delivery wiring", () => {
+  let transport: IKiroTransport;
+
+  const MASTER_REG: UserRegistry = {
+    users: [{ userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
+    byPlatformId: new Map([["master:telegram", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+    byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+  };
+
+  beforeEach(async () => {
+    transport = mockTransport();
+    setUserRegistryOverride(MASTER_REG);
+    const spinMod = await import("./spin.js");
+    const mockSession: ManagedSession = {
+      id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+      delivery: "streaming", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    };
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      console.log("ensureSessionTransport: setting transport id=", (transport as any)._id);
+      session.transport = transport;
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
+      ...mockSession, id,
+    }));
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => ({ ...mockSession }));
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+      async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
+        ...mockSession, delivery: "streaming",
+      }),
+    );
+  });
+
+  afterEach(() => {
+    setUserRegistryOverride(null);
+    vi.restoreAllMocks();
+  });
+
+  it("installs callbacks before spin() — a fast first thinking delta becomes a marked progress block", async () => {
+    const fake = transport as any;
+    fake.sendPrompt = vi.fn(async () => {
+      // Fast first delta: the model begins reasoning before the pipeline
+      // would have had time to wire callbacks after spin().
+      fake.onOutputDelta?.({ kind: "thinking", text: "pondering the question" });
+      await fake.onSegmentBreak?.("Pre-tool text.");
+      return "Pre-tool text.\n\nFinal answer.";
+    });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {});
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: unknown[]) => String(c[1]));
+    // Thinking was coalesced into exactly one marked progress block.
+    expect(sent.filter((t) => t.startsWith("💭 "))).toEqual(["💭 pondering the question"]);
+    // The pre-tool segment arrived once...
+    expect(sent.filter((t) => t.includes("Pre-tool text."))).toHaveLength(1);
+    // ...and the terminal answer excludes the already-delivered prefix.
+    expect(sent).toContain("Final answer.");
+  });
+
+  it("guest/group/TUI turns never receive master-chat progress blocks", async () => {
+    const fake = transport as any;
+    fake.sendPrompt = vi.fn(async () => {
+      fake.onOutputDelta?.({ kind: "thinking", text: "secret reasoning" });
+      return "answer";
+    });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {});
+    await handleInboundMessage(makeMsg({ isGroup: true }), adapter, deps);
+    await new Promise((r) => setTimeout(r, 20));
+    const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: unknown[]) => String(c[1]));
+    expect(sent.some((t) => t.startsWith("💭 "))).toBe(false);
+    expect(sent).toContain("answer");
+  });
+
+  it("an interim segment send failure keeps the complete final response (never lost)", async () => {
+    const fake = transport as any;
+    fake.sendPrompt = vi.fn(async () => {
+      await fake.onSegmentBreak?.("Lost segment text.");
+      return "Lost segment text.\n\nFinal answer.";
+    });
+    const adapter = mockAdapter({
+      sendMessage: vi.fn()
+        .mockRejectedValueOnce(new Error("network down"))
+        .mockResolvedValue(1),
+    });
+    const deps = mockDeps(transport, {});
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    await new Promise((r) => setTimeout(r, 20));
+    const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: unknown[]) => String(c[1]));
+    // The interim attempt failed (recorded), and the terminal delivery merged
+    // the failed segment into the complete final answer — nothing lost,
+    // nothing delivered twice.
+    const terminal = sent.filter((t) => t.includes("Final answer."));
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]).toContain("Lost segment text.");
+    expect(terminal[0]).toContain("Final answer.");
   });
 });
