@@ -9,12 +9,11 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const AGENT_API_PORT_FILE = join(homedir(), ".abtars", "state", "agent-api.port");
-
 function readPort(): number {
   try {
-    if (existsSync(AGENT_API_PORT_FILE)) {
-      return parseInt(readFileSync(AGENT_API_PORT_FILE, "utf-8").trim(), 10);
+    const portFile = join(homedir(), ".abtars", "state", "agent-api.port");
+    if (existsSync(portFile)) {
+      return parseInt(readFileSync(portFile, "utf-8").trim(), 10);
     }
   } catch {}
   return 0;
@@ -102,8 +101,13 @@ export async function kanban(args: string[]): Promise<number> {
     chat_id: chatId,
   });
 
+  // #1621: the Agent API is HTTPS-only (#1305); accept the bridge's
+  // self-signed loopback certificate for this one request, then restore the
+  // caller's TLS verification state.
+  const origReject = process.env["NODE_TLS_REJECT_UNAUTHORIZED"];
+  process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0";
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/v1/kanban`, {
+    const response = await fetch(`https://127.0.0.1:${port}/v1/kanban`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(body)) },
       body,
@@ -118,5 +122,11 @@ export async function kanban(args: string[]): Promise<number> {
   } catch (err) {
     process.stderr.write(`Connection failed: ${err instanceof Error ? err.message : String(err)}\n`);
     return 1;
+  } finally {
+    if (origReject === undefined) {
+      delete process.env["NODE_TLS_REJECT_UNAUTHORIZED"];
+    } else {
+      process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = origReject;
+    }
   }
 }
