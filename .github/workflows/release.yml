@@ -16,15 +16,34 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: 'npm'
 
-      - run: npm ci
-      - run: node esbuild.config.js
+      - name: Check version availability
+        id: version-check
+        run: |
+          VERSION=$(node -e "console.log(require('./package.json').version)")
+          if npm view "abtars@${VERSION}" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "Version ${VERSION} already published - skipping"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+            echo "Version ${VERSION} not published yet - proceeding"
+          fi
+
+      - name: Install dependencies
+        if: steps.version-check.outputs.already == 'false'
+        run: npm ci
+
+      - name: Build
+        if: steps.version-check.outputs.already == 'false'
+        run: node esbuild.config.js
 
       - name: Publish to npm (latest)
+        if: steps.version-check.outputs.already == 'false'
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Update Homebrew tap
+        if: steps.version-check.outputs.already == 'false'
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
