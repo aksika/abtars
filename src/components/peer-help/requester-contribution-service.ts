@@ -7,7 +7,7 @@
  */
 import type { PeerHelpRequestV1, PeerHelpResponseV1 } from "./contract.js";
 import { canonicalContributionHash } from "./contract.js";
-import { ContributionStore } from "./contribution-store.js";
+import { ContributionStore, type ContributionState } from "./contribution-store.js";
 import { getPeerTransport } from "../peer-transport/index.js";
 import { requireTaskDatabase, kanbanGetCard, kanbanUpdate, kanbanFail } from "../tasks/kanban-board.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
@@ -168,7 +168,11 @@ export class RequesterContributionService {
 
     if (reserve.status === "replay") {
       const existing = this.contributionStore.getContribution(input.peer, input.request.request_id);
-      if (existing && existing.state !== "pending") {
+      // #1357: Only terminal states short-circuit the resend. "unknown" and
+      // "pending" rows are re-sent against the SAME (peer, request_id) — that
+      // is reconciliation, never a new attempt or a duplicate execution.
+      const TERMINAL_STATES = new Set<ContributionState>(["accepted", "running", "completed", "declined", "deferred", "failed", "withdrawal_noted"]);
+      if (existing && TERMINAL_STATES.has(existing.state)) {
         logInfo(TAG, `replay of ${existing.state} request ${input.request.request_id} to ${input.peer} — no resend`);
         const decision: ContributionDecision = existing.state === "accepted" || existing.state === "running" || existing.state === "completed"
           ? "accepted"
@@ -213,6 +217,8 @@ export class RequesterContributionService {
       if (!this.contributionStore.adoptContributionRef(input.peer, input.request.request_id, acceptedRef)) {
         throw new Error("Accepted response has a conflicting contribution reference");
       }
+      // #1357: an unknown/pending row that is proven accepted by reconciliation
+      // is promoted — never left ambiguous.
       this.contributionStore.transitionToAccepted(input.peer, input.request.request_id);
       const notes: Record<string, unknown> = {
         peer: input.peer,
@@ -241,7 +247,15 @@ export class RequesterContributionService {
       };
     }
 
-    const decision = response.decision as ContributionDecision;
+    // #1357: a declined response WITHOUT proves_non_creation is not a decline —
+    // the receiver could not prove non-creation (e.g. a PiRun may exist). It
+    // degrades to unknown: freeze on this peer, keep the row recoverable, and
+    // reconcile the same request ID. Only a proven pre-creation decline is
+    // terminal and eligible for candidate advancement.
+    const rawDecision = response.decision as ContributionDecision;
+    const decision: ContributionDecision = rawDecision === "declined" && !response.proves_non_creation
+      ? "unknown"
+      : rawDecision;
     this.contributionStore.transitionToNonStarted(input.peer, input.request.request_id, decision);
     const notes: Record<string, unknown> = {
       peer: input.peer,
@@ -255,7 +269,11 @@ export class RequesterContributionService {
       contribution_ref: contributionRef,
     };
     this.kanbanUpdate(proxyCardId, { notes: JSON.stringify(notes) });
-    if (input.terminalizeNonStarted !== false) {
+    // #1357: only a terminal, proven outcome fails the card. "unknown" keeps
+    // the card alive for same-(peer, request_id) reconciliation; "deferred"
+    // binds the request to the peer and the card shows deferred until
+    // lifecycle events settle it.
+    if (input.terminalizeNonStarted !== false && decision !== "unknown" && decision !== "deferred") {
       this.kanbanFail(proxyCardId, `peer help ${decision}`);
     }
     logInfo(TAG, `help ${decision} by ${input.peer}${response.reason ? `: ${response.reason}` : ""}`);

@@ -182,7 +182,8 @@ describe("RequesterContributionService", () => {
 
   it("declined decision projects a non-started terminal outcome", async () => {
     const env = makeEnv();
-    env.nextResponse = { version: 1, request_id: "req_1", decision: "declined", reason_code: "busy" };
+    // #1357: only a decline carrying proves_non_creation is terminal.
+    env.nextResponse = { version: 1, request_id: "req_1", decision: "declined", reason_code: "busy", proves_non_creation: true };
     const result = await env.service.delegate({
       peer: "molty",
       request: makeRequest(),
@@ -201,7 +202,32 @@ describe("RequesterContributionService", () => {
     expect(env.sends).toHaveLength(1);
   });
 
-  it("transport failure projects unknown and a replay never resends", async () => {
+  it("declined without proves_non_creation degrades to unknown and stays recoverable", async () => {
+    const env = makeEnv();
+    env.nextResponse = { version: 1, request_id: "req_1", decision: "declined", reason_code: "pi_execution_failed" };
+    const result = await env.service.delegate({
+      peer: "molty",
+      request: makeRequest(),
+      binding: { kind: "create_cli_project", title: "delegate x", goal: "g" },
+    });
+    expect(result.decision).toBe("unknown");
+    const ledger = db.prepare("SELECT state FROM peer_contributions WHERE peer = 'molty'").get() as any;
+    expect(ledger.state).toBe("unknown");
+
+    // Same request ID: reconciliation proves the run existed → accepted.
+    env.nextResponse = { version: 1, request_id: "req_1", decision: "accepted", contribution_ref: "help_rc" };
+    const second = await env.service.delegate({
+      peer: "molty",
+      request: makeRequest(),
+      binding: { kind: "create_cli_project", title: "delegate x", goal: "g" },
+    });
+    expect(second.decision).toBe("accepted");
+    expect(env.sends).toHaveLength(2);
+    const promoted = db.prepare("SELECT state FROM peer_contributions WHERE peer = 'molty'").get() as any;
+    expect(promoted.state).toBe("accepted");
+  });
+
+  it("transport failure projects unknown; replay with the same request ID reconciles by resending", async () => {
     const env = makeEnv();
     env.nextError = new Error("connection lost");
     const first = await env.service.delegate({
@@ -213,15 +239,20 @@ describe("RequesterContributionService", () => {
     const ledger = db.prepare("SELECT state FROM peer_contributions WHERE peer = 'molty'").get() as any;
     expect(ledger.state).toBe("unknown");
 
-    // same request ID, recoverable — replay without a resend
+    // #1357: an unknown outcome never re-dispatches blindly — the same
+    // (peer, request_id) is re-sent for reconciliation; the receiver's
+    // idempotency ledger returns the original run instead of creating a second.
     env.nextError = undefined;
+    env.nextResponse = { version: 1, request_id: "req_1", decision: "accepted", contribution_ref: "help_rc2" };
     const second = await env.service.delegate({
       peer: "molty",
       request: makeRequest(),
       binding: { kind: "create_cli_project", title: "delegate x", goal: "g" },
     });
-    expect(env.sends).toHaveLength(1);
-    expect(second.decision).toBe("unknown");
+    expect(env.sends).toHaveLength(2);
+    expect(second.decision).toBe("accepted");
+    const promoted = db.prepare("SELECT state FROM peer_contributions WHERE peer = 'molty'").get() as any;
+    expect(promoted.state).toBe("accepted");
   });
 
   it("rejects a conflicting request with different content under the same request id", async () => {
@@ -260,7 +291,8 @@ describe("RequesterContributionService", () => {
 
   it("fallback reuse rebinds the same proxy card to a second peer without duplicates", async () => {
     const env = makeEnv();
-    env.nextResponse = { version: 1, request_id: "req_1", decision: "declined" };
+    // #1357: advancement is only allowed after a proven pre-creation decline.
+    env.nextResponse = { version: 1, request_id: "req_1", decision: "declined", reason_code: "policy_denied", proves_non_creation: true };
     const first = await env.service.delegate({
       peer: "molty",
       request: makeRequest(),

@@ -136,8 +136,10 @@ export const peerAskHelpTool: ToolDefinition = {
 
     // #1433/#1357: An explicit peer with no inventory may still be asked over a
     // live route; receiver admission is authoritative. Contradictory inventory
-    // is an early rejection, never a fallback to another peer.
-    if (peer && deduped.length > 0) {
+    // is an early rejection, never a fallback to another peer. Automatic
+    // selection does not re-check at dispatch time — capability changes are
+    // resolved by receiver admission, which is authoritative.
+    if (args.peer && deduped.length > 0) {
       const { getPeerInventory, hasAllCapabilities } = await import("../peer-transport/peer-inventory.js");
       if (getPeerInventory(peer) && !hasAllCapabilities(peer, deduped)) {
         return JSON.stringify({ error: `Peer ${peer} does not have the required capabilities: [${deduped.join(", ")}]` });
@@ -162,8 +164,9 @@ export const peerAskHelpTool: ToolDefinition = {
     };
 
     let localCardId: number | undefined;
-    let activeContributionPeer: string | undefined = peer;
-    let activeContributionRequestId = requestId;
+    let activeContributionPeer: string | undefined;
+    let activeContributionRequestId: string | undefined;
+    const attempts: Array<{ peer: string; request_id: string; outcome: string; code?: string }> = [];
     try {
       const activeOrc = await getActiveOrcProjectId(toolContext);
       if (rootCriteria.length > 0) {
@@ -183,105 +186,142 @@ export const peerAskHelpTool: ToolDefinition = {
         kanbanUpdate,
         kanbanFail,
       });
-      const allowFallback = !args.peer && deduped.length > 0;
-      const result = await contributionService.delegate({
-        peer,
-        request,
-        binding: { kind: "existing", projectCardId: activeOrc, rootCriteria },
-        // Keep the proxy reusable while the auto-selection fallback is still
-        // eligible. The final selected-peer outcome terminalizes it.
-        ...(allowFallback ? { terminalizeNonStarted: false } : {}),
-      });
-      localCardId = result.proxyCardId;
-      activeContributionPeer = peer;
-      activeContributionRequestId = requestId;
-      if (!localCardId) return JSON.stringify({ error: "Failed to persist help request", request_id: requestId });
-      if (result.decision === "accepted") {
-        const response = result.response;
-        return JSON.stringify({
-          ok: true, local_card_id: localCardId, peer, decision: "accepted",
-          contribution_ref: result.contributionRef, request_id: result.requestId,
-          remote_run_id: response?.remote_run_id,
-          remote_card_id: response?.remote_card_id,
-          remote_generation: response?.remote_generation,
-          remote_session_id: response?.remote_session_id,
-        });
-      }
 
-      if (result.decision === "unknown" && result.error) {
-        return JSON.stringify({
-          error: `peer_ask_help failed: ${result.error}`,
-          outcome: "unknown",
-          request_id: result.requestId,
-          local_card_id: result.proxyCardId,
-        });
-      }
+      // #1357/#1433: Automatic selection may advance only across candidates
+      // that return a proven pre-creation decline; each attempt carries a NEW
+      // request ID; the caller's intent holds exactly ONE local card. Explicit
+      // peers and generic (no-requires) auto-selection are single-candidate
+      // selections.
+      const autoAdvance = !args.peer && deduped.length > 0;
+      const candidates: string[] = autoAdvance
+        ? await (async () => {
+            const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
+            const { hasAllCapabilities } = await import("../peer-transport/peer-inventory.js");
+            const connected = getPeerWsBroker().getConnectedPeers();
+            const eligible = await resolveEnrolledPeers(connected.filter(p => hasAllCapabilities(p, deduped)));
+            eligible.sort((a, b) => a.localeCompare(b));
+            return eligible;
+          })()
+        : [peer];
 
-      if (result.decision === "declined" && !args.peer && deduped.length > 0) {
-        const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
-        const { hasAllCapabilities } = await import("../peer-transport/peer-inventory.js");
-        const connected = getPeerWsBroker().getConnectedPeers().filter(p => p !== peer);
-        const eligible = await resolveEnrolledPeers(connected.filter(p => deduped.length === 0 || hasAllCapabilities(p, deduped)));
-        eligible.sort((a, b) => a.localeCompare(b));
-        const nextCandidate = eligible[0];
-        if (nextCandidate) {
-          const newRequestId = randomUUID();
-          const fallbackRequest: PeerHelpRequestV1 = { ...request, request_id: newRequestId };
-          const contributionStore = getContributionStore();
-          contributionStore.detachProxy(peer, requestId);
-          activeContributionPeer = nextCandidate;
-          activeContributionRequestId = newRequestId;
-          const fallbackResult = await contributionService.delegate({
-            peer: nextCandidate,
-            request: fallbackRequest,
-            binding: { kind: "existing", projectCardId: activeOrc, rootCriteria },
-            proxyCardId: localCardId,
+      for (let i = 0; i < candidates.length; i++) {
+        const candidate = candidates[i]!;
+        const attemptRequestId = i === 0 ? requestId : randomUUID();
+        const attemptRequest: PeerHelpRequestV1 = { ...request, request_id: attemptRequestId };
+
+        const result = await contributionService.delegate({
+          peer: candidate,
+          request: attemptRequest,
+          binding: { kind: "existing", projectCardId: activeOrc, rootCriteria },
+          proxyCardId: localCardId,
+          // Keep the proxy reusable while candidates remain; the final attempt
+          // settles the card.
+          terminalizeNonStarted: !autoAdvance || i === candidates.length - 1 ? undefined : false,
+        });
+        localCardId = result.proxyCardId;
+        activeContributionPeer = candidate;
+        activeContributionRequestId = attemptRequestId;
+        if (!localCardId) return JSON.stringify({ error: "Failed to persist help request", request_id: attemptRequestId });
+
+        attempts.push({
+          peer: candidate,
+          request_id: attemptRequestId,
+          outcome: result.decision,
+          code: result.response?.reason_code,
+        });
+        await recordAttempt(localCardId, attempts);
+
+        if (result.decision === "accepted") {
+          const response = result.response;
+          return JSON.stringify({
+            ok: true, local_card_id: localCardId, peer: candidate, decision: "accepted",
+            contribution_ref: result.contributionRef, request_id: attemptRequestId,
+            remote_run_id: response?.remote_run_id,
+            remote_card_id: response?.remote_card_id,
+            remote_generation: response?.remote_generation,
+            remote_session_id: response?.remote_session_id,
           });
-          if (fallbackResult.decision === "accepted") {
-            return JSON.stringify({
-              ok: true, local_card_id: localCardId, peer: nextCandidate, decision: "accepted",
-              contribution_ref: fallbackResult.contributionRef, request_id: newRequestId,
-              fallback: true,
-            });
-          }
-          if (fallbackResult.decision === "unknown") {
-            return JSON.stringify({
-              error: fallbackResult.error ? `peer_ask_help failed: ${fallbackResult.error}` : "peer_ask_help outcome unknown",
-              outcome: "unknown",
-              request_id: fallbackResult.requestId,
-              local_card_id: fallbackResult.proxyCardId,
-              peer: nextCandidate,
-              fallback: true,
-            });
-          }
         }
+
+        if (result.decision === "unknown") {
+          // Freeze on this peer: an unknown outcome (timeout, drop, or a
+          // declined response without proves_non_creation) never advances.
+          // The caller reconciles the SAME (peer, request_id).
+          return JSON.stringify({
+            error: result.error ? `peer_ask_help failed: ${result.error}` : "peer_ask_help outcome unknown",
+            outcome: "unknown",
+            request_id: attemptRequestId,
+            local_card_id: localCardId,
+            peer: candidate,
+          });
+        }
+
+        if (result.decision === "deferred") {
+          // Deferred is an acceptance: the request stays bound to this peer.
+          // No further candidate is contacted.
+          return JSON.stringify({
+            ok: true, local_card_id: localCardId, peer: candidate, decision: "deferred",
+            reason_code: result.response?.reason_code, reason: result.response?.reason,
+            request_id: attemptRequestId,
+          });
+        }
+
+        // decision === "declined" here, and delegate() degrades an unproven
+        // decline to "unknown" — so this is a proven pre-creation decline.
+        if (!autoAdvance || i === candidates.length - 1) {
+          if (autoAdvance) {
+            // Candidate exhaustion: one bounded routing error naming every
+            // attempted peer and its reason. No run was created anywhere.
+            const details = attempts.map(a => `${a.peer}(${a.code ?? a.outcome})`).join(", ");
+            return JSON.stringify({
+              error: `No eligible peer accepted the request. Attempted: ${details}`,
+              outcome: "exhausted",
+              attempts,
+              local_card_id: localCardId,
+            });
+          }
+          // Explicit peer: a decline is terminal on that peer.
+          return JSON.stringify({
+            ok: true, local_card_id: localCardId, peer: candidate, decision: "declined",
+            reason_code: result.response?.reason_code, reason: result.response?.reason,
+            request_id: attemptRequestId,
+          });
+        }
+
+        // Proven pre-creation decline on an auto-selected candidate with
+        // candidates remaining: release the proxy binding from this peer and
+        // advance to the next candidate with a NEW request ID.
+        getContributionStore().detachProxy(candidate, attemptRequestId);
       }
 
-      // The first auto-selected attempt was kept reusable while fallback was
-      // possible. If no fallback accepted, settle declined/deferred outcomes
-      // now; unknown transport outcomes remain recoverable and must stay live.
-      if (allowFallback && (result.decision === "declined" || result.decision === "deferred")) {
-        kanbanFail(localCardId, `peer help ${result.decision}`);
-      }
-
-      return JSON.stringify({
-        ok: true, local_card_id: localCardId, peer, decision: result.decision,
-        reason_code: result.response?.reason_code, reason: result.response?.reason, request_id: requestId,
-      });
+      return JSON.stringify({ error: "peer_ask_help failed: no candidate attempted", outcome: "exhausted", attempts, local_card_id: localCardId });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (localCardId) {
         try {
           const store = getContributionStore();
-          if (activeContributionPeer) store.transitionToNonStarted(activeContributionPeer, activeContributionRequestId, "unknown");
-          kanbanUpdate(localCardId, { notes: JSON.stringify({ outcome: "unknown", request_id: requestId }) });
+          if (activeContributionPeer) store.transitionToNonStarted(activeContributionPeer, activeContributionRequestId ?? requestId, "unknown");
+          const card = kanbanGetCard(localCardId);
+          const notes = (card?.notes ? JSON.parse(card.notes) : {}) as Record<string, unknown>;
+          const priorAttempts = Array.isArray(notes.attempts) ? notes.attempts : [];
+          kanbanUpdate(localCardId, { notes: JSON.stringify({ ...notes, outcome: "unknown", request_id: activeContributionRequestId ?? requestId, attempts: priorAttempts }) });
         } catch {}
       }
       logWarn(TAG, `peer_ask_help failed: ${message}`);
-      return JSON.stringify({ error: `peer_ask_help failed: ${message}`, outcome: "unknown", request_id: requestId, local_card_id: localCardId });
+      return JSON.stringify({ error: `peer_ask_help failed: ${message}`, outcome: "unknown", request_id: activeContributionRequestId ?? requestId, local_card_id: localCardId });
     }
   },
 };
+
+/** #1357: persist the attempt history on the single delegation card. */
+async function recordAttempt(cardId: number, history: Array<{ peer: string; request_id: string; outcome: string; code?: string }>): Promise<void> {
+  try {
+    const card = kanbanGetCard(cardId);
+    const notes = (card?.notes ? JSON.parse(card.notes) : {}) as Record<string, unknown>;
+    notes.attempts = history.slice(-10);
+    kanbanUpdate(cardId, { notes: JSON.stringify(notes) });
+  } catch { /* best effort — the ledger row is authoritative */ }
+}
 
 export const peerHelpStatusTool: ToolDefinition = {
   name: "peer_help_status",

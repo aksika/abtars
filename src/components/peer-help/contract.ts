@@ -34,6 +34,14 @@ export interface PeerHelpResponseV1 {
   reason_code?: string;
   reason?: string;
   retry_after?: string;
+  /**
+   * #1357: Set to true ONLY when the receiver proves that no run, card,
+   * process, or reservation was created for this request (pre-creation
+   * rejections: schema, policy/capability, conflict, executor readiness).
+   * Absence means the outcome is not proven — the origin must treat the
+   * response as unknown and must not advance candidate iteration.
+   */
+  proves_non_creation?: boolean;
   /** #1357: Remote Pi identifiers (present when executor='pi' and decision='accepted'). */
   remote_run_id?: string;
   remote_card_id?: number;
@@ -266,6 +274,7 @@ export function parseHelpResponse(raw: unknown): { ok: true; value: PeerHelpResp
       reason: r.reason as string | undefined,
       retry_after: r.retry_after as string | undefined,
       // #1357: Remote Pi identifiers (present when executor='pi')
+      proves_non_creation: r.proves_non_creation === true,
       remote_run_id: r.remote_run_id as string | undefined,
       remote_card_id: typeof r.remote_card_id === "number" ? r.remote_card_id : undefined,
       remote_generation: typeof r.remote_generation === "number" ? r.remote_generation : undefined,

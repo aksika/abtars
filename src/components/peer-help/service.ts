@@ -85,7 +85,7 @@ export class PeerHelpService {
     const parsed = parseHelpRequest(raw);
     if (!parsed.ok) {
       logWarn(TAG, `Malformed help request from ${originPeer}: ${parsed.error}`);
-      return { version: 1, request_id: "unknown", decision: "declined", reason_code: "malformed", reason: parsed.error };
+      return { version: 1, request_id: "unknown", decision: "declined", reason_code: "malformed", reason: parsed.error, proves_non_creation: true };
     }
 
     const request = parsed.value;
@@ -101,7 +101,7 @@ export class PeerHelpService {
     }
     if (reservation.status === "conflict") {
       logWarn(TAG, `Conflicting reuse of request ${request.request_id} from ${originPeer} (different content)`);
-      return { version: 1, request_id: request.request_id, decision: "declined", reason_code: "conflict", reason: "request_id reused with different content" };
+      return { version: 1, request_id: request.request_id, decision: "declined", reason_code: "conflict", reason: "request_id reused with different content", proves_non_creation: true };
     }
     if (reservation.status === "in_flight") {
       // #1357: For Pi targets, reconcile via the Pi idempotency ledger. If a PiRun
@@ -180,6 +180,11 @@ export class PeerHelpService {
         reason_code: decision === "deferred" ? "queue_full" : "policy_denied",
         reason: decision === "deferred" ? "Queue capacity reached" : "Request declined by local policy",
         retry_after: decision === "deferred" ? new Date(Date.now() + 60_000).toISOString() : undefined,
+        // #1357: capability/policy/expiry rejections happen before any
+        // card, run, process, or reservation-affecting creation — the
+        // receiver can prove non-creation. Deferrals are not declines and
+        // carry no proof (they bind the request to this peer).
+        proves_non_creation: decision === "declined",
       };
       this.store.completeDecision(
         { originPeer, requestId: request.request_id },
@@ -200,6 +205,11 @@ export class PeerHelpService {
     if (request.target?.executor === "pi" && this.piHandler) {
       const piResult = await this.piHandler(originPeer, request, { decision: "accept", contributionRef });
       if (!piResult.ok) {
+        // #1357: A Pi handler failure cannot prove non-creation — a PiRun may
+        // already exist (committed ledger with a lost response). Mark the
+        // help row unknown and return a declined response WITHOUT
+        // proves_non_creation so the origin treats it as unknown, freezes
+        // selection on this peer, and reconciles the same request ID.
         this.store.markUnknown(originPeer, request.request_id);
         return {
           version: 1,

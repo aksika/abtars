@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 const mockKanbanEnqueue = vi.fn(() => 42);
 const mockKanbanUpdate = vi.fn();
 const mockKanbanFail = vi.fn();
+const mockKanbanGetCard = vi.fn(() => undefined);
 const mockAskHelp = vi.fn();
 const mockGetHelpStatus = vi.fn();
 const mockWithdrawHelp = vi.fn();
@@ -22,7 +23,7 @@ vi.mock("../tasks/kanban-board.js", () => ({
   kanbanUpdate: (...args: unknown[]) => mockKanbanUpdate(...args),
   kanbanFail: (...args: unknown[]) => mockKanbanFail(...args),
   kanbanRunning: vi.fn(),
-  kanbanGetCard: () => undefined,
+  kanbanGetCard: (...args: unknown[]) => mockKanbanGetCard(...args),
   requireTaskDatabase: () => mockDb,
 }));
 
@@ -70,6 +71,9 @@ let mod: typeof import("./peer-help-tools.js");
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  // mockReset removes stale mockImplementationOnce queues that would leak
+  // across tests (e.g. an unconsumed rejected Once from a freeze test).
+  mockAskHelp.mockReset();
   mockGetPeerInventory.mockReturnValue(undefined);
   mod = await import("./peer-help-tools.js");
 });
@@ -156,7 +160,7 @@ describe("peer_ask_help", () => {
     mockGetConnectedPeers.mockReturnValue(["kp"]);
     mockHasAllCapabilities.mockReturnValue(true);
     mockAskHelp.mockResolvedValue({
-      version: 1, request_id: "req-2", decision: "declined", reason_code: "policy_denied",
+      version: 1, request_id: "req-2", decision: "declined", reason_code: "policy_denied", proves_non_creation: true,
     });
     const result = JSON.parse(await mod.peerAskHelpTool.execute({
       goal: "do something", peer: "kp", request_id: "req-2",
@@ -188,17 +192,36 @@ describe("peer_ask_help", () => {
     expect(mockAskHelp).toHaveBeenCalledTimes(1);
   });
 
-  it("terminalizes an auto-selected decline when no fallback peer remains", async () => {
+  it("reports bounded exhaustion when every auto-selected candidate declines with proof", async () => {
     mockGetConnectedPeers.mockReturnValue(["kp"]);
     mockHasAllCapabilities.mockReturnValue(true);
     mockAskHelp.mockResolvedValue({
-      version: 1, request_id: "req-last", decision: "declined", reason_code: "policy_denied",
+      version: 1, request_id: "req-last", decision: "declined", reason_code: "policy_denied", proves_non_creation: true,
     });
     const result = JSON.parse(await mod.peerAskHelpTool.execute({
       goal: "do something", requires: ["docker"], request_id: "req-last",
     }));
-    expect(result.decision).toBe("declined");
+    expect(result.outcome).toBe("exhausted");
+    expect(result.error).toContain("Attempted");
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0]).toMatchObject({ peer: "kp", outcome: "declined", code: "policy_denied" });
     expect(mockKanbanFail).toHaveBeenCalledWith(42, "peer help declined");
+  });
+
+  it("freezes on an unproven decline (no proves_non_creation) — no candidate advancement", async () => {
+    mockGetConnectedPeers.mockReturnValue(["peer1", "peer2"]);
+    mockHasAllCapabilities.mockReturnValue(true);
+    mockAskHelp.mockResolvedValue({
+      version: 1, request_id: "req-np", decision: "declined", reason_code: "pi_execution_failed",
+    });
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "do something", requires: ["docker"], request_id: "req-np",
+    }));
+    expect(result.outcome).toBe("unknown");
+    expect(result.peer).toBe("peer1");
+    expect(result.request_id).toBe("req-np");
+    expect(mockAskHelp).toHaveBeenCalledTimes(1);
+    expect(mockKanbanFail).not.toHaveBeenCalled();
   });
 
   it("creates a project-linked non-dispatchable contribution proxy", async () => {
@@ -220,7 +243,7 @@ describe("peer_ask_help", () => {
     mockGetConnectedPeers.mockReturnValue(["peer1", "peer2"]);
     mockHasAllCapabilities.mockReturnValue(true);
     mockAskHelp
-      .mockResolvedValueOnce({ version: 1, request_id: "req-fallback", decision: "declined" })
+      .mockResolvedValueOnce({ version: 1, request_id: "req-fallback", decision: "declined", proves_non_creation: true })
       .mockResolvedValueOnce({ version: 1, request_id: "req-fallback-2", decision: "accepted", contribution_ref: "help_final" });
     const result = JSON.parse(await mod.peerAskHelpTool.execute({
       goal: "do something", requires: ["docker"], request_id: "req-fallback",
@@ -237,7 +260,7 @@ describe("peer_ask_help", () => {
     mockGetConnectedPeers.mockReturnValue(["zeta", "alpha", "beta"]);
     mockHasAllCapabilities.mockReturnValue(true);
     mockAskHelp
-      .mockResolvedValueOnce({ version: 1, request_id: "req-order", decision: "declined" })
+      .mockResolvedValueOnce({ version: 1, request_id: "req-order", decision: "declined", proves_non_creation: true })
       .mockResolvedValueOnce({ version: 1, request_id: "req-order-2", decision: "accepted", contribution_ref: "help_ordered" });
     const result = JSON.parse(await mod.peerAskHelpTool.execute({
       goal: "do something", requires: ["docker"], request_id: "req-order",
@@ -257,7 +280,39 @@ describe("peer_ask_help", () => {
       goal: "do something", requires: ["docker"], request_id: "req-unknown",
     }));
     expect(result.outcome).toBe("unknown");
-    expect(result.fallback).toBe(true);
+    expect(mockKanbanFail).not.toHaveBeenCalled();
+  });
+
+  it("records attempt history on the single delegation card across candidates", async () => {
+    mockGetConnectedPeers.mockReturnValue(["alpha", "beta"]);
+    mockHasAllCapabilities.mockReturnValue(true);
+    mockAskHelp
+      .mockResolvedValueOnce({ version: 1, request_id: "req-hist", decision: "declined", reason_code: "executor_not_ready", proves_non_creation: true })
+      .mockResolvedValueOnce({ version: 1, request_id: "req-hist-2", decision: "accepted", contribution_ref: "help_hist" });
+    mockKanbanGetCard.mockReturnValue({ id: 42, notes: JSON.stringify({ peer: "alpha", request_id: "req-hist", outcome: "declined" }) });
+    await mod.peerAskHelpTool.execute({
+      goal: "do something", requires: ["docker"], request_id: "req-hist",
+    });
+    const lastNotes = mockKanbanUpdate.mock.calls.at(-1)?.[1] as { notes?: string };
+    const notes = JSON.parse(lastNotes.notes ?? "{}");
+    expect(notes.attempts).toHaveLength(2);
+    expect(notes.attempts[0]).toMatchObject({ peer: "alpha", outcome: "declined", code: "executor_not_ready" });
+    expect(notes.attempts[1]).toMatchObject({ peer: "beta", outcome: "accepted" });
+  });
+
+  it("binds to the deferring candidate after a proven decline — no further candidate", async () => {
+    mockGetConnectedPeers.mockReturnValue(["alpha", "beta"]);
+    mockHasAllCapabilities.mockReturnValue(true);
+    mockAskHelp
+      .mockResolvedValueOnce({ version: 1, request_id: "req-bind", decision: "declined", reason_code: "executor_not_ready", proves_non_creation: true })
+      .mockResolvedValueOnce({ version: 1, request_id: "req-bind-2", decision: "deferred", reason_code: "queue_full" });
+    const result = JSON.parse(await mod.peerAskHelpTool.execute({
+      goal: "do something", requires: ["docker"], request_id: "req-bind",
+    }));
+    expect(result.decision).toBe("deferred");
+    expect(result.peer).toBe("beta");
+    expect(result.request_id).not.toBe("req-bind");
+    expect(mockAskHelp).toHaveBeenCalledTimes(2);
     expect(mockKanbanFail).not.toHaveBeenCalled();
   });
 });

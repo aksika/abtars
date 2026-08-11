@@ -247,7 +247,9 @@ export class ContributionStore {
   }
 
   transitionToAccepted(peer: string, requestId: string): boolean {
-    return this.transitionState(peer, requestId, ["pending"], "accepted");
+    // #1357: reconciliation may promote an unknown/pending row once the
+    // receiver proves acceptance with the original request ID.
+    return this.transitionState(peer, requestId, ["pending", "unknown"], "accepted");
   }
 
   transitionToRunning(peer: string, requestId: string): boolean {
@@ -268,7 +270,9 @@ export class ContributionStore {
 
   transitionToNonStarted(peer: string, requestId: string, state: ContributionState): boolean {
     if (!["declined", "deferred", "unknown"].includes(state)) return false;
-    return this.transitionState(peer, requestId, ["pending"], state);
+    // #1357: an unknown row may be resolved by a later deterministic outcome
+    // from the same (peer, request_id) — pending and unknown both transition.
+    return this.transitionState(peer, requestId, ["pending", "unknown"], state);
   }
 
   recordWithdrawal(peer: string, requestId: string): boolean {
