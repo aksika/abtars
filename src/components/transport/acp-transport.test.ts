@@ -96,6 +96,33 @@ describe("AcpTransport", () => {
       (transport as any)._pendingPrompt.reject(new Error("test cleanup"));
       await promise.catch(() => {});
     });
+
+    it("uses the caller's provider inactivity allowance for sleep deadlines", async () => {
+      vi.useFakeTimers();
+      try {
+        (transport as any).sm = {
+          state: "idle",
+          startPrompt: vi.fn(),
+          promptCompleted: vi.fn(),
+        };
+        (transport as any).sessions.set("key-1", "sess-timeout");
+        (transport as any).client = {
+          prompt: vi.fn().mockReturnValue(new Promise(() => {})),
+        };
+
+        const prompt = transport.sendPrompt("key-1", "sleep", undefined, {
+          providerInactivityTimeoutMs: 10_000,
+          deadlineAt: Date.now() + 60_000,
+        });
+        const rejected = expect(prompt).rejects.toThrow("Bridge prompt timeout");
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(15_000);
+
+        await rejected;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("handleSessionUpdate", () => {
@@ -167,6 +194,34 @@ describe("AcpTransport", () => {
       });
 
       expect(cb).toHaveBeenCalledWith("streaming...");
+    });
+
+    it("delivers pre-tool text before the tool callback and excludes thinking from the answer", async () => {
+      const sessionId = "sess-segment";
+      const segment = vi.fn().mockResolvedValue(undefined);
+      const deltas: Array<{ kind: string; text: string }> = [];
+      transport.onSegmentBreak = segment;
+      transport.onOutputDelta = (event) => deltas.push(event);
+      (transport as any).responseChunks.set(sessionId, []);
+      (transport as any).segmentOffsets.set(sessionId, 0);
+      (transport as any).sm = { state: "prompting", toolStarted: vi.fn() };
+
+      await (transport as any).handleSessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "thinking", text: "private" } },
+      });
+      await (transport as any).handleSessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "before tool" } },
+      });
+      await (transport as any).handleSessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "tool_call", title: "search", status: "running" },
+      });
+
+      expect((transport as any).responseChunks.get(sessionId)).toEqual(["before tool"]);
+      expect(segment).toHaveBeenCalledWith("before tool");
+      expect(deltas).toEqual([{ kind: "thinking", text: "private" }, { kind: "text", text: "before tool" }]);
     });
   });
 
@@ -256,6 +311,115 @@ describe("AcpTransport", () => {
       const pct = 73.2;
       handler.lastContextPercent = Math.ceil(pct);
       expect(transport.contextPercent).toBe(74);
+    });
+  });
+
+  /**
+   * #1550 — the #1338 live-output mirrors in handleSessionUpdate read from
+   * outputObservers, but sendPrompt never populated that map, so the ACP route
+   * published nothing to the TUI feed while the Pi route worked. The map is
+   * private plumbing; what matters is that a caller-supplied observer receives
+   * deltas for the session sendPrompt actually opened, and stops receiving
+   * them once the prompt completes.
+   */
+  describe("live output observer wiring (#1550)", () => {
+    it("delivers text deltas and tool starts to the caller's observer", async () => {
+      const deltas: string[] = [];
+      const toolStarts: string[] = [];
+      const outputObserver = {
+        onDelta: (e: { kind: string; text: string }) => { deltas.push(e.text); },
+        onToolStart: (e: { name: string }) => { toolStarts.push(e.name); },
+      };
+
+      (transport as any).sm = {
+        state: "idle",
+        startPrompt: vi.fn(),
+        promptCompleted: vi.fn(),
+        toolStarted: vi.fn(),
+        toolCompleted: vi.fn(),
+      };
+      (transport as any).sessions.set("key-1", "sess-live");
+      (transport as any).client = {
+        prompt: vi.fn().mockImplementation(async () => {
+          // Model emits while the prompt is in flight.
+          (transport as any).handleSessionUpdate({
+            sessionId: "sess-live",
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "streamed" } },
+          });
+          (transport as any).handleSessionUpdate({
+            sessionId: "sess-live",
+            update: { sessionUpdate: "tool_call", title: "execute_bash", status: "running" },
+          });
+          return { stopReason: "end_turn" };
+        }),
+      };
+
+      const result = await transport.sendPrompt("key-1", "hi", undefined, { outputObserver } as any);
+
+      expect(deltas).toEqual(["streamed"]);
+      expect(toolStarts).toEqual(["execute_bash"]);
+      expect(result).toBe("streamed");
+    });
+
+    it("stops publishing once the prompt completed", async () => {
+      const deltas: string[] = [];
+      const outputObserver = { onDelta: (e: { text: string }) => { deltas.push(e.text); } };
+
+      (transport as any).sm = {
+        state: "idle",
+        startPrompt: vi.fn(),
+        promptCompleted: vi.fn(),
+        toolCompleted: vi.fn(),
+      };
+      (transport as any).sessions.set("key-1", "sess-live");
+      (transport as any).client = { prompt: vi.fn().mockResolvedValue({ stopReason: "end_turn" }) };
+
+      await transport.sendPrompt("key-1", "hi", undefined, { outputObserver } as any);
+
+      // Late event from the finished call must not reach a (possibly newer) observer.
+      (transport as any).sm = { state: "prompting" };
+      (transport as any).responseChunks.set("sess-live", []);
+      (transport as any).handleSessionUpdate({
+        sessionId: "sess-live",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "late" } },
+      });
+
+      expect(deltas).toEqual([]);
+    });
+  });
+
+  describe("session expiry retry (#1564)", () => {
+    it("re-keys the chunk buffer and observer under the rotated session id", async () => {
+      let promptCalls = 0;
+      (transport as any).client = {
+        newSession: vi.fn()
+          .mockResolvedValueOnce({ sessionId: "sess-1" })
+          .mockResolvedValueOnce({ sessionId: "sess-2" }),
+        prompt: vi.fn().mockImplementation(async ({ sessionId: sid }: { sessionId: string }) => {
+          promptCalls++;
+          if (promptCalls === 1) throw { code: -32603, message: "No session found" };
+          (transport as any).handleSessionUpdate({
+            sessionId: sid,
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "the answer" } },
+          });
+          return { stopReason: "end_turn" };
+        }),
+      };
+
+      const outputObserver = { onDelta: vi.fn() };
+      const result = await transport.sendPrompt("key-1", "hello", undefined, { outputObserver } as any);
+
+      // The turn must return the model output, not "(no response)".
+      expect(result).toBe("the answer");
+      expect(promptCalls).toBe(2);
+      // The retry must have been sent to the freshly created session.
+      expect((transport as any).client.prompt.mock.calls[1][0].sessionId).toBe("sess-2");
+      // The live-output feed must have received the delta during the retry turn.
+      expect(outputObserver.onDelta).toHaveBeenCalledWith({ kind: "text", text: "the answer" });
+      // No stale keys may survive.
+      expect((transport as any).responseChunks.has("sess-1")).toBe(false);
+      expect((transport as any).outputObservers.has("sess-1")).toBe(false);
+      expect((transport as any).responseChunks.has("sess-2")).toBe(false);
     });
   });
 });

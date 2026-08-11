@@ -2,8 +2,19 @@ import { logInfo, logError } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext } from "./types.js";
 import { triggerResetSession} from "./registry.js";
+import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../compact-summarizer.js";
 
 const TAG = "cmd";
+
+/**
+ * #1619: resolve the transport attached to the session the command runs in.
+ * The attached session's own transport is authoritative; the bridge-global
+ * transport is only a fallback when the session has none.
+ */
+export function resolveAttachedTransport(ctx: CommandContext): import("./types.js").CommandContext["transport"] {
+  const session = ctx.sessionManager?.getSessionById?.(ctx.sessionKey);
+  return session?.transport ?? ctx.transport;
+}
 
 export async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
   const isResetDefault = text.trim().toLowerCase() === "/reset default";
@@ -36,7 +47,7 @@ export async function handleNewReset(text: string, ctx: CommandContext): Promise
   return true;
 }
 
-export async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleCompact(text: string, ctx: CommandContext): Promise<boolean> {
   try {
     // #1022: compaction only for A/C session types (hard requirement).
     const { isCompactable } = await import("../spin-types.js");
@@ -44,22 +55,28 @@ export async function handleCompact(_text: string, ctx: CommandContext): Promise
       await ctx.reply("Compaction not available for this session.");
       return true;
     }
-    // Context engine compaction — force compact via transport's orchestrator
-    const transport = ctx.transport as { contextOrchestrator?: { forceCompact(chatId: string, budget: number): Promise<import("abmind").CompactionResult> }; config?: { maxContext: number } };
-    if (transport.contextOrchestrator) {
-      const budget = (transport as any).config?.maxContext ?? 200000;
-      const result = await transport.contextOrchestrator.forceCompact(ctx.sessionKey, budget);
-      if (result.skipped) {
-        await ctx.reply("Compaction skipped (recent passes saved little — retry in ~30 min).");
-      } else if (result.ok) {
-        const pct = Math.round(result.savingsPct * 100);
-        await ctx.reply(`Compaction complete. ${result.tokensBefore}→${result.tokensAfter} tokens (${pct}% saved).`);
-      } else {
-        await ctx.reply("Nothing to compact.");
-      }
-    } else {
-      await ctx.reply("Context engine not active for this transport.");
+    // #1406: exact durable target through the backend-neutral control plane.
+    const { getSessionControlService } = await import("../session-control/instance.js");
+    const service = getSessionControlService();
+    if (!service) {
+      await ctx.reply("Compaction is unavailable (control service not initialized).");
+      return true;
     }
+    const instructions = text.replace(/^\/compact\b/i, "").trim();
+    if (Buffer.byteLength(instructions, "utf-8") > MAX_COMPACT_INSTRUCTIONS_BYTES) {
+      await ctx.reply(`Custom instructions exceed ${MAX_COMPACT_INSTRUCTIONS_BYTES} bytes.`);
+      return true;
+    }
+    const result = await service.execute(
+      { kind: "durable_conversation", principalId: ctx.userId, sessionId: ctx.sessionKey },
+      { kind: "compact", reason: "manual", customInstructions: instructions || undefined },
+    );
+    // #1619: a completed durable compaction invalidates the attached
+    // transport's measured context usage so stale fill is never shown again.
+    if (result.status === "completed") {
+      resolveAttachedTransport(ctx).invalidateContextUsage?.();
+    }
+    await ctx.reply(formatCompactReply(result));
   } catch (err) {
     logError(TAG, "Manual compaction failed", err);
     await ctx.reply("Compaction failed.");
@@ -67,12 +84,38 @@ export async function handleCompact(_text: string, ctx: CommandContext): Promise
   return true;
 }
 
+/** Bounded, platform-neutral reply for a session-control result. */
+export function formatCompactReply(result: {
+  status: string;
+  message: string;
+  tokensBefore?: number;
+  tokensAfter?: number;
+}): string {
+  const savings = result.tokensBefore && result.tokensAfter
+    ? ` (${Math.round((1 - result.tokensAfter / result.tokensBefore) * 100)}% smaller)`
+    : "";
+  switch (result.status) {
+    case "completed":
+      return `Compaction complete${savings}.`;
+    case "nothing_to_compact":
+      return "Nothing to compact — history is within budget.";
+    case "busy":
+      return "Compaction is already in progress — try again shortly.";
+    case "stale":
+      return "Compaction skipped — a newer checkpoint was committed first.";
+    case "unsupported":
+      return "Compaction is not supported for this session.";
+    default:
+      return "Compaction failed.";
+  }
+}
+
 export async function handleEmergencyAlias(_text: string, ctx: CommandContext): Promise<boolean> {
   return handleModels("/model emergency", ctx);
 }
 
 export async function handleModels(text: string, ctx: CommandContext): Promise<boolean> {
-  const { loadTransport, resolveAgent, getModelsForProvider } = await import("../transport-config.js");
+  const { loadTransport, resolveAgent, getModelsForProvider, routeAssignments } = await import("../transport-config.js");
   const tc = loadTransport();
   const prof = tc ? resolveAgent("main", tc) : null;
   const currentModel = ("currentModel" in ctx.transport
@@ -81,28 +124,10 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
-  // /model emergency — activate hailMary (paid) until /model restore, /reset, or wake-up
+  // #1447: embedded Pi has no private emergency engine. #1468 owns the
+  // dedicated emergency path; #1467 only defines the global ACP hailMary entry.
   if (arg === "emergency" || arg === "hailmary") {
-    if (!ctx.hailMary) { await ctx.reply("❌ hailMary not configured in transport.json"); return true; }
-    const t = ctx.transport as unknown as { setEmergencyMode?: (o: { provider: string; endpoint: string; apiKey?: string; model: string; maxContext: number } | null) => void };
-    if (!t.setEmergencyMode) { await ctx.reply("❌ Transport does not support emergency mode"); return true; }
-
-    // #367 — validate hailMary's provider is ready before switching.
-    let hmApiKey: string | undefined;
-    if (tc) {
-      const hmProvider = tc.hailMary ? tc.providers[tc.hailMary.provider] : undefined;
-      if (hmProvider) {
-        const { validateProviderReady, formatValidationError } = await import("../transport-config.js");
-        const { getEnv } = await import("../env-schema.js");
-        const result = validateProviderReady(tc.hailMary!.provider, hmProvider, getEnv());
-        if (!result.ok) { await ctx.reply(formatValidationError(tc.hailMary!.provider, result)); return true; }
-        hmApiKey = tc.hailMary?.provider ? getEnv().getApiKey(hmProvider.apiKeyEnv ?? "") : undefined;
-      }
-    }
-
-    const hmEndpoint = ctx.hailMary?.endpoint ?? "";
-    t.setEmergencyMode({ provider: tc?.hailMary?.provider ?? "unknown", model: ctx.hailMary?.model ?? "", endpoint: hmEndpoint, apiKey: hmApiKey, maxContext: 1_000_000 });
-    await ctx.reply(`🚨 EMERGENCY MODE: using ${ctx.hailMary.model} (paid). Clears on /model restore, /reset, or wake-up.`);
+    await ctx.reply("❌ Emergency execution is unavailable until #1468. Normal transport switching is available with /route pi-ai or /route acp.");
     return true;
   }
 
@@ -111,8 +136,6 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const { restorePrevious } = await import("../transport-config.js");
     const result = restorePrevious();
     if (!result.ok) { await ctx.reply(`❌ ${result.error}`); return true; }
-    const t = ctx.transport as unknown as { setEmergencyMode?: (o: null) => void };
-    t.setEmergencyMode?.(null);
     await ctx.reply("🔄 Restored previous config.");
     return true;
   }
@@ -125,20 +148,14 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
-  // /models health reset / primary / reset — reset model health buckets + clear emergency mode
+  // /models health reset / primary / reset — reset model health buckets
   if (arg === "health reset" || arg === "primary" || arg === "reset") {
     const t = ctx.transport as unknown as {
       policy?: { registry: { resetAll: () => void } };
-      setEmergencyMode?: (o: null) => void;
-      isEmergencyMode?: boolean;
     };
-    const wasEmergency = t.isEmergencyMode;
-    t.setEmergencyMode?.(null);
     if (t.policy?.registry) {
       t.policy.registry.resetAll();
-      await ctx.reply(wasEmergency
-        ? "Model health reset + emergency mode cleared — primary model active."
-        : "Model health reset — all models available (sticky credits/auth cleared).");
+      await ctx.reply("Model health reset — all models available (sticky credits/auth cleared).");
     } else {
       await ctx.reply("No fallback policy configured.");
     }
@@ -151,13 +168,16 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const endpoint = prof.provider.endpoint ?? "http://localhost:11434/v1";
     const apiKey = prof.provider.apiKeyEnv ? (await import("../env-schema.js")).getEnv().getApiKey(prof.provider.apiKeyEnv) : undefined;
 
-    // Collect all models under this provider
+    // Collect all models under this provider from the active route block + hailMary
     const models = new Set<string>();
-    for (const [, agent] of Object.entries(tc!.agents)) {
-      if (agent.provider === prof.providerName) models.add(agent.model);
-    }
-    for (const fb of tc!.fallbacks ?? []) {
-      if (fb.provider === prof.providerName) models.add(fb.model);
+    const ra = tc ? (await import("../transport-config.js")).routeAssignments(tc) : null;
+    if (ra) {
+      for (const [, agent] of Object.entries(ra.agents)) {
+        if (agent.provider === prof.providerName) models.add(agent.model);
+      }
+      for (const fb of ra.fallbacks ?? []) {
+        if (fb.provider === prof.providerName) models.add(fb.model);
+      }
     }
     if (tc!.hailMary?.provider === prof.providerName) models.add(tc!.hailMary.model);
 
@@ -224,11 +244,13 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       if (!result.ok) { await ctx.reply(formatValidationError(prof.providerName, result)); return true; }
     }
 
-    // Write + switch
-    tc.agents["main"]!.model = newModel;
+    // Build independent candidate — never mutate the cached object
+    const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
+    const activeRa = candidate.routes[candidate.activeRoute];
+    if (activeRa) activeRa.agents["main"]!.model = newModel;
     const { cleanDemotedModels, writeTransportConfig } = await import("../transport-config.js");
-    cleanDemotedModels(tc, newModel);
-    const result = writeTransportConfig(tc, `main model → ${newModel}`);
+    cleanDemotedModels(candidate, newModel);
+    const result = writeTransportConfig(candidate, `main model → ${newModel}`);
     if (!result.ok) {
       await ctx.reply(`❌ Cannot switch: ${result.issues.map(i => i.reason).join("; ")}`);
       return true;
@@ -301,19 +323,23 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     if (!validation.ok) { await ctx.reply(formatValidationError(providerName, validation)); return true; }
     const defaults = loadProviderDefaults(providerName);
     if (defaults?.main) {
-      tc.agents["main"] = { model: defaults.main.model, provider: providerName };
-      for (const role of ["dreamy", "browsie", "cody"] as const) {
-        tc.agents[role] = { model: defaults[role]?.model ?? defaults.main.model, provider: providerName };
+      const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
+      const activeRa = candidate.routes[candidate.activeRoute];
+      if (activeRa) {
+        activeRa.agents["main"] = { model: defaults.main.model, provider: providerName };
+        for (const role of ["dreamy", "browsie", "cody"] as const) {
+          activeRa.agents[role] = { model: defaults[role]?.model ?? defaults.main.model, provider: providerName };
+        }
+      }
+      const { writeTransportConfig } = await import("../transport-config.js");
+      const result = writeTransportConfig(candidate, `global provider → ${providerName}`);
+      if (!result.ok) {
+        await ctx.reply(`❌ Cannot switch to ${providerName}: ${result.issues.map(i => i.reason).join("; ")}`);
+        return true;
       }
     } else {
       // #1415: no provider defaults — don't retain old provider's model IDs
       await ctx.reply(`❌ ${providerName} has no model defaults. Use /model list ${providerName} and /model quick <model> to pick a compatible model.`);
-      return true;
-    }
-    const { writeTransportConfig } = await import("../transport-config.js");
-    const result = writeTransportConfig(tc, `global provider → ${providerName}`);
-    if (!result.ok) {
-      await ctx.reply(`❌ Cannot switch to ${providerName}: ${result.issues.map(i => i.reason).join("; ")}`);
       return true;
     }
     await ctx.reply(`✓ All agents → ${providerName}. Use /reset to apply.`);
@@ -322,20 +348,25 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
   // /models (no arg) — merged status: model + transport + agents
   // #1416: live snapshot from getRuntimeStatus() — shared formatter.
+  // #1619: the ATTACHED session transport is authoritative; the configured
+  // route is only a fallback. Context renders as ?/<window> when unknown.
   const { resolveRuntimeStatus, formatRuntimeRoute } = await import("../transport/runtime-status.js");
-  const liveStatus = resolveRuntimeStatus(ctx.transport as any, {
-    route: tc?.route,
+  const attached = resolveAttachedTransport(ctx);
+  const liveStatus = resolveRuntimeStatus(attached as any, {
+    route: tc?.activeRoute,
     provider: prof?.providerName,
     model: prof?.model,
   });
-  const ctxPct = ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a";
-  const isEmergency = (ctx.transport as unknown as { isEmergencyMode?: boolean }).isEmergencyMode === true;
-  const statusMark = ctx.transport.isReady ? "✓" : "✗";
+  const windowText = liveStatus.contextWindow !== undefined ? String(liveStatus.contextWindow) : "?";
+  const ctxText = liveStatus.contextPercent !== undefined && liveStatus.contextPercent >= 0
+    ? `${Math.round(liveStatus.contextPercent * 10) / 10}%/${windowText}`
+    : `?/${windowText}`;
+  const statusMark = attached.isReady ? "✓" : "✗";
 
   const lines = [
     `🔌 Transport: ${formatRuntimeRoute(liveStatus)} ${statusMark}`,
-    isEmergency ? `EMERGENCY MODE: ${liveStatus.model ?? currentModel} (paid)` : `Model: ${liveStatus.model ?? currentModel}`,
-    `Context: ${ctxPct}`,
+    `Model: ${liveStatus.model ?? currentModel}`,
+    `Context: ${ctxText}`,
     "",
     "Agents:",
   ];
@@ -345,7 +376,8 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const r = tc ? resolveAgent(a, tc) : null;
     let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`;
     if (a === "main") {
-      const fbLines = (tc?.fallbacks ?? []).map((f, i) => {
+      const ra = tc ? routeAssignments(tc) : null;
+      const fbLines = (ra?.fallbacks ?? []).map((f, i) => {
         if ((f as any).demoted) return null;
         return `    ↳ fb${i + 1}: ${f.model} (${f.provider})`;
       }).filter(Boolean).join("\n");
@@ -353,11 +385,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     }
     lines.push(line);
   }
-  if (tc?.fallbacks?.length) {
-    lines.push(`\nFallback chain: ${tc.fallbacks.map(f => f.model).join(" → ")}`);
+  const ra = tc ? routeAssignments(tc) : null;
+  if (ra?.fallbacks?.length) {
+    lines.push(`\nFallback chain: ${ra.fallbacks.map(f => f.model).join(" → ")}`);
   }
-  // #1386: Show effective candidate order from the transport's policy
-  const transport = ctx.transport as unknown as { policy?: { candidates: Array<{ model: string; endpoint: string; source: string }> } };
+  // #1386: Show effective candidate order from the attached transport's policy
+  const transport = attached as unknown as { policy?: { candidates: Array<{ model: string; endpoint: string; source: string }> } };
   if (transport.policy?.candidates && transport.policy.candidates.length > 1) {
     const { formatCandidateChain } = await import("../transport/model-candidates.js");
     lines.push(`\nEffective chain:\n${formatCandidateChain(transport.policy.candidates as any)}`);
@@ -372,37 +405,49 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
 // #1276: /effort (primary) + /thinking (alias). Both names route here via
 // registerExact in commands/index.ts. The arg regex strips the command word
-// for either name. The level set is pi-ai's verbatim (off|low|medium|high|xhigh)
-// — see #1311 for the transport-side wiring.
+// for either name. The level set is abtars's vocabulary (off|low|medium|high|xhigh).
 //
-// `off` is an effort level, NOT a display-toggle alias. We dropped the prior
-// `on`/`off` display aliases (frees `off` for the effort branch) — bare
-// `/effort` still echoes current state, `/effort show`/`/effort hide` toggle
-// the display only.
+// #1619: /effort mutates the ATTACHED session transport's session-scoped
+// reasoning level and reports the requested/effective pair. `off` is a real
+// reasoning level, never a display toggle. show/hide were removed — display
+// visibility is no longer coupled to effort. A transport without runtime
+// effort support returns an explicit unsupported response.
 export async function handleEffort(text: string, ctx: CommandContext): Promise<boolean> {
   const arg = text.replace(/^\/(?:effort|thinking)\s*/i, "").trim().toLowerCase();
-  // #1276: ACP transport doesn't implement getActiveSession — reply with the
-  // accurate "not supported" message rather than the generic "No active
-  // session." fallback. This check is structural (capability-based), not state.
-  if (!ctx.transport.getActiveSession) {
-    await ctx.reply("not supported on this transport");
+  const transport = resolveAttachedTransport(ctx);
+
+  if (["off", "low", "medium", "high", "xhigh"].includes(arg)) {
+    const level = arg as import("../transport/kiro-transport.js").ReasoningEffort;
+    if (typeof transport.setReasoningEffort !== "function") {
+      await ctx.reply("Runtime reasoning effort is not supported by this transport.");
+      return true;
+    }
+    const state = transport.setReasoningEffort(level);
+    if (state.effective !== state.requested) {
+      await ctx.reply(`Reasoning effort: ${state.requested} (effective: ${state.effective})`);
+    } else {
+      await ctx.reply(`Reasoning effort: ${state.effective}`);
+    }
     return true;
   }
-  const session = ctx.transport.getActiveSession();
-  if (!session) { await ctx.reply("No active session."); return true; }
 
-  if (arg === "show") {
-    session.showReasoning = true;
-    await ctx.reply("Reasoning display: on");
-  } else if (arg === "hide") {
-    session.showReasoning = false;
-    await ctx.reply("Reasoning display: off");
-  } else if (["off", "low", "medium", "high", "xhigh"].includes(arg)) {
-    session.reasoningEffort = arg as "off" | "low" | "medium" | "high" | "xhigh";
-    await ctx.reply(`Reasoning effort: ${arg}`);
-  } else {
-    await ctx.reply(`Reasoning: effort=${session.reasoningEffort ?? "default"}, display=${session.showReasoning ? "show" : "hide"}`);
+  if (arg) {
+    await ctx.reply("Usage: /effort off|low|medium|high|xhigh");
+    return true;
   }
+
+  // Bare /effort reports the live effective level from the attached transport.
+  const snapshot = transport.getRuntimeStatus?.();
+  const effective = snapshot?.reasoning && snapshot.reasoning !== "default" ? snapshot.reasoning : undefined;
+  if (effective !== undefined && snapshot) {
+    if (snapshot.reasoningRequested && snapshot.reasoningRequested !== effective) {
+      await ctx.reply(`Reasoning effort: ${snapshot.reasoningRequested} (effective: ${effective})`);
+    } else {
+      await ctx.reply(`Reasoning effort: ${effective}`);
+    }
+    return true;
+  }
+  await ctx.reply("Runtime reasoning effort is not supported by this transport.");
   return true;
 }
 
@@ -411,7 +456,7 @@ export async function handleContinue(_text: string, ctx: CommandContext): Promis
   const { result: response } = await ctx.sessionManager.spin({
     type: "A", sessionId: ctx.sessionKey,
     prompt: "[SYSTEM] Something went wrong during your previous response. Continue from where you left off.",
-    userId: ctx.userId, await: true,
+    userId: ctx.userId, settlementOwner: "spin", await: true,
   });
   if (response) await ctx.reply(response);
   return true;
@@ -420,53 +465,73 @@ export async function handleContinue(_text: string, ctx: CommandContext): Promis
 // ── /route handler (#1418) ───────────────────────────────────────────────────
 
 export async function handleRoute(args: string, ctx: CommandContext): Promise<boolean> {
-  const { loadTransport, writeTransportConfig, providersForRoute, allAssignmentsMatchRoute, providerSupportsRoute } = await import("../transport-config.js");
+  const { loadTransport, writeTransportConfig, providersForRoute, allAssignmentsMatchRoute, providerSupportsRoute, routeAssignments } = await import("../transport-config.js");
   const tc = loadTransport();
   if (!tc) { await ctx.reply("❌ transport.json not loaded"); return true; }
 
   const arg = args.replace(/^\/route\s*/i, "").trim().toLowerCase();
 
   if (!arg) {
-    const routeLabels: Record<string, string> = { "pi-ai": "pi-ai API", "direct-api": "Direct API", acp: "ACP" };
+    const routeLabels: Record<string, string> = { "pi-ai": "pi-ai API", acp: "ACP" };
     await ctx.reply(
-      `Current route: **${routeLabels[tc.route] ?? tc.route}**\n\n` +
-      `Choose a route:\n${["pi-ai", "direct-api", "acp"].map(r => `• \`/route ${r}\` — ${routeLabels[r]}`).join("\n")}\n\n` +
-      `_Provider filter: ${providersForRoute(tc, tc.route).length} compatible providers_`
+      `Current route: **${routeLabels[tc.activeRoute] ?? tc.activeRoute}**\n\n` +
+      `Choose a route:\n${["pi-ai", "acp"].map(r => `• \`/route ${r}\` — ${routeLabels[r]}`).join("\n")}\n\n` +
+      `_Provider filter: ${providersForRoute(tc, tc.activeRoute).length} compatible providers_`
     );
     return true;
   }
 
-  const validRoutes = ["pi-ai", "direct-api", "acp"] as const;
+  const validRoutes = ["pi-ai", "acp"] as const;
   if (!validRoutes.includes(arg as any)) {
-    await ctx.reply(`❌ Unknown route "${arg}". Choose: pi-ai, direct-api, or acp.`);
+    await ctx.reply(`❌ Unknown route "${arg}". Choose: pi-ai or acp.`);
     return true;
   }
 
-  const newRoute = arg as "pi-ai" | "direct-api" | "acp";
+  const newRoute = arg as "pi-ai" | "acp";
 
-  if (newRoute === tc.route) {
+  if (newRoute === tc.activeRoute) {
     await ctx.reply(`✓ Already on ${newRoute} route.`);
     return true;
   }
 
+  // Check that the target route block exists
+  const targetRa = routeAssignments(tc, newRoute);
+  if (!targetRa) {
+    await ctx.reply(`❌ Route "${newRoute}" is not configured. Use /model change to set up "${newRoute}" assignments first.`);
+    return true;
+  }
+
+  // Validate every provider used by the target block before switching (#367).
+  const { validateRouteProvidersReady } = await import("../transport-config.js");
+  const { getEnv } = await import("../env-schema.js");
+  const readiness = validateRouteProvidersReady(tc, newRoute, getEnv());
+  if (readiness && !readiness.result.ok) {
+    await ctx.reply(`❌ Cannot switch to ${newRoute}: ${readiness.result.reason}\n   Fix: ${readiness.result.fix}`);
+    return true;
+  }
+
   if (allAssignmentsMatchRoute(tc, newRoute)) {
-    tc.route = newRoute;
-    const result = writeTransportConfig(tc, `route → ${newRoute}`);
+    const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
+    candidate.activeRoute = newRoute;
+    const result = writeTransportConfig(candidate, `route → ${newRoute}`);
     if (!result.ok) {
       await ctx.reply(`❌ Cannot switch to ${newRoute}: ${result.issues.map(i => i.reason).join("; ")}`);
       return true;
     }
     await ctx.reply(`✓ Route switched to ${newRoute}. Use /reset to apply.`);
   } else {
+    const ra = routeAssignments(tc, newRoute);
     const incompatible: string[] = [];
-    for (const [role, a] of Object.entries(tc.agents)) {
-      const p = tc.providers[a.provider];
-      if (!p || !providerSupportsRoute(p, newRoute)) incompatible.push(role);
-    }
-    for (let i = 0; i < (tc.fallbacks ?? []).length; i++) {
-      const fb = tc.fallbacks![i]!;
-      const p = tc.providers[fb.provider];
-      if (!p || !providerSupportsRoute(p, newRoute)) incompatible.push(`fallback[${i}]`);
+    if (ra) {
+      for (const [role, a] of Object.entries(ra.agents)) {
+        const p = tc.providers[a.provider];
+        if (!p || !providerSupportsRoute(p, newRoute)) incompatible.push(role);
+      }
+      for (let i = 0; i < (ra.fallbacks ?? []).length; i++) {
+        const fb = ra.fallbacks![i]!;
+        const p = tc.providers[fb.provider];
+        if (!p || !providerSupportsRoute(p, newRoute)) incompatible.push(`fallback[${i}]`);
+      }
     }
     await ctx.reply(
       `❌ Cannot switch to ${newRoute}: incompatible assignments found.\n` +

@@ -99,4 +99,47 @@ describe("PowerTransitionStore", () => {
     expect(storeB.read()).toBeNull();
     expect(storeB.isActive()).toBe(false);
   });
+
+  describe("#1517 attempt ownership", () => {
+    function marker(attemptId?: string) {
+      return {
+        state: "suspending" as const,
+        taskId: "hardware-sleep",
+        requestedAt: Date.now(),
+        expiresAt: Date.now() + 3600_000,
+        expectedWakeAt: Date.now() + 8 * 3600_000,
+        ...(attemptId !== undefined ? { attemptId } : {}),
+      };
+    }
+
+    it("isActiveExcept ignores only the exact attempt ID", () => {
+      const store = new PowerTransitionStore();
+      store.write(marker("own-attempt"));
+      expect(store.isActiveExcept()).toBe(true);
+      expect(store.isActiveExcept("own-attempt")).toBe(false);
+      expect(store.isActiveExcept("other-attempt")).toBe(true);
+    });
+
+    it("never excludes a marker without an attempt ID", () => {
+      const store = new PowerTransitionStore();
+      store.write(marker(undefined));
+      expect(store.isActiveExcept("anything")).toBe(true);
+    });
+
+    it("clearIfOwned clears only the marker owned by that attempt", () => {
+      const store = new PowerTransitionStore();
+      store.write(marker("own-attempt"));
+      expect(store.clearIfOwned("stale-attempt")).toBe(false);
+      expect(store.read()).not.toBeNull();
+      expect(store.clearIfOwned("own-attempt")).toBe(true);
+      expect(store.read()).toBeNull();
+    });
+
+    it("stale cleanup cannot erase a replacement marker", () => {
+      const store = new PowerTransitionStore();
+      store.write(marker("new-attempt"));
+      expect(store.clearIfOwned("old-attempt")).toBe(false);
+      expect(store.read()?.attemptId).toBe("new-attempt");
+    });
+  });
 });

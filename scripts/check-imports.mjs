@@ -11,6 +11,9 @@ const EXEMPT_FILES = new Set([
   "src/utils/abmind-lazy.ts",
 ]);
 
+let failed = false;
+let violations = [];
+
 function isSourceFile(name) {
   return name.endsWith(".ts");
 }
@@ -47,11 +50,22 @@ function isExemptFile(filePath) {
 
 const scanDir = process.argv[2] ? join(ROOT_DIR, process.argv[2]) : join(ROOT_DIR, "src");
 
-const staticRe = /(?:^|\s)(?:from\s+)["']abmind\/([^"']+)["']/;
-const dynamicImportRe = /import\(["']abmind\/([^"']+)["']\)/;
+const PATTERNS = [
+  // Deleted runtime components — must never be imported or constructed
+  { re: /DirectApiTransport/, label: "DirectApiTransport (deleted)" },
+  { re: /ConversationSession/, label: "ConversationSession (deleted)" },
+  // Legacy "direct-api" route — must not appear in production source
+  { re: /"direct-api"/, label: '"direct-api" route (deleted)' },
+  // Emergency L0 — must not appear in production source
+  { re: /createL0Attempt|emergencyCandidate|defaultCreateL0Attempt/, label: "emergency L0 (deleted)" },
+  // Runtime imports from abmind internals
+  { re: /import\(["']abmind\//, label: "dynamic import from abmind/" },
+];
 
-let failed = false;
-let violations = [];
+// #1508: the abtars-owned signed WSS client must never import the abmind
+// package at runtime — protocol constants are represented locally and
+// protected by cross-repository conformance acceptance.
+const RUNTIME_ABMIND_IMPORT_RE = /^import\s+[^t]/;
 
 for (const file of walk(scanDir)) {
   if (isExemptFile(file)) continue;
@@ -61,15 +75,16 @@ for (const file of walk(scanDir)) {
     const line = lines[i];
     if (isErasedImport(line)) continue;
 
-    const staticMatch = staticRe.exec(line);
-    if (staticMatch) {
-      violations.push(`${relative(scanDir, file)}:${i + 1}: static import from abmind/${staticMatch[1]}`);
-      failed = true;
+    for (const { re, label } of PATTERNS) {
+      if (re.test(line)) {
+        violations.push(`${relative(scanDir, file)}:${i + 1}: ${label}`);
+        failed = true;
+      }
     }
 
-    const dynamicMatch = dynamicImportRe.exec(line);
-    if (dynamicMatch) {
-      violations.push(`${relative(scanDir, file)}:${i + 1}: dynamic import from abmind/${dynamicMatch[1]}`);
+    const rel = relative(ROOT_DIR, file);
+    if (rel === "src/components/abmind-signed-wss-client.ts" && RUNTIME_ABMIND_IMPORT_RE.test(line) && /from ["']abmind/.test(line)) {
+      violations.push(`${rel}:${i + 1}: runtime import from abmind (forbidden — remote client is self-contained)`);
       failed = true;
     }
   }
@@ -80,8 +95,8 @@ for (const v of violations) {
 }
 
 if (failed) {
-  process.stderr.write("\ncheck-imports: FAIL — runtime imports from abmind/* are prohibited.\n");
+  process.stderr.write("\ncheck-imports: FAIL — architecture violations found.\n");
   process.exit(1);
 } else {
-  process.stdout.write("check-imports: OK — no runtime imports from abmind/*.\n");
+  process.stdout.write("check-imports: OK — no architecture violations.\n");
 }

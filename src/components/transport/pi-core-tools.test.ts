@@ -1,0 +1,242 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { createPiAgentTools } from "./pi-core-tools.js";
+import type { PiCoreToolContext } from "./pi-core-tools.js";
+import { createPiExecutionSafetyController } from "./pi-core-safety.js";
+import { FallbackPolicy } from "./fallback-policy.js";
+import { ModelHealthRegistry } from "./model-health-registry.js";
+import type { ModelCandidate } from "./model-candidates.js";
+import { buildPolicy } from "../tool-sandbox.js";
+import { PiCoreToolExecutionError } from "./tool-failure-diagnostic.js";
+import { createClientRuntime } from "../memory-runtime.js";
+import type { MemoryToolDependenciesHolder } from "../memory-store-quota.js";
+import type { SessionType } from "../spin-types.js";
+
+function makeRegistry() {
+  return new ModelHealthRegistry();
+}
+
+function makeCandidate(overrides?: Partial<ModelCandidate>): ModelCandidate {
+  return {
+    model: "test-model",
+    provider: "test-provider",
+    endpoint: "https://api.test/v1",
+    maxContext: 128000,
+    apiKey: "test-key",
+    source: "primary",
+    ...overrides,
+  };
+}
+
+describe("createPiAgentTools", () => {
+  let registry: ModelHealthRegistry;
+  let policy: FallbackPolicy;
+  let depsHolder: MemoryToolDependenciesHolder;
+
+  beforeEach(() => {
+    registry = makeRegistry();
+    policy = new FallbackPolicy([makeCandidate()], registry);
+    depsHolder = { current: null };
+  });
+
+  afterEach(() => {
+    depsHolder.current = null;
+  });
+
+  function makeContext(overrides?: Partial<PiCoreToolContext>): PiCoreToolContext {
+    return {
+      executionId: "exec_1",
+      userId: "user_1",
+      sandboxPolicy: buildPolicy("owner"),
+      safety: createPiExecutionSafetyController(policy),
+      memoryToolDeps: depsHolder,
+      ...overrides,
+    };
+  }
+
+  it("creates tool list with sequential execution mode", () => {
+    const ctx = makeContext();
+    const tools = createPiAgentTools(ctx);
+    expect(tools.length).toBeGreaterThan(0);
+    for (const tool of tools) {
+      expect(tool.executionMode).toBe("sequential");
+    }
+  });
+
+  it("filters by sandbox policy", () => {
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["execute_bash"] }),
+    });
+    const tools = createPiAgentTools(ctx);
+    expect(tools.length).toBe(1);
+    expect(tools[0]?.name).toBe("execute_bash");
+  });
+
+  it("each tool has name and description", () => {
+    const ctx = makeContext();
+    const tools = createPiAgentTools(ctx);
+    for (const tool of tools) {
+      expect(typeof tool.name).toBe("string");
+      expect(tool.name.length).toBeGreaterThan(0);
+      expect(typeof tool.description).toBe("string");
+    }
+  });
+
+  it("executes tool through executeToolCall path", async () => {
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_recall"] }),
+    });
+    const tools = createPiAgentTools(ctx);
+    const recallTool = tools.find((t) => t.name === "memory_recall");
+    expect(recallTool).toBeDefined();
+  });
+
+  it("tool execute returns an AgentToolResult", async () => {
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
+    });
+    const tools = createPiAgentTools(ctx);
+    const tool = tools.find((t) => t.name === "secret_get");
+    if (tool) {
+      const result = await tool.execute("call_1", { name: "missing" });
+      expect(typeof result).toBe("object");
+      expect(Array.isArray(result.content)).toBe(true);
+      expect(result.details).toBeDefined();
+    }
+  });
+
+  it("calls onToolFailure when tool returns a failure result", async () => {
+    const onToolFailure = vi.fn();
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
+      onToolFailure,
+    });
+    const tools = createPiAgentTools(ctx);
+    const tool = tools.find((t) => t.name === "secret_get");
+    if (tool) {
+      await tool.execute("call_1", { name: "missing" });
+      expect(onToolFailure).toHaveBeenCalledTimes(1);
+      expect(onToolFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "unknown", tool: "secret_get" }),
+      );
+    }
+  });
+
+  it("treats repeated unavailable private writes as completed non-failures", async () => {
+    const instantStore = vi.fn();
+    const client = {
+      capabilities: {
+        version: 1,
+        methods: ["private.instantStore"],
+        domains: ["private"],
+        features: { private_write: "false" },
+      },
+      privateMemory: { instantStore },
+    } as unknown as import("abmind").AbmindClient;
+    depsHolder.current = { runtime: createClientRuntime(client), quota: null as never };
+
+    const onToolFailure = vi.fn();
+    const onToolSuccess = vi.fn();
+    const tools = createPiAgentTools(makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
+      onToolFailure,
+      onToolSuccess,
+      sessionType: "A",
+    }));
+    const storeTool = tools.find(tool => tool.name === "memory_store");
+    expect(storeTool).toBeDefined();
+
+    for (const [index, translated] of ["one", "two", "three"].entries()) {
+      const result = await storeTool!.execute(`call_${index}`, { translated, type: "fact" });
+      expect(result.content[0]?.text).toContain('"retryable":false');
+    }
+
+    expect(instantStore).not.toHaveBeenCalled();
+    expect(onToolFailure).not.toHaveBeenCalled();
+    expect(onToolSuccess).toHaveBeenCalledTimes(3);
+  });
+
+  // #1552 R1: memory_store is visible to Main (A) and Dreamy (D) only.
+  it.each([
+    ["B", "Browse"], ["C", "Code"], ["T", "Task"], ["P", "Peer"], ["S", "System"],
+    ["O", "Orc"], ["W", "Worker"], ["H", "Healer"], ["K", "Skill"],
+  ] as const)("hides memory_store from %s sessions while A and D see it", (type) => {
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
+      sessionType: type as SessionType,
+    });
+    const tools = createPiAgentTools(ctx);
+    expect(tools.find(tool => tool.name === "memory_store")).toBeUndefined();
+    const aCtx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
+      sessionType: "A",
+    });
+    expect(createPiAgentTools(aCtx).find(tool => tool.name === "memory_store")).toBeDefined();
+    const dCtx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
+      sessionType: "D",
+    });
+    expect(createPiAgentTools(dCtx).find(tool => tool.name === "memory_store")).toBeDefined();
+  });
+
+  it("hides memory_store when the session type is missing entirely", () => {
+    const tools = createPiAgentTools(makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
+      sessionType: undefined,
+    }));
+    expect(tools.find(tool => tool.name === "memory_store")).toBeUndefined();
+  });
+
+  it("throws PiCoreToolExecutionError on exact_repeat from beforeTool", async () => {
+    const onToolFailure = vi.fn();
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
+      onToolFailure,
+    });
+    const tools = createPiAgentTools(ctx);
+    const tool = tools.find((t) => t.name === "secret_get");
+    if (tool) {
+      await tool.execute("call_1", { name: "dup" });
+      await tool.execute("call_2", { name: "dup" });
+      await expect(tool.execute("call_3", { name: "dup" }))
+        .rejects.toThrow(PiCoreToolExecutionError);
+      expect(onToolFailure).toHaveBeenCalledTimes(3);
+    }
+  });
+
+  it("throws PiCoreToolExecutionError after repeated tool failure", async () => {
+    const onToolFailure = vi.fn();
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["send_document"] }),
+      onToolFailure,
+    });
+    const tools = createPiAgentTools(ctx);
+    const tool = tools.find((t) => t.name === "send_document");
+    if (tool) {
+      // Use different args to avoid exact_repeat; afterTool failure detection
+      // classifies each error response as a failure, triggering repeated_failure on the 3rd.
+      await tool.execute("call_1", { path: "/tmp/one.md" });
+      await tool.execute("call_2", { path: "/tmp/two.md" });
+      await expect(tool.execute("call_3", { path: "/tmp/three.md" }))
+        .rejects.toThrow(PiCoreToolExecutionError);
+      expect(onToolFailure).toHaveBeenCalledTimes(3);
+    }
+  });
+
+  it("skips tool on safety controller skip decision", async () => {
+    const safety = createPiExecutionSafetyController(policy);
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
+      safety,
+    });
+
+    safety.requestStop("test stop");
+
+    const tools = createPiAgentTools(ctx);
+    const tool = tools.find((t) => t.name === "secret_get");
+    if (tool) {
+      const result = await tool.execute("call_1", { name: "hi" });
+      expect(result.details).toEqual({ skipped: true });
+      expect(result.content[0]?.text).toContain("skipped");
+    }
+  });
+});

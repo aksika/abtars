@@ -1,5 +1,7 @@
 import { requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "./worker-contract.js";
+import { ExecutorLeaseStore } from "./executor-lease-store.js";
+import { logSwarmTrace } from "./swarm-trace.js";
 
 export type AttemptLifecycle =
   | "pending"
@@ -17,6 +19,10 @@ export type ExecutorKind = "agent" | "pi" | "remote";
 export interface ContractRow {
   id: string;
   card_id: number;
+  revision: number;
+  root_contract_id: string;
+  parent_contract_id: string | null;
+  source_attempt_id: string | null;
   schema_version: number;
   contract_json: string;
   contract_digest: string;
@@ -39,6 +45,26 @@ export interface AttemptRow {
   settled_at: string | null;
   hard_deadline_at: string | null;
   cancel_reason: string | null;
+  source_attempt_id: string | null;
+  retry_directive_id: string | null;
+  earliest_claim_at: string | null;
+  reserved_tokens: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  charged_tokens: number;
+  usage_charged_at: string | null;
+}
+
+export interface ReservationRow {
+  source_attempt_id: string;
+  target_attempt_id: string;
+  reserved_attempts: number;
+  reserved_tokens: number;
+  reserved_cost: number;
+  reserved_switches: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ResultRow {
@@ -69,14 +95,35 @@ export class WorkerSupervisionStore {
 
   migrate(): void {
     const db = this.db;
+
+    // Migration: rename old single-contract-per-card table before creating new revisioned one.
+    const migrationDone = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='worker_contracts_old'`).get();
+    if (!migrationDone) {
+      const oldSchema = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_contracts'`).get() as { sql: string } | undefined;
+      const needsMigration = oldSchema && oldSchema.sql.includes("card_id INTEGER UNIQUE");
+      if (needsMigration) {
+        db.exec(`ALTER TABLE worker_contracts RENAME TO worker_contracts_old`);
+        // Drop the old UNIQUE index that conflicts with the new table
+        try { db.exec(`DROP INDEX IF EXISTS sqlite_autoindex_worker_contracts_1`); } catch {}
+      }
+    }
+
+    // Now create (or recreate) the revisioned table safely
     db.exec(`
       CREATE TABLE IF NOT EXISTS worker_contracts (
         id TEXT PRIMARY KEY,
-        card_id INTEGER UNIQUE NOT NULL,
+        card_id INTEGER NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        root_contract_id TEXT NOT NULL,
+        parent_contract_id TEXT,
+        source_attempt_id TEXT,
         schema_version INTEGER NOT NULL,
         contract_json TEXT NOT NULL,
         contract_digest TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        UNIQUE(card_id, revision),
+        UNIQUE(card_id, contract_digest),
+        UNIQUE(source_attempt_id)
       );
 
       CREATE TABLE IF NOT EXISTS worker_attempts (
@@ -95,6 +142,9 @@ export class WorkerSupervisionStore {
         settled_at TEXT,
         hard_deadline_at TEXT,
         cancel_reason TEXT,
+        source_attempt_id TEXT,
+        retry_directive_id TEXT,
+        earliest_claim_at TEXT,
         UNIQUE(card_id, ordinal)
       );
 
@@ -104,24 +154,92 @@ export class WorkerSupervisionStore {
         envelope_digest TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS retry_budget_reservations (
+        source_attempt_id TEXT PRIMARY KEY,
+        target_attempt_id TEXT UNIQUE NOT NULL,
+        reserved_attempts INTEGER NOT NULL CHECK(reserved_attempts = 1),
+        reserved_tokens INTEGER NOT NULL,
+        reserved_cost REAL NOT NULL,
+        reserved_switches INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('active','claimed','released','consumed')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
+
+    // Migrate old rows to revision 1 if worker_contracts_old exists and has data
+    try {
+      const oldExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='worker_contracts_old'`).get();
+      if (!oldExists) throw new Error("no old table");
+      const oldRows = db.prepare(`SELECT count(*) AS cnt FROM worker_contracts_old`).get() as { cnt: number };
+      if (oldRows && oldRows.cnt > 0) {
+        db.transaction(() => {
+          const rows = db.prepare(`SELECT * FROM worker_contracts_old`).all() as Array<{
+            id: string; card_id: number; schema_version: number;
+            contract_json: string; contract_digest: string; created_at: string;
+          }>;
+          for (const row of rows) {
+            const existing = db.prepare(`SELECT 1 FROM worker_contracts WHERE id = ?`).get(row.id);
+            if (existing) continue;
+            db.prepare(`
+              INSERT INTO worker_contracts (id, card_id, revision, root_contract_id, parent_contract_id, source_attempt_id, schema_version, contract_json, contract_digest, created_at)
+              VALUES (?, ?, 1, ?, NULL, NULL, ?, ?, ?, ?)
+            `).run(row.id, row.card_id, row.id, row.schema_version, row.contract_json, row.contract_digest, row.created_at);
+          }
+          const newCount = (db.prepare(`SELECT count(*) AS cnt FROM worker_contracts`).get() as { cnt: number }).cnt;
+          if (newCount !== oldRows.cnt) throw new Error(`migration count mismatch: old=${oldRows.cnt} new=${newCount}`);
+        });
+      }
+    } catch { /* worker_contracts_old does not exist or is empty — skip migration */ }
+
     // Safe migration: add columns if they don't exist
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN generation INTEGER DEFAULT 1`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'pending'`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN claimed_at TEXT`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN hard_deadline_at TEXT`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN cancel_reason TEXT`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN source_attempt_id TEXT`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN retry_directive_id TEXT`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN earliest_claim_at TEXT`); } catch {}
+    // #1510: Add budget and usage columns
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN reserved_tokens INTEGER NOT NULL DEFAULT 0`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN input_tokens INTEGER`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN output_tokens INTEGER`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN charged_tokens INTEGER NOT NULL DEFAULT 0`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN usage_charged_at TEXT`); } catch {}
+
+    // Backfill lifecycle for rows created before the #1364 state machine.
+    db.exec(`
+      UPDATE worker_attempts
+      SET lifecycle = CASE
+        WHEN status IN ('settled', 'completed') THEN 'completed'
+        WHEN status = 'failed' THEN 'failed'
+        WHEN status = 'cancelled' THEN 'cancelled'
+        WHEN status = 'timed_out' THEN 'timed_out'
+        WHEN status = 'running' THEN 'running'
+        ELSE lifecycle
+      END
+      WHERE lifecycle = 'pending' AND status <> 'pending'
+    `);
   }
 
   insertContract(contract: WorkerAcceptanceContractV1, cardId: number): void {
+    const rev = contract.revision_meta;
+    const revision = rev?.revision ?? 1;
+    const rootContractId = rev?.root_contract_id ?? contract.id;
     this.db.prepare(`
-      INSERT INTO worker_contracts (id, card_id, schema_version, contract_json, contract_digest, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(contract.id, cardId, contract.schema_version, JSON.stringify(contract), contract.digest, new Date().toISOString());
+      INSERT INTO worker_contracts (id, card_id, revision, root_contract_id, parent_contract_id, source_attempt_id, schema_version, contract_json, contract_digest, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(contract.id, cardId, revision, rootContractId, rev?.parent_contract_id ?? null, rev?.source_attempt_id ?? null, contract.schema_version, JSON.stringify(contract), contract.digest, new Date().toISOString());
   }
 
   getContract(contractId: string): ContractRow | undefined {
     return this.db.prepare(`SELECT * FROM worker_contracts WHERE id = ?`).get(contractId) as ContractRow | undefined;
+  }
+
+  getLatestContractForCard(cardId: number): ContractRow | undefined {
+    return this.db.prepare(`SELECT * FROM worker_contracts WHERE card_id = ? ORDER BY revision DESC LIMIT 1`).get(cardId) as ContractRow | undefined;
   }
 
   getContractByCardId(cardId: number): ContractRow | undefined {
@@ -129,8 +247,13 @@ export class WorkerSupervisionStore {
   }
 
   contractExists(cardId: number): boolean {
-    const row = this.db.prepare(`SELECT 1 FROM worker_contracts WHERE card_id = ?`).get(cardId);
+    const row = this.db.prepare(`SELECT 1 FROM worker_contracts WHERE card_id = ? LIMIT 1`).get(cardId);
     return row !== undefined;
+  }
+
+  getNextRevision(cardId: number): number {
+    const row = this.db.prepare(`SELECT COALESCE(MAX(revision), 0) + 1 AS next_rev FROM worker_contracts WHERE card_id = ?`).get(cardId) as { next_rev: number } | undefined;
+    return row?.next_rev ?? 1;
   }
 
   insertAttempt(attempt: {
@@ -144,10 +267,19 @@ export class WorkerSupervisionStore {
     status: string;
     started_at: string;
   }): void {
+    const lifecycle: AttemptLifecycle = attempt.status === "running"
+      ? "running"
+      : attempt.status === "settled" || attempt.status === "completed"
+        ? "completed"
+        : attempt.status === "failed"
+          ? "failed"
+          : attempt.status === "cancelled"
+            ? "cancelled"
+            : "pending";
     this.db.prepare(`
-      INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, remote_task_id, status, started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(attempt.id, attempt.card_id, attempt.contract_id, attempt.ordinal, attempt.executor_kind, attempt.executor_id, attempt.remote_task_id ?? null, attempt.status, attempt.started_at);
+      INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, remote_task_id, status, lifecycle, started_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(attempt.id, attempt.card_id, attempt.contract_id, attempt.ordinal, attempt.executor_kind, attempt.executor_id, attempt.remote_task_id ?? null, attempt.status, lifecycle, attempt.started_at);
   }
 
   getAttempt(attemptId: string): AttemptRow | undefined {
@@ -160,10 +292,6 @@ export class WorkerSupervisionStore {
 
   getLatestAttempt(cardId: number): AttemptRow | undefined {
     return this.db.prepare(`SELECT * FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(cardId) as AttemptRow | undefined;
-  }
-
-  settleAttempt(attemptId: string, status: string): void {
-    this.db.prepare(`UPDATE worker_attempts SET status = ?, settled_at = ? WHERE id = ?`).run(status, new Date().toISOString(), attemptId);
   }
 
   // ── #1364: Lifecycle and claim operations ──────────────────────────────
@@ -224,7 +352,61 @@ export class WorkerSupervisionStore {
       hard_deadline_at: hardDeadlineAt ?? null,
     });
 
+    if (updated) {
+      logSwarmTrace({ event: "attempt_claimed", card: cardId, attempt: attemptId, generation, executor: executorId });
+    }
+
     return updated ? claim : null;
+  }
+
+  /** Claim a scheduled retry and its budget reservation atomically. */
+  claimRetryAttempt(
+    cardId: number,
+    attemptId: string,
+    contractId: string,
+    executorKind: ExecutorKind,
+    executorId: string,
+    generation: number,
+    sourceAttemptId: string,
+    hardDeadlineAt?: string,
+  ): ExecutionClaim | null {
+    try {
+      return this.db.transaction(() => {
+        const attempt = this.db.prepare(`
+          SELECT id, contract_id, executor_kind, executor_id, lifecycle, source_attempt_id
+          FROM worker_attempts
+          WHERE id = ? AND card_id = ?
+            AND id = (SELECT id FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1)
+        `).get(attemptId, cardId, cardId) as {
+          id: string; contract_id: string; executor_kind: string; executor_id: string;
+          lifecycle: AttemptLifecycle; source_attempt_id: string | null;
+        } | undefined;
+        if (!attempt || attempt.lifecycle !== "pending" ||
+            attempt.contract_id !== contractId ||
+            attempt.executor_kind !== executorKind ||
+            attempt.executor_id !== executorId ||
+            attempt.source_attempt_id !== sourceAttemptId) return null;
+
+        const claimedAt = new Date().toISOString();
+        const updated = this.db.prepare(`
+          UPDATE worker_attempts
+          SET lifecycle = 'claimed', claimed_at = ?, generation = ?, hard_deadline_at = ?
+          WHERE id = ? AND lifecycle = 'pending'
+        `).run(claimedAt, generation, hardDeadlineAt ?? null, attemptId);
+        if (updated.changes !== 1) return null;
+
+        const reservation = this.db.prepare(`
+          UPDATE retry_budget_reservations
+          SET status = 'claimed', updated_at = ?
+          WHERE source_attempt_id = ? AND target_attempt_id = ? AND status = 'active'
+        `).run(claimedAt, sourceAttemptId, attemptId);
+        if (reservation.changes !== 1) throw new Error("retry reservation was not active");
+
+        return { attemptId, cardId, contractId, executorKind, executorId, generation, claimedAt, hardDeadlineAt };
+      });
+    } catch {
+      return null;
+    }
   }
 
   markAttemptStartObservable(attemptId: string): boolean {
@@ -232,7 +414,12 @@ export class WorkerSupervisionStore {
   }
 
   markAttemptRunning(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting"], "running");
+    const ok = this.lifecycleTransition(attemptId, ["claimed", "starting"], "running");
+    if (ok) {
+      const attempt = this.getAttempt(attemptId);
+      if (attempt) logSwarmTrace({ event: "attempt_running", card: attempt.card_id, attempt: attemptId, generation: attempt.generation, executor: attempt.executor_id });
+    }
+    return ok;
   }
 
   requestCancel(attemptId: string, reason: string): boolean {
@@ -241,20 +428,55 @@ export class WorkerSupervisionStore {
     });
   }
 
+  /** Cancel work that has not been claimed yet so it can never be dispatched. */
+  cancelPendingAttempt(attemptId: string, reason: string): boolean {
+    return this.lifecycleTransition(attemptId, ["pending"], "cancelled", {
+      status: "cancelled",
+      cancel_reason: reason,
+      settled_at: new Date().toISOString(),
+    });
+  }
+
   completeAttempt(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed");
+    const ok = this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed", {
+      status: "settled",
+      settled_at: new Date().toISOString(),
+    });
+    if (ok) {
+      const attempt = this.getAttempt(attemptId);
+      if (attempt) {
+        logSwarmTrace({ event: "attempt_completed", card: attempt.card_id, attempt: attemptId, generation: attempt.generation, to: "completed" });
+      }
+    }
+    return ok;
   }
 
   failAttempt(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "failed");
+    const ok = this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "failed", {
+      status: "failed",
+      settled_at: new Date().toISOString(),
+    });
+    if (ok) {
+      const attempt = this.getAttempt(attemptId);
+      if (attempt) {
+        logSwarmTrace({ event: "attempt_failed", card: attempt.card_id, attempt: attemptId, generation: attempt.generation, to: "failed" });
+      }
+    }
+    return ok;
   }
 
   cancelAttempt(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "cancelled");
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "cancelled", {
+      status: "cancelled",
+      settled_at: new Date().toISOString(),
+    });
   }
 
   timeoutAttempt(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "timed_out");
+    return this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "timed_out", {
+      status: "timed_out",
+      settled_at: new Date().toISOString(),
+    });
   }
 
   isAttemptTerminal(lifecycle: AttemptLifecycle): boolean {
@@ -306,39 +528,431 @@ export class WorkerSupervisionStore {
     return row !== undefined;
   }
 
+  // ── Retry budget reservations ───────────────────────────────────────────
+
+  insertReservation(reservation: {
+    source_attempt_id: string;
+    target_attempt_id: string;
+    reserved_tokens: number;
+    reserved_cost: number;
+    reserved_switches: number;
+  }): boolean {
+    const now = new Date().toISOString();
+    try {
+      this.db.prepare(`
+        INSERT INTO retry_budget_reservations (source_attempt_id, target_attempt_id, reserved_attempts, reserved_tokens, reserved_cost, reserved_switches, status, created_at, updated_at)
+        VALUES (?, ?, 1, ?, ?, ?, 'active', ?, ?)
+      `).run(reservation.source_attempt_id, reservation.target_attempt_id, reservation.reserved_tokens, reservation.reserved_cost, reservation.reserved_switches, now, now);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  getReservation(sourceAttemptId: string): ReservationRow | undefined {
+    return this.db.prepare(`SELECT * FROM retry_budget_reservations WHERE source_attempt_id = ?`).get(sourceAttemptId) as ReservationRow | undefined;
+  }
+
+  updateReservationStatus(sourceAttemptId: string, status: string): boolean {
+    const result = this.db.prepare(`UPDATE retry_budget_reservations SET status = ?, updated_at = ? WHERE source_attempt_id = ?`).run(status, new Date().toISOString(), sourceAttemptId);
+    return result.changes > 0;
+  }
+
+  getActiveReservationsForCard(cardId: number): ReservationRow[] {
+    const attemptIds = this.db.prepare(`SELECT id FROM worker_attempts WHERE card_id = ?`).all(cardId) as Array<{ id: string }>;
+    if (attemptIds.length === 0) return [];
+    const ids = attemptIds.map(a => a.id);
+    const placeholders = ids.map(() => "?").join(",");
+    return this.db.prepare(`SELECT * FROM retry_budget_reservations WHERE source_attempt_id IN (${placeholders}) AND status IN ('active','claimed')`).all(...ids) as unknown as ReservationRow[];
+  }
+
   private computeEnvelopeDigest(envelopeJson: string): string {
     const { createHash } = require("node:crypto") as typeof import("node:crypto");
     return createHash("sha256").update(envelopeJson, "utf-8").digest("hex");
   }
-}
 
-export enum SettlementResult {
-  Settled = "settled",
-  Replayed = "replayed",
-  Conflict = "conflict",
-}
-
-function envelopeDigest(envelope: WorkerResultEnvelopeV1): string {
-  const { createHash } = require("node:crypto") as typeof import("node:crypto");
-  return createHash("sha256").update(JSON.stringify(envelope), "utf-8").digest("hex");
-}
-
-export function settleResult(
-  store: WorkerSupervisionStore,
-  attemptId: string,
-  envelope: WorkerResultEnvelopeV1,
-  status: string,
-): SettlementResult {
-  return store.db.transaction(() => {
-    const existing = store.getResult(attemptId);
-    if (existing) {
-      const digest = envelopeDigest(envelope);
-      const replayed = store.replayResult(attemptId, digest);
-      if (replayed === "conflict") return SettlementResult.Conflict;
-      return SettlementResult.Replayed;
+  /** #1588: a minimal result envelope for a non-completed terminal settlement. */
+  private buildAbsenceEnvelope(attempt: AttemptRow, outcome: "failed" | "cancelled" | "timed_out", now: number): WorkerResultEnvelopeV1 {
+    const contractRow = this.getContract(attempt.contract_id);
+    let criteria: Array<{ criterion_id: string; status: "not_run"; evidence_ids: readonly string[] }> = [];
+    if (contractRow) {
+      try {
+        const contract = JSON.parse(contractRow.contract_json) as unknown;
+        if (typeof contract === "object" && contract !== null && Array.isArray((contract as { criteria?: unknown })["criteria"])) {
+          criteria = ((contract as { criteria: unknown[] })["criteria"])
+            .filter((criterion): criterion is { id: string } =>
+              typeof criterion === "object" && criterion !== null && typeof (criterion as { id?: unknown })["id"] === "string")
+            .map((c) => ({ criterion_id: c.id, status: "not_run" as const, evidence_ids: [] }));
+        }
+      } catch { /* contract unreadable — empty criteria */ }
     }
-    store.insertResult(attemptId, envelope);
-    store.settleAttempt(attemptId, status);
-    return SettlementResult.Settled;
-  });
+    return {
+      schema_version: 1,
+      attempt: {
+        id: attempt.id,
+        ordinal: attempt.ordinal,
+        contract_id: attempt.contract_id,
+        contract_digest: contractRow?.contract_digest ?? "",
+        executor_kind: attempt.executor_kind === "remote" ? "remote_worker" : "local_worker",
+        executor_id: attempt.executor_id,
+        started_at: attempt.started_at,
+        finished_at: new Date(now).toISOString(),
+      },
+      outcome,
+      criteria,
+      checks: [],
+      artifacts: [],
+      worker_report: { summary: `settled ${outcome} without a worker result`, claims: [], unresolved_risks: [] },
+    };
+  }
+
+  // ── #1510: Atomic capacity-and-budget-guarded claim ─────────────────────
+
+  getActiveAttemptCountForExecutor(executorKind: string, executorId: string): number {
+    const sql = `
+      SELECT COUNT(*) AS cnt FROM worker_attempts
+      WHERE executor_kind = ? AND executor_id = ?
+        AND lifecycle IN ('claimed','starting','running','cancel_requested')
+    `;
+    const row = this.db.prepare(sql).get(executorKind, executorId) as { cnt: number };
+    return row?.cnt ?? 0;
+  }
+
+  getActiveAttemptsForExecutor(executorKind: string, executorId: string): AttemptRow[] {
+    return this.db.prepare(`
+      SELECT * FROM worker_attempts
+      WHERE executor_kind = ? AND executor_id = ?
+        AND lifecycle IN ('claimed','starting','running','cancel_requested')
+      ORDER BY ordinal ASC
+    `).all(executorKind, executorId) as unknown as AttemptRow[];
+  }
+
+  getActiveReservedTokensForProject(projectId: number): number {
+    const sql = `
+      SELECT COALESCE(SUM(wa.reserved_tokens), 0) AS total
+      FROM kanban_board k
+      JOIN worker_attempts wa ON wa.card_id = k.id
+      WHERE k.parent_id = ? AND wa.lifecycle IN ('claimed','starting','running','cancel_requested')
+    `;
+    const row = this.db.prepare(sql).get(projectId) as { total: number };
+    return row?.total ?? 0;
+  }
+
+  getActiveAttemptsForProject(projectId: number): AttemptRow[] {
+    return this.db.prepare(`
+      SELECT wa.* FROM worker_attempts wa
+      JOIN kanban_board k ON k.id = wa.card_id
+      WHERE k.parent_id = ? AND wa.lifecycle IN ('claimed','starting','running','cancel_requested')
+      ORDER BY wa.ordinal ASC
+    `).all(projectId) as unknown as AttemptRow[];
+  }
+
+  isCardLatestAttempt(cardId: number, attemptId: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 FROM worker_attempts
+      WHERE card_id = ? AND id = ? AND ordinal = (SELECT MAX(ordinal) FROM worker_attempts WHERE card_id = ?)
+    `).get(cardId, attemptId, cardId);
+    return row !== undefined;
+  }
+
+  getProjectCard(projectId: number): { max_tokens: number | null; tokens_used: number; status: string } | undefined {
+    const row = this.db.prepare(`
+      SELECT max_tokens, COALESCE(tokens_used, 0) AS tokens_used, status
+      FROM kanban_board WHERE id = ?
+    `).get(projectId) as { max_tokens: number | null; tokens_used: number; status: string } | undefined;
+    return row;
+  }
+
+  claimAttemptWithinLimits(input: {
+    cardId: number;
+    attemptId: string;
+    contractId: string;
+    executorKind: ExecutorKind;
+    executorId: string;
+    generation: number;
+    executorMax: number;
+    hardDeadlineAt?: string;
+    reservedTokens: number;
+    projectId: number;
+    sourceAttemptId?: string;
+  }): { kind: "claimed"; claim: ExecutionClaim } | { kind: string; reason: string } {
+    try {
+      return this.db.transaction(() => {
+        const attempt = this.db.prepare(`
+          SELECT id, lifecycle, ordinal FROM worker_attempts
+          WHERE id = ? AND card_id = ?
+        `).get(input.attemptId, input.cardId) as { id: string; lifecycle: AttemptLifecycle; ordinal: number } | undefined;
+        if (!attempt) return { kind: "stale", reason: "attempt not found" };
+        if (attempt.lifecycle !== "pending") return { kind: "stale", reason: `attempt lifecycle is ${attempt.lifecycle}` };
+        if (!this.isCardLatestAttempt(input.cardId, input.attemptId)) return { kind: "stale", reason: "not latest attempt" };
+
+        const card = this.db.prepare(`
+          SELECT status, parent_id FROM kanban_board WHERE id = ?
+        `).get(input.cardId) as { status: string; parent_id: number | null } | undefined;
+        if (!card || card.status !== "queued") return { kind: "card_not_queued", reason: `card status is ${card?.status}` };
+
+        if (card.parent_id !== input.projectId) return { kind: "project_mismatch", reason: "card parent is not expected project" };
+
+        const project = this.getProjectCard(input.projectId);
+        if (!project || project.status !== "running") return { kind: "project_not_running", reason: `project status is ${project?.status}` };
+
+        let supervision: { state: string } | undefined;
+        try {
+          supervision = this.db.prepare(`
+            SELECT state FROM project_supervision WHERE project_card_id = ?
+          `).get(input.projectId) as { state: string } | undefined;
+        } catch {
+          // Older/test databases do not have project supervision yet. The
+          // project status and contract admission checks remain authoritative
+          // for those databases.
+        }
+        if (supervision && supervision.state !== "executing" && supervision.state !== "repairing") {
+          return { kind: "project_supervision_not_dispatchable", reason: `project supervision state is ${supervision.state}` };
+        }
+
+        const activeCount = this.getActiveAttemptCountForExecutor(input.executorKind, input.executorId);
+        if (activeCount >= input.executorMax) return { kind: "capacity_full", reason: `active ${activeCount} >= max ${input.executorMax}` };
+
+        if (input.hardDeadlineAt && new Date(input.hardDeadlineAt).getTime() <= Date.now()) return { kind: "deadline_expired", reason: "hard deadline already passed" };
+
+        if (project.max_tokens != null) {
+          if (!Number.isFinite(input.reservedTokens) || input.reservedTokens <= 0) {
+            return { kind: "budget_reservation_missing", reason: "capped project requires a positive worker token reservation" };
+          }
+          const activeReserved = this.getActiveReservedTokensForProject(input.projectId);
+          const committed = project.tokens_used;
+          if (committed >= project.max_tokens) return { kind: "budget_exhausted", reason: `committed ${committed} >= cap ${project.max_tokens}` };
+          if (committed + activeReserved + input.reservedTokens > project.max_tokens) return { kind: "budget_wait", reason: `committed ${committed} + active ${activeReserved} + candidate ${input.reservedTokens} > cap ${project.max_tokens}` };
+        }
+
+        if (input.sourceAttemptId) {
+          const reservation = this.db.prepare(`
+            SELECT status FROM retry_budget_reservations
+            WHERE source_attempt_id = ? AND target_attempt_id = ? AND status = 'active'
+          `).get(input.sourceAttemptId, input.attemptId) as { status: string } | undefined;
+          if (!reservation) return { kind: "retry_reservation_missing", reason: "retry reservation not active" };
+        }
+
+        const claimedAt = new Date().toISOString();
+        const updated = this.db.prepare(`
+          UPDATE worker_attempts
+          SET lifecycle = 'claimed', claimed_at = ?, generation = ?, executor_kind = ?, executor_id = ?,
+              hard_deadline_at = ?, reserved_tokens = ?
+          WHERE id = ? AND lifecycle = 'pending'
+        `).run(claimedAt, input.generation, input.executorKind, input.executorId,
+              input.hardDeadlineAt ?? null, input.reservedTokens, input.attemptId);
+        if (updated.changes !== 1) return { kind: "claim_failed", reason: "update did not match" };
+
+        if (input.sourceAttemptId) {
+          this.db.prepare(`
+            UPDATE retry_budget_reservations SET status = 'claimed', updated_at = ?
+            WHERE source_attempt_id = ? AND target_attempt_id = ? AND status = 'active'
+          `).run(claimedAt, input.sourceAttemptId, input.attemptId);
+        }
+
+        const claim: ExecutionClaim = {
+          attemptId: input.attemptId,
+          cardId: input.cardId,
+          contractId: input.contractId,
+          executorKind: input.executorKind,
+          executorId: input.executorId,
+          generation: input.generation,
+          claimedAt,
+          hardDeadlineAt: input.hardDeadlineAt,
+        };
+        logSwarmTrace({ event: "attempt_claimed", card: input.cardId, attempt: input.attemptId, generation: input.generation, executor: input.executorId });
+        return { kind: "claimed", claim };
+      });
+    } catch {
+      return { kind: "internal_error", reason: "transaction failed" };
+    }
+  }
+
+  // ── #1510: Single terminal settlement primitive ─────────────────────────
+
+  getActiveProjectSupervision(projectId: number): { state: string } | undefined {
+    try {
+      const { ProjectReviewStore } = require("./project-acceptance/project-review-store.js");
+      const reviewStore = new ProjectReviewStore(this.db);
+      return reviewStore.getSupervision(projectId);
+    } catch { return undefined; }
+  }
+
+  terminalSettlement(input: {
+    attemptId: string;
+    expectedGeneration: number;
+    desiredState: "completed" | "failed" | "cancelled" | "timed_out";
+    stableReason: string;
+    normalizedUsage?: { input: number; output: number; trustworthy: boolean };
+    envelope?: WorkerResultEnvelopeV1;
+    now?: number;
+  }): { kind: "settled" | "replayed" | "stale" | "conflict" | "budget_violation"; lifecycle?: AttemptLifecycle; chargedTokens?: number } {
+    try {
+      return this.db.transaction(() => {
+        const attempt = this.db.prepare(`SELECT * FROM worker_attempts WHERE id = ?`).get(input.attemptId) as AttemptRow | undefined;
+        if (!attempt) return { kind: "stale" };
+        const latest = this.db.prepare(`SELECT id FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(attempt.card_id) as { id: string } | undefined;
+        if (!latest || latest.id !== input.attemptId) return { kind: "stale" };
+        if (attempt.generation !== input.expectedGeneration) return { kind: "stale" };
+
+        const terminalLifecycles: AttemptLifecycle[] = ["completed", "failed", "cancelled", "timed_out"];
+        if (terminalLifecycles.includes(attempt.lifecycle)) {
+          if (input.envelope) {
+            const existing = this.db.prepare(`SELECT envelope_digest FROM worker_results WHERE attempt_id = ?`).get(input.attemptId) as { envelope_digest: string } | undefined;
+            if (!existing) return { kind: "stale", lifecycle: attempt.lifecycle };
+            if (existing) {
+              const newDigest = this.computeEnvelopeDigest(JSON.stringify(input.envelope));
+              if (existing.envelope_digest !== newDigest) return { kind: "conflict" };
+            }
+          }
+          return { kind: "replayed", lifecycle: attempt.lifecycle, chargedTokens: attempt.charged_tokens };
+        }
+
+        const allowedFrom: AttemptLifecycle[] = input.desiredState === "timed_out" || input.desiredState === "cancelled"
+          ? ["pending", "claimed", "starting", "running", "cancel_requested"]
+          : ["claimed", "starting", "running", "cancel_requested"];
+        if (!allowedFrom.includes(attempt.lifecycle)) return { kind: "stale" };
+
+        let effectiveState = input.desiredState;
+        const now = input.now ?? Date.now();
+
+        if (input.desiredState === "completed") {
+          if (attempt.hard_deadline_at && now >= new Date(attempt.hard_deadline_at).getTime()) {
+            effectiveState = "timed_out";
+          }
+        }
+
+        const usage = input.normalizedUsage
+          && Number.isFinite(input.normalizedUsage.input) && input.normalizedUsage.input >= 0
+          && Number.isFinite(input.normalizedUsage.output) && input.normalizedUsage.output >= 0
+          ? input.normalizedUsage
+          : undefined;
+        let chargeTokens = 0;
+        let budgetViolation = false;
+
+        if (attempt.reserved_tokens > 0) {
+          if (usage && usage.trustworthy) {
+            chargeTokens = usage.input + usage.output;
+            if (chargeTokens > attempt.reserved_tokens) {
+              chargeTokens = usage.input + usage.output;
+              budgetViolation = true;
+            }
+          } else {
+            chargeTokens = attempt.reserved_tokens;
+          }
+        } else if (usage && usage.trustworthy) {
+          chargeTokens = usage.input + usage.output;
+        }
+
+        if (budgetViolation && effectiveState === "completed") {
+          effectiveState = "failed";
+        }
+
+        const settledAt = new Date(now).toISOString();
+
+        if (attempt.usage_charged_at == null) {
+          this.db.prepare(`
+            UPDATE worker_attempts
+            SET input_tokens = ?, output_tokens = ?, charged_tokens = ?, usage_charged_at = ?
+            WHERE id = ? AND usage_charged_at IS NULL
+          `).run(usage?.input ?? null, usage?.output ?? null, chargeTokens, settledAt, input.attemptId);
+
+          const card = this.db.prepare(`SELECT parent_id FROM kanban_board WHERE id = ?`).get(attempt.card_id) as { parent_id: number | null } | undefined;
+          this.db.prepare(`
+            UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now')
+            WHERE id = ?
+          `).run(chargeTokens, attempt.card_id);
+          if (card?.parent_id) {
+            this.db.prepare(`
+              UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now')
+              WHERE id = ? AND type = 'O'
+            `).run(chargeTokens, card.parent_id);
+          }
+        }
+
+        const durableStatus = effectiveState === "completed" ? "settled" : effectiveState;
+        this.db.prepare(`
+          UPDATE worker_attempts
+          SET lifecycle = ?, status = ?, settled_at = ?, cancel_reason = ?
+          WHERE id = ? AND lifecycle = ?
+        `).run(effectiveState, durableStatus, settledAt,
+              budgetViolation ? `token_budget_exceeded: ${input.stableReason}`
+                : effectiveState !== input.desiredState ? `late_completion_timed_out: ${input.stableReason}` : input.stableReason,
+              input.attemptId, attempt.lifecycle);
+
+        const leaseStore = new ExecutorLeaseStore(this.db);
+        leaseStore.closeLease(input.attemptId, attempt.generation, `terminal:${effectiveState}`);
+
+        if (effectiveState === "completed" && input.envelope) {
+          const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
+          if (!existingResult) {
+            this.insertResult(input.attemptId, input.envelope);
+          }
+        } else if (effectiveState === "failed" || effectiveState === "cancelled" || effectiveState === "timed_out") {
+          // #1588: record evidence of absence — a non-completed terminal
+          // settlement must not leave worker_results empty, or the reviewer
+          // cannot tell "no evidence" from "evidence says failed". Criteria
+          // are derived as not_run, never passed.
+          const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
+          if (!existingResult) {
+            this.insertResult(input.attemptId, this.buildAbsenceEnvelope(attempt, effectiveState, now));
+          }
+        }
+
+        logSwarmTrace({ event: `attempt_${effectiveState}`, card: attempt.card_id, attempt: input.attemptId, generation: attempt.generation, to: effectiveState, reason: input.stableReason });
+
+        const violationResult = budgetViolation
+          ? { kind: "budget_violation" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id }
+          : { kind: "settled" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id };
+        return violationResult;
+      });
+    } catch {
+      return { kind: "conflict" };
+    }
+  }
+
+  getActiveSupervisedAttempts(): AttemptRow[] {
+    return this.db.prepare(`
+      SELECT wa.* FROM worker_attempts wa
+      JOIN kanban_board k ON k.id = wa.card_id
+      WHERE k.type IS NOT NULL AND k.type != 'O'
+        AND wa.lifecycle IN ('claimed','starting','running','cancel_requested')
+      ORDER BY wa.card_id, wa.ordinal
+    `).all() as unknown as AttemptRow[];
+  }
+
+  /**
+   * #1551 — Prune telemetry for attempts that settled more than
+   * `olderThanDays` ago, restricted to the tables this store owns
+   * (worker_attempts, worker_results, retry_budget_reservations).
+   * worker_attempts.lifecycle + settled_at is the single terminality
+   * predicate (#1510); worker_results and retry_budget_reservations are
+   * keyed off an attempt id, so one terminal-attempt-id subquery drives
+   * every delete here. RetryStore.pruneTerminalAttempts is the companion
+   * for the retry_* tables it owns — see prunePiCommands's caller in
+   * heartbeat-housekeeping.ts for why the two are not merged into one method.
+   *
+   * First DELETE statements ever run against these tables — deliberately
+   * conservative (age-gated, terminal-only) rather than a blanket sweep.
+   */
+  pruneTerminalAttempts(olderThanDays: number): number {
+    const cutoff = `datetime('now', '-' || ${Number(olderThanDays)} || ' days')`;
+    const terminalAttempts = `
+      SELECT id FROM worker_attempts
+      WHERE lifecycle IN ('completed','failed','cancelled','timed_out')
+        AND settled_at IS NOT NULL
+        AND settled_at < ${cutoff}
+    `;
+    let deleted = 0;
+    deleted += this.db.prepare(`DELETE FROM worker_results WHERE attempt_id IN (${terminalAttempts})`).run().changes;
+    deleted += this.db.prepare(`
+      DELETE FROM retry_budget_reservations
+      WHERE status IN ('released','consumed')
+        AND updated_at < ${cutoff}
+        AND (source_attempt_id IN (${terminalAttempts}) OR target_attempt_id IN (${terminalAttempts}))
+    `).run().changes;
+    // Attempts themselves prune last so the subqueries above still resolve them.
+    deleted += this.db.prepare(`DELETE FROM worker_attempts WHERE id IN (${terminalAttempts})`).run().changes;
+    return deleted;
+  }
 }

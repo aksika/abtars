@@ -10,7 +10,7 @@ On boot, `discoverCapabilities()` scans `src/capabilities/` for directories with
 
 | Capability | What it provides |
 |------------|-----------------|
-| **Browser** | Browsie subagent, browse-checker heartbeat task, SSRF guard |
+| **Browser** | Browsie subagent, B-type Kanban delivery, SSRF guard |
 | **Hotskills** | Live-reload skill files, eligibility gating via `requires` frontmatter |
 | **Sleep** | Dreamy spawn + retry, progress protocol |
 

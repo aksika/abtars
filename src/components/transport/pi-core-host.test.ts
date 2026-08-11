@@ -1,0 +1,690 @@
+// TEST DEFICIENCY: Real-package complete-cancellation contract test (multi-tool sequential batch,
+// abort during active call, verify one terminal cancellation result per unstarted call in order)
+// is release-blocking per req.md:225-226. Verified against real Pi 0.80.7 (agent-loop.ts:475-478):
+// executeToolCallsSequential's for loop does `if (signal?.aborted) break;` — tool calls after the
+// abort point never receive a tool_execution_end/toolResult. This requires a fixed public Pi release
+// (req.md:37-42). The smallest future verification path: install a Pi release with the fix, create a
+// real Agent with sequential tools, abort mid-batch, and assert skipped results for every remaining
+// call. Deferred until the upstream contract gate is resolved — the ticket cannot pass its own
+// acceptance criteria while this stands.
+
+// Real-package construction/idle settlement is covered below. The complete
+// multi-tool cancellation assertion remains blocked by the known Pi 0.80.7
+// upstream defect and must run when a repaired public release is adopted.
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { PiCoreExecutionHost } from "./pi-core-host.js";
+import { DurableContextUnavailableError } from "./pi-core-context.js";
+import type { LoadedPiAgentCore, PiAgent, AgentEvent, StreamFn, PiAgentCoreModule } from "./pi-core-types.js";
+import type { InstructionLease } from "../spin-types.js";
+
+function makeMockAgent(): {
+  agent: PiAgent;
+  emitted: AgentEvent[];
+  resolvePrompt: () => void;
+  rejectPrompt: (error?: Error) => void;
+} {
+  const emitted: AgentEvent[] = [];
+  let subs: Array<(e: AgentEvent) => void> = [];
+  let _isRunning = false;
+  let promptResolve: (() => void) | null = null;
+  let promptReject: ((error: Error) => void) | null = null;
+  // #1622: the fake prompt is a genuinely active run until the test resolves
+  // or rejects it (or aborts). An immediately-resolving prompt violates Pi's
+  // documented contract and would mask the missing-agent_end fallback.
+  const prompt = vi.fn(() => new Promise<void>((resolve, reject) => {
+    _isRunning = true;
+    promptResolve = resolve;
+    promptReject = reject;
+  }));
+  const agent: PiAgent = {
+    get isRunning() { return _isRunning; },
+    subscribe: vi.fn((l) => { subs.push(l); return () => { subs = subs.filter(s => s !== l); }; }),
+    prompt,
+    steer: vi.fn((msg) => { emitted.push({ type: "message_start", message: msg } as any); }),
+    followUp: vi.fn((msg) => { emitted.push({ type: "message_start", message: msg } as any); }),
+    clearAllQueues: vi.fn(),
+    abort: vi.fn(() => {
+      // Real Pi: abort() settles the in-flight prompt; the host observes the
+      // resulting rejection as "interrupted during startup" because
+      // cancellation already claimed the terminal state.
+      if (promptReject) {
+        const reject = promptReject;
+        promptReject = null;
+        reject(new Error("aborted"));
+      }
+    }),
+    waitForIdle: vi.fn(async () => { _isRunning = false; }),
+  };
+  return {
+    agent,
+    emitted,
+    resolvePrompt: () => {
+      if (promptResolve) {
+        const resolve = promptResolve;
+        promptResolve = null;
+        resolve();
+      }
+    },
+    rejectPrompt: (error?: Error) => {
+      if (promptReject) {
+        const reject = promptReject;
+        promptReject = null;
+        reject(error ?? new Error("prompt failed"));
+      }
+    },
+  };
+}
+
+function makeFakeLease(overrides?: Partial<InstructionLease>): InstructionLease {
+  return {
+    leaseId: "lease_1",
+    sessionId: "session_1",
+    executionId: "exec_1",
+    kind: "steer",
+    instructions: [{ id: "inst_1", sessionId: "session_1", executionId: "exec_1", kind: "steer", source: "tui", text: "hello", bytes: 5, createdAt: Date.now(), state: "leased" }],
+    ...overrides,
+  };
+}
+
+function makeLoadedPiAgentCore(mockAgent: PiAgent): LoadedPiAgentCore {
+  const FakeAgentClass = class {
+    constructor(_opts: any) {
+      Object.assign(this, mockAgent);
+    }
+  } as unknown as PiAgentCoreModule["Agent"];
+  return {
+    module: { Agent: FakeAgentClass } as PiAgentCoreModule,
+    installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.83.0", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
+  };
+}
+
+describe("PiCoreExecutionHost", () => {
+  const defaultOpts = {
+    executionId: "exec_1",
+    sessionId: "session_1",
+    initialState: { systemPrompt: "You are a helpful assistant.", model: { id: "test-model" }, messages: [{ role: "user", content: "hello" }] },
+    streamFn: vi.fn() as unknown as StreamFn,
+  };
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("creates in 'created' state", () => {
+    const host = new PiCoreExecutionHost(defaultOpts);
+    expect(host.state).toBe("created");
+    expect(host.executionId).toBe("exec_1");
+    expect(host.sessionId).toBe("session_1");
+    expect(host.isSettled).toBe(false);
+  });
+
+  it("constructs independent hosts for distinct execution IDs", () => {
+    // NOTE: PiCoreExecutionHost has no call site yet (#1446/#1447 wire construction).
+    // Reuse-prevention today relies on SubagentRuntime.openExecution() always minting a
+    // fresh execution ID (see subagent-runtime.ts). A same-ID double-construction guard
+    // belongs at the call site once one exists — tracked as a #1446/#1447 follow-up, not
+    // enforceable here without introducing speculative module-level registry state.
+    const host = new PiCoreExecutionHost(defaultOpts);
+    expect(host.executionId).toBe("exec_1");
+    const host2 = new PiCoreExecutionHost({ ...defaultOpts, executionId: "exec_2" });
+    expect(host2.executionId).toBe("exec_2");
+    expect(host.executionId).not.toBe(host2.executionId);
+  });
+
+  it("start creates agent and transitions to running", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+
+    const startPromise = host.start(loaded).catch(() => {});
+    resolvePrompt();
+    await startPromise;
+
+    expect(agent.subscribe).toHaveBeenCalled();
+    expect(agent.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates durable projection failure instead of settling as an empty response", async () => {
+    const { agent } = makeMockAgent();
+    const projectionError = new DurableContextUnavailableError("no_provider");
+    const projection = {
+      buildSystemPromptFromSeed: () => "system",
+      transform: vi.fn().mockRejectedValue(projectionError),
+    };
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      initialState: {
+        ...defaultOpts.initialState,
+        messages: [{ role: "user", content: "current turn" }],
+      },
+      contextProjection: projection as never,
+      transformOptions: { hostGeneration: 0 },
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+    agent.prompt = vi.fn(async () => {
+      await projection.transform([], { hostGeneration: 0 });
+    });
+
+    await expect(host.start(loaded)).rejects.toBe(projectionError);
+    expect(host.isSettled).toBe(true);
+    expect(agent.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("constructs and settles with the installed public Pi Agent", async () => {
+    const real = await import("@earendil-works/pi-agent-core");
+    const model = {
+      id: "contract-model",
+      name: "contract-model",
+      api: "openai-completions" as const,
+      provider: "contract-provider",
+      baseUrl: "https://contract.invalid",
+      reasoning: false,
+      input: ["text"] as ("text")[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 128,
+    };
+    const host = new PiCoreExecutionHost({
+      executionId: "real_exec",
+      sessionId: "real_session",
+      initialState: { systemPrompt: "system", model, messages: [], tools: [] },
+      streamFn: vi.fn() as unknown as StreamFn,
+    });
+    await host.start({
+      module: { Agent: real.Agent },
+      installation: { executable: "", packageRoot: "", version: "0.83.0", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
+    });
+    expect(host.state).toBe("running");
+    host.cancel();
+    await host.waitForSettlement();
+    expect(host.isSettled).toBe(true);
+  });
+
+  it("cancel before start settles immediately", async () => {
+    const host = new PiCoreExecutionHost(defaultOpts);
+    host.cancel();
+    expect(host.state).toBe("settled");
+    expect(host.isSettled).toBe(true);
+  });
+
+  it("cancel while running transitions to settled", async () => {
+    const { agent } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    const startPromise = host.start(loaded).catch(() => {});
+
+    host.cancel();
+    expect(agent.abort).toHaveBeenCalled();
+    expect(host.isSettled).toBe(true);
+    await startPromise;
+  });
+
+  it("isolates concurrent executions", async () => {
+    const { agent: agent1, resolvePrompt: resolvePrompt1 } = makeMockAgent();
+    const { agent: agent2, resolvePrompt: resolvePrompt2 } = makeMockAgent();
+    const host1 = new PiCoreExecutionHost({ ...defaultOpts, executionId: "exec_1" });
+    const host2 = new PiCoreExecutionHost({ ...defaultOpts, executionId: "exec_2" });
+    const loaded1 = makeLoadedPiAgentCore(agent1);
+    const loaded2 = makeLoadedPiAgentCore(agent2);
+
+    const start1 = host1.start(loaded1).catch(() => {});
+    const start2 = host2.start(loaded2).catch(() => {});
+    resolvePrompt1();
+    resolvePrompt2();
+    await start1;
+    await start2;
+
+    expect(host1.executionId).not.toBe(host2.executionId);
+  });
+
+  it("waitForSettlement resolves after cancel", async () => {
+    const { agent } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    const startPromise = host.start(loaded).catch(() => {});
+
+    host.cancel();
+    await expect(host.waitForSettlement()).resolves.toBe("cancelled");
+    expect(host.isSettled).toBe(true);
+    await startPromise;
+  });
+
+  it("onEvent is called for agent events", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const onEvent = vi.fn();
+    const host = new PiCoreExecutionHost({ ...defaultOpts, onEvent });
+    const loaded = makeLoadedPiAgentCore(agent);
+
+    const startPromise = host.start(loaded).catch(() => {});
+    // Emit while the host is still running (prompt pending) so the event is
+    // not swallowed by the settled guard.
+    const event: AgentEvent = { type: "text_delta", contentIndex: 0, delta: "hello" };
+    await (host as any).handleEvent(event);
+    expect(onEvent).toHaveBeenCalledWith(event);
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("#1612: captures real token usage from the terminal assistant message", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    // Keep the prompt run active until agent_end claims the terminal state.
+    const startPromise = host.start(loaded).catch(() => {});
+
+    const end: AgentEvent = {
+      type: "agent_end",
+      messages: [
+        { role: "user", content: "hi", timestamp: 0 },
+        { role: "assistant", content: [{ type: "text", text: "hello" }], usage: { input: 120, output: 34, cacheRead: 0, cacheWrite: 0, totalTokens: 154, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", api: "openai-completions", provider: "x", model: "m", timestamp: 0 } as never,
+      ],
+    };
+    await (host as any).handleEvent(end);
+    expect(host.lastUsage).toEqual({ input: 120, output: 34, cacheRead: 0, cacheWrite: 0 });
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("#1612: zero-only usage is not captured (provider reported none)", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    const startPromise = host.start(loaded).catch(() => {});
+
+    const end: AgentEvent = {
+      type: "agent_end",
+      messages: [
+        { role: "assistant", content: [{ type: "text", text: "hello" }], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", api: "openai-completions", provider: "x", model: "m", timestamp: 0 } as never,
+      ],
+    };
+    await (host as any).handleEvent(end);
+    expect(host.lastUsage).toBeNull();
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("catches and isolates observer exceptions", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const onEvent = vi.fn().mockRejectedValue(new Error("observer failed"));
+    const host = new PiCoreExecutionHost({ ...defaultOpts, onEvent });
+    const loaded = makeLoadedPiAgentCore(agent);
+
+    const startPromise = host.start(loaded).catch(() => {});
+    resolvePrompt();
+    await startPromise;
+
+    const event: AgentEvent = { type: "text_delta", contentIndex: 0, delta: "test" };
+    await expect((host as any).handleEvent(event)).resolves.not.toThrow();
+  });
+
+  // ── #1506: Logical terminalisation vs cleanup ──────────────────────────
+
+  it("waitForSettlement resolves after cancel even when waitForIdle never resolves", async () => {
+    const { agent } = makeMockAgent();
+    // Simulate a provider that never acknowledges idle
+    agent.waitForIdle = vi.fn(() => new Promise<void>(() => {})); // never resolves
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    const startPromise = host.start(loaded).catch(() => {});
+
+    host.cancel();
+    // waitForSettlement must resolve even though waitForIdle hangs
+    await expect(host.waitForSettlement()).resolves.toBe("cancelled");
+    expect(host.isSettled).toBe(true);
+    // Cleanup promise should time out after 5s
+    const cleanupResult = await host.waitForCleanup();
+    expect(cleanupResult).toBe("timed_out");
+    await startPromise;
+  }, 15000);
+
+  it("cleanup timeout does not affect terminal state", async () => {
+    const { agent } = makeMockAgent();
+    agent.waitForIdle = vi.fn(() => new Promise<void>(() => {})); // never resolves
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    const startPromise = host.start(loaded).catch(() => {});
+
+    host.cancel();
+    await host.waitForSettlement();
+    expect(host.isSettled).toBe(true);
+
+    const cleanupResult = await host.waitForCleanup();
+    expect(cleanupResult).toBe("timed_out");
+    // Terminal state unchanged after cleanup timeout
+    expect(host.isSettled).toBe(true);
+    await startPromise;
+  }, 15000);
+
+  it("late agent_end is rejected after settlement", async () => {
+    const { agent } = makeMockAgent();
+    agent.waitForIdle = vi.fn(() => new Promise<void>(() => {}));
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    const startPromise = host.start(loaded).catch(() => {});
+
+    host.cancel();
+    await host.waitForSettlement();
+    expect(host.isSettled).toBe(true);
+
+    // Simulate a late agent_end arriving after the host is settled
+    const stateBefore = host.state;
+    (host as any).handleAgentEnd({ type: "agent_end" });
+    // State must remain settled (unchanged)
+    expect(host.state).toBe(stateBefore);
+    expect(host.isSettled).toBe(true);
+    await startPromise;
+  });
+
+  // ── #1531: per-lease deferred steering acknowledgement ──────────────────
+
+  it("steer delivers per-lease and resolves on the matching instruction message_end", async () => {
+    const { agent } = makeMockAgent();
+    // The queue must be the SAME array the lease references: in production the
+    // instructions live in the session queue and markDelivered/markConsumed
+    // mutate them in place.
+    const lease = makeFakeLease({ sessionId: "session_1" });
+    const sessionRef = { instructionQueue: lease.instructions as never, id: "session_1" };
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      session: sessionRef,
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+    // The fake prompt stays active so the host remains steerable.
+    const startPromise = host.start(loaded).catch(() => {});
+    let steered = false;
+    const steerP = host.steer("focus on memory", lease).then(() => { steered = true; });
+
+    // Delivered immediately before agent.steer.
+    expect((lease.instructions as unknown as Array<{ state: string }>)[0]?.state).toBe("delivered");
+    expect(agent.steer).toHaveBeenCalledTimes(1);
+    let resolved = false;
+    steerP.then(() => { resolved = true; });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolved).toBe(false);
+
+    // The matching instruction message_end resolves the lease.
+    const instructionMsg = (agent.steer as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    await (host as any).handleEvent({ type: "message_end", message: instructionMsg });
+    await steerP;
+    expect(steered).toBe(true);
+    expect((sessionRef.instructionQueue as unknown[]).length).toBe(0);
+    expect(host.isSettled).toBe(false);
+    host.cancel();
+    await startPromise;
+  });
+
+  it("steer rejects explicitly when the host is not running", async () => {
+    const host = new PiCoreExecutionHost(defaultOpts);
+    await expect(host.steer("x", makeFakeLease())).rejects.toThrow(/Cannot steer in state created/);
+  });
+
+  it("steer rejects a lease belonging to another session (generation isolation)", async () => {
+    const { agent } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+    const startPromise = host.start(loaded).catch(() => {});
+    await expect(host.steer("x", makeFakeLease({ sessionId: "other_session" })))
+      .rejects.toThrow(/belongs to session other_session/);
+    expect(agent.steer).not.toHaveBeenCalled();
+    host.cancel();
+    await startPromise;
+  });
+
+  it("steer rejects when another lease is outstanding — no silent acceptance", async () => {
+    const { agent } = makeMockAgent();
+    const firstLease = makeFakeLease({ sessionId: "session_1", leaseId: "lease_1" });
+    const sessionRef = { instructionQueue: firstLease.instructions as never, id: "session_1" };
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      session: sessionRef,
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+    const startPromise = host.start(loaded).catch(() => {});
+
+    const first = host.steer("first", firstLease);
+    expect(agent.steer).toHaveBeenCalledTimes(1);
+    await expect(host.steer("second", makeFakeLease({ sessionId: "session_1", leaseId: "lease_2" })))
+      .rejects.toThrow(/outstanding lease lease_1/);
+    expect(agent.steer).toHaveBeenCalledTimes(1);
+
+    // The first lease still completes on its message_end.
+    const instructionMsg = (agent.steer as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    await (host as any).handleEvent({ type: "message_end", message: instructionMsg });
+    await first;
+    host.cancel();
+    await startPromise;
+  });
+
+  it("settlement fails and rejects every outstanding lease exactly once", async () => {
+    const { agent } = makeMockAgent();
+    const doomedLease = makeFakeLease({ sessionId: "session_1" });
+    const sessionRef = { instructionQueue: doomedLease.instructions as never, id: "session_1" };
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      session: sessionRef,
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+    const startPromise = host.start(loaded).catch(() => {});
+
+    const steerP = host.steer("doomed", doomedLease);
+    host.cancel();
+    await expect(steerP).rejects.toThrow(/Host settled before lease/);
+    expect((doomedLease.instructions as unknown as Array<{ state: string }>)[0]?.state).toBe("failed");
+    expect((sessionRef.instructionQueue as unknown[]).length).toBe(0);
+
+    // Subsequent steers reject explicitly — nothing silently accepted.
+    await expect(host.steer("after", makeFakeLease({ sessionId: "session_1" })))
+      .rejects.toThrow(/Cannot steer in state settled/);
+    await startPromise;
+  });
+
+  it("followUp uses the same per-lease deferred machinery", async () => {
+    const { agent } = makeMockAgent();
+    const followLease = makeFakeLease({ sessionId: "session_1", kind: "followUp" });
+    const sessionRef = { instructionQueue: followLease.instructions as never, id: "session_1" };
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      session: sessionRef,
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+    const startPromise = host.start(loaded).catch(() => {});
+
+    const followP = host.followUp("continue", followLease);
+    expect((followLease.instructions as unknown as Array<{ state: string }>)[0]?.state).toBe("delivered");
+    expect(agent.followUp).toHaveBeenCalledTimes(1);
+    const instructionMsg = (agent.followUp as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    await (host as any).handleEvent({ type: "message_end", message: instructionMsg });
+    await followP;
+    expect((sessionRef.instructionQueue as unknown[]).length).toBe(0);
+    host.cancel();
+    await startPromise;
+  });
+
+  // ── #1622: terminalization of a returned prompt without agent_end ────────
+
+  it("#1622: settles as prompt_completed_without_agent_end when prompt resolves without agent_end", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+
+    const startPromise = host.start(loaded).catch(() => {});
+    resolvePrompt();
+    await startPromise;
+
+    await expect(host.waitForSettlement()).resolves.toBe("prompt_completed_without_agent_end");
+    expect(host.state).toBe("settled");
+    expect(host.isSettled).toBe(true);
+    // The one-shot settle path ran its cleanup exactly once.
+    expect(agent.waitForIdle).toHaveBeenCalledTimes(1);
+
+    // A late agent_end cannot replace the fallback reason or resettle the host.
+    (host as any).handleAgentEnd({ type: "agent_end", messages: [] });
+    expect(await host.waitForSettlement()).toBe("prompt_completed_without_agent_end");
+    expect(host.state).toBe("settled");
+    expect(host.isSettled).toBe(true);
+  });
+
+  it("#1622: agent_end emitted before prompt resolution keeps the agent_end reason", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const host = new PiCoreExecutionHost(defaultOpts);
+    const loaded = makeLoadedPiAgentCore(agent);
+
+    const startPromise = host.start(loaded).catch(() => {});
+    await (host as any).handleEvent({ type: "agent_end", messages: [] });
+    resolvePrompt();
+    await startPromise;
+
+    await expect(host.waitForSettlement()).resolves.toBe("agent_end");
+    expect(host.state).toBe("settled");
+    expect(host.isSettled).toBe(true);
+  });
+
+  it("#1622: a host started with no current-turn messages stays running (no invented run)", async () => {
+    const { agent } = makeMockAgent();
+    const host = new PiCoreExecutionHost({
+      ...defaultOpts,
+      initialState: { ...defaultOpts.initialState, messages: [] },
+    });
+    const loaded = makeLoadedPiAgentCore(agent);
+
+    await host.start(loaded);
+    expect(host.state).toBe("running");
+    expect(host.isSettled).toBe(false);
+    expect(agent.prompt).not.toHaveBeenCalled();
+
+    host.cancel();
+    await expect(host.waitForSettlement()).resolves.toBe("cancelled");
+  });
+});
+
+describe("#1619 host reasoning/context wiring", () => {
+  const localOpts = {
+    executionId: "exec_1",
+    sessionId: "session_1",
+    initialState: { systemPrompt: "You are a helpful assistant.", model: { id: "test-model" }, messages: [{ role: "user", content: "hello" }] },
+    streamFn: vi.fn() as unknown as StreamFn,
+  };
+
+  function makeCapturingCore(): { loaded: LoadedPiAgentCore; captured: Array<Record<string, unknown>>; resolvePrompt: () => void } {
+    const captured: Array<Record<string, unknown>> = [];
+    let listener: ((e: AgentEvent) => void) | null = null;
+    let resolvePrompt: (() => void) | null = null;
+    const Fake = class {
+      constructor(opts: unknown) {
+        captured.push(opts as Record<string, unknown>);
+      }
+      get isStreaming() { return true; }
+      subscribe = (l: (e: AgentEvent) => void) => { listener = l; return () => { listener = null; }; };
+      prompt = vi.fn(() => new Promise<void>((resolve) => { resolvePrompt = resolve; }));
+      clearAllQueues = vi.fn();
+      abort = vi.fn();
+      waitForIdle = vi.fn(async () => {});
+    } as unknown as PiAgentCoreModule["Agent"];
+    return {
+      loaded: {
+        module: { Agent: Fake } as PiAgentCoreModule,
+        installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.83.0", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
+      },
+      captured,
+      resolvePrompt: () => { resolvePrompt?.(); },
+    };
+  }
+
+  it("carries the clamped thinkingLevel into the Agent initialState", async () => {
+    const { loaded, captured, resolvePrompt } = makeCapturingCore();
+    const host = new PiCoreExecutionHost({
+      ...localOpts,
+      initialState: { ...localOpts.initialState, thinkingLevel: "high" },
+    });
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const initialState = (captured[0] as { initialState?: { thinkingLevel?: string } })?.initialState;
+    expect(initialState?.thinkingLevel).toBe("high");
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("defaults thinkingLevel to off when not supplied", async () => {
+    const { loaded, captured, resolvePrompt } = makeCapturingCore();
+    const host = new PiCoreExecutionHost(localOpts);
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const initialState = (captured[0] as { initialState?: { thinkingLevel?: string } })?.initialState;
+    expect(initialState?.thinkingLevel).toBe("off");
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("#1619: computes context tokens from positive totalTokens", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const host = new PiCoreExecutionHost(localOpts);
+    const startPromise = host.start(makeLoadedPiAgentCore(agent)).catch(() => {});
+    const end: AgentEvent = {
+      type: "agent_end",
+      messages: [
+        { role: "assistant", content: [{ type: "text", text: "hello" }], usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5, totalTokens: 200, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", api: "openai-completions", provider: "x", model: "m", timestamp: 0 } as never,
+      ],
+    };
+    await (host as any).handleEvent(end);
+    expect(host.lastContextTokens).toBe(200);
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("#1619: falls back to the usage sum when totalTokens is zero, and stays null on zero-only usage", async () => {
+    const { agent, resolvePrompt } = makeMockAgent();
+    const host = new PiCoreExecutionHost(localOpts);
+    const startPromise = host.start(makeLoadedPiAgentCore(agent)).catch(() => {});
+    const end: AgentEvent = {
+      type: "agent_end",
+      messages: [
+        { role: "assistant", content: [{ type: "text", text: "hello" }], usage: { input: 30, output: 20, cacheRead: 5, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", api: "openai-completions", provider: "x", model: "m", timestamp: 0 } as never,
+      ],
+    };
+    await (host as any).handleEvent(end);
+    expect(host.lastContextTokens).toBe(55);
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("pairs a safety replacement model with a fresh thinking level via the resolver", async () => {
+    const { loaded, captured, resolvePrompt } = makeCapturingCore();
+    const safety = {
+      promptRoundsUsed: 1,
+      maxPromptRounds: 25,
+      incident: null,
+      prepareNextTurn: vi.fn(() => ({ model: { id: "alt-model" } })),
+    };
+    const host = new PiCoreExecutionHost({
+      ...localOpts,
+      safety: safety as never,
+      resolveThinkingLevelForModel: (model: { id: string }) => (model.id === "alt-model" ? "high" : "off"),
+    });
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const agentOpts = captured[0] as { prepareNextTurnWithContext?: (ctx: unknown) => Promise<unknown> };
+    const paired = await agentOpts.prepareNextTurnWithContext!({ context: { messages: [], systemPrompt: "" } });
+    expect(paired).toMatchObject({ model: { id: "alt-model" }, thinkingLevel: "high" });
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("rejects a replacement model when no thinking-level resolver is supplied (contract error)", async () => {
+    const { loaded, captured, resolvePrompt } = makeCapturingCore();
+    const safety = {
+      promptRoundsUsed: 1,
+      maxPromptRounds: 25,
+      incident: null,
+      prepareNextTurn: vi.fn(() => ({ model: { id: "alt-model" } })),
+    };
+    const host = new PiCoreExecutionHost({ ...localOpts, safety: safety as never });
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const agentOpts = captured[0] as { prepareNextTurnWithContext?: (ctx: unknown) => Promise<unknown> };
+    await expect(agentOpts.prepareNextTurnWithContext!({ context: { messages: [], systemPrompt: "" } }))
+      .rejects.toThrow(/requires resolveThinkingLevelForModel/);
+    resolvePrompt();
+    await startPromise;
+  });
+});

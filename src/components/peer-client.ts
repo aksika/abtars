@@ -4,6 +4,7 @@
  */
 
 import { loadPeerConfig, type PeerEntry } from "./peer-config.js";
+import { resolvePeerName } from "./transport/peer-resolver.js";
 import { logInfo } from "./logger.js";
 import { createPinnedPeerHttpsAgent } from "./peer-transport/pinned-peer-tls.js";
 
@@ -36,12 +37,10 @@ export class PeerCallError extends Error {
  */
 export async function callPeer(peerName: string, prompt: string, hops: number, _opts?: { skipWakeup?: boolean }): Promise<string> {
   const config = loadPeerConfig();
-  const peerKey = Object.keys(config.peers).find(k => k.toLowerCase() === peerName.toLowerCase());
-  const peer = peerKey ? config.peers[peerKey] : undefined;
-  if (!peer) {
-    const available = Object.keys(config.peers).join(", ") || "(none)";
-    throw new PeerCallError("unknown_peer", `Unknown peer '${peerName}'. Available: ${available}`);
-  }
+  const resolved = resolvePeerName(peerName, config);
+  if (!resolved.ok) throw new PeerCallError("unknown_peer", `${resolved.code}: ${resolved.message}`);
+  const peer = config.peers[resolved.peer]!;
+  peerName = resolved.peer;
 
   // Sign outgoing message if we have a signing key (#416)
   let signedPrompt = prompt;

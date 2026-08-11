@@ -1,9 +1,10 @@
 import { existsSync, chmodSync, mkdirSync, statSync, readFileSync, readdirSync, unlinkSync, lstatSync } from "node:fs";
 import { join, relative } from "node:path";
-import { homedir } from "node:os";
-import { createRequire } from "node:module";
 import { abtarsHome } from "../../paths.js";
+import { resolveNativeDep } from "../../utils/lazy-require.js";
 import type { FixResult, DoctorOutputV2 } from "./doctor-types.js";
+// Static import (not require) — the CLI bundle is ESM; require is undefined there.
+import { kanbanTransition, wrapTaskDatabase, sqliteNow } from "../../components/tasks/kanban-board.js";
 
 const STALE_MS = 5 * 60 * 1000;
 
@@ -27,7 +28,7 @@ export interface DoctorFixDefinition {
 }
 
 const home = abtarsHome();
-const _require = createRequire(import.meta.url);
+
 
 const KNOWN_DIRS = ["config", "secret", "auth", "hooks", "logs", "workspace", "overflow", "received", "kanban", "state", "prompts"] as const;
 const SENSITIVE_DIRS = ["config", "secret", "auth", "hooks"] as const;
@@ -149,20 +150,40 @@ const definitions: DoctorFixDefinition[] = [
     revalidate: (): { ok: true } | { ok: false; reason: string } => {
       const dbPath = join(home, "kanban", "kanban.db");
       if (!existsSync(dbPath)) return { ok: false, reason: "no kanban.db" };
-      const sharedNm = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
-      if (!existsSync(sharedNm)) return { ok: false, reason: "better-sqlite3 not installed" };
-      return { ok: true };
+      try {
+        resolveNativeDep("better-sqlite3");
+        return { ok: true };
+      } catch {
+        return { ok: false, reason: "better-sqlite3 not installed" };
+      }
     },
     apply: () => {
       const dbPath = join(home, "kanban", "kanban.db");
       if (!existsSync(dbPath)) return;
       const cutoff = new Date(Date.now() - 86_400_000).toISOString();
       try {
-        const Database = _require(join(homedir(), ".local", "lib", "node_modules", "better-sqlite3"));
+        const Database = resolveNativeDep("better-sqlite3");
         const db = new Database(dbPath);
-        db.prepare(
-          "UPDATE kanban_board SET status = 'failed', error = ?, updated_at = datetime('now'), completed_at = datetime('now') WHERE status = 'running' AND updated_at < ?"
-        ).run("Abandoned — auto-failed by doctor fix", cutoff);
+        // #1590: select-then-transition-per-card so each card is its own
+        // transaction (a mid-sweep crash leaves a consistent prefix) and every
+        // change goes through the single status-transition choke point with a
+        // journal row. The reason drops the em dash for the ASCII convention.
+        // Static import at module top — synchronous apply() cannot await.
+        const taskDb = wrapTaskDatabase(db);
+        const stale = taskDb.prepare(
+          "SELECT id FROM kanban_board WHERE status = 'running' AND updated_at < ?"
+        ).all(cutoff) as Array<{ id: number }>;
+        for (const { id } of stale) {
+          kanbanTransition({
+            cardId: id,
+            from: ["running"],
+            to: "failed",
+            actor: "stale_repair",
+            reason: "Abandoned - auto-failed by doctor fix",
+            fields: { error: "Abandoned - auto-failed by doctor fix", completed_at: sqliteNow() },
+            emit: false,
+          }, taskDb);
+        }
         db.close();
       } catch { /* best-effort */ }
     },

@@ -4,11 +4,58 @@
  */
 
 import type { AgentName } from "./subagent-runtime.js";
+import type { Delivery, DeliveryMode } from "./tasks/task-types.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
 import { logError } from "./logger.js";
 
-export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H";
+export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H" | "K";
+
+/**
+ * #1611: provider-neutral candidate-selection policy for a session's
+ * transport. `configured-only` restricts the persistent transport to the
+ * configured candidate — no inherited Main candidate, no route fallback, no
+ * second ACP model — and must be applied during transport construction (ACP
+ * can fall back during initialization). The policy is immutable per attached
+ * session; reusing a session with a conflicting policy fails closed.
+ */
+export type CandidatePolicy = "fallback-chain" | "configured-only";
+
+/**
+ * #1529: explicit durable-context intent carried from prompt construction
+ * through Spin to the transport. Replaces the ambiguous optional cursor:
+ * `not_required` means durable memory is not required (ephemeral execution is
+ * valid); `required_unavailable` means durable memory IS required but cannot
+ * be satisfied — the transport must fail closed before any provider request.
+ */
+export type DurableContextIntent =
+  | { mode: "not_required" }
+  | { mode: "durable"; beforeMessageId: number }
+  | {
+      mode: "required_unavailable";
+      reason: "runtime_unavailable" | "record_failed" | "cursor_missing";
+    };
+
+/**
+ * #1520: typed scheduled-dispatch admission rejection. Thrown by dispatchAwait
+ * only for pre-execution gates (capacity/type-busy/model-cooldown); failures
+ * after a model call starts are execution failures and must never be converted
+ * to admission deferrals. Non-scheduler callers keep their queue/throw
+ * semantics — the error carries the same codes for everyone.
+ */
+export type SpinAdmissionCode = "session_capacity" | "type_busy" | "model_cooldown";
+
+export class SpinDispatchAdmissionError extends Error {
+  readonly code: SpinAdmissionCode;
+  readonly retryAt?: number;
+
+  constructor(code: SpinAdmissionCode, message: string, retryAt?: number) {
+    super(message);
+    this.name = "SpinDispatchAdmissionError";
+    this.code = code;
+    this.retryAt = retryAt;
+  }
+}
 
 // #1444: instruction kinds and delivery states
 export type ExecutionInstructionKind = "steer" | "followUp";
@@ -90,6 +137,9 @@ export interface ManagedSession {
   delivery: "streaming" | "simple";
   model?: string;
   provider?: string;
+  /** #1432: Agent selected at allocation (K). Transport creation and
+   *  reattachment use this; never derive a lifecycle type from an agent name. */
+  executionAgent?: AgentName;
   pid?: number;
   peer?: string;                 // remote host name (hollow session)
   remoteSessionId?: string;      // session ID on the peer
@@ -145,12 +195,21 @@ export interface ManagedSession {
   // #1332/#1361: Cooperative steering queue for any active execution
   instructionQueue: QueuedSessionInstruction[];
   activeExecutionId?: string;
+  /** #1611: immutable candidate policy of the attached transport, recorded on
+   *  first attachment. Conflicting reuse fails closed. */
+  candidatePolicy?: CandidatePolicy;
+  /** #1502 §7: execution control bound to the active run, so killSession /
+   *  endSession / shutdown can cancel the underlying execution without the
+   *  caller being in scope. Set by spin() from spec.executionControl. */
+  executionControl?: import("./execution-control.js").ExecutionControl;
   /** #1361: True while the current execution is accepting steering continuations. */
   steeringAccepting: boolean;
 
   // #1319: Orc activity correlation
   activeCardId?: number;
   activeRootCardId?: number;
+  // #1480: Orc invocation context for durable project ownership fencing.
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
 }
 
 export interface SpinRequest {
@@ -162,11 +221,16 @@ export interface SpinRequest {
   source: "task" | "user" | "agent" | "peer";
   cardId?: number;
   parentCardId?: number;
-  deliveryMode?: "silent" | "deliver" | "announce";
-  delivery?: "report" | "announce" | "silent";
+  deliveryMode?: DeliveryMode;
+  delivery?: Delivery;
+  /** #1520: scheduled runs create cards locked (delivery_ready=0) until the
+   *  shared settler wins successful validation and releases delivery. */
+  deliveryReady?: boolean;
   priority?: string;
   tools?: SandboxPolicy;
   timeoutMs?: number;
+  /** #1506: absolute deadline owned by the scheduled caller. */
+  deadlineAt?: number;
   callbackPeer?: string; // #675: peer to notify on completion
   sourcePeer?: string;   // #949: which peer delegated this task
   chatId?: string;      // #1008: delivery target chat (fallback: masterChatId)
@@ -175,6 +239,12 @@ export interface SpinRequest {
   contract?: import("./worker-contract.js").WorkerAcceptanceContractV1;
   /** #1366: Pre-allocated attempt ID for supervision correlation. */
   attemptId?: string;
+  /** #1502: Every caller must explicitly choose the single Kanban settlement owner. */
+  settlementOwner: "spin" | "caller";
+  /** #1502 Task 10: explicit task-local cwd/env for tool execution. */
+  executionScope?: import("./tasks/task-package.js").ToolExecutionScope;
+  /** #1480: Orc invocation context for durable project ownership fencing. */
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
 }
 
 // ── #1271: unified session API ──────────────────────────────────────────
@@ -190,7 +260,6 @@ export interface SpinSessionSpec {
   // Work
   goal?: string;            // user-facing → creates kanban card
   prompt?: string;          // background one-shot → no card
-
   // Reuse / continuation (multi-step sleep, pipeline main turn)
   sessionId?: string;       // reuse an existing session (send next prompt to it)
 
@@ -209,19 +278,30 @@ export interface SpinSessionSpec {
   // Execution
   agent?: import("./subagent-runtime.js").AgentName; // override the profile's agent
   timeoutMs?: number;
+  /** #1506: absolute deadline owned by the scheduled caller. */
+  deadlineAt?: number;
+  /** #1611: provider silence allowance for the current logical sleep step. */
+  providerInactivityTimeoutMs?: number;
+  /** Control-plane cancellation for bounded background provider work. */
+  signal?: AbortSignal;
+  /** #1611: candidate-selection policy for the persistent transport.
+   *  Defaults to `fallback-chain`; sleep sets `configured-only`. */
+  candidatePolicy?: CandidatePolicy;
   maxToolRounds?: number; // #1283: per-task circuit breaker override
 
   // Delivery (continuation / pipeline)
-  deliveryMode?: "deliver" | "silent" | "announce";
-  delivery?: "report" | "announce" | "silent";
+  deliveryMode?: DeliveryMode;
+  delivery?: Delivery;
+  /** #1520: scheduled runs create cards delivery-locked until settlement. */
+  deliveryReady?: boolean;
   imageContent?: unknown;   // → sendPrompt arg 3 (image passthrough)
   callbackPeer?: string;
   sourcePeer?: string;
-  // #1329: just-persisted raw user message ID (from BuildPromptResult.currentMessageId).
-  // Carried through to DirectApiTransport.sendPrompt as the exclusive
-  // `beforeMessageId` cursor so the augmented current turn is appended
-  // exactly once. Undefined on no-write paths (memory disabled, etc.).
-  currentMessageId?: number;
+  // #1529: explicit durable-context intent for the inbound turn. An omitted
+  // field means the caller is outside the inbound durable pipeline and
+  // defaults to not-required at the transport boundary; inbound pipeline
+  // calls always provide the explicit intent.
+  durableContextIntent?: DurableContextIntent;
   /** #1335: structured current turn components for Direct API cache-stable assembly. */
   directContextTurn?: {
     rawUserText: string;
@@ -237,10 +317,17 @@ export interface SpinSessionSpec {
   attemptId?: string;
   // #1248: Execution control for cancellation
   executionControl?: import("./execution-control.js").WorkerExecutionControl;
+  // #1502: Every caller must explicitly choose the single Kanban settlement owner.
+  settlementOwner: "spin" | "caller";
+  /** #1502 Task 10: explicit task-local cwd/env for tool execution. */
+  executionScope?: import("./tasks/task-package.js").ToolExecutionScope;
 
   // Extension / future-proofing
   metadata?: Record<string, unknown>;  // session-scoped initial data, set ONCE at allocation
                                         // (not merged on sessionId-reuse — see design §2)
+
+  // #1480: Orc invocation context for durable project ownership fencing.
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
 
   // Result
   await?: boolean;
@@ -266,9 +353,15 @@ export interface SpinResult {
   result?: string;          // present when await: true
 }
 
-/** #1361: Per-execution continuation-capable driver for Spin's execution loop. */
+/** #1361: Per-execution continuation-capable driver for Spin's execution loop.
+ *  #1531: `steer` is a per-lease acknowledgement operation (`Promise<void>`).
+ *  It acknowledges only the supplied lease; it never produces the execution's
+ *  final response — the initial `send` promise remains the sole source of the
+ *  final text. Drivers without native steering simply omit `steer` and use the
+ *  sequential post-send continuation path. */
 export interface SpinExecutionDriver {
   send(prompt: string, image?: { mime: string; base64: string }, context?: import("./transport/kiro-transport.js").PromptRequestContext): Promise<string>;
+  steer?(content: string, lease: import("./spin-types.js").InstructionLease): Promise<void>;
   close(): Promise<void>;
   readonly ephemeral: boolean;
 }
@@ -278,6 +371,8 @@ export interface DispatchBackgroundOptions {
   type?: SessionType;      // default "S" (ephemeral one-shot)
   agent?: import("./subagent-runtime.js").AgentName;  // override the profile agent
   timeoutMs?: number;
+  /** Abort the provider execution and settle the one-shot caller. */
+  signal?: AbortSignal;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -308,12 +403,13 @@ export function sessionCreatedAt(session: ManagedSession): number {
 
 const TYPE_LABELS: Record<SessionType, string> = {
   A: "Main", B: "Browse", C: "Code", T: "Task", P: "Peer",
-  S: "System", O: "Orc", W: "Worker", D: "Dreamy", H: "Healer",
+  S: "System", O: "Orc", W: "Worker", D: "Dreamy", H: "Healer", K: "Skill",
 };
 
 const TYPE_AGENT_MAP: Partial<Record<SessionType, AgentName>> = {
   A: "professor", C: "coding", B: "browsie", D: "dreamy",
   O: "professor", T: "professor", W: "browsie", H: "coding",
+  K: "professor",
 };
 
 export function typeLabel(t: SessionType): string { return TYPE_LABELS[t]; }

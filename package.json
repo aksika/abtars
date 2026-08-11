@@ -1,6 +1,6 @@
 {
   "name": "abtars",
-  "version": "0.3.6",
+  "version": "0.4.0",
   "description": "Agentic framework for connecting LLMs to messaging platforms, with persistent memory, skills, scheduled tasks, self-healing supervision, and distributed multi-agent collaboration",
   "type": "module",
   "main": "bundle/abtars.js",
@@ -9,13 +9,20 @@
     "bundle": "rm -rf bundle && node esbuild.config.js && rm -rf bundle/public && cp -r src/components/dashboard/public bundle/public && ([ -d agents ] && cp -r agents bundle/agents || true)",
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/main.js",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "check-imports": "node scripts/check-imports.mjs",
     "smoke:deps-standalone": "bash scripts/smoke-deps-standalone.sh",
-    "test": "vitest --run",
+    "test": "vitest --run --exclude 'src/tests/integration/**' --exclude 'src/tests/e2e/**' --exclude '**/*integration.test.ts' --exclude '**/*e2e.test.ts' --exclude 'src/tests/recovery-redesign.test.ts'",
     "test:watch": "vitest",
     "prepublishOnly": "node -e \"const p=require('./package.json');const d=JSON.stringify(p.dependencies||{});if(d.includes('file:')){console.error('ERROR: file: dependency found');process.exit(1)}\"",
-    "test:integration": "vitest --run --dir src/tests/integration"
+    "test:integration": "vitest --run --dir src/tests/integration",
+    "test:e2e": "vitest --run src/tests/e2e src/tests/recovery-e2e.test.ts src/tests/recovery-redesign.test.ts && npm run test:e2e:pi -- --profile core && npm run test:report-pipeline-e2e",
+    "test:swarm-e2e": "vitest --run src/tests/e2e/local-swarm.e2e.test.ts",
+    "test:e2e:pi": "tsx scripts/pi-production-e2e.ts",
+    "test:extended": "vitest --run --dir src/tests/integration && vitest --run src/tests/e2e src/components/peer-transport/remote-pi-integration.test.ts src/tests/recovery-e2e.test.ts src/tests/sleep-integration.test.ts src/tests/recovery-redesign.test.ts && npm run test:e2e:pi -- --profile full",
+    "test:all": "vitest --run",
+    "test:report-pipeline-e2e": "tsx scripts/report-pipeline-e2e.ts",
+    "test:abmind-local-probe": "tsx scripts/abmind-local-e2e-probe.ts"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -24,9 +31,10 @@
     "@agentclientprotocol/sdk": "^0.25.0",
     "@andresaya/edge-tts": "^1.8.0",
     "@clack/prompts": "^1.2.0",
-    "@earendil-works/pi-ai": "0.80.7",
-    "@earendil-works/pi-coding-agent": "0.80.7",
-    "@earendil-works/pi-tui": "0.80.7",
+    "@earendil-works/pi-ai": "~0.83.0",
+    "@earendil-works/pi-coding-agent": "~0.83.0",
+    "@earendil-works/pi-agent-core": "~0.83.0",
+    "@earendil-works/pi-tui": "~0.83.0",
     "@types/node": "^22.19.17",
     "@types/pdf-parse": "^1.1.5",
     "@types/ws": "^8.18.1",
@@ -46,7 +54,6 @@
   },
   "bin": {
     "abtars": "bundle/abtars-cli.js",
-    "abtars-browse": "bundle/abtars-browse.js",
     "abtars-restart": "bundle/abtars-restart.js"
   },
   "license": "Apache-2.0",

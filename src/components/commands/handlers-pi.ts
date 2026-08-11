@@ -1,6 +1,7 @@
 import type { CommandContext } from "./types.js";
 import { PiRunService } from "../pi-executor/pi-run-service.js";
 import type { PiRunView, PiRunOrigin } from "../pi-executor/types.js";
+import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../compact-summarizer.js";
 
 let piService: PiRunService | null = null;
 
@@ -110,6 +111,58 @@ export async function handlePiCancel(text: string, ctx: CommandContext): Promise
     return true;
   } catch (err) {
     await ctx.reply(`❌ ${err instanceof Error ? err.message : String(err)}`);
+    return true;
+  }
+}
+
+export async function handlePiCompact(text: string, ctx: CommandContext): Promise<boolean> {
+  try {
+    const svc = getService(ctx);
+    const args = text.replace(/^\/pi\s+compact\s*/i, "").trim();
+    const parts = args.match(/^(\S+)(?:\s+(.+))?$/);
+    if (!parts) { await ctx.reply("Usage: /pi compact <runId> [instructions]"); return true; }
+    const runId = parts[1]!;
+    const instructions = parts[2]?.trim() || undefined;
+    if (instructions && Buffer.byteLength(instructions, "utf-8") > MAX_COMPACT_INSTRUCTIONS_BYTES) {
+      await ctx.reply(`Custom instructions exceed ${MAX_COMPACT_INSTRUCTIONS_BYTES} bytes.`);
+      return true;
+    }
+    // #1406: local Pi runs use the same backend-neutral control plane as
+    // durable conversations. Resolve the owner-scoped generation before
+    // dispatch so the adapter can reject a stale request without guessing.
+    const view = svc.get(runId, { userId: ctx.userId });
+    const { getSessionControlService } = await import("../session-control/instance.js");
+    const control = getSessionControlService();
+    if (!control) {
+      await ctx.reply("Pi compaction is unavailable (control service not initialized).");
+      return true;
+    }
+    const result = await control.execute(
+      { kind: "local_pi_run", principalId: ctx.userId, runId, generation: view.generation },
+      { kind: "compact", reason: "manual", customInstructions: instructions },
+    );
+    const savings = result.tokensBefore && result.tokensAfter
+      ? ` (${Math.round((1 - result.tokensAfter / result.tokensBefore) * 100)}% smaller)`
+      : "";
+    switch (result.status) {
+      case "completed":
+        await ctx.reply(`Pi compaction complete for \`${runId}\` [gen ${view.generation}]${savings}.`);
+        break;
+      case "nothing_to_compact":
+        await ctx.reply(`Nothing to compact for \`${runId}\`.`);
+        break;
+      case "busy":
+        await ctx.reply(`Pi run \`${runId}\` is busy (already compacting or streaming a turn).`);
+        break;
+      case "stale":
+        await ctx.reply(`Stale generation for \`${runId}\` — the run changed since the request.`);
+        break;
+      default:
+        await ctx.reply("Pi compaction failed.");
+    }
+    return true;
+  } catch (err) {
+    await ctx.reply("Pi compaction failed.");
     return true;
   }
 }

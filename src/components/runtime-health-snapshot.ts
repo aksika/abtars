@@ -75,6 +75,13 @@ export function refreshSnapshot(): void {
   writeSnapshot();
 }
 
+export function refreshHeartbeatSnapshot(activeCardIds: number[]): void {
+  if (!_state) return;
+  _state.bridge.updatedAt = Date.now();
+  _state.activeCardIds = activeCardIds.slice(0, MAX_ACTIVE_CARD_IDS);
+  writeSnapshot();
+}
+
 function writeSnapshot(): void {
   if (!_state) return;
   ensureStateDir();

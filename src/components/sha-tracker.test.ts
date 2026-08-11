@@ -16,7 +16,7 @@ describe("sha-tracker", () => {
     writeFileSync(join(tempHome, "config", "sha-policy.json"), JSON.stringify({
       faults: {
         "missing-dep": { action: "disable-capability", cooldown: 60, maxRetries: 1 },
-        "irc-flap": { action: "disable-capability", cooldown: 10, maxRetries: 3 },
+        "sleep-flap": { action: "disable-capability", cooldown: 10, maxRetries: 3 },
       }
     }));
   });
@@ -58,10 +58,10 @@ describe("sha-tracker", () => {
 
   it("resets attempts on success", async () => {
     const { shouldAttempt, recordResult } = await getTracker();
-    recordResult("irc-flap", "default", false, "timeout");
-    recordResult("irc-flap", "default", false, "timeout");
-    recordResult("irc-flap", "default", true); // success
-    expect(shouldAttempt("irc-flap", "default")).toBe(true);
+    recordResult("sleep-flap", "default", false, "timeout");
+    recordResult("sleep-flap", "default", false, "timeout");
+    recordResult("sleep-flap", "default", true); // success
+    expect(shouldAttempt("sleep-flap", "default")).toBe(true);
   });
 
   it("returns false when policy file missing (circuit breaker)", async () => {

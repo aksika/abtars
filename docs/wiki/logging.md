@@ -23,7 +23,6 @@ LOG_LEVEL=debug
 - `[platform_detect] spawnSync ETIMEDOUT` — WSL journalctl probe timed out (sleep detection falls back to idle time)
 - `[phase_transport] pkill ... Command failed` — no stale process to kill on clean boot (expected)
 - `[skill-watcher] ENOENT` — optional skill file not present
-- `[irc-client] ECONNREFUSED` — IRC server not running (non-critical service)
 
 These are diagnostic noise at trace level, not bugs. Use TRACE when debugging a specific silent failure — don't leave it on permanently (log files grow fast).
 

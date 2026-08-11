@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { SystemTaskResult } from "../../components/tasks/system-task-registry.js";
 import type { PowerSafetyProbe, PowerAdapter, HardwareSleepInspection, HardwareSleepInspectEntry, PowerTransitionState } from "./types.js";
 import { PowerTransitionStore } from "./power-transition-store.js";
@@ -82,32 +83,39 @@ export class HardwareSleepController {
     }
 
     const expectedWakeAt = computeExpectedWakeAt(expectedWakeTime);
+    const attemptId = randomUUID();
     const transition: PowerTransitionState = {
       state: "suspending",
       taskId: "hardware-sleep",
       requestedAt: Date.now(),
       expiresAt: expectedWakeAt + POST_WAKE_MARGIN_MS,
       expectedWakeAt,
+      // #1517: unique persisted attempt marker so the second safety check can
+      // distinguish this attempt's own claim from a foreign or replacement one.
+      attemptId,
     };
     this.transitionStore.write(transition);
 
-    const safety2 = this.probe.inspect({ idleMinutes, latestLocalTime, currentEntryId: entry.id });
+    const safety2 = this.probe.inspect({ idleMinutes, latestLocalTime, currentEntryId: entry.id }, attemptId);
     if (!safety2.safe) {
-      this.transitionStore.clear();
+      this.transitionStore.clearIfOwned(attemptId);
       const retryAt = Date.now() + retryMinutes * 60 * 1000;
       return { status: "deferred", retryAt, detail: `second-check blocked: ${safety2.reasons.join(", ")}` };
     }
 
     if (this.isTestRuntime()) {
-      this.transitionStore.clear();
+      this.transitionStore.clearIfOwned(attemptId);
       return { status: "failed", error: "hardware suspend disabled under test runtime" };
     }
 
     try {
       await this.adapter.suspend();
-      return { status: "accepted", detail: "suspend command issued" };
+      // #1603: for this action, issuing the suspend command IS completion —
+      // the old `accepted` variant meant "started", and the settler mapped
+      // that to success anyway. `ok` says so truthfully.
+      return { status: "ok", detail: "suspend command issued" };
     } catch (err) {
-      this.transitionStore.clear();
+      this.transitionStore.clearIfOwned(attemptId);
       return { status: "failed", error: err instanceof Error ? err.message : String(err) };
     }
   }

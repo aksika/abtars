@@ -13,6 +13,7 @@ import { signRequest } from "./peer-auth.js";
 import { createPinnedPeerWsConnection } from "./pinned-peer-tls.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
+import type { PeerClientStatus } from "./interface.js";
 import { getPeerWsBroker } from "./peer-ws-broker.js";
 import { abtarsHome } from "../../paths.js";
 
@@ -22,7 +23,7 @@ export type OutboundPeerState = "idle" | "waiting" | "connecting" | "connected" 
 export type ConnectReason = "startup" | "udp-doorbell" | "outbox";
 
 const INITIAL_BACKOFF_MS = 5_000;
-const MAX_BACKOFF_MS = 300_000;
+const MAX_BACKOFF_MS = 3_600_000;
 
 export class WsPeerClient {
   private ws: WebSocket | null = null;
@@ -32,6 +33,9 @@ export class WsPeerClient {
   private socketGeneration = 0;
   private backoffMs = INITIAL_BACKOFF_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _lastError: string | null = null;
+  private _lastErrorAt: number | null = null;
+  private _nextRetryAt: number | null = null;
 
   constructor(peerName: string, entry: PeerEntry) {
     this.peerName = peerName;
@@ -41,32 +45,91 @@ export class WsPeerClient {
 
   get peer(): string { return this.peerName; }
   get currentState(): OutboundPeerState { return this.state; }
+  get lastError(): string | null { return this._lastError; }
+  get lastErrorAt(): number | null { return this._lastErrorAt; }
+  get nextRetryAt(): number | null { return this._nextRetryAt; }
   get connected(): boolean {
     const broker = getPeerWsBroker();
     return broker.hasRoute(this.peerName);
+  }
+
+  /** Read-only status snapshot for the /tribe command. */
+  get clientStatus(): PeerClientStatus {
+    return {
+      state: this.state,
+      lastError: this._lastError,
+      lastErrorAt: this._lastErrorAt,
+      nextRetryAt: this._nextRetryAt,
+    };
   }
 
   /**
    * Single idempotent entry point for all outbound connection triggers.
    * destroyed, waiting, connecting, and connected states are no-ops.
    * Delayed requests transition to waiting; immediate requests dial directly.
+   * Suppressed when broker already has an authenticated route to this peer.
    */
   requestConnect(input: { reason: ConnectReason; delayMs?: number }): void {
     if (this.state === "destroyed") return;
     if (this.state === "waiting" || this.state === "connecting" || this.state === "connected") return;
+    if (getPeerWsBroker().hasRoute(this.peerName)) return;
 
     if (input.delayMs && input.delayMs > 0) {
       this.state = "waiting";
+      this._nextRetryAt = Date.now() + input.delayMs;
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = null;
+        if (getPeerWsBroker().hasRoute(this.peerName)) {
+          this.state = "idle";
+          this._nextRetryAt = null;
+          logDebug(TAG, `Route appeared before delayed dial: ${this.peerName} — suppressed`);
+          return;
+        }
         this.internalDial();
       }, input.delayMs).unref();
       logDebug(TAG, `requestConnect delayed ${this.peerName}: ${input.delayMs}ms (reason: ${input.reason})`);
       return;
     }
 
+    if (getPeerWsBroker().hasRoute(this.peerName)) return;
     this.internalDial();
     logDebug(TAG, `requestConnect ${this.peerName} (reason: ${input.reason})`);
+  }
+
+  /**
+   * Cancel a pending retry timer because an authenticated route became
+   * available through another path (accepted inbound or another outbound
+   * that completed first). Returns true if a timer was cleared.
+   */
+  cancelRetry(): boolean {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.state === "waiting") {
+      this.state = "idle";
+      this._nextRetryAt = null;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Force a retry for a disconnected peer with no active route.
+   * Clears pending timers and transitions to dial. Never interrupts
+   * connecting/connected/destroyed states. Returns true if dial was triggered.
+   */
+  forceRetry(): boolean {
+    if (this.state === "destroyed" || this.state === "connecting" || this.state === "connected") return false;
+    if (getPeerWsBroker().hasRoute(this.peerName)) return false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.state = "idle";
+    this._nextRetryAt = null;
+    this.internalDial();
+    return true;
   }
 
   destroy(): void {
@@ -188,6 +251,9 @@ export class WsPeerClient {
             });
             this.state = "connected";
             this.backoffMs = INITIAL_BACKOFF_MS;
+            this._lastError = null;
+            this._lastErrorAt = null;
+            this._nextRetryAt = null;
             enrollWs.on("close", () => this.handleClose(this.socketGeneration));
             enrollWs.on("error", (err) => this.handleError(err, this.socketGeneration));
 
@@ -261,6 +327,9 @@ export class WsPeerClient {
       this.ws = ws;
       this.state = "connected";
       this.backoffMs = INITIAL_BACKOFF_MS;
+      this._lastError = null;
+      this._lastErrorAt = null;
+      this._nextRetryAt = null;
       (ws as any)._socket?.setKeepAlive(true, 20_000);
 
       // Attach socket to broker for bidirectional request/response routing
@@ -285,6 +354,8 @@ export class WsPeerClient {
 
   private handleError(err: Error, generation: number): void {
     logDebug(TAG, `WS error (${this.peerName} gen=${generation}): ${err.message}`);
+    this._lastError = err.message;
+    this._lastErrorAt = Date.now();
     this.ws?.close();
   }
 
@@ -295,6 +366,11 @@ export class WsPeerClient {
     if (this.state === "connecting" || this.state === "connected") {
       this.state = "idle";
       this.ws = null;
+      if (getPeerWsBroker().hasRoute(this.peerName)) {
+        this._nextRetryAt = null;
+        logDebug(TAG, `Route present on close: ${this.peerName} — suppressing retry`);
+        return;
+      }
       this.scheduleReconnect(generation);
     }
   }
@@ -306,8 +382,15 @@ export class WsPeerClient {
     const delay = this.backoffMs * (0.8 + Math.random() * 0.4);
     logDebug(TAG, `Reconnecting to ${this.peerName} in ${Math.round(delay)}ms (backoff: ${this.backoffMs}ms)`);
     this.state = "waiting";
+    this._nextRetryAt = Date.now() + delay;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
+      if (getPeerWsBroker().hasRoute(this.peerName)) {
+        this.state = "idle";
+        this._nextRetryAt = null;
+        logDebug(TAG, `Route appeared before reconnect: ${this.peerName} — suppressed`);
+        return;
+      }
       this.internalDial();
     }, delay).unref();
 

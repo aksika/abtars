@@ -59,6 +59,13 @@ export function projectPiEvent(event: PiAgentEvent): PiEventProjection {
       return progress("auto_retry", JSON.stringify({ status: "started", attempt: event.attempt }));
     case "auto_retry_end":
       return progress("auto_retry", JSON.stringify({ status: "ended", attempt: event.attempt }));
+    case "summarization_retry_scheduled":
+      // Bounded: attempt only — errorMessage is raw provider text, never persisted.
+      return progress("summarization_retry", JSON.stringify({ status: "scheduled", attempt: event.attempt }));
+    case "summarization_retry_attempt_start":
+      return progress("summarization_retry", JSON.stringify({ status: "started", source: event.source }));
+    case "summarization_retry_finished":
+      return progress("summarization_retry", JSON.stringify({ status: "finished" }));
     case "agent_settled":
     case "turn_start":
     case "turn_end":
@@ -70,6 +77,7 @@ export function projectPiEvent(event: PiAgentEvent): PiEventProjection {
     case "session_info_changed":
     case "thinking_level_changed":
     case "tool_execution_update":
+    case "bash_execution_update":
       return IGNORE;
     case "extension_error": {
       // Bound everything; never persist or log raw payloads/stacks.

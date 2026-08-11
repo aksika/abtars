@@ -1,95 +1,24 @@
 import { ProjectReviewStore } from "./project-review-store.js";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
+import {
+  REVIEW_ACTIONS,
+  CRITERION_VERDICTS,
+  OUTPUT_DISPOSITIONS,
+  CONTRADICTION_DISPOSITIONS,
+  validationError as error,
+  validationWarn as warn,
+  type ValidationIssue,
+  type ProjectReviewDecisionV1,
+} from "./project-review-contract.js";
 
 // ── Decision types ────────────────────────────────────────────────────────────
+// #1620: one runtime source for every enum lives in project-review-contract.ts;
+// these re-exports keep historical importers working.
 
-export type ProjectReviewAction = "accept" | "repair" | "blocked" | "needs_input";
-export type CriterionVerdict = "satisfied" | "unsatisfied" | "inconclusive" | "not_evaluated";
-export type OutputDisposition = "verified" | "present" | "missing" | "invalid" | "remote_only";
-
-export interface ProjectReviewDecisionV1 {
-  schema_version: 1;
-  id: string;
-  project_card_id: number;
-  review_case_id: string;
-  project_generation: number;
-  action: ProjectReviewAction;
-  criteria: Array<{
-    criterion_id: string;
-    verdict: CriterionVerdict;
-    evidence_ids: string[];
-    rationale: string;
-  }>;
-  outputs: Array<{
-    output_id: string;
-    disposition: OutputDisposition;
-    evidence_ids: string[];
-  }>;
-  contradictions: Array<{
-    id: string;
-    affected_criterion_ids: string[];
-    evidence_ids: string[];
-    disposition: "resolved" | "repair" | "blocking" | "inconclusive";
-    rationale: string;
-  }>;
-  residual_risks: Array<{
-    text: string;
-    blocking: boolean;
-    evidence_ids: string[];
-  }>;
-  synthesis: string;
-  repair?: ProjectRepairProposal;
-  blocker?: ProjectBlocker;
-  input_request?: ProjectInputRequest;
-  authored_at: string;
-}
-
-export interface ProjectRepairProposal {
-  items: Array<{
-    id: string;
-    affected_criterion_ids: string[];
-    required_evidence: string;
-    strategy: string;
-    do_not_repeat: string[];
-    capabilities: string[];
-    budget: { max_attempts?: number; max_tokens?: number };
-  }>;
-  rationale: string;
-}
-
-export interface ProjectBlocker {
-  blocker_class: string;
-  affected_criterion_ids: string[];
-  exhausted_failures: string[];
-  contradiction_evidence: string[];
-  what_was_attempted: string;
-  unblock_conditions: string;
-}
-
-export interface ProjectInputRequest {
-  question: string;
-  affected_criterion_ids: string[];
-  expected_response_kind: string;
-  context: string;
-}
+export type { ProjectReviewAction, CriterionVerdict, OutputDisposition, ProjectReviewDecisionV1, ProjectRepairProposal, ProjectBlocker, ProjectInputRequest } from "./project-review-contract.js";
+export type { ValidationSeverity, ValidationIssue } from "./project-review-contract.js";
 
 // ── Validation ────────────────────────────────────────────────────────────────
-
-export type ValidationSeverity = "error" | "warn";
-export interface ValidationIssue {
-  readonly severity: ValidationSeverity;
-  readonly tag: string;
-  readonly path: string;
-  readonly message: string;
-}
-
-function error(tag: string, path: string, message: string): ValidationIssue {
-  return { severity: "error", tag, path, message };
-}
-
-function warn(tag: string, path: string, message: string): ValidationIssue {
-  return { severity: "warn", tag, path, message };
-}
 
 export class ProjectReviewValidator {
   private store: ProjectReviewStore;
@@ -132,6 +61,7 @@ export class ProjectReviewValidator {
     // Criteria: every root criterion must have exactly one verdict
     const rootCriterionIds = new Set(caseSnapshot.root_contract.criteria.map(c => c.id));
     const decisionCriterionIds = new Set(decision.criteria.map(c => c.criterion_id));
+    const seenDecisionIds = new Set<string>();
 
     for (const rcId of rootCriterionIds) {
       if (!decisionCriterionIds.has(rcId)) {
@@ -139,50 +69,120 @@ export class ProjectReviewValidator {
       }
     }
 
-    const validVerdicts: CriterionVerdict[] = ["satisfied", "unsatisfied", "inconclusive", "not_evaluated"];
+    const validVerdicts: readonly string[] = CRITERION_VERDICTS;
     for (const c of decision.criteria) {
+      // #1605: reject duplicate verdicts for the same criterion id
+      if (seenDecisionIds.has(c.criterion_id)) {
+        errors.push(error("duplicate_id", `$.criteria[${c.criterion_id}]`, `duplicate verdict for criterion "${c.criterion_id}"`));
+      }
+      seenDecisionIds.add(c.criterion_id);
       if (!rootCriterionIds.has(c.criterion_id)) {
         errors.push(error("bad_reference", `$.criteria[${c.criterion_id}]`, `unknown criterion id "${c.criterion_id}"`));
       }
       if (!validVerdicts.includes(c.verdict)) {
-        errors.push(error("type_error", `$.criteria[${c.criterion_id}].verdict`, `invalid verdict "${c.verdict}"`));
+        errors.push(error("type_error", `$.criteria[${c.criterion_id}].verdict`, `invalid verdict "${c.verdict}" — legal values: ${CRITERION_VERDICTS.join(", ")}`));
       }
       if (c.rationale.length > 2000) {
         errors.push(error("too_long", `$.criteria[${c.criterion_id}].rationale`, "rationale exceeds 2000 characters"));
       }
+      // #1605: any non-satisfied verdict needs a rationale the Orc can stand
+      // behind — no empty "just trust me" on gaps or failures.
+      if (c.verdict !== "satisfied" && c.rationale.trim().length === 0) {
+        errors.push(error("empty_string", `$.criteria[${c.criterion_id}].rationale`, `rationale is required for verdict "${c.verdict}"`));
+      }
     }
 
-    // Outputs: every required output must have a disposition
+    // Outputs: every required output must have a disposition. #1620: on
+    // `accept` an omitted required output disposition is an ERROR (the
+    // shipped artifact was never classified); on non-accept actions it
+    // remains a deliberate warning — proceeding does not claim delivery.
     const requiredOutputIds = new Set(
       caseSnapshot.root_contract.required_outputs.filter(o => o.required).map(o => o.id),
     );
+    const rootOutputIds = new Set(caseSnapshot.root_contract.required_outputs.map(o => o.id));
     const decisionOutputIds = new Set(decision.outputs.map(o => o.output_id));
 
     for (const oid of requiredOutputIds) {
       if (!decisionOutputIds.has(oid)) {
-        errors.push(warn("missing_field", `$.outputs`, `missing disposition for required output "${oid}"`));
+        if (decision.action === "accept") {
+          errors.push(error("missing_field", `$.outputs`, `missing disposition for required output "${oid}"`));
+        } else {
+          errors.push(warn("missing_field", `$.outputs`, `missing disposition for required output "${oid}"`));
+        }
       }
     }
 
-    const validDispositions: OutputDisposition[] = ["verified", "present", "missing", "invalid", "remote_only"];
+    const validDispositions: readonly string[] = OUTPUT_DISPOSITIONS;
+    const seenOutputIds = new Set<string>();
     for (const o of decision.outputs) {
+      if (seenOutputIds.has(o.output_id)) {
+        errors.push(error("duplicate_id", `$.outputs[${o.output_id}]`, `duplicate disposition for output "${o.output_id}"`));
+      }
+      seenOutputIds.add(o.output_id);
+      if (!rootOutputIds.has(o.output_id)) {
+        errors.push(error("bad_reference", `$.outputs[${o.output_id}]`, `unknown output id "${o.output_id}"`));
+      }
       if (!validDispositions.includes(o.disposition)) {
-        errors.push(error("type_error", `$.outputs[${o.output_id}].disposition`, `invalid disposition "${o.disposition}"`));
+        errors.push(error("type_error", `$.outputs[${o.output_id}].disposition`, `invalid disposition "${o.disposition}" — legal values: ${OUTPUT_DISPOSITIONS.join(", ")}`));
       }
     }
 
-    // Evidence references must point to known items in the case
+    // Build the valid evidence IDs from the case snapshot. Keep a
+    // criterion-local index as well: a known evidence ID from another lane is
+    // not compatible evidence for this criterion's satisfaction.
+    const validEvidenceIds = new Set<string>();
+    const evidenceIdsByCriterion = new Map<string, Set<string>>();
+    for (const ci of caseSnapshot.criterion_inputs) {
+      const criterionEvidence = evidenceIdsByCriterion.get(ci.criterion_id) ?? new Set<string>();
+      for (const eid of ci.observed_evidence_ids) {
+        validEvidenceIds.add(eid);
+        criterionEvidence.add(eid);
+      }
+      for (const eid of ci.failed_or_inconclusive_check_ids) {
+        validEvidenceIds.add(eid);
+        criterionEvidence.add(eid);
+      }
+      for (const eid of ci.artifact_observation_ids) {
+        validEvidenceIds.add(eid);
+        criterionEvidence.add(eid);
+      }
+      evidenceIdsByCriterion.set(ci.criterion_id, criterionEvidence);
+    }
+    for (const cc of caseSnapshot.contradiction_candidates) {
+      for (const eid of cc.evidence_ids) {
+        validEvidenceIds.add(eid);
+        for (const criterionId of cc.affected_criterion_ids) {
+          const criterionEvidence = evidenceIdsByCriterion.get(criterionId) ?? new Set<string>();
+          criterionEvidence.add(eid);
+          evidenceIdsByCriterion.set(criterionId, criterionEvidence);
+        }
+      }
+    }
+
+    // Evidence references in decisions must be known
     for (const c of decision.criteria) {
+      const compatibleEvidenceIds = evidenceIdsByCriterion.get(c.criterion_id);
       for (const eid of c.evidence_ids) {
-        if (caseSnapshot.child_summaries.some(cs => cs.contract_id === eid || `card_${cs.card_id}` === eid)) continue;
+        if (!validEvidenceIds.has(eid)) {
+          errors.push(error("bad_reference", `$.criteria[${c.criterion_id}].evidence_ids`, `unknown evidence id "${eid}"`));
+        } else if (rootCriterionIds.has(c.criterion_id) && !compatibleEvidenceIds?.has(eid)) {
+          errors.push(error("bad_reference", `$.criteria[${c.criterion_id}].evidence_ids`, `evidence id "${eid}" is not compatible with criterion "${c.criterion_id}"`));
+        }
+      }
+    }
+    for (const cc of decision.contradictions) {
+      for (const eid of cc.evidence_ids) {
+        if (!validEvidenceIds.has(eid)) {
+          errors.push(error("bad_reference", `$.contradictions[${cc.id}].evidence_ids`, `unknown evidence id "${eid}"`));
+        }
       }
     }
 
     // Contradictions
-    const validContradictionDispositions = ["resolved", "repair", "blocking", "inconclusive"];
+    const validContradictionDispositions: readonly string[] = CONTRADICTION_DISPOSITIONS;
     for (const cc of decision.contradictions) {
       if (!validContradictionDispositions.includes(cc.disposition)) {
-        errors.push(error("type_error", `$.contradictions[${cc.id}].disposition`, `invalid disposition "${cc.disposition}"`));
+        errors.push(error("type_error", `$.contradictions[${cc.id}].disposition`, `invalid disposition "${cc.disposition}" — legal values: ${CONTRADICTION_DISPOSITIONS.join(", ")}`));
       }
       for (const acid of cc.affected_criterion_ids) {
         if (!rootCriterionIds.has(acid)) {
@@ -206,7 +206,7 @@ export class ProjectReviewValidator {
         errors.push(...this.validateNeedsInput(decision));
         break;
       default:
-        errors.push(error("type_error", "$.action", `invalid action "${decision.action}"`));
+        errors.push(error("type_error", "$.action", `invalid action "${decision.action}" — legal values: ${REVIEW_ACTIONS.join(", ")}`));
     }
 
     return errors;
@@ -220,10 +220,40 @@ export class ProjectReviewValidator {
   ): ValidationIssue[] {
     const errors: ValidationIssue[] = [];
 
-    // Every required criterion must be satisfied
+    // #1605: per-criterion policy from the immutable case — requiredness and
+    // execution ownership, not a set that implies everything is required.
+    const policyByCriterionId = new Map(caseSnapshot.criterion_inputs.map(ci => [ci.criterion_id, ci]));
+
     for (const c of decision.criteria) {
-      if (rootCriterionIds.has(c.criterion_id) && c.verdict !== "satisfied") {
+      const policy = policyByCriterionId.get(c.criterion_id);
+      const required = policy?.required ?? true;
+      const owner = policy?.execution_owner ?? "delegated";
+
+      // not_evaluated never accepts — required or optional
+      if (c.verdict === "not_evaluated") {
+        errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}]`, `criterion "${c.criterion_id}" is not_evaluated — every criterion must be evaluated to accept`));
+        continue;
+      }
+      // Hard criteria must be satisfied
+      if (required && c.verdict !== "satisfied") {
         errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}]`, `required criterion "${c.criterion_id}" is ${c.verdict}, not satisfied`));
+        continue;
+      }
+      if (c.verdict === "satisfied") {
+        // Delegated satisfaction requires durable evidence from the case
+        if (owner === "delegated" && c.evidence_ids.length === 0) {
+          errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].evidence_ids`, `satisfied delegated criterion "${c.criterion_id}" has no evidence`));
+        }
+        // #1605: Orc-owned criteria are satisfied by the Orc's own evaluation —
+        // a non-empty rationale plus the immutable case is their evidence; no
+        // fabricated Worker evidence id is demanded.
+        if (owner === "orc" && c.rationale.trim().length === 0) {
+          errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].rationale`, `satisfied Orc-owned criterion "${c.criterion_id}" requires a non-empty rationale`));
+        }
+      }
+      // Optional gaps on accept need an explicit declared omission
+      if (!required && (c.verdict === "unsatisfied" || c.verdict === "inconclusive") && c.rationale.trim().length === 0) {
+        errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].rationale`, `optional criterion "${c.criterion_id}" accepted with verdict ${c.verdict} requires a non-empty rationale`));
       }
     }
 
@@ -253,14 +283,26 @@ export class ProjectReviewValidator {
       }
     }
 
-    // Check uncovered criteria in case — must be addressed in decision
-    if (caseSnapshot.uncovered_criteria.length > 0) {
-      const uncovered = caseSnapshot.uncovered_criteria;
-      const addressed = decision.criteria.filter(c => uncovered.includes(c.criterion_id) && c.verdict === "satisfied");
-      if (addressed.length < uncovered.length) {
-        errors.push(warn("inconclusive", "$.criteria", `${uncovered.length - addressed.length} uncovered criteria remain`));
+    // #1363 Task 6: enforce hard deadline and budgets
+    if (caseSnapshot.root_contract.limits?.hard_deadline_at) {
+      const deadline = new Date(caseSnapshot.root_contract.limits.hard_deadline_at).getTime();
+      if (Date.now() > deadline) {
+        errors.push(error("invalid_proposal", "$.limits.hard_deadline_at", "project hard deadline has passed"));
       }
     }
+    if (caseSnapshot.root_contract.limits?.max_cost !== undefined) {
+      if (caseSnapshot.budgets.total_cost === undefined) {
+        errors.push(error("invalid_proposal", "$.limits.max_cost", "cost usage is unavailable; cannot verify the configured max_cost"));
+      } else if (caseSnapshot.budgets.total_cost > caseSnapshot.root_contract.limits.max_cost) {
+        errors.push(error("invalid_proposal", "$.limits.max_cost", `cost ${caseSnapshot.budgets.total_cost} exceeds limit ${caseSnapshot.root_contract.limits.max_cost}`));
+      }
+    }
+
+    // #1605: persisted coverage gaps are review evidence, decided by the Orc.
+    // A gap criterion accepted as satisfied requires case evidence (above); an
+    // accepted optional gap requires a rationale (above); a not_evaluated or
+    // missing verdict was already rejected. No legacy blanket warn here — gaps
+    // are not a reason to distrust an otherwise valid accept.
 
     return errors;
   }

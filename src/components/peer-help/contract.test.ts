@@ -96,6 +96,11 @@ describe("parseHelpRequest", () => {
     expect(r.ok).toBe(true);
   });
 
+  it("rejects malformed Pi model and delivery policy", () => {
+    expect(parseHelpRequest({ ...valid, target: { executor: "pi", workspace_alias: "devbox", model: { provider: "" } } }).ok).toBe(false);
+    expect(parseHelpRequest({ ...valid, target: { executor: "pi", workspace_alias: "devbox", delivery: "download" } }).ok).toBe(false);
+  });
+
   it("bounds capabilities to 50", () => {
     const caps = Array.from({ length: 60 }, (_, i) => `cap${i}`);
     const r = parseHelpRequest({ ...valid, required_capabilities: caps });
@@ -108,6 +113,22 @@ describe("parseHelpResponse", () => {
   it("accepts accepted with contribution_ref", () => {
     const r = parseHelpResponse({ version: 1, request_id: "r1", decision: "accepted", contribution_ref: "help_abc" });
     expect(r.ok).toBe(true);
+  });
+
+  it("preserves bounded remote Pi identifiers", () => {
+    const r = parseHelpResponse({
+      version: 1, request_id: "r1", decision: "accepted", contribution_ref: "help_abc",
+      remote_run_id: "run-1", remote_card_id: 42, remote_generation: 1, remote_session_id: "session-1",
+    });
+    expect(r).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({ remote_run_id: "run-1", remote_card_id: 42, remote_generation: 1, remote_session_id: "session-1" }),
+    });
+  });
+
+  it("rejects invalid remote Pi identifiers", () => {
+    expect(parseHelpResponse({ version: 1, request_id: "r1", decision: "accepted", contribution_ref: "help_abc", remote_card_id: 0 }).ok).toBe(false);
+    expect(parseHelpResponse({ version: 1, request_id: "r1", decision: "accepted", contribution_ref: "help_abc", remote_run_id: "" }).ok).toBe(false);
   });
 
   it("rejects accepted without contribution_ref", () => {
@@ -179,6 +200,30 @@ describe("parseContributionEvent", () => {
       version: 1, event_id: "evt1", sequence: 0, request_id: "r1",
       contribution_ref: "help_abc", kind: "bogus", occurred_at: "2026-07-17T12:00:00Z",
     }).ok).toBe(false);
+  });
+
+  it("requires a bounded projection for terminal events", () => {
+    expect(parseContributionEvent({
+      version: 1, event_id: "evt1", sequence: 0, request_id: "r1",
+      contribution_ref: "help_abc", kind: "completed", occurred_at: "2026-07-17T12:00:00Z",
+    }).ok).toBe(false);
+  });
+
+  it("rejects malformed terminal evidence and artifact entries", () => {
+    const base = {
+      version: 1, event_id: "evt1", sequence: 0, request_id: "r1",
+      contribution_ref: "help_abc", kind: "completed", occurred_at: "2026-07-17T12:00:00Z",
+      projection: {
+        schema_version: 1, outcome: "completed", summary: "done",
+        evidence: [], artifacts: [],
+        provenance: {
+          receiver_peer: "peer1", receiver_project_ref: "project1",
+          acceptance_id: "accept1", accepted_at: "2026-07-17T12:00:00Z",
+        },
+      },
+    };
+    expect(parseContributionEvent({ ...base, projection: { ...base.projection, evidence: [{ id: "e1" }] } }).ok).toBe(false);
+    expect(parseContributionEvent({ ...base, projection: { ...base.projection, artifacts: [{ name: "out" }] } }).ok).toBe(false);
   });
 });
 

@@ -23,7 +23,7 @@ export type StartObservation =
   | { kind: "already_started"; attemptId: string; generation: number; executorId: string }
   | { kind: "start_failed"; reason: string; retryable: boolean };
 
-export type CancelReason = "operator" | "deadline" | "project_abort" | "shutdown" | "superseded";
+export type CancelReason = "operator" | "deadline" | "project_abort" | "shutdown" | "superseded" | "session_end";
 
 export type CancelObservation =
   | { kind: "cancelled"; attemptId: string }
@@ -36,8 +36,16 @@ export type ExecutionObservation =
   | { kind: "terminal"; lifecycle: AttemptLifecycle }
   | { kind: "unknown"; message: string };
 
+export interface ExecutorSchedulingPolicy {
+  recovery: "process_bound" | "inspectable";
+  defaultMaxDurationMs?: number;
+}
+
 export interface SwarmExecutorAdapter {
   readonly kind: ExecutorKind;
+  readonly schedulingPolicy: ExecutorSchedulingPolicy;
+  /** Optional synchronous snapshot used by durable retry selection. */
+  capacitySnapshot?(): ExecutorCapacity;
   capacity(): Promise<ExecutorCapacity>;
   start(claim: ExecutionClaim): Promise<StartObservation>;
   cancel(claim: ExecutionClaim, reason: CancelReason): Promise<CancelObservation>;

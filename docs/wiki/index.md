@@ -30,7 +30,7 @@ abTARS integrates Pi as a symbiotic peer — Pi's provider engine powers Direct 
 
 ## Features
 
-- **Multi-platform** — Telegram, Discord, IRC (more coming)
+- **Multi-platform** — Telegram, Discord (more coming)
 - **Multi-provider** — ollama, OpenRouter, Kiro CLI, Gemini CLI, Codex
 - **Automatic fallback** — leaky-bucket health tracking, progressive backoff
 - **Persistent memory** — powered by abmind (in-process, multi-layer recall)

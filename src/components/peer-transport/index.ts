@@ -2,7 +2,7 @@
  * peer-transport/index.ts — Factory + singleton (#911).
  */
 
-export type { PeerTransport, PeerCard, PeerMessage, PeerHelpTransport, PeerHealth } from "./interface.js";
+export type { PeerTransport, PeerCard, PeerMessage, PeerHelpTransport, PeerHealth, PeerStatusEntry, PeerRouteInfo } from "./interface.js";
 export { HttpTransport } from "./http-transport.js";
 export { getHealthStore, getLocalCapabilities, CapabilityRegistry } from "./peer-health.js";
 export { PeerDoorbellService, type PeerConnectionManager } from "./peer-doorbell.js";

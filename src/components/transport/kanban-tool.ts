@@ -4,6 +4,7 @@
 
 import type { ToolDefinition } from "./tool-registry.js";
 import { createDispatchableCard, kanbanUpdate, kanbanList, type KanbanCard } from "../tasks/kanban-board.js";
+import type { DeliveryMode } from "../tasks/task-types.js";
 
 function formatCard(c: KanbanCard): string {
   const icon = c.status === "delivered" ? "*" : c.status === "done" ? "*" : c.status === "running" ? "~" : c.status === "failed" ? "x" : "+";
@@ -32,7 +33,7 @@ async function execute(args: Record<string, string>): Promise<string> {
       source: args.source || "agent",
       priority: args.priority,
       labels: args.labels,
-      deliveryMode: args.delivery_mode as "silent" | "deliver" | "announce" | undefined,
+      deliveryMode: args.delivery_mode as DeliveryMode | undefined,
       chatId: args.chat_id,
     });
     if ("error" in result) return `[err] ${result.error}`;
@@ -42,7 +43,9 @@ async function execute(args: Record<string, string>): Promise<string> {
   if (action === "update") {
     if (!args.id) return "[err] id required";
     const fields: Record<string, unknown> = {};
-    for (const k of ["title", "status", "priority", "type", "labels", "due_at", "notes", "approval"] as const) {
+    // #1590: `status` is lifecycle-owned and no longer accepted here — status
+    // changes go through kanbanTransition (dispatch/settlement/delivery).
+    for (const k of ["title", "priority", "type", "labels", "due_at", "notes", "approval"] as const) {
       if (args[k]) fields[k] = args[k];
     }
     if (args.parent_id) fields.parent_id = parseInt(args.parent_id, 10);
@@ -70,7 +73,6 @@ export const kanbanTool: ToolDefinition = {
       goal: { type: "string", description: "Detailed execution prompt for dispatchable cards (required for type B, max 32 KiB)" },
       id: { type: "string", description: "Card ID (required for update)" },
       source: { type: "string", description: "Who created: user | agent | cron | peer" },
-      status: { type: "string", description: "New status (for update): queued | running | done | failed" },
       priority: { type: "string", description: "CRITICAL | HIGH | MEDIUM | LOW" },
       type: { type: "string", description: "SessionType for dispatchable work (A/B/C/T/P/S/O/W/D/H). Omit for non-dispatchable tickets." },
       delivery_mode: { type: "string", description: "silent | deliver | announce" },

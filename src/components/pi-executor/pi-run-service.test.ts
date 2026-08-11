@@ -96,7 +96,6 @@ function makeService(configOverrides: Record<string, unknown> = {}): PiRunServic
       abortGraceMs: 5000,
       projectTrust: "never",
       sessionStorageRoot: "/tmp",
-      abmindPlugin: "",
       ...configOverrides,
     } as any,
     spin,
@@ -323,5 +322,95 @@ describe("PiRunService.list()", () => {
     const list = svc.list({}, u1);
     expect(list).toHaveLength(1);
     expect(list[0]!.runId).toBeDefined();
+  });
+});
+
+describe("PiRunService.compact() (#1406)", () => {
+  const mockCompactOwned = vi.fn();
+  const u1 = { userId: "usr-1" } as Principal;
+
+  beforeEach(() => {
+    mockCompactOwned.mockReset();
+  });
+
+  function makeCompactService(): { svc: PiRunService; db: TaskDatabase } {
+    const db = createTestDb();
+    const store = new PiRunStore({ db });
+    const executor = {
+      execute: mockExecute,
+      reply: mockReply,
+      steer: mockSteer,
+      cancel: mockCancel,
+      compactOwnedRun: mockCompactOwned,
+    } as unknown as PiExecutor;
+    const spin = {
+      allocateExternalSession: mockAllocateExternalSession,
+      endExternalSession: mockEndExternalSession,
+    } as unknown as Spin;
+    const svc = new PiRunService({
+      store,
+      executor,
+      config: {
+        enabled: true, command: "pi", fixedArgs: [],
+        workspaceAliases: { "test-ws": { path: wsPath } },
+        allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000,
+        projectTrust: "never", sessionStorageRoot: "/tmp",
+      } as any,
+      spin,
+    });
+    return { svc, db };
+  }
+
+  async function createActiveRun(svc: PiRunService): Promise<string> {
+    const ref = await svc.run(
+      { goal: "task a", workspaceAlias: "test-ws", owner: { principalId: "usr-1", origin: "user" } },
+      u1,
+    );
+    const db = svc.store as unknown as { db: { prepare: (sql: string) => { run: (...p: unknown[]) => unknown } } };
+    // Transition queued → starting → running so the run is active.
+    db.db.prepare("UPDATE pi_runs SET status = 'running' WHERE id = ?").run(ref.runId);
+    return ref.runId;
+  }
+
+  it("forwards a valid owner/active run to the executor with the current generation", async () => {
+    mockCompactOwned.mockResolvedValue({
+      status: "completed", targetKind: "local_pi_run", tokensBefore: 900, tokensAfter: 80, message: "ok",
+    });
+    const { svc } = makeCompactService();
+    const runId = await createActiveRun(svc);
+    const result = await svc.compact(runId, "focus", u1);
+    expect(result).toMatchObject({ status: "completed", tokensBefore: 900 });
+    expect(mockCompactOwned).toHaveBeenCalledWith(expect.objectContaining({
+      runId, ownerPrincipalId: "usr-1", customInstructions: "focus", expectedGeneration: 1,
+    }));
+  });
+
+  it("rejects another principal's run without touching the executor", async () => {
+    const { svc } = makeCompactService();
+    const runId = await createActiveRun(svc);
+    const result = await svc.compact(runId, undefined, { userId: "usr-2" } as Principal);
+    expect(result.status).toBe("failed");
+    expect(mockCompactOwned).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing and terminal runs", async () => {
+    const { svc } = makeCompactService();
+    const missing = await svc.compact("nope", undefined, u1);
+    expect(missing.status).toBe("failed");
+    expect(missing.message).toContain("not found");
+
+    const runId = await createActiveRun(svc);
+    const db = svc.store as unknown as { db: { prepare: (sql: string) => { run: (...p: unknown[]) => unknown } } };
+    db.db.prepare("UPDATE pi_runs SET status = 'completed' WHERE id = ?").run(runId);
+    const terminal = await svc.compact(runId, undefined, u1);
+    expect(terminal.status).toBe("failed");
+    expect(terminal.message).toContain("not active");
+  });
+
+  it("surfaces executor outcomes verbatim (stale/busy/process failures)", async () => {
+    mockCompactOwned.mockResolvedValue({ status: "stale", targetKind: "local_pi_run", message: "gen changed" });
+    const { svc } = makeCompactService();
+    const runId = await createActiveRun(svc);
+    await expect(svc.compact(runId, undefined, u1)).resolves.toMatchObject({ status: "stale" });
   });
 });

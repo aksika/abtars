@@ -35,7 +35,7 @@ On next bridge start:
 2. The value is loaded into `process.env.HA_TOKEN`
 3. The agent and skills can reference it as `$HA_TOKEN`
 
-**Shortcut:** If you put `HA_TOKEN=your-token` directly in `.env.skills`, the boot process auto-migrates it to `secret/` and removes it from the file. Either path works.
+**Do not** put credentials in `.env.skills`. Credential-shaped variables (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_ID`) in `.env.skills` are migrated to `secret/` on boot as a recovery path — but if a key was ever written there, treat it as compromised and rotate it. `~/.abtars/secret/<ENV_NAME>` is the only authorized location for credentials.
 
 ### How the bridge picks it up
 

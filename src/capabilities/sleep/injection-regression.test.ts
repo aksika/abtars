@@ -1,121 +1,80 @@
-/**
- * #1429 — Regression: injected SleepApi survives global cache resets.
- *
- * A constructed SleepHandle must use the API it was given at construction,
- * not re-resolve the mutable global abmind cache. Clearing the lazy-loader
- * cache after handle creation must not affect admission or execution.
- */
-
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createSleepHandle, type SleepApi } from "./index.js";
+import { createSleepHandle } from "./index.js";
 
-const mockRunSleepCycle = vi.fn(async () => ({
-  runId: "run-1", status: "completed" as const, startedAt: 0, finishedAt: 0, llmCalls: 0,
-  steps: [], essentialFailures: [], resumable: false, watermarkAdvanced: true, report: "ok",
+vi.mock("../../components/env-schema.js", () => ({
+  getEnv: vi.fn(() => ({ sleepQuality: "normal" })),
 }));
 
 vi.mock("../../components/system-event-buffer.js", () => ({
   bufferSystemEvent: vi.fn(),
 }));
 
-const stubApi: SleepApi = {
-  DEFAULT_LEVEL: "normal",
-  parseLevel: (s: string) => s,
-  runSleepCycle: mockRunSleepCycle,
-};
+vi.mock("../../components/transport/bridge-lock-transport.js", () => ({
+  writeSleepStatus: vi.fn(),
+}));
 
-/** Simulate clearing the global lazy-loader cache (#1429). */
-let _resetAbmindCache: (() => void) | null = null;
-
-async function ensureResetFn(): Promise<void> {
-  if (!_resetAbmindCache) {
-    const mod = await import("../../utils/abmind-lazy.js");
-    _resetAbmindCache = mod.resetAbmindCache;
-  }
-}
-
-async function resetAbmindCache(): Promise<void> {
-  await ensureResetFn();
-  _resetAbmindCache!();
+function makeFakeClient(): any {
+  return {
+    sleep: {
+      start: vi.fn(),
+      status: vi.fn(),
+      resume: vi.fn(),
+      cancel: vi.fn(),
+      events: vi.fn(),
+      runtime: { open: vi.fn(), next: vi.fn(), complete: vi.fn(), fail: vi.fn(), close: vi.fn() },
+    },
+  };
 }
 
 async function settle(): Promise<void> {
   for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 5));
 }
 
-describe("injected SleepApi lifetime (#1429)", () => {
+describe("client-backed sleep handle lifetime (#1381)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockRunSleepCycle.mockImplementation(async () => ({
-      runId: "run-1", status: "completed" as const, startedAt: 0, finishedAt: 0, llmCalls: 0,
-      steps: [], essentialFailures: [], resumable: false, watermarkAdvanced: true, report: "ok",
-    }));
   });
 
-  it("manual start uses the injected API after cache reset", async () => {
-    const handle = createSleepHandle({
-      api: stubApi,
-      memoryEnabled: false,
-      runtime: { complete: async () => "" },
-      onComplete: () => {},
-    });
+  it("manual start calls client.sleep.start with fresh mode", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
 
-    await resetAbmindCache();
+    const handle = createSleepHandle({
+      client, memoryEnabled: false, onComplete: () => {},
+      sessionManager: { spin: vi.fn() }, bufferSystemEvent: vi.fn(),
+    });
 
     const result = handle.startManual({ fresh: true, resume: false });
     expect(result.status).toBe("accepted");
-    expect(mockRunSleepCycle).toHaveBeenCalledTimes(1);
-    expect(mockRunSleepCycle).toHaveBeenCalledWith(
-      expect.objectContaining({ level: "ultimate", fresh: true, mode: "manual" }),
-    );
+    expect(client.sleep.start).toHaveBeenCalledWith("manual", "ultimate", true);
     await settle();
   });
 
-  it("scheduled start uses the injected API after cache reset", async () => {
-    const handle = createSleepHandle({
-      api: stubApi,
-      memoryEnabled: false,
-      runtime: { complete: async () => "" },
-      onComplete: () => {},
-    });
+  it("scheduled start calls client.sleep.start with scheduled mode", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-2" });
 
-    await resetAbmindCache();
+    const handle = createSleepHandle({
+      client, memoryEnabled: false, onComplete: () => {},
+      sessionManager: { spin: vi.fn() }, bufferSystemEvent: vi.fn(),
+    });
 
     const result = handle.startScheduled();
     expect(result.status).toBe("accepted");
-    expect(mockRunSleepCycle).toHaveBeenCalledTimes(1);
+    expect(client.sleep.start).toHaveBeenCalled();
     await settle();
   });
 
-  it("parseLevel and DEFAULT_LEVEL come from the injected API", async () => {
-    const customApi: SleepApi = {
-      DEFAULT_LEVEL: "deep",
-      parseLevel: vi.fn((s: string) => s === "deep" ? "deep" : "normal"),
-      runSleepCycle: mockRunSleepCycle,
-    };
-    // We can't easily test scheduledLevel() since it reads SLEEP_QUALITY from env.
-    // Instead verify that the handle accepts and starts without error — the
-    // scheduledLevel fallback calls api.DEFAULT_LEVEL which is "deep".
-    const handle = createSleepHandle({
-      api: customApi,
-      memoryEnabled: false,
-      runtime: { complete: async () => "" },
-      onComplete: () => {},
-    });
-    expect(handle.startScheduled().status).toBe("accepted");
-    await settle();
-  });
-
-  it("handle does not call abmind() or abmind-lazy after construction", async () => {
-    // Spy on the lazy module to verify it's never called
+  it("handle does not call abmind() after construction", async () => {
     const lazy = await import("../../utils/abmind-lazy.js");
     const abmindSpy = vi.spyOn(lazy, "abmind");
 
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-3" });
+
     const handle = createSleepHandle({
-      api: stubApi,
-      memoryEnabled: false,
-      runtime: { complete: async () => "" },
-      onComplete: () => {},
+      client, memoryEnabled: false, onComplete: () => {},
+      sessionManager: { spin: vi.fn() }, bufferSystemEvent: vi.fn(),
     });
 
     handle.startManual({ fresh: true, resume: false });

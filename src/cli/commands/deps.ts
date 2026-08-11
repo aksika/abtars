@@ -14,7 +14,7 @@ import {
   resolvePiInstallation, clearPiCache, resolvePiFromPath,
 } from "../../components/pi-installation.js";
 import { inspectPiRuntimeSurfaces } from "../../components/pi-inspector.js";
-import { PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
+import { PI_COMPATIBILITY, formatPiPinWarning, type PiPinStatus } from "../../config/pi-compatibility.js";
 import { ensureNativeGroup } from "../deploy-lib/native-group.js";
 
 // ── Observation types ─────────────────────────────────────────────────────────
@@ -120,7 +120,7 @@ export function observeGroup(name: string): GroupObservation {
 
 // ── Pi observation ────────────────────────────────────────────────────────────
 
-type PiObserveState = "absent" | "compatible" | "unloadable" | "below-minimum" | "incomplete" | "invalid";
+export type PiObserveState = "absent" | "compatible" | "above-pin" | "unloadable" | "below-minimum" | "incomplete" | "invalid";
 
 type PiObservation = {
   state: PiObserveState;
@@ -140,12 +140,26 @@ function observePi(): PiObservation {
       const unloadable = Object.entries(surfaces).filter(([, v]) => v.status === "unloadable");
       if (unloadable.length > 0) {
         const reason = unloadable.map(([key, v]) => `${key}: ${(v as { reason: string }).reason}`).join("; ");
+        const pinWarning = formatPiPinWarning(result.installation.version);
         return {
           state: "unloadable",
           version: result.installation.version,
           executable: result.installation.executable,
           reason,
-          remediation: `Pi's package structure matches, but ${unloadable.length} runtime module surface(s) failed to resolve. Reinstall with: abtars deps install pi`,
+          remediation: [
+            `Pi's package structure matches, but ${unloadable.length} runtime module surface(s) failed to resolve. Reinstall with: abtars deps install pi`,
+            pinWarning,
+          ].filter((line): line is string => Boolean(line)).join("\n"),
+        };
+      }
+      // #1572: surface-probe failure keeps priority over pin classification —
+      // an unloadable Pi is reported unloadable even when above-pin.
+      if (result.installation.pinStatus === "above-pin") {
+        return {
+          state: "above-pin",
+          version: result.installation.version,
+          executable: result.installation.executable,
+          remediation: formatPiPinWarning(result.installation.version) ?? undefined,
         };
       }
       return { state: "compatible", version: result.installation.version, executable: result.installation.executable };
@@ -161,6 +175,65 @@ function observePi(): PiObservation {
         remediation: result.remediation,
       };
   }
+}
+
+// ── Pure Pi mutation decision (#1572) ─────────────────────────────────────────
+
+export type PiMutationDecision =
+  | { kind: "install"; npmSpec: string; reason: "absent" | "below-pin" | "at-pin-refresh" | "forced" }
+  | { kind: "noop"; message: string }
+  | { kind: "refuse"; message: string };
+
+/**
+ * Decide what an abtars-driven Pi mutation should do. Pure — no spawning.
+ * `force` corresponds to the caller's --force / repair flag.
+ */
+export function resolvePiUpdateAction(
+  observed: { state: PiObserveState; version?: string; pinStatus?: PiPinStatus; remediation?: string },
+  force: boolean,
+): PiMutationDecision {
+  const npmSpec = `${PI_COMPATIBILITY.packageName}@${PI_COMPATIBILITY.pinnedRange}`;
+  const abovePin =
+    observed.state === "above-pin" ||
+    (observed.state === "compatible" && observed.pinStatus === "above-pin");
+
+  switch (observed.state) {
+    case "absent":
+      return { kind: "install", npmSpec, reason: "absent" };
+    case "below-minimum":
+      return { kind: "install", npmSpec, reason: "below-pin" };
+    case "compatible":
+      // at-pin (or above-pin reported through pinStatus): npm picks the newest
+      // patch within the pin range, so a patch bugfix lands and an already-
+      // current install is a no-op at the npm level.
+      if (!abovePin) return { kind: "install", npmSpec, reason: "at-pin-refresh" };
+      return refuseOrForce(npmSpec, observed.version, force);
+    case "above-pin":
+      return refuseOrForce(npmSpec, observed.version, force);
+    case "unloadable":
+    case "incomplete":
+    case "invalid":
+      if (force) return { kind: "install", npmSpec, reason: "forced" };
+      return {
+        kind: "refuse",
+        message: observed.remediation ?? `Pi status: ${observed.state}. Reinstall with: abtars deps install pi`,
+      };
+  }
+}
+
+function refuseOrForce(
+  npmSpec: string,
+  version: string | undefined,
+  force: boolean,
+): PiMutationDecision {
+  if (force) return { kind: "install", npmSpec, reason: "forced" };
+  const warning = formatPiPinWarning(version ?? "?");
+  return {
+    kind: "refuse",
+    message:
+      warning ??
+      `Pi ${version ?? "?"} is above the pinned range ${PI_COMPATIBILITY.pinnedRange} (built against ${PI_COMPATIBILITY.pinnedVersion}).`,
+  };
 }
 
 // ── Pure target resolver ──────────────────────────────────────────────────────
@@ -288,13 +361,22 @@ function mutateGroup(action: GroupAction, dep: (typeof OPTIONAL_DEPS)[string]): 
 
 // ── Pi mutation ────────────────────────────────────────────────────────────────
 
-function piInstall(repairExisting: boolean): MutationResult {
+/**
+ * Execute one Pi mutation against the resolved decision (#1572). Never moves Pi
+ * above the pin: the npm spec is always `${packageName}@${pinnedRange}` and
+ * `--force` is passed to npm only for the `forced` reason.
+ */
+function piInstall(force: boolean): MutationResult {
   const token = generateLockToken();
   acquireLock("abtars", "install:pi", token);
   try {
+    const decision = resolvePiUpdateAction(observePi(), force);
+    if (decision.kind === "noop") return { group: "pi", ok: true };
+    if (decision.kind === "refuse") return { group: "pi", ok: false, error: decision.message };
+
     const npmArgs = ["install", "-g", "--ignore-scripts"];
-    if (repairExisting) npmArgs.push("--force");
-    npmArgs.push("@earendil-works/pi-coding-agent");
+    if (decision.reason === "forced") npmArgs.push("--force");
+    npmArgs.push(decision.npmSpec);
 
     const result = spawnSync("npm", npmArgs, {
       stdio: "pipe",
@@ -388,35 +470,35 @@ function piUpdate(): MutationResult {
   const token = generateLockToken();
   acquireLock("abtars", "update:pi", token);
   try {
-    const result = resolvePiInstallation({ useCache: false });
-    if (result.state !== "compatible") {
-      return {
-        group: "pi",
-        ok: false,
-        error: result.state === "absent"
-          ? "Pi is not installed. Run 'abtars deps install pi' first."
-          : `Pi status: ${result.state}. ${result.remediation}`,
-      };
-    }
+    // #1572: `pi update --self` is gone — abtars never moves Pi above the pin.
+    // Update = npm reinstall of the pinned range (newest 0.83.x patch), or a
+    // refuse with the downgrade command when the install is above the pin.
+    const decision = resolvePiUpdateAction(observePi(), false);
+    if (decision.kind === "noop") return { group: "pi", ok: true };
+    if (decision.kind === "refuse") return { group: "pi", ok: false, error: decision.message };
 
-    const updateResult = spawnSync(result.installation.executable, ["update", "--self"], {
+    const npmArgs = ["install", "-g", "--ignore-scripts"];
+    npmArgs.push(decision.npmSpec);
+
+    const result = spawnSync("npm", npmArgs, {
       stdio: "pipe",
       shell: false,
       encoding: "utf-8",
     });
 
-    if (updateResult.error || updateResult.status !== 0) {
-      const msg = updateResult.error?.message ?? updateResult.stderr?.slice(0, 200) ?? `exit code ${updateResult.status}`;
+    if (result.error || result.status !== 0) {
+      const msg = result.error?.message ?? result.stderr?.slice(0, 200) ?? `exit code ${result.status}`;
       return { group: "pi", ok: false, error: msg };
     }
 
     clearPiCache();
     const postState = observePi();
-    if (postState.state !== "compatible") {
-      return { group: "pi", ok: false, error: `Pi update completed but verification failed: ${postState.state}` };
-    }
-
-    return { group: "pi", ok: true };
+    if (postState.state === "compatible") return { group: "pi", ok: true };
+    return {
+      group: "pi",
+      ok: false,
+      error: `Pi update completed but verification failed: ${postState.state}${postState.reason ? `: ${postState.reason}` : ""}`,
+    };
   } catch (err) {
     return { group: "pi", ok: false, error: err instanceof Error ? err.message : String(err) };
   } finally {
@@ -489,12 +571,14 @@ function list(): number {
     switch (piState.state) {
       case "compatible":
         return `✓ pi ${piState.version} (${piState.executable})`;
+      case "above-pin":
+        return `◐ pi ${piState.version ?? "?"}  —  above pin ${PI_COMPATIBILITY.pinnedRange}`;
       case "unloadable":
         return `✗ pi ${piState.version ?? "?"}  —  installed but unloadable: ${piState.reason ?? "runtime module surface failed"}`;
       case "absent":
         return "○ pi  —  not installed";
       case "below-minimum":
-        return `◐ pi ${piState.version ?? "?"}  —  below minimum ${PI_COMPATIBILITY.minimumPiVersion}`;
+        return `◐ pi ${piState.version ?? "?"}  —  below pinned version ${PI_COMPATIBILITY.pinnedVersion}`;
       case "incomplete":
         return `◐ pi ${piState.version ?? "?"}  —  incomplete installation`;
       case "invalid":
@@ -502,7 +586,10 @@ function list(): number {
     }
   })();
   process.stdout.write(`  ${piDesc}\n`);
-  process.stdout.write(`    minimum: ${PI_COMPATIBILITY.minimumPiVersion}\n`);
+  process.stdout.write(`    pin: ${PI_COMPATIBILITY.pinnedRange} (built against ${PI_COMPATIBILITY.pinnedVersion})\n`);
+  if ((piState.state === "above-pin" || piState.state === "unloadable") && piState.remediation) {
+    process.stdout.write(`    ${piState.remediation.split("\n").join("\n    ")}\n`);
+  }
   if (piState.state === "compatible") {
     const inst = resolvePiInstallation({ useCache: true });
     if (inst.state === "compatible") {
@@ -554,6 +641,11 @@ function list(): number {
 }
 
 function install(names: string[]): number {
+  // #1572: --force is the only way an abtars-driven Pi mutation may move an
+  // above-pin installation (e.g. deliberate downgrade to the pinned range).
+  const force = names.includes("--force");
+  names = names.filter(n => n !== "--force");
+
   for (const n of names) {
     if (n !== "all" && SYSTEM_DEPS[n]) {
       printSystemDepHint(n);
@@ -572,9 +664,8 @@ function install(names: string[]): number {
     if (piState.state === "compatible") {
       process.stdout.write("✓ pi already installed\n");
     } else {
-      const repairExisting = piState.state !== "absent";
-      process.stdout.write(repairExisting ? "→ pi: repairing installation...\n" : "→ pi: installing...\n");
-      const result = piInstall(repairExisting);
+      process.stdout.write(piState.state === "absent" ? "→ pi: installing...\n" : "→ pi: repairing installation...\n");
+      const result = piInstall(force);
       if (result.ok) {
         process.stdout.write("✓ pi installed\n");
       } else {

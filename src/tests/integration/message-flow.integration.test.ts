@@ -2,7 +2,7 @@
  * Integration: message flow — store → recall → citation round-trip.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createHarness, detectCitations, type IntegrationHarness } from "./harness.js";
+import { createHarness, memoryDb, detectCitations, type IntegrationHarness } from "./harness.js";
 
 describe("message-flow integration", () => {
   let h: IntegrationHarness;
@@ -28,7 +28,7 @@ describe("message-flow integration", () => {
       userId: "u1", sessionId: "sess_1", platformMessageId: 100,
     });
 
-    const db = h.memory.getDatabase()!;
+    const db = memoryDb(h.memory);
     const row = db.prepare("SELECT content, role FROM messages WHERE platform_message_id = 100").get() as { content: string; role: string };
     expect(row.content).toBe("Hello world");
     expect(row.role).toBe("user");
@@ -51,7 +51,7 @@ describe("message-flow integration", () => {
 
     h.memory.bumpCitedCount(citedIds);
 
-    const db = h.memory.getDatabase()!;
+    const db = memoryDb(h.memory);
     const row = db.prepare("SELECT cited_count FROM extracted_memories WHERE id = ?").get(citedIds[0]!) as { cited_count: number };
     expect(row.cited_count).toBe(1);
   });

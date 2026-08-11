@@ -112,38 +112,5 @@ export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
     logInfo("main", "📡 Discord disabled (DISCORD_ENABLED=false)");
   }
 
-  // ── IRC ──────────────────────────────────────────────────────────────────
-  registry.register("irc", {
-    configured: platforms.irc,
-    async create() {
-      const { loadIrcConfig } = await import("../platforms/irc/irc-config.js");
-      const { IrcAdapter } = await import("../platforms/irc/irc-adapter.js");
-      const { handleInboundMessage } = await import("../components/message-pipeline.js");
-      const ircConfig = loadIrcConfig();
-      if (!ircConfig) throw new Error("irc.json missing or empty");
-      const adapter = new IrcAdapter(ircConfig, {
-        onMessage: (msg) => handleInboundMessage(msg, adapter, pipelineDeps),
-      });
-      platformAdapters.set("irc", adapter);
-      return {
-        async start() { await adapter.start(); },
-        stop() { adapter.stop(); platformAdapters.delete("irc"); },
-      };
-    },
-  });
-
-  if (platforms.irc) {
-    const result = await registry.start("irc", { backgroundRetry: true });
-    if (result.ok) {
-      logInfo("main", "📡 IRC started");
-      const { setIrcSend } = await import("../components/transport/tool-registry.js");
-      const ircAdapter = platformAdapters.get("irc");
-      if (ircAdapter) setIrcSend((channel, message) => { ircAdapter.sendMessage(channel, message); });
-    } else if (result.error?.includes("not configured")) {
-      logWarn("main", "IRC flag set but irc.json missing — skipping");
-    } else {
-      logError("main", `IRC failed to start: ${result.error}`);
-    }
-  }
   return "ran";
 }

@@ -10,185 +10,121 @@ export type ProgressKind =
 
 export type ProgressPhase = "start" | "advance" | "end" | "resolved";
 
-export type ExecutorKind = "agent" | "pi" | "remote";
+export type LeaseExecutorKind = "agent" | "pi";
 
 export const SUPPORTED_SCHEMA_VERSION = 1;
 
 export const MAX_EVENT_JSON_BYTES = 10_000;
 export const MAX_PAYLOAD_SUMMARY_LENGTH = 500;
 export const MAX_OPERATION_LABEL_LENGTH = 200;
-export const MAX_STALL_REASON_LENGTH = 500;
+export const MAX_MILESTONE_ID_LENGTH = 200;
+export const MAX_INPUT_REQUEST_ID_LENGTH = 200;
+export const MAX_OBSERVATION_ID_LENGTH = 200;
+export const MAX_OPERATION_ID_LENGTH = 200;
 export const MAX_LEASES_PER_ATTEMPT = 100;
+export const MAX_EVENTS_PER_ATTEMPT = 500;
 
-/**
- * #1439: Shared candidate-staleness threshold for a "running" Kanban card.
- * This is the shortest `meaningfulProgressMs` across the lease policies
- * below (DEFAULT_LOCAL_POLICY) — the point at which the lease-based
- * reconciler (reconciler.ts → evaluateLease) would first consider a
- * supervised card's progress questionable. Doctor's read-only Kanban probe
- * uses this same constant as its candidate-age threshold instead of a
- * separate hardcoded value, so there is exactly one definition of "old
- * running work" shared between the actual lifecycle owner and doctor's
- * health probe.
- */
 export const KANBAN_STALE_CANDIDATE_MS = 300_000;
 
-export interface ExecutorProgressEventV1 {
+export interface ExecutorProgressFactV1 {
   readonly schema_version: 1;
+  readonly fact_id: string;
   readonly attempt_id: string;
   readonly claim_generation: number;
   readonly executor: {
-    readonly kind: ExecutorKind;
+    readonly kind: LeaseExecutorKind;
     readonly id: string;
   };
-  readonly sequence: number;
   readonly kind: ProgressKind;
   readonly phase?: ProgressPhase;
-  readonly producer_at: string;
+  readonly producer_at?: string;
   readonly payload: {
     readonly operation_id?: string;
     readonly operation_label?: string;
     readonly expected_timeout_ms?: number;
-    readonly output_units?: number;
+    readonly progress_units?: number;
+    readonly observation_id?: string;
     readonly milestone_id?: string;
     readonly input_request_id?: string;
     readonly summary?: string;
   };
 }
 
-export interface AttemptLeaseEvent {
+export interface PersistedProgressEventV1 extends ExecutorProgressFactV1 {
   sequence: number;
-  kind: ProgressKind;
-  phase?: string;
-  fingerprint?: string;
-  receivedAt: string;
+  received_at: string;
+  semantic_fingerprint: string;
+  lease_effect: "none" | "liveness" | "meaningful" | "state";
 }
 
-export interface AttemptLeaseSnapshot {
+export type LeaseReason =
+  | "liveness_expired"
+  | "progress_expired"
+  | "tool_silence_expired"
+  | "awaiting_input_expired"
+  | "explicit_stall"
+  | "hard_deadline"
+  | "inspection_unknown_exhausted";
+
+export type EvaluationPhase =
+  | "healthy"
+  | "warning"
+  | "inspect_due"
+  | "inspecting"
+  | "inspect_grace"
+  | "cancel_requested"
+  | "closed";
+
+export interface AttemptLeaseOperation {
+  id: string;
+  label: string;
+  startedAt: string;
+  absoluteSilenceDeadlineAt: string;
+  progressUnits?: number;
+  lastObservationId?: string;
+}
+
+export interface AttemptLeaseAwaitingInput {
+  requestId: string;
+  since: string;
+  deadlineAt: string;
+}
+
+export interface AttemptLeaseEvaluation {
+  phase: EvaluationPhase;
+  reason?: LeaseReason;
+  inspectionCount: number;
+  lastInspectionOutcome?: "running" | "terminal" | "unknown";
+  graceDeadlineAt?: string;
+  version: number;
+}
+
+export interface AttemptLeaseSnapshotV1 {
+  schemaVersion: 1;
   attemptId: string;
+  cardId: number;
   claimGeneration: number;
-  executorKind: ExecutorKind;
+  executorKind: LeaseExecutorKind;
   executorId: string;
   highWaterSequence: number;
+  stateVersion: number;
   semanticState: ProgressKind;
-  stateFingerprint?: string;
+  semanticFingerprint?: string;
+  lastMilestoneId?: string;
   lastReceivedAt: string;
   lastLivenessAt: string;
   lastMeaningfulProgressAt: string;
   livenessDeadlineAt: string;
   progressDeadlineAt: string;
-  operation?: {
-    id: string;
-    label: string;
-    startedAt: string;
-    silenceDeadlineAt: string;
-  };
-  awaitingInput?: {
-    requestId: string;
-    since: string;
-    deadlineAt: string;
-  };
-  evaluation: "healthy" | "warning" | "inspect_due" | "cancel_requested";
+  outputOnlySince?: string;
+  outputUnits?: number;
+  operation?: AttemptLeaseOperation;
+  awaitingInput?: AttemptLeaseAwaitingInput;
+  evaluation: AttemptLeaseEvaluation;
+  nextEvaluationAt?: string;
+  closedAt?: string;
+  closeReason?: string;
   updatedAt: string;
-}
-
-export type ValidationIssue = {
-  severity: "error" | "warn";
-  tag: string;
-  path: string;
-  message: string;
-};
-
-export type ProgressValidationResult =
-  | { ok: true; event: ExecutorProgressEventV1 }
-  | { ok: false; errors: readonly ValidationIssue[] };
-
-function issue(severity: "error" | "warn", tag: string, path: string, message: string): ValidationIssue {
-  return { severity, tag, path, message };
-}
-function error(tag: string, path: string, message: string): ValidationIssue {
-  return issue("error", tag, path, message);
-}
-
-export function validateProgressEvent(raw: unknown): ProgressValidationResult {
-  const errors: ValidationIssue[] = [];
-
-  if (typeof raw !== "object" || raw === null) {
-    return { ok: false, errors: [error("type_error", "$", "event must be an object")] };
-  }
-
-  const obj = raw as Record<string, unknown>;
-
-  if (obj["schema_version"] !== 1) {
-    errors.push(error("unknown_version", "$.schema_version", `unsupported version: ${String(obj["schema_version"])}`));
-    return { ok: false, errors };
-  }
-
-  if (typeof obj["attempt_id"] !== "string" || !obj["attempt_id"]) {
-    errors.push(error("missing_field", "$.attempt_id", "attempt_id is required"));
-  }
-
-  if (typeof obj["claim_generation"] !== "number" || obj["claim_generation"]! < 1) {
-    errors.push(error("type_error", "$.claim_generation", "claim_generation must be a positive number"));
-  }
-
-  const exec = obj["executor"];
-  if (typeof exec !== "object" || exec === null) {
-    errors.push(error("missing_field", "$.executor", "executor is required"));
-  } else {
-    const e = exec as Record<string, unknown>;
-    const ek = e["kind"];
-    if (ek !== "agent" && ek !== "pi" && ek !== "remote") {
-      errors.push(error("type_error", "$.executor.kind", 'must be "agent", "pi", or "remote"'));
-    }
-    if (typeof e["id"] !== "string" || !e["id"]) {
-      errors.push(error("missing_field", "$.executor.id", "executor id is required"));
-    }
-  }
-
-  if (typeof obj["sequence"] !== "number" || obj["sequence"]! < 1) {
-    errors.push(error("type_error", "$.sequence", "sequence must be a positive number"));
-  }
-
-  const validKinds: ProgressKind[] = ["alive", "producing_output", "using_tool", "durable_milestone", "awaiting_input", "stalled"];
-  if (!validKinds.includes(obj["kind"] as ProgressKind)) {
-    errors.push(error("type_error", "$.kind", `invalid kind: ${String(obj["kind"])}`));
-  }
-
-  const validPhases: ProgressPhase[] = ["start", "advance", "end", "resolved"];
-  if (obj["phase"] !== undefined && !validPhases.includes(obj["phase"] as ProgressPhase)) {
-    errors.push(error("type_error", "$.phase", `invalid phase: ${String(obj["phase"])}`));
-  }
-
-  if (typeof obj["producer_at"] !== "string" || !obj["producer_at"]) {
-    errors.push(error("missing_field", "$.producer_at", "producer_at is required"));
-  }
-
-  if (typeof obj["payload"] !== "object" || obj["payload"] === null) {
-    errors.push(error("missing_field", "$.payload", "payload is required"));
-  }
-
-  if (errors.length > 0) {
-    return { ok: false, errors };
-  }
-
-  if (Buffer.byteLength(JSON.stringify(obj), "utf-8") > MAX_EVENT_JSON_BYTES) {
-    errors.push(error("too_long", "$", `event exceeds ${MAX_EVENT_JSON_BYTES} bytes`));
-    return { ok: false, errors };
-  }
-
-  return { ok: true, event: obj as unknown as ExecutorProgressEventV1 };
-}
-
-export function computeSequenceFingerprint(event: ExecutorProgressEventV1): string {
-  const payload = event.payload;
-  const parts: string[] = [event.kind, event.phase ?? ""];
-  if (payload.operation_id) parts.push(payload.operation_id);
-  if (payload.milestone_id) parts.push(payload.milestone_id);
-  if (payload.input_request_id) parts.push(payload.input_request_id);
-  if (payload.output_units !== undefined) parts.push(String(payload.output_units));
-  if (payload.summary) parts.push(payload.summary.slice(0, 100));
-  return createHash("sha256").update(parts.join("|"), "utf-8").digest("hex").slice(0, 16);
 }
 
 export interface LeasePolicy {
@@ -213,17 +149,6 @@ export const DEFAULT_LOCAL_POLICY: LeasePolicy = {
   outputOnlyProgressCapMs: 120_000,
 };
 
-export const DEFAULT_REMOTE_POLICY: LeasePolicy = {
-  livenessMs: 300_000,
-  meaningfulProgressMs: 600_000,
-  warningBeforeMs: 60_000,
-  inspectGraceMs: 60_000,
-  maxUnknownInspections: 3,
-  maxToolSilenceMs: 900_000,
-  awaitingInputMs: 900_000,
-  outputOnlyProgressCapMs: 300_000,
-};
-
 export const DEFAULT_PI_POLICY: LeasePolicy = {
   livenessMs: 180_000,
   meaningfulProgressMs: 600_000,
@@ -235,26 +160,172 @@ export const DEFAULT_PI_POLICY: LeasePolicy = {
   outputOnlyProgressCapMs: 300_000,
 };
 
-export function isMeaningfulProgress(kind: ProgressKind, phase?: string): boolean {
-  switch (kind) {
-    case "durable_milestone":
-      return true;
-    case "using_tool":
-      return phase === "end" || phase === "advance";
-    case "producing_output":
-      return true;
-    case "awaiting_input":
-      return phase === "resolved";
-    default:
-      return false;
+export interface LeaseDecision {
+  action: "healthy" | "warning" | "inspect" | "cancel" | "closed";
+  reason?: LeaseReason;
+  nextAt?: string;
+}
+
+export type ValidationIssue = {
+  severity: "error" | "warn";
+  tag: string;
+  path: string;
+  message: string;
+};
+
+export type ProgressValidationResult =
+  | { ok: true; event: ExecutorProgressFactV1 }
+  | { ok: false; errors: readonly ValidationIssue[] };
+
+function issue(severity: "error" | "warn", tag: string, path: string, message: string): ValidationIssue {
+  return { severity, tag, path, message };
+}
+function error(tag: string, path: string, message: string): ValidationIssue {
+  return issue("error", tag, path, message);
+}
+
+const VALID_KINDS: ProgressKind[] = ["alive", "producing_output", "using_tool", "durable_milestone", "awaiting_input", "stalled"];
+const VALID_PHASES: ProgressPhase[] = ["start", "advance", "end", "resolved"];
+
+const PHASE_REQUIRED: Partial<Record<ProgressKind, boolean>> = {
+  "using_tool": true,
+  "awaiting_input": true,
+};
+
+const PHASE_OPTIONS: Partial<Record<ProgressKind, ProgressPhase[]>> = {
+  "using_tool": ["start", "advance", "end"],
+  "awaiting_input": ["start", "resolved"],
+};
+
+export function validateProgressEvent(raw: unknown): ProgressValidationResult {
+  const errors: ValidationIssue[] = [];
+
+  if (typeof raw !== "object" || raw === null) {
+    return { ok: false, errors: [error("type_error", "$", "event must be an object")] };
   }
+
+  const obj = raw as Record<string, unknown>;
+
+  if (obj["schema_version"] !== 1) {
+    errors.push(error("unknown_version", "$.schema_version", `unsupported version: ${String(obj["schema_version"])}`));
+    return { ok: false, errors };
+  }
+
+  if (typeof obj["fact_id"] !== "string" || !obj["fact_id"] || Buffer.byteLength(obj["fact_id"], "utf8") > 200) {
+    errors.push(error("missing_field", "$.fact_id", "fact_id is required"));
+  }
+
+  if (typeof obj["attempt_id"] !== "string" || !obj["attempt_id"] || Buffer.byteLength(obj["attempt_id"], "utf8") > 200) {
+    errors.push(error("missing_field", "$.attempt_id", "attempt_id is required"));
+  }
+
+  if (typeof obj["claim_generation"] !== "number" || !Number.isSafeInteger(obj["claim_generation"]) || obj["claim_generation"]! < 1) {
+    errors.push(error("type_error", "$.claim_generation", "claim_generation must be a positive number"));
+  }
+
+  const exec = obj["executor"];
+  if (typeof exec !== "object" || exec === null) {
+    errors.push(error("missing_field", "$.executor", "executor is required"));
+  } else {
+    const e = exec as Record<string, unknown>;
+    const ek = e["kind"];
+    if (ek !== "agent" && ek !== "pi") {
+      errors.push(error("type_error", "$.executor.kind", 'must be "agent" or "pi"'));
+    }
+    if (typeof e["id"] !== "string" || !e["id"] || Buffer.byteLength(e["id"], "utf8") > 200) {
+      errors.push(error("missing_field", "$.executor.id", "executor id is required"));
+    }
+  }
+
+  const kind = obj["kind"] as string;
+  if (!VALID_KINDS.includes(kind as ProgressKind)) {
+    errors.push(error("type_error", "$.kind", `invalid kind: ${kind}`));
+  }
+
+  const phase = obj["phase"] as string | undefined;
+  if (phase !== undefined && !VALID_PHASES.includes(phase as ProgressPhase)) {
+    errors.push(error("type_error", "$.phase", `invalid phase: ${phase}`));
+  }
+
+  if (kind && PHASE_REQUIRED[kind as ProgressKind] && !phase) {
+    errors.push(error("missing_field", "$.phase", `${kind} requires a phase`));
+  }
+
+  if (kind && phase && PHASE_OPTIONS[kind as ProgressKind]) {
+    const allowed = PHASE_OPTIONS[kind as ProgressKind]!;
+    if (!allowed.includes(phase as ProgressPhase)) {
+      errors.push(error("type_error", "$.phase", `${kind} does not support phase "${phase}"`));
+    }
+  }
+
+  if (typeof obj["payload"] !== "object" || obj["payload"] === null || Array.isArray(obj["payload"])) {
+    errors.push(error("missing_field", "$.payload", "payload is required"));
+  } else {
+    const payload = obj["payload"] as Record<string, unknown>;
+    const boundedStringFields: Array<[string, number]> = [
+      ["operation_id", MAX_OPERATION_ID_LENGTH],
+      ["operation_label", MAX_OPERATION_LABEL_LENGTH],
+      ["observation_id", MAX_OBSERVATION_ID_LENGTH],
+      ["milestone_id", MAX_MILESTONE_ID_LENGTH],
+      ["input_request_id", MAX_INPUT_REQUEST_ID_LENGTH],
+      ["summary", MAX_PAYLOAD_SUMMARY_LENGTH],
+    ];
+    for (const [field, maxBytes] of boundedStringFields) {
+      const value = payload[field];
+      if (value !== undefined && (typeof value !== "string" || Buffer.byteLength(value, "utf8") > maxBytes)) {
+        errors.push(error("invalid_payload", `$.payload.${field}`, `${field} must be a bounded string`));
+      }
+    }
+    for (const field of ["expected_timeout_ms", "progress_units"]) {
+      const value = payload[field];
+      if (value !== undefined && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) {
+        errors.push(error("invalid_payload", `$.payload.${field}`, `${field} must be a non-negative safe integer`));
+      }
+    }
+    if (kind === "durable_milestone" && typeof payload["milestone_id"] !== "string") {
+      errors.push(error("missing_field", "$.payload.milestone_id", "durable_milestone requires milestone_id"));
+    }
+    if (kind === "using_tool" && typeof payload["operation_id"] !== "string") {
+      errors.push(error("missing_field", "$.payload.operation_id", "using_tool requires operation_id"));
+    }
+    if (kind === "awaiting_input" && typeof payload["input_request_id"] !== "string") {
+      errors.push(error("missing_field", "$.payload.input_request_id", "awaiting_input requires input_request_id"));
+    }
+  }
+
+  if (obj["producer_at"] !== undefined && (typeof obj["producer_at"] !== "string" || obj["producer_at"].length > 64)) {
+    errors.push(error("type_error", "$.producer_at", "producer_at must be a bounded string"));
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  if (Buffer.byteLength(JSON.stringify(obj), "utf-8") > MAX_EVENT_JSON_BYTES) {
+    errors.push(error("too_long", "$", `event exceeds ${MAX_EVENT_JSON_BYTES} bytes`));
+    return { ok: false, errors };
+  }
+
+  return { ok: true, event: obj as unknown as ExecutorProgressFactV1 };
+}
+
+export function computeSemanticFingerprint(fact: ExecutorProgressFactV1): string {
+  const payload = fact.payload;
+  const parts: string[] = [fact.kind, fact.phase ?? ""];
+  if (payload.operation_id) parts.push(payload.operation_id);
+  if (payload.milestone_id) parts.push(payload.milestone_id);
+  if (payload.input_request_id) parts.push(payload.input_request_id);
+  if (payload.progress_units !== undefined) parts.push(String(payload.progress_units));
+  if (payload.observation_id) parts.push(payload.observation_id);
+  if (payload.summary) parts.push(payload.summary.slice(0, 100));
+  return createHash("sha256").update(parts.join("|"), "utf-8").digest("hex").slice(0, 16);
 }
 
 export function computeDeadlines(
   now: number,
   policy: LeasePolicy,
-  snapshot?: Partial<AttemptLeaseSnapshot>,
-  hardDeadlineMs?: number,
+  snapshot?: Partial<AttemptLeaseSnapshotV1>,
+  hardDeadlineAt?: number,
 ): { livenessDeadlineAt: string; progressDeadlineAt: string } {
   const lastLivenessAt = snapshot?.lastLivenessAt ? new Date(snapshot.lastLivenessAt).getTime() : now;
   const lastProgressAt = snapshot?.lastMeaningfulProgressAt ? new Date(snapshot.lastMeaningfulProgressAt).getTime() : now;
@@ -262,8 +333,8 @@ export function computeDeadlines(
   let livenessDeadline = lastLivenessAt + policy.livenessMs;
   let progressDeadline = lastProgressAt + policy.meaningfulProgressMs;
 
-  if (hardDeadlineMs) {
-    const hardAt = now + hardDeadlineMs;
+  if (hardDeadlineAt !== undefined) {
+    const hardAt = hardDeadlineAt;
     if (hardAt < livenessDeadline) livenessDeadline = hardAt;
     if (hardAt < progressDeadline) progressDeadline = hardAt;
   }
@@ -272,4 +343,28 @@ export function computeDeadlines(
     livenessDeadlineAt: new Date(livenessDeadline).toISOString(),
     progressDeadlineAt: new Date(progressDeadline).toISOString(),
   };
+}
+
+/**
+ * Classify the lease effect of a fact.
+ * Note: `producing_output` returns "liveness" here because the actual
+ * meaningful-progress effect depends on the output-only cap state in the
+ * reducer. The persisted event column is diagnostic only — the authoritative
+ * effect is determined at reduce time in executor-lease-reducer.ts.
+ */
+export function computeLeaseEffect(kind: ProgressKind, phase?: string): "none" | "liveness" | "meaningful" | "state" {
+  switch (kind) {
+    case "durable_milestone":
+      return "meaningful";
+    case "producing_output":
+      return "liveness";
+    case "using_tool":
+      return phase === "end" ? "meaningful" : "liveness";
+    case "awaiting_input":
+      return phase === "resolved" ? "meaningful" : "state";
+    case "stalled":
+      return "state";
+    default:
+      return "liveness";
+  }
 }

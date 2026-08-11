@@ -11,7 +11,7 @@ const mockTransport = {
   isReady: true,
   contextPercent: -1,
   initialize: vi.fn(),
-  // #1290: mirrors DirectApiTransport.agentLabel default (direct-api-transport.ts:59)
+  // #1290: mirrors PiCoreTransport.agentLabel default (direct-api-transport.ts:59)
   agentLabel: "professor",
 };
 
@@ -28,21 +28,29 @@ describe("SubagentRuntime", () => {
     runtime = new SubagentRuntime();
     vi.clearAllMocks();
     mockSendPrompt.mockResolvedValue("response text");
-    // #1290: reset to the DirectApiTransport default between tests
+    // #1290: reset to the PiCoreTransport default between tests
     mockTransport.agentLabel = "professor";
   });
 
   it("complete() returns response from transport", async () => {
     const result = await runtime.complete("dreamy", "test prompt");
     expect(result).toBe("response text");
-    expect(mockSendPrompt).toHaveBeenCalledWith("system:dreamy", "test prompt", undefined, { outputObserver: undefined });
+    expect(mockSendPrompt).toHaveBeenCalledWith("system:dreamy", "test prompt", undefined, expect.objectContaining({ executionId: expect.any(String), outputObserver: undefined }));
   });
 
-  it("caches transport — second call reuses", async () => {
+  it("reuses transport for reuse-strategy agents", async () => {
+    await runtime.complete("professor", "first");
+    await runtime.complete("professor", "second");
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(1);
+    expect(mockSendPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("creates fresh transport per call for fresh-strategy agents (#1502)", async () => {
     await runtime.complete("dreamy", "first");
     await runtime.complete("dreamy", "second");
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledTimes(1);
+    expect(createSubagentTransport).toHaveBeenCalledTimes(2);
     expect(mockSendPrompt).toHaveBeenCalledTimes(2);
   });
 
@@ -89,10 +97,11 @@ describe("SubagentRuntime", () => {
     expect(mockDestroy).toHaveBeenCalledTimes(2);
   });
 
-  it("fresh session resets before sending", async () => {
+  it("fresh session creates new transport (#1502)", async () => {
     await runtime.complete("dreamy", "first");
     await runtime.complete("dreamy", "second", { session: "fresh" });
-    expect(mockResetSession).toHaveBeenCalledWith("system:dreamy");
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(2);
   });
 
   // --- session() tests ---
@@ -165,6 +174,44 @@ describe("SubagentRuntime shared registry", () => {
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null);
+    // #1527: the late-bound durable context provider holder is the 4th arg;
+    // #1552: the memory-tool deps holder is the 5th.
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, { current: null }, { current: null }, undefined);
+  });
+
+  it("forwards the composed durable context provider holder to lazy transports (#1527)", async () => {
+    const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
+    const registry = new ModelHealthRegistry();
+    const runtime = new SubagentRuntime();
+    runtime.setRegistry(registry);
+
+    const holder = { current: { projectContext: () => Promise.resolve({ messages: [], estimatedTokens: 0, sourceMessageCount: 0 }) } };
+    runtime.setContextProvider(holder);
+    const memoryDepsHolder = { current: null };
+    runtime.setMemoryToolDependencies(memoryDepsHolder);
+
+    mockSendPrompt.mockResolvedValueOnce("ok");
+    await runtime.complete("dreamy", "test");
+
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, holder, memoryDepsHolder, undefined);
+  });
+
+  it("#1611: a persistent session rejects conflicting candidate-policy reuse — never broadens configured-only", async () => {
+    vi.clearAllMocks();
+    mockSendPrompt.mockResolvedValue("response text");
+    const runtime = new SubagentRuntime();
+    const s1 = await runtime.session("dreamy", undefined, { candidatePolicy: "configured-only" });
+    expect(s1.isReady).toBe(true);
+    // Same policy reuses the cached transport.
+    const s2 = await runtime.session("dreamy", undefined, { candidatePolicy: "configured-only" });
+    expect(s2.isReady).toBe(true);
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(1);
+
+    await expect(
+      runtime.session("dreamy", undefined, { candidatePolicy: "fallback-chain" }),
+    ).rejects.toThrow(/conflicting reuse/);
+    expect(createSubagentTransport, "the cached transport must not be recreated").toHaveBeenCalledTimes(1);
   });
 });

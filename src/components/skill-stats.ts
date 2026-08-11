@@ -56,14 +56,12 @@ export function setProvenance(name: string, createdBy: string): void {
 
 export function flush(): void {
   if (!dirty) return;
-  try {
-    const dir = join(abtarsHome(), "skills");
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const obj: Record<string, SkillStat> = {};
-    for (const [k, v] of stats) obj[k] = v;
-    writeFileSync(statsPath(), JSON.stringify(obj, null, 2) + "\n", "utf-8");
-    dirty = false;
-  } catch (err) { logAndSwallow(TAG, "flush", err); }
+  const dir = join(abtarsHome(), "skills");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const obj: Record<string, SkillStat> = {};
+  for (const [k, v] of stats) obj[k] = v;
+  writeFileSync(statsPath(), JSON.stringify(obj, null, 2) + "\n", "utf-8");
+  dirty = false;
 }
 
 /** Exposed for testing. */

@@ -5,9 +5,10 @@
  * The bridge side speaks TuiServerFrame; the client side speaks TuiClientFrame.
  * Both sides use encodeFrame/createFrameDecoder for symmetric framing.
  *
- * v1 transport: whole-message frames only. `chunk`/`chunk-end` are defined in
- * the protocol but reserved and never sent — see design.md "Streaming (v1)".
- * They exist so #1319 (live mirroring) can extend without a protocol rewrite.
+ * #1612: `stream-start`/`chunk`/`chunk-end`/`tool-start` carry optional
+ * execution correlation so the client can reconcile live stream rows with the
+ * whole-result fallback message. Correlation fields are internal wire
+ * metadata for state reconciliation — never rendered by the client.
  */
 
 import type { OrcActivitySnapshot } from "../../components/orc-activity-snapshot.js";
@@ -48,10 +49,11 @@ export type TuiClientFrame =
 export type TuiServerFrame =
   | { t: "ready"; sessionLabel: string; sessionId: string }              // attach accepted
   | { t: "error"; message: string }                                       // attach/route rejected (fatal)
-  | { t: "message"; role: "assistant" | "system"; markdown: string }     // v1: whole response
-  | { t: "chunk"; id: string; delta: string }                             // RESERVED — see Streaming (v1)
-  | { t: "chunk-end"; id: string; reason?: "complete" | "error" | "cancelled" | "truncated" }  // RESERVED — not emitted in v1
-  | { t: "tool-start"; id: string; name: string }                       // #1338: bounded tool-start name
+  | { t: "message"; role: "assistant" | "system"; markdown: string; executionId?: string }  // whole response
+  | { t: "stream-start"; id: string; executionId: string }               // #1612: visible stream start
+  | { t: "chunk"; id: string; executionId?: string; kind: "text" | "thinking"; delta: string }  // #1619: typed live delta
+  | { t: "chunk-end"; id: string; executionId?: string; reason?: "complete" | "error" | "cancelled" | "truncated" }
+  | { t: "tool-start"; id: string; executionId?: string; name: string }  // #1338: bounded tool-start name
   | { t: "typing" }
   | { t: "steer-ack"; status: "queued" | "rejected" | "consumed" | "expired" | "failed"; instructionId: string; message: string }  // #1332: steer lifecycle
   // #1319: Orc activity
@@ -264,7 +266,8 @@ export function isServerFrame(x: unknown): x is TuiServerFrame {
   if (typeof x !== "object" || x === null) return false;
   const t = (x as { t?: unknown }).t;
   return t === "ready" || t === "error" || t === "message" ||
-         t === "chunk" || t === "chunk-end" || t === "typing" || t === "steer-ack" ||
+         t === "stream-start" || t === "chunk" || t === "chunk-end" ||
+         t === "tool-start" || t === "typing" || t === "steer-ack" ||
          t === "activity-snapshot" || t === "activity" || t === "status";
 }
 

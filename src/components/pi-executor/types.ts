@@ -41,6 +41,8 @@ export interface PiRunOwner {
   platform?: string;
   chatId?: string;
   peer?: string;
+  /** Stable request ID from the originating peer delegation. */
+  requestId?: string;
 }
 
 export interface PiRunRequest {
@@ -49,6 +51,8 @@ export interface PiRunRequest {
   priority?: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
   model?: PiModelSelection;
   owner: PiRunOwner;
+  /** Requested remote result-delivery policy, when this is a delegated run. */
+  deliveryPolicy?: "leave_remote" | "patch_artifact" | "commit_push";
 }
 
 export interface PiRunRef {
@@ -68,6 +72,8 @@ export interface PiRunRecord {
   originPlatform?: string;
   originChatId?: string;
   originPeer?: string;
+  originRequestId?: string;
+  deliveryPolicy?: "leave_remote" | "patch_artifact" | "commit_push";
   executionGeneration: number;
   currentSessionId?: string;
   status: PiRunStatus;

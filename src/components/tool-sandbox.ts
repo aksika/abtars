@@ -87,7 +87,7 @@ export function auditDeny(tool: string, path: string | undefined, policy: string
 
 // ── Tool Loop Guard ─────────────────────────────────────────────────────────
 
-const IDEMPOTENT_TOOLS = new Set(["file_read", "web_fetch", "web_browse", "memory_recall"]);
+const IDEMPOTENT_TOOLS = new Set(["file_read", "web_fetch", "memory_recall"]);
 
 function argsHash(name: string, args: Record<string, unknown>): string {
   return createHash("sha256").update(name + JSON.stringify(args)).digest("hex");

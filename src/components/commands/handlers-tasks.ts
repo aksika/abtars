@@ -13,6 +13,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   let listing: string;
   try {
     const { readEntries } = await import("../tasks/task-store.js");
+    const { readState } = await import("../tasks/task-state-store.js");
     const entries = readEntries();
     const active = entries.filter((e: any) => !e.fired);
     active.sort((a: any, b: any) => {
@@ -43,14 +44,33 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
           runsToday = allowed.has(dow);
         }
       }
+      const state = readState(e.id);
+      const autoPaused = state?.autoPaused ?? false;
+      const defPaused = e.paused ?? false;
+      const isPaused = autoPaused || defPaused;
       const succeeded = e.history?.some((h: any) => h.exitCode === 0 && new Date(h.ts).toDateString() === today.toDateString());
       const failed = e.history?.some((h: any) => h.exitCode !== undefined && h.exitCode !== 0 && new Date(h.ts).toDateString() === today.toDateString());
       const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
       const running = ctx.cronCurrentJob?.entryId === e.id;
-      const tick = e.paused ? "⏸" : !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
-      const label = formatTaskLabel(e.id);
-      const name = label.length > 18 ? label.slice(0, 18) : label;
-      return `${tick}  ${name.padEnd(20)}${sched.padEnd(16)}${label}`;
+      const activeRun = state?.activeRun;
+      const isActive = activeRun && ["reserved", "queued", "executing", "cancelling", "validating", "settling"].includes(activeRun.phase);
+      const tick = isPaused ? "p" : !runsToday ? "-" : succeeded ? "+" : running || isActive ? "~" : failed ? "x" : started ? "x" : "+";
+      // #1520: show category/code plus failure count, latest occurrence, and
+      // the exact resume command.
+      let pauseMarker = "";
+      if (autoPaused) {
+        const inc = state?.lastIncident;
+        const code = inc ? `${inc.category}/${inc.code}` : `${state?.consecutiveFailures ?? 0}f`;
+        const at = state?.pausedAt ? ` @${new Date(state.pausedAt).toLocaleTimeString()}` : "";
+        pauseMarker = ` [auto-paused:${code} · ${state?.consecutiveFailures ?? 0}f${at} — /task resume ${e.id}]`;
+      } else if (isActive) {
+        pauseMarker = ` [${activeRun.phase}]`;
+      } else if (state?.retrying) {
+        pauseMarker = " [retrying]";
+      } else if (state?.deferredAdmission) {
+        pauseMarker = ` [deferred:${state.deferredAdmission.attempts}/5 → ${new Date(state.deferredAdmission.retryAt).toLocaleTimeString()}]`;
+      }
+      return `${tick}  ${sched.padEnd(16)}${e.id}${pauseMarker}`;
     });
     listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
   } catch (err) {
@@ -58,11 +78,34 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
     listing = "(no active entries)";
   }
   let running = "";
-  if (ctx.cronCurrentJob) {
-    const j = ctx.cronCurrentJob;
-    const ago = Math.round((Date.now() - j.startedAt) / 1000);
-    const name = (j.message.split("\n")[0] ?? "").slice(0, 30);
-    running = `\n~ Running: ${name} (${ago}s)`;
+  // #1539: show every lane currently executing with its durable run identity.
+  const jobs = ctx.cronCurrentJobs ?? (ctx.cronCurrentJob ? [ctx.cronCurrentJob] : []);
+  const queueView = ctx.cronQueueView?.();
+  const runViews = new Map((queueView ?? []).flatMap(l => l.current ? [[l.current.runId, l.current] as const] : []));
+  if (jobs.length > 0) {
+    const lines = jobs.map(j => {
+      const ago = Math.round((Date.now() - j.startedAt) / 1000);
+      const name = (j.message.split("\n")[0] ?? "").slice(0, 30);
+      const view = runViews.get(j.runId);
+      const phase = view?.phase ? ` phase=${view.phase}` : "";
+      const deadline = view?.deadlineAt ? ` dl=${new Date(view.deadlineAt).toLocaleTimeString()}` : "";
+      const card = view?.cardId !== undefined ? ` card=${view.cardId}` : "";
+      const progress = view?.lastProgressAt !== undefined ? ` prog=${Math.max(0, Math.round((Date.now() - view.lastProgressAt) / 1000))}s` : "";
+      const request = view?.terminalRequest ? ` req=${view.terminalRequest.kind}` : "";
+      return `~ [${j.lane}] ${name} (${ago}s, run ${j.runId.slice(0, 16)}${phase}${progress}${deadline}${request}${card})`;
+    });
+    running = `\n${lines.join("\n")}`;
+  }
+  // #1539: durable pending state stays visible before a model session exists.
+  if (queueView) {
+    const pendingLines: string[] = [];
+    for (const lane of queueView) {
+      for (const p of lane.pending) {
+        const run = p.runId ? `, run ${p.runId.slice(0, 16)}` : "";
+        pendingLines.push(`  [${lane.lane}] queued: ${p.entryId}${run}`);
+      }
+    }
+    if (pendingLines.length > 0) running += `\n${pendingLines.join("\n")}`;
   }
   await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "HTML" });
   return true;
@@ -100,9 +143,12 @@ export async function handleTasksLog(text: string, ctx: CommandContext): Promise
       else await ctx.reply(msg);
       return true;
     }
-    const runs = (data.runs as { ranAt: string; exitCode?: number }[]).slice(-5);
-    const lines = runs.map(r => `${r.ranAt}  exit=${r.exitCode ?? "?"}`);
-    const body = `📋 ${data.message}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``;
+    const runs = (data.runs as { ranAt: string; exitCode?: number; diagnostic?: { category: string; code: string; message?: string } }[]).slice(-5);
+    const lines = runs.map(r => {
+      const diagnostic = r.diagnostic ? `  ${r.diagnostic.category}/${r.diagnostic.code}${r.diagnostic.message ? `: ${r.diagnostic.message}` : ""}` : "";
+      return `${r.ranAt}  exit=${r.exitCode ?? "?"}${diagnostic}`;
+    });
+    const body = `📋 Task history: ${id}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``;
     if (placeholderId !== undefined && ctx.editReply) await ctx.editReply(placeholderId, body);
     else await ctx.reply(body, { parseMode: "Markdown" });
   } catch (err) {
@@ -120,11 +166,48 @@ export async function handleTaskPause(text: string, ctx: CommandContext): Promis
   const action = match[2]!.toLowerCase();
   const id = match[3]!.trim();
   try {
-    const raw = await execAsync("abtars-task", [action, id], 5000);
-    const data = JSON.parse(raw || "{}");
-    await ctx.reply(data.ok ? `✓ ${id} ${action}d` : `❌ ${data.error ?? "unknown error"}`);
+    if (action === "pause") {
+      // #1609: one service operation for chat, CLI, and dashboard pause — it
+      // refreshes pausedAt to now so an already-paused task gets a fresh
+      // 12-hour cooldown.
+      const { pauseTask } = await import("../tasks/task-service.js");
+      const { readEntry } = await import("../tasks/task-store.js");
+      const entry = readEntry(id);
+      if (!entry) {
+        await ctx.reply(`No task found for: ${id}`);
+        return true;
+      }
+      pauseTask(id, [entry]);
+      await ctx.reply(`Paused: ${id}`);
+      return true;
+    }
+    // #1520: one service operation for chat and CLI resume.
+    const { readEntry } = await import("../tasks/task-store.js");
+    const { resumeAutoPaused } = await import("../tasks/task-service.js");
+    const entry = readEntry(id);
+    if (!entry) {
+      await ctx.reply(`No task found for: ${id}`);
+      return true;
+    }
+    const result = resumeAutoPaused(id, [entry]);
+    switch (result) {
+      case "resumed":
+        await ctx.reply(`Resumed: ${id} — next run scheduled.`);
+        break;
+      case "not_paused":
+        await ctx.reply(`${id} is not auto-paused.`);
+        break;
+      case "already_running":
+        await ctx.reply(`${id} is currently running — cannot resume while active.`);
+        break;
+      case "invalid":
+        await ctx.reply(`${id} definition is invalid — fix it before resuming.`);
+        break;
+      default:
+        await ctx.reply(`No task found for: ${id}`);
+    }
   } catch (err) {
-    await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+    await ctx.reply(`Failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   return true;
 }
@@ -207,6 +290,22 @@ function renderDetail(c: Awaited<ReturnType<typeof import("../tasks/kanban-board
     `Status:   ${c.status}  |  Priority: ${c.priority}  |  Source: ${c.source}`,
   ];
   if (c.type) lines.push(`Type:     ${c.type}`);
+  if (c.type === "O") {
+    try {
+      const { ProjectReviewStore, summarizeReviewCase } = require("../project-acceptance/project-review-store.js") as typeof import("../project-acceptance/project-review-store.js");
+      const store = new ProjectReviewStore();
+      const sup = store.getSupervision(c.id);
+      if (sup) {
+        lines.push(`Project:  ${sup.state}`);
+        if (sup.generation) lines.push(` Gen:     ${sup.generation}`);
+        if (sup.review_round || sup.repair_round) lines.push(` Round:   review=${sup.review_round} repair=${sup.repair_round}`);
+        if (sup.blocked_reason) lines.push(` Blocked: ${sup.blocked_reason.slice(0, 100)}`);
+        if (sup.accepted_decision_id) lines.push(` Accept:  ${sup.accepted_decision_id.slice(0, 16)}`);
+        const reviewSummary = summarizeReviewCase(store.getLatestReviewCase(c.id));
+        if (reviewSummary) lines.push(` Review: ${reviewSummary.trim()}`);
+      }
+    } catch {}
+  }
   if (c.labels) lines.push(`Labels:   ${c.labels}`);
   if (c.assignee && c.assignee !== "professor") lines.push(`Assignee: ${c.assignee}`);
   if (c.due_at) lines.push(`Due:      ${c.due_at.slice(0, 10)}`);

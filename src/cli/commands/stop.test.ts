@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { stop } from "./stop.js";
+import { processStartIdentity } from "../../supervisor/identity.js";
 
 describe("#372 — abtars stop", () => {
   let tmpHome: string;
@@ -44,7 +45,7 @@ describe("#372 — abtars stop", () => {
     // Use node running a tight sleep loop, with argv[0] label so cmdline contains the needle
     const args = label === "watchdog"
       ? ["-e", "setInterval(()=>{}, 1000)", "watchdog.sh"]
-      : ["-e", "setInterval(()=>{}, 1000)", "abtars-main.js"];
+      : ["-e", "setInterval(()=>{}, 1000)", "abtars.js"];
     const child = spawn("node", args, { stdio: "ignore", detached: false });
     procs.push(child);
     if (!child.pid) throw new Error("failed to spawn dummy");
@@ -96,7 +97,7 @@ describe("#372 — abtars stop", () => {
     const brPid = spawnDummy("bridge");
     await new Promise(r => setTimeout(r, 100));
 
-    writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: brPid }));
+    writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: brPid, instanceId: "test", startIdentity: processStartIdentity(brPid) }));
 
     captureStdio();
     const exit = await stop({});
@@ -159,7 +160,7 @@ describe("#372 — abtars stop", () => {
     await new Promise(r => setTimeout(r, 100));
 
     writeFileSync(join(tmpHome, "manifest.json"), JSON.stringify({ installMode: "simple" }));
-    writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: brPid }));
+    writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: brPid, instanceId: "test", startIdentity: processStartIdentity(brPid) }));
 
     captureStdio();
     const exit = await stop({});

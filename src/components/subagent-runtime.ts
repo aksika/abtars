@@ -38,6 +38,7 @@ export interface RuntimeExecution {
   close(): Promise<void>;
   readonly transport: IKiroTransport;
   readonly sessionKey: string;
+  readonly executionId: string;
   readonly ephemeral: boolean;
   /** #1364: Per-execution abort signal. Abort the controller to cancel the execution. */
   readonly abortSignal?: AbortSignal;
@@ -67,6 +68,8 @@ interface CachedAgent {
   transport: IKiroTransport;
   model: string;
   sessionKey: string;
+  /** #1611: immutable candidate policy captured at transport creation. */
+  candidatePolicy?: import("./spin-types.js").CandidatePolicy;
 }
 
 const DEFAULT_SESSION: Record<AgentName, "fresh" | "reuse"> = {
@@ -80,7 +83,7 @@ const DEFAULT_SESSION: Record<AgentName, "fresh" | "reuse"> = {
 const DEFAULT_SPAWN_TIMEOUT_MS = 600_000; // 10 min
 
 export class SubagentRuntime {
-  private readonly cache = new Map<AgentName, CachedAgent>();
+  private readonly cache = new Map<string, CachedAgent>();
   private readonly activeSpawns = new Map<string, { abort: AbortController; startedAt: number }>();
   private _registry: ModelHealthRegistry | null = null;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
@@ -95,7 +98,7 @@ export class SubagentRuntime {
 
   /** Set main transport reference and wire the #1418 last-successful-Main tracker. */
   setMainTransport(transport: IKiroTransport): void {
-    // #1418: Wire last-successful-Main tracker from DirectApiTransport. The tracker
+    // #1418: Wire last-successful-Main tracker from the transport. The tracker
     // stores the complete secret-free candidate tuple (provider/model/endpoint/
     // maxContext) so specialists can reuse the exact Main candidate that worked.
     const apiTransport = transport as unknown as { lastSuccessfulCandidate: CandidateSpec | null; onLastSuccessfulChanged?: (candidate: CandidateSpec) => void };
@@ -118,6 +121,23 @@ export class SubagentRuntime {
   /** Get session manager (may be null before boot completes). */
   get sessionManager(): import("./spin.js").Spin | null { return this._sessionManager; }
 
+  /**
+   * #1527: late-bound durable context provider holder. Set by the boot
+   * composition point once memory is ready; lazy transports created after
+   * that point receive the shared holder.
+   */
+  private _contextProvider: import("./transport/pi-core-context.js").DurableContextProviderHolder = { current: null };
+  setContextProvider(holder: import("./transport/pi-core-context.js").DurableContextProviderHolder): void {
+    this._contextProvider = holder;
+  }
+
+  /** #1552: late-bound memory-tool dependencies holder; lazy transports
+   *  created after boot composition receive the shared holder. */
+  private _memoryToolDeps: import("./memory-store-quota.js").MemoryToolDependenciesHolder = { current: null };
+  setMemoryToolDependencies(holder: import("./memory-store-quota.js").MemoryToolDependenciesHolder): void {
+    this._memoryToolDeps = holder;
+  }
+
   /** Enable Docker sandbox for W/B/C sessions (#478). */
   setSandboxEnabled(enabled: boolean): void { this._sandboxEnabled = enabled; }
 
@@ -129,7 +149,8 @@ export class SubagentRuntime {
       this._lastUsage = exec.lastUsage();
       return response ?? "";
     } catch (err) {
-      logWarn(TAG, `${agent} complete failed: ${err instanceof Error ? err.message : String(err)}`);
+      const detail = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `${agent} complete failed (error_chars=${detail.length})`);
       this.cache.delete(agent);
       throw err;
     } finally {
@@ -150,13 +171,12 @@ export class SubagentRuntime {
 
     const sessionStrategy = opts?.session ?? DEFAULT_SESSION[agent] ?? "fresh";
 
-    const cached = this.cache.get(key as AgentName);
+    const cached = this.cache.get(key);
     if (cached && sessionStrategy === "fresh") {
       await cached.transport.resetSession?.(cached.sessionKey);
-      (await import("./transport/tool-registry.js")).resetStoreCounter();
     }
 
-    const cacheKey = key as AgentName;
+    const cacheKey = key;
     const entry = this.cache.get(cacheKey) ?? await this.createAgent(agent, opts?.sessionType, key);
     const { transport, model } = entry;
     const sessionKey = entry.sessionKey;
@@ -171,57 +191,99 @@ export class SubagentRuntime {
     }
 
     let closed = false;
+    let cancelled = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     const start = Date.now();
+
+    const execId = `runtime_${sessionKey}_${Date.now()}_${randomBytes(4).toString("hex")}`;
 
     const exec: RuntimeExecution = {
       transport,
       sessionKey,
+      executionId: execId,
       ephemeral: sessionStrategy === "fresh",
       lastUsage: () => transport.lastUsage?.() ?? null,
 
       send: async (prompt, image, context) => {
-        const response = await transport.sendPrompt(sessionKey, prompt, image, context);
+        if (cancelled) throw new Error("Execution cancelled");
+        const response = await transport.sendPrompt(sessionKey, prompt, image, {
+          ...context,
+          executionId: context?.executionId ?? execId,
+        });
+        if (cancelled) throw new Error("Execution cancelled");
         logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
         return response ?? "";
       },
 
-      cancel: async (_reason: import("./swarm-executor-types.js").CancelReason) => {
-        // Logical cancellation: mark closed so future send() is a no-op
-        // No shared transport interrupt to avoid affecting sibling executions
-        if (closed) return;
-        logDebug(TAG, `${key} exec.cancel (${_reason})`);
-        closed = true;
+      cancel: async (reason: import("./swarm-executor-types.js").CancelReason) => {
+        if (closed || cancelled) return;
+        cancelled = true;
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        logDebug(TAG, `${key} exec.cancel (${reason})`);
+        // Each open execution has a unique cache key, so interrupting this
+        // transport cannot cancel a sibling execution. This is required for
+        // ACP and tmux, which do not implement setTimeoutOverride().
+        try {
+          await transport.sendInterrupt(reason);
+        } catch (err) {
+          logAndSwallow(TAG, "exec.cancel", err);
+        }
       },
 
       close: async () => {
         if (closed) return;
         closed = true;
+        if (timeoutHandle) clearTimeout(timeoutHandle);
 
-        // Reset overrides — transport stays in cache (cleaned by shutdown())
-        if (opts?.timeoutMs && transport.setTimeoutOverride) {
-          transport.setTimeoutOverride(null);
+        if (sessionStrategy === "fresh") {
+          // Interrupt if still active, destroy transport, remove cache entry
+          if (!cancelled) {
+            try { await transport.sendInterrupt?.("execution_closed"); } catch { /* best effort */ }
+          }
+          try { transport.destroy(); } catch { /* best effort */ }
+          this.cache.delete(cacheKey);
+          logDebug(TAG, `${key} ephemeral exec closed — transport destroyed, cache removed`);
+        } else {
+          // Reset overrides — persistent transport stays in cache
+          if (opts?.timeoutMs && transport.setTimeoutOverride) {
+            transport.setTimeoutOverride(null);
+          }
+          if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+            transport.setMaxToolRoundsOverride(null);
+          }
+          logDebug(TAG, `${key} exec closed (${Date.now() - start}ms, ${model})`);
         }
-        if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
-          transport.setMaxToolRoundsOverride(null);
-        }
-
-        const elapsed = Date.now() - start;
-        logDebug(TAG, `${key} exec closed (${elapsed}ms, ${model})`);
       },
     };
+
+    // PiCoreTransport has its own host timer, but ACP and tmux do not expose
+    // a timeout override. Keep this execution-level deadline as the universal
+    // fallback; duplicate cancellation on PiCore is harmless and idempotent.
+    if (opts?.timeoutMs && opts.timeoutMs > 0) {
+      timeoutHandle = setTimeout(() => {
+        void exec.cancel("deadline");
+      }, opts.timeoutMs);
+    }
 
     return exec;
   }
 
   /** Get a persistent session handle for multi-turn callers. */
-  async session(agent: AgentName, key?: string): Promise<AgentSession> {
+  async session(agent: AgentName, key?: string, opts?: { candidatePolicy?: import("./spin-types.js").CandidatePolicy }): Promise<AgentSession> {
     const cacheKey = key ? `${agent}:${key}` : agent;
-    const cached = this.cache.get(cacheKey as AgentName) ?? await this.createAgent(agent, undefined, cacheKey);
+    const cached = this.cache.get(cacheKey) ?? await this.createAgent(agent, undefined, cacheKey, opts?.candidatePolicy);
+    // #1611: the candidate policy is immutable per attached transport. A
+    // conflicting request fails closed — it must never silently broaden a
+    // configured-only session into a fallback chain.
+    const policy = opts?.candidatePolicy;
+    if (policy && cached.candidatePolicy && cached.candidatePolicy !== policy) {
+      throw new Error(`Session ${cacheKey} is attached with candidate policy ${cached.candidatePolicy}; refusing conflicting reuse (${policy})`);
+    }
     return {
       sendPrompt: (sessionKey: string, prompt: string) => cached.transport.sendPrompt(sessionKey, prompt),
       destroy: async () => {
         try { cached.transport.destroy(); } catch (err) { logAndSwallow("subagent_runtime", "op", err); }
-        this.cache.delete(cacheKey as AgentName);
+        this.cache.delete(cacheKey);
         logInfo(TAG, `${cacheKey} session destroyed`);
       },
       get isReady() { return cached.transport.isReady; },
@@ -288,7 +350,7 @@ export class SubagentRuntime {
     return true;
   }
 
-  private async createAgent(agent: AgentName, sessionType?: import("./spin-types.js").SessionType, cacheKey?: string): Promise<CachedAgent> {
+  private async createAgent(agent: AgentName, sessionType?: import("./spin-types.js").SessionType, cacheKey?: string, candidatePolicy?: import("./spin-types.js").CandidatePolicy): Promise<CachedAgent> {
     const typeMap: Partial<Record<AgentName, import("./spin-types.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
     const resolvedType = sessionType || typeMap[agent];
     const sandboxTypes = new Set(["B", "C", "W"]);
@@ -306,12 +368,13 @@ export class SubagentRuntime {
     // #1418: pass the complete last-successful Main candidate (secret-free tuple)
     // into specialist construction so fallback ordering reuses the exact Main
     // candidate that last produced a non-empty response.
-    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain);
+    // #1611: configured-only restricts transport construction to the configured
+    // candidate — applied before the first Dreamy prompt, never after the fact.
+    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain, this._contextProvider, this._memoryToolDeps, candidatePolicy);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
-    // DirectApi only — ACP transport uses its own this.agentName. The "professor"
-    // default in direct-api-transport.ts stays correct for the main boot transport
-    // (phase-transport.ts), which bypasses createAgent.
+    // External ACP keeps its own agent label; embedded Pi uses this label when
+    // the transport exposes the optional capability.
     if ("agentLabel" in transport) {
       (transport as { agentLabel: string }).agentLabel = agent;
     }
@@ -329,9 +392,8 @@ export class SubagentRuntime {
     }
 
     const sessionKey = `system:${cacheKey ?? agent}`;
-    const entry: CachedAgent = { transport, model, sessionKey };
-    this.cache.set((cacheKey ?? agent) as AgentName, entry);
-    (await import("./transport/tool-registry.js")).resetStoreCounter();
+    const entry: CachedAgent = { transport, model, sessionKey, candidatePolicy };
+    this.cache.set(cacheKey ?? agent, entry);
     return entry;
   }
 }

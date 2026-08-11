@@ -1,6 +1,6 @@
 import { resolvePiInstallation } from "../../components/pi-installation.js";
 import { inspectPiRuntimeSurfaces } from "../../components/pi-inspector.js";
-import { PI_COMPATIBILITY } from "../../config/pi-compatibility.js";
+import { PI_COMPATIBILITY, formatPiPinWarning } from "../../config/pi-compatibility.js";
 
 /**
  * Pi compatibility preflight for deployment activation (#1438, #1441).
@@ -32,17 +32,25 @@ export async function preflightPiCompatibility(): Promise<number> {
         for (const [key, v] of unloadable) {
           process.stdout.write(`  ${key}: ${(v as { reason: string }).reason}\n`);
         }
+        const pinWarning = formatPiPinWarning(result.installation.version);
+        if (pinWarning) {
+          process.stdout.write(`[pi-preflight] ⚠ ${pinWarning.split("\n").join("\n[pi-preflight]   ")}\n`);
+        }
         return 0;
       }
       process.stdout.write(
-        `[pi-preflight] ✓ Pi ${result.installation.version} (minimum ${PI_COMPATIBILITY.minimumPiVersion}) — ${result.installation.source}\n`,
+        `[pi-preflight] ✓ Pi ${result.installation.version} (built against ${PI_COMPATIBILITY.pinnedVersion}) — ${result.installation.source}\n`,
       );
+      const pinWarning = formatPiPinWarning(result.installation.version);
+      if (pinWarning) {
+        process.stdout.write(`[pi-preflight] ⚠ ${pinWarning.split("\n").join("\n[pi-preflight]   ")}\n`);
+      }
       return 0;
     }
 
     case "below-minimum":
       process.stdout.write(
-        `[pi-preflight] ⚠ Pi ${result.observedVersion} below minimum ${PI_COMPATIBILITY.minimumPiVersion} — Pi features unavailable\n` +
+        `[pi-preflight] ⚠ Pi ${result.observedVersion} below pinned version ${PI_COMPATIBILITY.pinnedVersion} — Pi features unavailable\n` +
         `  ${result.remediation}\n`,
       );
       return 0;

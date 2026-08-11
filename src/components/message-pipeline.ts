@@ -9,8 +9,11 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
+import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
+import { attemptMemoryMutation } from "./memory-runtime.js";
+import { assistantMessageKey, feedbackKey } from "./memory-operation-key.js";
 
 /** Retry a send operation on transient network errors (fetch failed, timeout, 5xx). */
 async function retrySend<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
@@ -27,6 +30,17 @@ async function retrySend<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   }
   throw new Error("unreachable");
 }
+
+/** A compaction trigger is eligible only after the assistant row has a
+ * durable identity. `attemptMemoryMutation` intentionally swallows write
+ * failures, so callers must inspect its result rather than infer success from
+ * the absence of a thrown exception. */
+function hasDurableMessageId(
+  result: { ok: true; value: unknown } | { ok: false },
+): boolean {
+  if (!result.ok || !result.value || typeof result.value !== "object") return false;
+  return "id" in result.value && typeof (result.value as { id?: unknown }).id === "number";
+}
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import type { IdleSave } from "./idle-save.js";
@@ -42,18 +56,22 @@ import { buildPrompt } from "./pipeline/prompt-builder.js";
 import { getEnv } from "./env-schema.js";
 import { sanitizeOutbound } from "./sanitize-outbound.js";
 import { abmind } from "../utils/abmind-lazy.js";
+import { getSessionControlService } from "./session-control/instance.js";
+import type { ResolvedHailMary } from "./transport-config.js";
 
 const TAG = "pipeline";
 const PRIMING_MAX = 8;
 
 // #824: Track which recalled memory IDs were active per agent message (for emoji feedback)
-// Map<platform_message_id, recalled_memory_ids[]> with 1h TTL
-const recalledIdsPerMessage = new Map<number, number[]>();
+// Map<platform_message_id_string, recalled_memory_ids[]> with 1h TTL
+// Keys are lossless string representations of platform message IDs (Discord snowflakes,
+// Telegram integers, etc.) — never use Number() to avoid precision loss.
+const recalledIdsPerMessage = new Map<string, number[]>();
 const RECALL_MAP_TTL = 60 * 60_000;
 setInterval(() => { /* prune entries older than TTL — best-effort, no timestamp tracking needed for small maps */ if (recalledIdsPerMessage.size > 200) recalledIdsPerMessage.clear(); }, RECALL_MAP_TTL);
 
 /** Look up recalled memory IDs for a given platform message (for reaction-based feedback). */
-export function getRecalledIdsForMessage(platformMsgId: number): number[] | undefined {
+export function getRecalledIdsForMessage(platformMsgId: string): number[] | undefined {
   return recalledIdsPerMessage.get(platformMsgId);
 }
 
@@ -72,8 +90,6 @@ function extractKeywords(text: string): string[] {
     .slice(0, 3);
 }
 /** Reset by bridge-app on inbound message to re-enable floating compaction. */
-export let resetIdleCompactFlag: (() => void) | null = null;
-export function setIdleCompactReset(fn: () => void): void { resetIdleCompactFlag = fn; }
 
 /** Shared session reset: reset transport, clear buffer, mark pendingStart. */
 export async function resetAndPrepare(opts: {
@@ -93,9 +109,6 @@ export async function resetAndPrepare(opts: {
     pSession.busy = false;
     pSession.queue = [];
   }
-  // #254: clear emergency mode on reset — next session starts fresh
-  const t = opts.transport as unknown as { setEmergencyMode?: (o: null) => void };
-  t.setEmergencyMode?.(null);
 }
 
 /** Transport + agent runtime deps. */
@@ -126,6 +139,22 @@ export interface VoiceDeps {
 export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   sessionManager: import("./spin.js").Spin;
   cronCurrentJob?: () => RunningJob | null;
+  /** #1539: every lane currently executing (manual + scheduled). */
+  cronCurrentJobs?: () => RunningJob[];
+  /** #1539: per-lane durable pending/current view. */
+  cronQueueView?: () => Array<{
+    lane: string;
+    current: (RunningJob & {
+      phase?: string;
+      lastProgressAt?: number;
+      deadlineAt?: number;
+      terminalRequest?: { kind: "cancelled" | "deadline_exceeded"; requestedAt: number; reason: string };
+      cardId?: number;
+      sessionId?: string;
+      executionId?: string;
+    }) | null;
+    pending: Array<{ entryId: string; runId?: string; manual?: boolean; priority?: string }>;
+  }>;
   enqueueCron?: (entryId: string, manual?: boolean) => string | null;
   requestShutdown?: (code?: number) => void;
   sleepProgress?: () => { percent: number; step: string } | null;
@@ -133,7 +162,7 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   startSleep?: (opts: { fresh: boolean; resume: boolean }) => import("../capabilities/sleep/index.js").SleepStartResult;
   loadedCapabilities?: string[];
   selfHealerTask?: { enabled: boolean } | null;
-  hailMary?: { model: string; endpoint: string; apiKey?: string } | null;
+  hailMary?: (ResolvedHailMary & { apiKey?: string }) | null;
   /** Rebuild professor transport in place (used by /reset to pick up provider changes). */
   rebuildTransport?: () => Promise<void>;
   /** Boot-time phase health (#331). */
@@ -173,16 +202,60 @@ export async function handleInboundMessage(
   }
 
   // --- #1336: Ensure transport for the already-selected effective session ---
-  const effectiveSessionId = ctx.sessionId!;
-  const effectiveSession = ctx.session!;
+  let effectiveSessionId = ctx.sessionId!;
+  let effectiveSession = ctx.session!;
   const { spin } = await import("./spin.js");
+  const { sessionType } = await import("./spin-types.js");
+  let isSkillSession = sessionType(effectiveSession) === "K";
+
+  // #1432: suspended K binding — prepend the skill bootstrap to the first
+  // resumed turn exactly once. If revalidation fails, clear the binding and
+  // route this same message through A once (no model call happened yet).
+  let bootstrapPrefix: string | undefined;
+  const skillTarget = { userId: msg.userId, platform: msg.platform, chatId: msg.channelId, threadId: msg.threadId };
+  if (isSkillSession) {
+    const { skillSessionManager } = await import("./skill-session.js");
+    const prep = skillSessionManager.prepareBootstrap(skillTarget, ctx.text);
+    if (prep.kind === "bootstrap") {
+      bootstrapPrefix = prep.bootstrap;
+    } else if (prep.kind === "fallback_to_main") {
+      effectiveSession = spin.getActiveSession(msg.userId, msg.platform);
+      effectiveSessionId = effectiveSession.id;
+      ctx.session = effectiveSession;
+      ctx.sessionId = effectiveSessionId;
+      isSkillSession = false;
+    }
+  }
+
   if (!effectiveSession.transport) {
     try {
       await spin.ensureSessionTransport(effectiveSession);
     } catch (err) {
-      logWarn(TAG, `ensureSessionTransport failed for ${effectiveSessionId}: ${err instanceof Error ? err.message : String(err)}`);
-      await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(() => {});
-      return;
+      // A K rehydration can fail after selection but before Spin starts a
+      // model call (for example, capacity or provider-session attach). That
+      // is still an unambiguous pre-send failure: discard the broken binding
+      // and process this message once through the unchanged A session.
+      if (isSkillSession) {
+        const { skillSessionManager } = await import("./skill-session.js");
+        await skillSessionManager.stop(skillTarget, "replaced");
+        effectiveSession = spin.getActiveSession(msg.userId, msg.platform);
+        effectiveSessionId = effectiveSession.id;
+        ctx.session = effectiveSession;
+        ctx.sessionId = effectiveSessionId;
+        isSkillSession = false;
+        bootstrapPrefix = undefined;
+        try {
+          if (!effectiveSession.transport) await spin.ensureSessionTransport(effectiveSession);
+        } catch (fallbackErr) {
+          logWarn(TAG, `A fallback transport attach failed for ${effectiveSessionId}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
+          await adapter.sendMessage(msg.channelId, `⚠️ ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, { threadId: msg.threadId }).catch(() => {});
+          return;
+        }
+      } else {
+        logWarn(TAG, `ensureSessionTransport failed for ${effectiveSessionId}: ${err instanceof Error ? err.message : String(err)}`);
+        await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(() => {});
+        return;
+      }
     }
   }
   ctx.transport = effectiveSession.transport!;
@@ -214,23 +287,27 @@ export async function handleInboundMessage(
   let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;
   let toolElapsedTimer: ReturnType<typeof setInterval> | undefined;
   let streamMsgId: number | string | undefined; // tool indicator message (editable)
+  let assistantDurablyRecorded = false;
+  /** #1619: pipeline-owned incremental delivery controller (master/direct, non-TUI). */
+  let incremental: import("./incremental-block-delivery.js").IncrementalBlockDeliveryController | null = null;
   try {
     busyEntry.busy = true;
-    resetIdleCompactFlag?.(); // re-enable floating compaction on next idle
+
     const ctxPct = transport.contextPercent;
     logInfo(TAG, `← [${msg.platform}] ${isVoice ? "🎤 " : ""}"${text.slice(0, 60)}"${ctxPct >= 0 ? ` (ctx: ${ctxPct}%)` : ""}`);
     // --- Sleep: main transport is available during sleep (sleep uses its own) ---
     // No queueing needed
 
     // --- Build prompt ---
-    // #1329: currentMessageId is the just-persisted raw user row ID (or
-    // undefined on a no-write path). We forward it to spin as part of
-    // the spec, and the chokepoint at spin.ts#sendPrompt carries it
-    // through to DirectApiTransport.sendPrompt as `beforeMessageId`.
-    const { prompt: builtPrompt, imageContent, recalledHits, currentMessageId, currentTurn } = await buildPrompt(msg, text, {
+    // #1529: buildPrompt classifies the turn's durable-context intent (durable,
+    // not-required, or required-unavailable). We forward it to spin as part of
+    // the spec; the chokepoint at spin.ts#sendPrompt carries it through to the
+    // transport, which fails closed when durable context is required but
+    // unavailable.
+    const { prompt: builtPrompt, imageContent, recalledHits, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
-      isAcp: !("agentLoop" in transport),
-    }, registry);
+      isAcp: transport.getRuntimeStatus?.().route === "acp",
+    }, registry, effectiveSession);
 
     if (builtPrompt === "__INJECTION_BLOCKED__") {
       await adapter.sendMessage(channelId, "⛔ Message blocked — suspicious content detected.", { threadId: msg.threadId });
@@ -238,6 +315,9 @@ export async function handleInboundMessage(
     }
 
     let prompt = builtPrompt;
+    if (bootstrapPrefix) {
+      prompt = `${bootstrapPrefix}\n\n${prompt}`;
+    }
 
     // --- Auto-notify: inject background session completions (#570) ---
     const { drainCompletions } = await import("./completion-buffer.js");
@@ -266,7 +346,6 @@ export async function handleInboundMessage(
     }
 
     // --- Send to transport ---
-    const { sessionType } = await import("./spin-types.js");
     const sessionTransport = effectiveSession.transport ?? transport;
     logDebug(TAG, `Route: session=${activeSessionId} type=${sessionType(effectiveSession)} transport=${effectiveSession.transport ? "session" : "main"}`);
 
@@ -280,56 +359,13 @@ export async function handleInboundMessage(
       (sessionTransport as any).isPaused = () => effectiveSession.status === "paused";
     }
 
-    // Wire /wait steer injection (#1248) — agent loop drains bounded FIFO between tool rounds
-    if ("getPendingInstruction" in transport) {
-      (transport as any).getPendingInstruction = () => {
-        if (pSession.pendingWait.length === 0) return undefined;
-        const items = pSession.pendingWait.splice(0);
-        return items.map(i => i.text).join("\n");
-      };
-    }
-
     // #1271: pipeline main turn goes through spin(spec) (model-call chokepoint).
-    // Streaming/tool callbacks remain pipeline-owned (set on the transport before,
-    // reset in the finally below). spin() sends via the session's own transport.
+    // Streaming/tool callbacks remain pipeline-owned — #1619: they are
+    // installed BEFORE spin() starts the model call, because the early-start
+    // ordering otherwise loses fast first deltas.
     const directContextTurn = currentTurn
       ? { rawUserText: currentTurn.rawText, volatileBlocks: currentTurn.volatileContext }
       : undefined;
-    const responsePromise = deps.sessionManager.spin({
-      type: sessionType(effectiveSession),
-      sessionId: activeSessionId,
-      prompt,
-      imageContent,
-      userId,
-      currentMessageId,
-      directContextTurn,
-      await: true,
-    }).then(r => r.result ?? "");
-    // #1292: the model call is started early to overlap with the setReaction/sendTyping
-    // round-trips below, but is not awaited until later in this try block. Without this
-    // guard, a fast provider-down rejection (403 / all models exhausted) floats as an
-    // unhandled rejection during those awaits and crashes the bridge. Marking the promise
-    // handled here: the real rejection still propagates when `await responsePromise` runs
-    // and is caught by this try/catch, which renders the graceful error to the user.
-    void responsePromise.catch(() => {});
-
-    // --- Typing + reaction ---
-    if (!isVoice && adapter.setReaction && msg.messageId) {
-      await adapter.setReaction(channelId, msg.messageId, "👀");
-    }
-    if (adapter.sendTyping) {
-      await adapter.sendTyping(channelId, msg.threadId);
-      typingInterval = setInterval(() => {
-        adapter.sendTyping!(channelId, msg.threadId).catch(err => logAndSwallow(TAG, "adapter call", err));
-      }, 8000);
-    }
-
-    // --- Typing TTL ---
-    const TYPING_TTL_MS = getEnv().typingTtlMs;
-
-    typingTtlTimer = setTimeout(() => {
-      if (typingInterval) { clearInterval(typingInterval); typingInterval = undefined; }
-    }, TYPING_TTL_MS);
 
     // Per-tool-call progress — show tool name + elapsed time
     let lastToolNotifyAt = 0;
@@ -391,24 +427,110 @@ export async function handleInboundMessage(
       };
     }
 
-    // --- Segment break: deliver pre-tool text immediately ---
-    let fullResponseSegments: string[] = [];
-    transport.onSegmentBreak = (text: string) => {
-      const clean = sanitizeOutbound(text);
-      if (!clean) return;
-      fullResponseSegments.push(clean);
-      if (streamMsgId && adapter.editMessage) {
-        adapter.editMessage(channelId, streamMsgId, clean).catch(err => logAndSwallow(TAG, "adapter call", err));
-      } else {
-        adapter.sendMessage(channelId, clean, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
-      }
-      streamMsgId = undefined;
-    };
+    // --- #1619: bounded master-chat progress blocks (thinking coalescing) ---
+    // Exact eligibility: direct authenticated master turn outside the TUI.
+    // The TUI renders thinking natively through the output feed instead.
+    // The controller itself exists for every non-TUI turn so pre-tool segment
+    // reconciliation protects groups too; only eligible turns feed it typing.
+    const { IncrementalBlockDeliveryController, isIncrementalEligible } = await import("./incremental-block-delivery.js");
+    if (msg.platform !== "tui") {
+      incremental = new IncrementalBlockDeliveryController({
+        sendBlock: async (block) => {
+          await retrySend(() => adapter.sendMessage(channelId, block, { threadId: msg.threadId }));
+        },
+        sanitize: sanitizeOutbound,
+        chunkBound: (text: string) => adapter.chunkResponse(text),
+      });
+    }
+    if (isIncrementalEligible({ role: registry.byUserId.get(userId)?.role, isGroup: msg.isGroup, platform: msg.platform })) {
+      transport.onOutputDelta = (event) => { incremental?.accept(event); };
+    } else {
+      transport.onOutputDelta = undefined;
+    }
+
+    // --- Segment break: deliver pre-tool text immediately, awaited ---
+    // The transport awaits this before tool execution continues; success or
+    // failure is recorded for terminal reconciliation (never lost text).
+    // TUI turns skip segments entirely — the native stream row already shows
+    // the text and the adapter-side ledger reconciles the terminal result.
+    if (msg.platform !== "tui") {
+      transport.onSegmentBreak = async (text: string) => {
+        // Thinking can end without a following text delta (for example when
+        // the provider emits the complete assistant message at once). Ensure
+        // its progress block is visible before the semantic pre-tool text.
+        await incremental?.flushBeforeSemantics();
+        const clean = sanitizeOutbound(text);
+        if (!clean) return;
+        if (streamMsgId && adapter.editMessage) {
+          try {
+            await adapter.editMessage(channelId, streamMsgId, clean);
+            streamMsgId = undefined;
+            incremental?.segmentDelivered(clean);
+            return;
+          } catch { /* fall through to a fresh send */ }
+        }
+        try {
+          await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
+          streamMsgId = undefined;
+          incremental?.segmentDelivered(clean);
+        } catch (err) {
+          // #1619: interim send failure is content-free and never rejects the turn.
+          logWarn(TAG, `Pre-tool segment delivery failed (content-free): ${err instanceof Error ? err.message : String(err)}`);
+          incremental?.segmentFailed(clean);
+        }
+      };
+    } else {
+      transport.onSegmentBreak = undefined;
+    }
+
+    const responsePromise = deps.sessionManager.spin({
+      type: sessionType(effectiveSession),
+      sessionId: activeSessionId,
+      prompt,
+      imageContent,
+      userId,
+      durableContextIntent,
+      directContextTurn,
+      settlementOwner: "spin",
+      await: true,
+    }).then(r => r.result ?? "");
+    // #1292: the model call is started early to overlap with the setReaction/sendTyping
+    // round-trips below, but is not awaited until later in this try block. Without this
+    // guard, a fast provider-down rejection (403 / all models exhausted) floats as an
+    // unhandled rejection during those awaits and crashes the bridge. Marking the promise
+    // handled here: the real rejection still propagates when `await responsePromise` runs
+    // and is caught by this try/catch, which renders the graceful error to the user.
+    void responsePromise.catch(() => {});
+
+    // --- Typing + reaction ---
+    if (!isVoice && adapter.setReaction && msg.messageId) {
+      await adapter.setReaction(channelId, msg.messageId, "👀");
+    }
+    if (adapter.sendTyping) {
+      await adapter.sendTyping(channelId, msg.threadId);
+      typingInterval = setInterval(() => {
+        adapter.sendTyping!(channelId, msg.threadId).catch(err => logAndSwallow(TAG, "adapter call", err));
+      }, 8000);
+    }
+
+    // --- Typing TTL ---
+    const TYPING_TTL_MS = getEnv().typingTtlMs;
+
+    typingTtlTimer = setTimeout(() => {
+      if (typingInterval) { clearInterval(typingInterval); typingInterval = undefined; }
+    }, TYPING_TTL_MS);
 
     // --- Tool/segment state (used by tool indicators + segment breaks above) ---
     // No edit-in-place streaming timer. Final response delivered as chunks after completion (#583).
 
     const response = await responsePromise;
+
+    // #1432: a successful accepted K turn refreshes the skill inactivity
+    // deadline and clears the one-time bootstrap flag.
+    if (isSkillSession) {
+      const { skillSessionManager } = await import("./skill-session.js");
+      skillSessionManager.completeInbound({ userId: msg.userId, platform: msg.platform, chatId: msg.channelId, threadId: msg.threadId });
+    }
 
     clearTimeout(toolBatchTimer);
     transport.onIntermediateResponse = undefined;
@@ -416,7 +538,17 @@ export async function handleInboundMessage(
 
     // --- Extract clean answer ---
     const cleanAnswer = transport.answerOnly;
-    const rawResponse = pSession.fullMode ? response : (cleanAnswer || response);
+    // #1619: reconcile the terminal response with pre-tool segments delivered
+    // incrementally so every user-visible text segment arrives exactly once.
+    // Successful segments are removed only from a matching prefix; failed
+    // segments are retained and merged in. Thinking never participates.
+    let reconciledResponse = pSession.fullMode ? response : (cleanAnswer || response);
+    if (incremental) {
+      const reconciled = incremental.reconcileTerminal(reconciledResponse);
+      await incremental.end();
+      reconciledResponse = reconciled;
+    }
+    const rawResponse = reconciledResponse;
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
@@ -426,12 +558,9 @@ export async function handleInboundMessage(
         ? { sessionId: activeSessionId, executionId: pSession.activeExecutionId, kind: "final_assistant" }
         : undefined;
 
-    // #869: strip <think>/<thinking> blocks unless user opted in via /effort show
-    const reasoningSession = transport.getActiveSession?.();
-    if (!reasoningSession?.showReasoning) {
-      userResponse = userResponse.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>\s*/g, "");
-      userResponse = userResponse.replace(/<\/think(?:ing)?>\s*/g, "");
-    }
+    // #869: strip <think>/<thinking> blocks (Pi transport handles thinking natively via events)
+    userResponse = userResponse.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>\s*/g, "");
+    userResponse = userResponse.replace(/<\/think(?:ing)?>\s*/g, "");
 
     // --- Secret redaction (belt-and-suspenders for #436) ---
     for (const [key, val] of Object.entries(process.env)) {
@@ -451,10 +580,22 @@ export async function handleInboundMessage(
           if (clean) await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
         }
       }
-      // Record assistant response to memory
-      if (deps.memoryRuntime?.state === "ready" && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
+      // Record assistant response to memory (skipped for K — skill-isolated)
+      if (deps.memoryRuntime?.state === "ready" && !isSkillSession && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
         const timestamp = Date.now();
-        await deps.memoryRuntime.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp, userId, sessionId: activeSessionId }, `assistant-${userId}-${activeSessionId}-${timestamp}`);
+        const deliveryId = deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`;
+        const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
+        const writeResult = await attemptMemoryMutation({
+          phase: "after_delivery",
+          family: "assistant",
+          operationKey,
+          run: () => deps.memoryRuntime!.recordMessage({ role: "assistant", content: userResponse, timestamp, userId, sessionId: activeSessionId }, operationKey),
+        });
+        assistantDurablyRecorded = hasDurableMessageId(writeResult);
+      }
+      // #1406: automatic durable compaction also applies to simple delivery.
+      if (assistantDurablyRecorded) {
+        scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
       }
       if (isVoice && ttsConfig && adapter.sendVoice) {
         try {
@@ -526,14 +667,32 @@ export async function handleInboundMessage(
       pSession.primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
     }
 
-    // --- Record to memory (skip for guests and greeting injects) ---
+    // --- Record to memory (skipped for K — skill-isolated; guests and greeting injects) ---
     const isGuest = registry.byUserId.get(userId)?.role === "guest";
-    if (deps.memoryRuntime?.state === "ready" && !isGuest && !text.startsWith("[SESSION START]")) {
-      await deps.memoryRuntime.recordMessage({
-        role: "assistant", content: cleanAnswer || response,
-        timestamp: Date.now(), userId, sessionId: activeSessionId,
-        platformMessageId: typeof lastSentMsgId === "number" ? lastSentMsgId : undefined,
-      }, `assistant-${userId}-${activeSessionId}-${lastSentMsgId ?? Date.now()}`);
+    if (deps.memoryRuntime?.state === "ready" && !isSkillSession && !isGuest && !text.startsWith("[SESSION START]")) {
+      const timestamp = Date.now();
+      const deliveryId = lastSentMsgId != null ? String(lastSentMsgId) : (deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`);
+      const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
+      const writeResult = await attemptMemoryMutation({
+        phase: "after_delivery",
+        family: "assistant",
+        operationKey,
+        run: () => deps.memoryRuntime!.recordMessage({
+          role: "assistant", content: userResponse,
+          timestamp, userId, sessionId: activeSessionId,
+          platformMessageId: lastSentMsgId != null ? String(lastSentMsgId) : undefined,
+        }, operationKey),
+      });
+      assistantDurablyRecorded = hasDurableMessageId(writeResult);
+    }
+
+    // --- #1406: automatic durable compaction, scheduled once after the
+    // assistant row is durably recorded. Fire-and-forget: it must never delay
+    // or revoke the already delivered response. Deduplication happens in the
+    // control service and the daemon's generation CAS. No timer or heartbeat
+    // entry is added. ---
+    if (assistantDurablyRecorded) {
+      scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
     }
 
     // --- TTS for voice notes ---
@@ -572,12 +731,19 @@ export async function handleInboundMessage(
           const { detectCitations } = mod;
           const citedIds = detectCitations(userResponse, recalledHits);
           for (const memoryId of citedIds) {
-            await deps.memoryRuntime.recordFeedback({ userId, memoryId, feedbackType: "cite" }, `cite-${userId}-${memoryId}-${lastSentMsgId ?? Date.now()}`);
+            const messageIdForFeedback = lastSentMsgId != null ? String(lastSentMsgId) : deliveryCorrelation?.executionId ?? `${activeSessionId}-${Date.now()}`;
+            const operationKey = feedbackKey(msg.platform, msg.channelId, userId, messageIdForFeedback, memoryId, "cite");
+            await attemptMemoryMutation({
+              phase: "after_delivery",
+              family: "feedback",
+              operationKey,
+              run: () => deps.memoryRuntime!.recordFeedback({ userId, memoryId, feedbackType: "cite" }, operationKey),
+            });
           }
           logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
           // Track recalledIds for emoji reaction feedback (1h TTL)
           if (lastSentMsgId != null) {
-            recalledIdsPerMessage.set(Number(lastSentMsgId), recalledHits.map(h => h.id));
+            recalledIdsPerMessage.set(String(lastSentMsgId), recalledHits.map(h => h.id));
           }
         }
       } catch (err) {
@@ -634,6 +800,11 @@ export async function handleInboundMessage(
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
       if (notifyUser) await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+    } else if (err instanceof DurableContextUnavailableError) {
+      // #1529: required durable context is unavailable — fail closed with a
+      // bounded, stable response. No session reset, no candidate-health impact.
+      logWarn(TAG, `Durable context unavailable for ${activeSessionId} (${err.reason}) — failing closed`);
+      if (notifyUser) await adapter.sendMessage(channelId, "Memory context is temporarily unavailable. Please retry.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else {
       logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
       const reason = errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
@@ -651,9 +822,39 @@ export async function handleInboundMessage(
     if (toolElapsedTimer) clearInterval(toolElapsedTimer);
     transport.onToolCallStart = undefined;
     transport.onSegmentBreak = undefined;
+    transport.onOutputDelta = undefined;
+    await incremental?.dispose();
     releaseBusy(pSession, (m, a) => handleInboundMessage(m, a, deps));
     idleSave.reset(activeSessionId, chatId);
   }
+}
+
+/**
+ * #1406: schedule one automatic durable compaction after the assistant row is
+ * durably recorded. Fire-and-forget — never delays or revokes the delivered
+ * response; failures are logged bounded and content-free. Deduplication lives
+ * in the control service and the daemon's generation CAS.
+ */
+function scheduleAutomaticCompaction(
+  deps: PipelineDeps,
+  userId: string,
+  sessionId: string,
+  durableContextIntent: { mode: string; beforeMessageId?: number },
+): void {
+  if (deps.memoryRuntime?.state !== "ready") return;
+  if (durableContextIntent?.mode !== "durable") return;
+  if (typeof durableContextIntent.beforeMessageId !== "number") return;
+  const sessionControl = getSessionControlService();
+  if (!sessionControl) return;
+  sessionControl.execute(
+    {
+      kind: "durable_conversation",
+      principalId: userId,
+      sessionId,
+      beforeMessageId: durableContextIntent.beforeMessageId,
+    },
+    { kind: "compact", reason: "automatic" },
+  ).catch(err => logAndSwallow(TAG, "automatic compaction", err));
 }
 
 /** Build session-start prompt with SOUL + context + greeting, send to transport, push response to adapter. */

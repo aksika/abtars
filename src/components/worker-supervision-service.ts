@@ -1,14 +1,84 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
-import { WorkerSupervisionStore, settleResult, SettlementResult } from "./worker-supervision-store.js";
-import { normalizeContract, createContractId, createAttemptId } from "./worker-contract.js";
-import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation } from "./worker-contract.js";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { WorkerSupervisionStore } from "./worker-supervision-store.js";
+import { normalizeContract, createContractId, createAttemptId, validateEnvelope } from "./worker-contract.js";
+import { logWarn } from "./logger.js";
+import { logSwarmTrace } from "./swarm-trace.js";
+import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation, RetryContext } from "./worker-contract.js";
 import type { TaskDatabase } from "./tasks/kanban-board.js";
-import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
+import type { ContractRow } from "./worker-supervision-store.js";
+import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
+import { validateCriterionMapping } from "./project-acceptance/project-contract.js";
+import { rootCriterionIds } from "./project-acceptance/project-criterion-coverage.js";
 
+const TAG = "worker-supervision-service";
 const MAX_RESULT_LENGTH = 500;
 const MAX_CHECK_OUTPUT_LENGTH = 10_000;
+
+/**
+ * Return a stable admission error when a child claims root criteria it cannot
+ * support, or when a supervised child under a contract-bearing root omits the
+ * mapping entirely (#1604 R3, #1605 R2). Only DELEGATED root criteria are legal
+ * mapping targets — Orc-owned criteria are rejected as bad references. A root
+ * card with no project contract is unaffected; an Orc-only root admits
+ * unmapped children but rejects mappings to Orc-owned ids.
+ */
+export function validateWorkerRootCriteria(
+  rootCardId: number,
+  childContractId: string,
+  supportsRootCriteria: readonly string[],
+): string | undefined {
+  const legal = rootCriterionIds(rootCardId);
+  if (legal === undefined) return undefined; // no project contract → unchanged
+
+  if (legal.length === 0) {
+    // #1605: an Orc-only root has no delegable criteria — an empty mapping is
+    // valid, but a mapping referencing (Orc-owned) ids is a bad reference.
+    if (supportsRootCriteria.length > 0) {
+      return `root-criterion mapping rejected: no delegable root criteria for project #${rootCardId} — all criteria are Orc-owned and cannot be mapped to Workers`;
+    }
+    return undefined;
+  }
+
+  if (supportsRootCriteria.length === 0) {
+    return `supports_root_criteria is required for supervised children of project #${rootCardId}; `
+      + `declare a JSON array of delegated root criterion ids from: ${legal.join(", ")} (exact ids, case-sensitive)`;
+  }
+
+  const reviewStore = new ProjectReviewStore();
+  const rootContractRow = reviewStore.getContractByProjectCardId(rootCardId);
+  if (!rootContractRow) {
+    return `root contract not found for project ${rootCardId}; cannot validate criterion mapping`;
+  }
+  const rootContract = JSON.parse(rootContractRow.contract_json) as import("./project-acceptance/project-contract.js").ProjectAcceptanceContract;
+  const mappingErrors = validateCriterionMapping(rootContract, {
+    child_contract_id: childContractId || "(pending)",
+    supports_root_criteria: supportsRootCriteria,
+  });
+  if (mappingErrors.length > 0) {
+    return `root-criterion mapping rejected: ${mappingErrors.map(e => e.message).join("; ")}`;
+  }
+  return undefined;
+}
+
+function isWithinWorkspace(workingDir: string, candidate: string): boolean {
+  try {
+    const base = resolve(workingDir);
+    const target = resolve(candidate);
+    const baseReal = realpathSync(base);
+    const targetReal = realpathSync(target);
+    const rel = relative(baseReal, targetReal);
+    return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+  } catch {
+    return false;
+  }
+}
+
+/** Map internal executor names to the stable Worker result-contract vocabulary. */
+export function toWorkerExecutorKind(kind: string): "local_worker" | "remote_worker" {
+  return kind === "remote" || kind === "remote_worker" ? "remote_worker" : "local_worker";
+}
 
 export class WorkerSupervisionService {
   private store: WorkerSupervisionStore;
@@ -37,12 +107,22 @@ export class WorkerSupervisionService {
       return { error: `card #${cardId} already has a contract` };
     }
 
+    if (!opts?.criteria || opts.criteria.length === 0) {
+      return { error: "supervised children require at least one acceptance criterion; goal-only supervised dispatch is rejected" };
+    }
+
+    // #1604 R3: a supervised child under a contract-bearing root must declare
+    // the root criteria it supports; validated unconditionally so an omitted
+    // mapping is rejected here, at spawn time, not at settlement.
+    const mappingError = validateWorkerRootCriteria(rootCardId, opts?.contractId ?? "(pending)", opts?.supportsRootCriteria ?? []);
+    if (mappingError) return { error: mappingError };
+
     const contractId = opts?.contractId ?? createContractId();
     const raw: Record<string, unknown> = {
       schema_version: 1,
       id: contractId,
       goal: rawGoal,
-      criteria: opts?.criteria ?? [{ id: "c1", description: rawGoal }],
+      criteria: opts.criteria,
       provenance: {
         root_card_id: rootCardId,
         card_id: cardId,
@@ -71,25 +151,39 @@ export class WorkerSupervisionService {
       return { error: `contract validation failed: ${normalized.errors.map(e => e.message).join("; ")}` };
     }
 
-    this.store.insertContract(normalized.contract, cardId);
-
-    const attemptId = opts?.attemptId ?? createAttemptId();
-    this.store.insertAttempt({
-      id: attemptId,
-      card_id: cardId,
-      contract_id: normalized.contract.id,
-      ordinal: this.store.nextOrdinal(cardId),
-      executor_kind: "local_worker",
-      executor_id: "spin",
-      status: "pending",
-      started_at: new Date().toISOString(),
+    const attemptId = this.store.db.transaction(() => {
+      this.store.insertContract(normalized.contract, cardId);
+      const id = opts?.attemptId ?? createAttemptId();
+      this.store.insertAttempt({
+        id,
+        card_id: cardId,
+        contract_id: normalized.contract.id,
+        ordinal: this.store.nextOrdinal(cardId),
+        executor_kind: "local_worker",
+        executor_id: "spin",
+        status: "pending",
+        started_at: new Date().toISOString(),
+      });
+      return id;
     });
 
     return { contract: normalized.contract, attemptId };
   }
 
   getContractForCard(cardId: number): WorkerAcceptanceContractV1 | undefined {
-    const row = this.store.getContractByCardId(cardId);
+    const row = this.store.getLatestContractForCard(cardId);
+    if (!row) return undefined;
+    return JSON.parse(row.contract_json) as WorkerAcceptanceContractV1;
+  }
+
+  getContract(contractId: string): WorkerAcceptanceContractV1 | undefined {
+    const row = this.store.getContract(contractId);
+    if (!row) return undefined;
+    return JSON.parse(row.contract_json) as WorkerAcceptanceContractV1;
+  }
+
+  getContractByRevision(cardId: number, revision: number): WorkerAcceptanceContractV1 | undefined {
+    const row = this.store.db.prepare(`SELECT * FROM worker_contracts WHERE card_id = ? AND revision = ?`).get(cardId, revision) as ContractRow | undefined;
     if (!row) return undefined;
     return JSON.parse(row.contract_json) as WorkerAcceptanceContractV1;
   }
@@ -98,11 +192,39 @@ export class WorkerSupervisionService {
     return this.store.contractExists(cardId);
   }
 
-  renderContractForPrompt(contract: WorkerAcceptanceContractV1): string {
+  renderContractForPrompt(contract: WorkerAcceptanceContractV1, retryContext?: RetryContext): string {
     const lines: string[] = [];
 
-    lines.push(`<worker-contract id="${contract.id}" digest="${contract.digest}">`);
+    lines.push(`<worker-contract id="${contract.id}" digest="${contract.digest}"${contract.revision_meta ? ` revision="${contract.revision_meta.revision}" root-contract-id="${contract.revision_meta.root_contract_id}"` : ""}>`);
     lines.push(`  <goal>${contract.goal}</goal>`);
+
+    if (retryContext) {
+      lines.push("  <retry-instructions>");
+      lines.push(`    <mode>${retryContext.mode}</mode>`);
+      lines.push(`    <instruction>${retryContext.instruction}</instruction>`);
+      if (retryContext.do_not_repeat.length > 0) {
+        lines.push("    <do-not-repeat>");
+        for (const item of retryContext.do_not_repeat) {
+          lines.push(`      <item>${item}</item>`);
+        }
+        lines.push("    </do-not-repeat>");
+      }
+      if (retryContext.failed_criterion_ids.length > 0) {
+        lines.push("    <failed-criteria>");
+        for (const fc of retryContext.failed_criterion_ids) {
+          lines.push(`      <criterion id="${fc}"/>`);
+        }
+        lines.push("    </failed-criteria>");
+      }
+      if (retryContext.unresolved_risks.length > 0) {
+        lines.push("    <unresolved-risks>");
+        for (const risk of retryContext.unresolved_risks) {
+          lines.push(`      <risk>${risk}</risk>`);
+        }
+        lines.push("    </unresolved-risks>");
+      }
+      lines.push("  </retry-instructions>");
+    }
 
     if (contract.criteria.length > 0) {
       lines.push("  <criteria>");
@@ -140,34 +262,63 @@ export class WorkerSupervisionService {
     cardId: number,
     workerResult: string,
     workingDir?: string,
-  ): { settled: boolean; summary: string; envelope?: WorkerResultEnvelopeV1 } {
-    const contract = this.getContractForCard(cardId);
-    if (!contract) return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
-
+    attemptId?: string,
+    generation?: number,
+    telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
+  ): { settled: boolean; summary: string; envelope?: WorkerResultEnvelopeV1; stale?: boolean; budgetViolation?: boolean } {
+    if (!attemptId && !this.getContractForCard(cardId)) {
+      return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
+    }
     const attempts = this.store.getAttemptsForCard(cardId);
     const latestAttempt = attempts[attempts.length - 1];
-    if (!latestAttempt) return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
+    let targetAttempt = attemptId ? this.store.getAttempt(attemptId) : latestAttempt;
+    if (!latestAttempt || !targetAttempt || targetAttempt.card_id !== cardId) {
+      return { settled: false, summary: "stale execution result ignored", stale: true };
+    }
+    if (attemptId && (latestAttempt.id !== attemptId || (generation !== undefined && targetAttempt.generation !== generation))) {
+      return { settled: false, summary: "stale execution result ignored", stale: true };
+    }
+
+    // Settled evidence must use the exact contract named by the attempt. The
+    // card's latest revision is only valid for the legacy no-attempt path.
+    const contract = attemptId
+      ? this.getContract(targetAttempt.contract_id)
+      : this.getContractForCard(cardId);
+    if (!contract) return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
+
+    // Keep the legacy direct service API usable for callers that have not yet
+    // been migrated to Reconciler-issued claims. Production supervised Spin
+    // always supplies attemptId and therefore cannot bypass the claim path.
+    if (!attemptId && targetAttempt.lifecycle === "pending") {
+      const claim = this.store.claimAttempt(cardId, contract.id, "agent", "legacy-service", targetAttempt.generation || 1);
+      if (!claim) return { settled: false, summary: "execution claim rejected", stale: true };
+      targetAttempt = this.store.getAttempt(claim.attemptId);
+      if (!targetAttempt || !this.store.markAttemptRunning(targetAttempt.id)) {
+        return { settled: false, summary: "execution claim rejected", stale: true };
+      }
+    }
 
     const workerReport = this.parseWorkerReport(workerResult);
     const checks = this.runChecks(contract, workingDir);
     const artifacts = this.observeArtifacts(contract, workingDir);
     const criteria = this.deriveCriteria(contract, checks, artifacts);
     const allPassed = criteria.every(c => c.status === "passed");
-    const outcome = allPassed ? "completed" : "failed";
 
+    // Execution outcome is always "completed" when the Worker ran and checks
+    // executed. Failed criteria mean unmet acceptance, not execution failure.
     const envelope: WorkerResultEnvelopeV1 = {
       schema_version: 1,
       attempt: {
-        id: latestAttempt.id,
-        ordinal: latestAttempt.ordinal,
+        id: targetAttempt.id,
+        ordinal: targetAttempt.ordinal,
         contract_id: contract.id,
         contract_digest: contract.digest,
-        executor_kind: latestAttempt.executor_kind as "local_worker" | "remote_worker",
-        executor_id: latestAttempt.executor_id,
-        started_at: latestAttempt.started_at,
+        executor_kind: toWorkerExecutorKind(targetAttempt.executor_kind),
+        executor_id: targetAttempt.executor_id,
+        started_at: targetAttempt.started_at,
         finished_at: new Date().toISOString(),
       },
-      outcome,
+      outcome: "completed",
       criteria,
       checks,
       artifacts,
@@ -176,22 +327,49 @@ export class WorkerSupervisionService {
         claims: workerReport.claims.slice(0, 30),
         unresolved_risks: workerReport.unresolved_risks.slice(0, 20),
       },
+      ...(telemetryUsage ? {
+        usage: {
+          input_tokens: telemetryUsage.input,
+          output_tokens: telemetryUsage.output,
+          total_tokens: telemetryUsage.input + telemetryUsage.output,
+        },
+      } : {}),
     };
 
-    const result = settleResult(this.store, latestAttempt.id, envelope, outcome === "completed" ? "settled" : "failed");
-    if (result === SettlementResult.Conflict) {
-      return { settled: false, summary: "[conflict] duplicate attempt with different result" };
+    const envelopeValidation = validateEnvelope(envelope);
+    if (!envelopeValidation.ok) {
+      const msg = `envelope validation failed: ${envelopeValidation.errors.map(e => e.message).join("; ")}`;
+      logWarn(TAG, msg);
+      throw new Error(msg);
     }
 
-    // #1367: Emit durable milestone progress on settlement
-    try {
-      const emitter = new ExecutorProgressEmitter();
-      emitter.emitMilestone(latestAttempt.id, contract.provenance.card_id, latestAttempt.executor_id, contract.id, outcome === "completed" ? "all criteria passed" : "criteria failed");
-    } catch { /* progress emission is best-effort */ }
+    const normalizedUsage = telemetryUsage
+      ? { input: telemetryUsage.input, output: telemetryUsage.output, trustworthy: true }
+      : undefined;
+    const terminalInput = {
+      attemptId: targetAttempt.id,
+      expectedGeneration: targetAttempt.generation || 1,
+      desiredState: "completed" as const,
+      stableReason: "worker_completed",
+      normalizedUsage,
+      envelope,
+    };
+    const settlement = this.store.terminalSettlement(terminalInput);
+    if (settlement.kind === "stale") {
+      return { settled: false, summary: "stale execution result ignored", stale: true };
+    }
+    if (settlement.kind === "conflict") {
+      return { settled: false, summary: "[conflict] duplicate attempt with different result" };
+    }
+    if (settlement.kind === "budget_violation") {
+      return { settled: false, summary: "[budget_violation] worker exceeded its reserved token budget", stale: true, budgetViolation: true };
+    }
 
-    const summary = outcome === "completed"
+    const summary = allPassed
       ? `✓ ${criteria.filter(c => c.status === "passed").length}/${criteria.length} criteria passed`
       : `✗ ${criteria.filter(c => c.status === "failed").length}/${criteria.length} criteria failed`;
+
+    logSwarmTrace({ event: "worker_settled", card: cardId, attempt: targetAttempt.id, generation: targetAttempt.generation, to: "settled" });
 
     return { settled: true, summary, envelope };
   }
@@ -236,7 +414,17 @@ export class WorkerSupervisionService {
       let timedOut = false;
 
       try {
-        const cwd = cmd.cwd ? (workingDir ? resolve(workingDir, cmd.cwd) : cmd.cwd) : (workingDir ?? process.cwd());
+        const resolvedDir = cmd.cwd ? (workingDir ? resolve(workingDir, cmd.cwd) : cmd.cwd) : (workingDir ?? process.cwd());
+        if (workingDir && !isWithinWorkspace(workingDir, resolvedDir)) {
+          stderr = `rejected: cwd escapes workspace (${resolvedDir})`;
+          return {
+            check_id: cmd.id, argv: cmd.argv, cwd: cmd.cwd,
+            started_at: startedAt, finished_at: new Date().toISOString(),
+            timed_out: false, exit_code: null, signal: null,
+            stdout_excerpt: "", stderr_excerpt: stderr.slice(0, MAX_CHECK_OUTPUT_LENGTH),
+          };
+        }
+        const cwd = resolvedDir;
         const result = execFileSync(cmd.argv[0]!, cmd.argv.slice(1), {
           cwd,
           timeout: cmd.timeout_ms,
@@ -248,7 +436,7 @@ export class WorkerSupervisionService {
         stderr = result.stderr.toString("utf-8").slice(0, MAX_CHECK_OUTPUT_LENGTH);
       } catch (err: unknown) {
         const e = err as ExecError;
-        if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+        if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || e.code === "ETIMEDOUT") {
           timedOut = true;
         } else if (e.killed) {
           timedOut = true;
@@ -282,13 +470,16 @@ export class WorkerSupervisionService {
     return contract.expected_artifacts.map(a => {
       const ref = a.ref;
       const absPath = workingDir ? resolve(workingDir, ref) : ref;
+      if (workingDir && !isWithinWorkspace(workingDir, absPath)) {
+        return { artifact_id: a.id, exists: false, kind: a.kind, ref, error: "path escapes workspace" };
+      }
       try {
         if (!existsSync(absPath)) {
           return { artifact_id: a.id, exists: false, kind: a.kind, ref, error: "not found" };
         }
         const st = statSync(absPath);
         const digest = a.kind === "file"
-          ? createHash("sha256").update(absPath).digest("hex").slice(0, 16)
+          ? createHash("sha256").update(readFileSync(absPath)).digest("hex").slice(0, 16)
           : undefined;
         return {
           artifact_id: a.id,

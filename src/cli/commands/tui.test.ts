@@ -1,28 +1,21 @@
 /**
- * tui.test.ts — `abtars tui` client tests (#1315 + #1333 + #1423).
+ * tui.test.ts — `abtars tui` client tests (#1315 + #1333 + #1423 + #1612).
  *
- * parseAttachMode is pure and tested directly. The Markdown rendering path
- * is covered by:
- *   1. Required-key contract on `TUI_MARKDOWN_THEME`
- *   2. Real pi-tui render() against a representative fixture (unconditional)
- *   3. Text.setText() surface that exposed the local type-shim drift (#1423)
- *   4. The render error boundary — a forced Markdown constructor throw is
- *      caught and routed to the cleanup path without uncaught process death.
+ * parseAttachMode is pure and tested directly. Footer formatting (#1355) and
+ * the renderer shell live in `tui-ui.ts` (#1612) — footer tests import
+ * `formatRuntimeStatus` from there. #1333 render-error-boundary coverage now
+ * lives in `tui-ui.test.ts` at the component boundary.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as piTui from "@earendil-works/pi-tui";
+import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   isTuiExitCommand,
   parseAttachMode,
-  TUI_MARKDOWN_THEME,
-  createMarkdownMessage,
-  processMessageFrame,
-  formatRuntimeStatus,
-  describeChunkEnd,
   consumeServerFrames,
-  type MessageRole,
 } from "./tui.js";
+import { formatRuntimeStatus, nativeEditorTheme } from "./tui-ui.js";
 import {
   createFrameDecoder,
   encodeFrame,
@@ -147,88 +140,7 @@ describe("formatRuntimeStatus (#1355)", () => {
   });
 });
 
-// ── #1333: TUI MarkdownTheme contract ─────────────────────────────────
-
-/** Exact key set pi-tui 0.80's Markdown.render() invokes. */
-const REQUIRED_THEME_KEYS = [
-  "heading",
-  "link",
-  "linkUrl",
-  "code",
-  "codeBlock",
-  "codeBlockBorder",
-  "quote",
-  "quoteBorder",
-  "hr",
-  "listBullet",
-  "bold",
-  "italic",
-  "strikethrough",
-  "underline",
-] as const;
-
-describe("TUI_MARKDOWN_THEME (#1333)", () => {
-  it("contains all 14 required keys as no-op functions", () => {
-    for (const key of REQUIRED_THEME_KEYS) {
-      expect(typeof TUI_MARKDOWN_THEME[key], `theme.${key} is not a function`).toBe("function");
-    }
-  });
-
-  it("contains exactly the required keys (no extras drift)", () => {
-    expect(Object.keys(TUI_MARKDOWN_THEME).sort()).toEqual([...REQUIRED_THEME_KEYS].sort());
-  });
-
-  it("every key is the identity function (no styling leakage)", () => {
-    for (const key of REQUIRED_THEME_KEYS) {
-      expect(TUI_MARKDOWN_THEME[key]("hello")).toBe("hello");
-    }
-  });
-});
-
-// ── #1333: real pi-tui render against a representative fixture ────────
-
-const FIXTURE = [
-  "# Heading",
-  "",
-  "**bold** *italic* ~~strike~~",
-  "",
-  "- one",
-  "- two",
-  "",
-  "> a quote",
-  "",
-  "---",
-  "",
-  "[link](https://example.com) and `code`",
-  "",
-  "```ts",
-  "const value = 1;",
-  "```",
-  "",
-].join("\n");
-
-describe("createMarkdownMessage (#1333)", () => {
-  it("renders the fixture at width 80 without throwing", () => {
-    const md = createMarkdownMessage(piTui, "assistant", FIXTURE);
-    const lines = md.render(80);
-    expect(Array.isArray(lines)).toBe(true);
-    expect(lines.length).toBeGreaterThan(0);
-  });
-
-  it("renders the actual #1333 crash repro (bold + list) without throwing", () => {
-    const repro = "Hey aksika. 👋\n\nIt's been a minute.\n\n- **Sleep** is still broken.\n- **Finance** report needs review.";
-    const md = createMarkdownMessage(piTui, "assistant", repro);
-    const lines = md.render(80);
-    expect(Array.isArray(lines)).toBe(true);
-  });
-
-  it("wraps user-role markdown with a dim '>' prefix and still renders", () => {
-    const md = createMarkdownMessage(piTui, "user", "/status");
-    const lines = md.render(80);
-    expect(Array.isArray(lines)).toBe(true);
-    expect(lines.join("\n")).toContain("/status");
-  });
-});
+// ── #1612: footer formatting lives in tui-ui.ts; Text.setText (#1423) ────
 
 describe("Text.setText (#1423)", () => {
   it("setText exists and replaces content", () => {
@@ -242,85 +154,38 @@ describe("Text.setText (#1423)", () => {
   });
 });
 
-// ── #1333: render error boundary ──────────────────────────────────────
+// ── #1612: live-client crash regression (Molty `abtars tui` first paint) ──
 
-describe("processMessageFrame (#1333 error boundary)", () => {
-  it("catches a synchronous Markdown constructor throw and routes to onRenderError", () => {
-    const throwingPit = {
-      Markdown: class {
-        constructor() {
-          throw new Error("boom from Markdown ctor");
-        }
-      },
-    };
-    let captured: Error | null = null;
-    const onError = (err: Error): void => {
-      captured = err;
-    };
-    const frame = { t: "message", role: "assistant", markdown: "x" } as const;
-    const result = processMessageFrame(throwingPit, frame, onError);
-    expect(result.ok).toBe(false);
-    expect(captured).not.toBeNull();
-    expect(captured!.message).toBe("boom from Markdown ctor");
+describe("nativeEditorTheme (#1612)", () => {
+  it("constructs the real pi-tui Editor with a functional borderColor", () => {
+    const codingAgent = piTuiCodingAgent();
+    const terminal = new piTui.ProcessTerminal();
+    const ui = new piTui.TUI(terminal, true);
+    const editor = new piTui.Editor(ui, nativeEditorTheme(codingAgent));
+    expect(typeof editor.borderColor).toBe("function");
   });
 
-  it("returns ok=true when the Markdown constructor succeeds", () => {
-    const okPit = {
-      Markdown: class {
-        // biome-ignore lint: empty placeholder
-        // eslint-disable-next-line @typescript-eslint/no-empty-function
-        constructor(_text: string, _px: number, _py: number, _theme: unknown, _style?: unknown) {}
-        // biome-ignore lint: empty placeholder
-        // eslint-disable-next-line @typescript-eslint/no-empty-function
-        render(_w: number): string[] { return ["line"]; }
-      },
-    };
-    let captured: Error | null = null;
-    const onError = (err: Error): void => {
-      captured = err;
-    };
-    const frame = { t: "message", role: "assistant", markdown: "x" } as const;
-    const result = processMessageFrame(okPit, frame, onError);
-    expect(result.ok).toBe(true);
-    expect(captured).toBeNull();
+  it("renders the editor without throwing at any width", () => {
+    const terminal = new piTui.ProcessTerminal();
+    const ui = new piTui.TUI(terminal, true);
+    const editor = new piTui.Editor(ui, nativeEditorTheme(piTuiCodingAgent()));
+    expect(() => editor.render(40)).not.toThrow();
+    expect(() => editor.render(10)).not.toThrow();
   });
 
-  it("ignores non-message frames without calling onRenderError", () => {
-    const okPit = {
-      Markdown: class {
-        constructor() {
-          throw new Error("should not be called for non-message");
-        }
-        render(): string[] { return []; }
-      },
-    };
-    let captured: Error | null = null;
-    const onError = (err: Error): void => {
-      captured = err;
-    };
-    const frame = { t: "ready", sessionLabel: "M", sessionId: "1" } as const;
-    const result = processMessageFrame(okPit, frame, onError);
-    expect(result.ok).toBe(true);
-    expect(captured).toBeNull();
+  it("applies the native Pi border color (not identity)", () => {
+    const codingAgent = piTuiCodingAgent();
+    const borderColor = nativeEditorTheme(codingAgent).borderColor;
+    const rendered = borderColor("─");
+    expect(rendered).not.toBe("─"); // ANSI-wrapped by theme.fg("border", ...)
   });
 });
 
-describe("describeChunkEnd (#1339)", () => {
-  it("returns a marker for a truncated chunk-end", () => {
-    expect(describeChunkEnd({ t: "chunk-end", id: "s1", reason: "truncated" }))
-      .toMatch(/truncated/i);
-  });
-
-  it("returns null for a normal completion without a reason", () => {
-    expect(describeChunkEnd({ t: "chunk-end", id: "s1" })).toBeNull();
-    expect(describeChunkEnd({ t: "chunk-end", id: "s1", reason: "complete" })).toBeNull();
-    expect(describeChunkEnd({ t: "chunk-end", id: "s1", reason: "cancelled" })).toBeNull();
-  });
-
-  it("returns null for non chunk-end frames", () => {
-    expect(describeChunkEnd({ t: "message", role: "assistant", markdown: "x" })).toBeNull();
-  });
-});
+/** The real coding-agent module, theme initialized exactly as the client does. */
+function piTuiCodingAgent(): typeof import("@earendil-works/pi-coding-agent") {
+  piCodingAgent.initTheme();
+  return piCodingAgent;
+}
 
 // ── #1400: FrameDecoder socket-data integration ────────────────────────
 

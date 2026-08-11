@@ -237,8 +237,17 @@ export class TuiSocketAdapter implements PlatformAdapter {
     // #1338/#1397: suppress whole result when the exact execution's
     // complete streamed text matches the delivered text.
     const correlation = _opts?.deliveryCorrelation;
-    if (this.shouldSuppressWholeResult(text, correlation)) return;
-    this._push({ t: "message", role: "assistant", markdown: text });
+    if (this.shouldSuppressWholeResult(text, correlation)) {
+      // #1612: an exact-stream delivery still settles the turn — refresh the
+      // runtime status so the footer reflects post-turn metrics instead of
+      // staying at the attach-time values.
+      this._pushStatus();
+      return;
+    }
+    // #1612: copy the delivery execution ID so the client can reconcile the
+    // whole result with its streamed rows. Internal wire metadata — never
+    // rendered.
+    this._push({ t: "message", role: "assistant", markdown: text, executionId: correlation?.executionId });
     this._pushStatus();
     return undefined;
   }
@@ -277,9 +286,15 @@ export class TuiSocketAdapter implements PlatformAdapter {
       if (!stream.ended) return false;
     }
 
-    // Normalized text comparison (CRLF→LF only)
+    // Normalized text comparison (CRLF→LF only). #1619: thinking is never
+    // recorded in the ledger, so a stream with thinking blocks still compares
+    // on text alone. Multi-round transcripts deliver pre-tool segments as
+    // standalone messages — the terminal result is the final text suffix of
+    // the streamed transcript.
     const streamedText = obs.streamOrder.map(id => obs.streams.get(id)!.text).join("");
-    return normalizeComparison(streamedText) === normalizeComparison(text);
+    const normalized = normalizeComparison(streamedText);
+    const whole = normalizeComparison(text);
+    return normalized === whole || (normalized.length > whole.length && normalized.endsWith(whole));
   }
 
   /** #1397: Record a stream start from the output feed. */
@@ -595,9 +610,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     capturedAttGen: number,
   ): void {
     const feed = this.deps.orcActivityFeed;
-    const orcEntry = spin.listAllSessions().find(
-      s => s.id.includes("_O_") && s.status !== "ended",
-    );
+    const orcEntry = spin.getSessionById(sessionId);
     if (!feed || !orcEntry) return;
 
     this._activitySequence = 0;
@@ -623,7 +636,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     // Send the initial snapshot.
     const orcSession = spin.getSessionById(sessionId);
     if (orcSession) {
-      const snapshot = buildOrcActivitySnapshot(orcSession, spin.getSessions?.() ?? new Map(), this._activitySequence);
+      const snapshot = buildOrcActivitySnapshot(orcSession, new Map(), this._activitySequence);
       this._push({ t: "activity-snapshot", sequence: this._activitySequence, snapshot });
     }
   }
@@ -671,10 +684,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
         break;
       }
       case "orc": {
-        if (!spin.getOrcSession()) return this._reject("No Orc session is running.");
-        const orcEntry = spin.listAllSessions().find(
-          s => s.id.includes("_O_") && s.status !== "ended",
-        );
+        const orcEntry = spin.getOrcSession();
         if (!orcEntry) return this._reject("No Orc session is running.");
         sessionId = orcEntry.id;
         nextMode = "orc";
@@ -704,17 +714,14 @@ export class TuiSocketAdapter implements PlatformAdapter {
   private _recoverActivity(clearDirty = true): boolean {
     if (!this._writer || !this._activityDirty) return false;
     const feed = this.deps.orcActivityFeed;
-    if (!feed) return false;
-    const orcEntry = this.deps.spin.listAllSessions().find(
-      s => s.id.includes("_O_") && s.status !== "ended",
-    );
+    if (!feed || !this.attachedSessionId) return false;
+    const orcEntry = this.deps.spin.getSessionById(this.attachedSessionId);
     if (!orcEntry) return false;
 
     this._writer.dropActivity();
 
     const seq = feed.currentSequence;
-    const sessions = this.deps.spin.getSessions?.() ?? new Map();
-    const snapshot = buildOrcActivitySnapshot(orcEntry, sessions, seq);
+    const snapshot = buildOrcActivitySnapshot(orcEntry, new Map(), seq);
     const res = this._writer.enqueue({ t: "activity-snapshot", sequence: seq, snapshot });
     if (res === "dropped") {
       return false;
@@ -744,20 +751,25 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
       switch (event.type) {
         case "delta": {
-          // Enqueue and check acceptance
-          const result = this._push({ t: "chunk", id: event.streamId, delta: event.text });
+          // #1612: carry stream/execution identity on every delta.
+          // #1619: typed content rides the frame; the suppression ledger
+          // records only text deltas for final-answer comparison.
+          const frame: TuiServerFrame = { t: "chunk", id: event.streamId, executionId, kind: event.kind, delta: event.text };
+          const result = this._push(frame);
           const accepted = result !== "dropped";
           if (executionId) {
             this.observeStreamStart(executionId, event.streamId);
-            this.observeStreamDelta(executionId, event.streamId, event.text, accepted);
+            if (event.kind === "text") {
+              this.observeStreamDelta(executionId, event.streamId, event.text, accepted);
+            }
           }
           break;
         }
         case "tool-start":
-          this._push({ t: "tool-start", id: event.streamId, name: event.name });
+          this._push({ t: "tool-start", id: event.streamId, executionId, name: event.name });
           break;
         case "end": {
-          this._push({ t: "chunk-end", id: event.streamId, reason: event.reason });
+          this._push({ t: "chunk-end", id: event.streamId, executionId, reason: event.reason });
           if (executionId) {
             this.observeStreamStart(executionId, event.streamId);
             this.observeStreamEnd(executionId, event.streamId, event.reason);
@@ -765,6 +777,9 @@ export class TuiSocketAdapter implements PlatformAdapter {
           break;
         }
         case "start": {
+          // #1612: a visible stream start lets the client show a bounded
+          // busy indicator before the first chunk arrives.
+          this._push({ t: "stream-start", id: event.streamId, executionId });
           if (executionId) {
             this.observeStreamStart(executionId, event.streamId);
           }
@@ -802,8 +817,45 @@ export class TuiSocketAdapter implements PlatformAdapter {
     });
   }
 
+  /**
+   * #1533: When the attached pipeline session has ended (e.g. /reset ended it
+   * and Spin reconciled a replacement Main), rebind this attachment to the
+   * replacement through commitAttachment() before the triggering input is
+   * routed. The rebind emits the normal ready/status frames and advances the
+   * attachment generation so feed subscriptions change atomically.
+   *
+   * Returns "ok" when the caller may continue routing the input (possibly
+   * against the rebound session), or "dropped" when the input was consumed by
+   * a deterministic system error because the ended session cannot be resolved
+   * to a replacement owner/platform. Live pipeline attachments, Orc
+   * attachments, and attachments owned by another user are never moved.
+   */
+  private reconcileEndedPipelineAttachment(): "ok" | "dropped" {
+    if (this.mode !== "pipeline" || !this.attachedSessionId) return "ok";
+    const spin = this.deps.spin;
+    const session = spin.getSessionById(this.attachedSessionId);
+    if (!session) {
+      this._push({ t: "message", role: "system", markdown: "⚠️ Attached session is gone — reattach with /session N." });
+      return "dropped";
+    }
+    if (session.status !== "ended") return "ok";
+    // #1533: the replacement is the ended session's owner + home platform's
+    // active session (never the inbound TUI platform, never a guess).
+    const replacement = spin.getActiveSession(session.userId, session.platform);
+    if (!replacement || replacement.status === "ended" || replacement.id === session.id) {
+      this._push({ t: "message", role: "system", markdown: "⚠️ Attached session ended and no replacement is available — reattach with /session N." });
+      return "dropped";
+    }
+    logInfo(TAG, `Reconcile ended attachment ${session.id} → ${replacement.id}`);
+    this.commitAttachment(replacement.id, "pipeline", spin);
+    return "ok";
+  }
+
   private async _handleInput(text: string): Promise<void> {
     if (!this.attachedSessionId) return;
+    // #1533: rebind a stale pipeline attachment before any input is routed —
+    // exactly once (subsequent inputs target the live replacement).
+    if (this.reconcileEndedPipelineAttachment() === "dropped") return;
     if (this.mode === "orc") {
       if (text.startsWith("/steer ")) {
         const body = text.slice("/steer ".length).trim();
@@ -978,25 +1030,17 @@ export class TuiSocketAdapter implements PlatformAdapter {
     const spin = this.deps.spin;
     const capturedGen = this._connGen;
 
-    if (!spin.getOrcSession()) {
-      return void this._push({
-        t: "message", role: "system",
-        markdown: "Orc is not available (not running or still warming up).",
-      });
-    }
-    const orcEntry = spin.listAllSessions().find(
-      s => s.id.includes("_O_") && s.status !== "ended",
-    );
-    if (orcEntry?.busy) {
-      return void this._push({
-        t: "message", role: "system",
-        markdown: `Orc is busy — use /steer <text> to queue a steering instruction, or wait until idle.\n\nExisting steering: try \`/steer ${text.slice(0, 80)}\` to queue this as a steering instruction.`,
-      });
-    }
+    const orcEntry = spin.getOrcSession();
     if (!orcEntry) {
       return void this._push({
         t: "message", role: "system",
         markdown: "Orc is not available (not running or still warming up).",
+      });
+    }
+    if (orcEntry.busy) {
+      return void this._push({
+        t: "message", role: "system",
+        markdown: `Orc is busy — use /steer <text> to queue a steering instruction, or wait until idle.\n\nExisting steering: try \`/steer ${text.slice(0, 80)}\` to queue this as a steering instruction.`,
       });
     }
     try {
@@ -1004,6 +1048,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
         type: "O",
         sessionId: orcEntry.id,
         prompt: `[USER] ${text}`,
+        settlementOwner: "spin",
         await: true,
       });
       // #1398: Guard against replacement during the async spin call.

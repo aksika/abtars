@@ -54,10 +54,29 @@ export interface ContractProvenance {
   readonly created_at: string;
 }
 
+export interface RetryContext {
+  readonly directive_id: string;
+  readonly mode: string;
+  readonly instruction: string;
+  readonly do_not_repeat: readonly string[];
+  readonly prior_evidence_ids: readonly string[];
+  readonly failed_criterion_ids: readonly string[];
+  readonly unresolved_risks: readonly string[];
+}
+
+export interface WorkerContractRevisionV1 {
+  readonly revision: number;
+  readonly root_contract_id: string;
+  readonly parent_contract_id?: string;
+  readonly source_attempt_id?: string;
+  readonly retry_context?: RetryContext;
+}
+
 export interface WorkerAcceptanceContractV1 {
   readonly schema_version: 1;
   readonly id: string;
   readonly digest: string;
+  readonly revision_meta?: WorkerContractRevisionV1;
   readonly goal: string;
   readonly criteria: readonly ContractCriterion[];
   readonly expected_artifacts: readonly ExpectedArtifact[];
@@ -67,6 +86,7 @@ export interface WorkerAcceptanceContractV1 {
   readonly limits: {
     readonly max_duration_ms?: number;
     readonly max_tokens?: number;
+    readonly max_cost?: number;
   };
   readonly provenance: ContractProvenance;
 }
@@ -123,6 +143,7 @@ export interface WorkerResultEnvelopeV1 {
     readonly input_tokens?: number;
     readonly output_tokens?: number;
     readonly total_tokens?: number;
+    readonly cost?: number;
   };
   readonly error?: {
     readonly code: string;
@@ -258,6 +279,9 @@ export function validateContract(raw: unknown): ValidationResult {
     errors.push(error("too_long", "$.goal", `goal exceeds ${MAX_GOAL_LENGTH} characters`));
   }
 
+  const criterionIds = new Set<string>();
+  const criteriaIndex = new Map<string, number>();
+
   if (!Array.isArray(obj["criteria"])) {
     errors.push(error("missing_field", "$.criteria", "criteria is required"));
   } else {
@@ -267,7 +291,6 @@ export function validateContract(raw: unknown): ValidationResult {
     if (obj["criteria"].length > MAX_CRITERIA_COUNT) {
       errors.push(error("too_many", "$.criteria", `criteria count exceeds ${MAX_CRITERIA_COUNT}`));
     }
-    const ids = new Set<string>();
     errors.push(...errCollect(obj["criteria"] as unknown[], (c, i) => {
       const path = `$.criteria[${i}]`;
       const e: ValidationIssue[] = [];
@@ -278,10 +301,11 @@ export function validateContract(raw: unknown): ValidationResult {
       const cObj = c as Record<string, unknown>;
       if (!isNonEmptyString(cObj["id"])) {
         e.push(error("missing_field", `${path}.id`, "criterion id is required"));
-      } else if (ids.has(cObj["id"] as string)) {
+      } else if (criterionIds.has(cObj["id"] as string)) {
         e.push(error("duplicate_id", `${path}.id`, `duplicate criterion id "${cObj["id"]}"`));
       } else {
-        ids.add(cObj["id"] as string);
+        criterionIds.add(cObj["id"] as string);
+        criteriaIndex.set(cObj["id"] as string, i);
       }
       if (!isNonEmptyString(cObj["description"])) {
         e.push(error("missing_field", `${path}.description`, "criterion description is required"));
@@ -292,6 +316,7 @@ export function validateContract(raw: unknown): ValidationResult {
     }));
   }
 
+  const artifactRefs = new Set<string>();
   if (obj["expected_artifacts"] !== undefined) {
     if (!Array.isArray(obj["expected_artifacts"])) {
       errors.push(error("type_error", "$.expected_artifacts", "must be an array"));
@@ -337,6 +362,17 @@ export function validateContract(raw: unknown): ValidationResult {
             e.push(error("type_error", `${path}.criterion_ids`, "must be an array"));
           } else if (aObj["criterion_ids"].length > MAX_CRITERIA_IDS_PER_ITEM) {
             e.push(error("too_many", `${path}.criterion_ids`, `exceeds ${MAX_CRITERIA_IDS_PER_ITEM} criterion IDs`));
+          } else if (criterionIds.size > 0) {
+            for (const ref of aObj["criterion_ids"] as string[]) {
+              if (!criterionIds.has(ref)) {
+                e.push(error("bad_reference", `${path}.criterion_ids`, `unknown criterion id "${ref}"`));
+              }
+            }
+          }
+          if (aObj["required"] === true && Array.isArray(aObj["criterion_ids"])) {
+            for (const ref of aObj["criterion_ids"] as string[]) {
+              if (criterionIds.has(ref)) artifactRefs.add(ref);
+            }
           }
         }
         return e;
@@ -344,6 +380,7 @@ export function validateContract(raw: unknown): ValidationResult {
     }
   }
 
+  const cmdRefs = new Set<string>();
   if (obj["verification_commands"] !== undefined) {
     if (!Array.isArray(obj["verification_commands"])) {
       errors.push(error("type_error", "$.verification_commands", "must be an array"));
@@ -387,8 +424,18 @@ export function validateContract(raw: unknown): ValidationResult {
             }
           }
         }
-        if (cmdObj["cwd"] !== undefined && !isNonEmptyString(cmdObj["cwd"] as string)) {
-          e.push(error("type_error", `${path}.cwd`, "cwd must be a non-empty string"));
+        if (cmdObj["cwd"] !== undefined) {
+          if (!isNonEmptyString(cmdObj["cwd"] as string)) {
+            e.push(error("type_error", `${path}.cwd`, "cwd must be a non-empty string"));
+          } else {
+            const cwd = cmdObj["cwd"] as string;
+            if (hasTraversal(cwd)) {
+              e.push(error("traversal", `${path}.cwd`, "cwd must be a relative path without traversal"));
+            }
+            if (cwd.startsWith("/")) {
+              e.push(error("bad_format", `${path}.cwd`, "cwd must be a relative path, not absolute"));
+            }
+          }
         }
         const timeoutMs = cmdObj["timeout_ms"];
         if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -401,6 +448,17 @@ export function validateContract(raw: unknown): ValidationResult {
             e.push(error("type_error", `${path}.criterion_ids`, "must be an array"));
           } else if (cmdObj["criterion_ids"].length > MAX_CRITERIA_IDS_PER_ITEM) {
             e.push(error("too_many", `${path}.criterion_ids`, `exceeds ${MAX_CRITERIA_IDS_PER_ITEM} criterion IDs`));
+          } else if (criterionIds.size > 0) {
+            for (const ref of cmdObj["criterion_ids"] as string[]) {
+              if (!criterionIds.has(ref)) {
+                e.push(error("bad_reference", `${path}.criterion_ids`, `unknown criterion id "${ref}"`));
+              }
+            }
+          }
+          if (Array.isArray(cmdObj["criterion_ids"])) {
+            for (const ref of cmdObj["criterion_ids"] as string[]) {
+              if (criterionIds.has(ref)) cmdRefs.add(ref);
+            }
           }
         }
         return e;
@@ -426,16 +484,34 @@ export function validateContract(raw: unknown): ValidationResult {
     }
   }
 
+  if (obj["supports_root_criteria"] !== undefined) {
+    if (!Array.isArray(obj["supports_root_criteria"])) {
+      errors.push(error("type_error", "$.supports_root_criteria", "must be an array"));
+    } else {
+      const seen = new Set<string>();
+      for (let i = 0; i < (obj["supports_root_criteria"] as unknown[]).length; i++) {
+        const ref = (obj["supports_root_criteria"] as unknown[])[i];
+        if (!isNonEmptyString(ref as string)) {
+          errors.push(error("type_error", `$.supports_root_criteria[${i}]`, "each root criterion id must be a non-empty string"));
+        } else if (seen.has(ref as string)) {
+          errors.push(error("duplicate_id", `$.supports_root_criteria[${i}]`, `duplicate root criterion id "${ref}"`));
+        } else {
+          seen.add(ref as string);
+        }
+      }
+    }
+  }
+
   if (obj["limits"] !== undefined) {
     if (typeof obj["limits"] !== "object" || obj["limits"] === null) {
       errors.push(error("type_error", "$.limits", "limits must be an object"));
     } else {
       const limits = obj["limits"] as Record<string, unknown>;
-      if (limits["max_duration_ms"] !== undefined && (typeof limits["max_duration_ms"] !== "number" || !Number.isFinite(limits["max_duration_ms"] as number))) {
-        errors.push(error("type_error", "$.limits.max_duration_ms", "must be a finite number"));
+      if (limits["max_duration_ms"] !== undefined && (typeof limits["max_duration_ms"] !== "number" || !Number.isInteger(limits["max_duration_ms"] as number) || (limits["max_duration_ms"] as number) <= 0)) {
+        errors.push(error("type_error", "$.limits.max_duration_ms", "must be a positive integer"));
       }
-      if (limits["max_tokens"] !== undefined && (typeof limits["max_tokens"] !== "number" || !Number.isFinite(limits["max_tokens"] as number))) {
-        errors.push(error("type_error", "$.limits.max_tokens", "must be a finite number"));
+      if (limits["max_tokens"] !== undefined && (typeof limits["max_tokens"] !== "number" || !Number.isInteger(limits["max_tokens"] as number) || (limits["max_tokens"] as number) <= 0)) {
+        errors.push(error("type_error", "$.limits.max_tokens", "must be a positive integer"));
       }
     }
   }
@@ -472,6 +548,23 @@ export function validateContract(raw: unknown): ValidationResult {
   if (jsonBytes > MAX_CONTRACT_JSON_BYTES) {
     errors.push(error("too_long", "$", `contract JSON exceeds ${MAX_CONTRACT_JSON_BYTES} bytes`));
     return { ok: false, errors };
+  }
+
+  // #1588: a declared criterion must have an evidence path — a verification
+  // command referencing it or a required expected artifact referencing it.
+  // The exact daily-ai defect (one criterion, zero commands, zero artifacts)
+  // is rejected here at authoring time, never observed silently at review.
+  // Runs last so earlier structural and size diagnostics stay primary.
+  if (criterionIds.size > 0) {
+    for (const id of criterionIds) {
+      if (!cmdRefs.has(id) && !artifactRefs.has(id)) {
+        errors.push(error("missing_field", `$.criteria[${criteriaIndex.get(id)}]`,
+          `criterion ${id} has no evidence path: add a verification command or a required artifact`));
+      }
+    }
+    if (errors.length > 0) {
+      return { ok: false, errors };
+    }
   }
 
   return { ok: true, contract };
@@ -593,21 +686,115 @@ export function validateEnvelope(raw: unknown): ValidationResult {
     errors.push(error("type_error", "$.outcome", `invalid outcome "${String(obj["outcome"])}"`));
   }
 
-  if (!Array.isArray(obj["criteria"])) {
+  const validStatuses: CriterionStatus[] = ["passed", "failed", "not_run", "inconclusive"];
+  const criteriaArr = obj["criteria"];
+  if (!Array.isArray(criteriaArr)) {
     errors.push(error("missing_field", "$.criteria", "criteria results are required"));
+  } else {
+    for (let i = 0; i < criteriaArr.length; i++) {
+      const c = criteriaArr[i] as Record<string, unknown> | undefined;
+      if (!c || typeof c !== "object") {
+        errors.push(error("type_error", `$.criteria[${i}]`, "each criterion result must be an object"));
+        continue;
+      }
+      if (!isNonEmptyString(c["criterion_id"])) {
+        errors.push(error("missing_field", `$.criteria[${i}].criterion_id`, "criterion_id is required"));
+      }
+      if (!validStatuses.includes(c["status"] as CriterionStatus)) {
+        errors.push(error("type_error", `$.criteria[${i}].status`, `invalid status "${String(c["status"])}"`));
+      }
+      if (c["evidence_ids"] !== undefined && (!Array.isArray(c["evidence_ids"]) || !(c["evidence_ids"] as unknown[]).every(isNonEmptyString))) {
+        errors.push(error("type_error", `$.criteria[${i}].evidence_ids`, "evidence_ids must be an array of strings"));
+      }
+    }
   }
 
-  if (!Array.isArray(obj["checks"])) {
+  // Build the set of known check and artifact IDs for evidence link validation
+  const knownCheckIds = new Set<string>();
+  const checksArr = obj["checks"];
+  if (!Array.isArray(checksArr)) {
     errors.push(error("missing_field", "$.checks", "checks are required"));
+  } else {
+    for (let i = 0; i < checksArr.length; i++) {
+      const ch = checksArr[i] as Record<string, unknown> | undefined;
+      if (!ch || typeof ch !== "object") {
+        errors.push(error("type_error", `$.checks[${i}]`, "each check must be an object"));
+        continue;
+      }
+      if (!isNonEmptyString(ch["check_id"])) {
+        errors.push(error("missing_field", `$.checks[${i}].check_id`, "check_id is required"));
+      } else {
+        knownCheckIds.add(ch["check_id"] as string);
+      }
+      if (!Array.isArray(ch["argv"]) || !(ch["argv"] as unknown[]).every(isString)) {
+        errors.push(error("type_error", `$.checks[${i}].argv`, "argv must be an array of strings"));
+      }
+      if (typeof ch["exit_code"] !== "number" && ch["exit_code"] !== null) {
+        errors.push(error("type_error", `$.checks[${i}].exit_code`, "exit_code must be a number or null"));
+      }
+      if (typeof ch["timed_out"] !== "boolean") {
+        errors.push(error("type_error", `$.checks[${i}].timed_out`, "timed_out must be a boolean"));
+      }
+    }
   }
 
-  if (!Array.isArray(obj["artifacts"])) {
+  const knownArtifactIds = new Set<string>();
+  const artifactsArr = obj["artifacts"];
+  if (!Array.isArray(artifactsArr)) {
     errors.push(error("missing_field", "$.artifacts", "artifacts are required"));
+  } else {
+    for (let i = 0; i < artifactsArr.length; i++) {
+      const a = artifactsArr[i] as Record<string, unknown> | undefined;
+      if (!a || typeof a !== "object") {
+        errors.push(error("type_error", `$.artifacts[${i}]`, "each artifact must be an object"));
+        continue;
+      }
+      if (!isNonEmptyString(a["artifact_id"])) {
+        errors.push(error("missing_field", `$.artifacts[${i}].artifact_id`, "artifact_id is required"));
+      } else {
+        knownArtifactIds.add(a["artifact_id"] as string);
+      }
+      if (typeof a["exists"] !== "boolean") {
+        errors.push(error("type_error", `$.artifacts[${i}].exists`, "exists must be a boolean"));
+      }
+    }
+  }
+
+  // Validate evidence_ids reference known check or artifact IDs
+  if (criteriaArr && Array.isArray(criteriaArr)) {
+    for (let i = 0; i < criteriaArr.length; i++) {
+      const c = criteriaArr[i] as Record<string, unknown> | undefined;
+      if (!c || !Array.isArray(c["evidence_ids"])) continue;
+      for (let j = 0; j < (c["evidence_ids"] as unknown[]).length; j++) {
+        const eid = (c["evidence_ids"] as unknown[])[j] as string;
+        if (!knownCheckIds.has(eid) && !knownArtifactIds.has(eid)) {
+          errors.push(error("bad_reference", `$.criteria[${i}].evidence_ids[${j}]`, `unknown evidence id "${eid}"`));
+        }
+      }
+    }
   }
 
   const wr = obj["worker_report"];
   if (typeof wr !== "object" || wr === null) {
     errors.push(error("missing_field", "$.worker_report", "worker_report is required"));
+  } else {
+    const wrObj = wr as Record<string, unknown>;
+    if (typeof wrObj["summary"] !== "string") {
+      errors.push(error("type_error", "$.worker_report.summary", "summary must be a string"));
+    }
+    if (!Array.isArray(wrObj["claims"])) {
+      errors.push(error("missing_field", "$.worker_report.claims", "claims are required"));
+    }
+    if (wrObj["unresolved_risks"] !== undefined && !Array.isArray(wrObj["unresolved_risks"])) {
+      errors.push(error("type_error", "$.worker_report.unresolved_risks", "unresolved_risks must be an array"));
+    }
+  }
+
+  // Validate usage if present
+  if (obj["usage"] !== undefined) {
+    if (typeof obj["usage"] !== "object" || obj["usage"] === null) {
+      errors.push(error("type_error", "$.usage", "usage must be an object"));
+    }
   }
 
   if (errors.length > 0) {

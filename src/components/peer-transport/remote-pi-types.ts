@@ -107,8 +107,12 @@ export interface RemotePiEventV1 {
   origin_request_id: string;
   /** Remote run ID */
   run_id: string;
-  /** Remote card ID */
-  card_id: number;
+  /**
+   * Owner-local card ID, namespaced from the origin's own card ID space.
+   * Opaque display/correlation value on the origin side — never a key,
+   * index, join column, or lookup there.
+   */
+  remote_card_id: number;
   /** Generation number */
   generation: number;
   /** Monotonically increasing sequence per run (never resets) */
@@ -368,7 +372,7 @@ export function canonicalEventPayload(event: Omit<RemotePiEventV1, "content_sha2
     origin_peer: event.origin_peer,
     origin_request_id: event.origin_request_id,
     run_id: event.run_id,
-    card_id: event.card_id,
+    remote_card_id: event.remote_card_id,
     generation: event.generation,
     sequence: event.sequence,
     kind: event.kind,
@@ -402,7 +406,7 @@ export function validateEventV1(event: RemotePiEventV1): void {
   if (!event.event_id || !event.content_sha256 || !event.origin_peer || !event.origin_request_id) {
     throw new Error("Event missing required fields");
   }
-  if (!event.run_id || event.card_id <= 0 || event.generation < 1 || event.sequence < 1) {
+  if (!event.run_id || event.remote_card_id <= 0 || event.generation < 1 || event.sequence < 1) {
     throw new Error("Event has invalid identifiers");
   }
   if (!event.kind || !event.occurred_at) {
@@ -411,6 +415,9 @@ export function validateEventV1(event: RemotePiEventV1): void {
 
   // Validate projection
   validatePublicProjection(event.projection);
+  if (event.projection.generation !== event.generation) {
+    throw new Error("Event generation does not match projection generation");
+  }
 
   // Validate event_id matches derived value
   const expectedEventId = deriveEventId(event.run_id, event.sequence);

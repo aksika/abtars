@@ -9,11 +9,13 @@ const mockPiRunStore = vi.hoisted(() => vi.fn(function (_opts: unknown) {
   return {
     generateId: vi.fn(() => "test-run-id"),
     recoverNonterminal: vi.fn(() => ({ interrupted: 0, queuedCardIds: [] })),
+    setRemoteEventEmitter: vi.fn(),
   };
 }));
 const mockPiExecutor = vi.hoisted(() => vi.fn(function () {
   return {
     onTransition: vi.fn(),
+    onProgress: vi.fn(),
     startWithClaim: vi.fn(),
   };
 }));
@@ -45,6 +47,8 @@ vi.mock("../components/logger.js", () => ({
 
 vi.mock("../components/tasks/kanban-board.js", () => ({
   requireTaskDatabase: mockRequireTaskDatabase,
+  kanbanTransition: vi.fn(() => ({ kind: "applied", from: "queued" as const })),
+  sqliteNow: () => "2026-08-06 12:00:00",
 }));
 
 vi.mock("../components/pi-executor/pi-run-store.js", () => ({
@@ -131,7 +135,7 @@ describe("phasePiExecutor — #1440 disabled seed and enabled boot", () => {
     });
     mockResolvePiInstallation.mockReturnValue({
       state: "compatible",
-      installation: { version: "0.80.7", source: "path" },
+      installation: { version: "0.83.0", source: "path", pinStatus: "at-pin" },
     });
     const ctx = createBootCtx();
     const { phasePiExecutor } = await import("./phase-pi-executor.js");

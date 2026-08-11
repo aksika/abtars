@@ -4,9 +4,9 @@
  */
 
 import { logWarn } from "../logger.js";
-import type { ToolCall } from "./conversation-session.js";
+import type { LegacyToolCall as ToolCall } from "./pi-ai-adapter.js";
 
-const TAG = "direct-api";
+const TAG = "pi-ai";
 
 /**
  * Normalize tool calls from models that fragment a single call across multiple entries.
@@ -42,11 +42,37 @@ export function normalizeToolCalls(raw: ToolCall[]): ToolCall[] {
   return result;
 }
 
-/** Extract HTTP status code from error message. Returns 0 if not found. */
+/**
+ * Extract an HTTP status code from provider errors. Returns 0 if not found.
+ *
+ * Pi-AI emits more than one stable shape depending on the API adapter:
+ * `402: <body>`, `OpenAI API error (402): <body>`, and SDK errors carrying a
+ * numeric `status`/`statusCode` field. Keep the parsing here so the fallback
+ * layer does not need provider-specific knowledge.
+ */
 export function parseErrorStatus(err: unknown): number {
+  if (typeof err === "object" && err !== null) {
+    const record = err as Record<string, unknown>;
+    for (const key of ["status", "statusCode"]) {
+      const value = record[key];
+      if (typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599) return value;
+      if (typeof value === "string" && /^\d{3}$/.test(value)) return Number(value);
+    }
+  }
+
   const msg = err instanceof Error ? err.message : String(err);
-  const m = /API error (\d+)/.exec(msg);
-  return m ? parseInt(m[1]!, 10) : 0;
+  const patterns = [
+    /^\s*(\d{3})\s*:/,
+    /\bAPI error\s*\(?\s*(\d{3})\b/i,
+    /\bHTTP\s*(\d{3})\b/i,
+    /\b(\d{3})\s+status code\b/i,
+    /\bstatus(?:Code)?\s*[=:]\s*(\d{3})\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(msg);
+    if (match) return Number(match[1]);
+  }
+  return 0;
 }
 
 /** Extract Retry-After from error (seconds or date). Returns ms or undefined. */

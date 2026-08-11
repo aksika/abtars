@@ -1,41 +1,68 @@
 import { logAndSwallow } from "../log-and-swallow.js";
-import { addTaskFailure } from "./task-failure-buffer.js";
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { resolve, join, dirname, basename } from "node:path";
-import { homedir } from "node:os";
+import { existsSync, writeFileSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
-import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
-import { incrementFailures, resetFailures, setAutoPaused, advanceNextRun, updateState, readState } from "./task-state-store.js";
-import { appendRun } from "./task-history-store.js";
-import { kanbanComplete, kanbanFail } from "./kanban-board.js";
+import { createRunId, reserveRun, readState } from "./task-state-store.js";
+import { logTaskDebug } from "./task-log-ctx.js";
 import type { ScheduledTask } from "./task-types.js";
-import { isSystemEntry, formatTaskLabel } from "./task-types.js";
-import { getSystemTaskRegistry } from "./system-task-registry.js";
-import { localDate } from "../../utils/date.js";
+import { isSystemEntry, isReminder, runCeilingMs } from "./task-types.js";
+import { settleRunOnce, onRunTerminal } from "./task-run-settler.js";
+import { makeTaskFailure } from "./task-failure.js";
+import { ScheduledRunCoordinator, type RunLane } from "./scheduled-run-coordinator.js";
+import type { ActiveTaskRun } from "./task-state-store.js";
 
 const TAG = "cron-queue";
-const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
-const RETRY_DELAY_MS = 10 * 60 * 1000;
-const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
-const STATE_FILE = join(homedir(), ".abtars", "state", "task-queue-state.json");
+const LANES: RunLane[] = ["manual", "scheduled"];
+// #1520: the queue snapshot lives under abtarsHome() and is diagnostic-only —
+// it never replays work and is never a second source of truth.
+const STATE_FILE = join(abtarsHome(), "state", "task-queue-state.json");
+
+function getEntryMessage(entry: ScheduledTask): string {
+  if (entry.kind === "reminder") return entry.text;
+  if (entry.kind === "agent") return entry.prompt ?? entry.taskFile ?? "";
+  if (entry.kind === "script") return entry.command;
+  if (entry.kind === "system") return entry.action;
+  return "";
+}
+
+interface PersistedJob {
+  entryId: string;
+  message: string;
+  startedAt: number;
+  type: string;
+  runId?: string;
+  priority?: string;
+}
 
 interface PersistedState {
   pid: number;
-  currentJob: { entryId: string; message: string; startedAt: number; type: string } | null;
-  queue: Array<{ entryId: string; message: string; priority: string; manual: boolean }>;
+  currentJobs: Partial<Record<RunLane, PersistedJob | null>>;
+  queues: Partial<Record<RunLane, PersistedJob[]>>;
 }
 
-function persistState(current: RunningJob | null, queue: QueuedJob[]): void {
+function persistState(lanes: Record<RunLane, QueueLaneState>): void {
   try {
     const state: PersistedState = {
       pid: process.pid,
-      currentJob: current ? { entryId: current.entryId, message: current.message, startedAt: current.startedAt, type: current.type } : null,
-      queue: queue.map(j => ({ entryId: j.entry.id, message: getEntryMessage(j.entry), priority: j.entry.priority ?? "medium", manual: j.manual ?? false })),
+      currentJobs: Object.fromEntries(
+        LANES.map(lane => [lane, lanes[lane].current ? jobToPersisted(lanes[lane].current!) : null]),
+      ) as PersistedState["currentJobs"],
+      queues: Object.fromEntries(
+        LANES.map(lane => [lane, lanes[lane].pending.map(j => ({
+          entryId: j.entry.id,
+          message: getEntryMessage(j.entry),
+          priority: j.entry.priority ?? "medium",
+          runId: j.reservation?.runId,
+        }))]),
+      ) as PersistedState["queues"],
     };
     writeFileSync(STATE_FILE, JSON.stringify(state), "utf-8");
   } catch (err) { logAndSwallow("cron_queue", "op", err); }
+}
+
+function jobToPersisted(job: RunningJob): PersistedJob {
+  return { entryId: job.entryId, message: job.message, startedAt: job.startedAt, type: job.type, runId: job.runId };
 }
 
 function loadStaleState(): PersistedState | null {
@@ -47,159 +74,10 @@ function loadStaleState(): PersistedState | null {
   } catch (err) { logAndSwallow(TAG, "loadStaleState", err); return null; }
 }
 
-function getEntryMessage(entry: ScheduledTask): string {
-  if (entry.kind === "reminder") return entry.text;
-  if (entry.kind === "agent") return entry.prompt ?? entry.taskFile ?? "";
-  if (entry.kind === "script") return entry.command;
-  if (entry.kind === "orc") return entry.goal;
-  if (entry.kind === "system") return entry.action;
-  return "";
-}
-
-/**
- * Single settlement point for a run. Appends history and updates the scheduling
- * cursor. `nextRunAt` is the sole source of truth for the next fire time:
- *  - success/noop/skipped: advance a recurring task to its next cron occurrence
- *    (or mark a one-shot completed) and clear any retry flag from a prior failure;
- *  - deferred: the caller reschedules nextRunAt to the deferral time — do not advance;
- *  - failed (recurring): reschedule as a bounded retry (checkAutoPause caps attempts);
- *  - failed (one-shot): terminal — mark completed so it never re-fires.
- */
-function settleRun(entry: ScheduledTask, outcome: "success" | "failed" | "noop" | "deferred" | "skipped", startedAt: number, detail?: string, resultPath?: string, kanbanCardId?: number, trigger: "schedule" | "manual" | "retry" = "schedule"): void {
-  const finishedAt = Date.now();
-  appendRun({ taskId: entry.id, kind: entry.kind, trigger, startedAt, finishedAt, outcome, detail, resultPath, kanbanCardId });
-
-  if (outcome === "success" || outcome === "noop" || outcome === "skipped") {
-    advanceNextRun(entry.id, entry.schedule);
-    updateState(entry.id, { lastFinishedAt: finishedAt, retrying: false });
-  } else if (outcome === "deferred") {
-    updateState(entry.id, { lastFinishedAt: finishedAt });
-  } else if (entry.schedule) {
-    const retryAt = finishedAt + RETRY_DELAY_MS;
-    updateState(entry.id, { lastFinishedAt: finishedAt, nextRunAt: retryAt, retryAt, retrying: true });
-    logInfo(TAG, `Retry scheduled for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
-  } else {
-    updateState(entry.id, { lastFinishedAt: finishedAt, completed: true });
-  }
-}
-
-function writeResultFile(entryId: string, content: string): string | null {
-  try {
-    const dir = join(abtarsHome(), "workspace", entryId);
-    mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${entryId}-${localDate()}.md`);
-    writeFileSync(file, content, "utf-8");
-    return file;
-  } catch (err) { logAndSwallow(TAG, "writeResultFile", err); return null; }
-}
-
-const DOD_MIN_BYTES = 100;
-
-function todayStr(): string {
-  return localDate();
-}
-
-export interface TaskFileResult {
-  prompt: string;
-  dodPaths: string[];
-}
-
-export function readTaskFile(taskFile: string): TaskFileResult | null {
-  const filePath = resolve(taskFile.replace(/^~/, homedir()));
-  if (!existsSync(filePath)) { logWarn(TAG, `Task file not found: ${filePath}`); return null; }
-  const raw = readFileSync(filePath, "utf-8");
-  const today = todayStr();
-  const content = raw.replace(/\{today\}/g, today);
-
-  const dodIdx = content.indexOf("## Definition of Done");
-  let prompt: string;
-  let dodPaths: string[] = [];
-  if (dodIdx === -1) {
-    prompt = content.trim();
-  } else {
-    prompt = content.slice(0, dodIdx).trim();
-    const dodSection = content.slice(dodIdx);
-    dodPaths = dodSection.split("\n")
-      .filter(l => l.match(/^- /))
-      .map(l => l.replace(/^- /, "").trim())
-      .filter(p => {
-        if (p.length === 0 || p.includes(" ") || p.includes("\t") || (!p.startsWith("/") && !p.startsWith("~"))) {
-          logWarn(TAG, `Rejected malformed DoD path: "${p}" — must be absolute or ~/ path`);
-          return false;
-        }
-        return true;
-      })
-      .map(p => resolve(p.replace(/^~/, homedir())));
-  }
-
-  const dir = dirname(filePath);
-  const base = basename(filePath, ".md");
-  const associated = readdirSync(dir).filter(f => f !== base + ".md" && !f.startsWith(".")).sort();
-  if (associated.length > 0) {
-    let injected = "\n\n---\n## Associated files\n";
-    let totalChars = 0;
-    const CAP = 10_000;
-    for (const f of associated) {
-      const fc = readFileSync(join(dir, f), "utf-8");
-      if (totalChars + fc.length > CAP) {
-        injected += `\n[${f}]: (truncated — full file at ${join(dir, f)})\n`;
-        break;
-      }
-      injected += `\n### ${f}\n\`\`\`\n${fc}\n\`\`\`\n`;
-      totalChars += fc.length;
-    }
-    prompt += injected;
-  }
-
-  return { prompt, dodPaths };
-}
-
-function checkDoD(paths: string[]): { passed: boolean; details: string } {
-  if (paths.length === 0) return { passed: true, details: "no DoD defined" };
-  const results: string[] = [];
-  let allPassed = true;
-  for (const p of paths) {
-    let size: number | null = null;
-    if (existsSync(p)) {
-      size = statSync(p).size;
-    } else {
-      const deadline = Date.now() + 1500;
-      while (Date.now() < deadline) {
-        const remaining = deadline - Date.now();
-        if (remaining > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(remaining, 200));
-        if (existsSync(p)) { size = statSync(p).size; break; }
-      }
-    }
-    if (size === null) {
-      results.push(`✗ missing: ${p}`);
-      allPassed = false;
-    } else if (size < DOD_MIN_BYTES) {
-      results.push(`✗ too small (${size}B): ${p}`);
-      allPassed = false;
-    } else {
-      results.push(`✓ ${p} (${size}B)`);
-    }
-  }
-  return { passed: allPassed, details: results.join("\n") };
-}
-
-/** Push nextRunAt out by the retry delay for a recurring task. Used by the
- *  idle-gate deferral, which is not a settled run (the task never executed). */
-function scheduleRetry(entry: ScheduledTask): void {
-  if (!entry.schedule) return;
-  const retryAt = Date.now() + RETRY_DELAY_MS;
-  updateState(entry.id, { nextRunAt: retryAt, retryAt, retrying: true });
-  logInfo(TAG, `Retry scheduled for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
-}
-
-export type TaskCompleteCallback = (chatId: number, message: string, result: string, dodFiles?: string[]) => void;
-export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
-export type TaskPausedCallback = (chatId: number, title: string, reason: string) => void;
-
-interface QueuedJob {
+export interface QueuedJob {
   entry: ScheduledTask;
-  onComplete?: TaskCompleteCallback;
   manual?: boolean;
+  reservation?: ActiveTaskRun;
 }
 
 export interface RunningJob {
@@ -209,386 +87,305 @@ export interface RunningJob {
   startedAt: number;
   type: "script" | "agent" | "system";
   manual?: boolean;
+  /** #1517: the exact reserved run identity; ownership never infers from task ID. */
+  runId: string;
+  lane: RunLane;
 }
 
-export class CronQueue {
-  private queue: QueuedJob[] = [];
-  private _current: RunningJob | null = null;
-  private timeout: ReturnType<typeof setTimeout> | null = null;
-  private readonly onFailInject?: FailInjectCallback;
-  private readonly onTaskPaused?: TaskPausedCallback;
-  private readonly failCounts = new Map<string, { date: string; count: number }>();
+interface QueueLaneState {
+  current: RunningJob | null;
+  pending: QueuedJob[];
+  cap: 1;
+}
 
-  constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback, onTaskPaused?: TaskPausedCallback) {
-    this.onFailInject = onFailInject;
-    this.onTaskPaused = onTaskPaused;
+function emptyLane(): QueueLaneState {
+  return { current: null, pending: [], cap: 1 };
+}
+
+/**
+ * #1539: two-lane admission queue. Lanes are cap-1 ordering structures only:
+ * the ScheduledRunCoordinator owns execution, deadlines, cancellation, and
+ * terminal normalization. Lane release is driven by the durable terminal
+ * event, never by an adapter promise resolving.
+ */
+export class CronQueue {
+  private readonly lanes: Record<RunLane, QueueLaneState> = {
+    manual: emptyLane(),
+    scheduled: emptyLane(),
+  };
+  private readonly coordinator: ScheduledRunCoordinator;
+  private readonly terminalUnsub: () => void;
+
+  constructor(coordinator: ScheduledRunCoordinator) {
+    this.coordinator = coordinator;
+    this.coordinator.setFollowUpEnqueue((entry) => this.enqueue(entry, false));
+    this.terminalUnsub = onRunTerminal((_taskId, runId) => this.onRunTerminal(runId));
+    // #1520: the stale snapshot is correlated against the authoritative
+    // restart reconciliation (task state + history) for logging only. It
+    // cannot create or replay work; both sides of the snapshot are cleared.
     const stale = loadStaleState();
     if (stale) {
-      if (stale.currentJob) {
-        logWarn(TAG, `Stale in-flight job detected: "${stale.currentJob.entryId}" (PID ${stale.pid} dead) — marking failed`);
+      const currentJobs = stale.currentJobs ?? {};
+      const queues = stale.queues ?? {};
+      const currentCount = Object.values(currentJobs).filter(Boolean).length;
+      const queueCount = Object.values(queues).reduce((n, q) => n + (q?.length ?? 0), 0);
+      if (currentCount > 0) {
+        logWarn(TAG, `Stale in-flight job(s) observed (${currentCount}) — recovery owned by task state reconciliation`);
       }
-      if (stale.queue.length > 0) {
-        logWarn(TAG, `${stale.queue.length} stale queued job(s) from previous process — dropped`);
+      if (queueCount > 0) {
+        logWarn(TAG, `${queueCount} queued job(s) observed across restart — reconciliation decides; snapshot is diagnostic only`);
       }
-      persistState(null, []);
+      persistState(this.lanes);
     }
   }
 
-  get currentJob(): RunningJob | null { return this._current; }
-  get pending(): number { return this.queue.length; }
-
-  enqueue(entry: ScheduledTask, onComplete?: TaskCompleteCallback, manual?: boolean): string | null {
-    if (this._current?.entryId === entry.id) {
-      return `⏳ Already running: "${getEntryMessage(entry).slice(0, 60)}"`;
-    }
-    if (this.queue.some(j => j.entry.id === entry.id)) {
-      return `⏳ Already queued: "${getEntryMessage(entry).slice(0, 60)}"`;
-    }
-
-    const rank = PRIO_RANK[entry.priority ?? "medium"] ?? 1;
-    let i = 0;
-    while (i < this.queue.length) {
-      const qRank = PRIO_RANK[this.queue[i]!.entry.priority ?? "medium"] ?? 1;
-      if (rank < qRank) break;
-      i++;
-    }
-    this.queue.splice(i, 0, { entry, onComplete, manual });
-    logInfo(TAG, `Enqueued "${entry.id}" (${entry.kind}, ${entry.priority ?? "medium"}${manual ? ", manual" : ""}) — ${this.queue.length} pending`);
-    persistState(this._current, this.queue);
-
-    if (!this._current) this.processNext();
-    return null;
+  destroy(): void {
+    this.terminalUnsub();
   }
 
-  private processNext(): void {
-    if (this.queue.length === 0) return;
-    const job = this.queue.shift()!;
-    const { entry, manual } = job;
-
-    if (isSystemEntry(entry)) {
-      this.runSystem(entry, manual);
-    } else if (entry.kind === "script") {
-      this.runScript(entry, job.onComplete, manual);
-    } else if (entry.kind === "orc") {
-      this.runOrc(entry, manual);
-    } else if (entry.kind === "agent") {
-      this.runAgent(entry, job.onComplete, manual);
-    } else if (entry.kind === "reminder") {
-      logInfo(TAG, `Reminder "${entry.id}" already delivered — skipping`);
-      this.processNext();
-    }
+  /** #1539: scheduled lane first for backward-compatible single-run display. */
+  get currentJob(): RunningJob | null {
+    return this.lanes.scheduled.current ?? this.lanes.manual.current;
   }
 
-  private setCurrent(entry: ScheduledTask, pid: number, type: "script" | "agent" | "system", manual?: boolean): void {
-    this._current = {
-      entryId: entry.id,
-      message: getEntryMessage(entry).slice(0, 80),
-      pid,
-      startedAt: Date.now(),
-      type,
-      manual,
-    };
-    persistState(this._current, this.queue);
+  get currentJobs(): RunningJob[] {
+    return LANES.flatMap(lane => this.lanes[lane].current ? [this.lanes[lane].current!] : []);
   }
 
-  private clearCurrent(): void {
-    if (this.timeout) { clearTimeout(this.timeout); this.timeout = null; }
-    this._current = null;
-    persistState(this._current, this.queue);
+  get pending(): number {
+    return LANES.reduce((n, lane) => n + this.lanes[lane].pending.length, 0);
   }
 
-  private tryInjectFailure(entry: ScheduledTask, result: string): void {
-    if (!this.onFailInject) return;
-    const today = localDate();
-    const key = entry.id;
-    const fc = this.failCounts.get(key);
-    if (fc && fc.date === today && fc.count >= 2) {
-      logInfo(TAG, `Skip auto-fix for "${key}" — already 2 attempts today`);
-      return;
-    }
-    const count = (fc?.date === today ? fc.count : 0) + 1;
-    this.failCounts.set(key, { date: today, count });
-    logInfo(TAG, `Injecting failure to agent for "${key}" (attempt ${count}/2)`);
-    this.onFailInject(entry.id, getEntryMessage(entry), result);
-  }
-
-  private checkAutoPause(entry: ScheduledTask, exitCode: number, lastError: string): boolean {
-    if (!entry.schedule) return false;
-    if (exitCode === 0) {
-      resetFailures(entry.id);
-      return false;
-    }
-    const count = incrementFailures(entry.id);
-    if (count >= 3) {
-      setAutoPaused(entry.id, true);
-      logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${count} consecutive failures`);
-      this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), lastError.slice(0, 200));
-      return true;
-    }
-    return false;
-  }
-
-  private trigger(): "schedule" | "manual" | "retry" {
-    if (this._current?.manual) return "manual";
-    const state = readState(this._current?.entryId ?? "");
-    if (state?.retrying) return "retry";
-    return "schedule";
-  }
-
-  private async runSystem(entry: ScheduledTask & { kind: "system" }, manual?: boolean): Promise<void> {
-    logInfo(TAG, `▶ System: "${entry.action}" (${entry.id})`);
-    this.setCurrent(entry, 0, "system", manual);
-    try {
-      const result = await getSystemTaskRegistry().dispatch(entry);
-      if (result.status === "deferred") {
-        settleRun(entry, "deferred", this._current?.startedAt ?? Date.now(), result.detail, undefined, undefined, this.trigger());
-        logInfo(TAG, `⏸ Deferred: "${entry.action}" (${entry.id}) — retry at ${new Date(result.retryAt).toISOString()}: ${result.detail}`);
-        updateState(entry.id, { nextRunAt: result.retryAt, retryAt: result.retryAt, retrying: true });
-      } else if (result.status === "noop") {
-        settleRun(entry, "noop", this._current?.startedAt ?? Date.now(), result.detail, undefined, undefined, this.trigger());
-        const detail = result.detail ? ` — ${result.detail}` : "";
-        logInfo(TAG, `■ System noop: "${entry.action}" (${entry.id})${detail}`);
-      } else {
-        const ok = result.status === "accepted";
-        const detail = ok ? (result as { status: "accepted"; detail?: string }).detail : (result as { status: "failed"; error: string }).error;
-        settleRun(entry, ok ? "success" : "failed", this._current?.startedAt ?? Date.now(), detail, undefined, undefined, this.trigger());
-        logInfo(TAG, `■ System ${ok ? "✓" : "❌"}: "${entry.action}" (${entry.id})${detail ? ` — ${detail}` : ""}`);
-        if (!ok) {
-          this.checkAutoPause(entry, 1, detail ?? "");
-        }
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logWarn(TAG, `System dispatch error for "${entry.action}": ${msg}`);
-      settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), msg, undefined, undefined, this.trigger());
-      this.checkAutoPause(entry, 1, msg);
-    } finally {
-      this.clearCurrent();
-      this.processNext();
-    }
-  }
-
-  private runOrc(entry: ScheduledTask & { kind: "orc" }, _manual?: boolean): void {
-    logInfo(TAG, `▶ Orc: "${entry.goal.slice(0, 60)}"`);
-    import("../spin.js").then(({ spin }) => {
-      spin.dispatch({ type: "O", goal: entry.goal, source: "task", priority: entry.priority ?? "MEDIUM" });
-      this.clearCurrent();
-      this.processNext();
-    }).catch((err) => {
-      logWarn(TAG, `Orc dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
-      this.clearCurrent();
-      this.processNext();
+  /** Per-lane durable view: current + pending jobs with identity and trigger. */
+  describe(): Array<{
+    lane: RunLane;
+    current: (RunningJob & {
+      phase?: string;
+      lastProgressAt?: number;
+      deadlineAt?: number;
+      terminalRequest?: { kind: "cancelled" | "deadline_exceeded"; requestedAt: number; reason: string };
+      cardId?: number;
+      sessionId?: string;
+      executionId?: string;
+    }) | null;
+    pending: Array<{ entryId: string; runId?: string; manual?: boolean; priority?: string }>;
+  }> {
+    const runViews = new Map(this.coordinator.describe().map(v => [v.runId, v]));
+    return LANES.map(lane => {
+      const current = this.lanes[lane].current;
+      const view = current ? runViews.get(current.runId) : undefined;
+      return {
+        lane,
+        current: current ? {
+          ...current,
+          phase: view?.phase,
+          lastProgressAt: view?.lastProgressAt,
+          deadlineAt: view?.deadlineAt,
+          terminalRequest: view?.terminalRequest,
+          cardId: view?.cardId,
+          sessionId: view?.sessionId,
+          executionId: view?.executionId,
+        } : null,
+        pending: this.lanes[lane].pending.map(j => ({
+          entryId: j.entry.id,
+          runId: j.reservation?.runId,
+          manual: j.manual ?? false,
+          priority: j.entry.priority ?? "medium",
+        })),
+      };
     });
   }
 
-  private runScript(entry: ScheduledTask & { kind: "script" }, onComplete?: TaskCompleteCallback, manual?: boolean): void {
-    logInfo(TAG, `▶ Script: "${entry.command.slice(0, 60)}"`);
-    try {
-      const child = spawn("bash", ["-c", entry.command], { stdio: ["ignore", "pipe", "pipe"] });
-      this.setCurrent(entry, child.pid ?? 0, "script", manual);
-
-      let output = "";
-      child.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
-      child.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
-
-      child.on("exit", (code) => {
-        const status = code === 0 ? "✓" : `❌ (exit ${code})`;
-        logInfo(TAG, `■ Script ${status}: "${entry.command.slice(0, 60)}"`);
-        settleRun(entry, code === 0 ? "success" : "failed", this._current?.startedAt ?? Date.now(), output.slice(0, 200), undefined, undefined, this.trigger());
-        const paused = this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
-        const followUp = entry.followUp;
-        if (code === 0 && output.trim() && followUp) {
-          logInfo(TAG, `■ Gate triggered → enqueuing agent follow-up for "${entry.id}"`);
-          this.clearCurrent();
-          const agentPrompt = followUp.prompt.replace("{{GATE_OUTPUT}}", output.trim());
-          const followUpAgent = followUp.agent && ["task", "professor", "browsie", "coding", "dreamy"].includes(followUp.agent)
-            ? followUp.agent as "task" | "professor" | "browsie" | "coding" | "dreamy"
-            : "task";
-          const agentEntry: ScheduledTask = {
-            id: entry.id + "-followup",
-            enabled: true,
-            priority: "medium",
-            delivery: "silent",
-            kind: "agent",
-            prompt: agentPrompt,
-            agent: followUpAgent,
-          };
-          this.enqueue(agentEntry, onComplete);
-          return;
-        }
-        if (code !== 0) {
-          if (!paused) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
-          addTaskFailure({ taskName: formatTaskLabel(entry.id), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: Date.now(), consecutiveFailures: 1 });
-        }
-        if (!paused) {
-          if (code !== 0 || output.trim()) {
-            onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.command, `${status}\n${(output || "(no output)").slice(0, 500)}`);
-          }
-        }
-        this.clearCurrent();
-        this.processNext();
-      });
-
-      child.on("error", (err) => {
-        logWarn(TAG, `Script spawn failed: ${err.message}`);
-        onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.command, `❌ Failed: ${err.message}`);
-        this.clearCurrent();
-        this.processNext();
-      });
-    } catch (err) {
-      logWarn(TAG, `Script error: ${err instanceof Error ? err.message : String(err)}`);
-      this.clearCurrent();
-      this.processNext();
-    }
+  /** #1517: live stale-run ownership port — delegates to the coordinator. */
+  owns(runId: string): boolean {
+    return this.coordinator.owns(runId);
   }
 
-  private async runAgent(entry: ScheduledTask & { kind: "agent" }, onComplete?: TaskCompleteCallback, manual?: boolean): Promise<void> {
-    if (!manual) {
-      const idleMs = Date.now() - readLastPromptAt();
-      if (idleMs < 90_000) {
-        logInfo(TAG, `⏸ Deferring agent task "${entry.id}" — user active ${Math.round(idleMs / 1000)}s ago`);
-        const count = incrementFailures(entry.id);
-        if (count >= 3) {
-          setAutoPaused(entry.id, true);
-          logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${count} idle-gate deferrals`);
-          this.onTaskPaused?.(parseInt(entry.chatId ?? "0", 10), formatTaskLabel(entry.id), `idle-gate hit ${count}× in a row`);
-        }
-        scheduleRetry(entry);
-        this.clearCurrent();
-        this.processNext();
+  /** #1517: live stale-run cancellation — delegates to the coordinator. */
+  cancel(runId: string, reason: string): "requested" | "not_owned" {
+    return this.coordinator.cancel(runId, reason);
+  }
+
+  enqueue(entry: ScheduledTask, manual?: boolean, reservation?: ActiveTaskRun): string | null {
+    const inFlight = this.findOccurrence(entry.id);
+    // #1517: a supplied reservation rejected before queue ownership transfers
+    // must never remain active_run — terminalize it exactly once.
+    if (inFlight?.where === "current") {
+      if (reservation) this.rejectReservation(entry, reservation, "duplicate-current");
+      return `Already running: "${getEntryMessage(entry).slice(0, 60)}"`;
+    }
+    if (inFlight?.where === "pending") {
+      if (reservation) this.rejectReservation(entry, reservation, "duplicate-queued");
+      return `Already queued: "${getEntryMessage(entry).slice(0, 60)}"`;
+    }
+
+    // #1517: manual callers acquire the reservation at admission so every
+    // executable queued/current job owns an exact run ID before transfer.
+    // A scheduled caller's supplied reservation is authoritative and is never
+    // replaced or re-allocated by executor branches.
+    const owned = reservation ?? this.reserveForEntry(entry, manual);
+    if (!owned) {
+      return `Cannot run: "${getEntryMessage(entry).slice(0, 60)}" — active run in progress`;
+    }
+
+    // #1539: lane selection comes from the durable trigger — manual → manual;
+    // schedule/retry → scheduled. Priority ordering stays within each lane.
+    const lane: RunLane = owned.trigger === "manual" ? "manual" : "scheduled";
+    const laneState = this.lanes[lane];
+    const rank = PRIO_RANK[entry.priority ?? "medium"] ?? 1;
+    let i = 0;
+    try {
+      while (i < laneState.pending.length) {
+        const qRank = PRIO_RANK[laneState.pending[i]!.entry.priority ?? "medium"] ?? 1;
+        if (rank < qRank) break;
+        i++;
+      }
+      laneState.pending.splice(i, 0, { entry, manual, reservation: owned });
+    } catch (err) {
+      logAndSwallow(TAG, "enqueue insert", err);
+      this.rejectReservation(entry, owned, "queue-insertion-failed");
+      return "Queue error: task could not be admitted";
+    }
+    logInfo(TAG, `Enqueued "${entry.id}" (${entry.kind}, ${entry.priority ?? "medium"}${manual ? ", manual" : ""}, ${lane} lane) — ${laneState.pending.length} pending`);
+    logTaskDebug("task_queue_state", { task: entry.id, run: owned.runId }, `pending=${laneState.pending.length} manual=${manual === true} lane=${lane}`);
+    persistState(this.lanes);
+
+    this.processLane(lane);
+    return null;
+  }
+
+  private findOccurrence(entryId: string): { where: "current" | "pending" } | null {
+    for (const lane of LANES) {
+      if (this.lanes[lane].current?.entryId === entryId) return { where: "current" };
+      if (this.lanes[lane].pending.some(j => j.entry.id === entryId)) return { where: "pending" };
+    }
+    return null;
+  }
+
+  /**
+   * #1517: a reservation that never gained queue ownership is terminalized
+   * with a bounded queue-admission detail under its own run ID. The
+   * interruption/cancelled policy clears without retry or failure counting,
+   * so the occurrence ends cleanly and future runs are not blocked.
+   */
+  private rejectReservation(entry: ScheduledTask, run: ActiveTaskRun, detail: string): void {
+    settleRunOnce({
+      entry, run, outcome: "cancelled",
+      diagnostic: makeTaskFailure("interruption", "cancelled", "queued",
+        `queue admission rejected: ${detail}`, "none"),
+      detail: `queue_admission_rejected: ${detail}`,
+    });
+    logWarn(TAG, `Reservation for "${entry.id}" run=${run.runId} rejected at queue admission (${detail}) — settled as cancelled`);
+  }
+
+  /** #1539: dequeue, revalidate, record current, and start without awaiting. */
+  private processLane(lane: RunLane): void {
+    const laneState = this.lanes[lane];
+    if (laneState.current || laneState.pending.length === 0) return;
+    const job = laneState.pending.shift()!;
+    const { entry, manual, reservation } = job;
+
+    // #1517: a queued job may outlive its reservation (live reconciliation
+    // settles expired unowned runs). Never execute side effects for a run
+    // that no longer owns the active reservation.
+    if (reservation) {
+      const state = readState(entry.id);
+      if (!state?.activeRun || state.activeRun.runId !== reservation.runId) {
+        logWarn(TAG, `Job "${entry.id}" run=${reservation.runId} no longer owns the active reservation — skipping execution`);
+        this.processLane(lane);
         return;
       }
     }
-
-    let prompt = entry.prompt ?? "";
-    let dodPaths: string[] = [];
-    if (entry.taskFile) {
-      const task = readTaskFile(entry.taskFile);
-      if (task) {
-        prompt = task.prompt;
-        dodPaths = task.dodPaths;
-      } else {
-        logWarn(TAG, `Falling back to inline message for "${entry.id}"`);
+    const kind = isSystemEntry(entry) ? "system" : entry.kind === "script" ? "script" : entry.kind === "agent" ? "agent" : null;
+    if (kind === null || isReminder(entry)) {
+      // Reminders are settled immediately by checkCron(); a stray queued copy
+      // must not strand its reservation.
+      if (reservation) {
+        settleRunOnce({ entry, run: reservation, outcome: "success", detail: "reminder already delivered" });
       }
+      logInfo(TAG, `Reminder "${entry.id}" already delivered — skipping`);
+      this.processLane(lane);
+      return;
     }
-
-    const contextFile = join(abtarsHome(), "workspace", entry.id, "CONTEXT.md");
-    if (existsSync(contextFile)) {
-      const raw = readFileSync(contextFile, "utf-8").trim();
-      if (raw) {
-        const ctx = raw.length > 30000 ? (logWarn(TAG, `Task context truncated (${raw.length} > 30000)`), raw.slice(0, 30000)) : raw;
-        prompt = `[TASK CONTEXT — your notes from previous runs]\n${ctx}\n\n[TASK]\n${prompt}`;
-        logInfo(TAG, `Injected task context (${ctx.length} chars)`);
-      }
-    }
-
-    logInfo(TAG, `▶ Agent: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
-
-    if (entry.targetUserId) {
-      this.setCurrent(entry, 0, "agent", manual);
-      try {
-        const { spin } = await import("../spin.js");
-        const response = await spin.injectGreeting(entry.targetUserId, prompt);
-        if (response) {
-          settleRun(entry, "success", this._current?.startedAt ?? Date.now(), undefined, undefined, undefined, this.trigger());
-          logInfo(TAG, `✓ Greeting delivered to ${entry.targetUserId}`);
-        } else {
-          settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), "greeting returned no response", undefined, undefined, this.trigger());
-          logWarn(TAG, `Greeting failed for ${entry.targetUserId}`);
-        }
-      } catch (err) {
-        settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err), undefined, undefined, this.trigger());
-        logWarn(TAG, `Greeting error: ${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        this.clearCurrent();
-        this.processNext();
-      }
+    if (!reservation) {
+      logWarn(TAG, `Task "${entry.id}" reached execution without a reservation — skipping`);
+      this.processLane(lane);
       return;
     }
 
-    this.setCurrent(entry, 0, "agent", manual);
+    laneState.current = {
+      entryId: entry.id,
+      message: getEntryMessage(entry).slice(0, 80),
+      pid: 0,
+      startedAt: Date.now(),
+      type: kind,
+      manual,
+      runId: reservation.runId,
+      lane,
+    };
+    persistState(this.lanes);
 
-    const workspace = join(abtarsHome(), "workspace", entry.id);
-    mkdirSync(workspace, { recursive: true });
-    process.env["WORKSPACE"] = workspace;
-
-    const { spin } = await import("../spin.js");
-
-    this.timeout = setTimeout(() => {
-      logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min)`);
-    }, AGENT_TIMEOUT_MS);
-
-    const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
-    const sessionType = (AGENT_SESSION[entry.agent] ?? "T") as import("../spin-types.js").SessionType;
-
-    spin.dispatchAwait({
-      type: sessionType,
-      title: formatTaskLabel(entry.id),
-      goal: prompt,
-      source: "task",
-      priority: entry.priority ?? "MEDIUM",
-      chatId: String(entry.chatId),
-      maxToolRounds: entry.maxToolRounds,
-      delivery: entry.delivery,
-    })
-      .then(({ cardId: boardId, result: response }) => {
-        let cleaned = response || "(no output)";
-        try {
-          const parsed = JSON.parse(cleaned);
-          if (parsed && typeof parsed === "object" && "exit_code" in parsed) {
-            cleaned = parsed.stdout || parsed.stderr || "(task completed)";
-          }
-        } catch (err) { logAndSwallow(TAG, "JSON.parse task output", err); }
-        const summary = cleaned.slice(0, 500);
-        let exitCode = 0;
-        let dodResult = "";
-        if (dodPaths.length > 0) {
-          const dod = checkDoD(dodPaths);
-          exitCode = dod.passed ? 0 : 1;
-          dodResult = `\nDoD: ${dod.passed ? "PASSED" : "FAILED"}\n${dod.details}`;
-          logInfo(TAG, `■ Agent DoD ${dod.passed ? "✓" : "❌"}: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"\n${dod.details}`);
-        } else {
-          logInfo(TAG, `■ Agent completed: "${(entry.prompt ?? entry.taskFile ?? "").slice(0, 60)}"`);
-        }
-
-        const producedFiles = dodPaths.filter(p => existsSync(p));
-        const isReport = entry.delivery === "report";
-        const resultPath = producedFiles.length > 0 ? producedFiles[0] : (isReport ? writeResultFile(entry.id, cleaned) : null);
-        if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
-
-        if (exitCode === 0) {
-          const kanbanSummary = isReport ? summary : cleaned;
-          kanbanComplete(boardId, resultPath ?? null, kanbanSummary);
-        } else {
-          kanbanFail(boardId, `${summary}${dodResult}`);
-        }
-
-        settleRun(entry, exitCode === 0 ? "success" : "failed", this._current?.startedAt ?? Date.now(), `${summary}${dodResult}`, resultPath ?? undefined, boardId, this.trigger());
-        const paused = this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
-        const icon = exitCode === 0 ? "✓" : "❌";
-        if (exitCode !== 0) {
-          if (!paused) this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);
-        }
-        if (!paused) {
-          const producedFiles = dodPaths.filter(p => existsSync(p));
-          onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.prompt ?? "", `${icon} ${summary}${dodResult}`, producedFiles.length > 0 ? producedFiles : undefined);
-        }
-      })
-      .catch((err: unknown) => {
-        const boardId = 0;
-        logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
-        kanbanFail(boardId, err instanceof Error ? err.message : String(err));
-        settleRun(entry, "failed", this._current?.startedAt ?? Date.now(), err instanceof Error ? err.message : String(err), undefined, boardId, this.trigger());
-        const paused = this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
-        if (!paused) {
-          const errMsg = `❌ Failed: ${err instanceof Error ? err.message : String(err)}`;
-          this.tryInjectFailure(entry, errMsg);
-          onComplete?.(parseInt(entry.chatId ?? "0", 10), entry.prompt ?? "", errMsg);
-        }
-      })
-      .finally(() => {
-        this.clearCurrent();
-        this.processNext();
+    // #1539: a start exception settles the owned reservation once and
+    // continues with the next job — the lane must never wedge on a throw.
+    let started: "started" | "stale";
+    try {
+      started = this.coordinator.start(entry, reservation, lane);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `Start failed for "${entry.id}" run=${reservation.runId}: ${msg}`);
+      settleRunOnce({
+        entry, run: reservation, outcome: "failed",
+        diagnostic: makeTaskFailure("execution", "model_error", "executing", msg.slice(0, 500), "none"),
+        detail: msg.slice(0, 500),
+        factAt: Date.now(),
+        onFailure: this.coordinator.failureCallback,
       });
+      laneState.current = null;
+      persistState(this.lanes);
+      this.processLane(lane);
+      return;
+    }
+    if (started === "stale") {
+      logWarn(TAG, `Job "${entry.id}" run=${reservation.runId} lost its reservation before start — lane released`);
+      laneState.current = null;
+      persistState(this.lanes);
+      this.processLane(lane);
+      return;
+    }
+    logTaskDebug("run_admitted", { task: entry.id, run: reservation.runId }, `lane=${lane} kind=${kind}`);
+  }
+
+  /** #1539: lane release on the durable terminal event — run ID must match. */
+  private onRunTerminal(runId: string): void {
+    for (const lane of LANES) {
+      const laneState = this.lanes[lane];
+      if (laneState.current && laneState.current.runId === runId) {
+        laneState.current = null;
+        persistState(this.lanes);
+        logTaskDebug("lane_released", { run: runId }, `lane=${lane}`);
+        this.processLane(lane);
+        return;
+      }
+    }
+    // Terminal for a run this queue no longer tracks (recovery repair of an
+    // already-cleared lane, duplicate/late callback): pump defensively.
+    for (const lane of LANES) this.processLane(lane);
+  }
+
+  private reserveForEntry(entry: ScheduledTask, manual?: boolean): ActiveTaskRun | null {
+    const now = Date.now();
+    const res = reserveRun(entry.id, {
+      runId: createRunId(entry.id),
+      groupId: `${entry.id}:group:${now}`,
+      attempt: manual ? 1 : (readState(entry.id)?.retrying ? 2 : 1),
+      trigger: manual ? "manual" : "schedule",
+      occurrenceAt: now,
+      deadlineAt: now + runCeilingMs(),
+    });
+    if (res.ok) return res.run;
+    logWarn(TAG, `Cannot run "${entry.id}": active run in progress ${res.active.runId}`);
+    return null;
   }
 }
+
+const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };

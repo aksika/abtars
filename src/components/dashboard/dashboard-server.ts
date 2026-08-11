@@ -281,13 +281,21 @@ export class DashboardServer implements IDashboardSlot {
         return;
       }
 
-      // GET /api/cron — list all cron entries
+      // GET /api/cron — list all cron entries with #1520 incident/pause data
       if (method === "GET" && pathname === "/api/cron") {
         if (!this.deps.authGate.guard(req, res)) return;
         try {
           const { readEntries } = await import("../tasks/task-store.js");
+          const { getAllViews } = await import("../tasks/task-service.js");
+          const views = getAllViews(readEntries());
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: true, entries: readEntries() }));
+          res.end(JSON.stringify({ ok: true, entries: views.map(v => ({
+            definition: v.definition,
+            state: v.state,
+            lastIncident: v.lastIncident,
+            pausedAt: v.pausedAt,
+            resume: v.resumeCommand,
+          })) }));
         } catch (err) {
           this.sendError(res, 500, err);
         }
@@ -388,19 +396,27 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
 // ── Cron Control ────────────────────────────────────────────────────────────
 
 import { readEntry as cronReadEntry } from "../tasks/task-store.js";
-import { setAutoPaused, updateState } from "../tasks/task-state-store.js";
+import { readEntries as cronReadEntries } from "../tasks/task-store.js";
 
 function handleCronAction(id: string, action: string): { ok: boolean; error?: string } {
   const entry = cronReadEntry(id);
   if (!entry) return { ok: false, error: `Entry ${id} not found` };
 
   if (action === "pause") {
-    setAutoPaused(id, true);
+    // #1609: one service operation for dashboard, chat, and CLI pause — it
+    // refreshes pausedAt to now so an already-paused task gets a fresh
+    // 12-hour cooldown.
+    const { pauseTask } = require("../tasks/task-service.js") as typeof import("../tasks/task-service.js");
+    pauseTask(id, cronReadEntries());
   } else if (action === "resume") {
-    setAutoPaused(id, false);
+    // #1520: one service operation for dashboard, chat, and CLI resume.
+    const { resumeAutoPaused } = require("../tasks/task-service.js") as typeof import("../tasks/task-service.js");
+    const result = resumeAutoPaused(id, cronReadEntries());
+    if (result === "already_running") return { ok: false, error: `Entry ${id} is currently running` };
   } else if (action === "trigger") {
-    setAutoPaused(id, false);
-    updateState(id, { nextRunAt: Date.now() - 1000 });
+    // #1520: one service run-now operation clears pause and counters.
+    const { triggerNow } = require("../tasks/task-service.js") as typeof import("../tasks/task-service.js");
+    triggerNow(id, cronReadEntries());
   }
 
   return { ok: true };

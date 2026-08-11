@@ -1,18 +1,36 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CronQueue } from "./task-queue.js";
+import { ScheduledRunCoordinator } from "./scheduled-run-coordinator.js";
 import type { ScheduledTask } from "./task-types.js";
 
 vi.mock("./task-state-store.js", () => ({
+  createRunId: vi.fn((taskId: string) => `${taskId}_test-run`),
   incrementFailures: vi.fn().mockReturnValue(0),
   resetFailures: vi.fn(),
   setAutoPaused: vi.fn(),
   advanceNextRun: vi.fn(),
+  nextRunFromSchedule: vi.fn().mockReturnValue({ nextRunAt: Date.now() + 300000 }),
   updateState: vi.fn(),
-  readState: vi.fn(() => null),
+  readState: vi.fn(() => ({
+    nextRunAt: Date.now() - 1000,
+    consecutiveFailures: 0,
+    consecutiveDeferrals: 0,
+    autoPaused: false,
+    activeRun: { runId: "sys-run", groupId: "sys-group", attempt: 1, trigger: "schedule", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() },
+  })),
+  reserveRun: vi.fn().mockReturnValue({ ok: true, run: { runId: "sys-run", groupId: "sys-group", attempt: 1, trigger: "schedule", occurrenceAt: Date.now(), reservedAt: Date.now(), deadlineAt: Date.now() + 60000, phase: "reserved", lastProgressAt: Date.now() } }),
+  updateActiveRun: vi.fn().mockReturnValue(true),
+  advanceRun: vi.fn().mockReturnValue("advanced"),
+  requestRunTerminal: vi.fn().mockReturnValue("requested"),
+  settleActiveRun: vi.fn().mockReturnValue(true),
+  setRunOutcome: vi.fn(),
 }));
 
 vi.mock("./task-history-store.js", () => ({
   appendRun: vi.fn(),
+  appendRunOnce: vi.fn().mockReturnValue("sys-run"),
+  hasRun: vi.fn().mockReturnValue(false),
+  getRun: vi.fn().mockReturnValue(undefined),
 }));
 
 vi.mock("./task-store.js", () => ({
@@ -22,6 +40,16 @@ vi.mock("./task-store.js", () => ({
 
 vi.mock("../transport/bridge-lock-transport.js", () => ({
   readLastPromptAt: vi.fn().mockReturnValue(0),
+}));
+
+// Prevent runAgent's dynamic import of the real spin module (which pulls
+// in user-registry → env-schema) from resolving after environment teardown.
+vi.mock("../spin.js", () => ({
+  spin: {
+    dispatchAwait: vi.fn().mockResolvedValue({ cardId: 0, result: "done" }),
+    dispatch: vi.fn(),
+    injectGreeting: vi.fn().mockResolvedValue("ok"),
+  },
 }));
 
 function systemEntry(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
@@ -42,7 +70,7 @@ describe("CronQueue.runSystem", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    queue = new CronQueue("kiro-cli", ".");
+    queue = new CronQueue(new ScheduledRunCoordinator());
   });
 
   it("accepts and runs a system entry", () => {

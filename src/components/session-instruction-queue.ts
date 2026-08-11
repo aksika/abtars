@@ -4,6 +4,14 @@ import { isHollow } from "./spin-sessions.js";
 
 const TAG = "steer-queue";
 
+/**
+ * #1445: Narrowest shape actually read/written by markConsumed/failAfterDelivery —
+ * only session.instructionQueue. Callers that don't have a full ManagedSession
+ * (e.g. pi-core-host.ts, which is not yet wired to a real Spin session) can pass
+ * this instead of fabricating a fake ManagedSession via an unsafe cast.
+ */
+export type InstructionQueueHolder = Pick<ManagedSession, "instructionQueue">;
+
 const MAX_QUEUE_SIZE = 20;
 const MAX_BYTES_PER_ITEM = 4 * 1024;
 const MAX_TOTAL_BYTES = 32 * 1024;
@@ -188,7 +196,7 @@ export function markDelivered(lease: InstructionLease): void {
  * #1444: Mark delivered instructions as consumed (success).
  * Removes from queue and publishes steer.consumed.
  */
-export function markConsumed(lease: InstructionLease, session: ManagedSession): void {
+export function markConsumed(lease: InstructionLease, session: InstructionQueueHolder): void {
   const ids: string[] = [];
   for (const inst of lease.instructions) {
     if (inst.state === "delivered") {
@@ -223,7 +231,7 @@ export function restoreBeforeDelivery(lease: InstructionLease): void {
  * #1444: Mark delivered instructions as failed (delivery uncertain after handoff).
  * Publishes steer.failed and removes from queue.
  */
-export function failAfterDelivery(lease: InstructionLease, session: ManagedSession, reason: string): void {
+export function failAfterDelivery(lease: InstructionLease, session: InstructionQueueHolder, reason: string): void {
   const ids: string[] = [];
   for (const inst of lease.instructions) {
     if (inst.state === "delivered") {

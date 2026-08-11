@@ -54,15 +54,32 @@ interface NerveEmitter {
   fire(event: "card:queued" | "card:running" | "card:done" | "card:failed" | "card:delivered", cardId: number): void;
 }
 
+/** #1618: database-only receiver project admission. No Nerve/Spin/network/timer side effects. */
+interface ReceiverProjectAdmission {
+  ensureAwaitingContract(projectCardId: number): boolean;
+}
+
+interface Db {
+  prepare(sql: string): {
+    run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+    get(...params: unknown[]): Record<string, unknown> | undefined;
+    all(...params: unknown[]): Record<string, unknown>[];
+  };
+  exec(sql: string): void;
+  transaction<T>(fn: () => T): T;
+}
+
 export class PeerHelpStore {
-  private db: import("better-sqlite3").Database;
+  private db: Db;
   private kanban: KanbanBoard;
   private nerve: NerveEmitter;
+  private admission?: ReceiverProjectAdmission;
 
-  constructor(db: import("better-sqlite3").Database, kanban: KanbanBoard, nerve: NerveEmitter) {
+  constructor(db: Db, kanban: KanbanBoard, nerve: NerveEmitter, admission?: ReceiverProjectAdmission) {
     this.db = db;
     this.kanban = kanban;
     this.nerve = nerve;
+    this.admission = admission;
     this.migrate();
   }
 
@@ -160,6 +177,15 @@ export class PeerHelpStore {
       const cardId = Number(insert.lastInsertRowid);
       if (!cardId) throw new Error("Failed to insert help card");
 
+      // #1618: admit the receiver-owned project in the same transaction so the
+      // peer root is supervised from birth — no window where the card exists
+      // without its awaiting_contract supervision row. Generic admission must
+      // fail closed if production wiring omitted the supervision port.
+      if (!this.admission) throw new Error("receiver project admission unavailable");
+      if (!this.admission.ensureAwaitingContract(cardId)) {
+        throw new Error(`failed to admit receiver project ${cardId}`);
+      }
+
       this.db.prepare(
         `UPDATE peer_help_requests
          SET state = 'accepted', contribution_ref = ?, local_card_id = ?, response_json = ?, updated_at = datetime('now')
@@ -167,7 +193,7 @@ export class PeerHelpStore {
       ).run(contributionRef, cardId, JSON.stringify(response), reservation.originPeer, reservation.requestId);
 
       return cardId;
-    })();
+    });
 
     // Fire only after commit — a rolled-back transaction must not notify consumers.
     this.nerve.fire("card:queued", result);
@@ -195,7 +221,7 @@ export class PeerHelpStore {
          SET state = 'accepted', contribution_ref = ?, local_run_id = ?, response_json = ?, updated_at = datetime('now')
          WHERE origin_peer = ? AND request_id = ?`
       ).run(contributionRef, runId, JSON.stringify(response), reservation.originPeer, reservation.requestId);
-    })();
+    });
   }
 
   completeDecision(reservation: { originPeer: string; requestId: string }, decision: HelpDecision, response: PeerHelpResponseV1): void {
@@ -285,5 +311,16 @@ export class PeerHelpStore {
     this.db.prepare(
       `UPDATE peer_help_requests SET updated_at = datetime('now') WHERE origin_peer = ? AND request_id = ?`
     ).run(originPeer, requestId);
+  }
+
+  /** #1357: Retrieve stored response for a help request (used for reconciliation). */
+  getStoredResponse(originPeer: string, requestId: string): PeerHelpResponseV1 | null {
+    const row = this.db.prepare(
+      "SELECT state, response_json FROM peer_help_requests WHERE origin_peer = ? AND request_id = ?"
+    ).get(originPeer, requestId) as Pick<PeerHelpRow, "state" | "response_json"> | undefined;
+    if (!row || !row.response_json) return null;
+    try {
+      return JSON.parse(row.response_json) as PeerHelpResponseV1;
+    } catch { return null; }
   }
 }

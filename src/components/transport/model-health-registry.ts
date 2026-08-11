@@ -193,6 +193,11 @@ export class ModelHealthRegistry {
     return Math.round(b.level * 100);
   }
 
+  /** #1297: exact sticky credit-failure query for one model/endpoint pair. */
+  isCreditFailed(model: string, endpoint: string): boolean {
+    return this.buckets.get(`${endpoint}|${model}`)?.creditsFailed === true;
+  }
+
   resetAll(): void {
     this.buckets.clear();
   }
@@ -200,7 +205,7 @@ export class ModelHealthRegistry {
 
 /** Classify HTTP status to error kind. */
 export function classifyError(status: number, message?: string): ErrorKind {
-  if (status === 402 && message?.includes("credits")) return "credits";
+  if (status === 402 && message?.toLowerCase().includes("credit")) return "credits";
   if (status === 429 || status === 402) return "rate_limit";
   if (status === 404 && message && /image input|No endpoints found/i.test(message)) return "transient";
   if (status === 401 || status === 403 || status === 404) return "auth";

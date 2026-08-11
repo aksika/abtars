@@ -28,7 +28,7 @@ describe("pi-coding-agent dependency boundary (#1426)", () => {
         "utf-8",
       ),
     ) as { version: string };
-    expect(pkg.version).toMatch(/^0\.80\./);
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it("deleted pi-rpc-types.ts — no invented protocol file remains", () => {

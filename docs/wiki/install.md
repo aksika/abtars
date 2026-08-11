@@ -111,7 +111,6 @@ If `abtars` still behaves like the old version after updating, a stale `npm inst
 ```
 ~/.local/bin/
 ├── abtars               # CLI wrapper (overwritten on every deploy)
-├── abtars-browser       # browser subprocess wrapper
 ├── abtars-task          # task subprocess wrapper
 └── ...                  # other tool wrappers
 

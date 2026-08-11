@@ -1,6 +1,7 @@
 /**
- * Re-export of deploy-lib primitives. Local copy — synchronized with abmind's
- * deploy-lib manually. See abproject/docs/shared-utilities.md.
+ * Re-export of deploy-lib primitives. Local copy — see abproject/docs/shared-utilities.md
+ * for the SHARED/PARAMETERIZED-SHARED classification and abproject/docs/shared-utils.lock
+ * for the drift guard hashes.
  */
 
 export {
@@ -15,6 +16,7 @@ export {
   emptyManifest,
   type Manifest,
   acquireLock,
+  type AcquireLockOptions,
   inspectLock,
   LockHeldError,
   type LockContent,

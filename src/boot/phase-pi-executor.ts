@@ -1,7 +1,7 @@
 import { logInfo, logWarn, logError } from "../components/logger.js";
 import type { BootCtx } from "./context.js";
 import { resolvePiInstallation } from "../components/pi-installation.js";
-import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
+import { PI_COMPATIBILITY, formatPiPinWarning } from "../config/pi-compatibility.js";
 
 const TAG = "boot-pi";
 
@@ -27,13 +27,18 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const piResult = resolvePiInstallation();
   if (piResult.state !== "compatible") {
     const obsVer = piResult.state === "absent" ? "" : ` (version ${piResult.observedVersion ?? "?"})`;
-    logWarn(TAG, `Pi executor disabled — Pi ${piResult.state}${obsVer}. Minimum required: ${PI_COMPATIBILITY.minimumPiVersion}`);
+    logWarn(TAG, `Pi executor disabled — Pi ${piResult.state}${obsVer}. Pinned version: ${PI_COMPATIBILITY.pinnedVersion}`);
     if (piResult.state !== "absent" && piResult.remediation) logWarn(TAG, piResult.remediation);
     return;
   }
   logInfo(TAG, `Pi ${piResult.installation.version} (${piResult.installation.source})`);
+  if (piResult.installation.pinStatus === "above-pin") {
+    const pinWarning = formatPiPinWarning(piResult.installation.version);
+    if (pinWarning) logWarn(TAG, pinWarning.split("\n").join("; "));
+  }
 
   const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
+  const { kanbanTransition, sqliteNow } = await import("../components/tasks/kanban-board.js");
 
   let taskDb: import("../components/tasks/kanban-board.js").TaskDatabase;
   try {
@@ -75,26 +80,87 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
 
   const eventProducer = new RemotePiEventProducer({ store });
   const deliveryManager = new RemotePiDeliveryManager({ store, eventProducer, localPeerName });
-  const controlHandler = new RemotePiControlHandler({ store, service });
-  const originReducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb));
+  const controlHandler = new RemotePiControlHandler({ store, service, eventProducer });
+  const originReducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb), (projection, event) => {    // #1358: keep the single #1357 origin card as the user-visible projection.
+    // Kanban has no interrupted/awaiting-input states, so those remain active.
+    // On `resumed` the producer sends run.status="queued", so the projection
+    // re-asserts `queued` — not `running` as an earlier draft assumed.
+    const cardStatus = projection.latest_status === "completed"
+      ? "done"
+      : ["failed", "cancelled"].includes(projection.latest_status)
+        ? "failed"
+        : projection.latest_status === "queued" ? "queued" : "running";
+    // The event's remote_card_id is the owner's Pi card. Resolve the origin-side
+    // delegation card by the durable remote run reference instead of ever
+    // mutating the owner's card ID in this process.
+    const localCard = (taskDb.prepare(`SELECT id, notes FROM kanban_board WHERE source = 'peer'`).all() as Array<{ id: number; notes?: string | null }>).find((row) => {
+      try { return (JSON.parse(row.notes ?? "{}") as Record<string, unknown>).remote_run_id === projection.run_id; } catch { return false; }
+    });
+    if (!localCard) return;
+    // #1590: through the single transition helper. from is every status the
+    // computed target legally accepts; same-status events re-assert (fields
+    // applied, no journal row). The projection fired no nerve events before
+    // and emits none now.
+    const fields: Record<string, unknown> = {};
+    if (["done", "failed"].includes(cardStatus)) fields.completed_at = sqliteNow();
+    if (projection.result_summary !== undefined) fields.result_summary = projection.result_summary;
+    if (projection.error_summary !== undefined) fields.error = projection.error_summary;
+    if (event.kind === "resumed") {
+      fields.result_summary = null;
+      fields.error = null;
+      fields.completed_at = null;
+    }
+    // from is every status the computed target legally accepts per the #1590
+    // matrix — including the pairs the task-run-settler path added
+    // (queued→done, done→failed), so a queued/failed delegation card receiving
+    // a late event re-settles instead of throwing.
+    const FROM_FOR_TARGET: Record<string, readonly string[]> = {
+      queued: ["running", "failed", "done"],
+      running: ["queued"],
+      done: ["running", "delivering", "queued"],
+      failed: ["queued", "running", "done"],
+    };
+    // `to` is appended so same-status events re-assert (fields applied, no
+    // journal row) instead of no-op'ing — the design's reassertion contract.
+    const from = [...(FROM_FOR_TARGET[cardStatus] ?? ["queued"]), cardStatus];
+    kanbanTransition({
+      cardId: localCard.id,
+      from: [...new Set(from)] as readonly import("../components/tasks/kanban-board.js").CardStatus[],
+      to: cardStatus,
+      actor: "pi_origin_projection",
+      reason: "remote origin projection",
+      fields,
+      emit: false,
+    }, taskDb);
+  });
 
   setRemotePiComponents({ eventProducer, delivery: deliveryManager, controlHandler, originReducer });
 
-  // Wire the PiExecutor transition hook to produce lifecycle events.
-  // Only runs for delegated runs (origin_peer set).
+  // #1358 review — mechanism A: the store emits lifecycle events inside the
+  // SAME transaction as each public run transition (see pi-run-store.ts
+  // transition methods). The transition hooks below therefore only trigger
+  // opportunistic WSS push — they never produce events after commit, because
+  // a crash between commit and append would lose the event, and snapshot
+  // scanning is not a durability mechanism.
+  store.setRemoteEventEmitter(eventProducer);
+
+  // Wire the PiExecutor transition hook to trigger delivery only.
   executor.onTransition((runId, _fromStatus, _toStatus) => {
     const run = store.get(runId);
     if (!run || !run.originPeer) return; // not a delegated run
-    eventProducer.produceFromTransition({
+    deliveryManager.pushEvents(runId, run.originPeer!).catch(() => {});
+  });
+
+  executor.onProgress((runId, progressPayload) => {
+    const run = store.get(runId);
+    if (!run?.originPeer) return;
+    eventProducer.produceProgress({
       run,
-      previousStatus: _fromStatus,
       originPeer: run.originPeer,
-      originRequestId: run.originChatId ?? run.id,
-    }).then(() => {
-      // Attempt immediate WS push after producing
-      deliveryManager.pushEvents(runId, run.originPeer!).catch(() => {});
-    }).catch(err => {
-      logError(TAG, `Failed to produce lifecycle event for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+      originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+      progressPayload,
+    }).then(() => deliveryManager.pushEvents(runId, run.originPeer!).catch(() => {})).catch(err => {
+      logError(TAG, `Failed to produce progress event for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
     });
   });
 
@@ -118,16 +184,35 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     requestReconcile(cardId);
   }
 
+  // #1358: Startup recovery — push unacknowledged remote Pi events for all
+  // delegated runs. On restart, events produced before the crash are still
+  // in the outbox (unacknowledged). This scan ensures they reach the origin
+  // after the first WSS connection becomes available.
+  try {
+    await eventProducer.recoverMissingEvents();
+    const pending = store.findRunsWithUnacknowledgedEvents();
+    if (pending.length > 0) {
+      logInfo(TAG, `Remote Pi recovery: ${pending.length} run(s) with unacknowledged events`);
+      for (const row of pending) {
+        deliveryManager.pushEvents(row.run_id, row.origin_peer).catch(() => {});
+      }
+    }
+  } catch (err) {
+    logError(TAG, `Remote Pi event recovery scan failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // #1360: Register Pi executor capabilities in the peer-health store
   try {
     const { getHealthStore } = await import("../components/peer-transport/peer-health.js");
-    const store = getHealthStore();
+    const healthStore = getHealthStore();
     const capValues: string[] = ["pi-executor"];
     for (const alias of Object.keys(config.workspaceAliases)) {
       const normalized = alias.toLowerCase().replace(/[^a-z0-9_.\-]/g, "-");
       capValues.push(`workspace:${normalized}`);
     }
-    store.register("pi-executor-boot", capValues);
+    // #1357: Capture the disposer for clean withdrawal on shutdown
+    const disposePiCaps = healthStore.register("pi-executor-boot", capValues);
+    ctx._piCapDisposer = disposePiCaps;
   } catch { /* best effort */ }
 
   logInfo(TAG, `Pi executor ready (${config.command}, ${Object.keys(config.workspaceAliases).length} aliases)`);

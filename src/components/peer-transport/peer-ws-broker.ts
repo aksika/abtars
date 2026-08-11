@@ -1,10 +1,37 @@
 import WebSocket from "ws";
+import { randomBytes } from "node:crypto";
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import { signRequest, verifyRequest } from "./peer-auth.js";
+import { signWsRequest, verifyWsRequestSignature } from "./peer-auth.js";
+import { PeerNonceStore } from "./peer-nonce-store.js";
 import { loadPeerConfig } from "../peer-config.js";
 import { WsOutboxStore } from "./ws-outbox-store.js";
 import { join } from "node:path";
+import type { PeerRouteInfo } from "./interface.js";
 import { abtarsHome } from "../../paths.js";
+
+// ── Exported bounds (#1390) ─────────────────────────────────────────────────
+export const MAX_FRAME_BYTES = 1_048_576;  // 1 MiB raw WSS frame
+export const MAX_ID_BYTES = 64;            // UUID or compact ID
+export const MAX_METHOD_BYTES = 48;        // "help.request.v1" length
+export const MAX_PEER_ID_BYTES = 128;      // peer name length
+export const MAX_NONCE_BYTES = 64;         // hex-encoded 32-byte nonce
+export const MAX_SIG_BYTES = 128;          // base64 Ed25519 sig
+export const MAX_BODY_BYTES = 524_288;     // 512 KiB body
+export const MAX_TIMESTAMP_STR_BYTES = 16; // "9999999999"
+export const HELP_METHODS = new Set(["help.request.v1", "help.status.v1", "help.withdraw.v1", "help.event.v1"]);
+export const PI_REQUEST_METHODS = new Set(["pi.events.list.v1", "pi.events.ack.v1", "pi.control.v1"]);
+
+const WIRE_TOKEN_RE = /^[A-Za-z0-9._:-]+$/;
+const NONCE_RE = /^[0-9a-f]{32}$/;
+const SIG_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function isBoundedToken(value: unknown, maxBytes: number): value is string {
+  return typeof value === "string" && value.length > 0 && utf8Bytes(value) <= maxBytes && WIRE_TOKEN_RE.test(value);
+}
 
 export type PeerSocketDirection = "accepted" | "outbound";
 
@@ -48,7 +75,6 @@ interface PeerState {
   sockets: PeerSocketRegistration[];
   waiters: Map<string, PendingWaiter>;
   inFlight: InFlight | null;
-  nextGen: number;
   hasRoute: boolean; // tracks whether at least one OPEN socket existed
 }
 
@@ -59,6 +85,9 @@ export class PeerWsBroker {
   private requestHandler: PeerRequestHandler | null = null;
   private pushHandler: PeerPushHandler | null = null;
   private routeListeners: RouteListener[] = [];
+  private nonceStore: PeerNonceStore | null = null;
+  private nextGen = 1; // global monotonic — survives peer state cleanup
+  private peerActivity = new Map<string, number>(); // peer → lastActivityAt
 
   registerRequestHandler(handler: PeerRequestHandler): void {
     this.requestHandler = handler;
@@ -100,13 +129,13 @@ export class PeerWsBroker {
         maxEntryBytes: OUTBOX_MAX_ENTRY_BYTES,
         maxFileBytes: OUTBOX_MAX_FILE_BYTES,
       });
-      state = { outbox, sockets: [], waiters: new Map(), inFlight: null, nextGen: 1, hasRoute: false };
+      state = { outbox, sockets: [], waiters: new Map(), inFlight: null, hasRoute: false };
       this.peers.set(peer, state);
     }
 
     const hadRoute = state.hasRoute;
 
-    const generation = state.nextGen++;
+    const generation = this.nextGen++;
     const reg: PeerSocketRegistration = {
       peer,
       direction,
@@ -128,6 +157,8 @@ export class PeerWsBroker {
     socket.on("error", () => {
       this.detachSocket(peer, direction, generation);
     });
+
+    this.peerActivity.set(peer, Date.now());
 
     // #1459: pump pending outbox entries on every attach — resumes pending
     // entries retained across a zero-socket interval.
@@ -170,6 +201,21 @@ export class PeerWsBroker {
     return state.sockets.some(s => s.socket.readyState === WebSocket.OPEN);
   }
 
+  /** Read-only route info for the given peer. Returns null if peer has never been seen. */
+  getPeerRouteInfo(peer: string): PeerRouteInfo | null {
+    const state = this.peers.get(peer);
+    if (!state) return this.peerActivity.has(peer)
+      ? { hasRoute: false, direction: "none", connectedAt: null, lastActivityAt: this.peerActivity.get(peer)! }
+      : null;
+    const openSockets = state.sockets.filter(s => s.socket.readyState === WebSocket.OPEN);
+    if (openSockets.length === 0) {
+      return { hasRoute: false, direction: "none", connectedAt: null, lastActivityAt: this.peerActivity.get(peer) ?? null };
+    }
+    const direction = openSockets.some(s => s.direction === "accepted") ? "accepted" : "outbound";
+    const connectedAt = Math.min(...openSockets.map(s => s.connectedAt));
+    return { hasRoute: true, direction, connectedAt, lastActivityAt: this.peerActivity.get(peer) ?? null };
+  }
+
   async sendRequest<T>(peer: string, method: string, payload: unknown): Promise<T> {
     const state = this.peers.get(peer);
     if (!state) throw new Error(`No peer state for ${peer}`);
@@ -192,7 +238,22 @@ export class PeerWsBroker {
     if (!PUSH_ALLOWLIST.has(method)) return false;
     const socket = this.bestSocket(peer);
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-    socket.send(JSON.stringify({ type: "push", method, payload }));
+    if (method === "pi.lifecycle.v1") {
+      const config = loadPeerConfig();
+      const requestId = `push_${randomBytes(16).toString("hex")}`;
+      const body = JSON.stringify(payload);
+      const auth = signWsRequest(
+        config.self.name,
+        requestId,
+        method,
+        `/${method}`,
+        body,
+        config.self.signingKey,
+      );
+      socket.send(JSON.stringify({ type: "push", version: 1, method, id: requestId, body, auth }));
+    } else {
+      socket.send(JSON.stringify({ type: "push", method, payload }));
+    }
     return true;
   }
 
@@ -278,7 +339,9 @@ export class PeerWsBroker {
     }
   }
 
-  private handleMessage(peer: string, raw: string, _gen: number): void {
+  private handleMessage(peer: string, raw: string, gen: number): void {
+    // Reject oversized raw frame before parsing
+    if (utf8Bytes(raw) > MAX_FRAME_BYTES) return;
     try {
       const msg = JSON.parse(raw);
 
@@ -307,69 +370,194 @@ export class PeerWsBroker {
       }
 
       if (msg.type === "push") {
+        if (msg.method === "pi.lifecycle.v1") {
+          const config = loadPeerConfig();
+          const peerEntry = config.peers[peer];
+          const auth = msg.auth;
+          if (
+            msg.version !== 1 ||
+            typeof msg.id !== "string" ||
+            typeof msg.body !== "string" ||
+            utf8Bytes(msg.body) > MAX_BODY_BYTES ||
+            !auth || auth.peerId !== peer ||
+            !peerEntry?.verifyKey
+          ) return;
+          const sigResult = verifyWsRequestSignature(
+            { peerId: auth.peerId, requestId: msg.id, ts: String(auth.ts ?? ""), nonce: auth.nonce, sig: auth.sig },
+            msg.method,
+            `/${msg.method}`,
+            msg.body,
+            peerEntry.verifyKey,
+          );
+          if (!sigResult.ok) return;
+          if (!this.nonceStore) {
+            try { this.nonceStore = new PeerNonceStore(); } catch { return; }
+          }
+          const claim = this.nonceStore.claim(peer, auth.nonce);
+          if (!claim.ok) return;
+          this.peerActivity.set(peer, Date.now());
+          try {
+            this.pushHandler?.(peer, msg.method, JSON.parse(msg.body));
+          } catch { /* malformed lifecycle payload */ }
+          return;
+        }
         this.pushHandler?.(peer, msg.method, msg.payload);
         return;
       }
 
       if (msg.type !== "request") return;
 
-      this.handleRequest(peer, msg);
+      this.handleRequest(peer, msg, gen);
     } catch { /* malformed frame */ }
   }
 
-  private async handleRequest(peer: string, msg: { id?: string; method: string; payload: unknown }): Promise<void> {
-    if (!msg.method) return;
+  /** #1390: v1 request handler with full authentication pipeline. */
+  private async handleRequest(peer: string, msg: any, gen: number): Promise<void> {
+    // 1. Validate type/version/bounded fields/closed method membership
+    if (msg.version !== 1) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request version");
+      return;
+    }
+    if (!isBoundedToken(msg.id, MAX_ID_BYTES)) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request ID");
+      return;
+    }
+    if (typeof msg.method !== "string" || utf8Bytes(msg.method) > MAX_METHOD_BYTES) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request method");
+      return;
+    }
+    if (!HELP_METHODS.has(msg.method) && !PI_REQUEST_METHODS.has(msg.method)) {
+      this.rejectRequest(peer, msg, gen, "unsupported_method", "Unsupported request method");
+      return;
+    }
+    if (typeof msg.body !== "string" || utf8Bytes(msg.body) > MAX_BODY_BYTES) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request body");
+      return;
+    }
+    const body = msg.body;
+    const auth = msg.auth;
+    if (!auth || typeof auth !== "object" || Array.isArray(auth)) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request authentication");
+      return;
+    }
+    if (!isBoundedToken(auth.peerId, MAX_PEER_ID_BYTES)) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request peer");
+      return;
+    }
+    if (typeof auth.ts !== "string" || !/^\d{1,16}$/.test(auth.ts) || utf8Bytes(auth.ts) > MAX_TIMESTAMP_STR_BYTES) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request timestamp");
+      return;
+    }
+    if (typeof auth.nonce !== "string" || utf8Bytes(auth.nonce) > MAX_NONCE_BYTES || !NONCE_RE.test(auth.nonce)) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request nonce");
+      return;
+    }
+    if (typeof auth.sig !== "string" || utf8Bytes(auth.sig) > MAX_SIG_BYTES || auth.sig.length % 4 !== 0 || !SIG_RE.test(auth.sig)) {
+      this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request signature");
+      return;
+    }
+
+    // 2. Signed peerId must match socket identity
+    if (auth.peerId !== peer) {
+      this.sendError(peer, msg.id, "auth_failed", "Peer identity mismatch", gen);
+      return;
+    }
+
+    // 3. Look up enrolled key (must exist for this peer)
+    const config = loadPeerConfig();
+    const peerEntry = config.peers[peer];
+    if (!peerEntry?.verifyKey) {
+      this.sendError(peer, msg.id, "auth_failed", "Peer not enrolled", gen);
+      return;
+    }
+
+    // 4. Verify Ed25519 signature (WSS domain, no nonce check yet)
+    const path = `/${msg.method}`;
+    const sigResult = verifyWsRequestSignature(
+      { peerId: auth.peerId, requestId: msg.id, ts: auth.ts, nonce: auth.nonce, sig: auth.sig },
+      msg.method,
+      path,
+      body,
+      peerEntry.verifyKey,
+    );
+    if (!sigResult.ok) {
+      this.sendError(peer, msg.id, "auth_failed", `Request auth failed: ${sigResult.reason}`, gen);
+      return;
+    }
+
+    // 5. Atomic nonce claim (after crypto, before dispatch)
+    if (!this.nonceStore) {
+      try {
+        this.nonceStore = new PeerNonceStore();
+      } catch {
+        this.sendError(peer, msg.id, "auth_failed", "Store error", gen);
+        return;
+      }
+    }
+    const claimResult = this.nonceStore.claim(auth.peerId, auth.nonce);
+    if (!claimResult.ok) {
+      this.sendError(peer, msg.id, "auth_failed", claimResult.reason === "replay" ? "Nonce replay" : "Store error", gen);
+      return;
+    }
+
+    // 6. Parse body once, after authentication
+    let payload: unknown;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      this.sendError(peer, msg.id, "invalid_frame", "Malformed body", gen);
+      return;
+    }
+
+    // 7. Check handler exists (after auth, before dispatch — never leaks
+    //    handler state before authentication succeeds)
     if (!this.requestHandler) {
       logWarn("peer-broker", `No request handler registered for ${peer}:${msg.method}`);
       return;
     }
 
-    const config = loadPeerConfig();
-    const peerEntry = config.peers[peer];
-    if (!peerEntry?.verifyKey) {
-      this.sendError(peer, msg.id, "unknown_peer", "Peer not enrolled");
-      return;
-    }
+    this.peerActivity.set(peer, Date.now());
 
-    const authFields = ["X-Peer-Id", "X-Peer-Ts", "X-Peer-Nonce", "X-Peer-Sig"];
-    const headers: Record<string, string> = {};
-    for (const f of authFields) {
-      if (typeof (msg as any)[f] === "string") headers[f] = (msg as any)[f];
-    }
-
-    const path = `/${msg.method}`;
-    const body = typeof msg.payload === "string" ? msg.payload : JSON.stringify(msg.payload ?? {});
-    const authResult = verifyRequest(headers, "POST", path, body, peerEntry.verifyKey);
-    if (!authResult.ok) {
-      this.sendError(peer, msg.id, "auth_failed", `Request auth failed: ${authResult.reason}`);
-      return;
-    }
-
+    // 8. Dispatch to handler
     try {
-      const result = await this.requestHandler(peer, msg.method, msg.payload, msg.id ?? "");
-      this.sendResponse(peer, msg.id, result);
+      const result = await this.requestHandler(peer, msg.method, payload, msg.id);
+      this.sendResponse(peer, msg.id, result, gen);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logDebug("peer-broker", `Handler error for ${peer}:${msg.method}: ${message}`);
-      this.sendError(peer, msg.id, "handler_error", message);
+      this.sendError(peer, msg.id, "handler_error", message, gen);
     }
   }
 
-  private sendResponse(peer: string, frameId: string | undefined, payload: unknown): void {
-    const socket = this.bestSocket(peer);
-    if (!socket) return;
+  private sendResponse(peer: string, frameId: string | undefined, payload: unknown, gen?: number): void {
+    const socket = gen !== undefined ? this.socketByGeneration(peer, gen) : this.bestSocket(peer);
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({ type: "response", id: frameId, payload }));
   }
 
-  private sendError(peer: string, frameId: string | undefined, code: string, message: string): void {
-    const socket = this.bestSocket(peer);
-    if (!socket) return;
+  private sendError(peer: string, frameId: string | undefined, code: string, message: string, gen?: number): void {
+    const socket = gen !== undefined ? this.socketByGeneration(peer, gen) : this.bestSocket(peer);
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({
       type: "response", id: frameId,
       error: { code, message, retryable: false },
     }));
   }
 
+  private rejectRequest(peer: string, msg: any, gen: number, code: string, message: string): void {
+    // Only echo a syntactically bounded ID; malformed frames otherwise have no
+    // safe correlation value for a response.
+    if (isBoundedToken(msg?.id, MAX_ID_BYTES)) this.sendError(peer, msg.id, code, message, gen);
+  }
+
+  private socketByGeneration(peer: string, generation: number): WebSocket | null {
+    const state = this.peers.get(peer);
+    if (!state) return null;
+    const reg = state.sockets.find(s => s.generation === generation);
+    return reg?.socket ?? null;
+  }
+
+  /** #1390: pump sends a v1 envelope signed with the WSS domain. */
   private pump(peer: string): void {
     const state = this.peers.get(peer);
     if (!state) return;
@@ -385,9 +573,23 @@ export class PeerWsBroker {
     state.outbox.recordAttempt(entry.id);
 
     const config = loadPeerConfig();
-    const payloadStr = JSON.stringify(entry.payload);
-    const sigHeaders = signRequest("POST", `/${entry.method}`, payloadStr, config.self.signingKey, config.self.name);
-    const frame = JSON.stringify({ type: "request", id: entry.id, method: entry.method, payload: entry.payload, ...sigHeaders });
+    const body = JSON.stringify(entry.payload);
+    const auth = signWsRequest(
+      config.self.name,
+      entry.id,
+      entry.method,
+      `/${entry.method}`,
+      body,
+      config.self.signingKey,
+    );
+    const frame = JSON.stringify({
+      type: "request",
+      version: 1,
+      id: entry.id,
+      method: entry.method,
+      body,
+      auth: { peerId: config.self.name, ...auth },
+    });
 
     const timer = setTimeout(() => {
       const currentState = this.peers.get(peer);

@@ -1,6 +1,6 @@
 import { localISO } from "../utils/local-time.js";
 import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "../components/tasks/task-store.js";
-import { readState, updateState, setAutoPaused, resetFailures, removeState } from "../components/tasks/task-state-store.js";
+import { readState, updateState, removeState } from "../components/tasks/task-state-store.js";
 import { recentRuns } from "../components/tasks/task-history-store.js";
 import { validateTaskId, type ScheduledTask, type SystemTaskAction, SYSTEM_ACTIONS } from "../components/tasks/task-types.js";
 
@@ -18,7 +18,6 @@ interface AddArgs {
   schedule?: string;
   taskFile?: string;
   agent?: string;
-  targetUserId?: string;
 }
 
 function parseAddArgs(args: string[]): AddArgs {
@@ -34,7 +33,6 @@ function parseAddArgs(args: string[]): AddArgs {
       case "--schedule": parsed.schedule = args[++i] ?? ""; break;
       case "--task-file": parsed.taskFile = args[++i] ?? ""; break;
       case "--agent": parsed.agent = args[++i] ?? ""; break;
-      case "--target-user": parsed.targetUserId = args[++i] ?? ""; break;
     }
   }
   return parsed;
@@ -64,7 +62,7 @@ function add(args: string[]): void {
   }
 
   const kind = parsed.kind ?? "agent";
-  const validKinds = ["reminder", "agent", "script", "orc", "system"];
+  const validKinds = ["reminder", "agent", "script", "system"];
   if (!validKinds.includes(kind)) { console.log(JSON.stringify({ ok: false, error: `--kind must be one of: ${validKinds.join(", ")}` })); process.exit(1); }
 
   const isSystem = kind === "system";
@@ -85,7 +83,7 @@ function add(args: string[]): void {
     enabled: true,
     priority: "medium" as const,
     chatId,
-    delivery: isSystem ? "silent" as const : (kind === "reminder" ? "announce" as const : "report" as const),
+    delivery: isSystem ? "silent" as const : (kind === "reminder" ? "announce" as const : "announce" as const),
     schedule,
     at,
   };
@@ -95,13 +93,10 @@ function add(args: string[]): void {
       entry = { ...base, kind: "reminder" as const, text: parsed.message ?? "", delivery: "announce" as const };
       break;
     case "agent":
-      entry = { ...base, kind: "agent" as const, prompt: parsed.message, taskFile: parsed.taskFile, agent: (parsed.agent as "task" | "professor" | "browsie" | "coding" | "dreamy") || "task", targetUserId: parsed.targetUserId };
+      entry = { ...base, kind: "agent" as const, prompt: parsed.message, taskFile: parsed.taskFile, agent: (parsed.agent as "task" | "professor" | "browsie" | "coding" | "dreamy") || "task", interaction: { mode: "oneshot" }, orchestration: { maxAgents: 1 } };
       break;
     case "script":
       entry = { ...base, kind: "script" as const, command: parsed.message ?? "" };
-      break;
-    case "orc":
-      entry = { ...base, kind: "orc" as const, goal: parsed.message ?? "" };
       break;
     case "system":
       entry = { ...base, kind: "system" as const, action: action!, delivery: "silent" as const };
@@ -137,6 +132,16 @@ function listEntries(): void {
       ...(e.priority ? { priority: e.priority } : {}),
       ...(state?.autoPaused ? { autoPaused: true } : {}),
       ...(state?.nextRunAt ? { nextRunAt: localISO(new Date(state.nextRunAt)) } : {}),
+      // #1520: structured incident, pause time, counters, and resume command.
+      ...(state?.lastIncident ? { lastIncident: state.lastIncident } : {}),
+      ...(state?.pausedAt ? { pausedAt: localISO(new Date(state.pausedAt)) } : {}),
+      ...(state ? {
+        consecutiveFailures: state.consecutiveFailures ?? 0,
+        consecutiveDeferrals: state.consecutiveDeferrals ?? 0,
+        phase: state.activeRun?.phase ?? (state.deferredAdmission ? `deferred ${state.deferredAdmission.attempts}/5` : undefined),
+        retryAt: state.retryAt ? localISO(new Date(state.retryAt)) : undefined,
+        resume: state.autoPaused ? `abtars-task resume ${e.id}` : undefined,
+      } : {}),
     };
   });
   console.log(JSON.stringify({ ok: true, entries: display }));
@@ -149,18 +154,44 @@ function remove(id: string): void {
 }
 
 function pause(id: string): void {
-  const entry = dbReadEntries().find(e => e.id === id);
+  const entries = dbReadEntries();
+  const entry = entries.find(e => e.id === id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
-  setAutoPaused(id, true);
+  // #1609: one service operation for CLI, chat, and dashboard pause — it
+  // refreshes pausedAt to now so an already-paused task gets a fresh
+  // 12-hour cooldown.
+  const { pauseTask } = require("../components/tasks/task-service.js") as typeof import("../components/tasks/task-service.js");
+  pauseTask(id, entries);
   console.log(JSON.stringify({ ok: true, action: "paused", id }));
 }
 
 function resume(id: string): void {
-  const entry = dbReadEntries().find(e => e.id === id);
+  // #1520: one service operation for CLI and chat resume.
+  const { resumeAutoPaused } = require("../components/tasks/task-service.js") as typeof import("../components/tasks/task-service.js");
+  const entries = dbReadEntries();
+  const entry = entries.find(e => e.id === id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
-  setAutoPaused(id, false);
-  resetFailures(id);
-  console.log(JSON.stringify({ ok: true, action: "resumed", id }));
+  const result = resumeAutoPaused(id, entries);
+  switch (result) {
+    case "resumed":
+      console.log(JSON.stringify({ ok: true, action: "resumed", id }));
+      break;
+    case "not_paused":
+      console.log(JSON.stringify({ ok: false, error: `Entry ${id} is not auto-paused` }));
+      process.exit(1);
+      break;
+    case "already_running":
+      console.log(JSON.stringify({ ok: false, error: `Entry ${id} is currently running` }));
+      process.exit(1);
+      break;
+    case "invalid":
+      console.log(JSON.stringify({ ok: false, error: `Entry ${id} definition is invalid` }));
+      process.exit(1);
+      break;
+    default:
+      console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` }));
+      process.exit(1);
+  }
 }
 
 function showHistory(id: string): void {
@@ -170,6 +201,8 @@ function showHistory(id: string): void {
     ranAt: localISO(new Date(h.finishedAt)),
     outcome: h.outcome,
     ...(h.exitCode !== undefined ? { exitCode: h.exitCode } : {}),
+    // #1520: structured diagnostics on every unsuccessful run.
+    ...(h.diagnostic ? { diagnostic: h.diagnostic } : {}),
   }));
   const label = entry.kind === "agent" ? (entry.prompt ?? entry.taskFile ?? "") : entry.kind === "script" ? entry.command : entry.kind;
   console.log(JSON.stringify({ ok: true, id, label: label.slice(0, 80), runs }));

@@ -41,7 +41,6 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
     staticCaps = [];
     const individualCaps = [
       { name: "hotskills", load: () => import("../capabilities/hotskills/index.js") },
-      { name: "browser", load: () => import("../capabilities/browser/index.js") },
     ];
     for (const { name, load } of individualCaps) {
       if (disabled.has(name)) continue;

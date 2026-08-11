@@ -1,4 +1,4 @@
-import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
+import { PI_COMPATIBILITY, type PiPinStatus } from "../config/pi-compatibility.js";
 import {
   resolvePiInstallation, clearPiCache, resolvePiModuleUrl,
   type PiInstallationState, type PiInstallation, type PiModuleSpecifier,
@@ -11,7 +11,8 @@ export type PiInspection = {
   executable?: string;
   packageRoot?: string;
   version?: string;
-  minimum: string;
+  pin: string;
+  pinStatus?: PiPinStatus;
   ai: "present" | "absent";
   tui: "present" | "absent";
   core: "present" | "absent";
@@ -22,7 +23,7 @@ export function inspectPiInstallation(useCache = true): PiInspection {
 
   const base: PiInspection = {
     state: result.state,
-    minimum: PI_COMPATIBILITY.minimumPiVersion,
+    pin: PI_COMPATIBILITY.pinnedVersion,
     ai: "absent",
     tui: "absent",
     core: "absent",
@@ -37,6 +38,7 @@ export function inspectPiInstallation(useCache = true): PiInspection {
       executable: result.installation.executable,
       packageRoot: result.installation.packageRoot,
       version: result.installation.version,
+      pinStatus: result.installation.pinStatus,
       ai: "present",
       tui: "present",
       core: "present",

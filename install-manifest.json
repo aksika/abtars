@@ -92,7 +92,6 @@
   },
   "cliWrappers": [
     "abtars",
-    "abtars-browser",
     "abtars-restart",
     "abtars-rss",
     "abtars-task",

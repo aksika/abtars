@@ -33,7 +33,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "WORKING_DIR", type: "string", default: "~/.abtars/workspace", description: "Agent working directory (sandbox)" },
   { env: "MAIN_CHAT_ID", type: "string", description: "Primary chat ID for operator notifications" },
   { env: "MAIN_CHAT_PROVIDER", type: "string", default: "telegram", description: "Platform for MAIN_CHAT_ID: telegram | discord" },
-  { env: "LOG_LEVEL", type: "string", default: "low", description: "Log level: off, low, debug" },
+  { env: "LOG_LEVEL", type: "string", default: "low", description: "Log level: off, low, debug, trace" },
   { env: "LOG_FORMAT", type: "string", default: "text", description: "Log format: text or json" },
 
   // ── Transport ──
@@ -69,7 +69,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "CTX_COMPACT_PCT", type: "int", default: "80", description: "Context % to auto-compact" },
   { env: "CTX_AGGRESSIVE_PCT", type: "int", default: "90", description: "Context % for aggressive compaction" },
   { env: "CTX_IDLE_COMPACT_PCT", type: "int", default: "65", description: "Context % for idle compaction" },
-  { env: "CTX_IDLE_COMPACT_MIN", type: "int", default: "10", description: "Minutes idle before floating compaction" },
+
 
   // ── Typing / streaming ──
   { env: "TYPING_TTL_SEC", type: "int", default: "300", description: "Typing indicator TTL (seconds)" },
@@ -120,12 +120,15 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "MAX_AGENT_CALL_PER_DAY", type: "int", required: true, description: "Agent API rate limit: max requests per caller per day" },
   { env: "TELEGRAM_ENABLED", type: "bool", default: "", description: "Enable Telegram platform (fallback: token presence)" },
   { env: "DISCORD_ENABLED", type: "bool", default: "", description: "Enable Discord platform (fallback: token presence)" },
-  { env: "IRC_ENABLED", type: "bool", default: "", description: "Enable IRC platform (fallback: irc.json presence)" },
   { env: "TUI_ENABLED", type: "bool", default: "true", description: "Enable TUI socket server at ~/.abtars/tui.sock (#1315)" },
   { env: "ENABLE_DASHBOARD", type: "bool", default: "false", description: "Enable web dashboard (exposes port)" },
   { env: "ENABLE_AGENT_API", type: "bool", default: "false", description: "Enable A2A agent API (exposes port)" },
   { env: "ENABLE_ASYNC_DELEGATION", type: "bool", default: "false", description: "Enable async session delegation tools (spawn/check/terminate)" },
   { env: "MAX_SESSIONS", type: "int", default: "10", description: "Max concurrent managed sessions per user" },
+
+  // ── Scheduled runs (#1600) ──
+  { env: "TASK_RUN_CEILING_MS", type: "int", default: "7200000", description: "Scheduled-run absolute ceiling (ms)" },
+  { env: "TASK_RUN_IDLE_BUDGET_MS", type: "int", default: "900000", description: "Scheduled-run inactivity budget (ms)" },
 
   // ── Artifact Store (S3) ──
   { env: "ARTIFACT_S3_ENDPOINT", type: "string", description: "S3-compatible endpoint for artifact store" },
@@ -179,7 +182,7 @@ export interface EnvConfig {
   ctxCompactPct: number;
   ctxAggressivePct: number;
   ctxIdleCompactPct: number;
-  ctxIdleCompactMin: number;
+
 
   // Typing / streaming
   typingTtlMs: number;
@@ -213,6 +216,10 @@ export interface EnvConfig {
   dashboardModule: string | undefined;
   notebooklmEnabled: boolean;
   notebooklmDefaultNotebook: string;
+
+  // Scheduled runs (#1600)
+  taskRunCeilingMs: number;
+  taskRunIdleBudgetMs: number;
   permissionTimeoutMs: number;
   trustMode: boolean;
   securityMode: string;
@@ -249,16 +256,19 @@ export function getEnv(): Readonly<EnvConfig> {
   return _G.__abtarsEnv!;
 }
 
-/** Sanitized config dump — masks API keys/tokens, shows everything else. For /status. */
+/**
+ * Sanitized config dump — presence-only for credentials, plain values for
+ * everything else. For /status. (#1354: never a value or fragment of a
+ * credential — not even a masked prefix.)
+ */
 export function envDump(): Record<string, string> {
   const env = getEnv();
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     if (typeof value === "function") continue;
     const strVal = value == null ? "(not set)" : String(value);
-    // Mask anything that looks like a secret
-    if (/token|key|secret|password/i.test(key) && strVal.length > 4) {
-      result[key] = strVal.slice(0, 4) + "…" + strVal.slice(-2);
+    if (/token|key|secret|password|_api_id/i.test(key)) {
+      result[key] = value == null ? "(not set)" : "(set)";
     } else {
       result[key] = strVal;
     }
@@ -330,7 +340,6 @@ export function initEnv(): Readonly<EnvConfig> {
     ctxCompactPct: parseIntSafe(readOr("CTX_COMPACT_PCT", "80"), "CTX_COMPACT_PCT"),
     ctxAggressivePct: parseIntSafe(readOr("CTX_AGGRESSIVE_PCT", "90"), "CTX_AGGRESSIVE_PCT"),
     ctxIdleCompactPct: parseIntSafe(readOr("CTX_IDLE_COMPACT_PCT", "65"), "CTX_IDLE_COMPACT_PCT"),
-    ctxIdleCompactMin: parseIntSafe(readOr("CTX_IDLE_COMPACT_MIN", "10"), "CTX_IDLE_COMPACT_MIN"),
 
     typingTtlMs: parseIntSafe(readOr("TYPING_TTL_SEC", "300"), "TYPING_TTL_SEC") * 1000,
     typingSilentThresholdMs: parseIntSafe(readOr("TYPING_SILENT_THRESHOLD_SEC", "90"), "TYPING_SILENT_THRESHOLD_SEC") * 1000,
@@ -366,6 +375,9 @@ export function initEnv(): Readonly<EnvConfig> {
     maxSessions: parseIntSafe(readOr("MAX_SESSIONS", "10"), "MAX_SESSIONS"),
     maxAgentCallPerHour: parseIntSafe(readOr("MAX_AGENT_CALL_PER_HOUR", "30"), "MAX_AGENT_CALL_PER_HOUR"),
     maxAgentCallPerDay: parseIntSafe(readOr("MAX_AGENT_CALL_PER_DAY", "100"), "MAX_AGENT_CALL_PER_DAY"),
+
+    taskRunCeilingMs: parseIntSafe(readOr("TASK_RUN_CEILING_MS", "7200000"), "TASK_RUN_CEILING_MS"),
+    taskRunIdleBudgetMs: parseIntSafe(readOr("TASK_RUN_IDLE_BUDGET_MS", "900000"), "TASK_RUN_IDLE_BUDGET_MS"),
 
     getApiKey(envName: string): string | undefined {
       return process.env[envName]?.trim() || undefined;

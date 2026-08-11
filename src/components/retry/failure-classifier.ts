@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
-import type { AttemptLeaseSnapshot } from "../executor-progress.js";
+import type { AttemptLeaseSnapshotV1 } from "../executor-progress.js";
 
 export type FailureClass =
   | "transient_transport"
@@ -58,9 +58,10 @@ export const FAILURE_CLASSES: readonly FailureClass[] = [
 
 export const CLASSIFIER_VERSION = "v1.0.0";
 
-interface ClassifyInput {
+export interface ClassifyInput {
+  attempt_id: string;
   envelope?: WorkerResultEnvelopeV1;
-  leaseSnapshot?: AttemptLeaseSnapshot;
+  leaseSnapshot?: AttemptLeaseSnapshotV1;
   lifecycle: string;
   lifecycleReason?: string;
   cancelReason?: string;
@@ -128,11 +129,11 @@ export function classify(input: ClassifyInput): ClassifyResult {
   // Phase 2: lease evidence
   if (input.leaseSnapshot) {
     evidenceIds.push(`lease:${input.leaseSnapshot.attemptId}`);
-    const evalState = input.leaseSnapshot.evaluation;
-    if (evalState === "cancel_requested") {
+    const evalPhase = input.leaseSnapshot.evaluation.phase;
+    if (evalPhase === "cancel_requested") {
       factors.push("lease_expired");
       if (primary === "unknown") {
-        const leaseState = input.leaseSnapshot.semanticState;
+        const leaseState = input.leaseSnapshot.semanticState as string;
         if (leaseState === "stalled") {
           primary = "lease_expired";
           confidence = "derived";
@@ -304,7 +305,7 @@ export function classify(input: ClassifyInput): ClassifyResult {
     recommendedActions.push("invalid contract — no retry");
   }
 
-  const attemptId = (input as any).attempt_id ?? (input as any).envelope?.attempt?.id ?? "";
+  const attemptId = input.attempt_id;
   const id = makeId(attemptId, inputDigest);
 
   const classification: FailureClassificationV1 = {

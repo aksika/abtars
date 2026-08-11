@@ -67,7 +67,7 @@ export interface PlatformAdapter {
   chunkResponse(text: string): string[];
 
   // Optional capabilities
-  /** Set to false to disable intermediate streaming (IRC — no edit-in-place, no per-chunk delivery). */
+  /** Set to false to disable intermediate streaming. */
   supportsStreaming?: boolean;
   sendTyping?(channelId: string, threadId?: string): Promise<void>;
   editMessage?(channelId: string, messageId: number | string, text: string): Promise<void>;

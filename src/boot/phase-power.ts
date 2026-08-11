@@ -29,13 +29,14 @@ export async function phasePower(ctx: BootCtx): Promise<PhaseResult> {
   const probe = createPowerSafetyProbe({
     lastPromptAt: () => readLastPromptAt(),
     isAnyExecutionActive: (excludeEntryId?: string) => {
-      const job = ctx.cronQueue?.currentJob ?? null;
-      return job !== null && job.entryId !== excludeEntryId;
+      // #1539: either lane blocks a power transition.
+      const jobs = ctx.cronQueue?.currentJobs ?? [];
+      return jobs.some(j => j.entryId !== excludeEntryId);
     },
     isSleepCycleActive: () => ctx.sleepHandle?.isActive === true,
     isTaskQueueEmpty: () => (ctx.cronQueue?.pending ?? 0) === 0,
     isMaintenanceActive: () => false,
-    isTransitionActive: () => transitionStore.isActive(),
+    isTransitionActive: (excludeAttemptId?: string) => transitionStore.isActiveExcept(excludeAttemptId),
     isPlatformSupported: () => isDarwin || isLinux,
   });
 
@@ -60,13 +61,13 @@ export async function phasePower(ctx: BootCtx): Promise<PhaseResult> {
   const controller = new HardwareSleepController(probe, adapter, transitionStore);
 
   if (!registry.has("hardware-sleep")) {
-    registry.register("hardware-sleep", (entry) => {
+    registry.register("hardware-sleep", (_entry) => {
       const inspectEntry = {
-        id: entry.id,
-        idleMinutes: entry.kind === "system" ? entry.options?.idleMinutes : undefined,
-        retryMinutes: entry.kind === "system" ? entry.options?.retryMinutes : undefined,
-        latestLocalTime: entry.kind === "system" ? entry.options?.latestLocalTime : undefined,
-        expectedWakeTime: entry.kind === "system" ? entry.options?.expectedWakeTime : undefined,
+        id: _entry.id,
+        idleMinutes: _entry.kind === "system" ? _entry.options?.idleMinutes : undefined,
+        retryMinutes: _entry.kind === "system" ? _entry.options?.retryMinutes : undefined,
+        latestLocalTime: _entry.kind === "system" ? _entry.options?.latestLocalTime : undefined,
+        expectedWakeTime: _entry.kind === "system" ? _entry.options?.expectedWakeTime : undefined,
       };
       return controller.attempt(inspectEntry);
     });

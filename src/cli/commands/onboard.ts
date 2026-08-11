@@ -23,7 +23,7 @@ import { deriveFromPassphrase, writeKeyFile, writeKeyVerify, deriveKey } from '.
  */
 
 import { logAndSwallow } from "../../components/log-and-swallow.js";
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { packagePaths, readManifest, resolveReleasesDir } from '../deploy-lib-import.js';
 import { showHintOnce } from '../../components/hints.js';
@@ -84,6 +84,16 @@ const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
   ollama: 'OLLAMA_API_KEY',
   kiro: 'KIRO_API_KEY',
   gemini: 'GEMINI_API_KEY',
+};
+
+/** Minimal provider definitions needed to make a fresh onboarding config valid. */
+const ONBOARD_PROVIDER_CONFIG: Record<ProviderChoice, Record<string, unknown>> = {
+  openrouter: { transport: "api", endpoint: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY" },
+  anthropic: { transport: "api", endpoint: "https://api.anthropic.com/v1", apiKeyEnv: "ANTHROPIC_API_KEY", apiFormat: "anthropic" },
+  openai: { transport: "api", endpoint: "https://api.openai.com/v1", apiKeyEnv: "OPENAI_API_KEY" },
+  ollama: { transport: "api", endpoint: "http://localhost:11434/v1" },
+  kiro: { transport: "acp", cli: "kiro-cli" },
+  gemini: { transport: "acp", cli: "gemini" },
 };
 
 interface WizardAnswers {
@@ -269,8 +279,8 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     providerApiKey = String(v ?? '').trim() || existing?.providerApiKey || '';
   }
 
-  // Summary
-  const mask = (s: string): string => s ? (s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-4)}` : '***') : '(skipped)';
+  // Summary — #1354: credentials are presence-only, never values or fragments.
+  const presence = (s: string): string => (s ? "(set)" : "(not set)");
   const lines = [
     '',
     '── Summary ──',
@@ -278,11 +288,11 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     `  Install mode:        ${installMode}`,
     `  Security:            ${securityMode}`,
     `  Telegram chat ID:    ${String(telegramChatId ?? '') || '(skipped)'}`,
-    `  Telegram token:      ${mask(String(telegramToken ?? ''))}`,
-    `  Discord bot token:   ${mask(String(discordBotToken ?? ''))}`,
+    `  Telegram token:      ${presence(String(telegramToken ?? ''))}`,
+    `  Discord bot token:   ${presence(String(discordBotToken ?? ''))}`,
     `  Provider:            ${defaultProvider}`,
     `  Main model:          ${modelStr}`,
-    `  ${apiKeyEnv}:        ${mask(providerApiKey)}`,
+    `  ${apiKeyEnv}:        ${presence(providerApiKey)}`,
     '',
   ];
   process.stdout.write(lines.join('\n'));
@@ -404,22 +414,23 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
     }
     const provider = (kv.get('DEFAULT_PROVIDER') ?? 'openrouter') as ProviderChoice;
     if (!VALID_PROVIDERS.includes(provider)) return null;
-    const apiKeyEnv = PROVIDER_API_KEY_ENV[provider];
     return {
       installMode: 'simple',
       userName: kv.get('USER_DISPLAY_NAME') ?? '',
       instanceName: '',
       passphrase: '',
-      telegramToken: kv.get('TELEGRAM_BOT_TOKEN') ?? '',
+      // Never feed a persisted credential back into an interactive prompt.
+      // The migration step runs after the new answers are collected.
+      telegramToken: '',
       telegramChatId: kv.get('MAIN_CHAT_ID') ?? '',
-      discordBotToken: kv.get('DISCORD_BOT_TOKEN') ?? '',
+      discordBotToken: '',
       discordAppId: kv.get('DISCORD_APP_ID') ?? '',
       discordA2aChannel: kv.get('DISCORD_A2A_CHANNEL_ID') ?? '',
       defaultProvider: provider,
       defaultModel: kv.get('DEFAULT_MODEL') ?? DEFAULT_MODELS[provider],
-      providerApiKey: apiKeyEnv ? (kv.get(apiKeyEnv) ?? '') : '',
+      providerApiKey: '',
       hailMaryModel: '',
-      groqApiKey: kv.get('GROQ_API_KEY') ?? '',
+      groqApiKey: '',
       securityMode: kv.get('SECURITY_MODE') ?? 'guardrails',
       trustMode: kv.get('TRUST_MODE') === 'true',
     };
@@ -434,7 +445,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
     'HEARTBEAT_INTERVAL_SEC', 'TRUST_MODE',
-    'TELEGRAM_ENABLED', 'DISCORD_ENABLED', 'IRC_ENABLED',
+    'TELEGRAM_ENABLED', 'DISCORD_ENABLED',
     'LOG_LEVEL', 'ACTIVE_MEMORY', 'ENABLE_AGENT_API', 'SELFHEAL_ENABLED',
   ]);
   const keptLines: string[] = [];
@@ -460,13 +471,51 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
   newBlock.push(`TELEGRAM_ENABLED=${answers.telegramToken ? 'true' : 'false'}`);
   newBlock.push(`DISCORD_ENABLED=${answers.discordBotToken ? 'true' : 'false'}`);
-  newBlock.push(`IRC_ENABLED=false`);
   newBlock.push(`LOG_LEVEL=debug`);
   newBlock.push(`ACTIVE_MEMORY=true`);
   newBlock.push(`ENABLE_AGENT_API=false`);
   newBlock.push(`SELFHEAL_ENABLED=true`);
 
   return [...keptLines, ...newBlock, ''].join('\n');
+}
+
+/**
+ * Reconcile legacy credential assignments before onboarding rewrites .env.
+ * The CLI entrypoint does not run the bridge boot pipeline, so onboarding
+ * must still use the same migration policy and refuse to rewrite a source it
+ * could not safely migrate.
+ */
+async function migrateExistingCredentialAssignments(envPath: string, content: string): Promise<string | null> {
+  const [{ runSecretMigration }, { compareSecret, writeSecretCompatible }, { atomicWriteSync }] = await Promise.all([
+    import("../../boot/env-secret-migration.js"),
+    import("../../components/secrets.js"),
+    import("../../components/atomic-write.js"),
+  ]);
+  const result = runSecretMigration(
+    [{ path: envPath, content }],
+    { compare: compareSecret, commit: writeSecretCompatible },
+    { skipKeys: new Set(["WEB_AUTH"]) },
+  );
+  if (result.decisions.some(d => d.outcome === "rejected-conflict" || d.outcome === "rejected-unsafe")) {
+    process.stderr.write("error: existing credential assignments could not be migrated safely; no config rewrite performed\n");
+    return null;
+  }
+  try {
+    for (const file of result.files) atomicWriteSync(file.path, file.content, 0o600);
+  } catch {
+    process.stderr.write("error: existing credential cleanup could not be committed; no config rewrite performed\n");
+    return null;
+  }
+  return result.files.find(file => file.path === envPath)?.content ?? content;
+}
+
+function hasCredentialAssignment(content: string): boolean {
+  return content.split("\n").some((line) => {
+    const match = line.trim().match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    const key = match?.[1];
+    if (!key || key === "WEB_AUTH") return false;
+    return /(?:_KEY|_TOKEN|_SECRET|_PASSWORD|_API_ID)$/.test(key) && Boolean(match[2]?.trim());
+  });
 }
 
 export async function onboard(opts: OnboardOptions): Promise<number> {
@@ -517,11 +566,14 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   }
 
   const envPath = join(paths.config, '.env');
+  let currentContent = '';
+  try { currentContent = await readFile(envPath, 'utf-8'); } catch { /* first install — no existing assignments */ }
+  const legacyCredentialPresent = hasCredentialAssignment(currentContent);
   const existing = await readExisting(envPath);
   const secretDir = join(paths.home, 'secret');
   const { existsSync: secretExists } = await import('node:fs');
   const hasSecretToken = secretExists(join(secretDir, 'TELEGRAM_BOT_TOKEN')) || secretExists(join(secretDir, 'DISCORD_BOT_TOKEN'));
-  const hasUserConfig = existing !== null && (existing.telegramToken || existing.discordBotToken || hasSecretToken);
+  const hasUserConfig = legacyCredentialPresent || hasSecretToken || Boolean(existing?.telegramToken || existing?.discordBotToken);
   if (hasUserConfig && !opts.force) {
     showHintOnce("onboard-reoffer", "Re-running onboard overwrites config. Use --force to confirm, or edit ~/.abtars/config/.env directly.");
     if (opts.nonInteractive) {
@@ -545,7 +597,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       if (check.ok) {
         process.stdout.write(`✓ API key valid (${answers.defaultModel} available)\n`);
       } else {
-        process.stderr.write(`⚠ API key validation failed: ${check.message}\n  Continuing — fix key in ~/.abtars/config/.env or secret/ later.\n`);
+        process.stderr.write(`⚠ API key validation failed: ${check.message}\n  Continuing — fix key in ~/.abtars/secret/ later.\n`);
       }
     }
   } else {
@@ -570,22 +622,33 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     }
   }
 
-  // Read current .env to preserve operator-added lines.
-  let currentContent = '';
+  // Establish the encryption key before either migration or onboarding writes
+  // a secret. A failure must not leave newly collected credentials plaintext.
+  if (!answers.passphrase || !answers.userName) return 5;
   try {
-    currentContent = await readFile(envPath, 'utf-8');
-  } catch {
-    // File doesn't exist yet — install should have seeded it, but guard anyway.
-    currentContent = '';
+    const master = deriveFromPassphrase(answers.passphrase, answers.userName);
+    const keyPath = join(paths.home, "config", "abtars.key");
+    writeKeyFile(keyPath, master);
+    writeKeyVerify(keyPath, deriveKey(master));
+    process.stdout.write(`✓ abtars.key derived from passphrase\n`);
+  } catch (err) {
+    process.stderr.write(`error: key initialization failed: ${err instanceof Error ? err.message : "unknown error"}\n`);
+    return 5;
   }
 
+  const migratedContent = await migrateExistingCredentialAssignments(envPath, currentContent);
+  if (migratedContent === null) return 5;
+  currentContent = migratedContent;
+
+  // Read current .env to preserve operator-added lines.
   const next = mergeEnvContent(currentContent, answers);
   await writeFile(envPath, next, { mode: 0o600 });
   process.stdout.write(`\n✓ Wrote ${envPath}\n`);
 
-  // Write secrets to ~/.abtars/secret/ (boot auto-encrypts on first start)
+  // Write secrets through the policy layer. It enforces the safe directory,
+  // regular-file, ownership, mode, and atomic-write invariants.
   const secretDirPath = join(paths.home, 'secret');
-  await mkdir(secretDirPath, { recursive: true });
+  const { writeSecret } = await import("../../components/secrets.js");
   const secrets: Array<[string, string]> = [];
   if (answers.telegramToken) secrets.push(['TELEGRAM_BOT_TOKEN', answers.telegramToken]);
   if (answers.discordBotToken) secrets.push(['DISCORD_BOT_TOKEN', answers.discordBotToken]);
@@ -595,7 +658,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   }
   if (answers.groqApiKey) secrets.push(['GROQ_API_KEY', answers.groqApiKey]);
   for (const [name, value] of secrets) {
-    await writeFile(join(secretDirPath, name), value, { mode: 0o600 });
+    writeSecret(name, value);
   }
   if (secrets.length > 0) process.stdout.write(`✓ ${secrets.length} secrets → ${secretDirPath}\n`);
 
@@ -613,30 +676,57 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       tc = JSON.parse(await readFile(transportPath, 'utf-8'));
     } catch (err) { logAndSwallow("onboard", "op", err); }
 
-    // Seed providers and agents if not already present
-    if (!tc["providers"]) {
-      tc["providers"] = {
-        "kiro": { "transport": "acp", "cli": "kiro-cli" },
-        "ollama": { "transport": "api", "endpoint": "http://localhost:11434/v1" },
-        "openrouter": { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" },
+    // Seed providers and route-local agents if not already present (v3 schema)
+    tc["schemaVersion"] = 3;
+    const providers = (tc["providers"] && typeof tc["providers"] === "object" && !Array.isArray(tc["providers"]))
+      ? tc["providers"] as Record<string, Record<string, unknown>>
+      : {};
+    const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
+    if (!providers[provName]) providers[provName] = ONBOARD_PROVIDER_CONFIG[answers.defaultProvider];
+    // Interactive onboarding may configure hailMary even when an older config
+    // had a partial provider registry; ensure its ACP provider exists too.
+    if (answers.hailMaryModel && !providers["kiro"]) providers["kiro"] = ONBOARD_PROVIDER_CONFIG.kiro;
+    tc["providers"] = providers;
+    const defaultProviderCfg = providers[provName] as { transport?: string };
+    const isAcpProvider = defaultProviderCfg?.transport === "acp";
+    tc["activeRoute"] = isAcpProvider ? "acp" : "pi-ai";
+    if (!tc["routes"]) {
+      const route = isAcpProvider ? "acp" : "pi-ai";
+      tc["routes"] = {
+        [route]: {
+          "agents": {
+            "main": { "model": answers.defaultModel, "provider": provName },
+            "dreamy": { "model": answers.defaultModel, "provider": provName },
+            "browsie": { "model": answers.defaultModel, "provider": provName },
+            "cody": { "model": answers.defaultModel, "provider": provName },
+          },
+          "fallbacks": [],
+        },
       };
     }
-    if (!tc["agents"]) {
-      const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
-      tc["agents"] = {
-        "professor": { "model": answers.defaultModel, "provider": provName },
-        "dreamy": { "model": answers.defaultModel, "provider": provName },
-        "browsie": { "model": answers.defaultModel, "provider": provName },
-        "coding": { "model": answers.defaultModel, "provider": provName },
-      };
-    }
-    if (answers.hailMaryModel) {
-      const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
-      tc["hailMary"] = { model: answers.hailMaryModel, provider: provName };
+    // Set hailMary only when an ACP provider is available (kiro is always seeded)
+    if (answers.hailMaryModel && providers["kiro"]?.transport === "acp") {
+      tc["hailMary"] = { route: "acp", model: answers.hailMaryModel, provider: "kiro" };
     }
 
-    await writeFile(transportPath, JSON.stringify(tc, null, 2) + '\n', { mode: 0o600 });
-    process.stdout.write(`✓ transport.json → ${transportPath}\n`);
+    // Validate the full config before persisting — catch any schema violation early
+    const { validateTransportConfig, writeTransportConfig } = await import("../../components/transport-config.js");
+    const vr = validateTransportConfig(tc);
+    if (!vr.ok) {
+      process.stdout.write(`❌ Invalid transport config generated: ${vr.issues.map(i => i.message).join("; ")}\n`);
+      process.stdout.write("Fix your selections and try again.\n");
+      return 5;
+    } else {
+      // #1354: persist through the validated transport writer (the single
+      // serialization boundary) — never stringify the raw candidate directly.
+      const wr = writeTransportConfig(vr.config, "onboard setup");
+      if (!wr.ok) {
+        process.stdout.write(`❌ Invalid transport config generated: ${wr.issues.map(i => i.reason).join("; ")}\n`);
+        process.stdout.write("Fix your selections and try again.\n");
+        return 5;
+      }
+      process.stdout.write(`✓ transport.json → ${transportPath}\n`);
+    }
   }
 
   // Write users.json (always — onboard has the real chat ID)
@@ -694,19 +784,6 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
         process.stdout.write(`⚠️  abmind encryption uses name '${manifest.encryptionUser}' but you entered '${answers.userName}'. Backup restore will need the encryption name ('${manifest.encryptionUser}').\n`);
       }
     } catch { /* no abmind or no manifest — fine */ }
-  }
-
-  // Initialize passphrase-based encryption — generate abtars.key (#1166)
-  if (answers.passphrase && answers.userName) {
-    try {
-      const master = deriveFromPassphrase(answers.passphrase, answers.userName);
-      const keyPath = join(paths.home, "config", "abtars.key");
-      writeKeyFile(keyPath, master);
-      writeKeyVerify(keyPath, deriveKey(master));
-      process.stdout.write(`✓ abtars.key derived from passphrase\n`);
-    } catch (err) {
-      process.stdout.write(`⚠ Key init failed: ${err instanceof Error ? err.message : String(err)}\n`);
-    }
   }
 
   // Seed default tasks (#383) — morning greeting + midnight backup

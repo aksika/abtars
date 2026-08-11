@@ -31,7 +31,7 @@ Output (in `~/.backup-abtars/`):
 ### Full backup includes
 
 Everything in `~/.abtars/` **except** binaries and runtime:
-- `config/` — transport.json, models.json, users.json, peers.json, IRC config
+- `config/` — transport.json, models.json, users.json, peers.json
 - `secret/` — API keys and tokens
 - `skills/` — core, custom, self-created, downloaded
 - `core/` — prompts, personality, skills catalog

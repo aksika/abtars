@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 const tmpDir = mkdtempSync(join(tmpdir(), "logger-test-"));
 vi.mock("../paths.js", () => ({ abtarsHome: () => tmpDir }));
 
-const { logInfo, logWarn, logDebug, flushLogs, setLogLevel, setFileLogging, getLogFile } = await import("./logger.js");
+const { logInfo, logWarn, logDebug, logError, flushLogs, setLogLevel, setFileLogging, getLogFile } = await import("./logger.js");
 
 describe("logger buffered writes", () => {
   beforeEach(() => {
@@ -54,6 +54,59 @@ describe("logger buffered writes", () => {
   });
 });
 
-afterAll(() => {
-  rmSync(tmpDir, { recursive: true, force: true });
+describe("logger console/TTY redaction (#1354)", () => {
+  const SENTINEL = "sk-or-console-sentinel-1354-9876543210";
+  const originalIsTTY = process.stdout.isTTY;
+
+  afterEach(() => {
+    flushLogs();
+  });
+
+  afterAll(() => {
+    Object.defineProperty(process.stdout, "isTTY", { value: originalIsTTY, configurable: true });
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Patch console.log/warn/error directly (vitest spyOn misses module-scope calls). */
+  function patchConsole(
+    target: "log" | "warn" | "error",
+  ): () => { calls: Array<Array<unknown>> } {
+    const calls: Array<Array<unknown>> = [];
+    const orig = (console as Record<string, unknown>)[target] as (...args: unknown[]) => void;
+    (console as Record<string, unknown>)[target] = (...args: unknown[]) => { calls.push(args); };
+    return () => {
+      (console as Record<string, unknown>)[target] = orig;
+      return { calls };
+    };
+  }
+
+  it("redacts credentials before the console sink, not just the file", () => {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    const restoreLog = patchConsole("log");
+    const restoreWarn = patchConsole("warn");
+    try {
+      logInfo("test", `OPENAI_API_KEY=${SENTINEL} in use`);
+      logWarn("test", `provider failed with ${SENTINEL}`);
+      flushLogs();
+    } finally {
+      const { calls: logCalls } = restoreLog();
+      const { calls: warnCalls } = restoreWarn();
+      const consoleOutput = [...logCalls, ...warnCalls].map(c => String(c[0])).join("\n");
+      expect(consoleOutput).not.toContain(SENTINEL);
+      expect(consoleOutput).toContain("***REDACTED***");
+    }
+  });
+
+  it("redacts credential fragments from error rendering", () => {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    const restoreErr = patchConsole("error");
+    try {
+      logError("test", "boom", new Error(`header leaked ${SENTINEL}`));
+      flushLogs();
+    } finally {
+      const { calls } = restoreErr();
+      const rendered = calls.map(c => String(c[0])).join("\n") + calls.map(c => String(c[1])).join("\n");
+      expect(rendered).not.toContain(SENTINEL);
+    }
+  });
 });

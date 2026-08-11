@@ -37,6 +37,34 @@ export interface PeerHelpTransport {
   withdrawHelp(peer: string, request: PeerHelpWithdrawV1): Promise<{ acknowledged: boolean; owner_action?: string }>;
 }
 
+export interface PeerRouteInfo {
+  hasRoute: boolean;
+  direction: "accepted" | "outbound" | "none";
+  connectedAt: number | null;
+  lastActivityAt: number | null;
+}
+
+export interface PeerClientStatus {
+  state: string;
+  lastError: string | null;
+  lastErrorAt: number | null;
+  nextRetryAt: number | null;
+}
+
+export interface PeerStatusEntry {
+  name: string;
+  endpoint: string;
+  transport: string;
+  state: string;
+  hasRoute: boolean;
+  routeDirection: "accepted" | "outbound" | "none";
+  connectedAt: number | null;
+  lastActivityAt: number | null;
+  lastError: string | null;
+  lastErrorAt: number | null;
+  nextRetryAt: number | null;
+}
+
 export interface PeerTransport extends PeerHelpTransport {
   send(peer: string, message: PeerMessage): Promise<unknown>;
   broadcast(message: PeerMessage): Promise<void>;

@@ -53,8 +53,8 @@ function parseUsage(usageJson: string | null | undefined): { input_tokens?: numb
  * TODO: #1357 integration — read the actual target.delivery field from the
  * delegation record once the cross-repo wiring lands.
  */
-function getDeliveryPolicy(_run: PiRunRecord): DeliveryPolicy {
-  return "leave_remote";
+function getDeliveryPolicy(run: PiRunRecord): DeliveryPolicy {
+  return run.deliveryPolicy ?? "leave_remote";
 }
 
 /**
@@ -131,7 +131,11 @@ export function buildPublicProjection(run: PiRunRecord, uiRequest: Record<string
     const policy = getDeliveryPolicy(run);
     projection.delivery = {
       policy,
-      status: "not_requested", // Populated from actual delivery execution
+      // leave_remote is complete when execution settles. The other policies
+      // have no transfer implementation in this ticket, so expose that
+      // failure separately without hiding the execution result.
+      status: policy === "leave_remote" ? "succeeded" : "failed",
+      ...(policy === "leave_remote" ? {} : { error: `Delivery policy '${policy}' is not available on this owner` }),
     };
   }
 

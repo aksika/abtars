@@ -1,16 +1,12 @@
 # Pi Integration
 
-abTARS integrates with [Pi](https://github.com/earendil-works/pi) — a mature coding/session/model harness. Rather than compete, abTARS and Pi work as **symbiotic peers**: each runs standalone, runtime discovery bridges them. No master/slave, no npm dependency either way.
+abTARS integrates with [Pi](https://github.com/earendil-works/pi) — a mature coding/session/model harness. abTARS consumes Pi as a provider engine, a terminal UI, and a supervised coding subprocess; it does not load Pi into abmind or extend Pi with abtars features. No npm dependency either way.
 
 The adoption is **additive and reversible** — each Pi package plugs in beside existing paths. If a package breaks or goes away, abTARS keeps working.
 
 ## Architecture
 
-Two value flows drive the integration:
-
-**Flow A — Pi gains abTARS superpowers.** Pi loads abmind as a plugin for memory/soul/sleep in its TUI. Pi can also reach abTARS over A2A for messaging presence and task queueing.
-
-**Flow B — abTARS gains Pi superpowers.** Pi's provider engine (pi-ai) becomes an optional L1 motor inside `DirectApiTransport`, unlocking ~36 providers and prompt caching. Pi's coding agent becomes a supervised subprocess for complex coding tasks.
+abTARS gains Pi superpowers: Pi's provider engine (pi-ai) becomes an optional L1 motor inside `DirectApiTransport`, unlocking ~36 providers and prompt caching. Pi's coding agent becomes a supervised subprocess for complex coding tasks.
 
 ```
                 abtars
@@ -42,3 +38,31 @@ Sub-chapters:
 - [TUI (Terminal Interface)](/abtars/pi-tui) — how to use `abtars tui`
 - [pi-ai Providers](/abtars/pi-providers) — enabling Pi-powered providers
 - [Pi Executor](/abtars/pi-executor) — coding delegation via `/pi run`
+
+## Version policy
+
+abTARS is built and tested against a **pinned Pi minor line** (`0.83.x`). The pin
+lives in `PI_COMPATIBILITY` (`src/config/pi-compatibility.ts`) and is mirrored in
+`package.json` devDependencies — a test fails the build if they diverge.
+
+- `abtars deps install pi` and `abtars deps update pi` install the pinned range
+  (`~0.83.0`) and will **never** move Pi above it. Patch releases (bugfixes)
+  flow in automatically.
+- Pi's own updater (`pi update`) has **no version flag** — it always goes to
+  latest. If you run it and Pi moves above the pin, abtars keeps working but
+  warns everywhere it sees Pi (`abtars status` exits non-zero, `abtars deps
+  list` shows `above pin`, the deploy preflight and boot log warn).
+- `abtars deps update` exits non-zero while Pi is above the pin. That is
+  deliberate — the operator must act.
+
+Downgrade to the tested line:
+
+```
+npm i -g '@earendil-works/pi-coding-agent@~0.83.0'
+```
+
+If you deliberately want to keep a newer Pi, re-run with `--force`:
+
+```
+abtars deps install pi --force
+```

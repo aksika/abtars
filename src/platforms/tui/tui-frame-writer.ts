@@ -45,10 +45,11 @@ export type TuiFrameClass =
   | "status"      // runtime status — coalesce to latest revision
   | "progress"    // nonterminal incremental activity — coalesce per card
   | "chunk"       // model stream delta — coalesce per stream, lowest keep
+  | "stream-start" // #1612: visible stream start — coalesce per stream
   | "typing";     // typing indicator — lowest priority
 
 /** Eviction order from lowest priority (drop first) to highest. */
-const EVICT_ORDER: TuiFrameClass[] = ["typing", "status", "progress", "chunk"];
+const EVICT_ORDER: TuiFrameClass[] = ["typing", "stream-start", "status", "progress", "chunk"];
 
 export type TuiFrameWriterResult = "written" | "queued" | "coalesced" | "dropped";
 
@@ -93,6 +94,9 @@ export class TuiFrameWriter {
   /** Streams whose output was truncated (deltas dropped). */
   private readonly _truncatedStreams = new Set<string>();
 
+  /** #1612: latest execution ID observed per stream (for truncation terminals). */
+  private readonly _streamExecutions = new Map<string, string>();
+
   private readonly _onDrain: () => void;
   private readonly _onError: (err: Error) => void;
 
@@ -132,6 +136,10 @@ export class TuiFrameWriter {
     if (this._closed || !this._opts.isCurrent()) return "dropped";
 
     const clsInfo = classify(frame);
+
+    // #1612: remember the latest execution ID per stream so a synthetic
+    // truncation terminal can still close the correct renderer stream.
+    this._rememberStreamIdentity(frame);
 
     // A delta for an already-truncated stream is rejected — the truncated
     // terminal was already emitted and missing text is not replayable.
@@ -211,6 +219,7 @@ export class TuiFrameWriter {
     if (this._closed) return;
     this._queue = this._queue.filter((q) => q.cls === "control" || q.cls === "terminal");
     this._recomputeBytes();
+    this._streamExecutions.clear();
   }
 
   /** Idempotent. Remove writer listeners, clear queued data, invalidate. */
@@ -224,6 +233,7 @@ export class TuiFrameWriter {
     this._queuedBytes = 0;
     this._queuedFrames = 0;
     this._truncatedStreams.clear();
+    this._streamExecutions.clear();
   }
 
   // ── Internals ─────────────────────────────────────────────────────
@@ -242,9 +252,28 @@ export class TuiFrameWriter {
   private _markTruncated(streamId: string): void {
     if (this._truncatedStreams.has(streamId)) return;
     this._truncatedStreams.add(streamId);
-    const terminal: TuiServerFrame = { t: "chunk-end", id: streamId, reason: "truncated" };
+    // #1612: carry the remembered execution identity so the renderer can
+    // close the correct stream even after the identity-bearing frame was
+    // evicted or coalesced.
+    const executionId = this._streamExecutions.get(streamId);
+    const terminal: TuiServerFrame = executionId !== undefined
+      ? { t: "chunk-end", id: streamId, executionId, reason: "truncated" }
+      : { t: "chunk-end", id: streamId, reason: "truncated" };
     // Enqueue through the normal path (preserve-class, no re-entrant mark).
     this.enqueue(terminal);
+  }
+
+  /** #1612: remember the latest execution ID observed for each stream. */
+  private _rememberStreamIdentity(frame: TuiServerFrame): void {
+    if (frame.t === "stream-start") {
+      this._streamExecutions.set(frame.id, frame.executionId);
+      return;
+    }
+    if (frame.t === "chunk" || frame.t === "chunk-end" || frame.t === "tool-start") {
+      if (frame.executionId !== undefined) {
+        this._streamExecutions.set(frame.id, frame.executionId);
+      }
+    }
   }
 
   private _applyEvictSideEffects(q: QueuedFrame): void {
@@ -305,16 +334,35 @@ export class TuiFrameWriter {
         for (let i = this._queue.length - 1; i >= 0; i--) {
           const q = this._queue[i]!;
           if (q.cls === "chunk" && q.streamId === streamId) {
-            const existing = (q.frame as { delta: string }).delta;
-            const combined = existing + (frame as { delta: string }).delta;
+            // #1619: typed content — only same-kind deltas coalesce; a
+            // thinking→text transition must open a new block in order.
+            const existing = q.frame as { kind?: "text" | "thinking"; delta: string };
+            const incoming = frame as { kind: "text" | "thinking"; delta: string; executionId?: string };
+            if (existing.kind !== incoming.kind) return false;
+            const combined = existing.delta + incoming.delta;
             const capped = truncateUtf8(combined, this._maxChunkBytes);
-            (q.frame as { delta: string }).delta = capped;
+            const merged = q.frame as { kind: "text" | "thinking"; delta: string; executionId?: string };
+            merged.delta = capped;
+            if (incoming.executionId !== undefined) merged.executionId = incoming.executionId;
             q.bytes = encodedBytes(q.frame);
             this._queuedBytes = this._queue.reduce((s, x) => s + x.bytes, 0);
             if (Buffer.byteLength(combined, "utf8") > this._maxChunkBytes) {
               // Coalesced cap reached → remaining tail is lost → truncated.
               this._markTruncated(streamId);
             }
+            return true;
+          }
+        }
+        return false;
+      }
+      case "stream-start": {
+        // #1612: keep the newest stream-start per stream ID (carries the
+        // authoritative execution identity).
+        const streamId = clsInfo.streamId!;
+        for (let i = this._queue.length - 1; i >= 0; i--) {
+          const q = this._queue[i]!;
+          if (q.cls === "stream-start" && q.streamId === streamId) {
+            this._replace(i, frame, "stream-start", undefined, streamId);
             return true;
           }
         }
@@ -345,7 +393,7 @@ export class TuiFrameWriter {
     }
   }
 
-  private _replace(i: number, frame: TuiServerFrame, cls: TuiFrameClass, cardId?: number): void {
+  private _replace(i: number, frame: TuiServerFrame, cls: TuiFrameClass, cardId?: number, streamId?: string): void {
     const old = this._queue[i]!;
     const b = encodedBytes(frame);
     this._queuedBytes -= old.bytes;
@@ -353,7 +401,7 @@ export class TuiFrameWriter {
       frame,
       cls,
       bytes: b,
-      streamId: old.streamId,
+      streamId: streamId ?? old.streamId,
       cardId: cardId ?? old.cardId,
     };
     this._queuedBytes += b;
@@ -415,6 +463,10 @@ function classify(frame: TuiServerFrame): {
     case "status":
       return { cls: "status" };
     case "typing":
+      return { cls: "typing" };
+    case "stream-start":
+      // #1612: progress/typing priority, coalesce per stream ID.
+      return { cls: "stream-start", streamId: frame.id };
     case "tool-start":
       return { cls: "typing" };
     case "chunk":
@@ -439,9 +491,11 @@ function boundFrame(frame: TuiServerFrame, maxFrameBytes: number, _maxChunkBytes
   const make = (budget: number): TuiServerFrame => {
     switch (frame.t) {
       case "message":
-        return { t: "message", role: frame.role, markdown: truncateUtf8(frame.markdown, budget) + TRUNCATION_MARKER };
+        return { t: "message", role: frame.role, markdown: truncateUtf8(frame.markdown, budget) + TRUNCATION_MARKER, executionId: frame.executionId };
       case "chunk":
-        return { t: "chunk", id: frame.id, delta: truncateUtf8(frame.delta, budget) };
+        return { t: "chunk", id: frame.id, kind: frame.kind, delta: truncateUtf8(frame.delta, budget), executionId: frame.executionId };
+      case "stream-start":
+        return { t: "stream-start", id: frame.id, executionId: frame.executionId };
       case "activity":
         return { t: "activity", sequence: frame.sequence, event: truncateStringsDeep(frame.event, Math.min(budget, 512)) };
       case "activity-snapshot":
@@ -455,8 +509,9 @@ function boundFrame(frame: TuiServerFrame, maxFrameBytes: number, _maxChunkBytes
       case "steer-ack":
         return { t: "steer-ack", status: frame.status, instructionId: frame.instructionId, message: truncateUtf8(frame.message, budget) };
       case "tool-start":
-        return { t: "tool-start", id: frame.id, name: truncateUtf8(frame.name, budget) };
+        return { t: "tool-start", id: frame.id, name: truncateUtf8(frame.name, budget), executionId: frame.executionId };
       case "chunk-end":
+        return { t: "chunk-end", id: frame.id, executionId: frame.executionId, reason: frame.reason };
       case "typing":
         return frame;
     }

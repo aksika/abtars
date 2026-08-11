@@ -2,15 +2,65 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
-import { logInfo } from "../logger.js";
+import { logInfo, logWarn, logTrace } from "../logger.js";
 import { readEntries as dbReadEntries } from "./task-store.js";
-import { advanceNextRun, updateState, readState } from "./task-state-store.js";
-import { todaySuccessCount, appendRun } from "./task-history-store.js";
-import type { ScheduledTask } from "./task-types.js";
+import { advanceNextRun, claimPauseWarn, createRunId, readState, reserveRun } from "./task-state-store.js";
+import { todaySuccessCount } from "./task-history-store.js";
+import { settleRunOnce } from "./task-run-settler.js";
+import { runCeilingMs, type ScheduledTask } from "./task-types.js";
+import type { ActiveTaskRun } from "./task-state-store.js";
+import { PAUSED_WARN_INTERVAL_MS } from "./task-failure.js";
+import { autoResumeIfDue } from "./task-service.js";
 
 const TAG = "cron-checker";
 const memoryDir = (): string => join(abtarsHome(), "state");
 const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
+
+// #1502: the heartbeat evaluates schedules on every tick, so never-fires-again
+// skip warnings (auto_paused / no_state) must be rate-limited per task or they
+// replace one silence bug with a log flood. Paused tasks use the DURABLE
+// 12-per-hour claim in task_state (survives restarts); no_state has no row to
+// claim, so its in-memory one-per-hour limiter remains.
+const NO_STATE_WARN_INTERVAL_MS = 60 * 60 * 1000;
+const _noStateWarnLimiter = new Map<string, number>();
+function shouldWarnNoState(taskId: string): boolean {
+  const now = Date.now();
+  const last = _noStateWarnLimiter.get(taskId) ?? 0;
+  if (now - last < NO_STATE_WARN_INTERVAL_MS) return false;
+  _noStateWarnLimiter.set(taskId, now);
+  return true;
+}
+
+/**
+ * #1609: operator-visible recovery events emitted from the heartbeat path.
+ * Wired once in boot; the transition has already committed before the hook
+ * runs, and a hook failure is isolated/logged — it never undoes state.
+ */
+export type PausedRecoveryEvent =
+  | { kind: "resumed"; entryId: string; nextRunAt?: number }
+  | { kind: "cap_exhausted"; entryId: string };
+
+let pausedRecoveryHook: ((event: PausedRecoveryEvent) => void) | null = null;
+export function setPausedRecoveryHook(hook: ((event: PausedRecoveryEvent) => void) | null): void {
+  pausedRecoveryHook = hook;
+}
+
+export type ScheduleReason =
+  | "active_run"
+  | "due"
+  | "not_due"
+  | "disabled"
+  | "auto_paused"
+  | "no_state"
+  | "completed"
+  | "daily_cap"
+  | "stale_advanced";
+
+export interface ScheduleDecision {
+  run: boolean;
+  reason: ScheduleReason;
+  detail?: string;
+}
 
 export interface PendingReminder {
   chatId: number;
@@ -36,46 +86,137 @@ export function appendReminder(r: PendingReminder): void {
   writeFileSync(remindersPath(), JSON.stringify(existing, null, 2), "utf-8");
 }
 
-export function checkCron(): ScheduledTask[] {
+function decideSchedule(entry: ScheduledTask): ScheduleDecision {
+  if (!entry.enabled) return { run: false, reason: "disabled" };
+
+  const state = readState(entry.id);
+  if (!state) return { run: false, reason: "no_state" };
+  if (state.autoPaused) {
+    return { run: false, reason: "auto_paused", detail: `failures=${state.consecutiveFailures}` };
+  }
+  if (state.completed) return { run: false, reason: "completed" };
+  if (state.activeRun) {
+    return { run: false, reason: "active_run", detail: `run=${state.activeRun.runId} phase=${state.activeRun.phase}` };
+  }
+  if (state.nextRunAt && state.nextRunAt > Date.now()) return { run: false, reason: "not_due" };
+
+  if (entry.maxRunsPerDay) {
+    if (todaySuccessCount(entry.id, Date.now()) >= entry.maxRunsPerDay) {
+      advanceNextRun(entry.id, entry.schedule);
+      return { run: false, reason: "daily_cap" };
+    }
+  }
+
+  // A deferred admission is a durable occurrence with its own deadline. It
+  // must not be discarded by the generic missed-cron catch-up rule after a
+  // restart or a prolonged heartbeat outage.
+  if (!state.deferredAdmission && entry.schedule && state.nextRunAt) {
+    const maxDelay = (entry.catchUpHours ?? 0) * 3600_000;
+    const MIN_STALE_MS = 5 * 60_000;
+    const staleThreshold = Math.max(maxDelay, MIN_STALE_MS);
+    if (Date.now() - state.nextRunAt > staleThreshold) {
+      advanceNextRun(entry.id, entry.schedule);
+      return { run: false, reason: "stale_advanced", detail: `was ${Math.round((Date.now() - state.nextRunAt) / 60000)}min overdue` };
+    }
+  }
+
+  return { run: true, reason: "due" };
+}
+
+export interface ReservedTask {
+  entry: ScheduledTask;
+  run: ActiveTaskRun;
+}
+
+/**
+ * #1539: admission only. Active-run ownership, deadline policy, recovery, and
+ * terminal normalization live in the ScheduledRunCoordinator; the queue
+ * orders. Recovery is owned by coordinator.recover(), not here.
+ */
+export function checkCron(): ReservedTask[] {
   const entries = dbReadEntries();
-  const now = Date.now();
-  const dueTasks: ScheduledTask[] = [];
+  const dueTasks: ReservedTask[] = [];
 
   for (const entry of entries) {
-    if (!entry.enabled) continue;
-    const state = readState(entry.id);
-    if (!state) continue;
-    if (state.autoPaused) continue;
-    if (state.completed) continue;
-    if (state.nextRunAt && state.nextRunAt > now) continue;
-
-    if (entry.maxRunsPerDay) {
-      if (todaySuccessCount(entry.id, now) >= entry.maxRunsPerDay) {
-        advanceNextRun(entry.id, entry.schedule);
+    const decision = decideSchedule(entry);
+    if (decision.run) {
+      const now = Date.now();
+      const state = readState(entry.id);
+      // #1520: a due admission deferral resumes the SAME occurrence with its
+      // retained group/occurrence/deadline — a fresh run ID, never a new group.
+      const deferred = state?.deferredAdmission;
+      // #1502/#1520: a scheduled execution retry stays in its original run
+      // group with attempt 2 — never a second fresh group.
+      const retrying = state?.retrying === true && state.retryAttempt === 1;
+      const reservation = reserveRun(entry.id, {
+        runId: createRunId(entry.id),
+        groupId: deferred?.groupId ?? (retrying ? state?.retryGroupId : undefined) ?? `${entry.id}:group:${now}`,
+        attempt: retrying ? 2 : 1,
+        trigger: retrying ? "retry" : "schedule",
+        occurrenceAt: deferred?.occurrenceAt ?? now,
+        deadlineAt: deferred?.deadlineAt ?? now + runCeilingMs(),
+        cardId: undefined,
+      });
+      if (!reservation.ok) {
+        logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=active_run conflict run=${reservation.active.runId}`);
         continue;
       }
-    }
+      logTrace(TAG, `task_schedule_due task=${entry.id} run=${reservation.run.runId}${deferred ? ` deferred_attempt=${deferred.attempts + 1}` : ""}`);
 
-    if (entry.schedule && state.nextRunAt) {
-      const maxDelay = (entry.catchUpHours ?? 0) * 3600_000;
-      const MIN_STALE_MS = 5 * 60_000;
-      const staleThreshold = Math.max(maxDelay, MIN_STALE_MS);
-      if (now - state.nextRunAt > staleThreshold) {
-        advanceNextRun(entry.id, entry.schedule);
-        logInfo(TAG, `⏭️ Stale "${entry.id}" — advanced to next occurrence`);
+      if (entry.kind === "reminder") {
+        appendReminder({ chatId: parseInt(entry.chatId ?? "0", 10), message: entry.text, createdAt: now });
+        settleRunOnce({ entry, run: reservation.run, outcome: "success" });
+        logInfo(TAG, `Reminder fired: "${entry.text}"`);
+      } else {
+        dueTasks.push({ entry, run: reservation.run });
+      }
+    } else if (decision.reason === "auto_paused") {
+      // #1609: evaluate the durable cooldown/cap through the service. No new
+      // timer or heartbeat task — this rides the existing checker evaluation.
+      const resume = autoResumeIfDue(entry.id, [entry]);
+      if (resume === "resumed") {
+        // The conditional transition committed one atomic resume. Do NOT
+        // reserve a run in this same heartbeat; the next evaluation reads the
+        // freshly computed future schedule normally.
+        const nextState = readState(entry.id);
+        logInfo(TAG, `Auto-resumed "${entry.id}" after cooldown — next run scheduled`);
+        try {
+          pausedRecoveryHook?.({ kind: "resumed", entryId: entry.id, nextRunAt: nextState?.nextRunAt ?? undefined });
+        } catch (err) {
+          logAndSwallow(TAG, "pausedRecoveryHook (resumed)", err);
+        }
         continue;
       }
-    }
-
-    updateState(entry.id, { lastStartedAt: now });
-
-    if (entry.kind === "reminder") {
-      appendReminder({ chatId: parseInt(entry.chatId ?? "0", 10), message: entry.text, createdAt: now });
-      appendRun({ taskId: entry.id, kind: "reminder", trigger: "schedule", startedAt: now, finishedAt: now, outcome: "success" });
-      advanceNextRun(entry.id, entry.schedule);
-      logInfo(TAG, `⏰ Reminder fired: "${entry.text}"`);
+      if (resume === "cap_exhausted") {
+        // Durable, idempotent escalation: admitted only when the per-task
+        // WARN claim lands (at most 12/hour, survives restarts).
+        const now = Date.now();
+        if (claimPauseWarn(entry.id, now, PAUSED_WARN_INTERVAL_MS)) {
+          logWarn(TAG, `Pause cap exhausted for "${entry.id}" — remains paused until manual resume (/task resume ${entry.id})`);
+          try {
+            pausedRecoveryHook?.({ kind: "cap_exhausted", entryId: entry.id });
+          } catch (err) {
+            logAndSwallow(TAG, "pausedRecoveryHook (cap_exhausted)", err);
+          }
+        } else {
+          logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=auto_paused cap_exhausted (escalation rate-limited)`);
+        }
+        continue;
+      }
+      const now = Date.now();
+      if (claimPauseWarn(entry.id, now, PAUSED_WARN_INTERVAL_MS)) {
+        logWarn(TAG, `Schedule skip for "${entry.id}": reason=auto_paused (${resume}${decision.detail ? `, ${decision.detail}` : ""}) — resume: /task resume ${entry.id}`);
+      } else {
+        logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=auto_paused (warn rate-limited)`);
+      }
+    } else if (decision.reason === "no_state") {
+      if (shouldWarnNoState(entry.id)) {
+        logWarn(TAG, `Schedule skip for "${entry.id}": reason=no_state${decision.detail ? ` (${decision.detail})` : ""}`);
+      } else {
+        logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=${decision.reason} (warn rate-limited)`);
+      }
     } else {
-      dueTasks.push(entry);
+      logTrace(TAG, `task_schedule_skipped task=${entry.id} reason=${decision.reason}`);
     }
   }
 

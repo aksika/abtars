@@ -220,10 +220,6 @@ export async function main(argv: readonly string[]): Promise<number> {
         const { tribe: tribeCmd } = await import('./commands/tribe.js');
         return await tribeCmd(argv.slice(1));
       }
-      case 'pi': {
-        const { pi: piCmd } = await import('./commands/pi.js');
-        return await piCmd(argv.slice(1));
-      }
       case 'kanban': {
         const { kanban: kanbanCmd } = await import('./commands/kanban.js');
         return await kanbanCmd(argv.slice(1));

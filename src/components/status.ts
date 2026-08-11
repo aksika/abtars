@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { getInstanceName } from "./soul-bundle.js";
 import { packagePaths, readManifest } from "../cli/deploy-lib-import.js";
+import { PI_COMPATIBILITY, formatPiPinWarning } from "../config/pi-compatibility.js";
 import type { ServiceState } from "./service-registry.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -116,7 +117,7 @@ export interface BridgeStatusCtx {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const PLATFORM_NAMES = ["telegram", "discord", "irc"] as const;
+const PLATFORM_NAMES = ["telegram", "discord"] as const;
 const SYSTEMCTL_TIMEOUT_MS = 3000;
 
 // ── getStatus (the one data function) ────────────────────────────────────────
@@ -139,6 +140,21 @@ export async function getStatus(ctx?: BridgeStatusCtx): Promise<StatusView> {
 
   const appPresent = existsSync(paths.app);
   if (!appPresent) warnings.push("app/ directory missing");
+
+  // #1572: an above-pin Pi is a warning on every status surface. The warning
+  // carries the exact downgrade command (req 4); the CLI status command's
+  // existing `warnings.length > 0 → exit 1` then applies unchanged, and
+  // /status shows it through the same data function.
+  try {
+    const { resolvePiInstallation } = await import("./pi-installation.js");
+    const piRes = resolvePiInstallation();
+    if (piRes.state === "compatible" && piRes.installation.pinStatus === "above-pin") {
+      const pinWarning = formatPiPinWarning(piRes.installation.version);
+      warnings.push(pinWarning ?? `pi ${piRes.installation.version} above pin ${PI_COMPATIBILITY.pinnedRange}`);
+    }
+  } catch (err) {
+    logAndSwallow("status", "pi", err);
+  }
 
   // Rollback count
   let rollbackAvailable = 0;
@@ -208,7 +224,6 @@ export async function getStatus(ctx?: BridgeStatusCtx): Promise<StatusView> {
  */
 export function renderOperatorStatus(view: StatusView): string {
   const lines: string[] = [];
-  lines.push(`abtars status`);
   lines.push(`  home:          ${view.home}`);
   lines.push(`  version:       ${view.version ?? "(unset — run update)"}`);
   lines.push(`  commit:        ${view.commit ?? "(unknown)"}`);
@@ -238,8 +253,8 @@ export function renderOperatorStatus(view: StatusView): string {
   if (view.daemon) {
     const d = view.daemon;
     lines.push(`  daemon:        ${d.unit} (${d.scope})`);
-    lines.push(`                 ${stateIcon(d.active)} ${d.active}`);
-    if (d.mainPid !== null) lines.push(`                 pid: ${d.mainPid}`);
+    const pidSuffix = d.mainPid !== null ? ` (pid ${d.mainPid})` : "";
+    lines.push(`                 ${stateIcon(d.active)} ${d.active}${pidSuffix}`);
     if (d.bridgeUptimeSeconds !== null) {
       lines.push(`                 bridge uptime: ${formatUptime(d.bridgeUptimeSeconds * 1000)}`);
     }
@@ -259,6 +274,15 @@ export function renderOperatorStatus(view: StatusView): string {
     `  tui:           ${tuiIcon} ${tuiState} (enabled=${view.tui.enabled}, bridge tty=${view.tui.bridgeTty})`,
   );
   lines.push(`                 clients attached: ${view.tui.clientsAttached}`);
+
+  // Warnings — the operator must see why the command exits non-zero.
+  if (view.warnings.length > 0) {
+    lines.push("");
+    lines.push(`  warnings:      ${view.warnings.length}`);
+    for (const w of view.warnings) {
+      lines.push(`    - ${w.split("\n").join("\n      ")}`);
+    }
+  }
 
   return lines.join("\n") + "\n";
 }
@@ -280,6 +304,16 @@ export function renderChatStatus(view: StatusView): string {
   const sleepLabel = r.sleepStatus ?? "awake";
   lines.push(`abTARS™ ${r.instanceName} — ${sleepLabel} ${r.mood}`);
   lines.push(`  PID ${r.pid} (up ${formatUptime(r.uptimeMs)})`);
+
+  // Keep the chat status surface aligned with the operator status surface.
+  // In particular, an above-pin Pi warning includes the actionable downgrade
+  // command and must not disappear merely because the caller is /status.
+  if (view.warnings.length > 0) {
+    lines.push("", "Warnings:");
+    for (const warning of view.warnings) {
+      lines.push(`  - ${warning.split("\n").join("\n    ")}`);
+    }
+  }
 
   // Watchdog
   if (r.watchdog.pid !== null) {
@@ -491,12 +525,15 @@ function collectDaemon(
 
   const unit = unitName(scope);
   const isMac = process.platform === "darwin";
+  // The display name stays human-friendly, while launchd must be queried by
+  // the actual plist label. User scope = com.abtars.watchdog, system scope = com.abtars.daemon.
+  const probeUnit = isMac ? (scope === "system" ? "com.abtars.daemon" : "com.abtars.watchdog") : unit;
   const r = (() => {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
       if (isMac) {
-        return spawnSync("launchctl", ["list", unit], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: SYSTEMCTL_TIMEOUT_MS });
+        return spawnSync("launchctl", ["list", probeUnit], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: SYSTEMCTL_TIMEOUT_MS });
       }
       return spawnSync(
         "systemctl",
@@ -512,16 +549,28 @@ function collectDaemon(
   let activeRaw = "unknown";
   let mainPid: number | null = null;
   if (isMac) {
-    // launchctl list output: PID\tstatus\tlabel
-    // PID > 0 = running, PID = "-" = loaded but stopped, exit code 3 = not loaded
+    // launchctl list output: old macOS = tab-separated "PID\tstatus\tlabel",
+    // new macOS = plist format with "PID = <number>;"
     const pidField = output.split("\t")[0]?.trim();
     if (pidField === "-" || r?.status === 3 || (output === "" && r?.status !== 0)) {
       activeRaw = "loaded (not running)";
-    } else if (pidField) {
+    } else if (pidField && /^\d+$/.test(pidField)) {
       const parsed = parseInt(pidField, 10);
-      if (!isNaN(parsed) && parsed > 0) {
+      if (parsed > 0) {
         mainPid = parsed;
         activeRaw = "running";
+      }
+    } else {
+      // New macOS plist format: extract "PID" = <number>;
+      const pidMatch = output.match(/"PID"\s*=\s*(\d+);/);
+      if (pidMatch?.[1]) {
+        const parsed = parseInt(pidMatch[1], 10);
+        if (parsed > 0) {
+          mainPid = parsed;
+          activeRaw = "running";
+        } else {
+          activeRaw = "loaded (not running)";
+        }
       }
     }
   } else {

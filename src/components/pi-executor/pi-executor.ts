@@ -1,10 +1,10 @@
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import { SupervisedPiRpcClient, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
+import { SupervisedPiRpcClient, PiRpcError, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
 import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import { PiRunStore, type PiTerminalOutcome } from "./pi-run-store.js";
 import type { PiExecutorConfig } from "./config.js";
-import { resolveAndValidateWorkspace, buildTrustArgs, buildPluginArgs, buildChildEnv, validateSessionFile } from "./config.js";
+import { resolveAndValidateWorkspace, buildTrustArgs, buildChildEnv, validateSessionFile } from "./config.js";
 import type { PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim } from "./types.js";
 import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
 import { nerve } from "../nerve.js";
@@ -32,8 +32,10 @@ export class PiExecutor {
   private readonly live = new Map<string, OwnedProcess>();
   private _stopped = false;
   private _onCapacityReleased: (() => void) | null = null;
-  /** #1358 — Lifecycle transition hook for remote Pi event production. */
-  private _onTransition: ((runId: string, fromStatus: string | undefined, toStatus: string) => void) | null = null;
+  /** #1358 — Lifecycle transition subscribers (multi). */
+  private _transitionSubs = new Set<(runId: string, fromStatus: string | undefined, toStatus: string) => void>();
+  /** Progress event subscribers (multi). */
+  private _progressSubs = new Set<(runId: string, payload: string, progressType?: string) => void>();
 
   constructor(config: PiExecutorConfig, store: PiRunStore) {
     this.config = config;
@@ -50,15 +52,22 @@ export class PiExecutor {
     this._onCapacityReleased = cb;
   }
 
-  /** #1358 — Register a callback fired on run state transitions. */
-  onTransition(cb: (runId: string, fromStatus: string | undefined, toStatus: string) => void): void {
-    this._onTransition = cb;
+  /** #1358 — Subscribe to run state transitions. Returns unsubscribe function. */
+  onTransition(cb: (runId: string, fromStatus: string | undefined, toStatus: string) => void): () => void {
+    this._transitionSubs.add(cb);
+    return () => { this._transitionSubs.delete(cb); };
+  }
+
+  /** Subscribe to bounded public progress emission. Returns unsubscribe function. */
+  onProgress(cb: (runId: string, payload: string, progressType?: string) => void): () => void {
+    this._progressSubs.add(cb);
+    return () => { this._progressSubs.delete(cb); };
   }
 
   /** #1358 — Fire the transition hook for a run. */
   private _fireTransition(runId: string, fromStatus: string | undefined, toStatus: string): void {
-    if (this._onTransition) {
-      try { this._onTransition(runId, fromStatus, toStatus); } catch { /* best effort */ }
+    for (const cb of this._transitionSubs) {
+      try { cb(runId, fromStatus, toStatus); } catch { /* best effort */ }
     }
   }
 
@@ -73,6 +82,8 @@ export class PiExecutor {
     const run = this.store.get(runId);
     if (!run || run.executionGeneration !== generation) return "error";
     if (run.status !== "starting") return "error";
+
+    this._fireTransition(runId, "queued", "starting");
 
     // Register live ownership immediately, before spawn
     const placeholder: OwnedProcess = {
@@ -133,6 +144,7 @@ export class PiExecutor {
         error: `Launch exception: ${err instanceof Error ? err.message : String(err)}`,
       });
       nerve.fire("card:failed", run.cardId);
+      this._fireTransition(runId, "starting", "failed");
       return "error";
     }
   }
@@ -184,7 +196,6 @@ export class PiExecutor {
       ...this.config.fixedArgs,
       "--mode", "rpc",
       ...buildTrustArgs(this.config),
-      ...buildPluginArgs(this.config),
     ];
 
     const env = buildChildEnv(this.config, run);
@@ -319,6 +330,7 @@ export class PiExecutor {
       this.store.restorePendingUi({ runId, generation, requestId, requestType: claim.requestType });
     } else {
       this.store.recordUiReplyOutcome({ runId, generation, requestId, outcome: "delivery_unknown" });
+      this._fireTransition(runId, "awaiting_input", "running");
     }
     this.store.touchActivity(runId);
     return { claimed: true, requestType: claim.requestType };
@@ -329,6 +341,108 @@ export class PiExecutor {
     if (!owned) return false;
     this._cancelProcess(runId, owned, "Cancelled by user");
     return true;
+  }
+
+  /**
+   * #1406: native Pi RPC compaction of an owned, live run. Ownership,
+   * generation, live process identity, and state are verified before any
+   * write; the correlated `compact` response (plus bounded compaction
+   * lifecycle observation) determines the terminal result. An accepted write
+   * is never reported as completion without its response.
+   */
+  async compactOwnedRun(input: {
+    runId: string;
+    ownerPrincipalId: string;
+    expectedGeneration: number;
+    customInstructions?: string;
+  }): Promise<import("./pi-run-service.js").CompactionControlResult> {
+    const base = { targetKind: "local_pi_run" as const, message: "" };
+    const owned = this.live.get(input.runId);
+    if (!owned) {
+      return { ...base, status: "failed", message: "Run is not running (terminal or not started)" };
+    }
+    if (owned.generation !== input.expectedGeneration) {
+      return { ...base, status: "stale", message: "Run generation changed since the request was resolved" };
+    }
+    if (owned.settling) {
+      return { ...base, status: "failed", message: "Run is settling" };
+    }
+    const run = this.store.get(input.runId);
+    if (!run || run.status !== "running") {
+      // Native Pi compaction is valid only between turns. Awaiting-input,
+      // starting, cancelling, and terminal states are not safe compaction
+      // boundaries.
+      const busy = run?.status === "starting" || run?.status === "awaiting_input" || run?.status === "cancelling";
+      return { ...base, status: busy ? "busy" : "failed", message: `Run is ${run?.status ?? "unknown"}` };
+    }
+    if (run.ownerPrincipalId !== input.ownerPrincipalId) {
+      return { ...base, status: "failed", message: "Run belongs to a different principal" };
+    }
+
+    let state: { isStreaming: boolean; isCompacting: boolean };
+    try {
+      state = await owned.client.getState();
+    } catch (err) {
+      return { ...base, status: "failed", message: `Cannot probe run state: ${boundedError(err)}` };
+    }
+    if (state.isCompacting) {
+      return { ...base, status: "busy", message: "Run is already compacting" };
+    }
+    if (state.isStreaming) {
+      return { ...base, status: "busy", message: "Run is streaming an active turn" };
+    }
+
+    // Observe compaction lifecycle events during the call. The correlated
+    // `compact` response is the official terminal signal; the lifecycle
+    // listener cleans itself up on compaction_end or after a bounded grace.
+    let compactionEnded = false;
+    let lifecycleTimer: ReturnType<typeof setTimeout> | null = null;
+    const lifecycle = new Promise<void>((resolve) => {
+      let unsub: (() => void) | null = null;
+      unsub = owned.client.subscribe((event) => {
+        if (event.type === "compaction_end") {
+          compactionEnded = true;
+          if (lifecycleTimer) { clearTimeout(lifecycleTimer); lifecycleTimer = null; }
+          unsub?.();
+          resolve();
+        }
+      });
+      lifecycleTimer = setTimeout(() => { lifecycleTimer = null; unsub?.(); }, 15_000);
+      if (typeof lifecycleTimer.unref === "function") lifecycleTimer.unref();
+    });
+
+    try {
+      const started = Date.now();
+      const result = await owned.client.compact(input.customInstructions);
+      await Promise.race([
+        lifecycle,
+        new Promise<void>(resolve => setTimeout(resolve, 10_000)),
+      ]);
+      if (lifecycleTimer) { clearTimeout(lifecycleTimer); lifecycleTimer = null; }
+      this.store.touchActivity(input.runId);
+      if (!compactionEnded) {
+        logDebug(TAG, `Run ${input.runId}: compact response ok, no compaction_end observed (${Date.now() - started}ms)`);
+      }
+      if (!result.summary && !result.firstKeptEntryId) {
+        return { ...base, status: "failed", message: "Pi returned an empty compaction result" };
+      }
+      return {
+        ...base,
+        status: "completed",
+        tokensBefore: result.tokensBefore,
+        tokensAfter: result.estimatedTokensAfter,
+        message: "Native compaction completed",
+      };
+    } catch (err) {
+      const code = err instanceof PiRpcError ? err.code : "unknown";
+      if (code === "process_exit" || code === "process_error" || code === "closed") {
+        return { ...base, status: "failed", message: "Pi process exited during compaction" };
+      }
+      if (code === "timeout") {
+        return { ...base, status: "failed", message: "Compaction timed out" };
+      }
+      return { ...base, status: "failed", message: `Compaction failed: ${boundedError(err)}` };
+    }
   }
 
   async checkWallClock(runId: string): Promise<boolean> {
@@ -388,6 +502,7 @@ export class PiExecutor {
     });
     if (settlement.committed) {
       nerve.fire("card:failed", settlement.cardId);
+      this._fireTransition(runId, undefined, outcome);
     }
   }
 
@@ -433,7 +548,12 @@ export class PiExecutor {
     this.store.touchActivity(runId);
 
     const proj = projectPiEvent(event);
-    for (const p of proj.progress) this.store.addProgress(runId, p.type, p.json);
+    for (const p of proj.progress) {
+      this.store.addProgress(runId, p.type, p.json);
+      for (const cb of this._progressSubs) {
+          try { cb(runId, p.json, p.type); } catch { /* best effort */ }
+      }
+    }
     if (proj.log?.level === "warn") logWarn(TAG, `${proj.log.message} [run=${runId}]`);
     else if (proj.log?.level === "debug") logDebug(TAG, `${proj.log.message} [run=${runId}]`);
 
@@ -455,19 +575,24 @@ export class PiExecutor {
     if (dialogMethods.has(method)) {
       const owned = this.live.get(runId);
       if (!owned) return;
+      // #1358 review — the "ui" progress row is stored BEFORE the
+      // awaiting_input transition so the in-transaction event emitter can
+      // attach title/prompt/options to the public projection. A stray row on
+      // a rejected request is harmless: the next accepted request writes a
+      // newer row, and the projection reads the latest one.
+      this.store.addProgress(runId, "ui", JSON.stringify({
+        requestId: request.id,
+        type: method,
+        title: (request as any).title,
+        description: (request as any).message ?? (request as any).placeholder ?? (request as any).prefill,
+        options: (request as any).options,
+        defaultValue: (request as any).defaultValue,
+        filePattern: undefined,
+      }));
       const result = this.store.setPendingUi({
         runId, generation: owned.generation, requestId: request.id, requestType: method as PiPendingRequestType,
       });
       if (result.ok) {
-        this.store.addProgress(runId, "ui", JSON.stringify({
-          requestId: request.id,
-          type: method,
-          title: (request as any).title,
-          description: (request as any).message ?? (request as any).placeholder ?? (request as any).prefill,
-          options: (request as any).options,
-          defaultValue: (request as any).defaultValue,
-          filePattern: undefined,
-        }));
         this._fireTransition(runId, "running", "awaiting_input");
       } else {
         logWarn(TAG, `UI request rejected for ${runId} (gen=${owned.generation}, req=${request.id}): ${result.reason}`);
@@ -534,4 +659,10 @@ export class PiExecutor {
     }
     this.live.clear();
   }
+}
+
+/** Bounded, content-free error text (never raw RPC frame content). */
+function boundedError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.slice(0, 300);
 }

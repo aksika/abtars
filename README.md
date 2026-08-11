@@ -2,7 +2,7 @@
 
 **Meet the latest kid on the block.** An agentic framework designed to survive — and do the job.
 
-abTARS is an autonomous AI agent that runs 24/7 on your hardware. It talks to you via Telegram, Discord, or IRC. It remembers everything. It recovers from failures without intervention. It coordinates with peer instances across machines. Your hardware, your rules, zero cloud dependency.
+abTARS is an autonomous AI agent that runs 24/7 on your hardware. It talks to you via Telegram or Discord. It remembers everything. It recovers from failures without intervention. It coordinates with peer instances across machines. Your hardware, your rules, zero cloud dependency.
 
 ## Five Layers: Body → Heart → Brain → Soul → Tribe
 
@@ -24,7 +24,7 @@ Each layer builds on the one below it — lower layers work without the higher o
 │            Health monitoring                │
 ├─────────────────────────────────────────────┤
 │  Body      Platforms (Telegram, Discord,    │
-│            IRC), Dashboard, CLI,            │
+│            Dashboard, CLI,            │
 │            Security/Trust, ActionGate,      │
 │            Doctor, Watchdog, Boot, Config   │
 └─────────────────────────────────────────────┘
@@ -73,15 +73,15 @@ One agent is useful. A swarm is unstoppable. abTARS instances discover each othe
 
 abTARS integrates [Pi](https://github.com/earendil-works/pi) as a **symbiotic peer**, not a dependency — each runs standalone, runtime discovery bridges them. Additive and reversible: if a Pi package breaks or is absent, abTARS keeps working unchanged.
 
-- **Provider engine (L1 motor)** — Pi's `pi-ai` unlocks ~36 model providers and prompt caching inside Direct API, opt-in beside the always-on hand-rolled L0 floor
+- **Provider engine (L1 motor)** — Pi's `pi-ai` unlocks ~36 model providers and prompt caching on the `pi-ai` route
 - **Terminal face** — Pi's TUI gives abTARS a terminal interface (`abtars tui`)
 - **Supervised coding agent** — Pi's coding agent runs complex coding tasks as a supervised subprocess (`/pi run`)
-- **Zero coupling** — no npm dependency either direction; `/emergency` always pins to the L0 floor regardless of Pi's presence
+- **Zero coupling** — no npm dependency either direction; emergency execution is a separate ACP hailMary path owned by #1468
 
 ## Architecture
 
 ```
-You (Telegram / Discord / IRC / API client)
+You (Telegram / Discord / API client)
   │
   ▼
 abTARS (bridge)
@@ -93,7 +93,7 @@ abTARS (bridge)
   │
   ├── kiro-cli        → Claude, DeepSeek, MiniMax, Qwen (free tier)
   ├── gemini-cli      → Gemini 2.5 Pro/Flash (free tier)
-  ├── Direct API      → ollama, OpenRouter, any OpenAI-compatible, Pi's pi-ai (~36 providers)
+  ├── pi-ai route     → ollama, OpenRouter, any OpenAI-compatible, Pi's pi-ai (~36 providers)
   ├── Pi              → TUI face, supervised coding agent
   │
   └── Peer Network (Tribe — gossip + HTTP delegation + callbacks)
@@ -102,13 +102,13 @@ abTARS (bridge)
 | Transport | Providers |
 |-----------|-----------|
 | ACP (recommended) | kiro-cli, gemini-cli |
-| Direct API | ollama, OpenRouter, any OpenAI-compatible endpoint, Pi's pi-ai (~36 providers) |
+| pi-ai route | ollama, OpenRouter, any OpenAI-compatible endpoint, Pi's pi-ai (~36 providers) |
 | Hooks (standalone) | abmind lifecycle hooks on any CLI agent |
 
 ## Requirements
 
 - Node.js 22+
-- A Telegram bot token (Discord/IRC optional)
+- A Telegram bot token (Discord optional)
 - At least one model provider
 
 Optional: ollama + `nomic-embed-text` for memory embeddings.

@@ -337,6 +337,7 @@ export class DiscordAdapter implements PlatformAdapter {
       senderName: message.authorUsername,
       text: senderPrefix + text,
       timestamp: message.timestamp,
+      messageId: message.id,
       isGroup: !isDM,
       isVoice: false,
       mediaPath,
@@ -359,7 +360,7 @@ export class DiscordAdapter implements PlatformAdapter {
     user: import("discord.js").User,
   ): Promise<void> {
     const channelId = reaction.message.channelId;
-    const messageId = Number(reaction.message.id);
+    const messageId = String(reaction.message.id);
     const emoji = reaction.emoji.name ?? "";
     if (!emoji) return;
 
@@ -373,7 +374,17 @@ export class DiscordAdapter implements PlatformAdapter {
       const resolvedUserId = loadUsers().byPlatformId.get("discord:" + user.id)?.userId ?? "unknown";
       const recalledIds = (await import("../../components/message-pipeline.js")).getRecalledIdsForMessage(messageId);
       if (recalledIds && score !== 0) {
-        for (const memoryId of recalledIds) await this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType: score < 0 ? "reject" : "cite" }, `reaction-${messageId}-${memoryId}`);
+        for (const memoryId of recalledIds) {
+          const msgId = String(reaction.message.id);
+          const opKey = (await import("../../components/memory-operation-key.js")).feedbackKey("discord", channelId, resolvedUserId, msgId, memoryId, score < 0 ? "reject" : "cite");
+          const { attemptMemoryMutation } = await import("../../components/memory-runtime.js");
+          await attemptMemoryMutation({
+            phase: "feedback",
+            family: "feedback",
+            operationKey: opKey,
+            run: () => this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType: score < 0 ? "reject" : "cite" }, opKey),
+          });
+        }
       }
     }
 

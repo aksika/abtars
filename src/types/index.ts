@@ -31,7 +31,6 @@ export type {
   SearchResult,
   VectorSearchResult,
   SearchOptions,
-  ForgetResult,
   ExtractedMemory,
   MemorySearchParams,
   MemorySearchResult,
@@ -41,7 +40,22 @@ export type {
   EditMemoryResult,
 } from "abmind";
 
-export type HeartbeatTask = { name: string; heavy?: boolean; execute: () => Promise<boolean | void> };
+export type HeartbeatTaskOutcome = {
+  state: "ran" | "idle";
+  detail?: string;
+};
+
+export type HeartbeatTask = {
+  name: string;
+  heavy?: boolean;
+  execute: () => Promise<HeartbeatTaskOutcome>;
+};
+
+export type HeartbeatTaskStatus = {
+  marker: "✓" | "✗" | "—" | "?";
+  state: "ran" | "idle" | "failed" | "skipped" | "never";
+  detail?: string;
+};
 
 export type {
   DiscordInboundMessage,

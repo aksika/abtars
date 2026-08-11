@@ -13,7 +13,7 @@ Starts automatically on boot. Default port: 3000 (override with `DASHBOARD_PORT`
 
 ## Features
 
-- Platform connection status (Telegram, Discord, IRC)
+- Platform connection status (Telegram, Discord)
 - Live context window percentage
 - Cron task panel (status, next fire, last result)
 - Log viewer (filterable by level)

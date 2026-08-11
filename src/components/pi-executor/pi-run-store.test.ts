@@ -437,4 +437,66 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       expect(store.get("run-b")).toBeDefined();
     });
   });
+
+  describe("cleanupOldCommands / cleanupConsumedApprovals (#1551)", () => {
+    function insertCommand(store: PiRunStore, id: string, state: string, updatedAt: string) {
+      const db = (store as any).db as TaskDatabase;
+      db.prepare(`
+        INSERT INTO remote_pi_commands (origin_peer, command_id, run_id, payload_hash, state, created_at, updated_at)
+        VALUES ('peer1', ?, 'run-x', 'h', ?, ?, ?)
+      `).run(id, state, updatedAt, updatedAt);
+    }
+    function insertApproval(store: PiRunStore, id: string, consumedAt: string) {
+      const db = (store as any).db as TaskDatabase;
+      db.prepare(`
+        INSERT INTO remote_pi_approvals_consumed (approval_id, run_id, origin_peer, command_id, consumed_at)
+        VALUES (?, 'run-x', 'peer1', 'c1', ?)
+      `).run(id, consumedAt);
+    }
+
+    it("deletes a completed command older than the cutoff", () => {
+      const store = makeStore();
+      insertCommand(store, "old", "completed", "2020-01-01T00:00:00.000Z");
+
+      const deleted = store.cleanupOldCommands(168);
+
+      expect(deleted).toBe(1);
+    });
+
+    it("does not delete a completed command inside the retention window", () => {
+      const store = makeStore();
+      insertCommand(store, "recent", "completed", new Date().toISOString());
+
+      const deleted = store.cleanupOldCommands(168);
+
+      expect(deleted).toBe(0);
+    });
+
+    it("does not delete an old command still in a non-terminal state", () => {
+      const store = makeStore();
+      insertCommand(store, "pending-old", "pending", "2020-01-01T00:00:00.000Z");
+
+      const deleted = store.cleanupOldCommands(168);
+
+      expect(deleted).toBe(0);
+    });
+
+    it("deletes a consumed approval older than the cutoff regardless of state", () => {
+      const store = makeStore();
+      insertApproval(store, "appr-old", "2020-01-01T00:00:00.000Z");
+
+      const deleted = store.cleanupConsumedApprovals(168);
+
+      expect(deleted).toBe(1);
+    });
+
+    it("does not delete a recently consumed approval", () => {
+      const store = makeStore();
+      insertApproval(store, "appr-recent", new Date().toISOString());
+
+      const deleted = store.cleanupConsumedApprovals(168);
+
+      expect(deleted).toBe(0);
+    });
+  });
 });

@@ -17,7 +17,9 @@ const TAG = "remote-pi-origin-projection";
  */
 export interface RemotePiOriginProjection {
   run_id: string;
-  card_id: number;
+  /** Owner-local card ID — opaque display/correlation value, never a key on
+   * the origin side. Resolved by (owner_peer, origin_request_id, run_id). */
+  remote_card_id: number;
   origin_request_id: string;
   owner_peer: string;
   latest_sequence: number;
@@ -76,7 +78,11 @@ export interface ProjectionStore {
 
   /** Get all projections for an owner peer */
   getProjectionsByOwner(ownerPeer: string): RemotePiOriginProjection[];
+  getEventIdentity(runId: string, sequence: number): { event_id: string; content_sha256: string } | null;
+  applyProjectionAndEvent(projection: RemotePiOriginProjection, event: RemotePiEventV1): void;
 }
+
+export type RemotePiCardProjector = (projection: RemotePiOriginProjection, event: RemotePiEventV1) => void;
 
 /**
  * SQLite-backed projection store.
@@ -92,7 +98,7 @@ export class SqliteProjectionStore implements ProjectionStore {
   private _migrate(): void {
     this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_origin_projections (
       run_id TEXT PRIMARY KEY,
-      card_id INTEGER NOT NULL,
+      remote_card_id INTEGER NOT NULL,
       origin_request_id TEXT NOT NULL,
       owner_peer TEXT NOT NULL,
       latest_sequence INTEGER NOT NULL DEFAULT 0,
@@ -110,21 +116,36 @@ export class SqliteProjectionStore implements ProjectionStore {
       last_command_outcome_json TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`);
+    // #1358 review — namespacing: rename any legacy bare `card_id` column and
+    // DROP the index over the remote numeric card ID. The remote card ID is
+    // host-local to the owner and must never be an origin-side key, index,
+    // join column, or lookup.
+    try { this.db.exec(`ALTER TABLE remote_pi_origin_projections RENAME COLUMN card_id TO remote_card_id`); } catch { /* column already renamed */ }
+    this.db.exec(`DROP INDEX IF EXISTS idx_remote_projections_card`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_projections_owner ON remote_pi_origin_projections(owner_peer)`);
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_projections_card ON remote_pi_origin_projections(card_id)`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS remote_pi_origin_events (
+      run_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      event_id TEXT NOT NULL,
+      content_sha256 TEXT NOT NULL,
+      projection_json TEXT NOT NULL,
+      received_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (run_id, sequence),
+      UNIQUE (run_id, event_id)
+    )`);
   }
 
   upsertProjection(projection: RemotePiOriginProjection): void {
     this.db.prepare(`
       INSERT OR REPLACE INTO remote_pi_origin_projections
-        (run_id, card_id, origin_request_id, owner_peer, latest_sequence, acknowledged_sequence,
+        (run_id, remote_card_id, origin_request_id, owner_peer, latest_sequence, acknowledged_sequence,
          latest_generation, latest_status, last_activity_at, pending_input_json, result_summary,
          error_summary, usage_json, changed_files_summary, resume_capability, delivery_json,
          last_command_outcome_json, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `).run(
       projection.run_id,
-      projection.card_id,
+      projection.remote_card_id,
       projection.origin_request_id,
       projection.owner_peer,
       projection.latest_sequence,
@@ -158,10 +179,27 @@ export class SqliteProjectionStore implements ProjectionStore {
       .map(r => this._rowToProjection(r));
   }
 
+  getEventIdentity(runId: string, sequence: number): { event_id: string; content_sha256: string } | null {
+    const row = this.db.prepare(
+      `SELECT event_id, content_sha256 FROM remote_pi_origin_events WHERE run_id = ? AND sequence = ?`,
+    ).get(runId, sequence) as { event_id: string; content_sha256: string } | undefined;
+    return row ?? null;
+  }
+
+  applyProjectionAndEvent(projection: RemotePiOriginProjection, event: RemotePiEventV1): void {
+    this.db.transaction(() => {
+      this.upsertProjection(projection);
+      this.db.prepare(`
+        INSERT INTO remote_pi_origin_events (run_id, sequence, event_id, content_sha256, projection_json)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(event.run_id, event.sequence, event.event_id, event.content_sha256, JSON.stringify(event.projection));
+    });
+  }
+
   private _rowToProjection(row: Record<string, unknown>): RemotePiOriginProjection {
     return {
       run_id: row.run_id as string,
-      card_id: row.card_id as number,
+      remote_card_id: row.remote_card_id as number,
       origin_request_id: row.origin_request_id as string,
       owner_peer: row.owner_peer as string,
       latest_sequence: row.latest_sequence as number,
@@ -186,10 +224,29 @@ export class SqliteProjectionStore implements ProjectionStore {
  */
 export class RemotePiOriginReducer {
   private readonly store: ProjectionStore;
+  private readonly cardProjector?: RemotePiCardProjector;
   private readonly listeners = new Map<string, Array<(projection: RemotePiOriginProjection) => void>>();
 
-  constructor(store: ProjectionStore) {
+  constructor(store: ProjectionStore, cardProjector?: RemotePiCardProjector) {
     this.store = store;
+    this.cardProjector = cardProjector;
+  }
+
+  private _projectCard(projection: RemotePiOriginProjection, event: RemotePiEventV1): void {
+    try {
+      this.cardProjector?.(projection, event);
+    } catch (err) {
+      // Projection acceptance is durable even if the UI card update is
+      // temporarily unavailable; a later lifecycle event/reconciliation can
+      // retry the card-side projection without replaying the event itself.
+      logWarn(TAG, `Card projection failed for run ${event.run_id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** Return whether a previously committed sequence has conflicting content. */
+  hasConflictingEvent(event: RemotePiEventV1): boolean {
+    const prior = this.store.getEventIdentity(event.run_id, event.sequence);
+    return !!prior && (prior.event_id !== event.event_id || prior.content_sha256 !== event.content_sha256);
   }
 
   /**
@@ -208,6 +265,14 @@ export class RemotePiOriginReducer {
     // Load existing projection
     const existing = this.store.getProjection(event.run_id);
 
+    const prior = this.store.getEventIdentity(event.run_id, event.sequence);
+    if (prior) {
+      if (prior.event_id !== event.event_id || prior.content_sha256 !== event.content_sha256) {
+        logError(TAG, `Conflicting event identity for ${event.run_id} sequence ${event.sequence}`);
+      }
+      return false;
+    }
+
     // Initialize projection for first event
     if (!existing) {
       if (event.sequence !== 1) {
@@ -216,13 +281,19 @@ export class RemotePiOriginReducer {
       }
       // First event — initialize, store, and return immediately
       const projection = this._initializeProjection(event);
-      this.store.upsertProjection(projection);
+      this.store.applyProjectionAndEvent(projection, event);
+      this._projectCard(projection, event);
       this._notifyListeners(event.run_id, projection);
       logTrace(TAG, `Initialized projection for run ${event.run_id} at seq ${projection.latest_sequence}`);
       return true;
     }
 
     const projection = existing;
+
+    if (event.kind === "accepted" && event.sequence !== 1) {
+      logError(TAG, `Accepted event for run ${event.run_id} must be sequence 1`);
+      return false;
+    }
 
     // Idempotent duplicate: same sequence already processed
     if (event.sequence <= projection.latest_sequence) {
@@ -237,15 +308,22 @@ export class RemotePiOriginReducer {
       return false;
     }
 
-    // Validate monotonic generation
+    // A generation may advance only through the authenticated resume fact,
+    // and only one generation at a time.
     if (event.generation < projection.latest_generation) {
       logError(TAG, `Event generation regression for run ${event.run_id}: ${event.generation} < ${projection.latest_generation}`);
       return false;
     }
+    if (event.generation > projection.latest_generation) {
+      if (event.kind !== "resumed" || event.generation !== projection.latest_generation + 1) {
+        logError(TAG, `Unbound generation transition for run ${event.run_id}: ${projection.latest_generation} -> ${event.generation}`);
+        return false;
+      }
+    }
 
     // Don't regress terminal state
     const terminalKinds = ["completed", "failed", "cancelled"];
-    if (terminalKinds.includes(projection.latest_status) && !terminalKinds.includes(event.kind)) {
+    if (terminalKinds.includes(projection.latest_status) && event.generation === projection.latest_generation) {
       logDebug(TAG, `Ignoring non-terminal event for already-terminal run ${event.run_id}`);
       return false;
     }
@@ -254,7 +332,8 @@ export class RemotePiOriginReducer {
     const updated = this._applyProjection(projection, event);
 
     // Store updated projection
-    this.store.upsertProjection(updated);
+    this.store.applyProjectionAndEvent(updated, event);
+    this._projectCard(updated, event);
 
     // Notify listeners
     this._notifyListeners(event.run_id, updated);
@@ -355,7 +434,7 @@ export class RemotePiOriginReducer {
   private _initializeProjection(event: RemotePiEventV1): RemotePiOriginProjection {
     return {
       run_id: event.run_id,
-      card_id: event.card_id,
+      remote_card_id: event.remote_card_id,
       origin_request_id: event.origin_request_id,
       owner_peer: event.origin_peer,
       latest_sequence: event.sequence,
@@ -388,6 +467,17 @@ export class RemotePiOriginReducer {
       latest_status: event.projection.status,
       last_activity_at: event.occurred_at,
     };
+
+    if (event.generation > existing.latest_generation || event.kind === "resumed") {
+      updated.pending_input = undefined;
+      updated.latest_progress = undefined;
+      updated.result_summary = undefined;
+      updated.error_summary = undefined;
+      updated.usage = undefined;
+      updated.changed_files_summary = undefined;
+      updated.resume_capability = undefined;
+      updated.delivery = undefined;
+    }
 
     // Update pending input (clear if event kind clears it)
     if (event.kind === "input_cleared") {

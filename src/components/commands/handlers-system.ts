@@ -12,6 +12,15 @@ import type { CommandContext } from "./types.js";
 const TAG = "cmd";
 
 export async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
+  // Trigger manual retry for disconnected peers before diagnostics
+  try {
+    const { getPeerTransport } = await import("../peer-transport/index.js");
+    const retried = getPeerTransport().manualRetryDisconnected();
+    if (retried.length > 0) {
+      logInfo(TAG, `Manual retry triggered for: ${retried.join(", ")}`);
+    }
+  } catch { /* peer transport not available — non-fatal */ }
+
   const arg = _text.replace(/^\/(doctor|health)\s*/i, "").trim().toLowerCase();
 
   if (arg === "fix") {
@@ -38,6 +47,15 @@ export async function handleDoctor(_text: string, ctx: CommandContext): Promise<
 }
 
 export async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean> {
+  // Trigger manual retry for disconnected peers before status collection
+  try {
+    const { getPeerTransport } = await import("../peer-transport/index.js");
+    const retried = getPeerTransport().manualRetryDisconnected();
+    if (retried.length > 0) {
+      logInfo(TAG, `Manual retry triggered for: ${retried.join(", ")}`);
+    }
+  } catch { /* peer transport not available — non-fatal */ }
+
   if (ctx.phaseHealth && ctx.registry) {
     const { getStatus, renderChatStatus } = await import("../status.js");
     const view = await getStatus({
@@ -73,20 +91,22 @@ export async function handleWait(text: string, ctx: CommandContext): Promise<boo
 }
 
 export async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> {
-  await ctx.transport.sendInterrupt();
   const { spin } = await import("../spin.js");
-  const s = spin.getSessionById(ctx.sessionKey);
-  if (s) s.busy = false;
+  // #1534: interrupt the selected session's own transport — the boot/pipeline
+  // transport is only a fallback when the session has none. Busy clears after
+  // the interrupt resolves successfully; a rejected interrupt surfaces.
+  await spin.interruptSession(ctx.sessionKey, ctx.transport, "operator");
   await ctx.reply("🛑 Ctrl+C sent.");
   logInfo(TAG, "Ctrl+C interrupt sent");
   return true;
 }
 
 export async function handleRestart(_text: string, ctx: CommandContext): Promise<boolean> {
-  const { writeFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
-  writeFileSync(join(home, ".start-reason"), "user-restart");
+  const { setDesiredState, resetRestartCount } = await import("../../supervisor/state.js");
+  setDesiredState(home, "running");
+  resetRestartCount(home, "user-restart");
 
   const arg = _text.replace(/^\/restart\s*/i, "").trim().toLowerCase();
   if (arg === "cold") {
@@ -114,8 +134,9 @@ export async function handleHeartbeat(_text: string, ctx: CommandContext): Promi
   const statuses = hb.getTaskStatuses();
   if (statuses.size > 0) {
     lines.push("Tasks (last tick):");
-    for (const [name, status] of statuses) {
-      lines.push(`  ${status} ${name}`);
+    for (const [name, st] of statuses) {
+      const detail = st.detail ? ` — ${st.detail}` : "";
+      lines.push(`  ${st.marker} ${name}${detail}`);
     }
   }
 
@@ -226,21 +247,30 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     buildInfo = ` (${bi.hash} ${bi.date.slice(0, 10)})`;
   } catch (err) { logAndSwallow("command_handlers", "op", err); }
 
-  let model = "unknown";
-  if ("currentModel" in ctx.transport) {
-    model = (ctx.transport as unknown as { currentModel: string }).currentModel;
-  } else {
-    const { loadTransport, resolveAgent } = await import("../transport-config.js");
-    const tc = loadTransport();
-    const prof = tc ? resolveAgent("main", tc) : null;
-    model = prof?.model ?? "unknown";
+  // #1619: the attached session's live transport is authoritative — the
+  // bridge-global transport and transport.json are only configured fallbacks.
+  const session = ctx.sessionManager?.getSessionById?.(ctx.sessionKey);
+  const attached = session?.transport ?? ctx.transport;
+  const liveStatus = attached.getRuntimeStatus?.() ?? {};
+
+  let model = liveStatus.model ?? "unknown";
+  if (!liveStatus.model) {
+    if ("currentModel" in attached) {
+      model = (attached as unknown as { currentModel: string }).currentModel;
+    } else {
+      const { loadTransport, resolveAgent } = await import("../transport-config.js");
+      const tc = loadTransport();
+      const prof = tc ? resolveAgent("main", tc) : null;
+      model = prof?.model ?? "unknown";
+    }
   }
 
-  const transportStatus = ctx.transport.isReady ? "✓ Connected" : "❌ Disconnected";
+  const transportStatus = attached.isReady ? "✓ Connected" : "❌ Disconnected";
   const uptime = formatUptime(Date.now() - ctx.startedAt);
-  const ctxPct = ctx.transport.contextPercent >= 0
-    ? `${ctx.transport.contextPercent}%`
-    : "n/a";
+  const windowText = liveStatus.contextWindow !== undefined ? String(liveStatus.contextWindow) : "?";
+  const ctxPct = liveStatus.contextPercent !== undefined && liveStatus.contextPercent >= 0
+    ? `${Math.round(liveStatus.contextPercent * 10) / 10}%/${windowText}`
+    : `?/${windowText}`;
   const { getHeartbeatInstance } = await import("../heartbeat-system.js");
   const hb = getHeartbeatInstance();
 
@@ -248,7 +278,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   const { loadTransport: lt, resolveAgent: ra } = await import("../transport-config.js");
   const tc = lt();
   const prof = tc ? ra("main", tc) : null;
-  const provider = prof?.providerName ?? "unknown";
+  const provider = liveStatus.provider ?? prof?.providerName ?? "unknown";
   const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
   const transportLine = `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`;
 
@@ -261,6 +291,11 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     `🤖 Model: ${model}`,
     ...(fallbackModels.length > 0 ? [`   Fallbacks: ${fallbackModels.join(", ")}`] : []),
     `📊 Context window: ${ctxPct}`,
+    ...(liveStatus.reasoning && liveStatus.reasoning !== "default"
+      ? [`🧠 Reasoning effort: ${liveStatus.reasoningRequested && liveStatus.reasoningRequested !== liveStatus.reasoning
+        ? `${liveStatus.reasoningRequested} (effective: ${liveStatus.reasoning})`
+        : liveStatus.reasoning}`]
+      : []),
     `⏱️ Uptime: ${uptime}`,
   ];
   if (hb) {

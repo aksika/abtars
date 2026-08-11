@@ -1,139 +1,256 @@
-/**
- * cycle-end.test.ts — #1287: the night Dreamy session tears down on EVERY cycle
- * outcome. createSleepHandle must invoke opts.onCycleEnd exactly once per cycle on
- * every terminal SleepRunResult status and on a thrown error — regardless of
- * onComplete.
- *
- * #1353: runSleepCycle now returns a structured SleepRunResult, not {ok, failCount}.
- */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const { mockRunSleepCycle } = vi.hoisted(() => ({
-  mockRunSleepCycle: vi.fn(async () => ({
-    runId: "run-1", status: "completed" as const, startedAt: 0, finishedAt: 0, llmCalls: 0,
-    steps: [], essentialFailures: [], resumable: false, watermarkAdvanced: true, report: "ok",
-  })),
+vi.mock("../../components/env-schema.js", () => ({
+  getEnv: vi.fn(() => ({ sleepQuality: "normal" })),
 }));
 
-vi.mock("abmind", async () => {
-  const actual = await vi.importActual<Record<string, unknown>>("abmind");
-  return { ...actual, runSleepCycle: mockRunSleepCycle };
-});
-
-// system-event-buffer is imported lazily on the report path — stub it so no real
-// event is buffered and the dynamic import resolves in tests.
 vi.mock("../../components/system-event-buffer.js", () => ({
   bufferSystemEvent: vi.fn(),
 }));
 
+vi.mock("../../components/logger.js", () => ({
+  logInfo: vi.fn(),
+  logTrace: vi.fn(),
+  logWarn: vi.fn(),
+  logError: vi.fn(),
+}));
+
+vi.mock("../../components/transport/bridge-lock-transport.js", () => ({
+  writeSleepStatus: vi.fn(),
+}));
+
 import { createSleepHandle } from "./index.js";
 
-const stubRuntime = { complete: async () => "" };
-
-function completedResult(overrides: Partial<Awaited<ReturnType<typeof mockRunSleepCycle>>> = {}) {
+function makeFakeClient(): any {
   return {
-    runId: "run-1", status: "completed" as const, startedAt: 0, finishedAt: 0, llmCalls: 0,
-    steps: [], essentialFailures: [], resumable: false, watermarkAdvanced: true, report: "ok",
-    ...overrides,
+    sleep: {
+      start: vi.fn(),
+      status: vi.fn(),
+      resume: vi.fn(),
+      cancel: vi.fn(),
+      events: vi.fn(),
+      runtime: { open: vi.fn(), next: vi.fn(), complete: vi.fn(), fail: vi.fn(), close: vi.fn() },
+    },
   };
 }
 
 async function settle(): Promise<void> {
-  // Success path awaits a dynamic import() before .finally — needs macrotasks, not
-  // just microtasks. Poll a few real ticks so the whole chain settles.
   for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 5));
 }
 
-describe("createSleepHandle — onCycleEnd teardown (#1287, #1353)", () => {
+describe("createSleepHandle — client-backed lifecycle (#1381)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockRunSleepCycle.mockImplementation(async () => completedResult());
   });
 
-  const stubApi: import("./index.js").SleepApi = {
-    DEFAULT_LEVEL: "normal",
-    parseLevel: (s: string) => s,
-    runSleepCycle: mockRunSleepCycle,
-    loadSleepSteps: () => [],
-  };
+  it("returns already_running when sleep is active", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockImplementation(() => new Promise(() => {})); // never resolves
 
-  function makeHandle(onCycleEnd: () => void) {
-    return createSleepHandle({
-      api: stubApi,
-      memoryEnabled: false,
-      runtime: stubRuntime,
-      onComplete: () => {},
-      onCycleEnd,
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent: vi.fn(),
     });
+
+    const r1 = handle.startScheduled();
+    expect(r1.status).toBe("accepted");
+
+    const r2 = handle.startScheduled();
+    expect(r2.status).toBe("already_running");
+  });
+
+  it("calls client.sleep.start with scheduled mode", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+
+    const handle = createSleepHandle({
+      client, memoryEnabled: true, onComplete: vi.fn(),
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent: vi.fn(),
+    });
+
+    handle.startScheduled();
+    await settle();
+
+    expect(client.sleep.start).toHaveBeenCalledWith("scheduled", "normal", undefined);
+  });
+
+  it("calls client.sleep.start with manual mode on /sleep now", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-2" });
+
+    const handle = createSleepHandle({
+      client, memoryEnabled: true, onComplete: vi.fn(),
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent: vi.fn(),
+    });
+
+    handle.startManual({ fresh: true, resume: false });
+    await settle();
+
+    expect(client.sleep.start).toHaveBeenCalledWith("manual", "ultimate", true);
+  });
+
+  it("calls client.sleep.resume when resume=true", async () => {
+    const client = makeFakeClient();
+    client.sleep.resume.mockResolvedValue({ status: "accepted", runId: "run-3" });
+
+    const handle = createSleepHandle({
+      client, memoryEnabled: true, onComplete: vi.fn(),
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent: vi.fn(),
+    });
+
+    handle.startManual({ fresh: false, resume: true });
+    await settle();
+
+    expect(client.sleep.resume).toHaveBeenCalled();
+  });
+});
+
+describe("createSleepHandle — cycle outcome resolution (#1603)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** A runnable cycle: pump opens + serves nothing (lease expires), the event
+   *  poller observes a terminal cycle_finished batch. */
+  function runningCycle(opts: { terminalDetail?: string; statusLast?: { status: string; report?: string } }) {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-9" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-9" });
+    client.sleep.runtime.next.mockResolvedValue({ status: "lease_expired" });
+    client.sleep.events.mockResolvedValueOnce({
+      runId: "run-9",
+      events: [{ seq: 1, at: Date.now(), event: { type: "cycle_finished", detail: opts.terminalDetail } }],
+      nextSeq: 2,
+      gap: false,
+      terminal: true,
+    }).mockResolvedValue({ runId: "run-9", events: [], nextSeq: 2, gap: false, terminal: true });
+    client.sleep.status.mockResolvedValue({
+      state: "terminal",
+      last: { runId: "run-9", status: opts.statusLast?.status ?? "completed", report: opts.statusLast?.report, resumable: false, completedSteps: 6, failedSteps: 0 },
+    });
+    return client;
   }
 
-  it("fires onCycleEnd on the completed path", async () => {
-    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "completed" }));
-    const onCycleEnd = vi.fn();
-    const r = makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
-    expect(r.status).toBe("accepted");
-    await settle();
-    expect(onCycleEnd).toHaveBeenCalledTimes(1);
+  it("resolves completion with the observed cycle_finished status", async () => {
+    const client = runningCycle({ terminalDetail: "partial" });
+    const handle = createSleepHandle({
+      client, memoryEnabled: true, onComplete: vi.fn(),
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent: vi.fn(),
+    });
+
+    const started = handle.startScheduled();
+    expect(started.status).toBe("accepted");
+    const outcome = await (started as { completion: Promise<any> }).completion;
+
+    expect(outcome.status).toBe("partial");
   });
 
-  it("fires onCycleEnd on the partial path", async () => {
-    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "partial", essentialFailures: ["retrospective"] }));
-    const onCycleEnd = vi.fn();
-    makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
-    await settle();
-    expect(onCycleEnd).toHaveBeenCalledTimes(1);
+  it("delivers the report via bufferSystemEvent before resolving", async () => {
+    const client = runningCycle({ terminalDetail: "partial", statusLast: { status: "partial", report: "Sleep partial — 6 completed, 1 failed" } });
+    const bufferSystemEvent = vi.fn();
+    const onComplete = vi.fn();
+    const handle = createSleepHandle({
+      client, memoryEnabled: true, onComplete,
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent,
+    });
+
+    const started = handle.startScheduled();
+    const outcome = await (started as { completion: Promise<any> }).completion;
+
+    expect(outcome.report).toBe("Sleep partial — 6 completed, 1 failed");
+    expect(bufferSystemEvent).toHaveBeenCalledWith("Sleep partial — 6 completed, 1 failed");
   });
 
-  it("fires onCycleEnd on the failed path", async () => {
-    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "failed", essentialFailures: ["daily-summary"] }));
-    const onCycleEnd = vi.fn();
-    makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
-    await settle();
-    expect(onCycleEnd).toHaveBeenCalledTimes(1);
+  it("fires onComplete for partial (essentials succeeded) but not for failed", async () => {
+    const partialClient = runningCycle({ terminalDetail: "partial" });
+    const partialOnComplete = vi.fn();
+    const partialHandle = createSleepHandle({
+      client: partialClient, memoryEnabled: true, onComplete: partialOnComplete,
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent: vi.fn(),
+    });
+    const startedPartial = partialHandle.startScheduled();
+    await (startedPartial as { completion: Promise<any> }).completion;
+    expect(partialOnComplete).toHaveBeenCalledTimes(1);
+
+    const failedClient = runningCycle({ terminalDetail: "failed", statusLast: { status: "failed" } });
+    const failedOnComplete = vi.fn();
+    const failedHandle = createSleepHandle({
+      client: failedClient, memoryEnabled: true, onComplete: failedOnComplete,
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent: vi.fn(),
+    });
+    const startedFailed = failedHandle.startScheduled();
+    await (startedFailed as { completion: Promise<any> }).completion;
+    expect(failedOnComplete).not.toHaveBeenCalled();
   });
 
-  it("fires onCycleEnd on the cancelled path", async () => {
-    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "cancelled", resumable: true }));
-    const onCycleEnd = vi.fn();
-    makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
-    await settle();
-    expect(onCycleEnd).toHaveBeenCalledTimes(1);
+  it("collects failing step ids from step_failed events into the outcome", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-9" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-9" });
+    client.sleep.runtime.next.mockResolvedValue({ status: "lease_expired" });
+    client.sleep.events.mockResolvedValueOnce({
+      runId: "run-9",
+      events: [
+        { seq: 1, at: Date.now(), event: { type: "step_failed", detail: "retro-derive" } },
+        { seq: 2, at: Date.now(), event: { type: "cycle_finished", detail: "partial" } },
+      ],
+      nextSeq: 3,
+      gap: false,
+      terminal: true,
+    }).mockResolvedValue({ runId: "run-9", events: [], nextSeq: 3, gap: false, terminal: true });
+    client.sleep.status.mockResolvedValue({ state: "terminal", last: { status: "partial", resumable: false, completedSteps: 6, failedSteps: 1 } });
+    const handle = createSleepHandle({
+      client, memoryEnabled: true, onComplete: vi.fn(),
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent: vi.fn(),
+    });
+
+    const started = handle.startScheduled();
+    const outcome = await (started as { completion: Promise<any> }).completion;
+
+    expect(outcome.failedSteps).toContain("retro-derive");
   });
 
-  it("fires onCycleEnd on the thrown-error path", async () => {
-    mockRunSleepCycle.mockImplementation(async () => { throw new Error("boom"); });
-    const onCycleEnd = vi.fn();
-    makeHandle(onCycleEnd).startManual({ fresh: true, resume: false });
-    await settle();
-    expect(onCycleEnd).toHaveBeenCalledTimes(1);
-  });
+  it("reports progress once per non-empty poll batch", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-9" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-9" });
+    client.sleep.runtime.next.mockResolvedValue({ status: "lease_expired" });
+    client.sleep.events.mockResolvedValueOnce({
+      runId: "run-9",
+      events: [{ seq: 1, at: Date.now(), event: { type: "cycle_started" } }],
+      nextSeq: 2,
+      gap: false,
+      terminal: false,
+    }).mockResolvedValueOnce({
+      runId: "run-9",
+      events: [{ seq: 2, at: Date.now(), event: { type: "cycle_finished", detail: "completed" } }],
+      nextSeq: 3,
+      gap: false,
+      terminal: true,
+    }).mockResolvedValue({ runId: "run-9", events: [], nextSeq: 3, gap: false, terminal: true });
+    client.sleep.status.mockResolvedValue({ state: "terminal", last: { status: "completed", resumable: false, completedSteps: 6, failedSteps: 0 } });
 
-  it("startScheduled also tears down on completed (#1321, #1353)", async () => {
-    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "completed" }));
-    const onCycleEnd = vi.fn();
-    const r = makeHandle(onCycleEnd).startScheduled();
-    expect(r.status).toBe("accepted");
-    await settle();
-    expect(onCycleEnd).toHaveBeenCalledTimes(1);
-  });
+    const onProgress = vi.fn();
+    const handle = createSleepHandle({
+      client, memoryEnabled: true, onComplete: vi.fn(),
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent: vi.fn(),
+    });
 
-  it("already_running when a cycle is active (#1321 req 8)", async () => {
-    let release: () => void = () => {};
-    const gate = new Promise<void>(r => { release = r; });
-    mockRunSleepCycle.mockImplementation(async () => { await gate; return completedResult(); });
-    const handle = makeHandle(vi.fn());
-    expect(handle.startScheduled().status).toBe("accepted");
-    expect(handle.startScheduled().status).toBe("already_running");
-    expect(handle.startManual({ fresh: true, resume: false }).status).toBe("already_running");
-    release();
+    handle.startScheduled({ onProgress });
     await settle();
-  });
 
-  it("no_work / already_running results do not buffer a report (nothing new to say)", async () => {
-    mockRunSleepCycle.mockImplementation(async () => completedResult({ status: "no_work", report: "nothing to do" }));
-    const { bufferSystemEvent } = await import("../../components/system-event-buffer.js");
-    makeHandle(vi.fn()).startManual({ fresh: true, resume: false });
-    await settle();
-    expect(bufferSystemEvent).not.toHaveBeenCalled();
+    expect(onProgress).toHaveBeenCalledTimes(2); // one per non-empty batch
   });
 });

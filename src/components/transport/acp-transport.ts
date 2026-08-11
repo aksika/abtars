@@ -74,6 +74,10 @@ export class AcpTransport implements IKiroTransport {
   private client: ClientSideConnection | null = null;
   private sessions = new Map<string, string>(); // sessionKey → acpSessionId
   private responseChunks = new Map<string, string[]>(); // sessionId → chunks
+  /** Raw text length already offered as a pre-tool semantic segment. */
+  private segmentOffsets = new Map<string, number>();
+  /** Preserve event order when the raw ACP callback cannot await us. */
+  private updateChains = new Map<string, Promise<void>>();
   /** #1338: acpSessionId → call-local output observer (removed in finally). */
   private outputObservers = new Map<string, OutputObserver | undefined>();
   private lastContextPercent = -1;
@@ -86,6 +90,10 @@ export class AcpTransport implements IKiroTransport {
   /** Optional callback for streaming intermediate responses. */
   onIntermediateResponse?: (text: string) => void;
   onToolCallStart?: (toolName: string) => void;
+  /** #1619: awaited pre-tool semantic text delivery. */
+  onSegmentBreak?: (text: string) => void | Promise<void>;
+  /** #1619: typed live output deltas (ACP emits text; thinking when present). */
+  onOutputDelta?: (event: import("./kiro-transport.js").OutputDelta) => void;
   /** Fired on reinit — pipeline uses this to flush stale queues. */
   onReinit?: () => void;
 
@@ -177,7 +185,7 @@ export class AcpTransport implements IKiroTransport {
       this._rawClient = new AcpRawClient(this.cliPath, args, cleanEnv, this.workingDir, (method, params) => {
         logDebug(this.tag, `[ext] ${method}`);
         if (method === "session/update") {
-          this.handleSessionUpdate(params as any);
+          void this.enqueueSessionUpdate(params as any);
         }
       });
       this._rawClient.spawn();
@@ -273,7 +281,7 @@ export class AcpTransport implements IKiroTransport {
     this.client = new ClientSideConnection(
       () => ({
         sessionUpdate: async (params: SessionNotification) => {
-          this.handleSessionUpdate(params);
+          await this.enqueueSessionUpdate(params);
         },
         requestPermission: async (params: RequestPermissionRequest) => {
           return this.handlePermission(params);
@@ -326,12 +334,12 @@ export class AcpTransport implements IKiroTransport {
     }
   }
 
-  private _pendingPrompt?: { sessionKey: string; message: string; resolve: (r: string) => void; reject: (e: Error) => void };
+  private _pendingPrompt?: { sessionKey: string; message: string; context?: PromptRequestContext; resolve: (r: string) => void; reject: (e: Error) => void };
   private _processDeadRetries = 0;
 
   /**
    * ACP rebuilds context from its own internal history (CLI-owned
-   * window), so `beforeMessageId` is unused here. `userId` is
+   * window), so `durableContextIntent` is unused here. `userId` is
    * accepted for interface conformance with the chokepoint at
    * `IKiroTransport.sendPrompt` but the ACP transport doesn't yet
    * deliver it to tool execution.
@@ -340,7 +348,7 @@ export class AcpTransport implements IKiroTransport {
     sessionKey: string,
     message: string,
     _image?: { mime: string; base64: string },
-    _context?: PromptRequestContext,
+    context?: PromptRequestContext,
   ): Promise<string> {
     if (!this.client && !(AcpTransport._rawMode && this._rawClient?.alive)) {
       logWarn(this.tag, "ACP client dead — reinitializing");
@@ -354,13 +362,18 @@ export class AcpTransport implements IKiroTransport {
     if (this.sm.state !== "idle") {
       logWarn(this.tag, `Concurrent prompt while ${this.sm.state} — queuing for after completion`);
       return new Promise<string>((resolve, reject) => {
-        this._pendingPrompt = { sessionKey, message, resolve, reject };
+        this._pendingPrompt = { sessionKey, message, context, resolve, reject };
       });
     }
 
     this._toolCallsSucceeded = 0;
     const sessionId = await this.getOrCreateSession(sessionKey);
     this.responseChunks.set(sessionId, []);
+    this.segmentOffsets.set(sessionId, 0);
+    // #1550: bind the caller's live-output observer for this session so the
+    // agent_message_chunk / tool_call mirrors below actually reach the feed.
+    // Cleared in the finally block alongside responseChunks.
+    this.outputObservers.set(sessionId, context?.outputObserver);
 
     logDebug(this.tag, `Sending prompt to session ${sessionId}: "${message.replace(/\n/g, " ").slice(0, 80)}…"`);
 
@@ -374,9 +387,29 @@ export class AcpTransport implements IKiroTransport {
 
     // client.prompt() blocks until the full turn completes.
     // While running, sessionUpdate fires for each agent_message_chunk.
+    let usedSid = sessionId;
     try {
       // #160: track in-flight so child-exit can reject immediately
-      const result = await this.trackInFlight("prompt", sessionId, () => this.promptWithRetry(sessionId, message));
+      const result = await this.trackInFlight("prompt", sessionId, () => this.promptWithRetry(sessionId, message, 2, context));
+      usedSid = result.sessionId;
+
+      // #1564: a session-expiry retry inside promptWithRetry rotates to a new
+      // session id — move any pre-rotation chunks under the id actually used so
+      // the turn isn't read back as "(no response)".
+      if (usedSid !== sessionId) {
+        this.responseChunks.set(usedSid, [
+          ...(this.responseChunks.get(sessionId) ?? []),
+          ...(this.responseChunks.get(usedSid) ?? []),
+        ]);
+        this.responseChunks.delete(sessionId);
+        this.segmentOffsets.set(usedSid, this.segmentOffsets.get(sessionId) ?? 0);
+        this.segmentOffsets.delete(sessionId);
+      }
+
+      // Raw ACP dispatch is callback-based, so the prompt can resolve just
+      // before its last queued update. Drain that queue before collecting the
+      // terminal text and before the pipeline can clear its callbacks.
+      await this.updateChains.get(usedSid);
 
       logDebug(this.tag, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
       logTrace(this.tag, `Model: ${this.modelId ?? "unknown"}`);
@@ -385,18 +418,20 @@ export class AcpTransport implements IKiroTransport {
       // #287: if model/agent not found was flagged during this session, reject the response
       if (this._modelNotFound) {
         this._modelNotFound = false;
-        this.responseChunks.delete(sessionId);
+        this.responseChunks.delete(usedSid);
+        this.segmentOffsets.delete(usedSid);
         const model = this.modelId ?? "unknown";
         throw new ModelNotFoundError(`Model "${model}" not available — kiro-cli fell back to generic agent`);
       }
 
-      const chunks = this.responseChunks.get(sessionId) ?? [];
-      this.responseChunks.delete(sessionId);
+      const chunks = this.responseChunks.get(usedSid) ?? [];
+      this.responseChunks.delete(usedSid);
+      this.segmentOffsets.delete(usedSid);
       return chunks.join("") || "(no response)";
     } finally {
       // #1338: drop the observer association so late events from a completed
       // call cannot publish into a newer attachment.
-      this.outputObservers.delete(sessionId);
+      this.outputObservers.delete(usedSid);
       // AfterPrompt hook — observe-only
       const durationMs = Date.now() - this.promptStartedAt;
       // #832: metrics
@@ -427,7 +462,7 @@ export class AcpTransport implements IKiroTransport {
     const pending = this._pendingPrompt;
     this._pendingPrompt = undefined;
     logInfo(this.tag, `Draining queued prompt`);
-    this.sendPrompt(pending.sessionKey, pending.message)
+    this.sendPrompt(pending.sessionKey, pending.message, undefined, pending.context)
       .then(r => pending.resolve(r))
       .catch(e => pending.reject(e instanceof Error ? e : new Error(String(e))));
   }
@@ -468,7 +503,7 @@ export class AcpTransport implements IKiroTransport {
     }
   }
 
-  private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
+  private async promptWithRetry(sessionId: string, message: string, maxRetries = 2, context?: PromptRequestContext): Promise<{ stopReason: string; sessionId: string }> {
     let sid = sessionId;
 
     // #924: raw mode — use raw client directly
@@ -476,7 +511,7 @@ export class AcpTransport implements IKiroTransport {
       this.responseChunks.set(sid, []);
       const result = await this._rawClient.prompt({ sessionId: sid, prompt: [{ type: "text", text: message }] });
       this._promptSuccessCount++;
-      return result;
+      return { stopReason: result.stopReason, sessionId: sid };
     }
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -490,7 +525,9 @@ export class AcpTransport implements IKiroTransport {
         let timeoutTimer: ReturnType<typeof setInterval> | undefined;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutTimer = setInterval(() => {
-            if (Date.now() - this.lastContentAt > this._promptTimeoutMs) {
+            const inactivityMs = context?.providerInactivityTimeoutMs ?? this._promptTimeoutMs;
+            if ((context?.deadlineAt !== undefined && Date.now() >= context.deadlineAt)
+              || Date.now() - this.lastContentAt > inactivityMs) {
               clearInterval(timeoutTimer);
               reject(new Error("Bridge prompt timeout — model unresponsive"));
             }
@@ -504,7 +541,7 @@ export class AcpTransport implements IKiroTransport {
           timeoutPromise,
         ]);
         this._promptSuccessCount++;
-        return result;
+        return { stopReason: result.stopReason, sessionId: sid };
       } catch (err: unknown) {
         const code = (err as { code?: number }).code;
         const msg = (err as { message?: string }).message ?? "";
@@ -519,7 +556,7 @@ export class AcpTransport implements IKiroTransport {
           this.sessions.clear();
           await this.initialize();
           sid = await this.getOrCreateSession(this.lastSessionKey);
-          return this.promptWithRetry(sid, message, 0);
+          return this.promptWithRetry(sid, message, 0, context);
         }
 
         if (code === -32603 && msg.includes("No session found")) {
@@ -528,12 +565,24 @@ export class AcpTransport implements IKiroTransport {
           logWarn(this.tag, `Session ${sessionId} expired — invalidated, will recreate`);
           if (attempt < maxRetries) {
             sid = await this.getOrCreateSession(this.lastSessionKey);
-            this.responseChunks.set(sessionId, []);
+            // #1564: re-seed the chunk buffer under the NEW session id — the
+            // notification handler keys by the id the server reports, so the
+            // retry turn would otherwise be dropped.
+            this.responseChunks.set(sid, []);
+            this.segmentOffsets.set(sid, 0);
+            // #1564: the #1550 live-output observer follows the rotated session
+            // so deltas during the retry turn still reach the feed.
+            const observer = this.outputObservers.get(sessionId);
+            if (observer !== undefined) {
+              this.outputObservers.delete(sessionId);
+              this.outputObservers.set(sid, observer);
+            }
             continue;
           }
         } else if (code === -32603 && attempt < maxRetries) {
           logWarn(this.tag, `Transient error (code ${code}), retry ${attempt + 1}/${maxRetries}`);
           this.responseChunks.set(sessionId, []); // reset chunks for retry
+          this.segmentOffsets.set(sessionId, 0);
           await new Promise(r => setTimeout(r, 2000));
           continue;
         }
@@ -631,7 +680,23 @@ export class AcpTransport implements IKiroTransport {
     return { route: "acp", model: this.getModel(), contextPercent: this.contextPercent >= 0 ? this.contextPercent : undefined };
   }
 
-  private handleSessionUpdate(params: SessionNotification): void {
+  private enqueueSessionUpdate(params: SessionNotification): Promise<void> {
+    const sessionId = params.sessionId;
+    const previous = this.updateChains.get(sessionId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() => this.handleSessionUpdate(params))
+      .catch((err) => {
+        logWarn(this.tag, `ACP session update failed (isolated): ${err instanceof Error ? err.message : String(err)}`);
+      });
+    this.updateChains.set(sessionId, current);
+    void current.finally(() => {
+      if (this.updateChains.get(sessionId) === current) this.updateChains.delete(sessionId);
+    }).catch(() => {});
+    return current;
+  }
+
+  private async handleSessionUpdate(params: SessionNotification): Promise<void> {
     const update = params.update;
     if (!("sessionUpdate" in update)) return;
 
@@ -655,17 +720,33 @@ export class AcpTransport implements IKiroTransport {
           }
           // #1338: mirror text deltas to the live output feed.
           this.outputObservers.get(sessionId)?.onDelta?.({ kind: "text", text });
+          // #1619: shared typed delta channel (text only — ACP emits no thinking).
+          this.onOutputDelta?.({ kind: "text", text });
         } else if ((content as { type?: string })?.type === "thinking") {
           const text = (content as { text?: string }).text ?? "";
-          const chunks = this.responseChunks.get(sessionId);
-          if (chunks) chunks.push(`\n[thinking] ${text}\n`);
           this.lastActivityAt = Date.now();
           // NOT updating lastContentAt — thinking is keepalive, not content
+          // #1619: ACP-emitted thinking is forwarded typed, never fabricated.
+          if (text) this.onOutputDelta?.({ kind: "thinking", text });
         }
         break;
       }
       case "tool_call": {
         logDebug(this.tag, `[tool] ${update.title} (${update.status})`);
+        const chunks = this.responseChunks.get(sessionId);
+        const aggregate = chunks?.join("") ?? "";
+        const offset = this.segmentOffsets?.get(sessionId) ?? 0;
+        const segment = aggregate.slice(offset);
+        if (segment && this.onSegmentBreak) {
+          try {
+            await this.onSegmentBreak(segment);
+            this.segmentOffsets.set(sessionId, aggregate.length);
+          } catch (err) {
+            // Interim delivery is isolated from the ACP turn; the terminal
+            // response remains the authoritative fallback.
+            logWarn(this.tag, `Pre-tool segment delivery failed (isolated): ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         this.lastActivityAt = Date.now();
         this.lastContentAt = Date.now();
         this.toolMeta = { title: update.title ?? "unknown", startedAt: Date.now() }; this.sm.toolStarted();

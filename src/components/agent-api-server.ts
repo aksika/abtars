@@ -12,6 +12,18 @@ import type { SubagentRuntime } from "./subagent-runtime.js";
 import { openaiError } from "./openai-compat-translate.js";
 import { handleModels as v1HandleModels, handleModel as v1HandleModel, handleEmbeddings as v1HandleEmbeddings, writeResult } from "./openai-compat-routes.js";
 import type { ValidatedTlsIdentity } from "./peer-transport/tls-identity.js";
+import { isLoopbackAddress } from "../utils/net.js";
+import {
+  dispatchAgentApiRequest, pathMatcher,
+} from "./agent-api-router.js";
+import type {
+  AgentApiRoute, AgentApiDispatcherDeps, AgentApiRouteContext,
+} from "./agent-api-router.js";
+import {
+  handleOrcSpawn, handleOrcStatus, handleOrcCancel, handleOrcDelegate, handleKanbanCreate,
+} from "./agent-api-local-routes.js";
+import type { AgentApiLocalRouteDeps } from "./agent-api-local-routes.js";
+import { PeerEnrollmentHandler } from "./peer-enrollment-handler.js";
 
 const TAG = "agent-api";
 const MAX_TRAFFIC_LOG = 50;
@@ -40,7 +52,6 @@ interface AgentApiDeps {
   onPeerActivity?: (msg: string) => void;
   /** A2A platform adapter — routes chat through pipeline/Spin (#978). */
   a2aAdapter?: import("../platforms/agent-api/agent-api-adapter.js").AgentApiAdapter;
-  onPiNotify?: (text: string) => Promise<import("./main-chat.js").SendResult>;
   /** #1357 — Pi run service for remote Pi delegation on the receiving side. */
   piExecutorService?: import("./pi-executor/pi-run-service.js").PiRunService;
 }
@@ -130,25 +141,6 @@ function readBodyBounded(req: IncomingMessage, maxBytes: number): Promise<string
   });
 }
 
-/** #1313 — Read body with a smaller byte cap (for Pi routes). */
-function readBodyLimited(req: IncomingMessage, maxBytes: number): Promise<string> {
-  return readBodyBounded(req, maxBytes);
-}
-
-/** #1313 — Try reading package version from filesystem. */
-function tryReadVersion(): string | null {
-  try {
-    const { readFileSync } = require("node:fs") as typeof import("node:fs");
-    const { join, dirname } = require("node:path") as typeof import("node:path");
-    const { fileURLToPath } = require("node:url") as typeof import("node:url");
-    const here = dirname(fileURLToPath(import.meta.url));
-    const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf-8") as string) as { version?: string };
-    return pkg.version ?? null;
-  } catch {
-    return null;
-  }
-}
-
 export class AgentApiServer {
   private server: ReturnType<typeof import("node:https").createServer>;
   private config: AgentApiConfig;
@@ -159,24 +151,254 @@ export class AgentApiServer {
   private peerWsConnections = new Map<string, import("ws").WebSocket>();
   private peerWss: import("ws").WebSocketServer | null = null;
   private peerHelpService: import("./peer-help/service.js").PeerHelpService | null = null;
-  /** Rate-limit for /v1/enroll-ws: IP → last attempt timestamp (ms). */
-  private enrollRateLimit = new Map<string, number>();
-  /** #1313 — Pi notification callback (set by boot phase). */
-  private onPiNotify?: (text: string) => Promise<import("./main-chat.js").SendResult>;
+  /** #1557 — Long-lived enrollment handler; owns the per-IP rate limiter. */
+  private enrollmentHandler: PeerEnrollmentHandler | null = null;
+  /** #1557 — Declarative production route registry + dispatcher security deps. */
+  private routes: AgentApiRoute[];
+  private routerDeps: AgentApiDispatcherDeps;
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
     this.memoryRuntime = deps.memoryRuntime;
     this.onPeerActivity = deps.onPeerActivity;
-    this.onPiNotify = deps.onPiNotify;
     void deps.piExecutorService; // kept for compat
     this.a2aAdapter = deps.a2aAdapter;
+
+    // #1557 — Production route registry + dispatcher security primitives.
+    this.routerDeps = {
+      verifyBodylessPeer: (req, res) => this.authenticateBodylessPeer(req, res),
+      authenticatePeerBody: (req, res, options) => this.authenticatePeerBody(req, res, { maxBodyBytes: options.maxBytes, rateLimited: options.rateLimited }),
+      requireLoopback: (req, res) => this.requireLoopback(req, res),
+      readBodyBounded,
+    };
+    this.routes = this.buildRouteRegistry();
 
     // HTTPS-only: validated TLS material is a required dependency (#1305)
     this.server = createServer({
       key: deps.tls.key,
       cert: deps.tls.cert,
       minVersion: "TLSv1.3",
-    }, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
+    }, (req: IncomingMessage, res: ServerResponse) => { void this.handle(req, res); });
+  }
+
+  /**
+   * #1557 — Declarative production route table. One entry per documented
+   * endpoint: method, anchored matcher, auth policy, body policy, handler.
+   * Static routes are registered before overlapping parameter routes.
+   */
+  private buildRouteRegistry(): AgentApiRoute[] {
+    const localDeps: AgentApiLocalRouteDeps = {
+      getRequesterContributionService: () => this.requesterContributionService,
+    };
+    const peer = (rateLimited?: boolean) => ({ kind: "peer", ...(rateLimited ? { rateLimited } : {}) }) as const;
+
+    return [
+      {
+        id: "models.list",
+        method: "GET",
+        match: pathMatcher("/v1/models"),
+        auth: peer(),
+        body: { kind: "none" },
+        handler: (ctx) => { writeResult(ctx.res, v1HandleModels()); },
+      },
+      {
+        id: "agent-card.get",
+        method: "GET",
+        match: pathMatcher("/v1/agent-card"),
+        auth: peer(),
+        body: { kind: "none" },
+        handler: (ctx) => this.handleAgentCard(ctx),
+      },
+      {
+        id: "models.get",
+        method: "GET",
+        match: pathMatcher("/v1/models/:id"),
+        auth: peer(),
+        body: { kind: "none" },
+        handler: (ctx) => { writeResult(ctx.res, v1HandleModel(ctx.params["id"]!)); },
+      },
+      {
+        id: "chat.completions",
+        method: "POST",
+        match: pathMatcher("/v1/chat/completions"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: async (ctx) => {
+          const ip = normalizeIp(ctx.req.socket.remoteAddress ?? "");
+          const hopHeader = ctx.req.headers["x-peer-hops"];
+          const hopValue = typeof hopHeader === "string" ? parseInt(hopHeader, 10) : null;
+          const sessionId = (ctx.req.headers["x-session-id"] as string) || "default";
+          await this.handleV1ChatCompletions(ctx.body, ctx.res, ctx.caller!, ip, hopValue, sessionId);
+        },
+      },
+      {
+        id: "embeddings.create",
+        method: "POST",
+        match: pathMatcher("/v1/embeddings"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleV1Embeddings(ctx.body, ctx.res),
+      },
+      {
+        id: "help.requests.create",
+        method: "POST",
+        match: pathMatcher("/v1/help/requests"),
+        auth: peer(true),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: async (ctx) => {
+          if (!this.peerHelpService) { ctx.res.writeHead(503).end("Help service not available"); return; }
+          const response = await this.peerHelpService.handleHelpRequest(ctx.caller!, ctx.body);
+          ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+        },
+      },
+      {
+        id: "help.requests.status",
+        method: "GET",
+        match: pathMatcher("/v1/help/requests/:requestId"),
+        auth: peer(),
+        body: { kind: "none" },
+        handler: async (ctx) => {
+          if (!this.peerHelpService) { ctx.res.writeHead(503).end("Help service not available"); return; }
+          const response = await this.peerHelpService.handleHelpStatus(ctx.caller!, {
+            version: 1,
+            request_id: ctx.params["requestId"]!,
+            contribution_ref: ctx.query["contribution_ref"] ?? "",
+          });
+          ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+        },
+      },
+      {
+        id: "help.requests.withdraw",
+        method: "POST",
+        match: pathMatcher("/v1/help/requests/:requestId/withdraw"),
+        auth: peer(true),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: async (ctx) => {
+          if (!this.peerHelpService) { ctx.res.writeHead(503).end("Help service not available"); return; }
+          const response = await this.peerHelpService.handleHelpWithdraw(ctx.caller!, ctx.body);
+          ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+        },
+      },
+      {
+        id: "help.events.create",
+        method: "POST",
+        match: pathMatcher("/v1/help/events"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: async (ctx) => {
+          if (!this.peerHelpService) { ctx.res.writeHead(503).end("Help service not available"); return; }
+          const response = await this.peerHelpService.handleContributionEvent(ctx.caller!, ctx.body);
+          ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+        },
+      },
+      {
+        id: "task.messages.push",
+        method: "POST",
+        // Numeric card IDs only, anchored (preserves the historical \d+ shape).
+        match: (t) => {
+          const m = /^\/v1\/tasks\/(\d+)\/messages$/.exec(t.pathname);
+          return m ? { cardId: m[1]! } : false;
+        },
+        auth: peer(true),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleChannelPush(ctx.body, ctx.res, ctx.caller!, Number(ctx.params["cardId"])),
+      },
+      {
+        id: "task.messages.pull",
+        method: "GET",
+        match: (t) => {
+          const m = /^\/v1\/tasks\/(\d+)\/messages$/.exec(t.pathname);
+          return m ? { cardId: m[1]! } : false;
+        },
+        auth: peer(),
+        body: { kind: "none" },
+        handler: (ctx) => this.handleChannelPull(ctx.query, ctx.res, Number(ctx.params["cardId"])),
+      },
+      {
+        id: "callbacks.create",
+        method: "POST",
+        match: pathMatcher("/v1/callbacks"),
+        auth: peer(true),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleV1Callback(ctx.body, ctx.res, ctx.caller!),
+      },
+      {
+        id: "pi-events.push",
+        method: "POST",
+        match: pathMatcher("/v1/pi-events/push"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleRemotePiEventPush(ctx.body, ctx.res, ctx.caller!),
+      },
+      {
+        id: "pi-runs.events.acknowledge",
+        method: "POST",
+        match: pathMatcher("/v1/pi-runs/:runId/events/acknowledge"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleRemotePiEventsAck(ctx.body, ctx.res, ctx.caller!, ctx.params["runId"]!),
+      },
+      {
+        id: "pi-runs.events.list",
+        method: "GET",
+        match: pathMatcher("/v1/pi-runs/:runId/events"),
+        auth: peer(),
+        body: { kind: "none" },
+        handler: (ctx) => this.handleRemotePiEventsList(ctx, ctx.caller!, ctx.params["runId"]!),
+      },
+      {
+        id: "pi-runs.control",
+        method: "POST",
+        match: pathMatcher("/v1/pi-runs/:runId/control"),
+        auth: peer(),
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => this.handleRemotePiControl(ctx.body, ctx.res, ctx.caller!),
+      },
+      {
+        id: "orc.spawn",
+        method: "POST",
+        match: pathMatcher("/v1/orc/spawn"),
+        auth: { kind: "loopback" },
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => handleOrcSpawn(ctx.body, ctx.res, localDeps),
+      },
+      {
+        id: "orc.status",
+        method: "GET",
+        match: pathMatcher("/v1/orc/status"),
+        auth: { kind: "loopback" },
+        body: { kind: "none" },
+        handler: (ctx) => handleOrcStatus(ctx.res, localDeps),
+      },
+      {
+        id: "orc.cancel",
+        method: "POST",
+        match: pathMatcher("/v1/orc/cancel"),
+        auth: { kind: "loopback" },
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => handleOrcCancel(ctx.body, ctx.res, localDeps),
+      },
+      {
+        id: "orc.delegate",
+        method: "POST",
+        match: pathMatcher("/v1/orc/delegate"),
+        auth: { kind: "loopback" },
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => handleOrcDelegate(ctx.body, ctx.res, localDeps),
+      },
+      {
+        id: "kanban.create",
+        method: "POST",
+        match: pathMatcher("/v1/kanban"),
+        auth: { kind: "loopback" },
+        body: { kind: "json", maxBytes: MAX_BODY_BYTES },
+        handler: (ctx) => handleKanbanCreate(ctx.body, ctx.res, localDeps),
+      },
+    ];
+  }
+
+  /** #1557 — Production route objects, as inspected by the policy contract test. */
+  getRoutes(): readonly AgentApiRoute[] {
+    return this.routes;
   }
 
   /** #1433 — Wire the PeerHelpService for WSS/HTTPS help request handling. */
@@ -184,16 +406,33 @@ export class AgentApiServer {
     this.peerHelpService = service;
   }
 
+  /**
+   * #1618 — Wire the requester contribution service for /v1/orc/delegate.
+   * Defaults to a production instance; tests inject a deterministic one.
+   */
+  private requesterContributionService: import("./peer-help/requester-contribution-service.js").RequesterContributionService | null = null;
+
+  setRequesterContributionService(service: import("./peer-help/requester-contribution-service.js").RequesterContributionService): void {
+    this.requesterContributionService = service;
+  }
+
   async start(): Promise<void> {
     // #972: WebSocket server for persistent peer connections
     const { WebSocketServer } = await import("ws");
     this.peerWss = new WebSocketServer({ noServer: true });
 
+    // #1557 — One enrollment handler per server: per-IP rate limiter +
+    // per-socket enrollment sessions. Promotion hands sockets back to the
+    // server's steady-state peer registration.
+    this.enrollmentHandler = new PeerEnrollmentHandler({
+      registerPeerWs: (peerName, ws) => this.registerPeerWs(peerName, ws),
+    });
+
     this.server.on("upgrade", (req: IncomingMessage, socket: any, head: Buffer) => {
-      // /v1/enroll-ws — identity-less enrollment path (Task 6)
+      // /v1/enroll-ws — identity-less enrollment path
       if (req.url === "/v1/enroll-ws") {
         this.peerWss!.handleUpgrade(req, socket, head, (ws) => {
-          this.handleEnrollWs(ws, req).catch(err => logAndSwallow(TAG, "enroll-ws", err));
+          this.enrollmentHandler!.accept(ws, req).catch(err => logAndSwallow(TAG, "enroll-ws", err));
         });
         return;
       }
@@ -319,142 +558,21 @@ export class AgentApiServer {
     } catch { /* malformed — ignore */ }
   }
 
-  /**
-   * #1391 — Enrollment WS handler (responder side).
-   * Uses explicit stages and named listeners so promotion removes only the
-   * enrollment handler and registers the socket for steady-state messaging
-   * BEFORE the acknowledgement is sent.
-   */
-  private async handleEnrollWs(ws: import("ws").WebSocket, req: IncomingMessage): Promise<void> {
-    const ip = normalizeIp(req.socket?.remoteAddress ?? "");
-    const ENROLL_RATE_MS = 5 * 60 * 1000; // 1 per 5 min per IP
-
-    const lastAttempt = this.enrollRateLimit.get(ip) ?? 0;
-    if (Date.now() - lastAttempt < ENROLL_RATE_MS) {
-      logWarn(TAG, `Enrollment rate-limit hit for ${ip}`);
-      ws.close(1008, "rate limited");
-      return;
-    }
-    this.enrollRateLimit.set(ip, Date.now());
-
-    const {
-      macTribe, verifyEnroll, signAck,
-    } = await import("./peer-transport/peer-auth.js");
-    const { loadPeerConfig, deriveVerifyKey, clearPeerConfigCache } = await import("./peer-config.js");
-    const { randomBytes } = await import("node:crypto");
-    const { writeFileSync, existsSync } = await import("node:fs");
-    const { join } = await import("node:path");
-
+  /** #898 — GET /v1/agent-card: live capabilities + health. */
+  private handleAgentCard(ctx: AgentApiRouteContext): void {
+    const { getLocalCapabilities } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
+    const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+    const { loadavg, cpus } = require("node:os") as typeof import("node:os");
     const config = loadPeerConfig();
-    const selfVerifyKey = deriveVerifyKey(config.self.signingKey);
-    const nonceR = randomBytes(16).toString("hex");
-
-    type EnrollmentStage = "awaiting_knock" | "awaiting_enroll" | "promoting" | "steady_state" | "closed";
-    let stage: EnrollmentStage = "awaiting_knock";
-    let pubKeyI = "";
-
-    const onEnrollmentClose = () => {
-      stage = "closed";
-    };
-    const onEnrollmentError = () => {
-      stage = "closed";
-    };
-
-    const onEnrollmentMessage = async (rawData: import("ws").RawData) => {
-      try {
-        const msg = JSON.parse(rawData.toString());
-
-        if (stage === "awaiting_knock") {
-          // Step A: knock
-          const { pubKey_i, nonce_i, ts } = msg as { pubKey_i: string; nonce_i: string; ts: number };
-          if (!pubKey_i || !nonce_i || !ts) { ws.close(1008, "invalid knock"); return; }
-          const nowSec = Math.floor(Date.now() / 1000);
-          if (Math.abs(nowSec - ts) > 30) { ws.close(1008, "stale ts"); return; }
-
-          pubKeyI = pubKey_i;
-          stage = "awaiting_enroll";
-
-          // Step B: challenge
-          const macR = macTribe(config.self.tribeToken, selfVerifyKey + nonce_i);
-          ws.send(JSON.stringify({ pubKey_r: selfVerifyKey, nonce_r: nonceR, ts: nowSec, mac_r: macR }));
-          return;
-        }
-
-        if (stage === "awaiting_enroll") {
-          // Step C: enroll — transition to promoting BEFORE the first await
-          stage = "promoting";
-
-          const { mac_i, name, nonce_r, ts, selfSig } = msg as { mac_i: string; name: string; nonce_r: string; ts: number; selfSig: string };
-          if (!mac_i || !name || !nonce_r || !selfSig) { ws.close(1008, "invalid enroll msg"); return; }
-
-          if (nonce_r !== nonceR) { ws.close(1008, "nonce mismatch"); return; }
-
-          const nowSec = Math.floor(Date.now() / 1000);
-          if (Math.abs(nowSec - ts) > 30) { ws.close(1008, "stale ts"); return; }
-
-          // Verify mac_i
-          const expectedMacI = macTribe(config.self.tribeToken, pubKeyI + nonceR);
-          if (mac_i !== expectedMacI) { ws.close(1008, "mac mismatch"); stage = "closed"; return; }
-
-          // Verify selfSig
-          if (!verifyEnroll(selfSig, pubKeyI, pubKeyI, nonceR, name)) {
-            ws.close(1008, "bad selfSig"); stage = "closed"; return;
-          }
-
-          // Pin-and-alert: reject if existing peer has different verifyKey
-          const existing = config.peers[name];
-          if (existing && existing.verifyKey !== pubKeyI) {
-            logWarn(TAG, `Enrollment rejected — peer '${name}' verifyKey changed (pin-and-alert)`);
-            ws.close(1008, "key changed — operator action required"); stage = "closed"; return;
-          }
-
-          // Persist peer (first I/O — stage is already "promoting")
-          const peersPath = join(abtarsHome(), "config", "peers.json");
-          let raw: Record<string, unknown> = {};
-          if (existsSync(peersPath)) { try { raw = JSON.parse(require("fs").readFileSync(peersPath, "utf-8")); } catch { raw = {}; } }
-          if (!raw.peers || typeof raw.peers !== "object") raw.peers = {};
-          (raw.peers as Record<string, unknown>)[name] = {
-            host: ip,
-            port: parseInt(req.headers["x-peer-port"] as string ?? "0", 10) || 0,
-            verifyKey: pubKeyI,
-            trust: 1,
-          };
-          writeFileSync(peersPath, JSON.stringify(raw, null, 2) + "\n", { encoding: "utf-8" });
-          clearPeerConfigCache();
-
-          logInfo(TAG, `Enrolled new peer '${name}' from ${ip} at trust=1`);
-
-          // Build ack payload
-          const ackSig = signAck(config.self.signingKey, config.self.name, selfVerifyKey, nonceR);
-          const ackPayload = JSON.stringify({ name_r: config.self.name, pubKey_r: selfVerifyKey, ackSig });
-
-          // Detach handshake message listener
-          ws.removeListener("message", onEnrollmentMessage);
-          ws.removeListener("close", onEnrollmentClose);
-          ws.removeListener("error", onEnrollmentError);
-
-          // Register for steady-state messaging (BEFORE sending ack)
-          if (ws.readyState === ws.OPEN) {
-            this.registerPeerWs(name, ws);
-            stage = "steady_state";
-            ws.send(ackPayload);
-          } else {
-            stage = "closed";
-          }
-          return;
-        }
-
-        // Any message in promoting/steady_state/closed is a protocol violation
-        ws.close(1008, "unexpected frame after enrollment");
-      } catch (err) {
-        logWarn(TAG, `Enrollment error from ${ip}: ${err instanceof Error ? err.message : String(err)}`);
-        ws.close(1011, "enrollment error");
-      }
-    };
-
-    ws.on("message", onEnrollmentMessage);
-    ws.on("close", onEnrollmentClose);
-    ws.on("error", onEnrollmentError);
+    const load = Math.round(Math.min(1, loadavg()[0]! / (cpus().length || 1)) * 100) / 100;
+    ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+      name: config.self.name,
+      version: process.env["npm_package_version"] ?? "?",
+      capabilities: getLocalCapabilities(),
+      load,
+      max_sessions: parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10),
+      status: "ready",
+    }));
   }
 
   getTrafficLog(): TrafficEntry[] {
@@ -466,288 +584,26 @@ export class AgentApiServer {
     if (this.trafficLog.length > MAX_TRAFFIC_LOG) this.trafficLog.shift();
   }
 
-  /** #1402 — Wrap an async handler so uncaught errors always produce a 500. */
-  private handleAsync(
-    _req: IncomingMessage, res: ServerResponse, fn: () => Promise<void>,
-  ): void {
-    fn().catch((err) => {
-      logWarn(TAG, `Route error: ${err instanceof Error ? err.message : String(err)}`);
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" })
-          .end(JSON.stringify(openaiError("Internal server error", "server_error")));
-      }
-    });
+  /** #1557 — handle() is now pure dispatcher delegation. Authentication and
+   *  body policy are enforced by the declared route table, never by handlers. */
+  private handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    return dispatchAgentApiRequest(this.routes, this.routerDeps, req, res);
   }
 
-  private handle(req: IncomingMessage, res: ServerResponse): void {
-
-    const url = req.url ?? "";
-    const method = req.method ?? "";
-
-    // ── /v1/* routes (#373) ───────────────────────────────────────────────
-    if (url === "/v1/models" && method === "GET") {
-      if (this.authenticateBodylessPeer(req, res) === null) return;
-      writeResult(res, v1HandleModels());
-      return;
-    }
-    // #898 — GET /v1/agent-card: live capabilities + health
-    if (url === "/v1/agent-card" && method === "GET") {
-      if (this.authenticateBodylessPeer(req, res) === null) return;
-      const { getLocalCapabilities } = require("./peer-transport/peer-health.js") as typeof import("./peer-transport/peer-health.js");
-      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-      const { loadavg, cpus } = require("node:os") as typeof import("node:os");
-      const config = loadPeerConfig();
-      const load = Math.round(Math.min(1, loadavg()[0]! / (cpus().length || 1)) * 100) / 100;
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-        name: config.self.name,
-        version: process.env["npm_package_version"] ?? "?",
-        capabilities: getLocalCapabilities(),
-        load,
-        max_sessions: parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10),
-        status: "ready",
-      }));
-      return;
-    }
-    if (url.startsWith("/v1/models/") && method === "GET") {
-      if (this.authenticateBodylessPeer(req, res) === null) return;
-      const id = decodeURIComponent(url.slice("/v1/models/".length));
-      writeResult(res, v1HandleModel(id));
-      return;
-    }
-    if (url === "/v1/chat/completions" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-        if (!auth) return;
-        const ip = normalizeIp(req.socket.remoteAddress ?? "");
-        const hopHeader = req.headers["x-peer-hops"];
-        const hopValue = typeof hopHeader === "string" ? parseInt(hopHeader, 10) : null;
-        const sessionId = (req.headers["x-session-id"] as string) || "default";
-        const body = JSON.parse(auth.rawBody);
-        await this.handleV1ChatCompletions(body, res, auth.caller, ip, hopValue, sessionId);
-      });
-      return;
-    }
-    if (url === "/v1/embeddings" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-        if (!auth) return;
-        const body = JSON.parse(auth.rawBody);
-        await this.handleV1Embeddings(body, res);
-      });
-      return;
-    }
-    // #1433 — Peer help routes (replaces old /v1/tasks delegation)
-    if (url === "/v1/help/requests" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
-        if (!auth) return;
-        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
-        const body = JSON.parse(auth.rawBody);
-        const response = await this.peerHelpService.handleHelpRequest(auth.caller, body);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
-      });
-      return;
-    }
-    // GET /v1/help/requests/:requestId?contribution_ref=... — check help status
-    const helpStatusMatch = url.match(/^\/v1\/help\/requests\/([^/?]+)/);
-    if (helpStatusMatch && method === "GET") {
-      const caller = this.authenticateBodylessPeer(req, res);
-      if (caller === null) return;
-      this.handleAsync(req, res, async () => {
-        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
-        const requestId = helpStatusMatch[1]!;
-        const contributionRef = new URL(url, `https://${req.headers.host ?? "localhost"}`).searchParams.get("contribution_ref") ?? "";
-        const response = await this.peerHelpService!.handleHelpStatus(caller, { version: 1, request_id: requestId, contribution_ref: contributionRef });
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
-      });
-      return;
-    }
-    // POST /v1/help/requests/:requestId/withdraw — withdraw help
-    const helpWithdrawMatch = url.match(/^\/v1\/help\/requests\/([^/]+)\/withdraw/);
-    if (helpWithdrawMatch && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
-        if (!auth) return;
-        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
-        const body = JSON.parse(auth.rawBody);
-        const response = await this.peerHelpService.handleHelpWithdraw(auth.caller, body);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
-      });
-      return;
-    }
-    // POST /v1/help/events — contribution event delivery
-    if (url === "/v1/help/events" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-        if (!auth) return;
-        if (!this.peerHelpService) { res.writeHead(503).end("Help service not available"); return; }
-        const body = JSON.parse(auth.rawBody);
-        const response = await this.peerHelpService.handleContributionEvent(auth.caller, body);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
-      });
-      return;
-    }
-
-    // #949 — POST /v1/tasks/:cardId/messages: remote peer pushes channel message
-    // #949 — GET /v1/tasks/:cardId/messages?since=: pull catch-up
-    const msgMatch = url.match(/^\/v1\/tasks\/(\d+)\/messages/);
-    if (msgMatch && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
-        if (!auth) return;
-        const body = JSON.parse(auth.rawBody);
-        await this.handleChannelPush(body, res, auth.caller, Number(msgMatch[1]));
-      });
-      return;
-    }
-    if (msgMatch && method === "GET") {
-      if (this.authenticateBodylessPeer(req, res) === null) return;
-      this.handleChannelPull(url, res, Number(msgMatch[1]));
-      return;
-    }
-
-    // #675 — POST /v1/callbacks: peer pushes task result back
-    if (url === "/v1/callbacks" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES, rateLimited: true });
-        if (!auth) return;
-        const body = JSON.parse(auth.rawBody);
-        await this.handleV1Callback(body, res, auth.caller);
-      });
-      return;
-    }
-
-    // #1358 — Remote Pi lifecycle and control routes
-    // POST /v1/pi-events/push — owner pushes lifecycle event to origin
-    if (url === "/v1/pi-events/push" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-        if (!auth) return;
-        await this.handleRemotePiEventPush(JSON.parse(auth.rawBody), res, auth.caller);
-      });
-      return;
-    }
-    // GET /v1/pi-runs/:runId/events — origin pulls catch-up events from owner
-    // POST /v1/pi-runs/:runId/events/acknowledge — origin acknowledges events to owner
-    // POST /v1/pi-runs/:runId/control — origin sends control command to owner
-    const piRunMatch = url.match(/^\/v1\/pi-runs\/([^/]+)\/(events|control)(?:\/(acknowledge))?$/);
-    if (piRunMatch) {
-      const runId = piRunMatch[1]!;
-      const subPath = piRunMatch[2]!;
-      const action = piRunMatch[3];
-      if (subPath === "events" && action === "acknowledge" && method === "POST") {
-        this.handleAsync(req, res, async () => {
-          const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-          if (!auth) return;
-          await this.handleRemotePiEventsAck(JSON.parse(auth.rawBody), res, auth.caller, runId);
-        });
-        return;
-      }
-      if (subPath === "events" && !action && method === "GET") {
-        const caller = this.authenticateBodylessPeer(req, res);
-        if (caller === null) return;
-        this.handleRemotePiEventsList(url, res, caller, runId);
-        return;
-      }
-      if (subPath === "control" && !action && method === "POST") {
-        this.handleAsync(req, res, async () => {
-          const auth = await this.authenticatePeerBody(req, res, { maxBodyBytes: MAX_BODY_BYTES });
-          if (!auth) return;
-          await this.handleRemotePiControl(JSON.parse(auth.rawBody), res, auth.caller);
-        });
-        return;
-      }
-    }
-
-    // #1011 — Orc worker management (localhost only, no auth — same process)
-    if (url.startsWith("/v1/orc/")) {
-      this.handleOrcRoute(url, method, req, res);
-      return;
-    }
-
-    // #955 — Kanban card creation (localhost CLI, uses shared createDispatchableCard)
-    if (url === "/v1/kanban" && method === "POST") {
-      this.handleAsync(req, res, async () => {
-        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
-        const { createDispatchableCard } = await import("./tasks/kanban-board.js");
-        const result = createDispatchableCard({
-          type: body.type,
-          title: body.title,
-          goal: body.goal,
-          source: body.source || "cli",
-          priority: body.priority,
-          labels: body.labels,
-          deliveryMode: body.delivery_mode,
-          chatId: body.chat_id,
-        });
-        if ("error" in result) {
-          res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: result.error }));
-        } else {
-          res.writeHead(201, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, card_id: result.cardId, status: result.status }));
-        }
-      });
-      return;
-    }
-
-    // #1313 — Pi capability bridge (signed, loopback, scoped)
-    if (url.startsWith("/v1/pi/")) {
-      this.handlePiRoute(url, method, req, res).catch((err) => {
-        logWarn(TAG, `/v1/pi error: ${err instanceof Error ? err.message : String(err)}`);
-        if (!res.headersSent) {
-          res.writeHead(500, { "Content-Type": "application/json" })
-            .end(JSON.stringify({ ok: false, error: { code: "internal_error", message: "Internal server error", retryable: false } }));
-        }
-      });
-      return;
-    }
-
-    res.writeHead(404).end();
-  }
-
-  private async handleOrcRoute(url: string, method: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    try {
-      const { getOrcTools } = await import("./transport/orc-tools.js");
-      if (url === "/v1/orc/spawn" && method === "POST") {
-        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
-        const tool = getOrcTools().find(t => t.name === "spawn_worker");
-        const result = await tool!.execute(body);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
-        return;
-      }
-      if (url === "/v1/orc/status" && method === "GET") {
-        const tool = getOrcTools().find(t => t.name === "check_workers");
-        const result = await tool!.execute({});
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
-        return;
-      }
-      if (url === "/v1/orc/cancel" && method === "POST") {
-        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
-        const tool = getOrcTools().find(t => t.name === "cancel_worker");
-        const result = await tool!.execute(body);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
-        return;
-      }
-      if (url === "/v1/orc/delegate" && method === "POST") {
-        const body = JSON.parse(await readBodyBounded(req, MAX_BODY_BYTES));
-        const { peer, goal } = body as { peer?: string; goal?: string };
-        if (!peer || !goal) { res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: "peer and goal required" })); return; }
-        const { getPeerTransport } = await import("./peer-transport/index.js");
-        const transport = getPeerTransport();
-        const response = await transport.askHelp(peer, {
-          version: 1,
-          request_id: `orc_${Date.now()}`,
-          created_at: new Date().toISOString(),
-          expires_at: new Date(Date.now() + 300_000).toISOString(),
-          goal,
-          required_capabilities: [],
-        });
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result: `Asked ${peer} for help — ${response.decision}${response.contribution_ref ? ` ref=${response.contribution_ref}` : ""}` }));
-        return;
-      }
-      res.writeHead(404).end();
-    } catch (err) {
-      res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-    }
+  /**
+   * #1549 — Guard for routes that are only ever driven by a local CLI on this
+   * host and therefore carry no peer signature. The listener binds all
+   * interfaces (see start()), so "local only" must be enforced here rather
+   * than assumed.
+   * Returns true when the caller may proceed; otherwise writes 401 and
+   * returns false.
+   */
+  private requireLoopback(req: IncomingMessage, res: ServerResponse): boolean {
+    if (isLoopbackAddress(req.socket.remoteAddress)) return true;
+    logWarn(TAG, `rejected non-loopback ${req.method ?? "?"} ${req.url ?? "?"} from ${req.socket.remoteAddress ?? "unknown"}`);
+    res.writeHead(401, { "Content-Type": "application/json" })
+      .end(JSON.stringify({ ok: false, error: "loopback only" }));
+    return false;
   }
 
   /**
@@ -1019,10 +875,8 @@ export class AgentApiServer {
   }
 
   /** #949 — GET /v1/tasks/:cardId/messages?since=: pull messages for catch-up. */
-  private handleChannelPull(url: string, res: ServerResponse, cardId: number): void {
-    const sinceMatch = url.match(/[?&]since=([^&]+)/);
-    const sinceRaw = sinceMatch?.[1];
-    const since = sinceRaw ? decodeURIComponent(sinceRaw) : "1970-01-01";
+  private handleChannelPull(query: Record<string, string>, res: ServerResponse, cardId: number): void {
+    const since = query["since"] ?? "1970-01-01";
     const { channelGetSince } = require("./tasks/kanban-channel.js") as typeof import("./tasks/kanban-channel.js");
     const messages = channelGetSince(cardId, since);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ messages }));
@@ -1040,8 +894,8 @@ export class AgentApiServer {
     }
     const { loadPeerConfig } = await import("./peer-config.js");
     const localPeerName = loadPeerConfig().self.name;
-    const { handlePushLifecycleEvent } = await import("./peer-transport/remote-pi-agent-api-integration.js");
-    const result = await handlePushLifecycleEvent({ originReducer: reducer, localPeerName }, caller, body as any);
+    const { handlePushLifecycleEvent, authorizeRemotePiOwner } = await import("./peer-transport/remote-pi-agent-api-integration.js");
+    const result = await handlePushLifecycleEvent({ originReducer: reducer, localPeerName, authorizeOwner: authorizeRemotePiOwner }, caller, body as any);
     if (result.success) {
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
     } else {
@@ -1050,22 +904,22 @@ export class AgentApiServer {
   }
 
   /** GET /v1/pi-runs/:runId/events — origin pulls catch-up events from owner. */
-  private handleRemotePiEventsList(url: string, res: ServerResponse, caller: string, runId: string): void {
-    const afterMatch = url.match(/[?&]after_sequence=([^&]+)/);
-    const limitMatch = url.match(/[?&]limit=([^&]+)/);
+  private handleRemotePiEventsList(ctx: AgentApiRouteContext, caller: string, runId: string): void {
+    const afterRaw = ctx.query["after_sequence"];
+    const limitRaw = ctx.query["limit"];
     const { getRemotePiDelivery } = require("./peer-transport/remote-pi-registry.js") as typeof import("./peer-transport/remote-pi-registry.js");
     const delivery = getRemotePiDelivery();
     if (!delivery) {
-      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi delivery not available" }));
+      ctx.res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Remote Pi delivery not available" }));
       return;
     }
-    const after_sequence = afterMatch ? parseInt(afterMatch[1]!, 10) : 0;
-    const limit = limitMatch ? parseInt(limitMatch[1]!, 10) : 100;
+    const after_sequence = afterRaw !== undefined ? parseInt(afterRaw, 10) : 0;
+    const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : 100;
     delivery.listEvents({ version: 1, run_id: runId, after_sequence, limit }, caller).then(result => {
       if ("error" in result) {
-        res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: result.error }));
+        ctx.res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: result.error }));
       } else {
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
+        ctx.res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
       }
     });
   }
@@ -1189,424 +1043,6 @@ export class AgentApiServer {
       .end(JSON.stringify({ ok: true, local_card_id: card.id, status: typedBody.status }));
   }
 
-  // ── Pi capability bridge (#1313) ──────────────────────────────────────────
-
-  /** #1313 — Rate-limiter state for Pi clients (separate from peer rate limits). */
-  private piRateState = new Map<string, { reads: number[]; mutations: number[] }>();
-  private static readonly PI_READ_LIMIT = 120;
-  private static readonly PI_MUTATION_LIMIT = 30;
-
-  private checkPiRateLimit(clientId: string, isMutation: boolean): boolean {
-    const now = Date.now();
-    const window = 60_000;
-    let state = this.piRateState.get(clientId);
-    if (!state) {
-      state = { reads: [], mutations: [] };
-      this.piRateState.set(clientId, state);
-    }
-    const bucket = isMutation ? state.mutations : state.reads;
-    const limit = isMutation
-      ? AgentApiServer.PI_MUTATION_LIMIT
-      : AgentApiServer.PI_READ_LIMIT;
-    const cutoff = now - window;
-    while (bucket.length > 0 && bucket[0]! < cutoff) bucket.shift();
-    if (bucket.length >= limit) return false;
-    bucket.push(now);
-    if (this.piRateState.size > 100) {
-      for (const [k, s] of this.piRateState) {
-        while (s.reads.length > 0 && s.reads[0]! < cutoff) s.reads.shift();
-        while (s.mutations.length > 0 && s.mutations[0]! < cutoff) s.mutations.shift();
-        if (s.reads.length === 0 && s.mutations.length === 0) this.piRateState.delete(k);
-      }
-    }
-    return true;
-  }
-
-  /** #1313 — Uniform Pi API success response. */
-  private piOk(data: unknown, duplicate?: boolean): string {
-    return JSON.stringify({ ok: true, data, ...(duplicate ? { duplicate: true } : {}) });
-  }
-
-  /** #1313 — Uniform Pi API error response. */
-  private piErr(code: string, message: string, retryable: boolean): string {
-    return JSON.stringify({ ok: false, error: { code, message, retryable } });
-  }
-
-  /** #1313 — Route and handle authenticated Pi capability requests. */
-  private async handlePiRoute(
-    url: string, method: string, req: IncomingMessage, res: ServerResponse,
-  ): Promise<void> {
-    const { isLoopbackAddress, PI_MAX_BODY_BYTES, verifyPiRequest, piRouteRequiresScope } = await import("./pi-auth.js");
-
-    // 1. Loopback check
-    const addr = req.socket.remoteAddress;
-    if (!isLoopbackAddress(addr)) {
-      res.writeHead(401, { "Content-Type": "application/json" }).end(this.piErr("unauthorized", "Not authorized", false));
-      return;
-    }
-
-    // 2. Route must be a known /v1/pi/ route
-    const requiredScope = piRouteRequiresScope(url, method);
-    if (!requiredScope) {
-      res.writeHead(404, { "Content-Type": "application/json" }).end(this.piErr("not_found", "Unknown route", false));
-      return;
-    }
-
-    // 3. Read body with Pi-specific size limit (64 KiB)
-    let body = "";
-    try {
-      body = await readBodyLimited(req, PI_MAX_BODY_BYTES);
-    } catch {
-      res.writeHead(413, { "Content-Type": "application/json" }).end(this.piErr("too_large", "Request body too large", false));
-      return;
-    }
-
-    // 4. Verify authentication (registration, nonce, timestamp, body hash, signature)
-    const headers = req.headers as Record<string, string | string[] | undefined>;
-    const auth = verifyPiRequest(method, url, body, headers);
-    if (!auth.ok || !auth.registration) {
-      res.writeHead(401, { "Content-Type": "application/json" }).end(this.piErr("unauthorized", "Not authorized", false));
-      return;
-    }
-
-    // 5. Scope check
-    if (!auth.registration.scopes.includes(requiredScope)) {
-      res.writeHead(403, { "Content-Type": "application/json" }).end(this.piErr("forbidden", "Scope not granted", false));
-      return;
-    }
-
-    // 6. Rate limit (read vs mutation)
-    const isMutation = method === "POST" || method === "DELETE" || method === "PUT" || method === "PATCH";
-    if (!this.checkPiRateLimit(auth.registration.clientId, isMutation)) {
-      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" })
-        .end(this.piErr("rate_limited", "Rate limit exceeded", true));
-      return;
-    }
-
-    // 7. Parse JSON for routes that have a body
-    let parsedBody: Record<string, unknown> | undefined;
-    if (body.length > 0) {
-      try {
-        parsedBody = JSON.parse(body) as Record<string, unknown>;
-      } catch {
-        res.writeHead(400, { "Content-Type": "application/json" }).end(this.piErr("invalid_json", "Invalid JSON body", false));
-        return;
-      }
-    }
-
-    // 8. Route to handler
-    if (url === "/v1/pi/status" && method === "GET") {
-      return this.handlePiStatus(res);
-    }
-    if (url === "/v1/pi/notify" && method === "POST") {
-      return this.handlePiNotify(res, auth.registration.clientId, parsedBody);
-    }
-    if (url === "/v1/pi/tasks" && method === "POST") {
-      return this.handlePiTaskCreate(res, auth.registration.clientId, parsedBody);
-    }
-    if (url.startsWith("/v1/pi/tasks/") && method === "GET") {
-      return this.handlePiTaskStatus(url, res, auth.registration.clientId);
-    }
-    if (url === "/v1/pi/peers" && method === "GET") {
-      return this.handlePiPeerList(res);
-    }
-    if (url === "/v1/pi/peers/delegate" && method === "POST") {
-      return this.handlePiPeerDelegate(res, auth.registration.clientId, parsedBody);
-    }
-
-    res.writeHead(404, { "Content-Type": "application/json" }).end(this.piErr("not_found", "Unknown route", false));
-  }
-
-  /** #1313 — GET /v1/pi/status: bridge version, uptime, capability availability. */
-  private async handlePiStatus(res: ServerResponse): Promise<void> {
-    const uptime = Math.floor(process.uptime());
-    const pkg = await tryReadVersion();
-    res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({
-      version: pkg ?? "?",
-      uptimeSec: uptime,
-      capabilities: {
-        notify: !!this.onPiNotify,
-        tasks: true,
-        peers: true,
-        delegate: true,
-      },
-    }));
-  }
-
-  /** #1313 — POST /v1/pi/notify: send sanitized text to main chat. */
-  private async handlePiNotify(
-    res: ServerResponse, clientId: string, body: Record<string, unknown> | undefined,
-  ): Promise<void> {
-    if (!body || typeof body.request_id !== "string" || typeof body.text !== "string") {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id and text are required", false));
-      return;
-    }
-    const text = (body.text as string).slice(0, 4096);
-    const requestId = (body.request_id as string).slice(0, 128);
-
-    if (!/^[A-Za-z0-9._:\-]+$/.test(requestId)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id must match [A-Za-z0-9._:-]+", false));
-      return;
-    }
-
-    const { reserveRequest, completeRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
-    const hash = hashCanonicalJson(body as Record<string, unknown>);
-    const reservation = reserveRequest(clientId, "notify", requestId, hash);
-
-    if (!reservation.ok) {
-      if (reservation.code === "duplicate_conflict") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("id_conflict", "request_id used with different payload", false));
-        return;
-      }
-      if (reservation.code === "outcome_unknown") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("outcome_unknown", "Previous request outcome unknown", true));
-        return;
-      }
-    }
-
-    if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
-      res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
-      return;
-    }
-
-    if (!this.onPiNotify) {
-      completeRequest(clientId, "notify", requestId, this.piErr("not_available", "Main chat not configured", false));
-      res.writeHead(503, { "Content-Type": "application/json" })
-        .end(this.piErr("not_available", "Main chat not configured", false));
-      return;
-    }
-
-    try {
-      const result = await this.onPiNotify(text);
-      if (result.ok) {
-        const resp = this.piOk({ sent: true });
-        completeRequest(clientId, "notify", requestId, resp);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(resp);
-      } else {
-        const errCode = result.reason === "no-chat-id" ? "not_available"
-          : result.reason === "adapter-missing" ? "not_available"
-          : "send_failed";
-        const resp = this.piErr(errCode, "Notification failed", true);
-        completeRequest(clientId, "notify", requestId, resp);
-        res.writeHead(502, { "Content-Type": "application/json" }).end(resp);
-      }
-    } catch (err) {
-      void err;
-      const resp = this.piErr("send_failed", "Notification failed", true);
-      completeRequest(clientId, "notify", requestId, resp);
-      res.writeHead(502, { "Content-Type": "application/json" }).end(resp);
-    }
-  }
-
-  /** #1313/#1407 — POST /v1/pi/tasks: queue an async Kanban task, return tracking ID. */
-  private async handlePiTaskCreate(
-    res: ServerResponse, clientId: string, body: Record<string, unknown> | undefined,
-  ): Promise<void> {
-    if (!body || typeof body.request_id !== "string" || typeof body.goal !== "string") {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id and goal are required", false));
-      return;
-    }
-    const goal = (body.goal as string).slice(0, 32768);
-    const requestId = (body.request_id as string).slice(0, 128);
-    if (!/^[A-Za-z0-9._:\-]+$/.test(requestId)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id must match [A-Za-z0-9._:-]+", false));
-      return;
-    }
-
-    const context = typeof body.context === "string" ? (body.context as string).slice(0, 16384) : undefined;
-    const priority = typeof body.priority === "string" ? (body.priority as string) : "MEDIUM";
-    const deliveryMode = typeof body.delivery === "string" ? (body.delivery as string) : "silent";
-
-    const { reserveRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
-    const hash = hashCanonicalJson(body as Record<string, unknown>);
-    const reservation = reserveRequest(clientId, "task:create", requestId, hash);
-
-    if (!reservation.ok) {
-      if (reservation.code === "duplicate_conflict") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("id_conflict", "request_id used with different payload", false));
-        return;
-      }
-      if (reservation.code === "outcome_unknown") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("outcome_unknown", "Previous request outcome unknown", true));
-        return;
-      }
-    }
-
-    if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
-      res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
-      return;
-    }
-
-    // #1407: Use PiTaskStore for atomic card+ownership creation
-    try {
-      const { getPiTaskStore } = await import("./pi-task-store.js");
-      const store = await getPiTaskStore();
-      const fullGoal = context ? `${goal}\n\nContext: ${context}` : goal;
-      const result = store.createAndComplete({
-        clientId,
-        requestId,
-        requestHash: hash,
-        title: fullGoal.slice(0, 200),
-        goal: fullGoal,
-        priority: priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-        deliveryMode: deliveryMode as "silent" | "deliver" | "announce",
-      });
-
-      if (result.created) {
-        const { nerve } = await import("./nerve.js");
-        nerve.fire("card:queued", result.cardId);
-        res.writeHead(200, { "Content-Type": "application/json" }).end(result.responseJson);
-      } else {
-        const resp = this.piErr("task_failed", "Task creation failed", true);
-        res.writeHead(500, { "Content-Type": "application/json" }).end(resp);
-      }
-    } catch (err) {
-      const resp = this.piErr("task_failed", "Failed to create task", true);
-      res.writeHead(500, { "Content-Type": "application/json" }).end(resp);
-    }
-  }
-
-  /** #1313/#1407 — GET /v1/pi/tasks/:id — Pi-scoped task status with exact ownership. */
-  private async handlePiTaskStatus(url: string, res: ServerResponse, clientId: string): Promise<void> {
-    const id = parseInt(url.slice("/v1/pi/tasks/".length), 10);
-    if (isNaN(id)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "Invalid task ID", false));
-      return;
-    }
-    const { getPiTaskStore } = await import("./pi-task-store.js");
-    const store = await getPiTaskStore();
-    const view = store.getOwned(id, clientId);
-    if (!view) {
-      res.writeHead(404, { "Content-Type": "application/json" })
-        .end(this.piErr("not_found", "Task not found", false));
-      return;
-    }
-    res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({
-      task_id: view.id,
-      status: view.status,
-      created_at: view.createdAt,
-      completed_at: view.completedAt,
-      result_summary: view.resultSummary,
-      error: view.error,
-    }));
-  }
-
-  /** #1313 — GET /v1/pi/peers: secret-free peer presence (static config + live broker state). */
-  private handlePiPeerList(res: ServerResponse): void {
-    try {
-      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-      const { getPeerWsBroker } = require("./peer-transport/peer-ws-broker.js") as typeof import("./peer-transport/peer-ws-broker.js");
-      const config = loadPeerConfig();
-      const broker = getPeerWsBroker();
-      const connected = broker.getConnectedPeers();
-      const peers = Object.entries(config.peers).map(([name, entry]) => ({
-        name,
-        alive: connected.includes(name),
-        host: entry.host,
-        port: entry.port,
-      }));
-      res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({ peers }));
-    } catch {
-      res.writeHead(200, { "Content-Type": "application/json" }).end(this.piOk({ peers: [] }));
-    }
-  }
-
-  /** #1313 — POST /v1/pi/peers/delegate: delegate task to a peer. */
-  private async handlePiPeerDelegate(
-    res: ServerResponse, clientId: string, body: Record<string, unknown> | undefined,
-  ): Promise<void> {
-    if (!body || typeof body.request_id !== "string" || typeof body.goal !== "string") {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id and goal are required", false));
-      return;
-    }
-    const goal = (body.goal as string).slice(0, 32768);
-    const requestId = (body.request_id as string).slice(0, 128);
-    if (!/^[A-Za-z0-9._:\-]+$/.test(requestId)) {
-      res.writeHead(400, { "Content-Type": "application/json" })
-        .end(this.piErr("invalid_request", "request_id must match [A-Za-z0-9._:-]+", false));
-      return;
-    }
-
-    const peer = typeof body.peer === "string" ? (body.peer as string).slice(0, 128) : undefined;
-    const context = typeof body.context === "string" ? (body.context as string).slice(0, 16384) : undefined;
-    const priority = typeof body.priority === "string" ? (body.priority as string) : "MEDIUM";
-    const requirements = Array.isArray(body.requirements) ? (body.requirements as string[]).slice(0, 20) : [];
-
-    const { reserveRequest, completeRequest, hashCanonicalJson } = await import("./pi-request-ledger.js");
-    const hash = hashCanonicalJson(body as Record<string, unknown>);
-    const reservation = reserveRequest(clientId, "peer:delegate", requestId, hash);
-
-    if (!reservation.ok) {
-      if (reservation.code === "duplicate_conflict") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("id_conflict", "request_id used with different payload", false));
-        return;
-      }
-      if (reservation.code === "outcome_unknown") {
-        res.writeHead(409, { "Content-Type": "application/json" })
-          .end(this.piErr("outcome_unknown", "Previous request outcome unknown", true));
-        return;
-      }
-    }
-
-    if (reservation.ok && reservation.entry.state === "completed" && reservation.entry.responseJson) {
-      res.writeHead(200, { "Content-Type": "application/json" }).end(reservation.entry.responseJson);
-      return;
-    }
-
-    try {
-      const { getPeerTransport } = await import("./peer-transport/index.js");
-      const transport = getPeerTransport();
-      let targetPeer = peer;
-
-      if (!targetPeer) {
-        const { getPeerWsBroker } = await import("./peer-transport/peer-ws-broker.js");
-        const connected = getPeerWsBroker().getConnectedPeers();
-        if (connected.length === 0) {
-          const resp = this.piErr("no_peers", "No connected peers found", true);
-          completeRequest(clientId, "peer:ask", requestId, resp);
-          res.writeHead(503, { "Content-Type": "application/json" }).end(resp);
-          return;
-        }
-        targetPeer = connected[0]!;
-      }
-
-      const fullGoal = context ? `${goal}\n\nContext: ${context}` : goal;
-      const result = await transport.askHelp(targetPeer, {
-        version: 1,
-        request_id: requestId ?? `pi_${Date.now()}`,
-        created_at: new Date().toISOString(),
-        expires_at: new Date(Date.now() + 300_000).toISOString(),
-        goal: fullGoal,
-        required_capabilities: requirements,
-        priority: priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-      });
-
-      const resp = this.piOk({
-        decision: result.decision,
-        peer: targetPeer,
-        contribution_ref: result.contribution_ref,
-        status: result.decision === "accepted" ? "help_accepted" : result.decision,
-      });
-      completeRequest(clientId, "peer:ask", requestId, resp);
-      res.writeHead(200, { "Content-Type": "application/json" }).end(resp);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const resp = this.piErr("ask_failed", `Help request failed: ${msg}`, true);
-      completeRequest(clientId, "peer:ask", requestId, resp);
-      res.writeHead(502, { "Content-Type": "application/json" }).end(resp);
-    }
-  }
 }
 
 // ── Helper functions ────────────────────────────────────────────────────────

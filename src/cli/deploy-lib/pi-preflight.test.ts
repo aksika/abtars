@@ -2,10 +2,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PiInstallationState } from "../../components/pi-installation.js";
 
 const mockResolve = vi.fn<(...args: unknown[]) => PiInstallationState>();
+const mockInspectSurfaces = vi.fn();
 
 vi.mock("../../components/pi-installation.js", () => ({
   resolvePiInstallation: (...args: unknown[]) => mockResolve(...args),
   resolvePiModuleUrl: () => new URL("file:///dev/null"),
+}));
+
+vi.mock("../../components/pi-inspector.js", () => ({
+  inspectPiRuntimeSurfaces: (...args: unknown[]) => mockInspectSurfaces(...args),
 }));
 
 async function captureOutput(fn: () => Promise<number>): Promise<{ exitCode: number; stdout: string; stderr: string }> {
@@ -29,19 +34,28 @@ const compatibleState: PiInstallationState = {
   installation: {
     executable: "/usr/local/bin/pi",
     packageRoot: "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent",
-    version: "0.80.7",
+    version: "0.83.0",
     source: "path",
     moduleRoots: {
       ai: "/usr/local/lib/node_modules/@earendil-works/pi-ai",
       tui: "/usr/local/lib/node_modules/@earendil-works/pi-tui",
       agentCore: "/usr/local/lib/node_modules/@earendil-works/pi-agent-core",
     },
+    pinStatus: "at-pin",
   },
 };
 
 describe("pi-preflight (#1438)", () => {
   beforeEach(() => {
     mockResolve.mockReset();
+    mockInspectSurfaces.mockReset();
+    mockInspectSurfaces.mockReturnValue({
+      ai: { status: "loadable" },
+      "ai-api": { status: "loadable" },
+      "ai-providers": { status: "loadable" },
+      tui: { status: "loadable" },
+      "agent-core": { status: "loadable" },
+    });
   });
 
   it("passes when Pi is compatible", async () => {
@@ -54,7 +68,30 @@ describe("pi-preflight (#1438)", () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain("✓ Pi");
-    expect(stdout).toContain("0.80.7");
+    expect(stdout).toContain("0.83.0");
+  });
+
+  it("keeps the downgrade command visible when an above-pin Pi is unloadable", async () => {
+    mockResolve.mockReturnValue({
+      state: "compatible",
+      installation: {
+        ...compatibleState.installation,
+        version: "0.84.0",
+        pinStatus: "above-pin",
+      },
+    });
+    mockInspectSurfaces.mockReturnValue({
+      ai: { status: "unloadable", reason: "missing export" },
+    });
+
+    const { exitCode, stdout } = await captureOutput(async () => {
+      const { preflightPiCompatibility } = await import("./pi-preflight.js");
+      return preflightPiCompatibility();
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("unloadable");
+    expect(stdout).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.83.0'");
   });
 
   it("passes when Pi is absent", async () => {

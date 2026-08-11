@@ -7,8 +7,8 @@
  * exactly the session currently selected by `/session N` or `--orc`.
  *
  * Payloads are bounded at event boundaries. Thinking, prompts, tool
- * arguments/results, and secrets are never published here — only `text`
- * deltas, bounded tool-start names, and terminal markers.
+ * arguments/results, and secrets are never published here — only typed
+ * text/thinking deltas, bounded tool-start names, and terminal markers.
  */
 
 import { logWarn } from "./logger.js";
@@ -28,11 +28,12 @@ export interface OutputObserver {
   onDelta?(event: { kind: SessionOutputStreamKind; text: string }): void;
   onToolStart?(event: { name: string }): void;
   end?(reason: SessionOutputEndReason): void;
+  invalidate?(): void;
 }
 
 export type SessionOutputEvent =
   | { type: "start"; sessionId: string; executionId: string; streamId: string }
-  | { type: "delta"; sessionId: string; executionId: string; streamId: string; text: string }
+  | { type: "delta"; sessionId: string; executionId: string; streamId: string; kind: SessionOutputStreamKind; text: string }
   | { type: "tool-start"; sessionId: string; executionId: string; streamId: string; name: string }
   | { type: "end"; sessionId: string; executionId: string; streamId: string; reason: SessionOutputEndReason };
 
@@ -49,6 +50,15 @@ function truncateUtf8(s: string, maxBytes: number): string {
     bytes += b;
   }
   return res;
+}
+
+/** Strip terminal controls before a delta reaches the socket/TUI boundary. */
+function stripControls(text: string): string {
+  return text
+    .replace(/\u001b\]\d+;\u0007/g, "")
+    .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, "");
 }
 
 let _streamCounter = 0;
@@ -73,11 +83,12 @@ export class SessionOutputObserver implements OutputObserver {
 
   onDelta(event: { kind: SessionOutputStreamKind; text: string }): void {
     if (!this._valid || this._ended) return;
-    // Thinking is excluded from TUI frames by design — only `text` streams.
-    if (event.kind !== "text") return;
-    const text = truncateUtf8(event.text, MAX_DELTA_BYTES);
+    // #1619: thinking is no longer filtered here — the typed kind rides the
+    // event so the TUI can render ordered thinking/text content natively.
+    // Bounds and control stripping still apply to both kinds.
+    const text = truncateUtf8(stripControls(event.text), MAX_DELTA_BYTES);
     if (!text) return;
-    this._feed.publish({ type: "delta", ...this._ids, streamId: this.streamId, text });
+    this._feed.publish({ type: "delta", kind: event.kind, ...this._ids, streamId: this.streamId, text });
   }
 
   onToolStart(event: { name: string }): void {

@@ -2,7 +2,7 @@
  * Integration: recall quality feedback — #824.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createHarness, detectCitations, type IntegrationHarness } from "./harness.js";
+import { createHarness, memoryDb, detectCitations, type IntegrationHarness } from "./harness.js";
 
 describe("recall quality integration (#824)", () => {
   let h: IntegrationHarness;
@@ -23,7 +23,7 @@ describe("recall quality integration (#824)", () => {
     // Simulate negative emoji reaction
     h.memory.bumpRejectedCount(ids);
 
-    const db = h.memory.getDatabase()!;
+    const db = memoryDb(h.memory);
     const row = db.prepare("SELECT rejected_count FROM extracted_memories WHERE id = ?").get(ids[0]!) as { rejected_count: number };
     expect(row.rejected_count).toBe(1);
   });
@@ -39,7 +39,7 @@ describe("recall quality integration (#824)", () => {
 
     h.memory.bumpCitedCount(ids);
 
-    const db = h.memory.getDatabase()!;
+    const db = memoryDb(h.memory);
     const row = db.prepare("SELECT cited_count FROM extracted_memories WHERE id = ?").get(ids[0]!) as { cited_count: number };
     expect(row.cited_count).toBe(1);
   });
@@ -55,7 +55,7 @@ describe("recall quality integration (#824)", () => {
       contentOriginal: "alpha vue", memoryType: "fact", emotionScore: 0, topic: "projects",
     });
 
-    const db = h.memory.getDatabase()!;
+    const db = memoryDb(h.memory);
     const rows = db.prepare("SELECT id FROM extracted_memories ORDER BY id").all() as Array<{ id: number }>;
     const [goodId, badId] = [rows[0]!.id, rows[1]!.id];
 

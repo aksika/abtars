@@ -1,14 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 let tmpDir: string;
 let mockPgrepOutput: string = "";
+let mockSpawn: Array<{ cmd: string; behavior: () => any }> = [];
 
 // Captured by the vi.mock factories below via closure (stable across resetModules).
 const homedirRef = vi.hoisted(() => ({ current: "" }));
 const pgrepRef = vi.hoisted(() => ({ current: "" }));
+const spawnRef = vi.hoisted(() => ({ current: [] as Array<{ cmd: string; behavior: () => any }> }));
 const origSpawnRef = vi.hoisted(() => ({ current: null as any }));
 
 vi.mock("node:os", async (importOriginal) => {
@@ -22,8 +24,16 @@ vi.mock("node:child_process", async (importOriginal) => {
   return {
     ...actual,
     spawnSync: (cmd: string, args?: readonly string[]) => {
+      const match = spawnRef.current.find((s) => s.cmd === cmd);
+      if (match) return match.behavior();
       if (cmd === "pgrep" && args?.[0] === "-f" && typeof args[1] === "string" && args[1].includes("abtars.js")) {
         return { status: 0, stdout: pgrepRef.current, stderr: "", pid: 0, output: [pgrepRef.current], signal: null };
+      }
+      // Hermetic: never spawn the real `pi` binary (slow launcher — #1476
+      // raised its probe timeout to 15s, which can stall this file's tests
+      // past vitest's 5s default under parallel load).
+      if (args?.[0] === "--version") {
+        return { status: 0, stdout: "0.83.0\n", stderr: "", pid: 0, output: ["0.83.0\n"], signal: null, error: null };
       }
       return origSpawnRef.current(cmd, args);
     },
@@ -37,6 +47,7 @@ beforeEach(() => {
   mkdirSync(join(tmpDir, "config"), { recursive: true });
   mkdirSync(join(tmpDir, "kanban"), { recursive: true });
   process.env["ABTARS_HOME"] = tmpDir;
+  spawnRef.current = [];
   vi.resetModules();
 });
 
@@ -160,6 +171,67 @@ describe("doctor tribe probes (#1439)", () => {
     expect(result.schemaVersion).toBe("2.0");
   });
 
+  describe("pi probe (#1476)", () => {
+    function writePiExecutor(command: string): void {
+      writeFileSync(join(tmpDir, "config", "pi-executor.json"), JSON.stringify({ command }));
+    }
+
+    it("warns (not fails) when pi is slow to start — timeout is transient", async () => {
+      const fakePi = join(tmpDir, "fake-pi");
+      writeFileSync(fakePi, "#!/bin/sh\necho 0.83.0\n");
+      chmodSync(fakePi, 0o755);
+      writePiExecutor(fakePi);
+      spawnRef.current.push({
+        cmd: fakePi,
+        behavior: () => ({ status: null, stdout: "", stderr: "", pid: 0, output: [], signal: null, error: Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }) }),
+      });
+      const { runAllProbes } = await import("./doctor-probes.js");
+      const result = await runAllProbes();
+      const pi = result.layers.brain.find((r) => r.name === "pi");
+      expect(pi?.status).toBe("warning");
+      expect(pi?.detail).toContain("slow");
+    });
+
+    it("reports ok when pi responds with a version", async () => {
+      const fakePi = join(tmpDir, "fake-pi");
+      writeFileSync(fakePi, "#!/bin/sh\necho 0.83.0\n");
+      chmodSync(fakePi, 0o755);
+      writePiExecutor(fakePi);
+      spawnRef.current.push({
+        cmd: fakePi,
+        behavior: () => ({ status: 0, stdout: "0.83.0\n", stderr: "", pid: 0, output: ["0.83.0\n"], signal: null, error: null }),
+      });
+      const { runAllProbes } = await import("./doctor-probes.js");
+      const result = await runAllProbes();
+      const pi = result.layers.brain.find((r) => r.name === "pi");
+      expect(pi?.status).toBe("ok");
+      expect(pi?.detail).toContain("0.83.0");
+    });
+  });
+
+  describe("dashboard probe port resolution", () => {
+    it("uses WEB_PORT from process env when set there (operator override wins over .env)", async () => {
+      writeFileSync(join(tmpDir, "config", ".env"), "ENABLE_DASHBOARD=true\nWEB_PORT=3000\n");
+      process.env["WEB_PORT"] = "4567";
+      const { runAllProbes } = await import("./doctor-probes.js");
+      const result = await runAllProbes();
+      const dash = result.layers.body.find((r) => r.name === "dashboard");
+      // Nothing listens on :4567 in the test sandbox — the probe must have
+      // probed THAT port (not the .env/default 3000).
+      expect(dash?.status).toBe("failed");
+      expect(dash?.detail).toContain("4567");
+      delete process.env["WEB_PORT"];
+    });
+
+    it("falls back to .env WEB_PORT (configurable, not always 3000)", async () => {
+      writeFileSync(join(tmpDir, "config", ".env"), "ENABLE_DASHBOARD=true\nWEB_PORT=8081\n");
+      const { runAllProbes } = await import("./doctor-probes.js");
+      const result = await runAllProbes();
+      const dash = result.layers.body.find((r) => r.name === "dashboard");
+      expect(dash?.detail).toContain("8081");
+    });
+  });
+
   it("output has summary field", async () => {
     const { runAllProbes } = await import("./doctor-probes.js");
     const result = await runAllProbes();
@@ -175,7 +247,7 @@ describe("doctor tribe probes (#1439)", () => {
     const result = await runAllProbes();
     expect(result.abtars).toBeDefined();
     expect(typeof result.abtars.version).toBe("string");
-  });
+  }, 15_000);
 
   it("probes have evidence level", async () => {
     const { runAllProbes } = await import("./doctor-probes.js");
@@ -185,5 +257,5 @@ describe("doctor tribe probes (#1439)", () => {
       expect(p.evidence).toBeDefined();
       expect(["configuration", "filesystem", "executable", "reachable", "runtime", "authenticated"]).toContain(p.evidence);
     }
-  });
+  }, 15_000);
 });

@@ -34,6 +34,19 @@ export interface PeerHelpResponseV1 {
   reason_code?: string;
   reason?: string;
   retry_after?: string;
+  /**
+   * #1357: Set to true ONLY when the receiver proves that no run, card,
+   * process, or reservation was created for this request (pre-creation
+   * rejections: schema, policy/capability, conflict, executor readiness).
+   * Absence means the outcome is not proven — the origin must treat the
+   * response as unknown and must not advance candidate iteration.
+   */
+  proves_non_creation?: boolean;
+  /** #1357: Remote Pi identifiers (present when executor='pi' and decision='accepted'). */
+  remote_run_id?: string;
+  remote_card_id?: number;
+  remote_generation?: number;
+  remote_session_id?: string;
 }
 
 export interface PeerHelpStatusRequestV1 {
@@ -71,6 +84,7 @@ export interface PeerContributionEventV1 {
   summary?: string;
   evidence?: WorkerResultEnvelopeV1;
   artifacts?: BoundedArtifactRef[];
+  projection?: ContributionProjectionV1;
 }
 
 export const HELP_WIRE_METHODS = [
@@ -90,8 +104,10 @@ const MAX_REASON_LENGTH = 2000;
 const MAX_SUMMARY_LENGTH = 10_000;
 const MAX_EVIDENCE_BYTES = 1_000_000;
 const MAX_ARTIFACTS = 20;
+const MAX_PROJECTION_ITEM_LENGTH = 2_000;
 const MAX_REQUEST_ID_LENGTH = 128;
 const REQUEST_ID_RE = /^[A-Za-z0-9._:\-]+$/;
+const MAX_REMOTE_ID_LENGTH = 128;
 
 export const HELP_DEFAULTS = {
   maxGoalLength: MAX_GOAL_LENGTH,
@@ -117,6 +133,27 @@ export interface WorkerResultEnvelopeV1 {
   artifacts?: BoundedArtifactRef[];
   tokens_used?: number;
   metadata?: Record<string, unknown>;
+}
+
+export interface ContributionProvenanceV1 {
+  receiver_peer: string;
+  receiver_project_ref: string;
+  acceptance_id: string;
+  accepted_at: string;
+}
+
+export interface ContributionProjectionV1 {
+  schema_version: 1;
+  outcome: "completed" | "failed";
+  summary: string;
+  evidence: ReadonlyArray<{
+    id: string;
+    kind: string;
+    summary: string;
+    observed_by: string;
+  }>;
+  artifacts: ReadonlyArray<BoundedArtifactRef>;
+  provenance: ContributionProvenanceV1;
 }
 
 export interface BoundedArtifactRef {
@@ -179,6 +216,18 @@ export function parseHelpRequest(raw: unknown): { ok: true; value: PeerHelpReque
     const t = r.target as Record<string, unknown>;
     if (t.executor === "pi") {
       if (!isNonEmptyString(t.workspace_alias)) return { ok: false, error: "workspace_alias required for pi executor" };
+      if (t.model !== undefined) {
+        if (typeof t.model !== "object" || t.model === null || Array.isArray(t.model)) return { ok: false, error: "model must be an object" };
+        const model = t.model as Record<string, unknown>;
+        if (!isNonEmptyString(model.provider) || model.provider.length > MAX_REMOTE_ID_LENGTH ||
+            !isNonEmptyString(model.model_id) || model.model_id.length > MAX_REMOTE_ID_LENGTH ||
+            (model.thinking !== undefined && (typeof model.thinking !== "string" || model.thinking.length > MAX_REMOTE_ID_LENGTH))) {
+          return { ok: false, error: "invalid model" };
+        }
+      }
+      if (t.delivery !== undefined && !["commit_push", "patch_artifact", "leave_remote"].includes(t.delivery as string)) {
+        return { ok: false, error: "invalid delivery policy" };
+      }
     } else if (t.executor !== "agent") {
       return { ok: false, error: "target executor must be 'agent' or 'pi'" };
     }
@@ -207,6 +256,10 @@ export function parseHelpResponse(raw: unknown): { ok: true; value: PeerHelpResp
   if (!validateRequestId(r.request_id)) return { ok: false, error: "invalid request_id" };
   if (!["accepted", "declined", "deferred"].includes(r.decision as string)) return { ok: false, error: "invalid decision" };
   if (r.decision === "accepted" && !isNonEmptyString(r.contribution_ref)) return { ok: false, error: "contribution_ref required for accepted" };
+  if (r.remote_run_id !== undefined && (!isNonEmptyString(r.remote_run_id) || r.remote_run_id.length > MAX_REMOTE_ID_LENGTH)) return { ok: false, error: "invalid remote_run_id" };
+  if (r.remote_card_id !== undefined && (!Number.isSafeInteger(r.remote_card_id) || (r.remote_card_id as number) < 1)) return { ok: false, error: "invalid remote_card_id" };
+  if (r.remote_generation !== undefined && (!Number.isSafeInteger(r.remote_generation) || (r.remote_generation as number) < 1)) return { ok: false, error: "invalid remote_generation" };
+  if (r.remote_session_id !== undefined && (!isNonEmptyString(r.remote_session_id) || r.remote_session_id.length > MAX_REMOTE_ID_LENGTH)) return { ok: false, error: "invalid remote_session_id" };
   if (!isOptionalString(r.reason)) return { ok: false, error: "reason must be a string" };
   if (typeof r.reason === "string" && r.reason.length > MAX_REASON_LENGTH) return { ok: false, error: `reason exceeds ${MAX_REASON_LENGTH} chars` };
   if (r.retry_after !== undefined && !isISODate(r.retry_after)) return { ok: false, error: "retry_after must be ISO date" };
@@ -220,6 +273,12 @@ export function parseHelpResponse(raw: unknown): { ok: true; value: PeerHelpResp
       reason_code: r.reason_code as string | undefined,
       reason: r.reason as string | undefined,
       retry_after: r.retry_after as string | undefined,
+      // #1357: Remote Pi identifiers (present when executor='pi')
+      proves_non_creation: r.proves_non_creation === true,
+      remote_run_id: r.remote_run_id as string | undefined,
+      remote_card_id: typeof r.remote_card_id === "number" ? r.remote_card_id : undefined,
+      remote_generation: typeof r.remote_generation === "number" ? r.remote_generation : undefined,
+      remote_session_id: r.remote_session_id as string | undefined,
     },
   };
 }
@@ -266,7 +325,80 @@ export function parseContributionEvent(raw: unknown): { ok: true; value: PeerCon
   if (typeof r.sequence !== "number" || r.sequence < 0) return { ok: false, error: "sequence must be a non-negative number" };
   if (!["progress", "completed", "failed", "withdrawal_noted"].includes(r.kind as string)) return { ok: false, error: "invalid kind" };
   if (!isISODate(r.occurred_at)) return { ok: false, error: "invalid occurred_at" };
+  const terminal = r.kind === "completed" || r.kind === "failed";
+  if (terminal && r.projection === undefined) return { ok: false, error: "terminal projection required" };
+  if (!terminal && r.projection !== undefined) return { ok: false, error: "projection only allowed on terminal event" };
+  if (r.projection !== undefined) {
+    if (typeof r.projection !== "object" || r.projection === null) return { ok: false, error: "projection must be an object" };
+    const p = r.projection as Record<string, unknown>;
+    if (p.schema_version !== 1) return { ok: false, error: "unsupported projection version" };
+    if (p.outcome !== r.kind) return { ok: false, error: "projection outcome does not match event kind" };
+    if (typeof p.summary !== "string" || p.summary.length === 0 || p.summary.length > MAX_SUMMARY_LENGTH) return { ok: false, error: "projection summary is invalid" };
+    if (!Array.isArray(p.evidence) || p.evidence.length > 20) return { ok: false, error: "projection evidence is invalid" };
+    if (!Array.isArray(p.artifacts) || p.artifacts.length > MAX_ARTIFACTS) return { ok: false, error: "projection artifacts are invalid" };
+    if (Buffer.byteLength(JSON.stringify({ evidence: p.evidence, artifacts: p.artifacts }), "utf8") > MAX_EVIDENCE_BYTES) {
+      return { ok: false, error: "projection evidence exceeds byte limit" };
+    }
+    for (const item of p.evidence) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) return { ok: false, error: "projection evidence item is invalid" };
+      const evidence = item as Record<string, unknown>;
+      if (!isNonEmptyString(evidence.id) || evidence.id.length > MAX_REMOTE_ID_LENGTH ||
+          !isNonEmptyString(evidence.kind) || evidence.kind.length > MAX_REMOTE_ID_LENGTH ||
+          !isNonEmptyString(evidence.summary) || evidence.summary.length > MAX_PROJECTION_ITEM_LENGTH ||
+          !isNonEmptyString(evidence.observed_by) || evidence.observed_by.length > MAX_REMOTE_ID_LENGTH) {
+        return { ok: false, error: "projection evidence item is invalid" };
+      }
+    }
+    for (const item of p.artifacts) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) return { ok: false, error: "projection artifact is invalid" };
+      const artifact = item as Record<string, unknown>;
+      if (!isNonEmptyString(artifact.name) || artifact.name.length > MAX_PROJECTION_ITEM_LENGTH ||
+          !isNonEmptyString(artifact.content_type) || artifact.content_type.length > MAX_REMOTE_ID_LENGTH ||
+          !Number.isSafeInteger(artifact.size_bytes) || (artifact.size_bytes as number) < 0 ||
+          !isNonEmptyString(artifact.ref) || artifact.ref.length > MAX_PROJECTION_ITEM_LENGTH) {
+        return { ok: false, error: "projection artifact is invalid" };
+      }
+    }
+    if (typeof p.provenance !== "object" || p.provenance === null) return { ok: false, error: "projection provenance required" };
+    const provenance = p.provenance as Record<string, unknown>;
+    if (!isNonEmptyString(provenance.receiver_peer) || provenance.receiver_peer.length > MAX_REMOTE_ID_LENGTH ||
+        !isNonEmptyString(provenance.receiver_project_ref) || provenance.receiver_project_ref.length > MAX_REMOTE_ID_LENGTH ||
+        !isNonEmptyString(provenance.acceptance_id) || provenance.acceptance_id.length > MAX_REMOTE_ID_LENGTH ||
+        !isISODate(provenance.accepted_at)) {
+      return { ok: false, error: "projection provenance is invalid" };
+    }
+  }
   return { ok: true, value: r as unknown as PeerContributionEventV1 };
+}
+
+export function canonicalContributionHash(
+  request: PeerHelpRequestV1,
+  projectCardId: number | null,
+  rootCriteria: readonly string[],
+): string {
+  const { createHash } = require("node:crypto");
+  return createHash("sha256").update(JSON.stringify({
+    request_hash: canonicalRequestHash(request),
+    project_card_id: projectCardId,
+    root_criteria: [...rootCriteria].sort(),
+  })).digest("hex");
+}
+
+export function contributionEventDigest(event: PeerContributionEventV1): string {
+  const { createHash } = require("node:crypto");
+  return createHash("sha256").update(JSON.stringify({
+    version: event.version,
+    event_id: event.event_id,
+    sequence: event.sequence,
+    request_id: event.request_id,
+    contribution_ref: event.contribution_ref,
+    kind: event.kind,
+    occurred_at: event.occurred_at,
+    summary: event.summary,
+    evidence: event.evidence,
+    artifacts: event.artifacts,
+    projection: event.projection,
+  })).digest("hex");
 }
 
 export function canonicalRequestHash(request: PeerHelpRequestV1): string {

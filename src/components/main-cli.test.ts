@@ -26,14 +26,12 @@ describe("parsePlatformFlags — TUI (#1315)", () => {
   beforeEach(() => {
     savedEnv["TELEGRAM_ENABLED"] = process.env["TELEGRAM_ENABLED"];
     savedEnv["DISCORD_ENABLED"] = process.env["DISCORD_ENABLED"];
-    savedEnv["IRC_ENABLED"] = process.env["IRC_ENABLED"];
     savedEnv["TUI_ENABLED"] = process.env["TUI_ENABLED"];
     // Disable every other platform so the env path doesn't pick them up.
     delete process.env["TELEGRAM_ENABLED"];
     delete process.env["TELEGRAM_BOT_TOKEN"];
     delete process.env["DISCORD_ENABLED"];
     delete process.env["DISCORD_TOKEN"];
-    delete process.env["IRC_ENABLED"];
     delete process.env["TUI_ENABLED"];
   });
   afterEach(() => {

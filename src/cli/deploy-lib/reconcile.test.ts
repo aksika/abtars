@@ -43,7 +43,6 @@ describe("#1321 reconcile sleep-cycle from template", () => {
     projectTrust: "never",
     workspaceAliases: {},
     sessionStorageRoot: "",
-    abmindPlugin: "",
   }, null, 2) + "\n";
 
   /** Create templates/config/pi-executor.json in the test HOME. */

@@ -49,6 +49,7 @@ export class AgentApiAdapter implements PlatformAdapter {
       title: `peer:${peerId}`,
       source: "peer",
       timeoutMs,
+      settlementOwner: "spin",
     });
 
     const response = result || "No response";

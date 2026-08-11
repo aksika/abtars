@@ -1,6 +1,7 @@
 import type { PeerHelpRequestV1, PeerHelpResponseV1, HelpDecision } from "./contract.js";
-import { parseHelpRequest, canonicalRequestHash, generateContributionRef } from "./contract.js";
+import { parseHelpRequest, parseContributionEvent, canonicalRequestHash, contributionEventDigest, generateContributionRef } from "./contract.js";
 import { PeerHelpStore } from "./store.js";
+import { ContributionStore } from "./contribution-store.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { loadPeerConfig } from "../peer-config.js";
 
@@ -18,7 +19,7 @@ export interface PeerHelpAdmissionPolicy {
   }): "accept" | "decline" | "defer" | "ignore";
 }
 
-export type PeerHelpHandler = (originPeer: string, request: PeerHelpRequestV1, admission: { decision: "accept"; contributionRef: string }) => Promise<{ ok: boolean; runId?: string; error?: string }>;
+export type PeerHelpHandler = (originPeer: string, request: PeerHelpRequestV1, admission: { decision: "accept"; contributionRef: string }) => Promise<{ ok: boolean; runId?: string; cardId?: number; generation?: number; sessionId?: string; error?: string }>;
 
 const builtinPolicy: PeerHelpAdmissionPolicy = {
   decide(input) {
@@ -53,6 +54,7 @@ const builtinPolicy: PeerHelpAdmissionPolicy = {
 
 export class PeerHelpService {
   private store: PeerHelpStore;
+  private contributionStore: ContributionStore | null = null;
   private policy: PeerHelpAdmissionPolicy;
   private capabilityRegistry: () => string[];
   private piHandler: PeerHelpHandler | null = null;
@@ -67,6 +69,10 @@ export class PeerHelpService {
     this.policy = policy ?? builtinPolicy;
   }
 
+  setContributionStore(store: ContributionStore): void {
+    this.contributionStore = store;
+  }
+
   setPiHandler(handler: PeerHelpHandler): void {
     this.piHandler = handler;
   }
@@ -79,7 +85,7 @@ export class PeerHelpService {
     const parsed = parseHelpRequest(raw);
     if (!parsed.ok) {
       logWarn(TAG, `Malformed help request from ${originPeer}: ${parsed.error}`);
-      return { version: 1, request_id: "unknown", decision: "declined", reason_code: "malformed", reason: parsed.error };
+      return { version: 1, request_id: "unknown", decision: "declined", reason_code: "malformed", reason: parsed.error, proves_non_creation: true };
     }
 
     const request = parsed.value;
@@ -95,9 +101,50 @@ export class PeerHelpService {
     }
     if (reservation.status === "conflict") {
       logWarn(TAG, `Conflicting reuse of request ${request.request_id} from ${originPeer} (different content)`);
-      return { version: 1, request_id: request.request_id, decision: "declined", reason_code: "conflict", reason: "request_id reused with different content" };
+      return { version: 1, request_id: request.request_id, decision: "declined", reason_code: "conflict", reason: "request_id reused with different content", proves_non_creation: true };
     }
     if (reservation.status === "in_flight") {
+      // #1357: For Pi targets, reconcile via the Pi idempotency ledger. If a PiRun
+      // was already created (crash after piService.run() but before acceptPi()),
+      // mark the help as accepted and return the stored response.
+      if (request.target?.executor === "pi") {
+        try {
+          const { reserveRequest } = await import("../pi-request-ledger.js");
+          const { canonicalRequestHash } = await import("./contract.js");
+          const requestHash = canonicalRequestHash(request);
+          const piLedgerResult = reserveRequest(`peer:${originPeer}`, "help.pi", request.request_id, requestHash);
+          if (piLedgerResult.ok && piLedgerResult.entry.state === "completed" && piLedgerResult.entry.responseJson) {
+            const stored = JSON.parse(piLedgerResult.entry.responseJson) as {
+              task_id?: number;
+              run_id?: string;
+              generation?: number;
+              session_id?: string;
+            };
+            // The Pi ledger stores the creation response, while the help ledger
+            // owns the contribution identity. Rebuild the help response instead
+            // of returning the lower-level Pi response directly.
+            const storedResponse: PeerHelpResponseV1 = {
+              version: 1,
+              request_id: request.request_id,
+              decision: "accepted",
+              contribution_ref: generateContributionRef(),
+              remote_run_id: stored.run_id,
+              remote_card_id: stored.task_id,
+              remote_generation: stored.generation,
+              remote_session_id: stored.session_id,
+            };
+            logInfo(TAG, `Reconciled in-flight Pi request ${request.request_id} from ${originPeer}: PiRun already exists`);
+            // Mark the help record as accepted to prevent future in_flight
+            this.store.acceptPi(
+              { originPeer, requestId: request.request_id, requestHash },
+              storedResponse.remote_run_id ?? "",
+              storedResponse,
+            );
+            return storedResponse;
+          }
+        } catch { /* best effort reconciliation */ }
+      }
+
       // Same request redelivered while the original is still being processed.
       // Do not create duplicate work; defer so the requester neither fans out
       // to another peer nor treats this as an acceptance.
@@ -133,6 +180,11 @@ export class PeerHelpService {
         reason_code: decision === "deferred" ? "queue_full" : "policy_denied",
         reason: decision === "deferred" ? "Queue capacity reached" : "Request declined by local policy",
         retry_after: decision === "deferred" ? new Date(Date.now() + 60_000).toISOString() : undefined,
+        // #1357: capability/policy/expiry rejections happen before any
+        // card, run, process, or reservation-affecting creation — the
+        // receiver can prove non-creation. Deferrals are not declines and
+        // carry no proof (they bind the request to this peer).
+        proves_non_creation: decision === "declined",
       };
       this.store.completeDecision(
         { originPeer, requestId: request.request_id },
@@ -153,6 +205,11 @@ export class PeerHelpService {
     if (request.target?.executor === "pi" && this.piHandler) {
       const piResult = await this.piHandler(originPeer, request, { decision: "accept", contributionRef });
       if (!piResult.ok) {
+        // #1357: A Pi handler failure cannot prove non-creation — a PiRun may
+        // already exist (committed ledger with a lost response). Mark the
+        // help row unknown and return a declined response WITHOUT
+        // proves_non_creation so the origin treats it as unknown, freezes
+        // selection on this peer, and reconciles the same request ID.
         this.store.markUnknown(originPeer, request.request_id);
         return {
           version: 1,
@@ -162,6 +219,11 @@ export class PeerHelpService {
           reason: piResult.error ?? "Pi execution setup failed",
         };
       }
+      // Set remote identifiers BEFORE acceptPi so the persisted replay response includes them
+      response.remote_run_id = piResult.runId;
+      response.remote_card_id = piResult.cardId;
+      response.remote_generation = piResult.generation;
+      response.remote_session_id = piResult.sessionId;
       this.store.acceptPi(
         { originPeer, requestId: request.request_id, requestHash },
         piResult.runId ?? "",
@@ -222,15 +284,34 @@ export class PeerHelpService {
   }
 
   async handleContributionEvent(originPeer: string, raw: unknown): Promise<{ ok: boolean }> {
-    const { parseContributionEvent } = await import("./contract.js");
     const parsed = parseContributionEvent(raw);
-    if (!parsed.ok) {
+    if (!parsed.ok) return { ok: false };
+
+    const event = parsed.value;
+    if (event.projection && event.projection.provenance.receiver_peer !== originPeer) {
+      return { ok: false };
+    }
+    const cs = this.contributionStore;
+    if (!cs) {
+      logWarn(TAG, "Contribution event received before requester contribution store was wired");
       return { ok: false };
     }
 
-    const event = parsed.value;
-    this.store.recordContributionEvent(originPeer, event.request_id, event.contribution_ref, event.kind === "completed" ? "completed" : event.kind === "failed" ? "failed" : "running");
-    return { ok: true };
+    const projectionJson = event.projection ? JSON.stringify(event.projection) : null;
+    const payloadDigest = contributionEventDigest(event);
+    const result = cs.applyEvent(originPeer, event, payloadDigest, projectionJson);
+
+    if (result === "applied" && (event.kind === "completed" || event.kind === "failed")) {
+      try {
+        const row = cs.getContribution(originPeer, event.request_id);
+        if (row?.project_card_id) {
+          const { requestReconcile } = await import("../reconciler.js");
+          requestReconcile(row.project_card_id);
+        }
+      } catch {}
+    }
+
+    return { ok: result === "applied" || result === "duplicate" };
   }
 
   private async countActivePeerProjects(): Promise<number> {

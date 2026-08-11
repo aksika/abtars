@@ -19,6 +19,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // by spin-profiles.ts at runtime, so vi.mock works at the top of the test file.
 const orcLockUpdates: Array<string | number | null> = [];
 const activeOrcCardUpdates: Array<number | null> = [];
+const projectSupervision = new Map<number, unknown>();
+let projectStoreReadFails = false;
+const callbackSend = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("./transport/bridge-lock-transport.js", () => ({
   updateBridgeLockField: (field: string, val: unknown) => {
@@ -29,6 +32,37 @@ vi.mock("./transport/bridge-lock-transport.js", () => ({
 
 vi.mock("./transport/orc-tools.js", () => ({
   setActiveOrcCard: (val: number | null) => activeOrcCardUpdates.push(val),
+  setActiveOrcContext: () => {},
+  getActiveOrcContext: () => null,
+}));
+
+vi.mock("./project-acceptance/project-review-store.js", () => ({
+  ProjectReviewStore: class {
+    constructor() {
+      if (projectStoreReadFails) throw new Error("review store unavailable");
+    }
+    getSupervision(cardId: number): unknown {
+      return projectSupervision.get(cardId);
+    }
+  },
+}));
+
+vi.mock("./peer-transport/index.js", () => ({
+  getPeerTransport: () => ({ send: callbackSend }),
+}));
+
+// #1599: controlled worker-supervision settlement for the criteria gate tests.
+// spin.ts instantiates WorkerSupervisionService directly in finishSpin; the
+// mock supplies a per-test collectAndSettle outcome without touching the DB.
+const collectAndSettleOutcome = { value: undefined as unknown };
+vi.mock("./worker-supervision-service.js", () => ({
+  WorkerSupervisionService: class {
+    collectAndSettle() { return collectAndSettleOutcome.value as any; }
+    getContract() { return undefined; }
+    cardHasContract() { return false; }
+    renderContractForPrompt() { return ""; }
+  },
+  validateWorkerRootCriteria: () => null,
 }));
 
 vi.mock("./spin-notifications.js", () => ({
@@ -46,6 +80,21 @@ vi.mock("./tasks/kanban-channel.js", () => ({
 let _nextId = 1;
 interface MockCard { id: number; title: string; source: string; status: string; type: string; [key: string]: unknown; }
 const _cards = new Map<number, MockCard>();
+// #1629: configurable root resolution — defaults to identity (card is its own
+// root). Provenance tests install a parent-chain walker or a failure stub.
+let resolveRootImpl: ((id: number) => number | undefined) | null = null;
+function walkToRoot(id: number): number | undefined {
+  const seen = new Set<number>();
+  let current: number | undefined = id;
+  while (current !== undefined) {
+    if (seen.has(current)) return undefined; // cycle
+    seen.add(current);
+    const card = _cards.get(current);
+    if (!card || card.parent_id === undefined) return current;
+    current = card.parent_id as number;
+  }
+  return undefined;
+}
 vi.mock("./tasks/kanban-board.js", () => ({
   kanbanEnqueue: (title: string, source: string) => {
     const id = _nextId++;
@@ -61,9 +110,13 @@ vi.mock("./tasks/kanban-board.js", () => ({
     if (filter === "*") return cards;
     return cards.filter(c => c.status === (filter || "queued"));
   },
+  kanbanQueuedDispatchOrder: (now?: number) => {
+    const cards = Array.from(_cards.values()).filter(c => c.status === "queued" && (!c.next_retry_at || new Date(c.next_retry_at).getTime() <= (now ?? Date.now())));
+    return cards;
+  },
   kanbanGetCard: (id: number) => _cards.get(id) ?? null,
   isUnblocked: () => true,
-  resolveRootId: (id: number) => id,
+  resolveRootId: (id: number) => resolveRootImpl ? resolveRootImpl(id) : id,
   resolveActiveDescendants: () => [],
   resolveRecentDirectChildren: () => [],
   kanbanGetChildren: () => [],
@@ -174,6 +227,9 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
   beforeEach(() => {
     spin = new Spin();
+    projectSupervision.clear();
+    projectStoreReadFails = false;
+    callbackSend.mockClear();
     setUserRegistryOverride(makeRegistry([
       makeUser("aksika", "master", 111),
       makeUser("adrika", "user", 222),
@@ -210,7 +266,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(p.transportMode).toBe("persistent");
       expect(p.terminateAfter).toBe("external");
       expect(p.beforePrompt).toBeDefined();
-      expect(p.afterPrompt).toBeDefined();
+      expect(p.afterPrompt).toBeUndefined();
     });
 
     it("D profile is external (multi-step persistent)", () => {
@@ -350,6 +406,20 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(runtime.complete).not.toHaveBeenCalled();
     });
 
+    it("threads durableContextIntent through to the session transport unchanged (#1529)", async () => {
+      const transport = mockTransport();
+      const runtime = makeRuntime();
+      const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
+      dSession.transport = transport;
+      spin.setRuntime(runtime as any);
+
+      const intent = { mode: "required_unavailable" as const, reason: "record_failed" as const };
+      const r = await spin.spin({ type: "D", sessionId: dSession.id, prompt: "step1", durableContextIntent: intent, await: true });
+      expect(r.sessionId).toBe(dSession.id);
+      const context = (transport.sendPrompt as any).mock.calls[0]?.[3];
+      expect(context.durableContextIntent).toEqual(intent);
+    });
+
     it("A continuation does NOT overwrite existing session transport", async () => {
       const userKeyedTransport = mockTransport();
       const runtime = makeRuntime();
@@ -374,6 +444,143 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const noGoal = await spin.spin({ type: "S", prompt: "background", await: true });
       expect(withGoal.cardId).toBeDefined();
       expect(noGoal.cardId).toBeUndefined();
+    });
+
+    it("releases the T slot when caller terminalizes before a late execution rejection", async () => {
+      let rejectSend: ((error: Error) => void) | undefined;
+      const runtime = makeRuntime();
+      const transport = mockTransport();
+      runtime.openExecution = vi.fn().mockResolvedValue({
+        send: () => new Promise<string>((_resolve, reject) => { rejectSend = reject; }),
+        cancel: async () => { rejectSend?.(new Error("execution cancelled")); },
+        close: vi.fn().mockResolvedValue(undefined),
+        transport,
+        sessionKey: "mock:late",
+        executionId: "mock:late-execution",
+        ephemeral: true,
+        lastUsage: () => null,
+      });
+      spin.setRuntime(runtime as any);
+      const control = spin.executionSupervisor.open({ executionRef: `spin-slot-${Date.now()}`, type: "T" });
+      const dispatch = spin.dispatchAwait({
+        type: "T",
+        goal: "stalled task",
+        source: "task",
+        settlementOwner: "caller",
+        executionControl: control,
+      });
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(control.cardId).toBeDefined();
+      control.signalCancel("deadline");
+      control.markTerminal("timed_out");
+      await expect(dispatch).rejects.toThrow("execution cancelled");
+      expect(spin.getRunningCount("T")).toBe(0);
+    });
+
+    it("does not callback or complete a supervised O-card from the execution turn", async () => {
+      const cardId = kanbanEnqueue("supervised project", "peer");
+      projectSupervision.set(cardId, { state: "executing" });
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).not.toBe("done");
+      expect(callbackSend).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when O-card supervision cannot be read", async () => {
+      const cardId = kanbanEnqueue("unreadable project", "peer");
+      projectStoreReadFails = true;
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).not.toBe("done");
+      expect(callbackSend).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("#1599 — worker criteria outcome decides card status", () => {
+    function makeEnvelope(criteria: Array<{ status: string }>): any {
+      return {
+        schema_version: 1,
+        attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "local_worker", executor_id: "e", started_at: "", finished_at: "" },
+        outcome: "completed",
+        criteria,
+        checks: [],
+        artifacts: [],
+        worker_report: { summary: "x", claims: [], unresolved_risks: [] },
+      };
+    }
+
+    beforeEach(() => {
+      callbackSend.mockReset();
+    });
+
+    it("settles a supervised worker card failed when criteria did not pass", async () => {
+      collectAndSettleOutcome.value = {
+        settled: true,
+        summary: "✗ 2/2 criteria failed",
+        envelope: makeEnvelope([{ criterion_id: "c1", status: "failed", evidence_ids: [] }, { criterion_id: "c2", status: "failed", evidence_ids: [] }]),
+      };
+      const cardId = kanbanEnqueue("worker lane", "peer");
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("failed");
+      expect(card.status).not.toBe("delivering");
+      const cb = callbackSend.mock.calls[0]?.[1] as { payload?: { status?: string } } | undefined;
+      expect(cb?.payload?.status).toBe("failed");
+    });
+
+    it("settles a supervised worker card done when all criteria pass", async () => {
+      collectAndSettleOutcome.value = {
+        settled: true,
+        summary: "✓ 2/2 criteria passed",
+        envelope: makeEnvelope([{ criterion_id: "c1", status: "passed", evidence_ids: ["v1"] }, { criterion_id: "c2", status: "passed", evidence_ids: ["v2"] }]),
+      };
+      const cardId = kanbanEnqueue("worker lane", "peer");
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("done");
+    });
+
+    it("leaves unsupervised workers on today's done path", async () => {
+      collectAndSettleOutcome.value = { settled: false, summary: "worker output" };
+      const cardId = kanbanEnqueue("plain lane", "peer");
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "W", cardId, goal: "run lane", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("done");
+    });
+
+    it("fails closed when a supervised worker's criteria outcome cannot be read", async () => {
+      collectAndSettleOutcome.value = { settled: false, summary: "[conflict] duplicate attempt with different result" };
+      const cardId = kanbanEnqueue("unreadable lane", "peer");
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).not.toBe("done");
+      expect(card.status).not.toBe("failed");
+      expect(callbackSend).not.toHaveBeenCalled();
     });
   });
 
@@ -465,17 +672,14 @@ describe("spin(spec) — unified session API (#1271)", () => {
       activeOrcCardUpdates.length = 0;
     });
 
-    it("sets orc_active + setActiveOrcCard before, clears both after (success path)", async () => {
+    it("sets setActiveOrcCard before, clears after (success path)", async () => {
       spin.setRuntime(makeRuntime() as any);
       const r = await spin.spin({ type: "O", goal: "plan this", userId: "aksika", platform: "telegram", source: "user", await: true });
-      expect(orcLockUpdates).toEqual([expect.any(Number), null]);
-      expect(activeOrcCardUpdates.length).toBe(2);
-      expect(activeOrcCardUpdates[0]).toEqual(expect.any(Number));
-      expect(activeOrcCardUpdates[1]).toBeNull();
+      expect(activeOrcCardUpdates).toHaveLength(0);
       expect(r.cardId).toBeDefined();
     });
 
-    it("clears bridge-lock on failure path", async () => {
+    it("clears active card on failure path", async () => {
       const transport = mockTransport({
         sendPrompt: vi.fn().mockRejectedValue(new Error("transport died")),
       });
@@ -488,9 +692,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
       orcSession.transport = transport;
 
       await expect(spin.spin({ type: "O", goal: "fail", userId: "aksika", platform: "telegram", source: "user", await: true })).rejects.toThrow("transport died");
-      // afterPrompt must have cleared orc_active even on failure
-      expect(orcLockUpdates[orcLockUpdates.length - 1]).toBeNull();
-      expect(activeOrcCardUpdates[activeOrcCardUpdates.length - 1]).toBeNull();
+      // Project authority is no longer held in module-global active-card state.
+      expect(activeOrcCardUpdates).toHaveLength(0);
     });
 
     it("produces decorated prompt in the exact pre-refactor executeOrc order", async () => {
@@ -615,12 +818,14 @@ describe("spin(spec) — unified session API (#1271)", () => {
       await expect((spin as any).tick()).resolves.toBeUndefined();
     });
 
-    it("markDone removes card from running set", async () => {
+    it("release removes card from running set", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const runningMap: Map<string, Set<number>> = (spin as any).running;
-      runningMap.set("W", new Set([99999]));
-      (spin as any).markDone("W", 99999);
-      expect(runningMap.get("W")?.has(99999)).toBe(false);
+      // #1540: occupancy lives in the execution supervisor behind the facade.
+      const sup = spin.executionSupervisor;
+      expect(sup.admit("W", 99999)).toBe(true);
+      expect(sup.runningCardIds()).toContain(99999);
+      sup.release("W", 99999);
+      expect(sup.runningCardIds()).not.toContain(99999);
     });
   });
 
@@ -634,10 +839,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const future = new Date(Date.now() + 86_400_000).toISOString();
       const mod = await import("./tasks/kanban-board.js");
       (mod as any)._kanbanSetCardField(id, "next_retry_at", future);
-      const runningMap: Map<string, Set<number>> = (spin as any).running;
-      runningMap.set("W", new Set());
       await (spin as any).tick();
-      expect(runningMap.get("W")?.size ?? 0).toBe(0);
+      expect(spin.getRunningCount("W")).toBe(0);
     });
 
     it("dispatches due card with stored type B, not W", async () => {
@@ -684,13 +887,63 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
   });
 
+  describe("#1540 — one active execution generation per session", () => {
+    it("a second executionControl bound to a busy session is rejected with a typed failure", async () => {
+      const runtime = makeRuntime({ completeResponse: "first run ok" });
+      spin.setRuntime(runtime as any);
+
+      // Allocate a reusable session (D is persistent/external).
+      const first = await spin.spin({ type: "D", prompt: "step1", await: true });
+      const sessionId = first.sessionId;
+
+      // A non-terminal control is already bound to that session (simulating
+      // an in-flight supervised generation that has not settled yet).
+      const busy = spin.executionSupervisor.open({ executionRef: "gen-1", type: "T" });
+      const session = spin.getSessionById(sessionId)!;
+      session.executionControl = busy;
+      expect(spin.executionSupervisor.bindSession("gen-1", sessionId)).toBe(true);
+
+      // A second generation for the same session must not silently overwrite.
+      const second = spin.executionSupervisor.open({ executionRef: "gen-2", type: "T" });
+      expect(spin.executionSupervisor.bindSession("gen-2", sessionId)).toBe(false);
+      await expect(
+        spin.spin({
+          type: "D",
+          sessionId,
+          prompt: "step2",
+          await: true,
+          executionControl: second,
+        }),
+      ).rejects.toMatchObject({ code: "execution_bind_rejected" });
+      await expect(
+        spin.spin({
+          type: "D",
+          sessionId,
+          prompt: "step3",
+          await: true,
+          executionControl: second,
+        }),
+      ).rejects.toThrow(/already has an active execution/);
+
+      // The session keeps the original control; the stale generation never ran.
+      expect(session.executionControl).toBe(busy);
+      expect(second.terminal).toBe(false);
+
+      // A terminal old handle frees the session for the next generation.
+      busy.markTerminal("completed");
+      expect(spin.executionSupervisor.bindSession("gen-2", sessionId)).toBe(true);
+    });
+  });
+
   describe("#1274 — session cap gate at dispatch/dispatchAwait layer", () => {
     const MAX = parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10);
 
+    // #1540: the registry hides the backing map; fill the cap through the
+    // facade so the gate observes the same live-session count as production.
     function fillSessions(s: Spin, count: number): void {
-      const sessions: Map<string, { status: string }> = (s as any).sessions;
       for (let i = 0; i < count; i++) {
-        sessions.set(`fake_X_${String(i).padStart(2, "0")}`, { status: "ready" });
+        const r = s.createSubSession("aksika", "telegram", "S");
+        if (typeof r === "string") throw new Error(`fillSessions: ${r}`);
       }
     }
 
@@ -712,6 +965,105 @@ describe("spin(spec) — unified session API (#1271)", () => {
         spin.dispatchAwait({ type: "W", goal: "overflow", source: "user" }),
       ).rejects.toThrow(/System busy/);
     });
+  });
+});
+
+// ── #1629 trusted tool-authorization provenance ─────────────────────────
+
+describe("spin() — #1629 tool authorization provenance", () => {
+  let spin1629: Spin;
+
+  beforeEach(() => {
+    spin1629 = new Spin();
+    resolveRootImpl = null;
+    setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
+  });
+
+  function captureRuntime() {
+    const contexts: Array<any> = [];
+    const runtime = makeRuntime({
+      sendPromptImpl: async (_key: string, _prompt: string, _image?: { mime: string; base64: string }, ctx?: any) => {
+        contexts.push(ctx);
+        return "ok";
+      },
+    });
+    spin1629.setRuntime(runtime as any);
+    return contexts;
+  }
+
+  it("task-sourced root card → unattended-task on the prompt context", async () => {
+    const contexts = captureRuntime();
+    const cardId = kanbanEnqueue("scheduled direct task", "task");
+    const r = await spin1629.spin({ type: "T", cardId, prompt: "run it", source: "task", await: true, userId: "aksika", platform: "background" });
+    expect(r.result).toBe("ok");
+    expect(contexts[0]?.authorizationMode).toBe("unattended-task");
+  });
+
+  it("agent-sourced Worker child under a task-sourced project root → unattended-task", async () => {
+    const contexts = captureRuntime();
+    resolveRootImpl = walkToRoot;
+    const rootId = kanbanEnqueue("daily-ai project", "task");
+    const workerId = kanbanEnqueue("lane 3", "agent");
+    _cards.get(workerId)!.parent_id = rootId;
+    const r = await spin1629.spin({ type: "W", cardId: workerId, prompt: "run lane", await: true, userId: "aksika", platform: "background" });
+    expect(r.result).toBe("ok");
+    expect(contexts[0]?.authorizationMode).toBe("unattended-task");
+  });
+
+  it("user/agent-sourced roots → interactive", async () => {
+    const contexts = captureRuntime();
+    const agentCard = kanbanEnqueue("manual agent work", "agent");
+    await spin1629.spin({ type: "T", cardId: agentCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    const userCard = kanbanEnqueue("manual user work", "user");
+    await spin1629.spin({ type: "T", cardId: userCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+    expect(contexts[1]?.authorizationMode).toBe("interactive");
+  });
+
+  it("no card (prompt-only spin) → interactive", async () => {
+    const contexts = captureRuntime();
+    await spin1629.spin({ type: "S", prompt: "one-shot", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+  });
+
+  it("missing root card → interactive (fails closed)", async () => {
+    const contexts = captureRuntime();
+    const cardId = kanbanEnqueue("ghost card", "task");
+    _cards.delete(cardId); // root unreadable
+    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+  });
+
+  it("unreadable/cyclic ancestry → interactive (fails closed)", async () => {
+    const contexts = captureRuntime();
+    resolveRootImpl = () => undefined;
+    const cardId = kanbanEnqueue("cyclic card", "task");
+    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+  });
+
+  it("provenance resolver failure → interactive (fails closed)", async () => {
+    const contexts = captureRuntime();
+    resolveRootImpl = () => { throw new Error("kanban read failed"); };
+    const cardId = kanbanEnqueue("unreadable card", "task");
+    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+  });
+
+  it("unknown root source → interactive", async () => {
+    const contexts = captureRuntime();
+    const cardId = kanbanEnqueue("peer work", "peer");
+    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("interactive");
+  });
+
+  it("a reused session recomputes the mode from the current card, never retaining the prior value", async () => {
+    const contexts = captureRuntime();
+    const first = await spin1629.spin({ type: "D", goal: "step one", source: "task", await: true, userId: "aksika", platform: "background" });
+    expect(contexts[0]?.authorizationMode).toBe("unattended-task");
+    const second = await spin1629.spin({ type: "D", sessionId: first.sessionId, goal: "step two", source: "user", await: true, userId: "aksika", platform: "background" });
+    expect(second.sessionId).toBe(first.sessionId); // same reused session
+    expect(contexts[1]?.authorizationMode).toBe("interactive");
   });
 });
 
@@ -753,8 +1105,9 @@ describe("spin() — #1338 output mirroring", () => {
 
     const delta = feed.events.find((e) => e.type === "delta") as Extract<SessionOutputEvent, { type: "delta" }>;
     expect(delta.text).toBe("Hi from model");
-    // thinking never entered the feed
-    expect(feed.events.some((e) => e.type === "delta" && (e as any).text === "secret thought")).toBe(false);
+    // #1619: thinking enters the feed typed (the TUI renders it natively).
+    const thinking = feed.events.find((e) => e.type === "delta" && (e as any).kind === "thinking") as Extract<SessionOutputEvent, { type: "delta" }> | undefined;
+    expect(thinking?.text).toBe("secret thought");
     // end is terminal-complete for the same stream
     const end = feed.events.find((e) => e.type === "end") as Extract<SessionOutputEvent, { type: "end" }>;
     expect(end.reason).toBe("complete");

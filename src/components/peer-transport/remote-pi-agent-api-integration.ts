@@ -28,6 +28,24 @@ import { logError, logTrace } from "../logger.js";
 
 const TAG = "remote-pi-api";
 
+/** Verify the authenticated sender against the durable #1357 origin card. */
+export async function authorizeRemotePiOwner(authenticatedPeer: string, event: RemotePiEventV1): Promise<boolean> {
+  try {
+    const { kanbanList } = await import("../tasks/kanban-board.js");
+    return kanbanList().some(card => {
+      if (card.source_peer !== authenticatedPeer || card.source !== "peer") return false;
+      try {
+        const notes = JSON.parse(card.notes ?? "{}") as Record<string, unknown>;
+        return notes.request_id === event.origin_request_id && notes.remote_run_id === event.run_id;
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+}
+
 export interface RemotePiApiDeps {
   /** Owner-side event producer */
   eventProducer?: RemotePiEventProducer;
@@ -39,6 +57,8 @@ export interface RemotePiApiDeps {
   originReducer?: RemotePiOriginReducer;
   /** Local peer name (for origin-side ownership checks) */
   localPeerName?: string;
+  /** Verify that the authenticated owner owns this delegated run. */
+  authorizeOwner?: (authenticatedPeer: string, event: RemotePiEventV1) => boolean | Promise<boolean>;
 }
 
 /**
@@ -50,9 +70,12 @@ export interface RemotePiApiDeps {
  */
 export async function handlePushLifecycleEvent(
   deps: RemotePiApiDeps,
-  _authenticatedPeer: string,
+  authenticatedPeer: string,
   event: RemotePiEventV1
-): Promise<{ success: boolean; error?: string }> {
+): Promise<
+  { success: true; runId: string; sequence: number; duplicate?: boolean } |
+  { success: false; error: string; gapDetected?: boolean }
+> {
   if (!deps.originReducer) {
     return { success: false, error: "Origin reducer not available" };
   }
@@ -62,10 +85,12 @@ export async function handlePushLifecycleEvent(
     validateEventV1(event);
 
     // Verify this event is addressed to us (the origin).
-    // The owner pushes events whose origin_peer === our local peer name.
-    // authenticatedPeer is the owner; they need NOT match origin_peer.
     if (deps.localPeerName && event.origin_peer !== deps.localPeerName) {
       return { success: false, error: "Event origin_peer does not match local peer" };
+    }
+
+    if (deps.authorizeOwner && !(await deps.authorizeOwner(authenticatedPeer, event))) {
+      return { success: false, error: "Authenticated peer does not own this run" };
     }
 
     // Check payload size
@@ -74,15 +99,34 @@ export async function handlePushLifecycleEvent(
       return { success: false, error: `Event exceeds ${REMOTE_PI_BOUNDS.MAX_EVENT_SIZE} bytes` };
     }
 
+    // Use latest_sequence (what we've committed) for gap detection,
+    // NOT acknowledged_sequence (what we've acked back to the owner).
+    // getCursor() returns acknowledged_sequence — use getProjection instead.
+    const projection = deps.originReducer.getProjection(event.run_id);
+    const latestSeq = projection?.latest_sequence ?? 0;
+
+    // Duplicate already committed — resend the cumulative ack so the
+    // owner can advance its outbox cursor even if the prior ack was lost.
+    if (event.sequence <= latestSeq) {
+      if (deps.originReducer.hasConflictingEvent(event)) {
+        return { success: false, error: "Conflicting event identity" };
+      }
+      logTrace(TAG, `Duplicate event ${event.event_id} for run ${event.run_id} (seq ${event.sequence} <= ${latestSeq}) — re-sending ack`);
+      return { success: true, runId: event.run_id, sequence: event.sequence, duplicate: true };
+    }
+
+    // Gap: event sequence > next expected
+    const gapDetected = event.sequence > latestSeq + 1;
+
     // Reduce into local projection
     const accepted = deps.originReducer.reduce(event);
     if (!accepted) {
       logTrace(TAG, `Rejected event ${event.event_id} for run ${event.run_id}`);
-      return { success: false, error: "Event rejected by reducer" };
+      return { success: false, error: "Event rejected by reducer", gapDetected };
     }
     logTrace(TAG, `Accepted event ${event.event_id} for run ${event.run_id}`);
 
-    return { success: true };
+    return { success: true, runId: event.run_id, sequence: event.sequence };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logError(TAG, `Error in handlePushLifecycleEvent: ${message}`);
@@ -164,7 +208,10 @@ export async function wsHandlePiLifecycleV1(
   deps: RemotePiApiDeps,
   authenticatedPeer: string,
   payload: unknown
-): Promise<{ success: boolean; error?: string }> {
+): Promise<
+  { success: true; runId: string; sequence: number; duplicate?: boolean } |
+  { success: false; error: string; gapDetected?: boolean }
+> {
   const event = payload as RemotePiEventV1;
   return handlePushLifecycleEvent(deps, authenticatedPeer, event);
 }

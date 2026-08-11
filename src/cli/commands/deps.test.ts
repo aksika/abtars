@@ -152,6 +152,88 @@ describe("resolveGroupActions", () => {
   });
 });
 
+// ── resolvePiUpdateAction (#1572) ─────────────────────────────────────────────
+
+describe("resolvePiUpdateAction (#1572)", () => {
+  const EXPECTED_SPEC = "@earendil-works/pi-coding-agent@~0.83.0";
+  const REMEDIATION = "reinstall with: abtars deps install pi";
+
+  it.each([
+    // [observed state, version, pinStatus, force, expected kind, expected reason]
+    ["absent", undefined, undefined, false, "install", "absent"],
+    ["absent", undefined, undefined, true, "install", "absent"],
+    ["below-minimum", "0.82.0", undefined, false, "install", "below-pin"],
+    ["below-minimum", "0.82.0", undefined, true, "install", "below-pin"],
+    ["compatible", "0.83.0", "at-pin", false, "install", "at-pin-refresh"],
+    ["compatible", "0.83.5", "at-pin", true, "install", "at-pin-refresh"],
+    ["compatible", "0.85.1", "above-pin", false, "refuse", null],
+    ["compatible", "0.85.1", "above-pin", true, "install", "forced"],
+    ["above-pin", "0.85.1", undefined, false, "refuse", null],
+    ["above-pin", "0.85.1", undefined, true, "install", "forced"],
+    ["incomplete", "0.83.0", undefined, false, "refuse", null],
+    ["incomplete", "0.83.0", undefined, true, "install", "forced"],
+    ["invalid", "0.83.0", undefined, false, "refuse", null],
+    ["invalid", "0.83.0", undefined, true, "install", "forced"],
+    ["unloadable", "0.83.0", undefined, false, "refuse", null],
+    ["unloadable", "0.83.0", undefined, true, "install", "forced"],
+  ] as const)(
+    "%s v=%s force=%s → %s%s",
+    async (state, version, pinStatus, force, kind, reason) => {
+      const { resolvePiUpdateAction } = await import("./deps.js");
+      const decision = resolvePiUpdateAction(
+        { state, version, pinStatus, remediation: REMEDIATION },
+        force,
+      );
+      expect(decision.kind).toBe(kind);
+      if (kind === "install") {
+        expect((decision as { reason: string }).reason).toBe(reason);
+        expect((decision as { npmSpec: string }).npmSpec).toBe(EXPECTED_SPEC);
+      }
+    },
+  );
+
+  it("never yields an npm spec without a version", async () => {
+    const { resolvePiUpdateAction } = await import("./deps.js");
+    for (const state of ["absent", "below-minimum", "compatible", "above-pin", "incomplete", "invalid", "unloadable"] as const) {
+      for (const force of [false, true]) {
+        const decision = resolvePiUpdateAction({ state, version: "0.83.0", pinStatus: "at-pin" }, force);
+        if (decision.kind === "install") {
+          expect(decision.npmSpec).toMatch(/@~?\d+\.\d+\.\d+$/);
+        }
+      }
+    }
+  });
+
+  it("above-pin without force never yields install", async () => {
+    const { resolvePiUpdateAction } = await import("./deps.js");
+    for (const state of ["above-pin", "compatible"] as const) {
+      const decision = resolvePiUpdateAction(
+        { state, version: "0.85.1", pinStatus: state === "compatible" ? "above-pin" : undefined },
+        false,
+      );
+      expect(decision.kind).not.toBe("install");
+    }
+  });
+
+  it("refuse messages for above-pin carry the downgrade command", async () => {
+    const { resolvePiUpdateAction } = await import("./deps.js");
+    const decision = resolvePiUpdateAction({ state: "above-pin", version: "0.85.1" }, false);
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind === "refuse") {
+      expect(decision.message).toContain(`npm i -g '${EXPECTED_SPEC}'`);
+    }
+  });
+
+  it("refuse messages for broken installs carry the remediation text", async () => {
+    const { resolvePiUpdateAction } = await import("./deps.js");
+    const decision = resolvePiUpdateAction({ state: "unloadable", version: "0.83.0", remediation: REMEDIATION }, false);
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind === "refuse") {
+      expect(decision.message).toContain(REMEDIATION);
+    }
+  });
+});
+
 // ── CLI integration ──────────────────────────────────────────────────────────
 
 describe("abtars deps", () => {

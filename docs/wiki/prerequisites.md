@@ -79,4 +79,38 @@ Install all optional npm deps with one command once the CLI is available:
 abtars deps install all
 ```
 
+## Do I need sudo? No.
+
+abtars and abmind install, update, and run entirely in user space.
+
+| Component | Location |
+|-----------|----------|
+| Node + npm packages | `~/.nvm/versions/node/...` (nvm) or `~/.npm-global/` |
+| abtars releases | `~/.abtars-releases/` |
+| abtars runtime | `~/.abtars/` |
+| abmind data | `~/.abmind/` |
+| Watchdog service | `~/Library/LaunchAgents/` (macOS) or `~/.config/systemd/user/` (Linux) |
+| Native deps | `~/.local/lib/node_modules/` |
+
+No system paths. No `/usr/local/`. No `/etc/`. No root.
+
+**One exception — systemd linger (Linux only):** for the bridge to survive a reboot as a user systemd service, you may need to enable linger once:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+That's a one-time system admin action. After that, you never need sudo again.
+
+**The optional system binaries above** (ollama, bwrap, lightpanda) are the only things that might ask for sudo — and only because their own upstream installers do (e.g. `apt install bubblewrap`). abtars itself never runs a system installer or `sudo` for you: `abtars deps install ollama` just prints the command to install it yourself.
+
+**If npm defaults to `/usr/local/` (macOS):** macOS ships with npm pointing at `/usr/local/`, which requires sudo for `npm install -g`. Fix with one of:
+
+- **Redirect npm globals to your home dir:**
+  ```bash
+  npm config set prefix ~/.npm-global
+  echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+  ```
+- **Use nvm (recommended):** nvm installs Node + npm under `~/.nvm/` — no sudo, multiple Node versions, no config needed. See [Node.js 22+](#node-js-22-required) above.
+
 Ready? Go to [Installation](./install.md).

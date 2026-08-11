@@ -1,36 +1,39 @@
 # pi-ai Providers
 
-Pi's provider engine (pi-ai) can serve as an optional L1 motor inside `DirectApiTransport`. When enabled, it replaces the hand-rolled provider adapters with Pi's maintained catalog of ~36 providers, including prompt caching, OAuth auth, and up-to-date model metadata.
+Pi's provider engine (pi-ai) is the L1 motor for API providers. When `activeRoute` is `"pi-ai"`, providers with `transport: "api"` run through Pi's maintained catalog (~36 providers), including prompt caching and up-to-date model metadata.
 
 ## Enabling pi-ai
 
-Set `useProviderLib: true` on a provider entry in `~/.abtars/config/transport.json`:
+The route is selected in `~/.abtars/config/transport.json`. Any provider with `transport: "api"` is served by the pi-ai engine on the `pi-ai` route:
 
 ```json
 {
+  "schemaVersion": 3,
+  "activeRoute": "pi-ai",
   "providers": {
     "openrouter": {
       "transport": "api",
       "endpoint": "https://openrouter.ai/api/v1",
-      "apiKeyEnv": "OPENROUTER_API_KEY",
-      "useProviderLib": true
+      "apiKeyEnv": "OPENROUTER_API_KEY"
     },
     "anthropic": {
       "transport": "api",
       "endpoint": "https://api.anthropic.com/v1",
       "apiKeyEnv": "ANTHROPIC_API_KEY",
-      "useProviderLib": true
+      "apiFormat": "anthropic"
     }
   }
 }
 ```
 
-The flag is **per-provider**, not global. You can mix L1 (Pi-powered) and L0 (hand-rolled) providers in the same config.
+The `apiKeyEnv` field references the key in `~/.abtars/secret/` by environment-variable name. Raw credential fields (`apiKey`, `token`, `secret`, ...) are rejected — credentials never live in `transport.json`.
 
-## What changes
+The `acp` route runs agent CLIs (kiro-cli, gemini) and is independent of pi-ai.
 
-| Feature | L0 (hand-rolled) | L1 (pi-ai) |
-|---------|------------------|-------------|
+## What pi-ai provides
+
+| Feature | Hand-rolled (L0) | pi-ai (L1) |
+|---------|------------------|------------|
 | Supported providers | ~3 (Anthropic, OpenAI, OpenRouter) | ~36 |
 | Prompt caching | No | Yes (reported in `/usage`) |
 | Model catalog | `models.json` | Pi's catalog (live at boot) |
@@ -44,11 +47,11 @@ Pi-ai surfaces `cacheRead` and `cacheWrite` fields. These are visible in `/usage
 
 ## Model Picker
 
-When pi-ai is on, the `/model` Telegram command uses Pi's catalog to populate the picker with cost data. The `/usage` command shows cache savings where applicable.
+The `/model` Telegram command uses Pi's catalog to populate the picker with cost data. The `/usage` command shows cache savings where applicable.
 
 ## Fallback and Emergency
 
-- L2 fallback/rotation stays abTARS's own — Pi classifies errors, abTARS decides which model to retry with
+- Fallback/rotation stays abTARS's own — Pi classifies errors, abTARS decides which model to retry with
 - `/emergency` (hailMary) always runs on the L0 reptile floor — never through pi-ai
 - ACP transport is untouched (Pi has no ACP path)
 

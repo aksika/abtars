@@ -93,12 +93,12 @@ export async function healthProbe(
   home: string,
   afterTimestamp: number,
   timeoutMs: number = 60_000,
-  opts?: { lockReader?: (path: string) => string },
+  opts?: { lockReader?: (path: string) => string; oldPid?: number },
 ): Promise<{ healthy: boolean; pid?: number; heartbeat?: number }> {
   const lockPath = join(home, 'bridge.lock');
   const deadline = Date.now() + timeoutMs;
   const readLock = opts?.lockReader ?? ((p: string) => readFileSync(p, 'utf-8'));
-  const oldPid = (() => { try { return JSON.parse(readLock(lockPath)).pid; } catch { return 0; } })();
+  const oldPid = opts?.oldPid ?? (() => { try { return JSON.parse(readLock(lockPath)).pid; } catch { return 0; } })();
   while (Date.now() < deadline) {
     try {
       const content = JSON.parse(readLock(lockPath));

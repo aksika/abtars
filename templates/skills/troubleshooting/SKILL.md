@@ -23,9 +23,6 @@ done
 
 ## Browser agent
 ```bash
-docker ps --filter name=abtars-browser --format "{{.ID}} {{.Status}}"
-docker logs abtars-browser --tail 30
-abtars-browser --action screenshot --session-id browse | jq -r '.screenshot' | base64 -d > /tmp/browser.png
 ```
 
 ## Memory DB
@@ -43,6 +40,6 @@ cat ~/.abtars/memory/pending_reminders.json 2>/dev/null
 
 ## Telegram connectivity
 ```bash
-TOKEN=$(grep TELEGRAM_BOT_TOKEN ~/.abtars/.env | cut -d= -f2)
+TOKEN=$(cat ~/.abtars/secret/TELEGRAM_BOT_TOKEN)
 curl -s "https://api.telegram.org/bot${TOKEN}/getMe" | jq .ok
 ```

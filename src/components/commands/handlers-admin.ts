@@ -61,28 +61,48 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
 }
 
 export async function handleSkills(text: string, ctx: CommandContext): Promise<boolean> {
-  // #1141: /skill run <name>, /skill stop, /skill list (runnable)
+  // #1432: /skill run <name>, /skill stop, /skill list route through the same
+  // SkillSessionManager and strict loader as scheduled skill launch.
   const args = text.replace(/^\/skills?\s*/, "").trim();
   if (args.startsWith("run ")) {
-    const skillName = args.slice(4).trim();
-    if (!skillName) { await ctx.reply("Usage: /skill run <name>"); return true; }
-    const { launchSkill } = await import("../skill-session.js");
-    const err = await launchSkill(skillName, ctx.userId, String(ctx.chatId));
-    await ctx.reply(err ?? `* Skill "${skillName}" started.`);
+    const rest = args.slice(4).trim();
+    const [skillName, ...messageParts] = rest.split(/\s+/);
+    if (!skillName) { await ctx.reply("Usage: /skill run <name> [message]"); return true; }
+    const { skillSessionManager } = await import("../skill-session.js");
+    const { loadSkill } = await import("../skill-loader.js");
+    const loaded = loadSkill(skillName, ctx.userId);
+    if (!loaded.ok) { await ctx.reply(`x ${loaded.error.message}`); return true; }
+    const target = { userId: ctx.userId, platform: ctx.platform, chatId: String(ctx.chatId) };
+    const result = await skillSessionManager.launch({
+      skill: skillName,
+      agent: loaded.skill.config.agent ?? "professor",
+      target,
+      message: messageParts.join(" ").trim() || "Start the session.",
+    });
+    if (result.ok) {
+      await ctx.reply(`* Skill "${skillName}" started.\n\n${result.response}`);
+    } else {
+      await ctx.reply(`x ${result.error.message}`);
+    }
     return true;
   }
   if (args === "stop") {
-    const { endSkillSession } = await import("../skill-session.js");
-    const ended = await endSkillSession(String(ctx.chatId));
-    await ctx.reply(ended ? "* Skill session ended." : "No active skill session.");
+    const { skillSessionManager } = await import("../skill-session.js");
+    const target = { userId: ctx.userId, platform: ctx.platform, chatId: String(ctx.chatId) };
+    const stopped = await skillSessionManager.stop(target, "explicit");
+    await ctx.reply(stopped ? "* Skill session ended." : "No active skill session.");
     return true;
   }
   if (args === "list") {
+    const { skillSessionManager } = await import("../skill-session.js");
+    const target = { userId: ctx.userId, platform: ctx.platform, chatId: String(ctx.chatId) };
+    const active = skillSessionManager.list(target);
     const { listRunnableSkills } = await import("../skill-session.js");
     const skills = listRunnableSkills();
-    if (skills.length === 0) { await ctx.reply("No runnable skills (no skill.json found)."); return true; }
+    if (skills.length === 0 && !active) { await ctx.reply("No runnable skills (no skill.json found)."); return true; }
     const lines = skills.map(s => `  ${s.interactive ? "~" : "*"} ${s.name}${s.description ? ` — ${s.description}` : ""}`);
-    await ctx.reply(`Runnable skills:\n${lines.join("\n")}\n\nUse: /skill run <name>`);
+    const activeLine = active ? `\nActive: ${active.skillName} (${active.agent})` : "";
+    await ctx.reply(`Runnable skills:\n${lines.join("\n")}${activeLine}\n\nUse: /skill run <name>`);
     return true;
   }
 
@@ -223,7 +243,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/models — Model, transport & agent status (legacy)",
     "/models change — Switch model/provider (any agent)",
     "/models quick <model> — Instant switch on same provider",
-    "/emergency — 🚨 Activate paid hailMary model",
+    "/emergency — Emergency execution unavailable until #1468 (global ACP hailMary config)",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/task run <id> — Manually fire a task",
@@ -238,8 +258,15 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/restart — Restart bridge",
     "/sleep — Sleep status / /sleep resume / /sleep now",
     "/whoami — Your user info & clearance",
-    "/effort (alias /thinking) — Reasoning effort (off/low/medium/high/xhigh) + show/hide thinking",
+    "/effort (alias /thinking) — Reasoning effort (off/low/medium/high/xhigh)",
     "/kanban — Kanban board",
+    "/tribe — Peer status (Orc + enrolled peers)",
+    "/pi run --workspace <alias> <goal> — Start a Pi coding run",
+    "/pi status <runId> — Pi run status",
+    "/pi steer <runId> <text> — Steer a Pi run",
+    "/pi compact <runId> [instructions] — Native Pi compaction of a coding run",
+    "/pi cancel <runId> — Cancel a Pi run",
+    "/pi resume <runId> — Resume a Pi run",
   ];
   if (ctx.platform === "telegram") {
     cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");
@@ -249,27 +276,66 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
   return true;
 }
 
-export async function handlePeers(_text: string, ctx: CommandContext): Promise<boolean> {
-  const { loadPeerConfig } = await import("../peer-config.js");
-  const config = loadPeerConfig();
-  const peerNames = Object.keys(config.peers);
-  if (peerNames.length === 0) {
-    await ctx.reply("No peers configured.");
-    return true;
+export async function handleTribe(_text: string, ctx: CommandContext): Promise<boolean> {
+  const lines: string[] = [];
+
+  // Orc (internal orchestrator)
+  try {
+    const { spin } = await import("../spin.js");
+    const sessions = spin.listAllSessions();
+    const orcSessions = sessions.filter(s => s.id?.includes("_O_"));
+    const oc = orcSessions.length > 0 ? orcSessions[0] : null;
+    if (oc) {
+      const since = oc.lastActiveAt ? formatRelTime(Date.now() - oc.lastActiveAt) : "?";
+      lines.push(`Orc: running (${since})`);
+    } else {
+      lines.push("Orc: idle");
+    }
+  } catch {
+    lines.push("Orc: unknown");
   }
-  const { getPeerWsBroker } = await import("../peer-transport/peer-ws-broker.js");
-  const broker = getPeerWsBroker();
-  const connected = broker.getConnectedPeers();
-  const lines = peerNames.map(n => {
-    const entry = config.peers[n];
-    const isConnected = connected.includes(n);
-    const icon = isConnected ? "🟢" : "🔴";
-    const host = entry?.host ?? "?";
-    const port = entry?.port ?? 0;
-    return `${icon} **${n}** — ${host}:${port}${isConnected ? "" : " (disconnected)"}`;
-  });
-  const alive = connected.length;
-  lines.push(`\n${peerNames.length} peer(s) (${alive} connected, ${peerNames.length - alive} disconnected)`);
+
+  // Enrolled external peers
+  const { getPeerTransport } = await import("../peer-transport/index.js");
+  const transport = getPeerTransport();
+  const statuses = transport.getPeerStatuses();
+
+  if (statuses.length === 0) {
+    lines.push("", "Peers: (none configured)");
+  } else {
+    lines.push("");
+    for (const p of statuses) {
+      const stateLabel = p.hasRoute
+        ? `connected (${p.routeDirection})`
+        : p.state === "waiting"
+          ? `waiting (${
+            p.nextRetryAt ? formatRelTime(p.nextRetryAt - Date.now()) : "?"
+          })`
+          : p.state === "connecting"
+            ? "connecting"
+            : "disconnected";
+      const age = p.connectedAt ? formatRelTime(Date.now() - p.connectedAt) : "-";
+      const activity = p.lastActivityAt ? formatRelTime(Date.now() - p.lastActivityAt) : "unknown";
+      const error = p.lastError
+        ? ` error: ${p.lastError.slice(0, 60)}${p.lastErrorAt ? ` (${formatRelTime(Date.now() - p.lastErrorAt)} ago)` : ""}`
+        : "";
+      lines.push(
+        `${p.name} -- ${p.endpoint} (${p.transport})`,
+        `  state: ${stateLabel} | connected: ${age} | activity: ${activity}${error}`,
+      );
+    }
+    lines.push("", `${statuses.length} peer(s) configured`);
+  }
+
   await ctx.reply(lines.join("\n"));
   return true;
+}
+
+function formatRelTime(ms: number): string {
+  if (ms < 0) return "now";
+  const abs = Math.abs(ms);
+  if (abs < 60_000) return `${Math.round(abs / 1000)}s`;
+  if (abs < 3_600_000) return `${Math.round(abs / 60_000)}m`;
+  if (abs < 86_400_000) return `${Math.round(abs / 3_600_000)}h`;
+  return `${Math.round(abs / 86_400_000)}d`;
 }

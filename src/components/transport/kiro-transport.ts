@@ -3,18 +3,35 @@
  * Both ACP and tmux transports implement this contract.
  */
 
+import type { PiDurableContextProvider } from "./pi-core-context.js";
+import type { ToolExecutionScope } from "../tasks/task-package.js";
+import type { DurableContextIntent } from "../spin-types.js";
+
 /**
  * Per-call request metadata threaded from the pipeline through to the
- * transport. #1329: `beforeMessageId` is the exclusive upper bound for
- * DB-backed context assembly; the transport appends the augmented
- * current turn on top of the bounded historical context exactly once.
+ * transport. #1529: `durableContextIntent` is the explicit discriminated
+ * durable-context intent computed in prompt construction. An omitted intent
+ * means the caller is outside the inbound durable pipeline and defaults to
+ * not-required — it never implies a failed durable cursor.
  *
  * `userId` replaces the previous positional 4th argument so call-site
  * readability and tool-execution delivery are preserved.
  */
 export interface PromptRequestContext {
   userId?: string;
-  beforeMessageId?: number;
+  /** #1552: trusted session type from Spin's allocated ManagedSession. Never
+   *  selectable by model arguments; transports may use it to scope tools. */
+  sessionType?: import("../spin-types.js").SessionType;
+  /** #1529: explicit durable-context intent for Pi transport enforcement. */
+  durableContextIntent?: DurableContextIntent;
+  /** #1445: execution ID for Pi-core host correlation. */
+  executionId?: string;
+  /** #1506: caller-owned absolute execution deadline. */
+  deadlineAt?: number;
+  /** #1611: maximum provider silence for this call. When omitted, transports
+   * retain their normal default. Dreamy supplies its remaining provider window
+   * so a long logical step is not clipped by the unrelated 180s default. */
+  providerInactivityTimeoutMs?: number;
   /**
    * #1338: call-local observer for live TUI output mirroring. Set by Spin per
    * model call/round; transports invoke it alongside existing transport-wide
@@ -28,6 +45,16 @@ export interface PromptRequestContext {
   };
   /** #1444: execution telemetry scope for provider-call correlation. */
   executionTelemetry?: import("../execution-telemetry.js").ExecutionTelemetryScope;
+  /** #1502 Task 10: task-local cwd/env; never mutate process.env. */
+  executionScope?: ToolExecutionScope;
+  /** #1527: durable context provider for Pi-core's exclusive before-message projection. */
+  contextProvider?: PiDurableContextProvider;
+  /** #1480: Orc invocation context for durable project ownership fencing. */
+  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  /** #1629: trusted authorization mode derived by Spin from durable Kanban
+   *  provenance. Optional so callers outside Spin fail closed at the
+   *  ActionGate default; production Spin executions always set it. */
+  authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
 }
 
 export interface RuntimeUsageSnapshot {
@@ -35,6 +62,21 @@ export interface RuntimeUsageSnapshot {
   output: number;
   cacheRead?: number;
   cacheWrite?: number;
+}
+
+/** #1619: session-scoped reasoning effort vocabulary (abtars subset of Pi's). */
+export type ReasoningEffort = "off" | "low" | "medium" | "high" | "xhigh";
+
+/** #1619: typed stream delta emitted by transports to shared consumers. */
+export interface OutputDelta {
+  kind: "text" | "thinking";
+  text: string;
+}
+
+/** #1619: requested vs Pi-clamped effective reasoning level. */
+export interface ReasoningEffortState {
+  requested: ReasoningEffort;
+  effective: ReasoningEffort;
 }
 
 export interface RuntimeStatusSnapshot {
@@ -45,6 +87,8 @@ export interface RuntimeStatusSnapshot {
   contextWindow?: number;
   autoCompaction?: boolean;
   reasoning?: "off" | "low" | "medium" | "high" | "xhigh" | "default";
+  /** #1619: requested level when Pi clamped it to a different effective value. */
+  reasoningRequested?: ReasoningEffort;
   lastTurnUsage?: RuntimeUsageSnapshot;
 }
 
@@ -56,9 +100,9 @@ export interface IKiroTransport {
    * Send a prompt to Kiro and return the complete response text.
    * For ACP: sends session/prompt and collects streaming chunks.
    * For tmux: sends via send-keys and polls capture-pane for output.
-   * For DirectApi: rebuilds context from DB (bounded by
-   * `context.beforeMessageId` when set) and appends the current
-   * augmented turn on top exactly once (#1329).
+   * For Pi-core: rebuilds context from abmind (bounded by the durable
+   * intent's before-message cursor when durable) and appends the current
+   * augmented turn on top exactly once (#1529).
    */
   sendPrompt(
     sessionKey: string,
@@ -72,6 +116,17 @@ export interface IKiroTransport {
 
   /** Send Ctrl+C interrupt to the running Kiro CLI process. */
   sendInterrupt(reason?: string): Promise<void>;
+
+  /**
+   * Queue an instruction on the active Pi execution, when supported. #1531:
+   * per-lease acknowledgement — resolves only when the supplied lease reaches
+   * a terminal backend acknowledgement, never the execution-wide latch, and
+   * never returns response text.
+   */
+  steer?(content: string, lease: import("../spin-types.js").InstructionLease): Promise<void>;
+
+  /** Queue a follow-up on the active Pi execution, when supported. Same per-lease acknowledgement contract. */
+  followUp?(content: string, lease: import("../spin-types.js").InstructionLease): Promise<void>;
 
   /** Clean up resources (kill processes, etc.) */
   destroy(): void;
@@ -101,13 +156,26 @@ export interface IKiroTransport {
   onToolCallStart?: (toolName: string) => void;
 
   /** Optional callback fired when pre-tool text should be delivered before tool execution. */
-  onSegmentBreak?: (text: string) => void;
+  onSegmentBreak?: (text: string) => void | Promise<void>;
+
+  /** #1619: typed live output deltas (text + thinking) for shared consumers. */
+  onOutputDelta?: (event: OutputDelta) => void;
+
+  /**
+   * #1619: change the attached session's reasoning effort. Resolves against
+   * the transport's model capability/clamping semantics and returns the
+   * requested/effective pair. Optional: transports without runtime effort
+   * support omit it and commands must report unsupported, never pretend.
+   */
+  setReasoningEffort?(level: ReasoningEffort): ReasoningEffortState;
+
+  /** #1619: invalidate measured context usage (reset/compaction). */
+  invalidateContextUsage?(): void;
 
   /** Transport-specific slash commands (e.g. /usage for kiro, /stats for gemini). */
   readonly transportCommands: string[];
 
-  /** Get the active ConversationSession (DirectApi only). */
-  getActiveSession?(): import("./conversation-session.js").ConversationSession | null;
+  /** Get runtime status snapshot. Implementations return route/provider/model info. */
 
   /** Execute a transport-specific command. Returns output text. */
   executeCommand?(cmd: string): Promise<string>;
@@ -118,10 +186,10 @@ export interface IKiroTransport {
   /** Restart the CLI session (tmux-only). No-op if not supported. */
   restartSession?(workingDir: string, model?: string): Promise<void>;
 
-  /** Hot-swap provider+model. API transport only. Throws if prompt in flight. */
+  /** Hot-swap provider+model (API transports only). */
   switchProvider?(opts: { provider?: string; endpoint: string; apiKey?: string; model: string; maxContext: number; policy: unknown }): void;
 
-  /** Temporarily override model API timeout for next call(s). null resets to default. */
+  /** Temporarily override model API timeout for next call(s). null resets to config default. */
   setTimeoutOverride?(ms: number | null): void;
 
   /** Temporarily override max tool rounds (circuit breaker) for next call(s). null resets to config default. */

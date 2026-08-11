@@ -18,7 +18,7 @@ export interface ServiceInstance {
 }
 
 export interface ServiceFactory {
-  /** Whether required config (tokens, etc.) is present in .env */
+  /** Whether required configuration (including secret-store credentials) is present. */
   configured: boolean;
   /** Create and wire the service. Called on start(). */
   create(): Promise<ServiceInstance>;
@@ -75,7 +75,7 @@ export class ServiceRegistry {
 
     const factory = this.factories.get(name);
     if (!factory) return { ok: false, error: `Unknown service: ${name}` };
-    if (!factory.configured) return { ok: false, error: `${name} not configured (check .env)` };
+    if (!factory.configured) return { ok: false, error: `${name} not configured (check ~/.abtars/secret/ or config/.env)` };
     if (this.instances.has(name)) return { ok: false, error: `${name} already running` };
 
     // Foreground retry loop (unchanged semantics)

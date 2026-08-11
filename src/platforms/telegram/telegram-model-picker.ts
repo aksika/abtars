@@ -39,26 +39,23 @@ export function isModelPickerCallback(data: string): boolean {
  */
 const PICKER_MAX = 50;
 
-async function buildModelEntries(providerName: string, providerConfig: { transport?: string; useProviderLib?: boolean } | undefined): Promise<Array<{ id: string; label: string }>> {
+async function buildModelEntries(providerName: string, providerConfig: { transport?: string } | undefined): Promise<Array<{ id: string; label: string }>> {
   const { getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
 
   // Tier 1: pi-catalog (small list → use directly)
   let pi: Array<{ id: string; cost: { input: number; output: number } }> | null = null;
-  if (providerConfig?.useProviderLib) {
-    const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
-    pi = modelsForProviderSync(providerName);
-  }
+  const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
+  pi = modelsForProviderSync(providerName);
   if (pi && pi.length > 0 && pi.length <= PICKER_MAX) {
     return pi.map(m => ({ id: m.id, label: `${m.id} (${formatCost(m.cost)})` }));
   }
 
   // Tier 2: curated models.json, filtered against the warmed pi-ai catalog when available
-  // to prevent stale IDs and 404s.
   let curated = getModelsForProvider(providerName);
   if (providerConfig?.transport === "api") {
     curated = curated.filter(m => !m.entry.status || m.entry.status === "alive");
   }
-  if (pi && pi.length > 0 && providerConfig?.useProviderLib) {
+  if (pi && pi.length > 0) {
     const piIds = new Set(pi.map(m => m.id));
     curated = curated.filter(m => piIds.has(m.id));
   }
@@ -122,13 +119,14 @@ export async function handleModelPickerCallback(
     }
   } else if (data.startsWith("mslot:")) {
     const agent = data.slice(6);
-    const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
+    const { loadTransport, resolveAgent, routeAssignments, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
     const tc = loadTransport();
     if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
 
     if (agent === "main") {
       const profResolved = resolveAgent("main", tc);
-      const fallbacks = tc.fallbacks ?? [];
+      const ra = routeAssignments(tc);
+      const fallbacks = ra?.fallbacks ?? [];
       const slots: Array<{ label: string; key: string }> = [
         { label: `★ Main: ${profResolved?.model ?? "?"}`, key: `mpos:main::main` },
       ];
@@ -174,7 +172,7 @@ export async function handleModelPickerCallback(
 
   } else if (data.startsWith("mpos:")) {
     const [, , , slot] = data.split(":");
-    const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
+    const { loadTransport, resolveAgent, routeAssignments, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
     const tc = loadTransport();
     if (!tc) { await api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
     let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
@@ -190,7 +188,8 @@ export async function handleModelPickerCallback(
     if (slot === "main") currentProvider = mainResolved?.providerName;
     else if (isFallbackSlot) {
       const fbIdx = parseInt(slot!.replace("fallback", ""), 10) - 1;
-      currentProvider = tc.fallbacks?.[fbIdx]?.provider;
+      const ra = routeAssignments(tc);
+      currentProvider = ra?.fallbacks?.[fbIdx]?.provider;
     }
     const slotLabel = slot === "main" ? "Main" : isFallbackSlot ? slot!.replace("fallback", "Fb") : slot!;
     const buttons = providers.map(p => {
@@ -235,50 +234,57 @@ export async function handleModelPickerCallback(
 
     const providerConfig = tc.providers[providerName];
     if (!providerConfig) { await api.sendMessage(chatId, `❌ Provider ${providerName} not found`); return; }
-    // #1311: pi-sourced models aren't in models.json — trust the picker cache for pi providers.
-    if (!providerConfig.useProviderLib) {
-      const validModels = getModelsForProvider(providerName);
-      if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
-    }
+    const validModels = getModelsForProvider(providerName);
+    if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
     const validation = validateProviderReady(providerName, providerConfig, getEnv());
     if (!validation.ok) { await api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
 
+    const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
+    const activeRa = candidate.routes[candidate.activeRoute];
     const fbMatch = slot.match(/^fallback(\d+)$/);
     if (fbMatch) {
       const fbIndex = parseInt(fbMatch[1]!, 10) - 1;
-      if (!tc.fallbacks) tc.fallbacks = [];
-      tc.fallbacks[fbIndex] = { model, provider: providerName };
+      if (activeRa) {
+        if (!activeRa.fallbacks) activeRa.fallbacks = [];
+        activeRa.fallbacks[fbIndex] = { model, provider: providerName };
+      }
       const { cleanDemotedModels } = await import("../../components/transport-config.js");
-      cleanDemotedModels(tc, model);
-      writeTransportConfig(tc, `fallback ${fbIndex + 1} → ${model} (${providerName})`);
-      try { await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "confirm fallback", err); }
+      cleanDemotedModels(candidate, model);
+      const wr = writeTransportConfig(candidate, `fallback ${fbIndex + 1} → ${model} (${providerName})`);
+      if (wr.ok) {
+        try { await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "confirm fallback", err); }
+      } else {
+        try { await api.sendMessage(chatId, `❌ Fallback not updated: ${wr.issues.map(i => i.reason).join("; ")}`); } catch (err) { logAndSwallow(TAG, "confirm fallback fail", err); }
+        return;
+      }
     } else {
-      const oldProvider = tc.agents[slot]?.provider;
-      tc.agents[slot] = { ...tc.agents[slot]!, model, provider: providerName };
-      const { cleanDemotedModels } = await import("../../components/transport-config.js");
-      cleanDemotedModels(tc, model);
-      writeTransportConfig(tc, `${slot} → ${model} (${providerName})`);
-
+      const oldProvider = activeRa?.agents[slot]?.provider;
       const providerChanged = oldProvider !== providerName;
       const isMain = slot === "main";
+      if (activeRa) {
+        activeRa.agents[slot] = { ...activeRa.agents[slot]!, model, provider: providerName };
+      }
+      const { cleanDemotedModels } = await import("../../components/transport-config.js");
+      cleanDemotedModels(candidate, model);
+      const wr = writeTransportConfig(candidate, `${slot} → ${model} (${providerName})`);
+      if (!wr.ok) {
+        try { await api.sendMessage(chatId, `❌ ${slot} not updated: ${wr.issues.map(i => i.reason).join("; ")}`); } catch (err) { logAndSwallow(TAG, "confirm model fail", err); }
+        return;
+      }
 
+      // Resolve transport types for cascade detection using original tc
       let oldType: string | undefined;
       let newType: string | undefined;
       let newResolved: ReturnType<typeof resolveAgent> | undefined;
-      if (isMain && providerChanged) {
-        const oldResolved = resolveAgent("_old", { ...tc, agents: { ...tc.agents, _old: { model: "", provider: oldProvider! } } });
-        newResolved = resolveAgent("_new", { ...tc, agents: { ...tc.agents, _new: { model, provider: providerName } } });
+      const route = tc.activeRoute;
+      const tcRa = tc.routes[route];
+      if (isMain && providerChanged && tcRa) {
+        const tcWithOld = { ...tc, routes: { ...tc.routes, [route]: { agents: { ...tcRa.agents, _old: { model: "", provider: oldProvider! } }, fallbacks: tcRa.fallbacks } } };
+        const tcWithNew = { ...tc, routes: { ...tc.routes, [route]: { agents: { ...tcRa.agents, _new: { model, provider: providerName } }, fallbacks: tcRa.fallbacks } } };
+        const oldResolved = resolveAgent("_old", tcWithOld);
+        newResolved = resolveAgent("_new", tcWithNew);
         oldType = oldResolved?.provider.transport ?? "api";
         newType = newResolved?.provider.transport ?? "api";
-        if (oldType !== newType) {
-          const resetAgents: string[] = [];
-          for (const [a, assignment] of Object.entries(tc.agents)) {
-            if (a === "main") continue;
-            const ap = tc.providers[assignment.provider];
-            if (ap && ap.transport !== newType) { tc.agents[a] = { model, provider: providerName }; resetAgents.push(a); }
-          }
-          if (resetAgents.length > 0) writeTransportConfig(tc, `cascade: ${resetAgents.join(", ")} → ${providerName}`);
-        }
       }
 
       if (isMain && !providerChanged && "setModel" in deps.transport) {
@@ -292,8 +298,11 @@ export async function handleModelPickerCallback(
           const apiKey = getEnv().getApiKey(newResolved?.provider.apiKeyEnv ?? "API_KEY");
           // #1418: build candidates through the shared builder so each carries its
           // complete identity tuple (provider/endpoint/apiKey/maxContext).
-          const fallbackCandidates = (tc.fallbacks ?? []).map(fb => {
-            const fbRes = resolveAgent("_fb", { ...tc, agents: { ...tc.agents, _fb: { model: fb.model, provider: fb.provider } } });
+          const route = tc.activeRoute;
+          const tcRa = tc.routes[route];
+          const fallbackCandidates = (tcRa?.fallbacks ?? []).map(fb => {
+            const tcWithFb = tcRa ? { ...tc, routes: { ...tc.routes, [route]: { agents: { ...tcRa.agents, _fb: { model: fb.model, provider: fb.provider } }, fallbacks: tcRa.fallbacks } } } : tc;
+            const fbRes = resolveAgent("_fb", tcWithFb);
             return {
               model: fb.model,
               provider: fb.provider,

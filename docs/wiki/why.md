@@ -50,7 +50,6 @@ One agent, multiple interfaces — same memory, same personality:
 
 - Telegram (full-featured: voice, reactions, inline keyboards)
 - Discord (slash commands, threads, streaming)
-- IRC (lightweight, text-only)
 - Peer-to-peer (agent-to-agent communication over Tailscale)
 
 Switch platforms mid-conversation. The agent remembers everything regardless of where you talk to it.

@@ -2,7 +2,7 @@
  * Integration: boot phase — memory initialization + schema correctness.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { createHarness, type IntegrationHarness } from "./harness.js";
+import { createHarness, memoryDb, type IntegrationHarness } from "./harness.js";
 
 describe("boot-memory integration", () => {
   let h: IntegrationHarness;
@@ -11,7 +11,7 @@ describe("boot-memory integration", () => {
 
   it("phaseMemory creates DB with full schema + functional store/recall", async () => {
     h = await createHarness();
-    const db = h.memory.getDatabase()!;
+    const db = memoryDb(h.memory);
 
     // Verify critical columns exist
     const cols = db.prepare("PRAGMA table_info(extracted_memories)").all() as Array<{ name: string }>;

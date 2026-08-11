@@ -6,7 +6,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
-import { abtarsHome } from "../../paths.js";
 
 
 function isWSL(): boolean {

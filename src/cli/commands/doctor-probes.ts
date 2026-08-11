@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, lstatSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+
+
 import { abtarsHome, abtarsRoot, abmindHome, getDeployedVersion } from "../../paths.js";
 import { resolveAbmindPackageDir } from "../../utils/abmind-lazy.js";
 import { pathToFileURL } from "node:url";
@@ -14,8 +15,6 @@ import { truncate } from "./doctor-types.js";
 
 const home = abtarsHome();
 const root = abtarsRoot();
-
-const SHARED_NM = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
 
 
 async function timedProbe(name: string, evidence: import("./doctor-types.js").EvidenceLevel, fn: () => Promise<ProbeResult>): Promise<ProbeResult> {
@@ -84,8 +83,6 @@ async function probePlatforms(): Promise<ProbeResult> {
     } catch { results.push({ name: "discord", status: "warning", detail: "unreachable" }); }
   }
 
-  const ircServer = readSecretEnv("IRC_SERVER", env);
-  if (ircServer) results.push({ name: "irc", status: "ok", detail: "server configured" });
 
   if (results.length === 0) return { name: "platforms", status: "skipped", evidence: "configuration", detail: "no platform configured", ms: 0 };
 
@@ -94,19 +91,22 @@ async function probePlatforms(): Promise<ProbeResult> {
   return { name: "platforms", status, evidence: "reachable", detail: results.map(r => `${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`).join(", "), ms: 0 };
 }
 
-function readSecretEnv(key: string, env: Map<string, string>): string | undefined {
-  return env.get(key);
-}
-
 async function probeDashboard(): Promise<ProbeResult> {
   const env = readEnv();
-  if (env.get("ENABLE_DASHBOARD") !== "true") return { name: "dashboard", status: "skipped", evidence: "configuration", detail: "not enabled", ms: 0 };
-  const port = env.get("DASHBOARD_PORT") || env.get("WEB_PORT") || "3000";
+  const enabled = process.env["ENABLE_DASHBOARD"] ?? env.get("ENABLE_DASHBOARD");
+  if (enabled !== "true") return { name: "dashboard", status: "skipped", evidence: "configuration", detail: "not enabled", ms: 0 };
+  // Match the dashboard server's own resolution (dashboard-config via
+  // process.env after dotenv) — the port is configurable (WEB_PORT), never
+  // assume 3000, and operator-set env (launchd/shell) wins over .env.
+  const { loadDashboardConfig } = await import("../../components/dashboard/dashboard-config.js");
+  const cfg = loadDashboardConfig({ ...Object.fromEntries(env), ...process.env });
+  const port = cfg.webPort;
+  const host = cfg.webHost || "127.0.0.1";
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) });
-    return { name: "dashboard", status: res.ok ? "ok" : "failed", evidence: "reachable", detail: `:${port}`, ms: 0 };
+    const res = await fetch(`http://${host}:${port}/`, { signal: AbortSignal.timeout(10000) });
+    return { name: "dashboard", status: res.ok ? "ok" : "failed", evidence: "reachable", detail: `${host}:${port}`, ms: 0 };
   } catch {
-    return { name: "dashboard", status: "failed", evidence: "reachable", detail: `:${port} unreachable`, ms: 0 };
+    return { name: "dashboard", status: "failed", evidence: "reachable", detail: `${host}:${port} unreachable`, ms: 0 };
   }
 }
 
@@ -118,11 +118,22 @@ async function probeSecurity(): Promise<ProbeResult> {
 
   let permIssues = 0;
   const secretDir = join(home, "secret");
-  if (existsSync(secretDir)) {
-    for (const f of readdirSync(secretDir)) {
-      const st = statSync(join(secretDir, f));
-      if (st.isFile() && (st.mode & 0o777) !== 0o600) permIssues++;
+  try {
+    const dirStat = lstatSync(secretDir);
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+      permIssues++;
+    } else {
+      for (const f of readdirSync(secretDir)) {
+        const st = lstatSync(join(secretDir, f));
+        if (st.isSymbolicLink() || !st.isFile() ||
+            (typeof process.getuid === "function" && st.uid !== process.getuid()) ||
+            (st.mode & 0o777) !== 0o600) permIssues++;
+      }
     }
+  } catch (err) {
+    // A missing secret directory is a valid pre-onboarding state; any other
+    // lstat/readdir failure is an unsafe/inaccessible store.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") permIssues++;
   }
 
   const parts = [mode];
@@ -162,6 +173,9 @@ async function probeTui(): Promise<ProbeResult> {
     const { connect } = await import("node:net");
     await new Promise<void>((resolve, reject) => {
       const s = connect(sockPath, () => { s.end(); resolve(); });
+      // Without setTimeout the handler below never fires and a hung socket
+      // blocks doctor forever.
+      s.setTimeout(2000, () => { s.destroy(); reject(new Error("connect timeout")); });
       s.on("error", (e) => { s.destroy(); reject(e); });
       s.on("timeout", () => { s.destroy(); reject(new Error("connect timeout")); });
     });
@@ -188,7 +202,16 @@ async function probeTransport(): Promise<ProbeResult> {
   const tPath = join(home, "config", "transport.json");
   const t = readJson(tPath) as Record<string, unknown> | null;
   if (!t) return { name: "transport", status: "failed", evidence: "filesystem", detail: "transport.json missing", ms: 0 };
-  const agents = Object.keys((t.agents as Record<string, unknown>) ?? {});
+  // v3: agents live in the active route block
+  const activeRoute = t.activeRoute as string | undefined;
+  const routes = t.routes as Record<string, unknown> | undefined;
+  let agents: string[] = [];
+  if (activeRoute && routes) {
+    const routeBlock = routes[activeRoute] as Record<string, unknown> | undefined;
+    if (routeBlock) {
+      agents = Object.keys((routeBlock.agents as Record<string, unknown>) ?? {});
+    }
+  }
   if (agents.length === 0) return { name: "transport", status: "failed", evidence: "configuration", detail: "no agents configured", ms: 0 };
   return { name: "transport", status: "ok", evidence: "configuration", detail: `${agents.length} agent(s): ${agents.join(", ")}`, ms: 0 };
 }
@@ -202,16 +225,13 @@ async function probeSpin(): Promise<ProbeResult> {
 async function probeKanban(): Promise<ProbeResult> {
   const dbPath = join(home, "kanban", "kanban.db");
   if (!existsSync(dbPath)) return { name: "kanban", status: "skipped", evidence: "filesystem", detail: "no kanban.db", ms: 0 };
-  if (!existsSync(SHARED_NM)) return { name: "kanban", status: "skipped", evidence: "filesystem", detail: "better-sqlite3 not installed", remediation: "Run abtars deps install", ms: 0 };
-
   let Db: new (path: string, opts: { readonly: boolean }) => {
     prepare: (sql: string) => { get: () => Record<string, unknown>; all: (...params: unknown[]) => Array<Record<string, unknown>> };
     close: () => void;
   };
   try {
-    const { createRequire } = await import("node:module");
-    const _require = createRequire(import.meta.url);
-    Db = _require(SHARED_NM);
+    const { resolveNativeDep: rnd } = await import("../../utils/lazy-require.js");
+    Db = rnd("better-sqlite3");
   } catch {
     return { name: "kanban", status: "skipped", evidence: "filesystem", detail: "better-sqlite3 not loadable", ms: 0 };
   }
@@ -299,6 +319,11 @@ async function probeSharedDeps(): Promise<ProbeResult> {
 async function probePi(): Promise<ProbeResult> {
   const result = getPiVersion();
   if (!result.found) {
+    // #1476: a timeout means Pi is present but slow to start (boot load) —
+    // transient, warn instead of failing. Hard errors still fail.
+    if (result.error?.includes("timed out")) {
+      return { name: "pi", status: "warning", evidence: "executable", detail: `Pi slow to start (${result.error})`, ms: 0 };
+    }
     if (result.error) return { name: "pi", status: "failed", evidence: "executable", detail: `Pi unavailable (${result.error})`, remediation: "Install Pi or check PATH", ms: 0 };
     return { name: "pi", status: "warning", evidence: "executable", detail: "Pi not installed (optional)", ms: 0 };
   }
@@ -316,7 +341,7 @@ async function probePeerApi(): Promise<ProbeResult> {
     await new Promise<void>((resolve, reject) => {
       const sock = createConnection({ port, host: "127.0.0.1" }, () => { sock.destroy(); resolve(); });
       sock.on("error", reject);
-      sock.setTimeout(2000, () => { sock.destroy(); reject(new Error("timeout")); });
+      sock.setTimeout(5000, () => { sock.destroy(); reject(new Error("timeout")); });
     });
     return { name: "peer-api", status: "ok", evidence: "reachable", detail: `:${port} listening`, ms: 0 };
   } catch (err) {

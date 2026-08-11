@@ -33,6 +33,38 @@ describe("encodeFrame", () => {
     const cancelled = decoder.push(Buffer.from(encodeFrame({ t: "chunk-end", id: "s2", reason: "cancelled" })));
     expect(cancelled).toEqual([{ t: "chunk-end", id: "s2", reason: "cancelled" }]);
   });
+
+  it("round-trips #1612 correlation frames (stream-start, chunk, tool-start)", () => {
+    const decoder = createFrameDecoder<TuiServerFrame>();
+    const start = decoder.push(Buffer.from(encodeFrame({ t: "stream-start", id: "st1", executionId: "e1" })));
+    expect(start).toEqual([{ t: "stream-start", id: "st1", executionId: "e1" }]);
+    const chunk = decoder.push(Buffer.from(encodeFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "hi" })));
+    expect(chunk).toEqual([{ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "hi" }]);
+    const tool = decoder.push(Buffer.from(encodeFrame({ t: "tool-start", id: "st1", executionId: "e1", name: "read" })));
+    expect(tool).toEqual([{ t: "tool-start", id: "st1", executionId: "e1", name: "read" }]);
+    const end = decoder.push(Buffer.from(encodeFrame({ t: "chunk-end", id: "st1", executionId: "e1", reason: "complete" })));
+    expect(end).toEqual([{ t: "chunk-end", id: "st1", executionId: "e1", reason: "complete" }]);
+  });
+
+  it("#1619: round-trips typed thinking/text chunk kinds through the wire", () => {
+    const decoder = createFrameDecoder<TuiServerFrame>();
+    const first = decoder.push(Buffer.from(encodeFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "thinking", delta: "ponder" })));
+    expect(first).toEqual([{ t: "chunk", id: "st1", executionId: "e1", kind: "thinking", delta: "ponder" }]);
+    const second = decoder.push(Buffer.from(encodeFrame({ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "answer" })));
+    expect(second).toEqual([{ t: "chunk", id: "st1", executionId: "e1", kind: "text", delta: "answer" }]);
+  });
+
+  it("round-trips an uncorrelated chunk (optional executionId absent)", () => {
+    const decoder = createFrameDecoder<TuiServerFrame>();
+    const out = decoder.push(Buffer.from(encodeFrame({ t: "chunk", id: "st1", kind: "text", delta: "x" })));
+    expect(out).toEqual([{ t: "chunk", id: "st1", kind: "text", delta: "x" }]);
+  });
+
+  it("round-trips a whole message with a delivery execution ID", () => {
+    const decoder = createFrameDecoder<TuiServerFrame>();
+    const out = decoder.push(Buffer.from(encodeFrame({ t: "message", role: "assistant", markdown: "final", executionId: "e1" })));
+    expect(out).toEqual([{ t: "message", role: "assistant", markdown: "final", executionId: "e1" }]);
+  });
 });
 
 describe("createFrameDecoder", () => {
@@ -359,6 +391,8 @@ describe("isServerFrame / isClientFrame", () => {
     expect(isServerFrame({ t: "ready", sessionLabel: "M", sessionId: "x" })).toBe(true);
     expect(isServerFrame({ t: "message", role: "assistant", markdown: "" })).toBe(true);
     expect(isServerFrame({ t: "typing" })).toBe(true);
+    expect(isServerFrame({ t: "stream-start", id: "s1", executionId: "e1" })).toBe(true);
+    expect(isServerFrame({ t: "tool-start", id: "s1", executionId: "e1", name: "read" })).toBe(true);
     expect(isServerFrame({ t: "input", text: "x" })).toBe(false);
     expect(isServerFrame({ t: "attach", mode: { kind: "resume" }, cols: 1, rows: 1 })).toBe(false);
     expect(isServerFrame({})).toBe(false);

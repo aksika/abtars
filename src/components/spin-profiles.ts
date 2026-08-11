@@ -27,6 +27,9 @@ export interface SessionProfile {
   terminateAfter: "call" | "response" | "external";
   /** Ordered prompt transforms (decorator at index N prepends; last in list = outermost). */
   decorators: readonly PromptDecorator[];
+  /** #1432: Memory behavior for this session type. "skill-isolated" skips
+   *  session assembly, active recall, and automatic general-memory writes. */
+  memoryMode?: "standard" | "skill-isolated";
   /** Side-effect hook fired before the prompt is sent. */
   beforePrompt?: (session: ManagedSession, cardId?: number) => Promise<void> | void;
   /** Side-effect hook fired after the prompt resolves (success OR failure). */
@@ -84,22 +87,17 @@ export const SESSION_PROFILES: Record<SessionType, SessionProfile> = {
   W: { agent: "browsie",   transportMode: "oneshot",    resolution: "transient", terminateAfter: "response", decorators: [soulBundle, channelMessages] },
   H: { agent: "coding",    transportMode: "oneshot",    resolution: "transient", terminateAfter: "response", decorators: [soulBundle] },
   D: { agent: "dreamy",    transportMode: "persistent", resolution: "transient", terminateAfter: "external", decorators: [] },
+  // #1432: K = persistent interactive skill session. Non-active (resolution
+  // "transient" — the skill manager scopes and reuses it by exact sessionId);
+  // skill instructions define behavior; no SOUL/memory decorators here.
+  K: { agent: "professor", transportMode: "persistent", resolution: "transient", terminateAfter: "external", decorators: [], memoryMode: "skill-isolated" },
   O: {
     agent: "browsie",                    // ← preserves current Orc agent (NOT professor)
     transportMode: "persistent",
-    resolution: "singleton",             // ← one Orc; reuse the visible O session
+    resolution: "singleton",             // project-scoped session reuse; global O capacity remains one
     terminateAfter: "external",
     decorators: [orcContext, soulBundle, orcNotifications, orcChannel],
-    beforePrompt: async (_session, cardId) => {
-      const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
-      const { setActiveOrcCard } = await import("./transport/orc-tools.js");
-      if (cardId !== undefined) { updateBridgeLockField("orc_active", cardId); setActiveOrcCard(cardId); }
-    },
-    afterPrompt: async () => {
-      const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
-      const { setActiveOrcCard } = await import("./transport/orc-tools.js");
-      updateBridgeLockField("orc_active", null); setActiveOrcCard(null);
-    },
+    beforePrompt: async () => {},
   },
 };
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { createDecipheriv, hkdfSync } from "node:crypto";
 import { homedir } from "node:os";
 function abtarsHome() {
   return process.env.ABTARS_HOME ?? join(homedir(), ".abtars");
@@ -15,6 +16,31 @@ import { join, basename } from "node:path";
 const AB_HOME = abtarsHome();
 const TWITTER_DIR = join(AB_HOME, "workspace", "twitterX");
 const COOKIE_PATH = join(AB_HOME, "secret", "x-cookies.json");
+const SECRET_KEY_PATH = join(AB_HOME, "config", "abtars.key");
+function readEncryptedSecret(filePath) {
+  const raw = readFileSync(filePath, "utf8").trim();
+  if (!raw.startsWith("ENC:")) return raw;
+  let master;
+  try {
+    const hex = readFileSync(SECRET_KEY_PATH, "utf8").trim();
+    if (hex.length !== 64) return undefined;
+    master = Buffer.from(hex, "hex");
+  } catch {
+    return undefined;
+  }
+  try {
+    const key = hkdfSync("sha256", master, "", "abtars-secrets-v1", 32);
+    const buf = Buffer.from(raw.slice(4), "base64");
+    const iv = buf.subarray(1, 1 + 12);
+    const tag = buf.subarray(buf.length - 16);
+    const ct = buf.subarray(1 + 12, buf.length - 16);
+    const d = createDecipheriv("aes-256-gcm", key, iv);
+    d.setAuthTag(tag);
+    return d.update(ct, undefined, "utf8") + d.final("utf8");
+  } catch {
+    return undefined;
+  }
+}
 const BASE_FOLLOWS = join(TWITTER_DIR, process.env["TWEET_BASE_FOLLOWS_FILE"] ?? "base.follows.json");
 const AGENT_FOLLOWS = join(TWITTER_DIR, process.env["TWEET_FOLLOWS_FILE"] ?? "agent.follows.json");
 const OUTPUT_DIR = join(TWITTER_DIR, "output");
@@ -45,11 +71,12 @@ function loadApiKey() {
     process.stderr.write("⚠️ Twitter cookies not configured. Add x-cookies.json to ~/.abtars/secret/\n");
     process.exit(2);
   } else {
-    raw = readFileSync(COOKIE_PATH, "utf8");
-    if (raw.startsWith("ENC:")) {
-      process.stderr.write("⚠️ Cannot read cookies (encrypted). Use get_secret tool: get_secret(\"x-cookies.json\") and pass via TWITTER_COOKIES env.\n");
+    const decrypted = readEncryptedSecret(COOKIE_PATH);
+    if (decrypted === undefined) {
+      process.stderr.write("⚠️ Twitter cookies unreadable (decryption failed). Check ~/.abtars/config/abtars.key or refresh x-cookies.json via the secrets tool.\n");
       process.exit(2);
     }
+    raw = decrypted;
   }
   try {
     const parsed = JSON.parse(raw);
@@ -121,7 +148,7 @@ async function fetchUser(handle) {
     console.error("User not found");
     process.exit(1);
   }
-  console.log(JSON.stringify(d.toJSON(), null, 2));
+  console.log(JSON.stringify(d, null, 2));
 }
 const GQL_USER_TWEETS = "https://x.com/i/api/graphql/E3opETHurmVJflFsUBVuUQ/UserTweets";
 async function fetchTimeline(handle, count) {
@@ -139,8 +166,8 @@ async function fetchTimeline(handle, count) {
     }
   }
   const data = await r.user.timeline(user.id, count);
-  return data.list.map((t) => {
-    const j = t.toJSON();
+  return (data?.list ?? []).map((t) => {
+    const j = t;
     const likes = j.likeCount ?? 0;
     const retweets = j.retweetCount ?? 0;
     const views = j.viewCount ?? 0;
@@ -240,7 +267,6 @@ async function runFeed(format, count, topN, discover, outputPath) {
     });
   }
 }
-}
 const BEARER = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 const GQL_TWEET_DETAIL = "https://x.com/i/api/graphql/97JF30KziU00483E_8elBA/TweetDetail";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -276,8 +302,9 @@ function loadCookieHeader() {
   } else if (!existsSync(COOKIE_PATH)) {
     return void 0;
   } else {
-    raw = readFileSync(COOKIE_PATH, "utf8");
-    if (raw.startsWith("ENC:")) return void 0;
+    const decrypted = readEncryptedSecret(COOKIE_PATH);
+    if (decrypted === undefined) return void 0;
+    raw = decrypted;
   }
   try {
     const parsed = JSON.parse(raw);
@@ -289,7 +316,7 @@ function loadCookieHeader() {
 }
 async function twitterGql(url, variables) {
   const auth = loadCookieHeader();
-  if (!auth) throw new Error("User auth required. Refresh cookies in ~/.abtars/secret/cookies/x-cookies.json");
+  if (!auth) throw new Error("User auth required. Refresh cookies in ~/.abtars/secret/x-cookies.json");
   const params = new URLSearchParams({
     variables: JSON.stringify(variables),
     features: JSON.stringify(GQL_FEATURES)
@@ -303,7 +330,7 @@ async function twitterGql(url, variables) {
     }
   });
   if (!res.ok) {
-    if (res.status === 403) throw new Error("403 \u2014 cookies may be expired. Refresh in ~/.abtars/secret/cookies/x-cookies.json");
+    if (res.status === 403) throw new Error("403 \u2014 cookies may be expired. Refresh in ~/.abtars/secret/x-cookies.json");
     throw new Error(`Twitter API ${res.status}: ${await res.text().catch(() => "")}`);
   }
   return res.json();
@@ -399,7 +426,7 @@ async function runDiscover(topTweets, knownHandles) {
         try {
           const profile = await guestRettiwt.user.details(rHandle);
           if (!profile) continue;
-          const pj = profile.toJSON();
+          const pj = profile;
           const bio = pj.description ?? "";
           if (!AI_BIO_KEYWORDS.test(bio)) continue;
           candidates.push({

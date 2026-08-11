@@ -9,6 +9,8 @@ import { atomicWriteSync } from "../atomic-write.js";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { localISO } from "../../utils/local-time.js";
+import { randomUUID } from "node:crypto";
+import { processStartIdentity } from "../../supervisor/identity.js";
 
 export type SleepStatus = "awake" | "sleeping";
 
@@ -41,7 +43,7 @@ export function updateBridgeLockField(key: string, value: unknown): void {
     const lock = JSON.parse(readFileSync(p, "utf-8"));
     lock[key] = value;
     atomicWriteSync(p, JSON.stringify(lock));
-  } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
+  } catch (err) { logAndSwallow("bridge_lock_transport", `updateBridgeLockField(${key}) on ${p}`, err); }
 }
 
 /** Read a field from bridge.lock. Returns null if missing/unreadable. */
@@ -81,19 +83,6 @@ export function writeSleepStatus(status: SleepStatus): void {
   updateBridgeLockField("sleepStatus", status);
 }
 
-/** Append a restart timestamp to bridge.lock (capped at 10). Used by in-process watchdog circuit breaker. */
-export function appendRestartTimestamp(): void {
-  const ts = readBridgeLockField<number[]>("restartTimestamps") ?? [];
-  ts.push(Date.now());
-  if (ts.length > 10) ts.splice(0, ts.length - 10);
-  updateBridgeLockField("restartTimestamps", ts);
-}
-
-/** Read recent restart timestamps from bridge.lock. */
-export function readRestartTimestamps(): number[] {
-  return readBridgeLockField<number[]>("restartTimestamps") ?? [];
-}
-
 /** Initialize bridge.lock with full boot state. Single writer for initial creation. */
 export interface PrevBridgeState { pid: number | null; lastHeartbeat: number | null }
 
@@ -106,21 +95,37 @@ export function initBridgeLock(opts: { pid: number; startedAt: number; version: 
     try { existing = JSON.parse(readFileSync(p, "utf-8")); } catch { /* missing or corrupt — cold boot */ }
     const prevPid = typeof existing.pid === "number" ? existing.pid : null;
     prev = { pid: prevPid, lastHeartbeat: typeof existing.lastHeartbeat === "number" ? existing.lastHeartbeat : null };
-    // Classify boot type from previous heartbeat gap
+    // Classify boot type from previous heartbeat gap. The value reflects the
+    // gap since the previous process's last heartbeat, not any wake classification.
     let bootType = "cold";
     if (prev.lastHeartbeat) {
       const gapS = (Date.now() - prev.lastHeartbeat) / 1000;
-      if (gapS < 300) bootType = "darkwake";
+      if (gapS < 300) bootType = "quick-restart";
       else if (gapS <= 7200) bootType = "short-outage";
       else bootType = "long-outage";
     }
     // Merge: preserve watchdogPid from watchdog or env var
     const wdPid = Number(process.env.ABTARS_WATCHDOG_PID) || existing.watchdogPid || null;
+    const wdStartIdentity = typeof existing.watchdogStartIdentity === "string"
+      ? existing.watchdogStartIdentity
+      : (typeof wdPid === "number" && wdPid > 0 ? processStartIdentity(wdPid) : null);
+    // A bridge instance ID belongs to this process, not to the lock file. Never
+    // carry the previous bridge's ID across a respawn.
+    const instanceId = randomUUID();
     atomicWriteSync(p, JSON.stringify({
-      pid: opts.pid, watchdogPid: wdPid, startedAt: opts.startedAt, version: opts.version,
-      sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(), startReason: opts.startReason ?? "unknown", bootType,
+      pid: opts.pid, watchdogPid: wdPid, watchdogStartIdentity: wdStartIdentity,
+      startedAt: opts.startedAt, version: opts.version,
+      instanceId, startIdentity: processStartIdentity(opts.pid),
+      sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(),
+      startReason: opts.startReason ?? "unknown", bootType,
     }));
-  } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
+  } catch (err) {
+    // #1632: a bridge running without a lock has no L1→L3 watchdog lifeline —
+    // the watchdog reads bridge.lock to decide whether this process is alive.
+    // This failure caused a full-afternoon outage while logging nothing
+    // identifiable, so it is reported at error level, never as a trace line.
+    logAndSwallow("bridge_lock_transport", `initBridgeLock on ${p}`, err, "error");
+  }
   return prev;
 }
 

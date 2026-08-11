@@ -182,6 +182,46 @@ describe("ModelHealthRegistry sticky credits (#1296)", () => {
   });
 });
 
+describe("ModelHealthRegistry isCreditFailed (#1297)", () => {
+  it("returns true only after a credits error", () => {
+    const reg = new ModelHealthRegistry();
+    expect(reg.isCreditFailed("kimi", "ep1")).toBe(false);
+    reg.recordError("kimi", "ep1", "credits");
+    expect(reg.isCreditFailed("kimi", "ep1")).toBe(true);
+  });
+
+  it("is false for other failure kinds that fill the bucket", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "auth");
+    reg.recordError("kimi", "ep1", "transient");
+    reg.recordError("kimi", "ep1", "rate_limit");
+    expect(reg.isCreditFailed("kimi", "ep1")).toBe(false);
+  });
+
+  it("isolates model/endpoint pairs", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "credits");
+    expect(reg.isCreditFailed("kimi", "ep1")).toBe(true);
+    expect(reg.isCreditFailed("kimi", "ep2")).toBe(false);
+    expect(reg.isCreditFailed("nemotron", "ep1")).toBe(false);
+  });
+
+  it("clears through resetAll (/models reset)", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "credits");
+    expect(reg.isCreditFailed("kimi", "ep1")).toBe(true);
+    reg.resetAll();
+    expect(reg.isCreditFailed("kimi", "ep1")).toBe(false);
+  });
+
+  it("recordSuccess does not clear sticky credit state", () => {
+    const reg = new ModelHealthRegistry();
+    reg.recordError("kimi", "ep1", "credits");
+    reg.recordSuccess("kimi", "ep1");
+    expect(reg.isCreditFailed("kimi", "ep1")).toBe(true);
+  });
+});
+
 // #1326 — context_exceeded is a static misconfiguration (maxOutput oversized for the
 // model's context window), NOT the model's live health. recordError must leave
 // the bucket + cooldown untouched so a healthy model is not degraded by a config

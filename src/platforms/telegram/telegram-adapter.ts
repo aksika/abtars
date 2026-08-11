@@ -441,15 +441,22 @@ export class TelegramAdapter implements PlatformAdapter {
 
       // #824: Emoji reaction as recall quality feedback
       const { getRecalledIdsForMessage } = await import("../../components/message-pipeline.js");
-      const recalledIds = getRecalledIdsForMessage(reaction.message_id);
-      if (recalledIds && recalledIds.length > 0) {
-        if (score < 0) {
-          for (const memoryId of recalledIds) await this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType: "reject" }, `reaction-${reaction.message_id}-${memoryId}`);
-          logDebug(TAG, `Recall rejection: ${recalledIds.length} memories penalized (emoji ${emojis[0]})`);
-        } else if (score > 0) {
-          for (const memoryId of recalledIds) await this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType: "cite" }, `reaction-${reaction.message_id}-${memoryId}`);
-          logDebug(TAG, `Recall confirmed: ${recalledIds.length} memories boosted (emoji ${emojis[0]})`);
+      const recalledIds = getRecalledIdsForMessage(String(reaction.message_id));
+      if (recalledIds && recalledIds.length > 0 && score !== 0) {
+        const feedbackType = score < 0 ? "reject" : "cite";
+        for (const memoryId of recalledIds) {
+          const { feedbackKey } = await import("../../components/memory-operation-key.js");
+          const { attemptMemoryMutation } = await import("../../components/memory-runtime.js");
+          const opKey = feedbackKey("telegram", String(chatId), resolvedUserId, String(reaction.message_id), memoryId, feedbackType);
+          await attemptMemoryMutation({
+            phase: "feedback",
+            family: "feedback",
+            operationKey: opKey,
+            run: () => this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType }, opKey),
+          });
         }
+        const label = score < 0 ? "penalized" : "boosted";
+        logDebug(TAG, `Recall ${label}: ${recalledIds.length} memories (emoji ${emojis[0]})`);
       }
     }
 
@@ -475,7 +482,7 @@ export class TelegramAdapter implements PlatformAdapter {
           // #1271: reaction signal goes through spin() (model-call chokepoint)
           const { result: response } = await spin.spin({
             type: "A", sessionId: activeId, prompt: signal,
-            userId: reactionUser, await: true,
+            userId: reactionUser, settlementOwner: "spin", await: true,
           });
           logDebug(TAG, `Sent reaction signal to transport for chat ${chatId}`);
           if (response) {

@@ -17,6 +17,9 @@ export class FallbackPolicy {
   readonly candidates: readonly ModelCandidate[];
   readonly registry: ModelHealthRegistry;
   lastDecision: FallbackDecision | null = null;
+  /** Candidates temporarily skipped by successful-turn rotation. */
+  rotationExcludedKeys: Set<string> = new Set();
+  /** Candidates excluded for a behavior incident in the current prompt. */
   excludedKeys: Set<string> = new Set();
 
   constructor(candidates: readonly ModelCandidate[], registry: ModelHealthRegistry) {
@@ -31,6 +34,10 @@ export class FallbackPolicy {
       const key = candidateKey(c.model, c.endpoint);
       if (this.excludedKeys.has(key)) {
         skipped.push(`${c.model}: excluded (behavior failure this prompt)`);
+        continue;
+      }
+      if (this.rotationExcludedKeys.has(key)) {
+        skipped.push(`${c.model}: excluded (rotation this prompt)`);
         continue;
       }
       if (this.registry.shouldSkip(c.model, c.endpoint)) {
@@ -56,6 +63,18 @@ export class FallbackPolicy {
       if (this.excludedKeys.has(key)) return false;
       return !this.registry.shouldSkip(c.model, c.endpoint);
     });
+  }
+
+  /**
+   * #1297: strict all-candidates credit-failure predicate. True only when the
+   * candidate list is non-empty AND every member is sticky credit-failed in the
+   * shared health registry — including candidates skipped during this call
+   * because they were already poisoned. Mixed failure kinds, empty lists, and
+   * any viable candidate all return false.
+   */
+  allCandidatesCreditFailed(): boolean {
+    if (this.candidates.length === 0) return false;
+    return this.candidates.every((c) => this.registry.isCreditFailed(c.model, c.endpoint));
   }
 
   recordSuccess(candidate: ModelCandidate): void {

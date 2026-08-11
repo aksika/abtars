@@ -9,13 +9,26 @@ import { tmpdir } from "node:os";
 let TEST_HOME: string;
 let board: typeof import("./kanban-board.js");
 let deliverCard: typeof import("./kanban-delivery.js").deliverCard;
+let supervisionState: string | undefined;
+let logWarnMock: ReturnType<typeof vi.fn>;
 
 beforeEach(async () => {
   vi.resetModules();
   TEST_HOME = join(tmpdir(), `delivery-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(TEST_HOME, { recursive: true });
   vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
-  vi.doMock("../logger.js", () => ({ logInfo: vi.fn(), logWarn: vi.fn(), logError: vi.fn(), logDebug: vi.fn() }));
+  supervisionState = undefined;
+  logWarnMock = vi.fn();
+  vi.doMock("../logger.js", () => ({ logInfo: vi.fn(), logWarn: logWarnMock, logError: vi.fn(), logDebug: vi.fn(), logTrace: vi.fn(), redactSecrets: (s: string) => s }));
+  vi.doMock("../project-acceptance/project-review-store.js", () => ({
+    ProjectReviewStore: class {
+      getSupervision() {
+        return supervisionState === undefined
+          ? undefined
+          : { project_card_id: 1, state: supervisionState, accepted_decision_id: supervisionState === "accepted" ? "rd_1" : null };
+      }
+    },
+  }));
   board = await import("./kanban-board.js");
   ({ deliverCard } = await import("./kanban-delivery.js"));
 });
@@ -24,8 +37,8 @@ afterEach(() => { rmSync(TEST_HOME, { recursive: true, force: true }); });
 
 function makeDeps() {
   return {
-    sendMessage: vi.fn().mockResolvedValue(undefined),
-    sendDocument: vi.fn().mockResolvedValue(undefined),
+    sendMessage: vi.fn().mockResolvedValue("sent" as const),
+    sendDocument: vi.fn().mockResolvedValue("sent" as const),
     announce: vi.fn().mockResolvedValue(undefined),
     chatIdFor: vi.fn().mockReturnValue("100"),
   };
@@ -39,6 +52,22 @@ function makeCard(overrides: Partial<import("./kanban-board.js").KanbanCard> = {
 }
 
 describe("deliverCard — deliver mode", () => {
+  it("defers a card until the scheduled owner releases delivery", async () => {
+    const id = board.kanbanEnqueue("Deferred task", "task", "run-1", { deliveryReady: false });
+    board.kanbanRunning(id);
+    board.kanbanComplete(id, null, "validated");
+    const deps = makeDeps();
+
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(board.kanbanGetCard(id)!.status).toBe("done");
+
+    board.kanbanSetDeliveryReady(id);
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    expect(deps.sendMessage).toHaveBeenCalledOnce();
+    expect(board.kanbanGetCard(id)!.status).toBe("delivered");
+  });
+
   it("sends plain confirmation via sendMessage, never touches announce/model", async () => {
     const card = makeCard({ delivery_mode: "deliver" });
     const deps = makeDeps();
@@ -90,5 +119,101 @@ describe("deliverCard — silent mode", () => {
     expect(deps.sendDocument).not.toHaveBeenCalled();
     expect(deps.announce).not.toHaveBeenCalled();
     expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+  });
+});
+
+describe("#1520 delivery separation", () => {
+  it("definitely_not_sent returns the card to the bounded poll for a delivery-only retry", async () => {
+    const card = makeCard();
+    const deps = makeDeps();
+    deps.sendMessage.mockResolvedValue("not_sent" as const);
+    await deliverCard(card, deps);
+    expect(board.kanbanGetCard(card.id)!.delivery_result).toBe("definitely_not_sent");
+    expect(board.kanbanGetCard(card.id)!.status).toBe("done");
+    // A second poll retries delivery only — never re-executes anything.
+    deps.sendMessage.mockResolvedValue("sent" as const);
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    expect(deps.sendMessage).toHaveBeenCalledTimes(2);
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+  });
+
+  it("unknown send state blocks automatic resend and is visible for operator review", async () => {
+    const card = makeCard();
+    const deps = makeDeps();
+    deps.sendMessage.mockResolvedValue("unknown" as const);
+    await deliverCard(card, deps);
+    expect(board.kanbanGetCard(card.id)!.delivery_result).toBe("unknown");
+    // Repeated polls never resend a card in unknown state.
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    expect(deps.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("delivery failure never appends task history or reruns execution", async () => {
+    const card = makeCard();
+    const deps = makeDeps();
+    deps.sendMessage.mockResolvedValue("not_sent" as const);
+    const { deliverCard: dc } = await import("./kanban-delivery.js");
+    await dc(card, deps);
+    const { recentRuns } = await import("./task-history-store.js");
+    expect(recentRuns(card.source_id ?? "none", 5)).toHaveLength(0);
+  });
+
+  it("repeated delivery polls cannot duplicate a delivered card", async () => {
+    const card = makeCard();
+    const deps = makeDeps();
+    await deliverCard(card, deps);
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    expect(deps.sendMessage).toHaveBeenCalledTimes(1);
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+  });
+});
+
+describe("deliverCard — O-type acceptance gate (#1595)", () => {
+  function makeOCard(): { id: number; card: import("./kanban-board.js").KanbanCard } {
+    const id = board.kanbanEnqueue("Daily Project", "task", "run-1", { type: "O" });
+    board.kanbanRunning(id);
+    board.kanbanComplete(id, join(TEST_HOME, "report.md"), "Report ready");
+    return { id, card: board.kanbanGetCard(id)! };
+  }
+
+  it("does not send an unaccepted O card and leaves it done", async () => {
+    supervisionState = "executing";
+    const { id, card } = makeOCard();
+    const deps = makeDeps();
+    await deliverCard(card, deps);
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(deps.sendDocument).not.toHaveBeenCalled();
+    expect(board.kanbanGetCard(id)!.status).toBe("done");
+    expect(board.kanbanGetCard(id)!.delivery_attempts).toBe(0);
+  });
+
+  it("warns once per card episode, not once per delivery poll", async () => {
+    supervisionState = "executing";
+    const { id, card } = makeOCard();
+    const deps = makeDeps();
+    // Three consecutive polls (heartbeat cadence) — one warning total.
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    expect(logWarnMock).toHaveBeenCalledTimes(1);
+    expect(logWarnMock.mock.calls[0]![1]).toContain("no accepted supervision");
+    // Acceptance later unblocks delivery normally.
+    supervisionState = "accepted";
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+    expect(deps.sendDocument).toHaveBeenCalledTimes(1);
+    expect(board.kanbanGetCard(id)!.status).toBe("delivered");
+  });
+
+  it("delivers an accepted O card normally", async () => {
+    supervisionState = "accepted";
+    const { id, card } = makeOCard();
+    const deps = makeDeps();
+    await deliverCard(card, deps);
+    expect(deps.sendDocument).toHaveBeenCalledTimes(1);
+    expect(deps.sendDocument).toHaveBeenCalledWith("100", join(TEST_HOME, "report.md"), "Daily Project");
+    expect(board.kanbanGetCard(id)!.status).toBe("delivered");
+    expect(logWarnMock).not.toHaveBeenCalled();
   });
 });

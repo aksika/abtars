@@ -1,7 +1,24 @@
 
 import { CronExpressionParser } from "cron-parser";
+import { getEnv } from "../env-schema.js";
 
 const HH_MM_RE = /^\d{1,2}:\d{2}$/;
+
+/**
+ * #1600: scheduled-run limits, resolved through the env schema (override then
+ * default). The absolute ceiling bounds the whole run; the inactivity budget
+ * settles a run that stops making meaningful progress. The old single
+ * 30-minute literal was both too short (it killed healthy daily-ai runs at
+ * 30.00 min against a 23.7 min successful maximum) and too long (a silent
+ * wedge kept its reservation for 29 minutes).
+ */
+export function runCeilingMs(): number {
+  return getEnv().taskRunCeilingMs;
+}
+
+export function runIdleBudgetMs(): number {
+  return getEnv().taskRunIdleBudgetMs;
+}
 
 function isValidHHmm(value: string): boolean {
   if (!HH_MM_RE.test(value)) return false;
@@ -15,6 +32,25 @@ function parseMinutes(value: string): number {
 }
 
 export type Delivery = "report" | "announce" | "silent";
+
+/**
+ * The kanban `delivery_mode` column vocabulary. Distinct from `Delivery`: a
+ * card has no "report" mode, because a report is a *task-definition* intent
+ * that resolves to a delivered artifact by the time a card exists.
+ * `kanbanEnqueue` performs the report->deliver translation at the write
+ * boundary.
+ */
+export type DeliveryMode = "silent" | "deliver" | "announce";
+
+/** #1516: Upper bound on scheduled agent orchestration (1 Orc + up to 3 Workers). */
+export const MAX_SCHEDULED_AGENTS = 4;
+
+export interface TaskOrchestration {
+  /** Normalized total agent budget, 1..MAX_SCHEDULED_AGENTS — includes the Orc. */
+  maxAgents: number;
+  /** #1588: per-lane hard duration budget (ms) the Orc must not under-author. */
+  laneDurationMs?: number;
+}
 
 export interface SchedulePolicy {
   schedule?: string;
@@ -35,6 +71,30 @@ interface TaskBase extends SchedulePolicy {
   delivery: Delivery;
 }
 
+export interface ReportContract {
+  artifact: string;
+  requiredSections: string[];
+  minBytes: number;
+  requires: {
+    files: string[];
+    executables: string[];
+    tools: string[];
+  };
+}
+
+/** #1432: Exact conversation address a scheduled interactive skill binds to. */
+export interface ConversationTarget {
+  userId: string;
+  platform: string;
+  chatId: string;
+  threadId?: string;
+}
+
+/** #1432: Session lifecycle contract for scheduled agent definitions — missing defaults to oneshot. */
+export type AgentInteraction =
+  | { mode: "oneshot" }
+  | { mode: "skill"; skill: string; target: ConversationTarget };
+
 export type ScheduledTask =
   | (TaskBase & {
       kind: "reminder";
@@ -46,17 +106,15 @@ export type ScheduledTask =
       prompt?: string;
       taskFile?: string;
       agent: "task" | "professor" | "browsie" | "coding" | "dreamy";
+      interaction: AgentInteraction;
       maxToolRounds?: number;
-      targetUserId?: string;
+      report?: ReportContract;
+      orchestration: TaskOrchestration;
     })
   | (TaskBase & {
       kind: "script";
       command: string;
       followUp?: { prompt: string; agent?: string };
-    })
-  | (TaskBase & {
-      kind: "orc";
-      goal: string;
     })
   | (TaskBase & {
       kind: "system";
@@ -72,10 +130,42 @@ export type ScheduledTask =
 
 export type TaskKind = ScheduledTask["kind"];
 
-const SYSTEM_FORBIDDEN_FIELDS = [
-  "command", "args", "taskFile", "agent", "agentMessage",
-  "agentFollowUp", "skill", "env", "environment",
+/**
+ * #1569: the complete set of top-level fields a task entry may carry, per kind.
+ *
+ * A key outside this set is a definition error, never something to ignore.
+ * #1432 removed `targetUserId` from the contract but left the leftover key
+ * silently dropped, so a task whose only expression of "interactive lesson for
+ * this user" was `targetUserId` normalized to a plain oneshot announce and ran
+ * with different semantics than its author wrote — with no error, warning, or
+ * log line. Rejecting unrecognized keys makes a stale definition quarantine
+ * loudly on first load instead of degrading in silence.
+ *
+ * This also covers what a per-kind denylist would: a field belonging to another
+ * kind (`agent` on a script, `command` on a system entry) is unrecognized here,
+ * as is a typo. Adding a field to the contract means adding it here.
+ */
+const COMMON_FIELDS = [
+  "id", "kind", "schedule", "at", "enabled", "priority",
+  "chatId", "delivery", "catchUpHours", "maxRunsPerDay",
 ] as const;
+
+const KIND_FIELDS: Readonly<Record<TaskKind, readonly string[]>> = {
+  reminder: ["text"],
+  agent: ["prompt", "taskFile", "agent", "orchestration", "interaction", "report", "maxToolRounds"],
+  script: ["command", "followUp"],
+  system: ["action", "options"],
+};
+
+function isTaskKind(value: string): value is TaskKind {
+  return Object.prototype.hasOwnProperty.call(KIND_FIELDS, value);
+}
+
+/** #1569: top-level keys the entry carries that its kind does not define. */
+function unknownFields(e: Record<string, unknown>, kind: TaskKind): string[] {
+  const allowed = new Set<string>([...COMMON_FIELDS, ...KIND_FIELDS[kind]]);
+  return Object.keys(e).filter(key => !allowed.has(key));
+}
 
 export type NormalizeResult =
   | { ok: true; entry: ScheduledTask }
@@ -84,6 +174,29 @@ export type NormalizeResult =
 function parsePriority(raw: unknown): "high" | "medium" | "low" {
   if (raw === "high" || raw === "low") return raw;
   return "medium";
+}
+
+/** #1516: Normalize `orchestration` for agent tasks — hard default of one agent. */
+export function normalizeOrchestration(raw: unknown):
+  | { ok: true; value: TaskOrchestration }
+  | { ok: false; error: string } {
+  if (raw === undefined) return { ok: true, value: { maxAgents: 1 } };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, error: "agent orchestration must be an object" };
+  }
+  const maxAgents = (raw as Record<string, unknown>).maxAgents;
+  if (maxAgents === undefined) return { ok: true, value: { maxAgents: 1 } };
+  if (typeof maxAgents !== "number" || !Number.isInteger(maxAgents) || maxAgents < 1 || maxAgents > MAX_SCHEDULED_AGENTS) {
+    return { ok: false, error: `agent orchestration.maxAgents must be an integer from 1 to ${MAX_SCHEDULED_AGENTS}` };
+  }
+  const laneDurationMs = (raw as Record<string, unknown>).laneDurationMs;
+  if (laneDurationMs !== undefined) {
+    if (typeof laneDurationMs !== "number" || !Number.isInteger(laneDurationMs) || laneDurationMs < 1) {
+      return { ok: false, error: "agent orchestration.laneDurationMs must be a positive integer (ms)" };
+    }
+    return { ok: true, value: { maxAgents, laneDurationMs } };
+  }
+  return { ok: true, value: { maxAgents } };
 }
 
 export function normalize(raw: unknown): NormalizeResult {
@@ -99,6 +212,16 @@ export function normalize(raw: unknown): NormalizeResult {
   const kind = e["kind"];
   if (typeof kind !== "string") {
     return { ok: false, error: `missing kind`, id };
+  }
+
+  // #1569: reject a definition carrying fields its kind does not define, before
+  // any field-by-field normalization can silently drop one. An unknown kind
+  // falls through to the switch's own error below.
+  if (isTaskKind(kind)) {
+    const unknown = unknownFields(e, kind);
+    if (unknown.length > 0) {
+      return { ok: false, error: `unknown field(s) for kind "${kind}": ${unknown.join(", ")}`, id };
+    }
   }
 
   const schedule = typeof e["schedule"] === "string" ? e["schedule"] as string : undefined;
@@ -146,11 +269,87 @@ export function normalize(raw: unknown): NormalizeResult {
         return { ok: false, error: `agent is required for agent kind and must be one of: task, professor, browsie, coding, dreamy`, id };
       }
       const agent = agentRaw as "task" | "professor" | "browsie" | "coding" | "dreamy";
+      const orchestrationResult = normalizeOrchestration(e["orchestration"]);
+      if (!orchestrationResult.ok) {
+        return { ok: false, error: orchestrationResult.error, id };
+      }
+      // #1432: interaction selects the session lifecycle. Missing defaults to
+      // oneshot — a new optional field must never quarantine the whole task.
+      const interactionRaw = e["interaction"];
+      const reportRaw = e["report"];
+      let interaction: AgentInteraction;
+      if (typeof interactionRaw !== "object" || interactionRaw === null) {
+        interaction = { mode: "oneshot" };
+      } else {
+        const interactionEntry = interactionRaw as Record<string, unknown>;
+        const mode = interactionEntry["mode"];
+        if (mode === "oneshot") {
+          interaction = { mode: "oneshot" };
+        } else if (mode === "skill") {
+          if (base.delivery !== "announce") {
+            return { ok: false, error: `interaction.mode=skill requires delivery=announce`, id };
+          }
+          if (orchestrationResult.value.maxAgents !== 1) {
+            return { ok: false, error: `interaction.mode=skill requires orchestration.maxAgents=1`, id };
+          }
+          if (reportRaw !== undefined) {
+            return { ok: false, error: `interaction.mode=skill forbids a report contract`, id };
+          }
+          const skill = typeof interactionEntry["skill"] === "string" ? interactionEntry["skill"].trim() : "";
+          if (!skill || !SKILL_IDENTIFIER_RE.test(skill)) {
+            return { ok: false, error: `interaction.mode=skill requires a valid skill identifier`, id };
+          }
+          const targetRaw = interactionEntry["target"];
+          if (typeof targetRaw !== "object" || targetRaw === null) {
+            return { ok: false, error: `interaction.mode=skill requires an exact target`, id };
+          }
+          const t = targetRaw as Record<string, unknown>;
+          const userId = typeof t["userId"] === "string" ? t["userId"].trim() : "";
+          const platform = typeof t["platform"] === "string" ? t["platform"].trim() : "";
+          const chatId = typeof t["chatId"] === "string" ? t["chatId"].trim() : "";
+          const threadId = typeof t["threadId"] === "string" ? t["threadId"] : undefined;
+          if (!userId || !platform || !chatId) {
+            return { ok: false, error: `interaction.mode=skill target requires userId, platform, and chatId`, id };
+          }
+          if (prompt === undefined && taskFile === undefined) {
+            return { ok: false, error: `interaction.mode=skill requires at least one of prompt or taskFile`, id };
+          }
+          interaction = { mode: "skill", skill, target: { userId, platform, chatId, ...(threadId !== undefined ? { threadId } : {}) } };
+        } else {
+          return { ok: false, error: `interaction.mode must be "oneshot" or "skill"`, id };
+        }
+      }
       const maxToolRounds = typeof e["maxToolRounds"] === "number" ? e["maxToolRounds"] as number : undefined;
-      const targetUserId = typeof e["targetUserId"] === "string" ? e["targetUserId"] : undefined;
+      let report: ReportContract | undefined;
+      if (base.delivery === "report") {
+        if (typeof reportRaw !== "object" || reportRaw === null) {
+          return { ok: false, error: `report contract is required for delivery=report`, id };
+        } else {
+          const r = reportRaw as Record<string, unknown>;
+          const artifact = typeof r["artifact"] === "string" ? r["artifact"] : "";
+          const requiredSections = Array.isArray(r["requiredSections"]) ? r["requiredSections"].filter((s: unknown) => typeof s === "string" && s.length > 0) : [];
+          const minBytes = typeof r["minBytes"] === "number" ? r["minBytes"] : 0;
+          if (!artifact || typeof artifact !== "string" || (!artifact.startsWith("/") && !artifact.startsWith("~/"))) {
+            return { ok: false, error: `report.artifact must be an absolute or ~/ path`, id };
+          }
+          if (requiredSections.length === 0) {
+            return { ok: false, error: `report.requiredSections must be a non-empty array of Markdown headings`, id };
+          }
+          if (!Number.isInteger(minBytes) || minBytes < 100) {
+            return { ok: false, error: `report.minBytes must be an integer >= 100`, id };
+          }
+          const requiresRaw = typeof r["requires"] === "object" && r["requires"] !== null ? r["requires"] as Record<string, unknown> : {};
+          const filesArr = Array.isArray(requiresRaw["files"]) ? requiresRaw["files"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
+          const executablesArr = Array.isArray(requiresRaw["executables"]) ? requiresRaw["executables"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
+          const toolsArr = Array.isArray(requiresRaw["tools"]) ? requiresRaw["tools"].filter((x: unknown) => typeof x === "string" && x.length > 0) : [];
+          report = { artifact, requiredSections, minBytes, requires: { files: filesArr, executables: executablesArr, tools: toolsArr } };
+        }
+      } else if (reportRaw !== undefined) {
+        return { ok: false, error: `report contract is only valid for delivery=report tasks`, id };
+      }
       return {
         ok: true,
-        entry: { ...base, kind: "agent", prompt, taskFile, agent, maxToolRounds, targetUserId },
+        entry: { ...base, kind: "agent", prompt, taskFile, agent, interaction, maxToolRounds, report, orchestration: orchestrationResult.value },
       };
     }
     case "script": {
@@ -160,20 +359,12 @@ export function normalize(raw: unknown): NormalizeResult {
       const followUp = followUpRaw && typeof followUpRaw === "object" ? followUpRaw as { prompt: string; agent?: string } : undefined;
       return { ok: true, entry: { ...base, kind: "script", command, followUp } };
     }
-    case "orc": {
-      const goal = typeof e["goal"] === "string" ? e["goal"] : "";
-      if (!goal) return { ok: false, error: "goal is required for orc", id };
-      return { ok: true, entry: { ...base, kind: "orc", goal } };
-    }
     case "system": {
       const action = e["action"];
       if (typeof action !== "string" || !SYSTEM_ACTIONS.includes(action as SystemTaskAction)) {
         return { ok: false, error: `unknown system action "${String(action)}"`, id };
       }
       if (delivery !== "silent") return { ok: false, error: "system delivery must be silent", id };
-      for (const field of SYSTEM_FORBIDDEN_FIELDS) {
-        if (e[field] !== undefined) return { ok: false, error: `system entry must not carry "${field}"`, id };
-      }
       if (action === "hardware-sleep") {
         const opts = e["options"] && typeof e["options"] === "object"
           ? (e["options"] as Record<string, unknown>) : {};
@@ -228,6 +419,9 @@ export function formatTaskLabel(id: string): string {
 
 const TASK_ID_RE = /^[a-z][a-z0-9-]*[a-z0-9]$/;
 
+/** #1432: skill identifiers in scheduled definitions are validated identifiers, not paths. */
+const SKILL_IDENTIFIER_RE = /^[a-z][a-z0-9-]*[a-z0-9]$/;
+
 export function isValidTaskId(id: string): boolean {
   return TASK_ID_RE.test(id);
 }
@@ -251,7 +445,6 @@ export function getTaskKindLabel(kind: TaskKind): string {
     case "reminder": return "Reminder";
     case "agent": return "Agent Task";
     case "script": return "Script";
-    case "orc": return "Orc Project";
     case "system": return "System";
   }
 }

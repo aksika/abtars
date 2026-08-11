@@ -9,8 +9,9 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
-import { logWarn } from "../logger.js";
+import { logWarn, logDebug, redactSecrets } from "../logger.js";
 import { isValidSessionType } from "../spin-profiles.js";
+import { initTaskStateSchema } from "./task-state-schema.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
 type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
@@ -69,25 +70,36 @@ export interface KanbanCard {
   completed_at: string | null;
   delivered_at: string | null;
   max_tokens: number | null;
+  max_cost: number | null;
   tokens_used: number | null;
   delivery_mode: string;
   chat_id: string | null;
   source_peer: string | null;
+  delivery_claimed_at: string | null;
+  delivery_result: string | null;
+  delivery_receipt: string | null;
+  /** #1516: scheduled project delivery stays blocked until shared validation settles. */
+  delivery_ready: number;
+  /** #1516: total agent budget (1 Orc + workers) for scheduled projects. */
+  max_agents: number | null;
+  /** #1539: durable retry backoff marker; only cleared by the promotion helper. */
+  next_retry_at: string | null;
 }
 
 let _db: SqliteDb | null = null;
 let _dbAttempted = false;
 
-function db(): SqliteDb | null {
-  if (_dbAttempted) return _db;
-  _dbAttempted = true;
-  const dir = join(abtarsHome(), "kanban");
-  mkdirSync(dir, { recursive: true });
-  try {
-    const Database = resolveNativeDep("better-sqlite3");
-    _db = new Database(join(dir, "kanban.db")) as SqliteDb;
-    _db.pragma("journal_mode = WAL");
-    _db.exec(`CREATE TABLE IF NOT EXISTS kanban_board (
+/**
+ * #1631: the production kanban_board bootstrap, extracted so test fixtures can
+ * mirror the real schema without opening the production database. Owns exactly
+ * the board CREATE statement and the idempotent ALTER migrations, verbatim
+ * from the original db() open path. Performs only `exec` on the caller's
+ * database — never calls db()/requireTaskDatabase() and never resolves a
+ * native dependency. Transition-journal and task-state initialization stay in
+ * db(); they are not board schema.
+ */
+export function ensureKanbanBoardSchema(database: { exec(sql: string): void }): void {
+  database.exec(`CREATE TABLE IF NOT EXISTS kanban_board (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
       source TEXT NOT NULL,
@@ -112,15 +124,54 @@ function db(): SqliteDb | null {
       delivered_at TEXT
     )`);
     // Migrations — safe to re-run (silently skip if column exists)
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_tokens INTEGER`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN progress TEXT`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_mode TEXT DEFAULT 'deliver'`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN retry_count INTEGER DEFAULT 0`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN source_peer TEXT`); } catch {}
-    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN goal TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_tokens INTEGER`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_cost REAL`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN progress TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_mode TEXT DEFAULT 'deliver'`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN retry_count INTEGER DEFAULT 0`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN source_peer TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN goal TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_claimed_at TEXT`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_result TEXT CHECK(delivery_result IS NULL OR delivery_result IN ('sent','definitely_not_sent','unknown'))`); } catch {}
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_receipt TEXT`); } catch {}
+    // #1516: durable per-project agent cap (scheduled orchestration policy)
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_agents INTEGER`); } catch {}
+    // #1516: project acceptance happens before scheduled artifact validation.
+    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_ready INTEGER NOT NULL DEFAULT 1`); } catch {}
+}
+
+function db(): SqliteDb | null {
+  if (_dbAttempted) return _db;
+  _dbAttempted = true;
+  const dir = join(abtarsHome(), "kanban");
+  mkdirSync(dir, { recursive: true });
+  try {
+    const Database = resolveNativeDep("better-sqlite3");
+    _db = new Database(join(dir, "kanban.db")) as SqliteDb;
+    _db.pragma("journal_mode = WAL");
+    // #1631: production board schema via the shared helper (verbatim DDL +
+    // migrations moved here from the inline block).
+    ensureKanbanBoardSchema(_db);
+    // #1590: append-only status-transition journal (same transaction as the CAS).
+    _db.exec(`CREATE TABLE IF NOT EXISTS kanban_card_transitions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      card_id INTEGER NOT NULL,
+      from_status TEXT NOT NULL,
+      to_status TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      reason TEXT,
+      attempt_id TEXT,
+      claim_generation INTEGER,
+      at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_card_transitions_card
+      ON kanban_card_transitions(card_id, id)`);
+    // #1601: durable scheduled-run state lives in the same shared database.
+    // Idempotent DDL + one-time JSON migration, inside the same open path.
+    initTaskStateSchema(wrapTaskDatabase(_db));
   } catch {
     logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
     _db = null;
@@ -135,21 +186,327 @@ function dbOrNull(): SqliteDb | null {
   return db();
 }
 
-import type { Delivery } from "./task-types.js";
+import type { Delivery, DeliveryMode } from "./task-types.js";
+import { MAX_SCHEDULED_AGENTS } from "./task-types.js";
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "deliver" | "announce"; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string }): number {
+// ── #1590: single status-transition choke point ───────────────────────────────
+//
+// kanbanTransition is the ONLY code allowed to write kanban_board.status. It
+// performs a single-statement compare-and-set against an explicit expected-from
+// set and appends one row to the append-only kanban_card_transitions journal in
+// the same transaction. Illegal DECLARED pairs throw (coding bug); a lost CAS
+// is a normal no-op.
+
+export type CardStatus = "queued" | "running" | "done" | "failed" | "delivering" | "delivered";
+
+/** Why the board moved. One value per production call site — not free text. */
+export type TransitionActor =
+  | "dispatch"              // kanbanRunning, sleep-card start
+  | "retry_promotion"       // kanbanPromoteDueRetry
+  | "retry_backoff"         // kanbanRetryOrFail
+  | "settle_done"           // kanbanComplete
+  | "settle_failed"         // kanbanFail, cascadeFail
+  | "delivery_claim"        // kanbanClaimDelivery
+  | "delivery_settle"       // kanban-delivery markSent/markUnknown/markDefinitelyNotSent
+  | "project_acceptance"    // project-review-store 552/610
+  | "pi_run_settle"         // pi-run-store 317/322
+  | "pi_run_dispatch"       // pi-run-store 518
+  | "pi_resume_generation"  // pi-run-store 574 (queueResumeGeneration)
+  | "restart_recovery"      // pi-run-store 626
+  | "pi_origin_projection"  // boot/phase-pi-executor 105
+  | "budget_enforcement"    // reconciler 1015
+  | "stale_repair";         // doctor-fixes 166
+
+export interface TransitionRequest {
+  readonly cardId: number;
+  /** CAS predicate. Must be non-empty. `to` may appear here for reassertion. */
+  readonly from: readonly CardStatus[];
+  readonly to: CardStatus;
+  readonly actor: TransitionActor;
+  /** Bounded to 300 chars and redacted before storage. */
+  readonly reason: string;
+  /** Correlates to worker_attempts when the mover is a supervised attempt. */
+  readonly attemptId?: string;
+  readonly claimGeneration?: number;
+  /**
+   * Columns co-written in the SAME statement as the status change. Keys are
+   * restricted to the whitelist; values are bound parameters, never
+   * interpolated.
+   */
+  readonly fields?: Readonly<Partial<Record<CoWritableColumn, unknown>>>;
+  /**
+   * Fixed internal SQL fragment appended to the CAS WHERE clause (allowlisted
+   * module constants only — never caller text). Used when a bound cannot be
+   * expressed through `from` alone (e.g. delivery_attempts < 5).
+   */
+  readonly extraPredicate?: string;
+  /** Bound parameters for `extraPredicate`. */
+  readonly extraPredicateParams?: readonly unknown[];
+  /**
+   * Default true: fire the STATUS_EVENT nerve event and notifyKanbanDueChanged
+   * after commit, exactly like the pre-#1590 board helpers did. Callers whose
+   * own layer already fires the event (pi-executor, project-review-service,
+   * pi-run-service) or that fired nothing before must pass false to preserve
+   * today's wire behavior.
+   */
+  readonly emit?: boolean;
+}
+
+export type CoWritableColumn =
+  | "error" | "result_path" | "result_summary" | "retry_count" | "next_retry_at"
+  | "delivery_attempts" | "delivery_result" | "delivery_receipt"
+  | "completed_at" | "delivered_at";
+
+export type TransitionOutcome =
+  /** Status changed. Exactly one journal row written. Events fired. */
+  | { readonly kind: "applied"; readonly from: CardStatus }
+  /** observed === to. `fields` applied, no status change, NO journal row, no events. */
+  | { readonly kind: "reasserted"; readonly observed: CardStatus }
+  /** CAS lost, or card absent, or database unavailable. Nothing written. */
+  | { readonly kind: "no_op"; readonly observed: CardStatus | null };
+
+const CO_WRITABLE_COLUMNS = new Set<string>([
+  "error", "result_path", "result_summary", "retry_count", "next_retry_at",
+  "delivery_attempts", "delivery_result", "delivery_receipt",
+  "completed_at", "delivered_at",
+]);
+
+/**
+ * #1590 — Legal transition matrix, Task-1 derived from every production writer
+ * (see specs/1590/requirements.md). Each pair cites a real call site; no
+ * speculative pairs. `delivered` is terminal: it appears only as a `to`.
+ * Deviations from the design draft, both verified against code:
+ * - `done → queued` and `failed → queued` are legal because
+ *   pi-run-store.ts:574 (queueResumeGeneration) re-queues cards from
+ *   `failed|done` — a writer missed by the original enumeration.
+ * - `done → running` / `failed → running` (design's "resumed" rows) are NOT
+ *   legal: the remote producer sets run.status="queued" on resumed events, so
+ *   the origin projection targets `queued`, never `running`.
+ */
+const LEGAL_TRANSITIONS: Readonly<Record<CardStatus, ReadonlySet<CardStatus>>> = {
+  // queued → running: kanbanRunning, kanbanPromoteDueRetry, pi-run-store:518
+  // queued → failed:  cascadeFail/kanbanFail, pi-run-store:626, reconciler:1015
+  // queued → done:    task-run-settler settles one-shot K/T cards that were
+  //                    enqueued but never dispatched (system-task runner path)
+  queued: new Set(["running", "failed", "done"]),
+  // running → done:   kanbanComplete, pi-run-store:317, project-review-store:552
+  // running → failed: kanbanFail, pi-run-store:322/626, project-review-store:610,
+  //                   reconciler:1015, doctor-fixes:166
+  // running → queued: kanbanRetryOrFail
+  running: new Set(["done", "failed", "queued"]),
+  // done → delivering: kanbanClaimDelivery, kanbanSetDelivering
+  // done → queued:     pi-run-store:574 (queueResumeGeneration)
+  // done → failed:     task-run-settler fails an accepted-but-stale project
+  //                     when artifact validation runs after acceptance
+  done: new Set(["delivering", "queued", "failed"]),
+  // failed → queued: pi-run-store:574 (queueResumeGeneration)
+  failed: new Set(["queued"]),
+  // delivering → delivered: kanbanMarkDelivered, kanban-delivery markSent
+  // delivering → done:      kanban-delivery markUnknown/markDefinitelyNotSent
+  delivering: new Set(["delivered", "done"]),
+  delivered: new Set(),
+};
+
+/** #1590 — per-target nerve event, reproducing today's emissions exactly. */
+const STATUS_EVENT: Readonly<Record<CardStatus, string | null>> = {
+  queued: "card:queued",
+  running: "card:running",
+  done: "card:done",
+  failed: "card:failed",
+  delivering: null, // no card:delivering exists today — do not invent one
+  delivered: "card:delivered",
+};
+
+const MAX_TRANSITIONS_PER_CARD = 200;
+const MAX_JOURNAL_REASON = 300;
+
+/**
+ * #1590 — allowlisted extra CAS predicates. Callers reference these fixed
+ * internal strings only; caller-supplied SQL text is rejected in
+ * kanbanTransition.
+ */
+const EXTRA_PREDICATES = new Set<string>([
+  "COALESCE(delivery_attempts, 0) < 5",                    // kanbanClaimDelivery
+  "next_retry_at IS NOT NULL AND unixepoch(next_retry_at) <= ?", // kanbanPromoteDueRetry
+  "delivery_result IS NULL",                                // kanban-delivery markUnknown
+]);
+
+/** SQLite datetime('now')-compatible UTC timestamp for co-written columns. */
+export function sqliteNow(): string {
+  return new Date().toISOString().replace("T", " ").slice(0, 19);
+}
+
+/** Wrap a raw better-sqlite3 connection as a TaskDatabase (out-of-process callers). */
+export function wrapTaskDatabase(db: {
+  prepare(sql: string): {
+    run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+    get(...params: unknown[]): unknown;
+    all(...params: unknown[]): unknown[];
+  };
+  exec(sql: string): void;
+  transaction<T>(fn: () => T): unknown;
+}): TaskDatabase {
+  return {
+    prepare(sql: string) {
+      const stmt = db.prepare(sql);
+      return {
+        run(...params: unknown[]) { return stmt.run(...params); },
+        get(...params: unknown[]) { return stmt.get(...params) as Record<string, unknown> | undefined; },
+        all(...params: unknown[]) { return stmt.all(...params) as Record<string, unknown>[]; },
+      };
+    },
+    exec(sql: string) { db.exec(sql); },
+    transaction<T>(fn: () => T): T { return (db.transaction(fn) as () => T)(); },
+  };
+}
+
+/** #1590 — the single permitted writer of kanban_board.status. */
+export function kanbanTransition(req: TransitionRequest, database?: TaskDatabase): TransitionOutcome {
+  if (req.from.length === 0) {
+    throw new Error(`illegal kanban transition: empty from-set (${req.to}) (${req.actor})`);
+  }
+  for (const from of req.from) {
+    if (from === req.to) continue; // reassertion intent — same-status, no journal
+    if (!LEGAL_TRANSITIONS[from]?.has(req.to)) {
+      throw new Error(`illegal kanban transition: ${from} -> ${req.to} (${req.actor})`);
+    }
+  }
+  for (const key of Object.keys(req.fields ?? {})) {
+    if (!CO_WRITABLE_COLUMNS.has(key)) {
+      throw new Error(`illegal kanban transition: field "${key}" not co-writable (${req.actor})`);
+    }
+  }
+  if (req.extraPredicate !== undefined && !EXTRA_PREDICATES.has(req.extraPredicate)) {
+    throw new Error(`illegal kanban transition: extraPredicate not allowlisted (${req.actor})`);
+  }
+
+  let tx: TaskDatabase | null = database ?? null;
+  if (!tx) {
+    const d = dbOrNull();
+    if (d) tx = wrapTaskDatabase(d);
+  }
+  if (!tx) return { kind: "no_op", observed: null };
+
+  // Out-of-process connections (doctor-fixes) may not have run the module
+  // bootstrap; ensure the journal schema idempotently.
+  if (database) {
+    tx.exec(`CREATE TABLE IF NOT EXISTS kanban_card_transitions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      card_id INTEGER NOT NULL,
+      from_status TEXT NOT NULL,
+      to_status TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      reason TEXT,
+      attempt_id TEXT,
+      claim_generation INTEGER,
+      at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    tx.exec(`CREATE INDEX IF NOT EXISTS idx_card_transitions_card
+      ON kanban_card_transitions(card_id, id)`);
+  }
+
+  const reason = redactSecrets(req.reason).slice(0, MAX_JOURNAL_REASON);
+  const fields = req.fields ?? {};
+  const fieldEntries = Object.entries(fields);
+  const extraPredicate = req.extraPredicate;
+
+  const outcome = tx.transaction<TransitionOutcome>(() => {
+    const row = tx.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(req.cardId) as { status: string } | undefined;
+    const observed = row?.status as CardStatus | undefined;
+
+    if (observed === undefined) return { kind: "no_op", observed: null };
+
+    // Reassertion: observed === to AND the caller declared reassertion intent
+    // by including `to` in the from-set. Keep the status predicate in the
+    // write: the diagnostic SELECT is not the CAS, and a projection must not
+    // apply fields to a card that changed status after that read. No journal
+    // row is written. Callers that do NOT include `to` (kanbanComplete,
+    // claimDelivery) get a lost-CAS no_op instead — nothing written, matching
+    // the old guards.
+    if (observed === req.to && req.from.includes(req.to)) {
+      const sets = [`status = ?`, `updated_at = datetime('now')`];
+      const vals: unknown[] = [req.to];
+      for (const [k, v] of fieldEntries) { sets.push(`${k} = ?`); vals.push(v); }
+      let where = `WHERE id = ? AND status = ?`;
+      if (extraPredicate) where += ` AND ${extraPredicate}`;
+      const params: unknown[] = [...vals, req.cardId, req.to, ...(req.extraPredicateParams ?? [])];
+      const result = tx.prepare(`UPDATE kanban_board SET ${sets.join(", ")} ${where}`).run(...params);
+      if (result.changes === 1) {
+        return { kind: "reasserted", observed };
+      }
+      const current = tx.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(req.cardId) as { status: string } | undefined;
+      return { kind: "no_op", observed: (current?.status as CardStatus | undefined) ?? null };
+    }
+
+    const sets = [`status = ?`, `updated_at = datetime('now')`];
+    const vals: unknown[] = [req.to];
+    for (const [k, v] of fieldEntries) { sets.push(`${k} = ?`); vals.push(v); }
+    const placeholders = req.from.map(() => "?").join(", ");
+    let where = `WHERE id = ? AND status IN (${placeholders})`;
+    if (extraPredicate) where += ` AND ${extraPredicate}`;
+    const params: unknown[] = [...vals, req.cardId, ...req.from, ...(req.extraPredicateParams ?? [])];
+
+    const result = tx.prepare(`UPDATE kanban_board SET ${sets.join(", ")} ${where}`).run(...params);
+
+    if (result.changes === 1) {
+      tx.prepare(
+        `INSERT INTO kanban_card_transitions (card_id, from_status, to_status, actor, reason, attempt_id, claim_generation)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        req.cardId, observed, req.to, req.actor, reason,
+        req.attemptId ?? null, req.claimGeneration ?? null,
+      );
+      // Bounded growth without a timer: prune the oldest rows per card.
+      tx.prepare(
+        `DELETE FROM kanban_card_transitions
+         WHERE card_id = ? AND id NOT IN (
+           SELECT id FROM kanban_card_transitions WHERE card_id = ? ORDER BY id DESC LIMIT ?
+         )`
+      ).run(req.cardId, req.cardId, MAX_TRANSITIONS_PER_CARD);
+      return { kind: "applied", from: observed };
+    }
+
+    // CAS lost — re-read for an accurate observed value.
+    const current = tx.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(req.cardId) as { status: string } | undefined;
+    return { kind: "no_op", observed: (current?.status as CardStatus | undefined) ?? null };
+  });
+
+  if (outcome.kind === "applied" && req.emit !== false) {
+    const event = STATUS_EVENT[req.to];
+    if (event) nerve.fire(event as "card:queued" | "card:running" | "card:done" | "card:failed" | "card:delivered", req.cardId);
+    notifyKanbanDueChanged();
+  }
+  return outcome;
+}
+
+
+export type KanbanPriority = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
+
+const VALID_PRIORITIES = new Set<KanbanPriority>(["CRITICAL", "HIGH", "MEDIUM", "LOW"]);
+
+export function normalizePriority(raw: string | undefined | null): KanbanPriority {
+  if (!raw) return "MEDIUM";
+  const upper = raw.toUpperCase();
+  return VALID_PRIORITIES.has(upper as KanbanPriority) ? upper as KanbanPriority : "MEDIUM";
+}
+
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: DeliveryMode; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string; maxAgents?: number; deliveryReady?: boolean }): number {
   const d = dbOrNull();
   if (!d) return 0;
   const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
   const deliveryMode = raw === "report" ? "deliver" : raw;
-  const VALID_PRIORITIES = new Set(["CRITICAL", "HIGH", "MEDIUM", "LOW"]);
-  const normalizedPriority = opts?.priority?.toUpperCase();
-  const priority = normalizedPriority && VALID_PRIORITIES.has(normalizedPriority) ? normalizedPriority : "MEDIUM";
+  const priority = normalizePriority(opts?.priority);
+  // #1516: validate the durable agent cap at the write boundary.
+  const maxAgents = opts?.maxAgents;
+  if (maxAgents !== undefined && (!Number.isInteger(maxAgents) || maxAgents < 1 || maxAgents > MAX_SCHEDULED_AGENTS)) {
+    logWarn("kanban", `rejected invalid max_agents=${String(maxAgents)} (must be an integer 1..${MAX_SCHEDULED_AGENTS})`);
+    return 0;
+  }
   const stmt = d.prepare(
-    `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer, max_agents, delivery_ready)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null);
+  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null, maxAgents ?? null, opts?.deliveryReady === false ? 0 : 1);
   const id = Number(result.lastInsertRowid);
   nerve.fire("card:queued", id);
   return id;
@@ -163,7 +520,7 @@ export interface CreateCardInput {
   sourceId?: string;
   priority?: string;
   labels?: string;
-  deliveryMode?: "silent" | "deliver" | "announce";
+  deliveryMode?: DeliveryMode;
   chatId?: string;
   sourcePeer?: string;
 }
@@ -176,7 +533,7 @@ export function createDispatchableCard(input: CreateCardInput): { cardId: number
   const titleBytes = Buffer.byteLength(title, "utf-8");
   if (titleBytes > 160) return { error: `title exceeds 160 bytes (${titleBytes})` };
   if (type && !isValidSessionType(type)) {
-    return { error: `invalid type "${type}": must be a SessionType (A/B/C/T/P/S/O/W/D/H)` };
+    return { error: `invalid type "${type}": must be a SessionType (A/B/C/T/P/S/O/W/D/H/K)` };
   }
   if (type === "B" && (!goal || !goal.trim())) {
     return { error: "goal is required for type B (Browsie) cards" };
@@ -199,28 +556,77 @@ export function createDispatchableCard(input: CreateCardInput): { cardId: number
 }
 
 export function kanbanRunning(id: number): void {
-  const d = dbOrNull();
-  if (!d) return;
-  d.prepare(`UPDATE kanban_board SET status = 'running', updated_at = datetime('now') WHERE id = ?`).run(id);
-  nerve.fire("card:running", id);
+  kanbanTransition({
+    cardId: id, from: ["queued"], to: "running", actor: "dispatch",
+    reason: "dispatch to running",
+  });
 }
 
-export function kanbanComplete(id: number, resultPath: string | null, summary: string): void {
-  const d = dbOrNull();
-  if (!d) return;
-  d.prepare(
-    `UPDATE kanban_board SET status = 'done', result_path = ?, result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-  ).run(resultPath, summary.slice(0, 4000), id);
-  nerve.fire("card:done", id);
+/**
+ * #1546: atomic due-retry promotion. The single writer that clears
+ * `next_retry_at` for a retried root/child: one conditional update from
+ * `queued` + due to `running` + no marker, preserving `retry_count` and the
+ * retry error. Fires the existing running event and the due-change hook only
+ * on one changed row; a lost conditional race is a no-op. The due predicate
+ * uses `unixepoch` so both `kanbanRetryOrFail`'s ISO-8601 markers and legacy
+ * SQLite `datetime('now')` markers compare correctly.
+ */
+export function kanbanPromoteDueRetry(cardId: number, now?: number): boolean {
+  const nowVal = now ?? Date.now();
+  const outcome = kanbanTransition({
+    cardId,
+    from: ["queued"],
+    to: "running",
+    actor: "retry_promotion",
+    reason: "due retry promotion",
+    fields: { next_retry_at: null },
+    extraPredicate: "next_retry_at IS NOT NULL AND unixepoch(next_retry_at) <= ?",
+    extraPredicateParams: [Math.floor(nowVal / 1000)],
+  });
+  return outcome.kind === "applied";
 }
 
-export function kanbanFail(id: number, error: string): void {
-  const d = dbOrNull();
-  if (!d) return;
-  d.prepare(
-    `UPDATE kanban_board SET status = 'failed', error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-  ).run(error.slice(0, 1000), id);
-  nerve.fire("card:failed", id);
+/** #1539: kanban due-change hook wired to the lifecycle wake scheduler. */
+let kanbanDueChangedHook: (() => void) | null = null;
+export function setKanbanDueChangedHook(hook: (() => void) | null): void {
+  kanbanDueChangedHook = hook;
+}
+function notifyKanbanDueChanged(): void {
+  try {
+    kanbanDueChangedHook?.();
+  } catch { /* hook failures must never break board writes */ }
+}
+
+export function kanbanComplete(id: number, resultPath: string | null, summary: string, emit = true): void {
+  // #1590: from includes `queued` because task-run-settler completes one-shot
+  // K/T cards that were enqueued but never dispatched (system-task runner
+  // path) — verified against production callers, not just the matrix.
+  const outcome = kanbanTransition({
+    cardId: id, from: ["running", "queued"], to: "done", actor: "settle_done",
+    reason: "settlement complete",
+    fields: {
+      result_path: resultPath,
+      result_summary: summary.slice(0, 4000),
+      completed_at: sqliteNow(),
+    },
+    emit,
+  });
+  // #1590: preserve the pre-CAS debug log for the already-settled case.
+  if (outcome.kind === "no_op" && (outcome.observed === "done" || outcome.observed === "delivering" || outcome.observed === "delivered")) {
+    logDebug("kanban", `Card ${id}: already ${outcome.observed} — skipping kanbanComplete`);
+  }
+}
+
+export function kanbanFail(id: number, error: string, emit = true): void {
+  // #1590: `done` is included because task-run-settler fails an accepted
+  // project card when artifact validation later detects a stale artifact
+  // (verified against the scheduled-project integration flow).
+  kanbanTransition({
+    cardId: id, from: ["queued", "running", "done"], to: "failed", actor: "settle_failed",
+    reason: "settlement failed",
+    fields: { error: error.slice(0, 1000), completed_at: sqliteNow() },
+    emit,
+  });
 }
 
 const MAX_RETRIES = 3;
@@ -237,34 +643,79 @@ export function kanbanRetryOrFail(id: number, error: string): "retrying" | "fail
   }
   const backoffMs = Math.min(10_000 * Math.pow(2, retryCount - 1), 300_000);
   const nextRetryAt = new Date(Date.now() + backoffMs).toISOString();
-  d.prepare(
-    `UPDATE kanban_board SET status = 'queued', retry_count = ?, next_retry_at = ?, error = ?, updated_at = datetime('now') WHERE id = ?`
-  ).run(retryCount, nextRetryAt, error.slice(0, 1000), id);
-  nerve.fire("card:queued", id);
-  return "retrying";
+  // #1590: `queued` is included so a retry of an already-queued card reasserts
+  // (fields applied, no journal row) instead of no-op'ing — preserving the old
+  // blind-write retry semantics for back-to-back retries.
+  const outcome = kanbanTransition({
+    cardId: id, from: ["running", "queued"], to: "queued", actor: "retry_backoff",
+    reason: "retry backoff",
+    fields: { retry_count: retryCount, next_retry_at: nextRetryAt, error: error.slice(0, 1000) },
+  });
+  if (outcome.kind === "applied" || outcome.kind === "reasserted") return "retrying";
+  return "failed";
 }
 
 export function kanbanPending(): KanbanCard[] {
   const d = dbOrNull();
   if (!d) return [];
   return d.prepare(
-    `SELECT * FROM kanban_board WHERE status = 'done' AND delivery_attempts < 3 ORDER BY priority = 'CRITICAL' DESC, priority = 'HIGH' DESC, created_at ASC`
+    `SELECT * FROM kanban_board WHERE status = 'done' AND delivery_attempts < 5 ORDER BY priority = 'CRITICAL' DESC, priority = 'HIGH' DESC, created_at ASC`
   ).all() as KanbanCard[];
 }
 
 export function kanbanSetDelivering(id: number): void {
+  kanbanTransition({
+    cardId: id, from: ["done"], to: "delivering", actor: "delivery_claim",
+    reason: "set delivering", emit: false,
+  });
+}
+
+/** Atomically claim one delivery attempt for a completed card. */
+export function kanbanClaimDelivery(id: number): boolean {
   const d = dbOrNull();
-  if (!d) return;
-  d.prepare(`UPDATE kanban_board SET status = 'delivering', updated_at = datetime('now') WHERE id = ?`).run(id);
+  if (!d) return false;
+  const row = d.prepare("SELECT COALESCE(delivery_attempts, 0) AS attempts FROM kanban_board WHERE id = ?").get(id) as { attempts: number } | undefined;
+  const outcome = kanbanTransition({
+    cardId: id,
+    from: ["done"],
+    to: "delivering",
+    actor: "delivery_claim",
+    reason: "delivery claim",
+    fields: { delivery_attempts: (row?.attempts ?? 0) + 1 },
+    extraPredicate: "COALESCE(delivery_attempts, 0) < 5",
+    emit: false,
+  });
+  if (outcome.kind !== "applied") {
+    logDebug("kanban-delivery", `delivery_skipped_duplicate card=${id}`);
+    return false;
+  }
+  return true;
 }
 
 export function kanbanMarkDelivered(id: number): void {
+  kanbanTransition({
+    cardId: id, from: ["delivering"], to: "delivered", actor: "delivery_settle",
+    reason: "delivery complete",
+    fields: { delivered_at: sqliteNow() },
+  });
+}
+
+/**
+ * #1539: durable Kanban retry due items for the lifecycle wake scheduler.
+ * Queued cards whose `next_retry_at` has passed are woken by the source; the
+ * earliest future one arms the shared timer.
+ */
+export function kanbanDueRetryItems(): Array<{ key: string; dueAt: number }> {
   const d = dbOrNull();
-  if (!d) return;
-  d.prepare(
-    `UPDATE kanban_board SET status = 'delivered', delivered_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-  ).run(id);
-  nerve.fire("card:delivered", id);
+  if (!d) return [];
+  const rows = d.prepare(
+    `SELECT id, next_retry_at FROM kanban_board WHERE status = 'queued' AND next_retry_at IS NOT NULL`
+  ).all() as Array<{ id: number; next_retry_at: string }>;
+  return rows.flatMap(r => {
+    const t = new Date(r.next_retry_at).getTime();
+    if (!Number.isFinite(t)) return [];
+    return [{ key: `kanban:${r.id}`, dueAt: t }];
+  });
 }
 
 
@@ -303,14 +754,24 @@ export function kanbanList(filter?: string, filterKey?: string): KanbanCard[] {
   return d.prepare(`SELECT * FROM kanban_board WHERE status NOT IN ('delivered') ORDER BY status = 'running' DESC, priority = 'CRITICAL' DESC, created_at DESC LIMIT 50`).all() as KanbanCard[];
 }
 
-export function kanbanUpdate(id: number, fields: Partial<Pick<KanbanCard, "title" | "status" | "priority" | "type" | "labels" | "due_at" | "notes" | "parent_id" | "approval">>): void {
+export function kanbanUpdate(id: number, fields: Partial<Pick<KanbanCard, "title" | "priority" | "type" | "labels" | "due_at" | "notes" | "parent_id" | "approval">>): void {
   const d = dbOrNull();
   if (!d) return;
+  const allowed = new Set(["title", "priority", "type", "labels", "due_at", "notes", "parent_id", "approval"]);
   const sets: string[] = ["updated_at = datetime('now')"];
   const vals: unknown[] = [];
   for (const [k, v] of Object.entries(fields)) {
-    if (v !== undefined) { sets.push(`${k} = ?`); vals.push(v); }
+    if (!allowed.has(k)) throw new Error(`kanbanUpdate cannot update field "${k}"`);
+    if (v === undefined) continue;
+    if (k === "priority") {
+      sets.push("priority = ?");
+      vals.push(normalizePriority(v as string));
+    } else {
+      sets.push(`${k} = ?`);
+      vals.push(v);
+    }
   }
+  if (vals.length === 0) return;
   vals.push(id);
   d.prepare(`UPDATE kanban_board SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
 }
@@ -318,10 +779,22 @@ export function kanbanUpdate(id: number, fields: Partial<Pick<KanbanCard, "title
 export function kanbanCleanup(olderThanDays = 7): number {
   const d = dbOrNull();
   if (!d) return 0;
-  const result = d.prepare(
-    `DELETE FROM kanban_board WHERE status = 'delivered' AND delivered_at < datetime('now', '-' || ? || ' days')`
-  ).run(olderThanDays);
-  return result.changes;
+  // #1590: journal rows must not outlive their card — delete in the same
+  // transaction as the board rows. All terminal statuses age out: delivered
+  // on delivered_at, done/failed on completed_at (fallback updated_at for
+  // cards whose completion never stamped a timestamp).
+  return d.transaction(() => {
+    const doomed = d.prepare(
+      `SELECT id FROM kanban_board
+       WHERE (status = 'delivered' AND delivered_at < datetime('now', '-' || ? || ' days'))
+          OR (status IN ('done','failed') AND COALESCE(completed_at, updated_at) < datetime('now', '-' || ? || ' days'))`
+    ).all(olderThanDays, olderThanDays) as Array<{ id: number }>;
+    const ids = doomed.map(r => r.id);
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => "?").join(", ");
+    d.prepare(`DELETE FROM kanban_card_transitions WHERE card_id IN (${placeholders})`).run(...ids);
+    return d.prepare(`DELETE FROM kanban_board WHERE id IN (${placeholders})`).run(...ids).changes;
+  })();
 }
 
 export function kanbanGetCard(id: number): KanbanCard | undefined {
@@ -352,6 +825,63 @@ export function kanbanGetChildren(parentId: number): KanbanCard[] {
   const d = dbOrNull();
   if (!d) return [];
   return d.prepare(`SELECT * FROM kanban_board WHERE parent_id = ? ORDER BY id`).all(parentId) as KanbanCard[];
+}
+
+// ── #1516: bounded agent orchestration ───────────────────────────────────────
+
+export type WorkerSlotResult =
+  | { ok: true }
+  | { ok: false; reason: "agent_cap_reached"; active: number; workerLimit: number };
+
+export const KANBAN_TERMINAL_STATUSES: readonly string[] = ["done", "delivered", "failed"];
+
+/**
+ * #1516: Central child-admission authority. For a project with a durable
+ * max_agents cap, refuse a new Worker when admitting it would push active
+ * non-terminal type-W children to or past `max_agents - 1`. Queued/admitted
+ * children count; terminal history does not. Uncapped projects always admit.
+ * The count runs on the same synchronous task-database connection as the
+ * subsequent child-card insert, so admission cannot interleave.
+ */
+export function checkWorkerSlotForProject(rootCardId: number): WorkerSlotResult {
+  const d = dbOrNull();
+  if (!d) return { ok: true };
+  const root = d.prepare(`SELECT max_agents FROM kanban_board WHERE id = ?`).get(rootCardId) as { max_agents: number | null } | undefined;
+  if (!root || root.max_agents == null) return { ok: true };
+  const workerLimit = root.max_agents - 1;
+  const placeholders = KANBAN_TERMINAL_STATUSES.map(() => "?").join(",");
+  const row = d.prepare(
+    `SELECT COUNT(*) AS active FROM kanban_board WHERE parent_id = ? AND type = 'W' AND status NOT IN (${placeholders})`
+  ).get(rootCardId, ...KANBAN_TERMINAL_STATUSES) as { active: number };
+  const active = Number(row.active);
+  if (active >= workerLimit) return { ok: false, reason: "agent_cap_reached", active, workerLimit };
+  return { ok: true };
+}
+
+/**
+ * #1516: Attach the validated report artifact to an accepted project card.
+ * Project acceptance already marks the root card done; this fills in the
+ * delivery payload without re-triggering settlement. Idempotent — only
+ * applies while result_path is still null.
+ */
+export function kanbanAttachResult(cardId: number, resultPath: string, summary: string): void {
+  const d = dbOrNull();
+  if (!d) return;
+  d.prepare(
+    `UPDATE kanban_board SET result_path = ?, result_summary = ?, updated_at = datetime('now')
+     WHERE id = ? AND status = 'done' AND result_path IS NULL`
+  ).run(resultPath, summary.slice(0, 4000), cardId);
+}
+
+/** #1516: Release a scheduled project for delivery after shared settlement. */
+export function kanbanSetDeliveryReady(cardId: number): void {
+  const d = dbOrNull();
+  if (!d) return;
+  const result = d.prepare(
+    `UPDATE kanban_board SET delivery_ready = 1, updated_at = datetime('now')
+     WHERE id = ? AND status = 'done' AND delivery_ready = 0`
+  ).run(cardId) as { changes?: number };
+  if ((result.changes ?? 0) === 1) nerve.fire("card:done", cardId);
 }
 
 export function kanbanAddTokens(id: number, tokens: number): void {
@@ -440,6 +970,63 @@ export function kanbanRunningProjectIds(): number[] {
   return d.prepare(
     `SELECT id FROM kanban_board WHERE status = 'running' AND type = 'O' ORDER BY id`
   ).all().map((row: Record<string, unknown>) => Number(row.id));
+}
+
+/**
+ * #1628: stranded Orc roots — a live Kanban status with non-terminal
+ * supervision and no live Orc run. The durability floor for a project whose
+ * ownership relinquishment committed but whose recovery event was lost (e.g.
+ * a crash between the release commit and the publish), or whose root was
+ * queued with no run ever claimed. Project 63's exact state.
+ *
+ * Best-effort: the joined supervision/run tables are created lazily by their
+ * owning stores; a boot that has not constructed them yet yields no strandings.
+ */
+export function kanbanStrandedQueuedProjectIds(): number[] {
+  const d = dbOrNull();
+  if (!d) return [];
+  try {
+    return d.prepare(`
+      SELECT k.id AS project_card_id
+        FROM kanban_board k
+        JOIN project_supervision s ON s.project_card_id = k.id
+       WHERE k.type = 'O'
+         AND k.status IN ('queued', 'running')
+         AND s.state NOT IN ('accepted', 'blocked')
+         AND NOT EXISTS (
+           SELECT 1 FROM orc_project_runs r
+            WHERE r.project_card_id = k.id
+              AND r.state IN ('scheduled', 'dispatching', 'running')
+         )
+       ORDER BY k.id
+    `).all().map((row: Record<string, unknown>) => Number(row.project_card_id));
+  } catch (err) {
+    logDebug("kanban", `stranded-project sweep unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
+}
+
+/**
+ * #1510: Return queued cards in effective dispatch order (priority/age promotion).
+ * Uses SQLite epoch arithmetic for deterministic ordering. Excludes cards whose
+ * next_retry_at is still in the future. Accepts explicit `now` for testing.
+ */
+export function kanbanQueuedDispatchOrder(now?: number): KanbanCard[] {
+  const d = dbOrNull();
+  if (!d) return [];
+  const nowVal = now ?? Date.now();
+  const rows = d.prepare(`
+    SELECT *, (
+      SELECT MIN(3, CASE k.priority
+        WHEN 'CRITICAL' THEN 3 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 1 ELSE 0
+        END + MAX(0, CAST((? - unixepoch(k.created_at)) * 1000 AS INTEGER)) / 60000)
+    ) AS effective_priority
+    FROM kanban_board k
+    WHERE k.status = 'queued'
+      AND (k.next_retry_at IS NULL OR unixepoch(k.next_retry_at) <= ?)
+    ORDER BY effective_priority DESC, k.created_at ASC, k.id ASC
+  `).all(nowVal, Math.floor(nowVal / 1000)) as KanbanCard[];
+  return rows;
 }
 
 /**

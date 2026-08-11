@@ -16,7 +16,8 @@ export interface PowerSafetyResult {
 }
 
 export interface PowerSafetyProbe {
-  inspect(entry: { idleMinutes: number; latestLocalTime: string; currentEntryId?: string }): PowerSafetyResult;
+  /** #1517: an optional exact attempt ID whose own transition marker is ignored. */
+  inspect(entry: { idleMinutes: number; latestLocalTime: string; currentEntryId?: string }, excludeAttemptId?: string): PowerSafetyResult;
 }
 
 export interface WakeVerification {
@@ -44,6 +45,8 @@ export interface PowerTransitionState {
   requestedAt: number;
   expiresAt: number;
   expectedWakeAt: number;
+  /** #1517: unique persisted attempt ID; legacy markers without it stay readable. */
+  attemptId?: string;
 }
 
 /** Fields that the power controller reads from a hardware-sleep task entry. */

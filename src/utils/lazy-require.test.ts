@@ -51,6 +51,28 @@ describe("lazyRequire", { timeout: 30000 }, () => {
   });
 });
 
+describe("resolveNativeDep", () => {
+  it("prefers the shared native-module path", async () => {
+    const { resolveNativeDep } = await import("./lazy-require.js");
+    const staged = join(tmpDir, ".local", "lib", "node_modules", "fixture-native");
+    mkdirSync(staged, { recursive: true });
+    writeFileSync(join(staged, "package.json"), JSON.stringify({ name: "fixture-native", main: "index.cjs" }));
+    writeFileSync(join(staged, "index.cjs"), "module.exports = { source: 'shared' };\n");
+
+    expect(resolveNativeDep("fixture-native").source).toBe("shared");
+  });
+
+  it("falls back to normal module resolution", async () => {
+    const { resolveNativeDep } = await import("./lazy-require.js");
+    expect(resolveNativeDep("node:path").join).toBeTypeOf("function");
+  });
+
+  it("propagates an unavailable native dependency", async () => {
+    const { resolveNativeDep } = await import("./lazy-require.js");
+    expect(() => resolveNativeDep("__missing_native_dep_1231__")).toThrow();
+  });
+});
+
 describe("OPTIONAL_DEPS registry", () => {
   it("has expected entries", async () => {
     const { OPTIONAL_DEPS } = await import("./lazy-require.js");

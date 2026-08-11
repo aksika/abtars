@@ -3,7 +3,7 @@ import { initBridgeLock } from "./components/transport/bridge-lock-transport.js"
 
 import { logInfo, logWarn, logError } from "./components/logger.js";
 import type { BootCtx } from "./boot/context.js";
-import { createBootCtx } from "./boot/context.js";
+import { clearMemoryToolDependencies, createBootCtx } from "./boot/context.js";
 import { phaseConfig } from "./boot/phase-config.js";
 import { phaseMemory } from "./boot/phase-memory.js";
 import { phaseTransport } from "./boot/phase-transport.js";
@@ -15,6 +15,7 @@ import { phaseHeartbeat } from "./boot/phase-heartbeat.js";
 import { phaseSleep } from "./boot/phase-sleep.js";
 import { phaseDashboard } from "./boot/phase-dashboard.js";
 import { phaseAgentApi } from "./boot/phase-agent-api.js";
+import { phaseSessionControl } from "./boot/phase-session-control.js";
 import { phaseShutdown } from "./boot/phase-shutdown.js";
 
 /**
@@ -45,17 +46,18 @@ export class Bridge {
     }, 15_000);
     forceTimer.unref();
 
-    const step = (name: string, fn: () => Promise<void> | void, ms = 3000): Promise<void> =>
-      Promise.race([
-        Promise.resolve(fn()).catch(() => {}),
-        new Promise<void>(r => {
-          const t = setTimeout(() => {
-            logWarn("main", `Shutdown step '${name}' timed out (${ms}ms) — skipping`);
-            r();
-          }, ms);
-          (t as NodeJS.Timeout).unref?.();
-        }),
-      ]);
+    const step = (name: string, fn: () => Promise<void> | void, ms = 3000): Promise<void> => {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<void>(r => {
+        timer = setTimeout(() => {
+          logWarn("main", `Shutdown step '${name}' timed out (${ms}ms) — skipping`);
+          r();
+        }, ms);
+        timer.unref?.();
+      });
+      return Promise.race([Promise.resolve(fn()).catch(() => {}), timeout])
+        .finally(() => { if (timer) clearTimeout(timer); });
+    };
 
     await step("agent-api", () => this.ctx.agentApiServer?.stop());
     await step("peer-transport", () => {
@@ -71,12 +73,16 @@ export class Bridge {
     });
     await step("dashboard", () => this.ctx.dashboardServer?.stop());
     await step("services", () => this.ctx.registry.stopAll());
-    await step("pi-executor", () => this.ctx.piExecutorService?.executor.interruptAll());
+    await step("pi-executor", () => {
+      this.ctx.piExecutorService?.executor.interruptAll();
+      // #1357: Withdraw Pi capability registration on shutdown
+      this.ctx._piCapDisposer?.();
+    });
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
-    await     step("runtime", () => this.ctx.runtime.shutdown());
+    await step("memory-tools", () => clearMemoryToolDependencies(this.ctx));
+    await step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", async () => {
       await this.ctx.memoryRuntime.close().catch(() => {});
-      if (this.ctx.client) await this.ctx.client.close().catch(() => {});
     });
     await step("transport", () => this.ctx.transport?.destroy());
     await step("snapshot", () => { const { removeSnapshot } = require("./components/runtime-health-snapshot.js"); removeSnapshot(); });
@@ -118,6 +124,7 @@ export const BOOT_PHASES = [
   phaseSleep,
   phaseDashboard,
   phaseAgentApi,
+  phaseSessionControl,
   phaseShutdown,
 ] as const;
 

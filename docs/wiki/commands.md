@@ -1,6 +1,6 @@
 # Commands
 
-All commands work on Telegram, Discord, and IRC unless noted otherwise.
+All commands work on Telegram and Discord unless noted otherwise.
 
 ## Session
 

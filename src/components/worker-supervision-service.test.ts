@@ -7,6 +7,8 @@ import { vi } from "vitest";
 let TEST_HOME: string;
 let Service: typeof import("./worker-supervision-service.js").WorkerSupervisionService;
 let Store: typeof import("./worker-supervision-store.js").WorkerSupervisionStore;
+let validateWorkerRootCriteria: typeof import("./worker-supervision-service.js").validateWorkerRootCriteria;
+let ReviewStore: typeof import("./project-acceptance/project-review-store.js").ProjectReviewStore;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -15,8 +17,11 @@ beforeEach(async () => {
   vi.doMock("../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
   const svcMod = await import("./worker-supervision-service.js");
   Service = svcMod.WorkerSupervisionService;
+  validateWorkerRootCriteria = svcMod.validateWorkerRootCriteria;
   const storeMod = await import("./worker-supervision-store.js");
   Store = storeMod.WorkerSupervisionStore;
+  const reviewMod = await import("./project-acceptance/project-review-store.js");
+  ReviewStore = reviewMod.ProjectReviewStore;
 });
 
 afterEach(() => {
@@ -44,8 +49,8 @@ describe("WorkerSupervisionService", () => {
 
   it("createChild returns error for duplicate card", () => {
     const svc = new Service();
-    svc.createChild("Build report", 101, 100, "orc");
-    const result = svc.createChild("Another report", 101, 100, "orc");
+    svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }], expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }] });
+    const result = svc.createChild("Another report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }], expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }] });
     expect("error" in result).toBe(true);
     if ("error" in result) {
       expect(result.error).toContain("already has a contract");
@@ -56,6 +61,7 @@ describe("WorkerSupervisionService", () => {
     const svc = new Service();
     svc.createChild("Build report", 101, 100, "orc", {
       criteria: [{ id: "c1", description: "Test" }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
     });
     const contract = svc.getContractForCard(101);
     expect(contract).toBeDefined();
@@ -70,20 +76,187 @@ describe("WorkerSupervisionService", () => {
   it("cardHasContract returns correct state", () => {
     const svc = new Service();
     expect(svc.cardHasContract(101)).toBe(false);
-    svc.createChild("Build report", 101, 100, "orc");
+    svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }], expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }] });
     expect(svc.cardHasContract(101)).toBe(true);
   });
 
   it("rejects evidence-free supervised children (no criteria)", () => {
     const svc = new Service();
     const result = svc.createChild("Do something", 101, 100, "orc");
-    expect("error" in result).toBe(false);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("at least one acceptance criterion");
+    }
+  });
+
+  it("rejects root-criterion mappings that are unknown to the immutable root contract", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 1,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [{ id: "root_c1", description: "Root criterion", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    expect(validateWorkerRootCriteria(100, "child_c1", ["root_missing"]))
+      .toContain("is not delegable");
+  });
+
+  it("#1604 rejects an empty mapping under a contract-bearing root, naming every legal id", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 1,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [
+        { id: "c1", description: "C1", required: true, evidence_expectation: "synthesis" },
+        { id: "c2", description: "C2", required: true, evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    const err = validateWorkerRootCriteria(100, "child_c1", []);
+    expect(err).toContain("supports_root_criteria is required");
+    expect(err).toContain("c1, c2");
+  });
+
+  it("#1604 admits a supervised child with no mapping when the root has no project contract", () => {
+    const err = validateWorkerRootCriteria(999_001, "child_c1", []);
+    expect(err).toBeUndefined();
+  });
+
+  it("#1604 rejects a case-mismatched mapping and names the legal set", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 1,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [
+        { id: "c1", description: "C1", required: true, evidence_expectation: "synthesis" },
+        { id: "c2", description: "C2", required: true, evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    const err = validateWorkerRootCriteria(100, "child_c1", ["C1"]);
+    expect(err).toContain(`is not delegable`);
+    expect(err).toContain("legal delegated ids: c1, c2");
+  });
+
+  it("#1605 rejects a mapping to an Orc-owned criterion even though the id exists", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 2,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [
+        { id: "lane1", description: "Lane 1", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+        { id: "synthesis", description: "Synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    const err = validateWorkerRootCriteria(100, "child_c1", ["synthesis"]);
+    expect(err).toContain(`"synthesis" is not delegable`);
+    expect(err).toContain("legal delegated ids: lane1");
+    // empty mapping rejected — a delegated criterion exists
+    const emptyErr = validateWorkerRootCriteria(100, "child_c1", []);
+    expect(emptyErr).toContain("supports_root_criteria is required");
+  });
+
+  it("#1605 admits an unmapped child under an Orc-only root (no delegated criteria)", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 2,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [
+        { id: "synthesis", description: "Synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    expect(validateWorkerRootCriteria(100, "child_c1", [])).toBeUndefined();
+  });
+
+  it("#1605 rejects a mapping to an Orc-owned criterion under an Orc-only root", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 2,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [
+        { id: "synthesis", description: "Synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    const err = validateWorkerRootCriteria(100, "child_c1", ["synthesis"]);
+    expect(err).toContain("no delegable root criteria");
+  });
+
+  it("#1604 createChild rejects a supervised child with no mapping under a contract-bearing root", () => {
+    const rootStore = new ReviewStore();
+    rootStore.insertContract({
+      schema_version: 1,
+      id: "pc_root",
+      digest: "root_digest",
+      project_card_id: 100,
+      goal: "Root project",
+      criteria: [{ id: "c1", description: "C1", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "test", authored_by: "orc", created_at: new Date().toISOString() },
+    });
+
+    const svc = new Service();
+    const result = svc.createChild("Child work", 101, 100, "orc", {
+      criteria: [{ id: "l1c1", description: "Must work" }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["l1c1"] }],
+    });
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("supports_root_criteria is required");
+    }
   });
 
   it("renderContractForPrompt produces XML-formatted contract", () => {
     const svc = new Service();
     const result = svc.createChild("Build report", 101, 100, "orc", {
       criteria: [{ id: "c1", description: "Report must exist" }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "output/report.md", required: true, criterion_ids: ["c1"] }],
     });
     expect("error" in result).toBe(false);
     if (!("error" in result)) {
@@ -106,6 +279,7 @@ describe("WorkerSupervisionService", () => {
       const svc = new Service();
       svc.createChild("Build report", 101, 100, "orc", {
         criteria: [{ id: "c1", description: "Must work" }],
+        expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
       });
       const outcome = svc.collectAndSettle(101, "<summary>Done</summary>");
       expect(outcome.settled).toBe(true);
@@ -119,6 +293,7 @@ describe("WorkerSupervisionService", () => {
       const svc = new Service();
       svc.createChild("Build report", 101, 100, "orc", {
         criteria: [{ id: "c1", description: "Must work" }],
+        expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
       });
       const outcome = svc.collectAndSettle(101, `
         <summary>All checks passed</summary>
@@ -131,15 +306,35 @@ describe("WorkerSupervisionService", () => {
       expect(outcome.envelope!.worker_report.unresolved_risks).toHaveLength(1);
     });
 
-    it("settleResult returns conflict on duplicate call", () => {
+    it("terminalSettlement returns conflict on duplicate call", () => {
       const svc = new Service();
       svc.createChild("Build report", 101, 100, "orc", {
         criteria: [{ id: "c1", description: "Must work" }],
+        expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
       });
       svc.collectAndSettle(101, "<summary>Done</summary>");
       const second = svc.collectAndSettle(101, "<summary>Different result</summary>");
       expect(second.settled).toBe(false);
       expect(second.summary).toContain("conflict");
+    });
+
+    it("ignores a late result from an older attempt", () => {
+      const svc = new Service();
+      const created = svc.createChild("Build report", 101, 100, "orc", { criteria: [{ id: "c1", description: "Must work" }], expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }] });
+      if ("error" in created) throw new Error(created.error);
+      const store = new Store();
+      const first = store.getAttempt(created.attemptId)!;
+      store.insertAttempt({
+        id: "a_newer", card_id: 101, contract_id: first.contract_id,
+        ordinal: 2, executor_kind: "local_worker", executor_id: "spin-01",
+        status: "running", started_at: "2026-07-12T00:01:00.000Z",
+      });
+
+      const outcome = svc.collectAndSettle(101, "<summary>late</summary>", undefined, first.id, first.generation);
+      expect(outcome.settled).toBe(false);
+      expect(outcome.stale).toBe(true);
+      expect(store.getAttempt("a_newer")!.lifecycle).toBe("running");
+      expect(store.getResult(first.id)).toBeUndefined();
     });
   });
 });

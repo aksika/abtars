@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const SUPPORTED_SCHEMA_VERSION = 1;
+export const SUPPORTED_SCHEMA_VERSION = 2;
 export const MAX_GOAL_LENGTH = 4000;
 export const MAX_CRITERIA_COUNT = 30;
 export const MAX_CRITERION_DESC_LENGTH = 500;
@@ -16,12 +16,27 @@ export const MAX_REPAIR_ROUNDS = 5;
 export type EvidenceExpectation = "observed" | "artifact" | "synthesis";
 export type OutputKind = "file" | "directory" | "report" | "logical";
 
-export interface ProjectCriterion {
+/** #1605: who is responsible for producing/evaluating a root criterion. */
+export type CriterionExecutionOwner = "delegated" | "orc";
+
+/** v1 historical schema: every criterion is required and delegated. */
+export interface ProjectCriterionV1 {
   readonly id: string;
   readonly description: string;
   readonly required: true;
   readonly evidence_expectation: EvidenceExpectation;
 }
+
+/** v2 schema: ownership and requiredness are explicit per criterion. */
+export interface ProjectCriterionV2 {
+  readonly id: string;
+  readonly description: string;
+  readonly required: boolean;
+  readonly execution_owner: CriterionExecutionOwner;
+  readonly evidence_expectation: EvidenceExpectation;
+}
+
+export type ProjectCriterion = ProjectCriterionV1 | ProjectCriterionV2;
 
 export interface RequiredOutput {
   readonly id: string;
@@ -50,12 +65,29 @@ export interface ProjectAcceptanceContractV1 {
   readonly digest: string;
   readonly project_card_id: number;
   readonly goal: string;
-  readonly criteria: readonly ProjectCriterion[];
+  readonly criteria: readonly ProjectCriterionV1[];
   readonly required_outputs: readonly RequiredOutput[];
   readonly constraints: readonly string[];
   readonly limits: ProjectContractLimits;
   readonly provenance: ProjectContractProvenance;
 }
+
+export interface ProjectAcceptanceContractV2 {
+  readonly schema_version: 2;
+  readonly id: string;
+  readonly digest: string;
+  readonly project_card_id: number;
+  readonly goal: string;
+  readonly criteria: readonly ProjectCriterionV2[];
+  readonly required_outputs: readonly RequiredOutput[];
+  readonly constraints: readonly string[];
+  readonly limits: ProjectContractLimits;
+  readonly provenance: ProjectContractProvenance;
+}
+
+export type ProjectAcceptanceContract =
+  | ProjectAcceptanceContractV1
+  | ProjectAcceptanceContractV2;
 
 export interface ContractCriterionMapping {
   readonly child_contract_id: string;
@@ -84,11 +116,11 @@ export interface ValidationIssue {
 }
 
 export type ValidationResult =
-  | { ok: true; contract: ProjectAcceptanceContractV1 }
+  | { ok: true; contract: ProjectAcceptanceContract }
   | { ok: false; errors: readonly ValidationIssue[] };
 
 export type NormalizeResult =
-  | { ok: true; contract: ProjectAcceptanceContractV1 }
+  | { ok: true; contract: ProjectAcceptanceContractV2 }
   | { ok: false; errors: readonly ValidationIssue[] };
 
 function issue(severity: ValidationSeverity, tag: ValidationTag, path: string, message: string): ValidationIssue {
@@ -156,21 +188,11 @@ function errCollect<T>(arr: readonly T[], fn: (item: T, index: number) => readon
 
 const VALID_EVIDENCE_EXPECTATIONS: readonly string[] = ["observed", "artifact", "synthesis"];
 const VALID_OUTPUT_KINDS: readonly string[] = ["file", "directory", "report", "logical"];
+const VALID_EXECUTION_OWNERS: readonly string[] = ["delegated", "orc"];
 
-export function validateContract(raw: unknown): ValidationResult {
-  const errors: ValidationIssue[] = [];
+// ── Shared field validation (both schema versions) ────────────────────────────
 
-  if (typeof raw !== "object" || raw === null) {
-    return { ok: false, errors: [error("type_error", "$", "contract must be an object")] };
-  }
-
-  const obj = raw as Record<string, unknown>;
-
-  if (obj["schema_version"] !== 1) {
-    errors.push(error("unknown_version", "$.schema_version", `unsupported schema_version: ${String(obj["schema_version"])}`));
-    return { ok: false, errors };
-  }
-
+function validateSharedFields(obj: Record<string, unknown>, errors: ValidationIssue[]): void {
   if (!isNonEmptyString(obj["id"])) {
     errors.push(error("missing_field", "$.id", "contract id is required"));
   }
@@ -183,48 +205,6 @@ export function validateContract(raw: unknown): ValidationResult {
     errors.push(error("missing_field", "$.goal", "goal is required"));
   } else if ((obj["goal"] as string).length > MAX_GOAL_LENGTH) {
     errors.push(error("too_long", "$.goal", `goal exceeds ${MAX_GOAL_LENGTH} characters`));
-  }
-
-  // criteria
-  if (!Array.isArray(obj["criteria"])) {
-    errors.push(error("missing_field", "$.criteria", "criteria is required"));
-  } else {
-    if (obj["criteria"].length === 0) {
-      errors.push(error("too_few", "$.criteria", "at least one criterion is required"));
-    }
-    if (obj["criteria"].length > MAX_CRITERIA_COUNT) {
-      errors.push(error("too_many", "$.criteria", `criteria count exceeds ${MAX_CRITERIA_COUNT}`));
-    }
-    const ids = new Set<string>();
-    errors.push(...errCollect(obj["criteria"] as unknown[], (c, i) => {
-      const path = `$.criteria[${i}]`;
-      const e: ValidationIssue[] = [];
-      if (typeof c !== "object" || c === null) {
-        e.push(error("type_error", path, "criterion must be an object"));
-        return e;
-      }
-      const cObj = c as Record<string, unknown>;
-      if (!isNonEmptyString(cObj["id"])) {
-        e.push(error("missing_field", `${path}.id`, "criterion id is required"));
-      } else if (ids.has(cObj["id"] as string)) {
-        e.push(error("duplicate_id", `${path}.id`, `duplicate criterion id "${cObj["id"]}"`));
-      } else {
-        ids.add(cObj["id"] as string);
-      }
-      if (!isNonEmptyString(cObj["description"])) {
-        e.push(error("missing_field", `${path}.description`, "criterion description is required"));
-      } else if ((cObj["description"] as string).length > MAX_CRITERION_DESC_LENGTH) {
-        e.push(error("too_long", `${path}.description`, `description exceeds ${MAX_CRITERION_DESC_LENGTH} characters`));
-      }
-      if (cObj["required"] !== true) {
-        e.push(error("type_error", `${path}.required`, "project criterion must be required: true"));
-      }
-      const ee = cObj["evidence_expectation"];
-      if (!VALID_EVIDENCE_EXPECTATIONS.includes(ee as string)) {
-        e.push(error("type_error", `${path}.evidence_expectation`, `must be one of: ${VALID_EVIDENCE_EXPECTATIONS.join(", ")}`));
-      }
-      return e;
-    }));
   }
 
   // required_outputs
@@ -326,22 +306,143 @@ export function validateContract(raw: unknown): ValidationResult {
       errors.push(error("missing_field", "$.provenance.created_at", "created_at is required"));
     }
   }
+}
 
+// ── Criteria validation (per version) ─────────────────────────────────────────
+
+function validateCriteriaV1(raw: unknown, errors: ValidationIssue[]): void {
+  if (!Array.isArray(raw)) {
+    errors.push(error("missing_field", "$.criteria", "criteria is required"));
+    return;
+  }
+  if (raw.length === 0) {
+    errors.push(error("too_few", "$.criteria", "at least one criterion is required"));
+  }
+  if (raw.length > MAX_CRITERIA_COUNT) {
+    errors.push(error("too_many", "$.criteria", `criteria count exceeds ${MAX_CRITERIA_COUNT}`));
+  }
+  const ids = new Set<string>();
+  errors.push(...errCollect(raw, (c, i) => {
+    const path = `$.criteria[${i}]`;
+    const e: ValidationIssue[] = [];
+    if (typeof c !== "object" || c === null) {
+      e.push(error("type_error", path, "criterion must be an object"));
+      return e;
+    }
+    const cObj = c as Record<string, unknown>;
+    if (!isNonEmptyString(cObj["id"])) {
+      e.push(error("missing_field", `${path}.id`, "criterion id is required"));
+    } else if (ids.has(cObj["id"] as string)) {
+      e.push(error("duplicate_id", `${path}.id`, `duplicate criterion id "${cObj["id"]}"`));
+    } else {
+      ids.add(cObj["id"] as string);
+    }
+    if (!isNonEmptyString(cObj["description"])) {
+      e.push(error("missing_field", `${path}.description`, "criterion description is required"));
+    } else if ((cObj["description"] as string).length > MAX_CRITERION_DESC_LENGTH) {
+      e.push(error("too_long", `${path}.description`, `description exceeds ${MAX_CRITERION_DESC_LENGTH} characters`));
+    }
+    if (cObj["required"] !== true) {
+      e.push(error("type_error", `${path}.required`, "project criterion must be required: true"));
+    }
+    const ee = cObj["evidence_expectation"];
+    if (!VALID_EVIDENCE_EXPECTATIONS.includes(ee as string)) {
+      e.push(error("type_error", `${path}.evidence_expectation`, `must be one of: ${VALID_EVIDENCE_EXPECTATIONS.join(", ")}`));
+    }
+    return e;
+  }));
+}
+
+function validateCriteriaV2(raw: unknown, errors: ValidationIssue[]): void {
+  if (!Array.isArray(raw)) {
+    errors.push(error("missing_field", "$.criteria", "criteria is required"));
+    return;
+  }
+  if (raw.length === 0) {
+    errors.push(error("too_few", "$.criteria", "at least one criterion is required"));
+  }
+  if (raw.length > MAX_CRITERIA_COUNT) {
+    errors.push(error("too_many", "$.criteria", `criteria count exceeds ${MAX_CRITERIA_COUNT}`));
+  }
+  const ids = new Set<string>();
+  errors.push(...errCollect(raw, (c, i) => {
+    const path = `$.criteria[${i}]`;
+    const e: ValidationIssue[] = [];
+    if (typeof c !== "object" || c === null) {
+      e.push(error("type_error", path, "criterion must be an object"));
+      return e;
+    }
+    const cObj = c as Record<string, unknown>;
+    if (!isNonEmptyString(cObj["id"])) {
+      e.push(error("missing_field", `${path}.id`, "criterion id is required"));
+    } else if (ids.has(cObj["id"] as string)) {
+      e.push(error("duplicate_id", `${path}.id`, `duplicate criterion id "${cObj["id"]}"`));
+    } else {
+      ids.add(cObj["id"] as string);
+    }
+    if (!isNonEmptyString(cObj["description"])) {
+      e.push(error("missing_field", `${path}.description`, "criterion description is required"));
+    } else if ((cObj["description"] as string).length > MAX_CRITERION_DESC_LENGTH) {
+      e.push(error("too_long", `${path}.description`, `description exceeds ${MAX_CRITERION_DESC_LENGTH} characters`));
+    }
+    if (typeof cObj["required"] !== "boolean") {
+      e.push(error("type_error", `${path}.required`, "required must be a boolean"));
+    }
+    const owner = cObj["execution_owner"];
+    if (!VALID_EXECUTION_OWNERS.includes(owner as string)) {
+      e.push(error("type_error", `${path}.execution_owner`, `must be one of: ${VALID_EXECUTION_OWNERS.join(", ")}`));
+    }
+    const ee = cObj["evidence_expectation"];
+    if (!VALID_EVIDENCE_EXPECTATIONS.includes(ee as string)) {
+      e.push(error("type_error", `${path}.evidence_expectation`, `must be one of: ${VALID_EVIDENCE_EXPECTATIONS.join(", ")}`));
+    } else if (owner === "orc" && ee !== "synthesis") {
+      e.push(error("type_error", `${path}.execution_owner`, "orc-owned criteria must use synthesis evidence"));
+    }
+    return e;
+  }));
+}
+
+function finishValidation(errors: ValidationIssue[], contract: unknown): ValidationResult {
   if (errors.length > 0) {
     return { ok: false, errors };
   }
-
-  const contract = obj as unknown as ProjectAcceptanceContractV1;
-
   const jsonBytes = Buffer.byteLength(JSON.stringify(contract), "utf-8");
   if (jsonBytes > MAX_CONTRACT_JSON_BYTES) {
     errors.push(error("too_long", "$", `contract JSON exceeds ${MAX_CONTRACT_JSON_BYTES} bytes`));
     return { ok: false, errors };
   }
-
-  return { ok: true, contract };
+  return { ok: true, contract: contract as ProjectAcceptanceContract };
 }
 
+export function validateContract(raw: unknown): ValidationResult {
+  if (typeof raw !== "object" || raw === null) {
+    return { ok: false, errors: [error("type_error", "$", "contract must be an object")] };
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const errors: ValidationIssue[] = [];
+
+  if (obj["schema_version"] === 1) {
+    validateSharedFields(obj, errors);
+    validateCriteriaV1(obj["criteria"], errors);
+    return finishValidation(errors, obj);
+  }
+
+  if (obj["schema_version"] === 2) {
+    validateSharedFields(obj, errors);
+    validateCriteriaV2(obj["criteria"], errors);
+    return finishValidation(errors, obj);
+  }
+
+  errors.push(error("unknown_version", "$.schema_version", `unsupported schema_version: ${String(obj["schema_version"])}`));
+  return { ok: false, errors };
+}
+
+/**
+ * #1605: emit v2 contracts only. `required` and `execution_owner` are explicit
+ * Orc-supplied fields — normalization never guesses them (missing values fall
+ * through to validation and fail admission).
+ */
 export function normalizeContract(raw: unknown): NormalizeResult {
   if (typeof raw !== "object" || raw === null) {
     return { ok: false, errors: [error("type_error", "$", "contract must be an object")] };
@@ -354,7 +455,8 @@ export function normalizeContract(raw: unknown): NormalizeResult {
   const criteria = criteriaRaw.map(c => ({
     id: (c as Record<string, unknown>)["id"] as string,
     description: (c as Record<string, unknown>)["description"] as string,
-    required: true as const,
+    required: (c as Record<string, unknown>)["required"] as boolean,
+    execution_owner: (c as Record<string, unknown>)["execution_owner"] as CriterionExecutionOwner,
     evidence_expectation: ((c as Record<string, unknown>)["evidence_expectation"] as EvidenceExpectation) ?? "synthesis",
   }));
 
@@ -371,7 +473,7 @@ export function normalizeContract(raw: unknown): NormalizeResult {
   const provenanceRaw = (typeof obj["provenance"] === "object" && obj["provenance"] !== null) ? (obj["provenance"] as Record<string, unknown>) : undefined;
 
   const built: Record<string, unknown> = {
-    schema_version: 1,
+    schema_version: 2,
     id,
     digest: "",
     project_card_id: typeof obj["project_card_id"] === "number" ? obj["project_card_id"] : 0,
@@ -401,15 +503,56 @@ export function normalizeContract(raw: unknown): NormalizeResult {
   const validated = validateContract(built);
   if (!validated.ok) return validated;
 
-  return { ok: true, contract: built as unknown as ProjectAcceptanceContractV1 };
+  return { ok: true, contract: built as unknown as ProjectAcceptanceContractV2 };
+}
+
+// ── #1605: common policy projection ───────────────────────────────────────────
+
+export interface CriterionPolicyView {
+  id: string;
+  description: string;
+  required: boolean;
+  execution_owner: CriterionExecutionOwner;
+  evidence_expectation: EvidenceExpectation;
+}
+
+/**
+ * The single ownership/requiredness projection. v1 contracts are normalized
+ * in memory only to their original semantics: required=true, delegated.
+ * New production authoring emits v2 only; v1 JSON is never rewritten.
+ */
+export function criterionPolicyView(contract: ProjectAcceptanceContract): readonly CriterionPolicyView[] {
+  if (contract.schema_version === 1) {
+    return contract.criteria.map(c => ({
+      id: c.id,
+      description: c.description,
+      required: true,
+      execution_owner: "delegated" as const,
+      evidence_expectation: c.evidence_expectation,
+    }));
+  }
+  return contract.criteria.map(c => ({
+    id: c.id,
+    description: c.description,
+    required: c.required,
+    execution_owner: c.execution_owner,
+    evidence_expectation: c.evidence_expectation,
+  }));
+}
+
+/** #1605: only delegated criteria are legal mapping targets / coverage members. */
+export function delegatedCriterionIds(contract: ProjectAcceptanceContract): readonly string[] {
+  return criterionPolicyView(contract)
+    .filter(c => c.execution_owner === "delegated")
+    .map(c => c.id);
 }
 
 /**
  * Validate a child contract's root criterion mapping.
- * Returns errors for unknown root IDs.
+ * Returns errors for unknown root IDs and for mappings to Orc-owned criteria.
  */
 export function validateCriterionMapping(
-  rootContract: ProjectAcceptanceContractV1,
+  rootContract: ProjectAcceptanceContract,
   mapping: ContractCriterionMapping,
 ): readonly ValidationIssue[] {
   const errors: ValidationIssue[] = [];
@@ -420,7 +563,9 @@ export function validateCriterionMapping(
     errors.push(error("missing_field", "$.supports_root_criteria", "supports_root_criteria must be an array"));
     return errors;
   }
-  const rootIds = new Set(rootContract.criteria.map(c => c.id));
+  const legalIds = delegatedCriterionIds(rootContract);
+  const rootIds = new Set(legalIds);
+  const legalList = legalIds.length > 0 ? legalIds.join(", ") : "(none — all root criteria are Orc-owned)";
   const seen = new Set<string>();
   for (let i = 0; i < mapping.supports_root_criteria.length; i++) {
     const rcId = mapping.supports_root_criteria[i]!;
@@ -431,7 +576,7 @@ export function validateCriterionMapping(
     } else {
       seen.add(rcId);
       if (!rootIds.has(rcId)) {
-        errors.push(error("bad_reference", `$.supports_root_criteria[${i}]`, `unknown root criterion id "${rcId}"`));
+        errors.push(error("bad_reference", `$.supports_root_criteria[${i}]`, `root criterion id "${rcId}" is not delegable (unknown or Orc-owned); legal delegated ids: ${legalList}`));
       }
     }
   }
@@ -439,11 +584,12 @@ export function validateCriterionMapping(
 }
 
 /**
- * Find which root criteria have no child contract mapping them.
+ * Find which delegated root criteria have no child contract mapping them.
  * Returns list of uncovered criterion IDs (not errors — they are valid gaps).
+ * Orc-owned criteria never appear here.
  */
 export function findUncoveredCriteria(
-  rootContract: ProjectAcceptanceContractV1,
+  rootContract: ProjectAcceptanceContract,
   mappings: readonly ContractCriterionMapping[],
 ): readonly string[] {
   const covered = new Set<string>();
@@ -452,7 +598,6 @@ export function findUncoveredCriteria(
       covered.add(rcId);
     }
   }
-  return rootContract.criteria
-    .map(c => c.id)
+  return delegatedCriterionIds(rootContract)
     .filter(id => !covered.has(id));
 }

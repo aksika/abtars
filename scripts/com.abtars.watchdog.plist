@@ -21,7 +21,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>{{HOME}}/.abtars/bin:{{HOME}}/.local/bin:{{HOME}}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>{{HOME}}/.abtars/bin:{{HOME}}/.local/bin:{{HOME}}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>NODE_PATH</key>
     <string>{{HOME}}/.local/lib/node_modules</string>
   </dict>

@@ -5,8 +5,8 @@
  * and appends them to the durable outbox.
  */
 
-import type { PiRunRecord } from "../pi-executor/types.js";
-import type { PiRunStore } from "../pi-executor/pi-run-store.js";
+import type { PiRunRecord, PiRunStatus } from "../pi-executor/types.js";
+import type { PiRunStore, RemotePiTransitionEmitter } from "../pi-executor/pi-run-store.js";
 import type {
   RemotePiEventV1,
   RemotePiEventKind,
@@ -66,12 +66,119 @@ function coalesceProgress(payload: string): RemotePiPublicProjectionV1["progress
 
 /**
  * Owner-side event producer for remote Pi lifecycle.
+ *
+ * Two emission paths exist:
+ *
+ * 1. `emitTransitionInTx` — mechanism A (spec #1358 review invariant #1):
+ *    called by PiRunStore INSIDE the same transaction that applies a public
+ *    run transition. The transition and its outbox event commit together;
+ *    snapshot scanning is never the durability mechanism.
+ * 2. `produceEvent`/`produceProgress` — standalone appends (progress facts,
+ *    which have no run-transition counterpart). These open their own
+ *    transaction via `appendEventAuto`.
  */
-export class RemotePiEventProducer {
+export class RemotePiEventProducer implements RemotePiTransitionEmitter {
   private readonly deps: EventProducerDeps;
 
   constructor(deps: EventProducerDeps) {
     this.deps = deps;
+  }
+
+  /**
+   * Map a public run transition to its lifecycle event kind.
+   * Returns null for transitions that produce no event (same-status updates,
+   * internal-only statuses).
+   */
+  private static kindForTransition(
+    fromStatus: string | undefined,
+    toStatus: string,
+    generationBumped: boolean,
+  ): RemotePiEventKind | null {
+    if (generationBumped) return "resumed";
+    // A reply that clears pending input is the `input_cleared` fact — it must
+    // not be emitted as a plain `running` event, or the origin's pending-input
+    // projection would never clear.
+    if (fromStatus === "awaiting_input" && toStatus === "running") return "input_cleared";
+    if (fromStatus !== undefined && fromStatus === toStatus) return null;
+    switch (toStatus) {
+      case "accepted": return "accepted";
+      case "queued": return "queued";
+      case "starting": return "starting";
+      case "running": return "running";
+      case "awaiting_input": return "awaiting_input";
+      case "cancelling": return "cancelling";
+      case "interrupted": return "interrupted";
+      case "completed": return "completed";
+      case "failed": return "failed";
+      case "cancelled": return "cancelled";
+      default: return null;
+    }
+  }
+
+  /**
+   * #1358 review — In-transaction transition emission (mechanism A).
+   * Synchronous; runs inside the store's transition transaction. Reads the
+   * run through the store (same connection → sees the uncommitted transition)
+   * and appends the outbox row without opening a nested transaction.
+   */
+  emitTransitionInTx(input: {
+    runId: string;
+    fromStatus: string | undefined;
+    toStatus: string;
+    newGeneration?: number;
+  }): void {
+    const { runId, fromStatus, toStatus, newGeneration } = input;
+
+    const run = this.deps.store.get(runId);
+    if (!run || !run.originPeer) return; // not a delegated run
+
+    const generationBumped = newGeneration !== undefined;
+    const kind = RemotePiEventProducer.kindForTransition(fromStatus, toStatus, generationBumped);
+    if (!kind) return;
+
+    // The resumed event must carry the NEW generation. For the other kinds the
+    // run record already reflects the transitioned state (read inside the tx).
+    const runForProjection = kind === "resumed"
+      ? { ...run, status: toStatus as PiRunStatus, executionGeneration: newGeneration! }
+      : run;
+
+    const uiRequest = runForProjection.pendingRequestId && runForProjection.status === "awaiting_input"
+      ? this.deps.store.getLatestUiRequest(runForProjection.id)
+      : null;
+    const projection = buildPublicProjection(runForProjection, uiRequest);
+    validatePublicProjection(projection);
+
+    const occurredAt = new Date().toISOString();
+    const projectionJson = JSON.stringify(projection);
+
+    const result = this.deps.store.appendEventAutoInTx({
+      runId,
+      cardId: run.cardId,
+      generation: runForProjection.executionGeneration,
+      originPeer: run.originPeer,
+      originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+      kind,
+      occurredAt,
+      projectionJson,
+      computeFields: (seq) => {
+        const eId = deriveEventId(runId, seq);
+        const hash = computeEventHash({
+          version: 1,
+          event_id: eId,
+          origin_peer: run.originPeer!,
+          origin_request_id: run.originRequestId ?? run.originChatId ?? run.id,
+          run_id: runId,
+          remote_card_id: run.cardId,
+          generation: runForProjection.executionGeneration,
+          sequence: seq,
+          kind,
+          occurred_at: occurredAt,
+          projection,
+        });
+        return { eventId: eId, contentSha256: hash };
+      },
+    });
+    logTrace(TAG, `In-tx event appended for run ${runId} kind=${kind} (seq ${result.sequence})`);
   }
 
   /**
@@ -138,7 +245,7 @@ export class RemotePiEventProducer {
             origin_peer: originPeer,
             origin_request_id: originRequestId,
             run_id: run.id,
-            card_id: run.cardId,
+            remote_card_id: run.cardId,
             generation: run.executionGeneration,
             sequence: seq,
             kind,
@@ -329,12 +436,94 @@ export class RemotePiEventProducer {
   }
 
   /**
+   * Recover state facts whose transition hook was interrupted by a process
+   * crash. The run row is authoritative; an absent/stale outbox projection is
+   * repaired before normal delivery draining resumes.
+   */
+  async recoverMissingEvents(originPeer?: string): Promise<number> {
+    let repaired = 0;
+    for (const run of this.deps.store.list()) {
+      if (!run.originPeer || (originPeer && run.originPeer !== originPeer)) continue;
+      const max = this.deps.store.getMaxSequence(run.id);
+      const latest = max > 0
+        ? this.deps.store.getEventsAfter({ runId: run.id, afterSequence: max - 1, limit: 1 })[0]
+        : undefined;
+      let projectionStatus: string | undefined;
+      let projectionGeneration: number | undefined;
+      const latestKind = latest?.kind;
+      if (latest) {
+        try {
+          const projection = JSON.parse(latest.projection_json) as { status?: string; generation?: number };
+          projectionStatus = projection.status;
+          projectionGeneration = latest.generation;
+        } catch { /* malformed local row is handled by normal delivery validation */ }
+      }
+      // Creation emits accepted and queued as separate facts. If a crash
+      // happened before either append, restore both facts before reconciling
+      // the run's current state so the origin sees the complete lifecycle.
+      if (!latest) {
+        const accepted = await this.produceEvent({
+          run: { ...run, status: "queued" },
+          kind: "accepted",
+          originPeer: run.originPeer,
+          originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+        });
+        if (accepted) repaired++;
+        const queued = await this.produceEvent({
+          run: { ...run, status: "queued" },
+          kind: "queued",
+          originPeer: run.originPeer,
+          originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+        });
+        if (queued) repaired++;
+        if (run.status !== "queued") {
+          const current = await this.produceFromTransition({
+            run,
+            previousStatus: "queued",
+            originPeer: run.originPeer,
+            originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+          });
+          if (current) repaired++;
+        }
+        continue;
+      }
+      if (latestKind === "accepted") {
+        const queued = await this.produceEvent({
+          run: { ...run, status: "queued" },
+          kind: "queued",
+          originPeer: run.originPeer,
+          originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+        });
+        if (queued) repaired++;
+        if (run.status !== "queued") {
+          const current = await this.produceFromTransition({
+            run,
+            previousStatus: "queued",
+            originPeer: run.originPeer,
+            originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+          });
+          if (current) repaired++;
+        }
+      } else if (!latest || projectionStatus !== run.status || projectionGeneration !== run.executionGeneration) {
+        const result = await this.produceFromTransition({
+          run,
+          previousStatus: projectionStatus,
+          originPeer: run.originPeer,
+          originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
+        });
+        if (result) repaired++;
+      }
+    }
+    return repaired;
+  }
+
+  /**
    * Build a complete event envelope from stored event data.
-   * Uses the card_id and occurred_at stored alongside the event.
+   * Uses the remote_card_id and occurred_at stored alongside the event.
    */
   buildEventEnvelope(row: {
     run_id: string;
-    card_id: number;
+    remote_card_id: number;
     generation: number;
     sequence: number;
     event_id: string;
@@ -355,7 +544,7 @@ export class RemotePiEventProducer {
       origin_peer: row.origin_peer,
       origin_request_id: row.origin_request_id,
       run_id: row.run_id,
-      card_id: row.card_id,
+      remote_card_id: row.remote_card_id,
       generation: row.generation,
       sequence: row.sequence,
       kind: row.kind as RemotePiEventKind,

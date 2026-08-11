@@ -102,7 +102,7 @@ describe("failure-classifier", () => {
     const leaseSnapshot = {
       attemptId: "a_test_1",
       semanticState: "stalled" as const,
-      evaluation: "cancel_requested" as const,
+      evaluation: { phase: "cancel_requested" },
     };
     const result = classify({ ...baseInput, leaseSnapshot } as any);
     expect(result.classification.primary).toBe("lease_expired");

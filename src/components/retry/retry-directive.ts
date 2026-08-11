@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
+import type { WorkerAcceptanceContractV1, RetryContext, WorkerContractRevisionV1 } from "../worker-contract.js";
+import { createContractId } from "../worker-contract.js";
 import type { FailureClassificationV1 } from "./failure-classifier.js";
 import type { RetryPolicyDecision } from "./retry-policy.js";
 import type { SelectionRationale } from "./executor-selector.js";
@@ -119,16 +120,34 @@ export function buildDirective(
 export function deriveContractRevision(
   original: WorkerAcceptanceContractV1,
   directive: RetryDirectiveV1,
+  _cardId: number,
+  revision: number,
 ): WorkerAcceptanceContractV1 {
-  const retryContextSection = `\n\nRETRY CONTEXT (attempt ${directive.source_attempt_id} → ${directive.target_ordinal}):\n${directive.strategy.instruction}\nDo not repeat: ${directive.strategy.do_not_repeat.join(", ")}\nPrior evidence: ${directive.prior_context.evidence_ids.join(", ")}\nFailed criteria: ${directive.prior_context.failed_criterion_ids.join(", ")}`;
+  const rootId = original.revision_meta?.root_contract_id ?? original.id;
+  const retryContext: RetryContext = {
+    directive_id: directive.id,
+    mode: directive.mode,
+    instruction: directive.strategy.instruction,
+    do_not_repeat: directive.strategy.do_not_repeat,
+    prior_evidence_ids: directive.prior_context.evidence_ids,
+    failed_criterion_ids: directive.prior_context.failed_criterion_ids,
+    unresolved_risks: directive.prior_context.unresolved_risks,
+  };
+  const revMeta: WorkerContractRevisionV1 = {
+    revision,
+    root_contract_id: rootId,
+    parent_contract_id: original.id,
+    source_attempt_id: directive.source_attempt_id,
+    retry_context: retryContext,
+  };
 
-  const revisedGoal = original.goal + retryContextSection;
-
+  const newId = createContractId();
   const revised: Record<string, unknown> = {
     schema_version: 1,
-    id: original.id,
+    id: newId,
     digest: "",
-    goal: revisedGoal.slice(0, 4000),
+    revision_meta: revMeta,
+    goal: original.goal,
     criteria: original.criteria.map(c => ({ id: c.id, description: c.description })),
     expected_artifacts: original.expected_artifacts.map(a => ({
       id: a.id,
@@ -145,6 +164,7 @@ export function deriveContractRevision(
       criterion_ids: [...c.criterion_ids],
     })),
     required_capabilities: [...original.required_capabilities],
+    supports_root_criteria: original.supports_root_criteria ? [...original.supports_root_criteria] : undefined,
     limits: { ...original.limits },
     provenance: { ...original.provenance },
   };
@@ -183,24 +203,26 @@ export function validateContractRevision(original: WorkerAcceptanceContractV1, r
 
   if (revised.criteria.length < original.criteria.length) {
     errors.push("criteria count cannot decrease");
-  }
-
-  const originalCriteriaMap = new Map(original.criteria.map(c => [c.id, c]));
-  for (const rc of revised.criteria) {
-    const oc = originalCriteriaMap.get(rc.id);
-    if (oc && rc.description !== oc.description) {
-      errors.push(`criterion ${rc.id} description changed`);
+  } else {
+    const originalCriteriaMap = new Map(original.criteria.map(c => [c.id, c]));
+    for (const rc of revised.criteria) {
+      const oc = originalCriteriaMap.get(rc.id);
+      if (oc && rc.description !== oc.description) {
+        errors.push(`criterion ${rc.id} description changed`);
+      }
     }
   }
 
-  const originalCapCount = original.required_capabilities.length;
-  const revisedCapCount = revised.required_capabilities.length;
-  if (revisedCapCount < originalCapCount) {
+  if (revised.required_capabilities.length < original.required_capabilities.length) {
     errors.push("capabilities cannot be removed");
   }
 
-  if (!revised.goal.startsWith(original.goal.slice(0, 100))) {
+  if (revised.goal !== original.goal) {
     errors.push("root goal changed");
+  }
+
+  if (JSON.stringify(revised.limits) !== JSON.stringify(original.limits)) {
+    errors.push("limits cannot be weakened");
   }
 
   return errors;

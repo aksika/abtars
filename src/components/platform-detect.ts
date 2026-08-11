@@ -3,13 +3,17 @@ import { logAndSwallow } from "./log-and-swallow.js";
  * Platform-specific wake classification.
  * Detects whether a resume from sleep is a background wake (darkwake) or full user wake.
  *
- * #1321: hardware sleep is gone. This module retains only general standby
- * detection for non-bridge-initiated sleeps (lid close, OS idle) used by the
- * heartbeat resume handler — it no longer classifies a bridge-owned sleep window.
+ * #1532: the bridge-owned hardware suspend marker (state/power-transition.json,
+ * written by the #1322 hardware-sleep power action) is classified first — it is
+ * authoritative over the OS log inside the owned overnight window. General
+ * standby detection for non-bridge-initiated sleeps (lid close, OS idle)
+ * remains the OS fallback used by the heartbeat resume handler.
  */
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { platform } from "node:os";
+import { PowerTransitionStore } from "../capabilities/power/power-transition-store.js";
+import type { PowerTransitionState } from "../capabilities/power/types.js";
 
 /** #1265: WSL detection — cached at module load since the platform never changes at runtime.
  *  WSL kernels append "microsoft" or "WSL" to /proc/version. */
@@ -31,13 +35,55 @@ export const WSL_STANDBY_THRESHOLD_MS = 180 * 60 * 1000;
 
 export type ResumeKind = "dark" | "full" | "unknown";
 
+/** #1532: injectable inputs for the resume classifier (tests only). */
+export interface ClassifyResumeOptions {
+  /** Power-transition marker store; defaults to the runtime file. */
+  transitionStore?: PowerTransitionStore;
+  /** Clock for the owned-window boundary checks; defaults to Date.now(). */
+  now?: number;
+}
+
 /** Classify the current wake state. Fast, non-throwing. */
-export function classifyResume(): ResumeKind {
+export function classifyResume(opts: ClassifyResumeOptions = {}): ResumeKind {
+  const owned = classifyBridgeOwnedSuspend(opts);
+  if (owned !== null) return owned;
   // OS-specific detection for non-bridge-initiated sleeps (lid close, idle).
   const os = platform();
   if (os === "darwin") return classifyMacOS();
   if (os === "linux") return classifyLinux();
   return "unknown";
+}
+
+/**
+ * #1532: classify the bridge-owned hardware suspend window from the
+ * power-transition marker. A valid, unexpired marker means the bridge itself
+ * requested the hardware suspend; pre-wake darkwakes are `"dark"`, and the
+ * expected-wake boundary is the deterministic handoff back to `"full"`.
+ * Absent, corrupt, malformed, future-requested, or expired markers return
+ * null so the caller falls through to OS detection.
+ */
+function classifyBridgeOwnedSuspend(opts: ClassifyResumeOptions): ResumeKind | null {
+  const store = opts.transitionStore ?? new PowerTransitionStore();
+  const state = store.read();
+  if (!state) return null;
+  const now = opts.now ?? Date.now();
+  if (!isOwnedTransition(state, now)) return null;
+  return now < state.expectedWakeAt ? "dark" : "full";
+}
+
+function isOwnedTransition(state: PowerTransitionState, now: number): boolean {
+  if (state.state !== "suspending") return false;
+  if (state.taskId !== "hardware-sleep") return false;
+  const { requestedAt, expectedWakeAt, expiresAt } = state;
+  if (!Number.isFinite(requestedAt) || !Number.isFinite(expectedWakeAt) || !Number.isFinite(expiresAt)) {
+    return false;
+  }
+  if (!(requestedAt <= expectedWakeAt && expectedWakeAt <= expiresAt)) return false;
+  // Reject future requestedAt: the suspend was not issued yet.
+  // Also validate expiry against the classifier clock. PowerTransitionStore
+  // performs the same check with Date.now(), but keeping the predicate here
+  // makes injected boundary clocks and the production path obey one contract.
+  return requestedAt <= now && now <= expiresAt;
 }
 
 function classifyMacOS(): ResumeKind {

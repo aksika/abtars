@@ -9,10 +9,13 @@ import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
-import type { AbtarsMemoryRuntime } from "../memory-runtime.js";
+import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
+import { attemptMemoryMutation } from "../memory-runtime.js";
+import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import type { InboundMessage } from "../../types/platform.js";
 import type { UserRegistry } from "../user-registry.js";
+import { sessionTypeOf, type DurableContextIntent } from "../spin-types.js";
 
 const TAG = "pipeline";
 const ACTIVE_MEMORY_LIMIT = 5;
@@ -32,9 +35,9 @@ export interface BuildPromptResult {
   isSessionStart: boolean;
   imageContent?: { mime: string; base64: string; path: string };
   recalledHits?: Array<{ id: number; contentEn: string }>;
-  /** #1329: the SQLite message ID assigned to the just-persisted raw user row. */
-  currentMessageId?: number;
-  /** #1335: structured current turn components for Direct API cache-stable assembly. */
+  /** #1529: explicit durable-context intent — never an ambiguous optional cursor. */
+  durableContextIntent: DurableContextIntent;
+  /** #1335: structured current turn components for Pi cache-stable assembly. */
   currentTurn?: {
     rawText: string;
     volatileContext: Array<{
@@ -44,19 +47,29 @@ export interface BuildPromptResult {
   };
 }
 
+/**
+ * #1432: the effective session is passed in — never recomputed. For K
+ * (memoryMode "skill-isolated") session assembly, active recall, general
+ * conversation-buffer injection, and automatic general-memory writes are
+ * skipped; timestamp, media, injection scanning, and busy queueing remain.
+ */
 export async function buildPrompt(
   msg: InboundMessage,
   text: string,
   deps: BuildPromptDeps,
   registry: UserRegistry,
+  session?: import("../spin-types.js").ManagedSession,
 ): Promise<BuildPromptResult> {
   const { memoryRuntime, conversationBuffer, contextPercent } = deps;
   const { channelId, isGroup } = msg;
   const userId = msg.userId;
-  const sessionKey = deps.sessionManager.getActiveSessionId(userId, msg.platform);
-  const bufKey = `${msg.platform}:${channelId}`;
   const { spin } = await import("../spin.js");
-  const pSession = spin.getSessionById(sessionKey);
+  const pSession = session ?? spin.getSessionById(deps.sessionManager.getActiveSessionId(userId, msg.platform));
+  const sessionKey = pSession?.id ?? deps.sessionManager.getActiveSessionId(userId, msg.platform);
+  const bufKey = `${msg.platform}:${channelId}`;
+  const isSkillIsolated = pSession
+    && (await import("../spin-profiles.js")).profileFor(sessionTypeOf(pSession.id))?.memoryMode === "skill-isolated";
+  const memoryMode = isSkillIsolated ? "skill-isolated" : "standard";
 
   // #1335: collect volatile context blocks separately from raw user text
   const volatileContext: Array<{ kind: "timestamp" | "recall" | "session_start" | "runtime" | "other"; content: string }> = [];
@@ -71,7 +84,7 @@ export async function buildPrompt(
       // ACP: agent reads files itself — just provide the path, no I/O
       prompt += `\nImage saved at: ${msg.mediaPath}`;
     } else {
-      // DirectApi: encode for API
+      // Pi API: encode for the embedded provider boundary
       const { readFileSync } = await import("node:fs");
       const ext = msg.mediaPath.split(".").pop()?.toLowerCase();
       const visionMimes: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" };
@@ -97,8 +110,8 @@ export async function buildPrompt(
     }
   }
 
-  // --- Group buffer drain ---
-  if (isGroup) {
+  // --- Group buffer drain (skipped for K — skill context is manager-owned) ---
+  if (isGroup && memoryMode !== "skill-isolated") {
     const context = conversationBuffer.drain(bufKey);
     if (context) {
       volatileContext.push({ kind: "other", content: context });
@@ -107,11 +120,11 @@ export async function buildPrompt(
     }
   }
 
-  // --- Session-start injection ---
+  // --- Session-start injection (skipped for K — no A SOUL/session assembly) ---
   const entry = pSession;
   const isSessionStart = !entry || entry.pendingStart || !entry.seen;
-  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart}`);
-  if (isSessionStart && memoryRuntime?.state === "ready") {
+  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} memoryMode=${memoryMode}`);
+  if (isSessionStart && memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated") {
     try {
       const sessionCtx = await memoryRuntime.assembleSessionContext({
         identity: { principalId: userId, executionId: sessionKey },
@@ -131,20 +144,49 @@ export async function buildPrompt(
     entry.pendingStart = false;
   }
 
-  // Record user message to memory
+  // #1529: classify durable-context intent from configuration and message
+  // policy, independently of the memory runtime's instantaneous readiness.
+  // A required-but-unavailable intent must never degrade to ephemeral.
   const userRole = registry.byUserId.get(userId)?.role;
-  logTrace(TAG, `recordMessage gate: memory=${memoryRuntime?.state === "ready"} userId=${userId} userRole=${userRole}`);
-  let currentMessageId: number | undefined;
-  if (memoryRuntime?.state === "ready" && userRole !== "guest" && !text.startsWith("[SESSION START]")) {
-    const numericMsgId = typeof msg.messageId === "number" ? msg.messageId : undefined;
-    const messageTimestamp = Date.now();
-    const id = await memoryRuntime.recordMessage({ role: "user", content: text, timestamp: messageTimestamp, userId, sessionId: sessionKey, platformMessageId: numericMsgId }, `message-${userId}-${msg.platform}-${numericMsgId ?? messageTimestamp}`);
-    if (typeof id === "number") currentMessageId = id;
+  logTrace(TAG, `recordMessage gate: memory=${memoryRuntime?.state === "ready"} userId=${userId} userRole=${userRole} memoryMode=${memoryMode}`);
+  const durableRequired =
+    deps.memoryConfig.memoryEnabled
+    && memoryMode !== "skill-isolated"
+    && userRole !== "guest"
+    && !text.startsWith("[SESSION START]");
+  let durableContextIntent: DurableContextIntent = { mode: "not_required" };
+  if (durableRequired && memoryRuntime?.state !== "ready") {
+    durableContextIntent = { mode: "required_unavailable", reason: "runtime_unavailable" };
+  } else if (durableRequired) {
+    const messageIdStr = typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "";
+    const messageTimestamp = msg.timestamp;
+    const operationKey = messageIdStr
+      ? inboundMessageKey(msg.platform, msg.channelId, msg.threadId, userId, messageIdStr)
+      : inboundExecutionKey(msg.platform, msg.channelId, msg.threadId, userId, `${sessionKey}:${messageTimestamp}`);
+    const phase: MemoryWritePhase = "before_model";
+    const result = await attemptMemoryMutation({
+      phase,
+      family: "inbound",
+      operationKey,
+      run: () => memoryRuntime!.recordMessage(
+        { role: "user", content: text, timestamp: messageTimestamp, userId, sessionId: sessionKey, platformMessageId: typeof msg.messageId === "number" || typeof msg.messageId === "string" ? msg.messageId : undefined },
+        operationKey,
+      ),
+    });
+    if (result.ok) {
+      const r = result as { ok: true; value: { id: number | null } };
+      const id = r.value.id;
+      durableContextIntent = typeof id === "number"
+        ? { mode: "durable", beforeMessageId: id }
+        : { mode: "required_unavailable", reason: "cursor_missing" };
+    } else {
+      durableContextIntent = { mode: "required_unavailable", reason: "record_failed" };
+    }
   }
 
-  // --- Active recall ---
+  // --- Active recall (skipped for K — skill-isolated memory boundary) ---
   let recalledHits: Array<{ id: number; contentEn: string }> | undefined;
-  if (getEnv().activeMemory && memoryRuntime?.state === "ready") {
+  if (memoryMode !== "skill-isolated" && getEnv().activeMemory && memoryRuntime?.state === "ready") {
     const userEntry = registry.byUserId.get(userId);
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
       try {
@@ -192,7 +234,7 @@ export async function buildPrompt(
       const scan = scanFn(text);
       if (!scan.safe) {
         logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map((f: { category: string }) => f.category).join(", ")}`);
-      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined, currentMessageId: undefined };
+      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined, durableContextIntent };
     }
     }
   }
@@ -203,5 +245,5 @@ export async function buildPrompt(
     volatileContext,
   };
 
-  return { prompt, isSessionStart, imageContent, recalledHits, currentMessageId, currentTurn };
+  return { prompt, isSessionStart, imageContent, recalledHits, durableContextIntent, currentTurn };
 }

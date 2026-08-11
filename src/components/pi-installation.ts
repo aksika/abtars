@@ -2,13 +2,11 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, dirname, resolve, relative, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
-import { spawnSync } from "node:child_process";
-import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
+import { PI_COMPATIBILITY, classifyPiPin, type PiPinStatus } from "../config/pi-compatibility.js";
 import { compareSemver } from "../utils/version-compare.js";
 
-export const PI_VERSION_PROBE_TIMEOUT_MS = 5_000;
-export const PI_VERSION_PROBE_MAX_BYTES = 1024;
 const ANCESTOR_WALK_MAX = 10;
+const PI_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-.+)?$/;
 
 export type PiInstallationSource = "configured" | "path";
 
@@ -17,6 +15,7 @@ export type PiInstallation = {
   packageRoot: string;
   version: string;
   source: PiInstallationSource;
+  pinStatus: PiPinStatus;
   moduleRoots: {
     ai: string;
     tui: string;
@@ -41,17 +40,26 @@ export type PiInstallationState =
 export type PiModulePackage =
   | "@earendil-works/pi-ai"
   | "@earendil-works/pi-tui"
-  | "@earendil-works/pi-agent-core";
+  | "@earendil-works/pi-agent-core"
+  | "@earendil-works/pi-coding-agent";
 
 export interface PiModuleSpecifier {
   package: PiModulePackage;
   subpath?: string;
 }
 
-const PACKAGE_TO_MODULE_KEY: Record<PiModulePackage, keyof PiInstallation["moduleRoots"]> = {
+/**
+ * The coding-agent package IS the discovered installation root
+ * (`installation.packageRoot`), so it resolves through a different base than
+ * the nested packages. Everything else uses `moduleRoots`.
+ */
+type PiModuleBase = keyof PiInstallation["moduleRoots"] | "packageRoot";
+
+const PACKAGE_TO_MODULE_KEY: Record<PiModulePackage, PiModuleBase> = {
   "@earendil-works/pi-ai": "ai",
   "@earendil-works/pi-tui": "tui",
   "@earendil-works/pi-agent-core": "agentCore",
+  "@earendil-works/pi-coding-agent": "packageRoot",
 };
 
 function resolveExportTarget(pkgRoot: string, target: string, pkgLabel: string): URL {
@@ -93,8 +101,10 @@ function resolveExportTarget(pkgRoot: string, target: string, pkgLabel: string):
  * to the same containment and regular-file validation as an export-map target.
  */
 export function resolvePiModuleUrl(installation: PiInstallation, specifier: PiModuleSpecifier): URL {
-  const key = PACKAGE_TO_MODULE_KEY[specifier.package];
-  const pkgRoot = installation.moduleRoots[key];
+  const base = PACKAGE_TO_MODULE_KEY[specifier.package];
+  const pkgRoot = base === "packageRoot"
+    ? installation.packageRoot
+    : installation.moduleRoots[base];
   const pkgJsonPath = join(pkgRoot, "package.json");
   if (!existsSync(pkgJsonPath)) {
     throw new Error(`${specifier.package}: package.json not found at ${pkgRoot}`);
@@ -244,23 +254,12 @@ function findPiPackageRoot(executable: string): string | null {
   return findPackageRoot(dir, PI_COMPATIBILITY.packageName);
 }
 
-function probePiVersion(executable: string): string | null {
-  const result = spawnSync(executable, ["--version"], {
-    shell: false,
-    encoding: "utf-8",
-    timeout: PI_VERSION_PROBE_TIMEOUT_MS,
-    maxBuffer: PI_VERSION_PROBE_MAX_BYTES,
-  });
-  if (result.error || result.signal || result.status !== 0) return null;
-  const stdout = (result.stdout ?? "").trim();
-  if (!stdout || stdout.length > 100) return null;
-  return stdout;
-}
-
 function readPackageVersion(packageRoot: string): string | null {
   try {
     const meta = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf-8")) as { version?: string };
-    return meta.version ?? null;
+    return typeof meta.version === "string" && PI_VERSION_PATTERN.test(meta.version)
+      ? meta.version
+      : null;
   } catch {
     return null;
   }
@@ -316,22 +315,11 @@ export function resolvePiInstallation(options?: { useCache?: boolean }): PiInsta
     source = "path";
   }
 
-  const version = probePiVersion(executable);
-  if (!version) {
-    return {
-      state: "invalid",
-      executable,
-      reason: "pi --version returned no valid output",
-      remediation: `Verify the pi executable at ${executable} is working. Install with: abtars deps install pi`,
-    };
-  }
-
   const packageRoot = findPiPackageRoot(executable);
   if (!packageRoot) {
     return {
       state: "invalid",
       executable,
-      observedVersion: version,
       reason: `Could not find ${PI_COMPATIBILITY.packageName} package root from ${executable}`,
       remediation: `The pi executable at ${executable} is not part of an official Pi installation. Install with: abtars deps install pi`,
     };
@@ -343,32 +331,20 @@ export function resolvePiInstallation(options?: { useCache?: boolean }): PiInsta
       state: "invalid",
       executable,
       packageRoot,
-      observedVersion: version,
       reason: `Missing or invalid version in ${join(packageRoot, "package.json")}`,
       remediation: `Corrupt installation at ${packageRoot}. Reinstall with: abtars deps install pi`,
     };
   }
 
-  if (pkgVersion !== version) {
-    return {
-      state: "invalid",
-      executable,
-      packageRoot,
-      observedVersion: `${pkgVersion} (pkg) / ${version} (cli)`,
-      reason: `Package version (${pkgVersion}) does not match CLI version (${version})`,
-      remediation: `Installation at ${packageRoot} seems corrupted. Reinstall with: abtars deps install pi`,
-    };
-  }
-
-  const cmp = compareSemver(version, PI_COMPATIBILITY.minimumPiVersion);
+  const cmp = compareSemver(pkgVersion, PI_COMPATIBILITY.pinnedVersion);
   if (cmp === -1) {
     return {
       state: "below-minimum",
       executable,
       packageRoot,
-      observedVersion: version,
-      reason: `Pi version ${version} is below minimum ${PI_COMPATIBILITY.minimumPiVersion}`,
-      remediation: `Update Pi with: abtars deps update pi, or manually run: ${executable} update --self`,
+      observedVersion: pkgVersion,
+      reason: `Pi version ${pkgVersion} is below pinned version ${PI_COMPATIBILITY.pinnedVersion}`,
+      remediation: `Update Pi with: abtars deps update pi, or manually run: npm i -g '${PI_COMPATIBILITY.packageName}@${PI_COMPATIBILITY.pinnedRange}'`,
     };
   }
 
@@ -386,7 +362,7 @@ export function resolvePiInstallation(options?: { useCache?: boolean }): PiInsta
       state: "incomplete",
       executable,
       packageRoot,
-      observedVersion: version,
+      observedVersion: pkgVersion,
       reason: `Missing nested Pi packages: ${missingNested.join(", ")}`,
       remediation: `Installation at ${packageRoot} is incomplete. Reinstall with: abtars deps install pi`,
     };
@@ -395,8 +371,9 @@ export function resolvePiInstallation(options?: { useCache?: boolean }): PiInsta
   const installation: PiInstallation = {
     executable,
     packageRoot,
-    version,
+    version: pkgVersion,
     source,
+    pinStatus: classifyPiPin(pkgVersion),
     moduleRoots: {
       ai: aiRoot!,
       tui: tuiRoot!,

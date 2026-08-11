@@ -1,9 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { recordLatency, recordCall, recordCronDepth, recordCompaction, getMetricsSummary, initMetrics, flushToFile, pruneMetricsFile } from "./metrics-collector.js";
+import { recordLatency, recordCall, recordCronDepth, recordCompaction, getMetricsSummary, initMetrics, flushToFile, pruneMetricsFile, type CompactionMetricEvent } from "./metrics-collector.js";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CompactionEvent } from "abmind";
 
 describe("metrics-collector", () => {
   let tmp: string;
@@ -66,19 +65,19 @@ describe("metrics-collector", () => {
   });
 
   it("recordCompaction aggregates real passes, persists all events (incl skipped) to JSONL (#1022)", () => {
-    const ev = (over: Partial<CompactionEvent>): CompactionEvent => ({
-      conversationId: "1_A_01", timestamp: Date.now(), tokensBefore: 1000, tokensAfter: 200,
-      savingsPct: 0.8, model: "cheap", durationMs: 100, level: "normal", ...over,
+    const ev = (over: Partial<CompactionMetricEvent>): CompactionMetricEvent => ({
+      timestamp: Date.now(), tokensBefore: 1000, tokensAfter: 200,
+      savingsPct: 0.8, model: "cheap", durationMs: 100, level: "completed", ...over,
     });
-    recordCompaction(ev({ level: "normal", savingsPct: 0.8 }));
-    recordCompaction(ev({ level: "fallback", savingsPct: 0 }));
+    recordCompaction(ev({ level: "completed", savingsPct: 0.8 }));
+    recordCompaction(ev({ level: "skipped", savingsPct: 0 }));
     recordCompaction(ev({ level: "skipped", savingsPct: 0, durationMs: 0 })); // audit-only
 
     const s = getMetricsSummary();
     expect(s.compaction).not.toBeNull();
-    expect(s.compaction!.count).toBe(2);        // skipped excluded from aggregate
+    expect(s.compaction!.count).toBe(1);        // skipped excluded from aggregate
     expect(s.compaction!.failures).toBe(0);
-    expect(s.compaction!.avgSavingsPct).toBe(40); // (0.8 + 0) / 2
+    expect(s.compaction!.avgSavingsPct).toBe(80);
 
     const path = join(tmp, "metrics", "metrics.jsonl");
     const lines = readFileSync(path, "utf-8").trim().split("\n");

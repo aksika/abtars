@@ -6,11 +6,17 @@
  * swap, Orc busy-guard rejection, Orc idle spin with [USER] prefix.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+
+// Real-socket tests with bounded 2s polls: under full parallel-suite load the
+// 5s default budget blows even when every poll eventually passes. Give the
+// file a generous wall-clock budget instead of flaking (see waitFor below).
+vi.setConfig({ testTimeout: 15_000 });
+afterAll(() => vi.resetConfig());
 
 vi.mock("../../components/master-user.js", () => ({
   getMasterUserId: () => "aksika",
@@ -24,9 +30,9 @@ import {
   type TuiClientFrame,
   type TuiAttachMode,
 } from "./tui-protocol.js";
-import type { Spin, ManagedSession, SessionType } from "../../components/spin.js";
+import { Spin, type ManagedSession, type SessionType } from "../../components/spin.js";
+import { createSpinSessionRegistry, type SpinSessionRegistry } from "../../components/spin-sessions.js";
 import type { QueuedSessionInstruction } from "../../components/spin-types.js";
-import type { AgentSession } from "../../components/subagent-runtime.js";
 import type { InboundMessage } from "../../types/platform.js";
 import { expireInstructions, drainInstructionBatch } from "../../components/session-instruction-queue.js";
 import { OrcActivityFeed } from "../../components/orc-activity-feed.js";
@@ -42,8 +48,12 @@ interface MockSpinOpts {
   activeSessionId?: string;
   switchResult?: ManagedSession | string;
   createResult?: ManagedSession | string;
-  orcSession?: AgentSession | null;
+  /** #1545: the live orc ManagedSession — the single source the getter and
+   *  the registry both report, so the mock cannot configure them apart. */
+  orcSession?: ManagedSession | null;
   orcBusy?: boolean;
+  /** #1533: mark the orc ManagedSession entry as ended (getOrcSession → null). */
+  orcEnded?: boolean;
   spinResult?: { sessionId: string; cardId?: number; result?: string };
   /** #1336: sessions returned by listAllSessions for cross-platform attach. */
   allSessions?: ManagedSession[];
@@ -51,10 +61,10 @@ interface MockSpinOpts {
 
 function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActiveSessionId: Array<[string, string]>; switchSession: Array<[string, string, number]>; createSession: Array<[string, string, SessionType]>; getSessionByGlobalIndex: Array<[number]>; spin: Array<unknown[]> } } {
   const calls = { getActiveSessionId: [] as Array<[string, string]>, switchSession: [] as Array<[string, string, number]>, getSessionByGlobalIndex: [] as Array<[number]>, createSession: [] as Array<[string, string, SessionType]>, spin: [] as unknown[][] };
-  // The orc ManagedSession is what listAllSessions().find(...) returns and
-  // what carries the busy flag.
-  const orcManagedEntry: ManagedSession | undefined = opts.orcSession
-    ? ({ id: opts.orcSession.id, busy: opts.orcBusy ?? false,
+  // #1545: one orc ManagedSession backs both getOrcSession() and the registry.
+  const orcManagedEntry: ManagedSession | undefined = opts.orcSession && !opts.orcEnded
+    ? ({ id: opts.orcSession.id, status: "ready",
+        busy: opts.orcBusy ?? false,
         instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined,
         steeringAccepting: opts.orcBusy ?? false } as unknown as ManagedSession)
     : undefined;
@@ -72,10 +82,16 @@ function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActive
       calls.createSession.push([userId, platform, type]);
       return opts.createResult ?? { id: `1749563282_${type}_99` } as ManagedSession;
     }),
-    getOrcSession: vi.fn(() => opts.orcSession ?? null),
+    getOrcSession: vi.fn(() => orcManagedEntry ?? null),
     getSessionById: vi.fn((id: string) => {
-      if (!opts.orcSession || id !== opts.orcSession.id) return undefined;
-      return { id, busy: opts.orcBusy ?? false, instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined, steeringAccepting: opts.orcBusy ?? false } as unknown as ManagedSession;
+      if (opts.orcSession && id === opts.orcSession.id) {
+        return { id, busy: opts.orcBusy ?? false, instructionQueue: [], activeExecutionId: opts.orcBusy ? "exec_1" : undefined, steeringAccepting: opts.orcBusy ?? false, status: opts.orcEnded ? "ended" : "ready" } as unknown as ManagedSession;
+      }
+      const found = allEntries.find(s => s.id === id);
+      if (found) return found;
+      // #1533: mock sessions stay resolvable while attached, like production —
+      // an attached id is never an "unknown session".
+      return { id, userId: "aksika", platform: "tui", status: "ready", busy: false, instructionQueue: [], steeringAccepting: false } as unknown as ManagedSession;
     }),
     getSessionByGlobalIndex: vi.fn((index: number) => {
       calls.getSessionByGlobalIndex.push([index]);
@@ -631,8 +647,36 @@ describe("TuiSocketAdapter — orc mode", () => {
     conn.destroy(); adapter.stop();
   });
 
+  it("#1545: orc attach succeeds when the real Spin registry holds a live O session", async () => {
+    const spin = new Spin();
+    const created = spin.createSubSession("aksika", "background", "O");
+    expect(typeof created).not.toBe("string");
+    const adapter = new TuiSocketAdapter({ spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    const ready = frames.find((f) => f.t === "ready");
+    expect(ready).toBeDefined();
+    if (ready && ready.t === "ready") {
+      expect(ready.sessionId).toBe((created as ManagedSession).id);
+    }
+    conn.destroy(); adapter.stop();
+  });
+
+  it("#1545: orc attach rejects cleanly when the real Spin registry has no live O session", async () => {
+    const spin = new Spin();
+    const adapter = new TuiSocketAdapter({ spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    const err = frames.find((f) => f.t === "error");
+    expect(err).toBeDefined();
+    if (err && err.t === "error") {
+      expect(err.message).toMatch(/No Orc session is running/);
+    }
+    conn.destroy(); adapter.stop();
+  });
+
   it("orc attach against a busy Orc rejects the input with a system message and does NOT call spin", async () => {
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     mock = makeMockSpin({ orcSession: orc, orcBusy: true });
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
     await adapter.start();
@@ -655,7 +699,7 @@ describe("TuiSocketAdapter — orc mode", () => {
   });
 
   it("orc attach against an idle Orc calls spin with [USER] prefix and pushes the awaited result", async () => {
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     mock = makeMockSpin({
       orcSession: orc,
       orcBusy: false,
@@ -700,7 +744,7 @@ describe("TuiSocketAdapter — steer mode", () => {
   });
 
   it("steer client frame on busy Orc queues the instruction and returns steer-ack queued", async () => {
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     mock = makeMockSpin({ orcSession: orc, orcBusy: true });
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
     await adapter.start();
@@ -739,7 +783,7 @@ describe("TuiSocketAdapter — steer mode", () => {
   });
 
   it("/steer prefix in plain input on busy Orc queues the instruction", async () => {
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     mock = makeMockSpin({ orcSession: orc, orcBusy: true });
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
     await adapter.start();
@@ -761,7 +805,7 @@ describe("TuiSocketAdapter — steer mode", () => {
   });
 
   it("plain text on idle Orc still routes through spin (no steer)", async () => {
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     mock = makeMockSpin({
       orcSession: orc, orcBusy: false,
       spinResult: { sessionId: "1749563282_O_01", cardId: 1, result: "ok" },
@@ -781,7 +825,7 @@ describe("TuiSocketAdapter — steer mode", () => {
   });
 
   it("steer on non-busy Orc returns rejected steer-ack", async () => {
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     mock = makeMockSpin({ orcSession: orc, orcBusy: false });
     const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
     await adapter.start();
@@ -812,7 +856,7 @@ describe("TuiSocketAdapter — #1339 activity overflow recovery", () => {
 
   it("recovers with a fresh snapshot before subsequent incremental activity", async () => {
     const feed = new OrcActivityFeed();
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     const mockSpin = makeMockSpin({ orcSession: orc, orcBusy: true }).spin;
 
     adapter = new TuiSocketAdapter({
@@ -917,8 +961,8 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
 
     feed.publish({ type: "start", sessionId: sid, executionId: "e1", streamId: "st1" });
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "Hello " });
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "world" });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "Hello " });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "world" });
     feed.publish({ type: "tool-start", sessionId: sid, executionId: "e1", streamId: "st1", name: "search" });
     feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
     await new Promise((r) => setTimeout(r, 40));
@@ -947,13 +991,102 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
     const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
 
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "mine" });
-    feed.publish({ type: "delta", sessionId: "other_session", executionId: "e2", streamId: "st2", text: "theirs" });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "mine" });
+    feed.publish({ type: "delta", kind: "text", sessionId: "other_session", executionId: "e2", streamId: "st2", text: "theirs" });
     await new Promise((r) => setTimeout(r, 40));
 
     const chunks = frames.filter((f) => f.t === "chunk");
     expect(chunks.length).toBe(1);
     expect((chunks[0] as any).delta).toBe("mine");
+
+    conn.destroy();
+  });
+
+  it("#1612: output-feed events emit correlated stream frames (start/delta/tool/end)", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin();
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
+
+    feed.publish({ type: "start", sessionId: sid, executionId: "e1", streamId: "st1" });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "Hello " });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "world" });
+    feed.publish({ type: "tool-start", sessionId: sid, executionId: "e1", streamId: "st1", name: "search" });
+    feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    const starts = frames.filter((f) => f.t === "stream-start");
+    expect(starts.length).toBe(1);
+    expect(starts[0]).toMatchObject({ id: "st1", executionId: "e1" });
+
+    const chunks = frames.filter((f) => f.t === "chunk");
+    expect(chunks.length).toBe(2);
+    for (const c of chunks) expect((c as any).executionId).toBe("e1");
+
+    const tools = frames.filter((f) => f.t === "tool-start");
+    expect(tools.length).toBe(1);
+    expect(tools[0]).toMatchObject({ id: "st1", executionId: "e1", name: "search" });
+
+    const ends = frames.filter((f) => f.t === "chunk-end");
+    expect(ends.length).toBe(1);
+    expect(ends[0]).toMatchObject({ id: "st1", executionId: "e1", reason: "complete" });
+
+    conn.destroy();
+  });
+
+  it("#1612: the whole message frame carries the delivery execution ID when correlated", async () => {
+    const mockSpin = makeMockSpin();
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath,
+    });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
+
+    await adapter.sendMessage("tui:local", "whole-result", {
+      deliveryCorrelation: { sessionId: sid, executionId: "e42", kind: "final_assistant" },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const msgs = frames.filter((f) => f.t === "message");
+    expect(msgs.length).toBe(1);
+    expect(msgs[0]).toMatchObject({ role: "assistant", markdown: "whole-result", executionId: "e42" });
+
+    conn.destroy();
+  });
+
+  it("#1612: a suppressed exact-stream delivery still refreshes the runtime status", async () => {
+    const feed = new SessionOutputFeed();
+    const mockSpin = makeMockSpin();
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
+    });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
+    const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
+
+    // Streamed turn: the whole result is suppressed, but the footer must
+    // still advance past the attach-time revision.
+    const statusesAtAttach = frames.filter((f) => f.t === "status").length;
+
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "streamed" });
+    feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
+    await new Promise((r) => setTimeout(r, 30));
+
+    await adapter.sendMessage("tui:local", "streamed", {
+      deliveryCorrelation: { sessionId: sid, executionId: "e1", kind: "final_assistant" },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(frames.filter((f) => f.t === "message").length).toBe(0); // suppressed
+    const statusesAfter = frames.filter((f) => f.t === "status");
+    expect(statusesAfter.length).toBeGreaterThan(statusesAtAttach);
+    const last = statusesAfter[statusesAfter.length - 1] as Extract<TuiServerFrame, { t: "status" }>;
+    expect(last.status.revision).toBeGreaterThan(statusesAtAttach);
 
     conn.destroy();
   });
@@ -968,7 +1101,7 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     const { conn, frames } = await attachAndCollect(sockPath, { kind: "resume" });
     const sid = (frames.find((f) => f.t === "ready") as any).sessionId;
 
-    feed.publish({ type: "delta", sessionId: sid, executionId: "e1", streamId: "st1", text: "streamed" });
+    feed.publish({ type: "delta", kind: "text", sessionId: sid, executionId: "e1", streamId: "st1", text: "streamed" });
     feed.publish({ type: "end", sessionId: sid, executionId: "e1", streamId: "st1", reason: "complete" });
     await new Promise((r) => setTimeout(r, 30));
 
@@ -995,7 +1128,7 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
 
   it("switches output mirroring atomically on attach change", async () => {
     const feed = new SessionOutputFeed();
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     const mockSpin = makeMockSpin({ orcSession: orc });
     adapter = new TuiSocketAdapter({
       spin: mockSpin.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath, sessionOutputFeed: feed,
@@ -1010,8 +1143,8 @@ describe("TuiSocketAdapter — #1338 output mirroring", () => {
     expect(oSid).toBe("1749563282_O_01");
 
     // Output for the now-detached A session must not reach the client.
-    feed.publish({ type: "delta", sessionId: aSid, executionId: "eA", streamId: "stA", text: "old" });
-    feed.publish({ type: "delta", sessionId: oSid, executionId: "eO", streamId: "stO", text: "new" });
+    feed.publish({ type: "delta", kind: "text", sessionId: aSid, executionId: "eA", streamId: "stA", text: "old" });
+    feed.publish({ type: "delta", kind: "text", sessionId: oSid, executionId: "eO", streamId: "stO", text: "new" });
     await new Promise((r) => setTimeout(r, 40));
 
     const chunks = [...first.frames, ...second.frames].filter((f) => f.t === "chunk");
@@ -1081,7 +1214,7 @@ describe("TuiSocketAdapter — #1398 feed isolation", () => {
     await new Promise((r) => setTimeout(r, 50));
 
     // Publish output for A's old session. With the fix it reaches no one.
-    feed.publish({ type: "delta", sessionId: aSessionId, executionId: "e1", streamId: "st1", text: "LEAK" });
+    feed.publish({ type: "delta", kind: "text", sessionId: aSessionId, executionId: "e1", streamId: "st1", text: "LEAK" });
     await new Promise((r) => setTimeout(r, 30));
 
     const hasAttachmentFrame = bFrames.some(
@@ -1288,7 +1421,7 @@ describe("TuiSocketAdapter — #1399 steer binding", () => {
   afterEach(() => { if (adapter) adapter.stop(); });
 
   it("non-matching sessionId sends rejected ack preserving client instructionId", async () => {
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     const mock = makeMockSpin({ orcSession: orc, orcBusy: true });
     adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath });
     await adapter.start();
@@ -1329,7 +1462,7 @@ describe("TuiSocketAdapter — #1399 steer binding", () => {
   });
 
   it("correct sessionId queues normally", async () => {
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     const mock = makeMockSpin({ orcSession: orc, orcBusy: true });
     adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage: makeRecoveryHandler(), socketPath: sockPath });
     await adapter.start();
@@ -1380,7 +1513,7 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
    * same object so queue mutations persist.
    */
   function makeSpinWithSharedSession(orcBusy: boolean, execId: string): { spin: Spin; getSession: () => ManagedSession } {
-    const orc = { id: "1749563282_O_01", isReady: true } as unknown as AgentSession;
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
     let sharedSession: ManagedSession | null = null;
     const mock = makeMockSpin({ orcSession: orc, orcBusy });
     const origGet = mock.spin.getSessionById as any;
@@ -1624,6 +1757,154 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
     expect(terminalAcks.length).toBe(2);
     const terminalIds = terminalAcks.map((a: any) => a.instructionId as string).sort();
     expect(terminalIds).toEqual([...ids].sort());
+    conn.destroy();
+  });
+});
+
+// ── #1533: Ended-attachment reconciliation ─────────────────────────────
+
+describe("TuiSocketAdapter — ended pipeline attachment reconciliation (#1533)", () => {
+  let sockPath: string;
+  let adapter: TuiSocketAdapter;
+  let onMessage: ReturnType<typeof vi.fn>;
+  let spin: Spin;
+  let registry: SpinSessionRegistry;
+
+  beforeEach(() => {
+    sockPath = tmpSocketPath();
+    registry = createSpinSessionRegistry({ maxTotalSessions: 12 });
+    spin = new Spin({ sessions: registry });
+    onMessage = makeRecoveryHandler();
+  });
+
+  afterEach(() => {
+    try { adapter.stop(); } catch { /* already stopped */ }
+  });
+
+  async function attachNew(): Promise<{ conn: net.Socket; frames: TuiServerFrame[]; attached: string }> {
+    adapter = new TuiSocketAdapter({ spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "new", sessionType: "A" });
+    const ready = frames.find((f) => f.t === "ready");
+    const attached = ready && ready.t === "ready" ? ready.sessionId : "";
+    expect(attached).toBeTruthy();
+    return { conn, frames, attached };
+  }
+
+  it("rebinds to the replacement session on the first input after the attached session ends", async () => {
+    const { conn, frames, attached } = await attachNew();
+
+    // /reset semantics: end the attached session; Spin reconciles a replacement.
+    const result = spin.endSession("aksika", "tui");
+    expect(typeof result).not.toBe("string");
+    expect(spin.getSessionById(attached)?.status).toBe("ended");
+    const replacement = spin.getActiveSession("aksika", "tui");
+    expect(replacement.id).not.toBe(attached);
+    frames.length = 0;
+
+    // First input after the end must rebind and route exactly once.
+    conn.write(encodeFrame({ t: "input", text: "hello" }));
+    await waitFor(() => onMessage.mock.calls.length > 0, 2000);
+
+    const readyFrames = frames.filter((f): f is Extract<TuiServerFrame, { t: "ready" }> => f.t === "ready");
+    expect(readyFrames).toHaveLength(1);
+    expect(readyFrames[0]!.sessionId).toBe(replacement.id);
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const routed = onMessage.mock.calls[0]![0] as InboundMessage;
+    expect(routed.targetSessionId).toBe(replacement.id);
+    expect(routed.targetSessionId).not.toBe(attached);
+    expect(routed.text).toBe("hello");
+
+    // Subsequent inputs target the live replacement with no further rebinds.
+    frames.length = 0;
+    conn.write(encodeFrame({ t: "input", text: "again" }));
+    await waitFor(() => onMessage.mock.calls.length > 1, 2000);
+    expect(frames.filter((f) => f.t === "ready")).toHaveLength(0);
+    expect((onMessage.mock.calls[1]![0] as InboundMessage).targetSessionId).toBe(replacement.id);
+    conn.destroy();
+  });
+
+  it("routes a subsequent steer frame to the replacement session after the rebind (Task 4)", async () => {
+    const { conn, frames, attached } = await attachNew();
+    const result = spin.endSession("aksika", "tui");
+    expect(typeof result).not.toBe("string");
+    const replacement = spin.getActiveSession("aksika", "tui");
+    frames.length = 0;
+
+    // First input rebinds the attachment and emits ready for the replacement.
+    conn.write(encodeFrame({ t: "input", text: "hello" }));
+    await waitFor(() => onMessage.mock.calls.length > 0, 2000);
+    expect(frames.filter((f) => f.t === "ready")).toHaveLength(1);
+
+    // A steer carrying the replacement ID passes the attachment gate (the
+    // session has no active execution, so it is rejected at queue time with
+    // the stale-execution reason — NOT the attachment-mismatch reason); the
+    // ended ID is rejected at the attachment gate.
+    frames.length = 0;
+    conn.write(encodeFrame({ t: "steer", sessionId: replacement.id, instructionId: "cid-new", text: "focus" }));
+    await waitFor(() => frames.some((f) => f.t === "steer-ack"), 2000);
+    const newAck = frames.find((f) => f.t === "steer-ack") as Extract<TuiServerFrame, { t: "steer-ack" }> | undefined;
+    expect(newAck?.status).toBe("rejected");
+    expect(newAck?.message).not.toMatch(/does not match the current attachment/);
+
+    frames.length = 0;
+    conn.write(encodeFrame({ t: "steer", sessionId: attached, instructionId: "cid-old", text: "stale" }));
+    await waitFor(() => frames.some((f) => f.t === "steer-ack"), 2000);
+    const staleAck = frames.find((f) => f.t === "steer-ack") as Extract<TuiServerFrame, { t: "steer-ack" }> | undefined;
+    expect(staleAck?.status).toBe("rejected");
+    expect(staleAck?.message).toMatch(/does not match the current attachment/);
+    conn.destroy();
+  });
+
+  it("does not rebind a live pipeline attachment", async () => {
+    const { conn, frames, attached } = await attachNew();
+    frames.length = 0;
+
+    conn.write(encodeFrame({ t: "input", text: "hi" }));
+    await waitFor(() => onMessage.mock.calls.length > 0, 2000);
+
+    expect(frames.filter((f) => f.t === "ready")).toHaveLength(0);
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect((onMessage.mock.calls[0]![0] as InboundMessage).targetSessionId).toBe(attached);
+    conn.destroy();
+  });
+
+  it("drops the input with a bounded system error when the attached session object is gone", async () => {
+    const { conn, frames, attached } = await attachNew();
+    registry.remove(attached);
+    frames.length = 0;
+
+    conn.write(encodeFrame({ t: "input", text: "hello" }));
+    await waitFor(() => frames.some((f) => f.t === "message"), 2000);
+
+    const sysMsg = frames.find((f) => f.t === "message" && (f as { role: string }).role === "system");
+    expect(sysMsg && sysMsg.t === "message" ? sysMsg.markdown : "").toMatch(/gone/i);
+    expect(onMessage).not.toHaveBeenCalled();
+    conn.destroy();
+  });
+
+  it("does not rebind an Orc attachment even when its session is ended", async () => {
+    // #1545: backed by a real Spin registry — the orc ends after attach.
+    const created = spin.createSubSession("aksika", "background", "O");
+    expect(typeof created).not.toBe("string");
+    const orcId = (created as ManagedSession).id;
+    const spinSpy = vi.spyOn(spin, "spin");
+    adapter = new TuiSocketAdapter({ spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    expect(frames.find((f) => f.t === "ready")).toBeDefined();
+    frames.length = 0;
+
+    spin.finalizeExactSession(orcId, "aksika");
+    expect(spin.getSessionById(orcId)?.status).toBe("ended");
+    expect(spin.getOrcSession()).toBeNull();
+
+    conn.write(encodeFrame({ t: "input", text: "hello" }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(frames.filter((f) => f.t === "ready")).toHaveLength(0);
+    expect(spinSpy).not.toHaveBeenCalled();
+    expect(onMessage).not.toHaveBeenCalled();
     conn.destroy();
   });
 });

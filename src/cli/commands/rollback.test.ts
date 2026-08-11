@@ -98,17 +98,16 @@ describe("rollback (#1291 — manifest update)", () => {
       { ref: "aaaaaaa", version: "0.3.4-alpha.8-aaaaaaa" },
       { ref: "bbbbbbb", version: "0.3.4-alpha.8-bbbbbbb" },
     ]);
-    await writeFile(join(home, "deploy.state"), JSON.stringify({ status: "success", version: "old", restartCount: 5 }));
+    await writeFile(join(home, "deploy.state"), JSON.stringify({ status: "success", version: "old" }));
 
     await rollback({ to: 1 });
 
     const state = JSON.parse(readFileSync(join(home, "deploy.state"), "utf-8"));
     expect(state["status"]).toBe("rollback");
     expect(state["version"]).toBe("0.3.4-alpha.8-bbbbbbb");
-    expect(state["restartCount"]).toBe(0);
   });
 
-  it("repoints both current and app symlinks to the target release", async () => {
+  it("repoints current to the target release and app to the canonical current", async () => {
     await seedHistory([
       { ref: "aaaaaaa", version: "0.3.4-alpha.8-aaaaaaa" },
       { ref: "bbbbbbb", version: "0.3.4-alpha.8-bbbbbbb" },
@@ -117,11 +116,13 @@ describe("rollback (#1291 — manifest update)", () => {
     await rollback({ to: 1 });
 
     const { readlinkSync } = await import("node:fs");
+    // current -> target release dir (atomic rename)
     expect(readlinkSync(join(releases, "current"))).toBe(join(releases, "bbbbbbb"));
-    expect(readlinkSync(join(home, "app"))).toBe(join(releases, "bbbbbbb"));
+    // app -> current (canonical link), never directly at a release (#1262 R7.5)
+    expect(readlinkSync(join(home, "app"))).toBe(join(releases, "current"));
   });
 
-  it("writes .start-reason with the rollback target", async () => {
+  it("publishes rollback command via supervisor state", async () => {
     await seedHistory([
       { ref: "aaaaaaa", version: "0.3.4-alpha.8-aaaaaaa" },
       { ref: "bbbbbbb", version: "0.3.4-alpha.8-bbbbbbb" },
@@ -129,8 +130,13 @@ describe("rollback (#1291 — manifest update)", () => {
 
     await rollback({ to: 1 });
 
-    const reason = readFileSync(join(home, ".start-reason"), "utf-8").trim();
-    expect(reason).toBe("rollback:bbbbbbb");
+    const svState = JSON.parse(readFileSync(join(home, "supervisor.state"), "utf-8"));
+    // Command was published (seq=1, type=rollback)
+    expect(svState.pendingCommand).not.toBeNull();
+    expect(svState.pendingCommand.type).toBe("rollback");
+    expect(svState.pendingCommand.reason).toBe("rollback:bbbbbbb");
+    // Restart counter was reset
+    expect(svState.restartCount).toBe(0);
   });
 
   it("returns 2 when target slot is beyond history length", async () => {

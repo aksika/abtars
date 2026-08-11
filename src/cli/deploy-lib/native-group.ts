@@ -63,6 +63,31 @@ const NATIVE_PROBE_IDS: Record<string, string> = {
   "sqlite-vec": NATIVE_TARGET_CONTRACT.packages["sqlite-vec"].probeId,
 };
 
+// ── Ownership and freshness predicates (#1514) ─────────────────────────────────
+
+function expectedOwnershipMarker(name: string, kind: NativeClosureEntry["kind"]): string {
+  return kind === "root" ? (NATIVE_PROBE_IDS[name] ?? "") : nativeClosureProbeId();
+}
+
+function recordOwnsEntry(
+  record: NativePackageRecord,
+  entry: Pick<NativeClosureEntry, "name" | "kind">,
+): boolean {
+  return record.probe === expectedOwnershipMarker(entry.name, entry.kind);
+}
+
+function recordMatchesLiveEntry(
+  record: NativePackageRecord,
+  entry: NativeClosureEntry,
+): boolean {
+  return recordOwnsEntry(record, entry)
+    && record.version === entry.version
+    && record.contentHash === entry.contentHash
+    && record.nodeAbi === (process.versions?.modules ?? "")
+    && record.platform === process.platform
+    && record.arch === process.arch;
+}
+
 // ── Content hashing ───────────────────────────────────────────────────────────
 
 export function hashContent(dir: string): string {
@@ -234,20 +259,29 @@ export function observeNativeGroup(): NativeGroupObservation {
   const manifest = readManifest();
   const manifestOk = manifest ? manifestReady(manifest) : false;
 
+  let liveClosure: ClosureResult | null = null;
+  if (allInstalledAtTarget) {
+    liveClosure = resolveClosure(liveNmDir(), NATIVE_TARGET_NAMES);
+  }
+
   let state: NativeGroupState;
   if (absent) state = "absent";
   else if (anyInvalid) state = "invalid";
-  else if (allInstalledAtTarget && manifestOk) state = "ready";
-  else if (allInstalledAtTarget && !manifestOk) state = "drifted";
+  else if (allInstalledAtTarget && manifestOk && liveClosure?.ok &&
+           liveClosure.entries.every(e => {
+             const rec = manifest!.packages[e.name];
+             return rec !== undefined && recordMatchesLiveEntry(rec, e);
+           })) {
+    state = "ready";
+  } else if (allInstalledAtTarget) state = "drifted";
   else if (anyInstalled) state = "drifted";
   else state = "partial";
 
   let adoption: { eligible: false; reason?: string } | { eligible: true; closure: NativeClosureEntry[] } = { eligible: false };
-  if (state === "drifted" && allInstalledAtTarget) {
-    const closureResult = resolveClosure(liveNmDir(), NATIVE_TARGET_NAMES);
-    adoption = closureResult.ok
-      ? { eligible: true, closure: closureResult.entries }
-      : { eligible: false, reason: closureResult.reason };
+  if (state === "drifted" && allInstalledAtTarget && liveClosure) {
+    adoption = liveClosure.ok
+      ? { eligible: true, closure: liveClosure.entries }
+      : { eligible: false, reason: liveClosure.reason };
   }
 
   return { packages, state, adoption };
@@ -322,7 +356,6 @@ type LiveCollisionOwner =
   | { kind: "unrelated-or-untracked" };
 
 function resolveCollisionOwner(
-  livePkgDir: string,
   pkgName: string,
   manifest: SharedNativeManifest | null,
 ): LiveCollisionOwner {
@@ -339,19 +372,7 @@ function resolveCollisionOwner(
   }
 
   if (rec.probe === nativeClosureProbeId()) {
-    const liveHash = hashContent(livePkgDir);
-    let liveVersion = "unknown";
-    try {
-      const raw = readFileSync(join(livePkgDir, "package.json"), "utf-8");
-      liveVersion = (JSON.parse(raw) as { version?: string }).version ?? "unknown";
-    } catch { /* fall through */ }
-    const runtimeAbi = process.versions?.modules ?? "";
-    if (rec.version === liveVersion && rec.contentHash === liveHash &&
-        rec.nodeAbi === runtimeAbi &&
-        rec.platform === process.platform &&
-        rec.arch === process.arch) {
-      return { kind: "native-closure" };
-    }
+    return { kind: "native-closure" };
   }
 
   return { kind: "unrelated-or-untracked" };
@@ -366,7 +387,7 @@ function checkCollisions(
     const livePkgDir = join(liveRoot, pkg.name);
     if (!existsSync(livePkgDir)) continue;
 
-    const owner = resolveCollisionOwner(livePkgDir, pkg.name, manifest);
+    const owner = resolveCollisionOwner(pkg.name, manifest);
     if (owner.kind !== "unrelated-or-untracked") continue;
 
     const liveHash = hashContent(livePkgDir);
@@ -652,21 +673,6 @@ function adoptNativeGroup(product: "abtars"): NativeGroupResult {
     if (entry.kind === "transitive" && existing.probe !== expectedProbe) {
       return { action: "adopt", ok: false, error: `Transitive "${entry.name}" has non-native-closure probe "${existing.probe}"` };
     }
-    if (existing.version !== entry.version) {
-      return { action: "adopt", ok: false, error: `Existing record for "${entry.name}" version mismatch: manifest ${existing.version}, live ${entry.version}` };
-    }
-    if (existing.contentHash !== entry.contentHash) {
-      return { action: "adopt", ok: false, error: `Existing record for "${entry.name}" hash mismatch` };
-    }
-    if (existing.nodeAbi !== nodeAbi) {
-      return { action: "adopt", ok: false, error: `Existing record for "${entry.name}" ABI mismatch: manifest ${existing.nodeAbi}, runtime ${nodeAbi}` };
-    }
-    if (existing.platform !== platform) {
-      return { action: "adopt", ok: false, error: `Existing record for "${entry.name}" platform mismatch` };
-    }
-    if (existing.arch !== arch) {
-      return { action: "adopt", ok: false, error: `Existing record for "${entry.name}" arch mismatch` };
-    }
   }
 
   if (!nativeProbesPass(liveRoot)) {
@@ -744,41 +750,50 @@ function reuseNativeGroup(product: "abtars"): NativeGroupResult {
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 export function ensureNativeGroup(product: "abtars", operation: "install" | "update"): NativeGroupResult {
-  const action = selectNativeGroupAction(operation, observeNativeGroup());
+  const initialAction = selectNativeGroupAction(operation, observeNativeGroup());
 
   const nodeMajor = Number(process.version.match(/^v(\d+)/)?.[1]);
   if ((nodeMajor ?? 0) < NATIVE_TARGET_CONTRACT.nodeMajor) {
     return {
-      action,
+      action: initialAction,
       ok: false,
       error: `Native targets require Node ${NATIVE_TARGET_CONTRACT.nodeMajor}; running ${process.version}.`,
     };
   }
 
-  if (action === "instruct-install") {
+  if (initialAction === "instruct-install") {
     return { action: "instruct-install", ok: false, error: "Native deps not installed. Run: abtars deps install" };
   }
 
   const token = generateLockToken();
-  acquireLock(product, `native:${action}`, token);
+  acquireLock(product, `native:${initialAction}`, token);
   try {
-    const lockedObs = observeNativeGroup();
-    const lockedAction = selectNativeGroupAction(operation, lockedObs);
+    // A successful adoption reconciles stale marker-owned records; re-select
+    // within the same invocation so install continues to reuse and update
+    // continues to refresh (bounded: adoption converges on the next pass).
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const lockedObs = observeNativeGroup();
+      const lockedAction = selectNativeGroupAction(operation, lockedObs);
 
-    switch (lockedAction) {
-      case "reuse":
-        return reuseNativeGroup(product);
-      case "instruct-install":
-        return { action: "instruct-install", ok: false, error: "Native deps not installed. Run: abtars deps install" };
-      case "refresh":
-        return refreshNativeGroup(product);
-      case "adopt":
-        return adoptNativeGroup(product);
-      default:
-        return repairNativeGroup(product);
+      switch (lockedAction) {
+        case "reuse":
+          return reuseNativeGroup(product);
+        case "instruct-install":
+          return { action: "instruct-install", ok: false, error: "Native deps not installed. Run: abtars deps install" };
+        case "refresh":
+          return refreshNativeGroup(product);
+        case "adopt": {
+          const adopted = adoptNativeGroup(product);
+          if (!adopted.ok) return adopted;
+          continue;
+        }
+        default:
+          return repairNativeGroup(product);
+      }
     }
+    return { action: "adopt", ok: false, error: "Native group adoption did not converge after re-observation" };
   } catch (err) {
-    return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { action: initialAction, ok: false, error: err instanceof Error ? err.message : String(err) };
   } finally {
     releaseLock(token);
   }

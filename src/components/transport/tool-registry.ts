@@ -1,18 +1,19 @@
 /**
- * Tool registry for DirectApiTransport.
+ * Tool registry for PiCoreTransport.
  * Phase 2: native tool schemas. Phase 3: in-process memory when available.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { MemoryBackend } from "abmind";
-import type { InstantStoreParams } from "../../types/index.js";
 import { logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { getMasterUserId } from "../master-user.js";
+import type { ToolExecutionScope } from "../tasks/task-package.js";
+import type { OrcInvocationContextV1 } from "../orc-project/orc-project-contracts.js";
+import { checkCommand, classifyCommand } from "../guardrails.js";
 
 const TAG = "tool_registry";
 
@@ -24,15 +25,93 @@ function audit(entry: Record<string, unknown>): void {
   try { appendFileSync(AUDIT_PATH, JSON.stringify(entry) + "\n"); } catch (err) { logAndSwallow(TAG, "audit write", err); }
 }
 
+export interface ToolExecutionContext {
+  userId: string;
+  signal?: AbortSignal;
+  executionScope?: ToolExecutionScope;
+  orcContext?: OrcInvocationContextV1;
+  /** #1552: trusted session type (from Spin); missing/invalid fails closed for memory_store. */
+  sessionType?: import("../spin-types.js").SessionType;
+  /** #1552: late-bound memory-tool dependencies (runtime + quota). */
+  memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
+  /** #1629: trusted tool authorization mode (from Spin via the Pi tool context).
+   *  Never read from tool arguments — missing values fail closed to interactive. */
+  authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
+}
+
 export type ToolDefinition = {
   readonly name: string;
   readonly description: string;
   readonly parameters: Record<string, unknown>;
-  execute(args: Record<string, string>, context?: { userId: string; signal?: AbortSignal }): Promise<string>;
+  /** Optional side-effect-free process probe consumed by scheduled preflight. */
+  readonly processDependency?: { executable: string; probeArgs: string[] };
+  // Implementations receive the provider's JSON object unchanged. Legacy
+  // command-backed tools normalize individual values at their own boundary.
+  execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<string>;
 };
+
+/** Tool implementations may still consume textual CLI-style values, but the
+ * registry boundary preserves the provider's JSON types until that point. */
+function stringValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function optionalStringValue(value: unknown): string | undefined {
+  return value === undefined || value === null ? undefined : stringValue(value);
+}
 
 const BASH_TIMEOUT_MS = 300_000;
 const CLI_TIMEOUT_MS = 60_000;
+
+/**
+ * #1595: parse-only shell validation before any execution. A malformed command
+ * must never reach the executor: return a structured `shell_syntax_error` with
+ * bounded diagnostics and an actionable correction hint for recognizable
+ * truncated redirection operators. The command itself is never rewritten —
+ * the model must re-submit a corrected command explicitly.
+ */
+export function validateBashSyntax(cmd: string): { ok: true } | { ok: false; stderr: string; hint?: string } {
+  try {
+    // Do not source BASH_ENV or user startup files during validation. This is
+    // a parse-only probe and must not run ambient shell initialization before
+    // the real, authorized command is started.
+    execFileSync("bash", ["--noprofile", "--norc", "-n", "-c", cmd], { timeout: 5000, maxBuffer: 64 * 1024, stdio: "pipe" });
+    return { ok: true };
+  } catch (err) {
+    const e = err as { stderr?: Buffer | string; message?: string; code?: string | number; killed?: boolean; signal?: string };
+    // Fail OPEN on infrastructure failures — these are not syntax verdicts
+    // and must never block a possibly-valid command as shell_syntax_error:
+    // bash absent (ENOENT), oversized stderr/stdout (maxBuffer), or a
+    // hung/killed parse (timeout).
+    const msg = e.message ?? "";
+    if (e.code === "ENOENT" || e.code === "ETIMEDOUT" || e.code === "ENOBUFS" || e.killed === true || e.signal || /maxBuffer|timed out/i.test(msg)) return { ok: true };
+    const raw = typeof e.stderr === "string" ? e.stderr : e.stderr instanceof Buffer ? e.stderr.toString("utf-8") : "";
+    const stderr = redactSecrets(raw || msg || "syntax error").slice(0, 1000);
+    const trimmed = cmd.trimEnd();
+    let hint: string | undefined;
+    // Recognizable truncated redirection operator (e.g. trailing `2>&`) gets
+    // an actionable hint; other syntax errors rely on bash's own stderr.
+    if (/\b2>&\s*$/.test(trimmed)) {
+      hint = 'redirection operator truncated — did you mean "2>&1"? Re-submit the corrected command explicitly.';
+    }
+    return { ok: false, stderr, hint };
+  }
+}
+
+function shellSyntaxErrorResult(cmd: string, check: { stderr: string; hint?: string }): string {
+  logWarn("tool-registry", `Shell syntax error [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+  const result: Record<string, unknown> = {
+    error: "shell_syntax_error",
+    stderr: check.stderr,
+    exit_code: 2,
+    command_fingerprint: fingerprintCommand(cmd),
+    command_preview: previewCommand(cmd),
+  };
+  if (check.hint) result["syntax_hint"] = check.hint;
+  return JSON.stringify(result);
+}
 
 // #1266: when no in-process memory backend is wired, return this error
 // rather than silently shelling out to a CLI on PATH we don't trust.
@@ -71,42 +150,50 @@ function isBridgeKillCommand(cmd: string): boolean {
   return false;
 }
 
-function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
+function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal, executionScope?: ToolExecutionScope, authorizationMode?: import("../action-gate.js").ToolAuthorizationMode): Promise<string> {
   // Guardrails: command check
-  const { checkCommand, classifyCommand } = require("../guardrails.js") as typeof import("../guardrails.js");
   const cmdBlock = checkCommand(cmd);
   if (cmdBlock) {
-    logWarn("tool-registry", `Guardrails blocked: ${cmd.slice(0, 200)}`);
-    return Promise.resolve(JSON.stringify({ stderr: cmdBlock, exit_code: 126 }));
+    logWarn("tool-registry", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+    return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: cmdBlock, exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
   }
 
   // Action gate: auth-required commands
   const tier = classifyCommand(cmd);
   if (tier === "auth-required" && _actionGate) {
-    return _actionGate.requestAuth("bash-auth", cmd).then((granted) => {
+    // #1629: the trusted mode comes from the execution context, never from
+    // the command text or tool arguments. ActionGate applies persistent rules
+    // first, then its bash-only unattended fallback.
+    return _actionGate.requestAuth("bash-auth", cmd, { mode: authorizationMode }).then((granted) => {
       if (!granted) {
-        logWarn("tool-registry", `Auth denied for: ${cmd.slice(0, 200)}`);
-        return JSON.stringify({ stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126 });
+        logWarn("tool-registry", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+        return JSON.stringify({ error: "policy_rejected", stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
       }
-      return executeBash(cmd, timeout, signal);
+      return executeBash(cmd, timeout, signal, executionScope);
     });
   }
 
   if (isBridgeSpawnCommand(cmd)) {
-    logWarn("tool-registry", `Blocked bridge-spawn command: ${cmd.slice(0, 200)}`);
+    logWarn("tool-registry", `Blocked bridge-spawn command [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
     return Promise.resolve(JSON.stringify({
+      error: "policy_rejected",
       stderr: "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision; use launchctl inspection commands (launchctl list, launchctl print) or signal the existing process instead.",
       exit_code: 126,
+      command_fingerprint: fingerprintCommand(cmd),
+      command_preview: previewCommand(cmd),
     }));
   }
   if (isBridgeKillCommand(cmd)) {
-    logWarn("tool-registry", `Blocked bridge-kill command: ${cmd.slice(0, 200)}`);
+    logWarn("tool-registry", `Blocked bridge-kill command [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
     return Promise.resolve(JSON.stringify({
+      error: "policy_rejected",
       stderr: "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset or restart the bridge manually.",
       exit_code: 126,
+      command_fingerprint: fingerprintCommand(cmd),
+      command_preview: previewCommand(cmd),
     }));
   }
-  return executeBash(cmd, timeout, signal);
+  return executeBash(cmd, timeout, signal, executionScope);
 }
 
 let _seatbeltActive = false;
@@ -118,10 +205,36 @@ export function setSeatbelt(active: boolean, policy?: import("../seatbelt/policy
   _seatbeltPolicy = policy ?? null;
 }
 
-function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promise<string> {
+import { fingerprintCommand, previewCommand } from "./tool-failure-diagnostic.js";
+
+function executeBash(cmd: string, timeout: number, signal?: AbortSignal, executionScope?: ToolExecutionScope): Promise<string> {
+  // #1595: parse-only validation before any execution (every caller routes
+  // through this choke point, including the auth-granted path). A malformed
+  // command is never executed; the model receives a structured
+  // shell_syntax_error and must re-submit a corrected command. The original
+  // command text is never rewritten (fingerprint/preview are untouched).
+  const syntaxCheck = validateBashSyntax(cmd);
+  if (!syntaxCheck.ok) return Promise.resolve(shellSyntaxErrorResult(cmd, syntaxCheck));
+
+  // Check pre-aborted signal BEFORE spawning — a cancelled request must
+  // never execute side effects (#1497 review).
+  if (signal?.aborted) {
+    return Promise.resolve(JSON.stringify({
+      exit_code: null,
+      timed_out: false,
+      aborted: true,
+      stderr: "Execution cancelled before start",
+      command_fingerprint: fingerprintCommand(cmd),
+      command_preview: previewCommand(cmd),
+    }));
+  }
+
   return new Promise((resolve) => {
     let bin = "bash";
     let args = ["-c", cmd];
+    let timedOut = false;
+    let aborted = false;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 
     // #906: Wrap in OS sandbox if seatbelt active and command needs sandboxing
     if (_seatbeltActive && _seatbeltPolicy) {
@@ -133,32 +246,53 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promis
       }
     }
 
-    const child = execFile(bin, args, { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-      const result: Record<string, unknown> = {};
+    const child = execFile(bin, args, {
+      maxBuffer: 1024 * 1024,
+      cwd: executionScope?.cwd,
+      env: executionScope ? { ...process.env, ...executionScope.env } : undefined,
+    }, (err, stdout, stderr) => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+
+      const result: Record<string, unknown> = {
+        command_fingerprint: fingerprintCommand(cmd),
+        command_preview: previewCommand(cmd),
+        timed_out: timedOut,
+        aborted,
+      };
       if (stdout) result["stdout"] = stdout.slice(0, 50_000);
       if (stderr) result["stderr"] = stderr.slice(0, 10_000);
-      if (err) result["exit_code"] = (err as NodeJS.ErrnoException & { code?: number }).code ?? 1;
-      else result["exit_code"] = 0;
+      if (err) {
+        const nodeErr = err as NodeJS.ErrnoException & { code?: number; signal?: string; killed?: boolean };
+        if (nodeErr.code !== undefined && typeof nodeErr.code === "number") {
+          result["exit_code"] = nodeErr.code;
+        } else {
+          result["exit_code"] = null;
+          if (typeof nodeErr.code === "string") result["process_error_code"] = nodeErr.code;
+        }
+        if (nodeErr.signal) result["signal"] = nodeErr.signal;
+      } else {
+        result["exit_code"] = 0;
+      }
       resolve(JSON.stringify(result));
     });
+
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
+    }, timeout);
+
     if (signal) {
-      if (signal.aborted) { child.kill("SIGTERM"); return; }
       const onAbort = (): void => {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        aborted = true;
         child.kill("SIGTERM");
-        // #1003: escalate to SIGKILL if child doesn't exit within 3s
         setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
       };
       signal.addEventListener("abort", onAbort, { once: true });
       child.on("exit", () => signal.removeEventListener("abort", onAbort));
     }
   });
-}
-
-let memoryBackend: MemoryBackend | null = null;
-
-/** Wire in-process memory backend. Call once after memory init. */
-export function setMemoryBackend(backend: MemoryBackend | null): void {
-  memoryBackend = backend;
 }
 
 let _actionGate: import("../action-gate.js").ActionGate | null = null;
@@ -185,14 +319,28 @@ const bashTool: ToolDefinition = {
     properties: { command: { type: "string", description: "The bash command to execute" } },
     required: ["command"],
   },
-  execute: (args, context) => runBash(args["command"] ?? "", BASH_TIMEOUT_MS, context?.signal),
+  execute: (args, context) => runBash(stringValue(args["command"]), BASH_TIMEOUT_MS, context?.signal, context?.executionScope, context?.authorizationMode),
 };
 
-let _storeCount = 0;
-const STORE_CAP = 20;
+/** #1552: resolve the current memory-tool dependencies from the execution
+ *  context's late-bound holder. A null holder fails closed. */
+function memoryDeps(context?: ToolExecutionContext): import("../memory-store-quota.js").MemoryToolDependencies | null {
+  return context?.memoryToolDeps?.current ?? null;
+}
 
-/** Reset store counter (called on new subagent session). */
-export function resetStoreCounter(): void { _storeCount = 0; }
+const PRIVATE_WRITE_UNAVAILABLE = {
+  stored: false,
+  code: "private_write_unavailable",
+  retryable: false,
+  message: "Explicit memory storage is unavailable in this runtime. Do not retry this call.",
+};
+
+const EDIT_UNAVAILABLE = {
+  edited: false,
+  code: "private_write_unavailable",
+  retryable: false,
+  message: "Explicit memory editing is unavailable in this runtime. Do not retry this call.",
+};
 
 const memoryStoreTool: ToolDefinition = {
   name: "memory_store",
@@ -210,46 +358,82 @@ const memoryStoreTool: ToolDefinition = {
     required: ["translated", "type"],
   },
   async execute(args, context): Promise<string> {
-    if (++_storeCount > STORE_CAP) {
-      return JSON.stringify({ stored: false, error: "Store limit reached for this session. Move to next task." });
+    // #1552 R1: execution-time allowlist — a forged or direct call with any
+    // other (or missing) session type fails closed without touching quota.
+    const sessionType = context?.sessionType;
+    if (sessionType !== "A" && sessionType !== "D") {
+      return JSON.stringify({ stored: false, code: "memory_store_not_allowed", retryable: false });
     }
-    if (memoryBackend) {
-      try {
-        const params: InstantStoreParams = {
-          userId: context?.userId ?? getMasterUserId(),
-          contentEn: args["translated"] ?? "",
-          contentOriginal: args["original"] ?? args["translated"] ?? "",
-          memoryType: (args["type"] ?? "fact") as InstantStoreParams["memoryType"],
-          emotionScore: parseInt(args["emotion"] ?? "0", 10),
-          confidence: parseInt(args["confidence"] ?? "3", 10),
-          classification: parseInt(args["classification"] ?? "1", 10),
-        };
-        const result = await memoryBackend.instantStore({ ...params, createdBy: "tool:memory_store" });
-        return JSON.stringify(result);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        // #706: FTS5 corruption self-heal — rebuild indexes and retry once
-        if (msg.includes("fts5") || msg.includes("corruption")) {
-          try {
-            await memoryBackend.rebuildFtsIndexes();
-            logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
-            const params: InstantStoreParams = {
-              userId: context?.userId ?? getMasterUserId(),
-              contentEn: args["translated"] ?? "",
-              contentOriginal: args["original"] ?? args["translated"] ?? "",
-              memoryType: (args["type"] ?? "fact") as InstantStoreParams["memoryType"],
-              emotionScore: parseInt(args["emotion"] ?? "0", 10),
-              confidence: parseInt(args["confidence"] ?? "3", 10),
-              classification: parseInt(args["classification"] ?? "1", 10),
-            };
-            const result = await memoryBackend.instantStore({ ...params, createdBy: "tool:memory_store" });
-            return JSON.stringify(result);
-          } catch (retryErr) { /* fall through */ }
-        }
-        return JSON.stringify({ error: msg });
+    const deps = memoryDeps(context);
+    if (!deps || !deps.runtime.supports("instantStore")) {
+      return JSON.stringify(PRIVATE_WRITE_UNAVAILABLE);
+    }
+    const userId = context?.userId ?? getMasterUserId();
+    const storeOnce = async (): Promise<import("../memory-runtime.js").InstantStoreResult> => deps.runtime.instantStore({
+      userId,
+      contentEn: stringValue(args["translated"]),
+      contentOriginal: stringValue(args["original"] ?? args["translated"]),
+      memoryType: stringValue(args["type"] ?? "fact"),
+      emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
+      confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
+      classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
+    });
+
+    // #1552 R2/R5: Main reserves exactly once before the first attempt; the
+    // FTS rebuild/retry stays inside the same reservation. Dreamy bypasses
+    // quota reservation entirely.
+    let reservationId: string | undefined;
+    if (sessionType === "A") {
+      const reserved = deps.quota.reserve(userId);
+      if (reserved.kind === "limited") {
+        return JSON.stringify({
+          stored: false,
+          code: "memory_store_quota_exceeded",
+          retryable: false,
+          limit: reserved.limit,
+          used: reserved.used,
+          retry_after: new Date(reserved.retryAfter).toISOString(),
+        });
       }
+      if (reserved.kind === "unavailable") {
+        return JSON.stringify({
+          stored: false,
+          code: "memory_store_quota_unavailable",
+          retryable: false,
+          reason: reserved.reason,
+        });
+      }
+      reservationId = reserved.id;
     }
-    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
+    try {
+      const result = await storeOnce();
+      // #1552 R3/R5: only a final stored:true commits the reservation; a
+      // definitively unsuccessful write releases it so it does not count.
+      if (reservationId) {
+        if (result.stored === true) deps.quota.commit(reservationId);
+        else deps.quota.release(reservationId);
+      }
+      return JSON.stringify(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // #706: FTS corruption self-heal — rebuild indexes and retry once,
+      // still inside the same reservation.
+      if ((msg.includes("fts5") || msg.includes("corruption")) && deps.runtime.supports("rebuildFts")) {
+        try {
+          await deps.runtime.rebuildFtsIndexes();
+          logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
+          const result = await storeOnce();
+          if (reservationId) {
+            if (result.stored === true) deps.quota.commit(reservationId);
+            else deps.quota.release(reservationId);
+          }
+          return JSON.stringify(result);
+        } catch (retryErr) { /* fall through */ }
+      }
+      // Known thrown failure after all retry handling: release the slot.
+      if (reservationId) deps.quota.release(reservationId);
+      return JSON.stringify({ error: msg });
+    }
   },
 };
 
@@ -265,84 +449,75 @@ const memoryRecallTool: ToolDefinition = {
     required: ["query"],
   },
   async execute(args, context): Promise<string> {
-    if (memoryBackend) {
-      try {
-        const t0 = Date.now();
-        const userId = context?.userId ?? getMasterUserId();
-        const { loadUsers } = await import("../user-registry.js");
-        const userEntry = loadUsers().byUserId.get(userId);
-        const result = await memoryBackend.recall({
-          translated: [args["query"] ?? ""],
-          original: args["query"] ?? "",
-          userId,
-          limit: parseInt(args["limit"] ?? "10", 10),
-          maxClassification: userEntry?.maxClass ?? 1,
-        });
-        import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
-        return JSON.stringify(result);
-      } catch (err) {
-        return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
-      }
+    const runtime = memoryDeps(context)?.runtime;
+    if (!runtime || !runtime.supports("recall")) {
+      return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
     }
-    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
+    try {
+      const t0 = Date.now();
+      const userId = context?.userId ?? getMasterUserId();
+      const { loadUsers } = await import("../user-registry.js");
+      const userEntry = loadUsers().byUserId.get(userId);
+      const result = await runtime.recall({
+        query: stringValue(args["query"]),
+        userId,
+        limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
+        maxClassification: userEntry?.maxClass ?? 1,
+      });
+      import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
+      return JSON.stringify(result);
+    } catch (err) {
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+    }
   },
 };
 
 const memoryEditTool: ToolDefinition = {
   name: "memory_edit",
-  description: "Edit an existing memory by ID. Change content, type, emotion, confidence, or classification.",
+  description: "Edit an existing memory by ID. Requires the expected_revision from a prior recall call to avoid stale overwrites. Change content, type, emotion, confidence, or classification.",
   parameters: {
     type: "object",
     properties: {
       memory_id: { type: "integer", description: "Memory ID to edit" },
+      expected_revision: { type: "integer", description: "Semantic revision from the most recent recall read of this memory. Required for safe concurrent edits." },
       translated: { type: "string", description: "New English content" },
       original: { type: "string", description: "New original language content" },
       type: { type: "string", description: "New memory type" },
       emotion: { type: "integer", description: "New emotion score" },
       confidence: { type: "integer", description: "New confidence" },
       classification: { type: "integer", description: "New classification" },
-      caller: { type: "string", enum: ["kp", "dreamy"], description: "Who is making the edit" },
     },
-    required: ["memory_id"],
+    required: ["memory_id", "expected_revision"],
   },
-  async execute(args): Promise<string> {
-    if (memoryBackend) {
-      try {
-        const result = await memoryBackend.editMemory({
-          memoryId: parseInt(args["memory_id"] ?? "0", 10),
-          contentEn: args["translated"],
-          contentOriginal: args["original"],
-          memoryType: args["type"] as "fact" | "decision" | "preference" | "event" | undefined,
-          emotionScore: args["emotion"] ? parseInt(args["emotion"], 10) : undefined,
-          confidence: args["confidence"] ? parseInt(args["confidence"], 10) : undefined,
-          classification: args["classification"] ? parseInt(args["classification"], 10) : undefined,
-          caller: (args["caller"] ?? "kp") as "kp" | "dreamy",
-        });
-        return JSON.stringify(result);
-      } catch (err) {
-        return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
-      }
+  async execute(args, context): Promise<string> {
+    const runtime = memoryDeps(context)?.runtime;
+    if (!runtime || !runtime.supports("editMemory")) {
+      return JSON.stringify(EDIT_UNAVAILABLE);
     }
-    return JSON.stringify({ error: MEMORY_BACKEND_ERROR });
-  },
-};
-
-const webBrowseTool: ToolDefinition = {
-  name: "web_browse",
-  description: "Browse a URL or perform a complex multi-step web task. For quick lookups use execute_bash with curl.",
-  parameters: {
-    type: "object",
-    properties: {
-      task: { type: "string", description: "What to do on the web" },
-      chat_id: { type: "string", description: "Chat ID for result delivery" },
-      engine: { type: "string", description: "Browser engine (optional)" },
-    },
-    required: ["task", "chat_id"],
-  },
-  execute: (args) => {
-    let cmd = `abtars-browse --task ${JSON.stringify(args["task"] ?? "")} --chat-id ${args["chat_id"] ?? "0"}`;
-    if (args["engine"]) cmd += ` --engine ${args["engine"]}`;
-    return runBash(cmd, CLI_TIMEOUT_MS);
+    try {
+      const expectedRevision = parseInt(stringValue(args["expected_revision"] ?? "0"), 10);
+      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+        return JSON.stringify({ ok: false, error: "expected_revision must be a positive integer" });
+      }
+      const result = await runtime.editMemory({
+        memoryId: parseInt(stringValue(args["memory_id"] ?? "0"), 10),
+        expectedRevision,
+        userId: context?.userId ?? getMasterUserId(),
+        contentEn: optionalStringValue(args["translated"]),
+        contentOriginal: optionalStringValue(args["original"]),
+        memoryType: optionalStringValue(args["type"]),
+        emotionScore: args["emotion"] ? parseInt(stringValue(args["emotion"]), 10) : undefined,
+        confidence: args["confidence"] ? parseInt(stringValue(args["confidence"]), 10) : undefined,
+        classification: args["classification"] ? parseInt(stringValue(args["classification"]), 10) : undefined,
+      });
+      return JSON.stringify(result);
+    } catch (err) {
+      const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
+      if (code === "conflict") {
+        return JSON.stringify({ ok: false, error: "Stale revision: memory was modified since you last read it. Please re-recall and retry.", retryable: false, code: "conflict" });
+      }
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+    }
   },
 };
 
@@ -359,10 +534,10 @@ const todoTool: ToolDefinition = {
     required: ["action"],
   },
   execute: (args) => {
-    const action = args["action"] ?? "list";
-    if (action === "add") return runBash(`abtars-todo add ${JSON.stringify(args["text"] ?? "")}`, CLI_TIMEOUT_MS);
-    if (action === "done") return runBash(`abtars-todo done ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    if (action === "remove") return runBash(`abtars-todo remove ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
+    const action = stringValue(args["action"] ?? "list");
+    if (action === "add") return runBash(`abtars-todo add ${JSON.stringify(stringValue(args["text"]))}`, CLI_TIMEOUT_MS);
+    if (action === "done") return runBash(`abtars-todo done ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
+    if (action === "remove") return runBash(`abtars-todo remove ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
     return runBash("abtars-todo list", CLI_TIMEOUT_MS);
   },
 };
@@ -371,11 +546,6 @@ let _enqueueCron: ((id: string, manual?: boolean) => string | null) | null = nul
 
 /** Inject enqueueCron from bridge for task_manage --run. */
 export function setEnqueueCron(fn: (id: string, manual?: boolean) => string | null): void { _enqueueCron = fn; }
-
-let _ircSend: ((channel: string, message: string) => void) | null = null;
-
-/** Inject IRC send from bridge for irc_send tool. */
-export function setIrcSend(fn: (channel: string, message: string) => void): void { _ircSend = fn; }
 
 /** @deprecated — secret_get now reads from file, not DB. Kept for backward compat (callers may still call this). */
 
@@ -399,11 +569,11 @@ const sendDocumentTool: ToolDefinition = {
     required: ["path"],
   },
   execute: async (args) => {
-    const path = args["path"];
+    const path = stringValue(args["path"]);
     if (!path) return JSON.stringify({ error: "path is required" });
     if (!_sendDocument) return JSON.stringify({ error: "Telegram not configured (sendDocument unavailable)" });
     try {
-      const messageId = await _sendDocument(path, args["caption"]);
+      const messageId = await _sendDocument(path, optionalStringValue(args["caption"]));
       return JSON.stringify({ ok: true, message_id: messageId });
     } catch (err) {
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
@@ -413,34 +583,55 @@ const sendDocumentTool: ToolDefinition = {
 
 const taskTool: ToolDefinition = {
   name: "task_manage",
-  description: "Manage scheduled/recurring tasks (cron). Add, list, remove, pause, resume, or run tasks. Use action=run to execute a task immediately via the cron queue (isolated subagent).",
+  description: "Manage scheduled/recurring tasks (cron). Add, list, remove, pause, resume, or run tasks. Use action=run to execute a task immediately via the cron queue (isolated subagent). Use action=adjust to change a whitelisted budget field within its hard ceiling, or action=escalate to surface a concrete human ask.",
   parameters: {
     type: "object",
     properties: {
-      action: { type: "string", enum: ["add", "list", "remove", "pause", "resume", "run"], description: "Action" },
-      message: { type: "string", description: "Task message/command (for add)" },
+      action: { type: "string", enum: ["add", "list", "remove", "pause", "resume", "run", "adjust", "escalate"], description: "Action" },
+      message: { type: "string", description: "Task message/command (for add); human ask text (for escalate)" },
       schedule: { type: "string", description: "Cron schedule expression (for add)" },
       type: { type: "string", enum: ["reminder", "script", "agent"], description: "Task type (for add)" },
       chat_id: { type: "string", description: "Chat ID (for add)" },
-      id: { type: "string", description: "Task ID (for remove/pause/resume/run)" },
+      id: { type: "string", description: "Task ID (for remove/pause/resume/run/adjust/escalate)" },
+      field: { type: "string", description: "Budget field to adjust (maxToolRounds | report.minBytes | orchestration.laneDurationMs)" },
+      value: { type: "number", description: "New value for the field, within its hard ceiling (for adjust)" },
     },
     required: ["action"],
   },
-  execute: (args) => {
-    const action = args["action"] ?? "list";
+  execute: async (args) => {
+    const action = stringValue(args["action"] ?? "list");
+    if (action === "adjust") {
+      const { remediateAdjust } = await import("../tasks/task-remediation.js");
+      const id = stringValue(args["id"]).trim();
+      const field = stringValue(args["field"]).trim();
+      const value = args["value"];
+      if (!id || !field) return JSON.stringify({ error: "id and field are required for adjust" });
+      if (typeof value !== "number" || !Number.isFinite(value)) return JSON.stringify({ error: "value must be a number for adjust" });
+      const result = remediateAdjust(id, field, value, undefined);
+      return JSON.stringify(result.ok ? { ok: true, message: result.message } : { error: result.reason });
+    }
+    if (action === "escalate") {
+      const { remediateEscalate } = await import("../tasks/task-remediation.js");
+      const id = stringValue(args["id"]).trim();
+      const ask = stringValue(args["message"]).trim();
+      if (!id || !ask) return JSON.stringify({ error: "id and message (the ask) are required for escalate" });
+      const result = remediateEscalate(id, ask, undefined);
+      return JSON.stringify(result.ok ? { ok: true, message: result.message } : { error: result.reason });
+    }
     if (action === "list") return runBash("abtars-task list", CLI_TIMEOUT_MS);
-    if (action === "remove") return runBash(`abtars-task remove ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    if (action === "pause") return runBash(`abtars-task pause ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    if (action === "resume") return runBash(`abtars-task resume ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
+    if (action === "remove") return runBash(`abtars-task remove ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
+    if (action === "pause") return runBash(`abtars-task pause ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
+    if (action === "resume") return runBash(`abtars-task resume ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
     if (action === "run") {
       if (!_enqueueCron) return Promise.resolve(JSON.stringify({ error: "enqueueCron not available" }));
-      const err = _enqueueCron(args["id"] ?? "", true);
-      return Promise.resolve(JSON.stringify(err ? { error: err } : { ok: true, message: `Task ${args["id"]} enqueued for immediate execution` }));
+      const id = stringValue(args["id"]);
+      const err = _enqueueCron(id, true);
+      return Promise.resolve(JSON.stringify(err ? { error: err } : { ok: true, message: `Task ${id} enqueued for immediate execution` }));
     }
-    let cmd = `abtars-task add --message ${JSON.stringify(args["message"] ?? "")}`;
-    if (args["schedule"]) cmd += ` --schedule ${JSON.stringify(args["schedule"])}`;
-    if (args["type"]) cmd += ` --type ${args["type"]}`;
-    if (args["chat_id"]) cmd += ` --chat-id ${args["chat_id"]}`;
+    let cmd = `abtars-task add --message ${JSON.stringify(stringValue(args["message"]))}`;
+    if (args["schedule"]) cmd += ` --schedule ${JSON.stringify(stringValue(args["schedule"]))}`;
+    if (args["type"]) cmd += ` --type ${stringValue(args["type"])}`;
+    if (args["chat_id"]) cmd += ` --chat-id ${stringValue(args["chat_id"])}`;
     return runBash(cmd, CLI_TIMEOUT_MS);
   },
 };
@@ -457,25 +648,30 @@ const peerSessionTool: ToolDefinition = {
     },
     required: ["peer_name", "message"],
   },
-  async execute(args) {
-    // #1301 — no relay: a peer-originated request must never make us call a third peer.
+  async execute(args, context) {
+    // #1301/#1480 — no relay for a currently authenticated peer-originated Orc run.
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
-    if (await isActiveCardPeerSourced()) {
+    if (await isActiveCardPeerSourced(context)) {
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
+    const { resolvePeerName } = await import("./peer-resolver.js");
     const { callPeer } = await import("../peer-client.js");
     const { loadPeerConfig } = await import("../peer-config.js");
     const { getOrCreateSession, addTurn, isEnded, destroySession } = await import("../peer-sessions.js");
 
-    const peerName = args.peer_name?.trim();
-    const message = args.message?.trim();
-    if (!peerName || !message) return JSON.stringify({ error: "peer_name and message required" });
+    const peerNameRaw = stringValue(args.peer_name).trim();
+    const message = stringValue(args.message).trim();
+    if (!peerNameRaw || !message) return JSON.stringify({ error: "peer_name and message required" });
 
+    // #1520: reject local session identities before config lookup or transport.
+    const resolved = resolvePeerName(peerNameRaw);
+    if (!resolved.ok) {
+      return JSON.stringify({ error: resolved.message, code: resolved.code });
+    }
+    const peerName = resolved.peer;
     const config = loadPeerConfig();
-    if (peerName === config.self.name) return JSON.stringify({ error: "Cannot chat with yourself" });
-    if (!config.peers[peerName]) return JSON.stringify({ error: `Unknown peer: ${peerName}` });
 
-    const session = getOrCreateSession(args.session_id?.trim() || undefined, peerName);
+    const session = getOrCreateSession(stringValue(args.session_id).trim() || undefined, peerName);
 
     // Check turn cap before sending
     if (session.messages.length >= 20) {
@@ -514,18 +710,21 @@ const peerDoorbellTool: ToolDefinition = {
     },
     required: ["peer_name"],
   },
-  async execute(args) {
+  async execute(args, context) {
     // #1301 — no relay: a peer-originated request must never reach a third peer via us.
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
-    if (await isActiveCardPeerSourced()) {
+    if (await isActiveCardPeerSourced(context)) {
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
-    const { loadPeerConfig } = await import("../peer-config.js");
-    const peerName = args.peer_name?.trim();
-    if (!peerName) return JSON.stringify({ error: "peer_name required" });
-    const config = loadPeerConfig();
-    const peer = config.peers[peerName];
-    if (!peer) return JSON.stringify({ error: `Unknown peer: ${peerName}` });
+    const { resolvePeerName } = await import("./peer-resolver.js");
+    const peerNameRaw = stringValue(args.peer_name).trim();
+    if (!peerNameRaw) return JSON.stringify({ error: "peer_name required" });
+    // #1520: reject local session identities before config lookup or transport.
+    const resolved = resolvePeerName(peerNameRaw);
+    if (!resolved.ok) {
+      return JSON.stringify({ error: resolved.message, code: resolved.code });
+    }
+    const peerName = resolved.peer;
     const { getPeerTransport } = await import("../peer-transport/index.js");
     const transport = getPeerTransport();
     if (typeof transport.ringDoorbell !== "function") {
@@ -533,23 +732,6 @@ const peerDoorbellTool: ToolDefinition = {
     }
     const result = await transport.ringDoorbell(peerName);
     return JSON.stringify({ ok: true, result: result.status, message: `Doorbell rang ${peerName}: ${result.status}` });
-  },
-};
-
-const ircSendTool: ToolDefinition = {
-  name: "irc_send",
-  description: "Send a message to an IRC channel (e.g. #bridges)",
-  parameters: {
-    channel: { type: "string", description: "IRC channel (e.g. #bridges)" },
-    message: { type: "string", description: "Message text to send" },
-  },
-  execute: async (args) => {
-    if (!_ircSend) return JSON.stringify({ error: "IRC adapter not connected" });
-    const channel = args["channel"] ?? "";
-    const message = args["message"] ?? "";
-    if (!channel || !message) return JSON.stringify({ error: "channel and message are required" });
-    _ircSend(channel, message);
-    return JSON.stringify({ ok: true, channel, sent: message.length + " chars" });
   },
 };
 
@@ -563,7 +745,7 @@ const secretGetTool: ToolDefinition = {
     required: ["name"],
   },
   execute: async (args) => {
-    const name = args.name?.trim();
+    const name = stringValue(args.name).trim();
     if (!name) return JSON.stringify({ error: "name is required" });
     try {
       const { readSecret } = await import("../../components/secrets.js");
@@ -591,7 +773,7 @@ import { kanbanTool } from "./kanban-tool.js";
 import { channelPostTool, channelReadTool } from "./channel-tool.js";
 import { artifactPushTool, artifactPullTool, artifactAttachTool } from "./artifact-tools.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
 
 // Conditional: artifact store tools (#929)
 if (process.env["ARTIFACT_S3_ENDPOINT"]) {
@@ -599,6 +781,11 @@ if (process.env["ARTIFACT_S3_ENDPOINT"]) {
 }
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
+
+/** #1535: preflight tool verification against the canonical definitions. */
+export function getToolDescriptor(name: string): ToolDefinition | undefined {
+  return ALL_TOOLS.find(t => t.name === name);
+}
 
 export function getToolSchemas(policy?: SandboxPolicy): Array<{ type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }> {
   const tools = policy ? ALL_TOOLS.filter(t => checkTool(t.name, policy).allowed) : ALL_TOOLS;
@@ -611,16 +798,16 @@ export function getToolSchemas(policy?: SandboxPolicy): Array<{ type: "function"
 import { bumpRead } from "../skill-stats.js";
 
 /** Check if a bash command result indicates a skill file was read. */
-function checkSkillRead(toolName: string, args: Record<string, string>): void {
+function checkSkillRead(toolName: string, args: Record<string, unknown>): void {
   if (toolName !== "execute_bash") return;
-  const cmd = args["command"] ?? "";
+  const cmd = stringValue(args["command"]);
   if (cmd.includes("/.abtars/skills/") && cmd.includes("/SKILL.md")) {
     const match = cmd.match(/\/.abtars\/skills\/[^/]+\/([^/]+)\/SKILL\.md/);
     if (match) bumpRead(match[1]!);
   }
 }
 
-export async function executeToolCall(name: string, args: Record<string, string>, context?: { userId: string; signal?: AbortSignal; sandboxPolicy?: SandboxPolicy }): Promise<string> {
+export async function executeToolCall(name: string, args: Record<string, unknown>, context?: ToolExecutionContext & { sandboxPolicy?: SandboxPolicy }): Promise<string> {
   // Sandbox enforcement
   if (context?.sandboxPolicy) {
     const toolCheck = checkTool(name, context.sandboxPolicy);
@@ -629,7 +816,7 @@ export async function executeToolCall(name: string, args: Record<string, string>
       auditDeny(name, undefined, "session", toolCheck.reason!);
       return JSON.stringify({ error: `Tool '${name}' not available in this session`, available_tools: available, reason: "peer_sandbox" });
     }
-    const filePath = args["path"] ?? args["file_path"];
+    const filePath = stringValue(args["path"] ?? args["file_path"]);
     if (filePath) {
       const mode = name.includes("read") || name === "memory_recall" ? "read" as const : "write" as const;
       const pathCheck = checkPath(filePath, mode, context.sandboxPolicy);
@@ -645,7 +832,7 @@ export async function executeToolCall(name: string, args: Record<string, string>
   const ts = Date.now();
 
   // #621: redact abmind_store args based on classification
-  const storeClass = (name === "abmind_store" || name === "memory_store") ? parseInt(args.classification ?? args.class ?? "1", 10) : 0;
+  const storeClass = (name === "abmind_store" || name === "memory_store") ? parseInt(stringValue(args.classification ?? args.class ?? "1"), 10) : 0;
   const auditArgs = storeClass >= 2
     ? `{"class":${storeClass},"[REDACTED]":true}`
     : redactSecrets(JSON.stringify(args));

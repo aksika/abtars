@@ -81,7 +81,6 @@ describe("renderOperatorStatus", () => {
     const view = makeOperatorView();
     const out = renderOperatorStatus(view);
     const expected = [
-      "abtars status",
       "  home:          /home/test/.abtars",
       "  version:       0.3.5-alpha.0",
       "  commit:        abc1234",
@@ -98,13 +97,13 @@ describe("renderOperatorStatus", () => {
       "  agent-api:     :7100",
     ].join("\n");
     expect(out.startsWith(expected)).toBe(true);
+    expect(out).not.toMatch(/^abtars status/m);
   });
 
   it("renders the daemon block when daemon info is present", () => {
     const out = renderOperatorStatus(makeOperatorView());
     expect(out).toContain("  daemon:        abtars (system)");
-    expect(out).toContain("                 ● active (running)");
-    expect(out).toContain("                 pid: 12340");
+    expect(out).toContain("                 ● active (running) since Fri 2026-07-10 15:30:00 UTC; 5min ago (pid 12340)");
     expect(out).toContain("                 bridge uptime: 5m");
     expect(out).toContain("                 start reason: watchdog-respawn");
   });
@@ -155,6 +154,24 @@ describe("renderOperatorStatus", () => {
     expect(out).not.toContain("mood");
     expect(out).not.toContain("transport:");
   });
+
+  it("renders warnings so an exit-1 status is never silent (#1572)", () => {
+    const out = renderOperatorStatus(
+      makeOperatorView({
+        warnings: [
+          "Pi 0.84.0 is newer than the version abtars is built against (0.83.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.83.0'",
+        ],
+      }),
+    );
+    expect(out).toContain("warnings:      1");
+    expect(out).toContain("Pi 0.84.0 is newer than the version abtars is built against");
+    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.83.0'");
+  });
+
+  it("omits the warnings section when there are none", () => {
+    const out = renderOperatorStatus(makeOperatorView({ warnings: [] }));
+    expect(out).not.toContain("warnings:");
+  });
 });
 
 // ── renderChatStatus ─────────────────────────────────────────────────────────
@@ -180,13 +197,27 @@ describe("renderChatStatus", () => {
     const out = renderChatStatus(makeOperatorView({ runtime: makeRuntimeView() }));
     expect(out).toContain("✓ Telegram");
     expect(out).toContain("✓ Discord");
-    expect(out).toContain("✗ Irc");
+    expect(out).not.toContain("Irc");
   });
 
   it("warns when runtime is not available (no ctx provided)", () => {
     const view = makeOperatorView(); // no runtime
     const out = renderChatStatus(view);
     expect(out).toContain("⚠ runtime not available");
+  });
+
+  it("renders warnings, including the Pi downgrade command", () => {
+    const out = renderChatStatus(
+      makeOperatorView({
+        runtime: makeRuntimeView(),
+        warnings: [
+          "Pi 0.84.0 is newer than the version abtars is built against (0.83.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.83.0'",
+        ],
+      }),
+    );
+    expect(out).toContain("Warnings:");
+    expect(out).toContain("Pi 0.84.0 is newer than the version abtars is built against");
+    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.83.0'");
   });
 
   it("reflects mood from runtime failure signals", () => {
@@ -260,6 +291,75 @@ describe("bridge tty parsing from /proc/<pid>/stat", () => {
       result = "?";
     }
     expect(result).toBe("?");
+  });
+});
+
+// ── macOS launchd probe labels (#1462) ───────────────────────────────────────
+
+describe("collectDaemon macOS launchd probe labels", () => {
+  // The probe unit selection logic in collectDaemon:
+  //   const probeUnit = isMac ? (scope === "system" ? "com.abtars.daemon" : "com.abtars.watchdog") : unit;
+  // We test this decision table in isolation.
+
+  const macOS_SYSTEM_PROBE = "com.abtars.daemon";
+  const macOS_USER_PROBE = "com.abtars.watchdog";
+  const LINUX_USER_UNIT = "abtars-watchdog";
+  const LINUX_SYSTEM_UNIT = "abtars";
+
+  it("macOS system scope probes com.abtars.daemon", () => {
+    const isMac = true;
+    const scope = "system";
+    const unit = LINUX_SYSTEM_UNIT; // unitName("system") returns "abtars"
+    const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
+    expect(probeUnit).toBe("com.abtars.daemon");
+  });
+
+  it("macOS user scope probes com.abtars.watchdog", () => {
+    const isMac = true;
+    const scope = "user";
+    const unit = LINUX_USER_UNIT; // unitName("user") returns "abtars-watchdog"
+    const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
+    expect(probeUnit).toBe("com.abtars.watchdog");
+  });
+
+  it("Linux system scope uses unit name unchanged", () => {
+    const isMac = false;
+    const scope = "system";
+    const unit = "abtars";
+    const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
+    expect(probeUnit).toBe("abtars");
+  });
+
+  it("Linux user scope uses unit name unchanged", () => {
+    const isMac = false;
+    const scope = "user";
+    const unit = "abtars-watchdog";
+    const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
+    expect(probeUnit).toBe("abtars-watchdog");
+  });
+
+  it("parses new macOS plist format: running PID", () => {
+    const plistOutput = `{
+  "PID" = 31235;
+  "Label" = "com.abtars.watchdog";
+  "LastExitStatus" = 0;
+  "LimitLoadToSessionType" = "Aqua";
+  "OnDemand" = false;
+}`;
+    const pidMatch = plistOutput.match(/"PID"\s*=\s*(\d+);/);
+    expect(pidMatch?.[1]).toBe("31235");
+    const parsed = pidMatch?.[1] ? parseInt(pidMatch[1], 10) : null;
+    expect(parsed).toBe(31235);
+  });
+
+  it("parses new macOS plist format: not running (PID = 0)", () => {
+    const plistOutput = `{
+  "PID" = 0;
+  "Label" = "com.abtars.watchdog";
+  "LastExitStatus" = 256;
+}`;
+    const pidMatch = plistOutput.match(/"PID"\s*=\s*(\d+);/);
+    expect(pidMatch?.[1]).toBe("0");
   });
 });
 

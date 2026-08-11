@@ -6,7 +6,7 @@
 │             │     │              │     │                 │
 │ • Telegram  │     │ • Commands   │     │ • CLI (ACP/tmux)│
 │ • Discord   │◀────│ • Memory     │◀────│ • API (HTTP)    │
-│ • IRC       │     │ • Streaming  │     │ • Fallback      │
+│              │     │ • Streaming  │     │ • Fallback      │
 └─────────────┘     └──────────────┘     └─────────────────┘
                            │
                     ┌──────┴──────┐

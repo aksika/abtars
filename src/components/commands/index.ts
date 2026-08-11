@@ -16,12 +16,12 @@ import {
   handleMemory, handleNlm,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
   handleHooks, handleMcp, handleUsers, handleUsage, handleOpenRouter, handleWhoami,
-  handleSoftware, handlePeers, handleMetrics,
+  handleSoftware, handleTribe, handleMetrics,
 } from "./handlers.js";
 import { handleSession } from "./session-handler.js";
 import {
   handlePiRun, handlePiStatus, handlePiList, handlePiReply,
-  handlePiSteer, handlePiCancel, handlePiResume,
+  handlePiSteer, handlePiCancel, handlePiResume, handlePiCompact,
 } from "./handlers-pi.js";
 
 // ── Exact-match commands ────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ registerExact("/hooks", handleHooks);
 registerExact("/usage", handleUsage);
 registerExact("/openrouter", handleOpenRouter);
 registerExact("/whoami", handleWhoami);
-registerExact("/peers", handlePeers);
+registerExact("/tribe", handleTribe);
 registerExact("/metrics", handleMetrics);
 registerExact("/session", handleSession);
 
@@ -93,4 +93,5 @@ registerPrefix("/pi list", handlePiList);
 registerPrefix("/pi reply ", handlePiReply);
 registerPrefix("/pi steer ", handlePiSteer);
 registerPrefix("/pi cancel ", handlePiCancel);
+registerPrefix("/pi compact ", handlePiCompact);
 registerPrefix("/pi resume ", handlePiResume);

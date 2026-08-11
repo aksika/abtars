@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
 import type { ManagedSession } from "./spin-types.js";
+import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
 
 const detectCitationsSpy = vi.fn().mockReturnValue([1]);
 let abmindReturn: any = { detectCitations: detectCitationsSpy };
@@ -133,6 +134,7 @@ describe("handleInboundMessage", () => {
     // Mock it to wire the describe-block's transport (recreated fresh per test) so
     // ctx.transport and deps.transport resolve to the same object.
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      console.log("ensureSessionTransport: setting transport id=", (transport as any)._id);
       session.transport = transport;
     });
     vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
@@ -244,6 +246,47 @@ describe("handleInboundMessage", () => {
     expect((deps as any)._session.busy).toBe(false);
   });
 
+  // #1529: a configured durable turn whose inbound write rejects must fail
+  // closed at the Pi boundary — bounded response, no normal model response,
+  // busy state released.
+  it("fails closed with a bounded response when the inbound durable write rejects (#1529)", async () => {
+    const adapter = mockAdapter();
+    const recordMessage = vi.fn().mockRejectedValue(new Error("owner down"));
+    const deps = mockDeps(transport, {
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      memoryRuntime: {
+        state: "ready",
+        capabilities: new Set(["durableContext"]),
+        recordMessage,
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
+        getRecentConversation: vi.fn().mockResolvedValue({ results: [] }),
+        getStatus: vi.fn().mockResolvedValue({}),
+        getCoreKnowledge: vi.fn().mockResolvedValue({ core: [] }),
+        embed: vi.fn().mockResolvedValue({}),
+        runMaintenance: vi.fn().mockResolvedValue({}),
+        close: vi.fn().mockResolvedValue(undefined),
+      } as any,
+    } as any);
+    // Stub spin() forwards the intent to the transport boundary so the Pi
+    // preflight can fail closed before any provider work.
+    (deps.sessionManager as any).spin = async (spec: any) => {
+      const context = { userId: spec.userId, durableContextIntent: spec.durableContextIntent };
+      if (context.durableContextIntent?.mode === "required_unavailable") {
+        throw new DurableContextUnavailableError("cursor_unavailable");
+      }
+      const result = await transport.sendPrompt(spec.sessionId ?? "test_A_01", spec.prompt, spec.imageContent, context);
+      return { sessionId: spec.sessionId ?? "test_A_01", result: result ?? "" };
+    };
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Memory context is temporarily unavailable. Please retry.", expect.any(Object));
+    expect(transport.sendPrompt).not.toHaveBeenCalled();
+    expect((deps as any)._session.busy).toBe(false);
+  });
+
   // #1294: a synthetic boot greeting that fails must NOT send a user-facing error reply.
   it("suppresses user-facing error for synthetic [SESSION START] greeting failures", async () => {
     transport.sendPrompt = vi.fn().mockRejectedValue(new Error("All models exhausted:\nno candidates")) as any;
@@ -320,18 +363,39 @@ describe("handleInboundMessage", () => {
   });
 
   it("different users get different session keys from SessionManager", async () => {
-    const sm = {
-      getActiveSessionId: vi.fn((userId: string) => `${userId}_A_01`),
-      getActiveSession: () => ({ id: "x", type: "A", shortIndex: 1, ended: false }),
-    };
-    const deps = mockDeps(transport, { sessionManager: sm } as any);
+    // #1432: session-selection middleware resolves the effective session per
+    // user/platform; buildPrompt uses that selected session (never recomputes).
+    const spinMod = await import("./spin.js");
+    const sessions = new Map<string, ManagedSession>();
+    const selectSpy = vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((userId: string, platform: string): ManagedSession => {
+      const id = `${userId}_A_01`;
+      let s = sessions.get(id);
+      if (!s) {
+        s = {
+          id, userId, platform, chatId: 100,
+          delivery: "streaming", active: true, status: "ready",
+          idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+          log: [], shortIndex: 1,
+          busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+          compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        };
+        sessions.set(id, s);
+      }
+      return s;
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => {
+      const s = sessions.get(id);
+      if (!s) throw new Error(`no session ${id}`);
+      return s;
+    });
     const adapter = mockAdapter();
+    const deps = mockDeps(transport);
 
     await handleInboundMessage(makeMsg({ userId: "aksika" }), adapter, deps);
     await handleInboundMessage(makeMsg({ userId: "adrika" }), adapter, deps);
 
-    expect(sm.getActiveSessionId).toHaveBeenCalledWith("aksika", "telegram");
-    expect(sm.getActiveSessionId).toHaveBeenCalledWith("adrika", "telegram");
+    expect(selectSpy).toHaveBeenCalledWith("aksika", "telegram");
+    expect(selectSpy).toHaveBeenCalledWith("adrika", "telegram");
   });
 
   it("userId flows to transport.sendPrompt for tool context", async () => {
@@ -375,6 +439,7 @@ describe("citation detection (#1270)", () => {
     abmindReturn = { detectCitations: detectCitationsSpy, renderMemory: vi.fn().mockReturnValue("test memory") };
     const spinMod = await import("./spin.js");
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      console.log("ensureSessionTransport: setting transport id=", (transport as any)._id);
       session.transport = transport;
     });
     vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
@@ -470,5 +535,212 @@ describe("citation detection (#1270)", () => {
 
     expect(warnSpy).toHaveBeenCalledWith("pipeline", expect.stringContaining("Citation detection failed"));
     expect(debugSpy).not.toHaveBeenCalledWith("pipeline", expect.stringContaining("Citation detection failed"));
+  });
+
+  describe("recordMessage canonical content (#1473)", () => {
+    function mockMemoryRuntime(overrides: Record<string, unknown> = {}) {
+      return {
+        state: "ready",
+        capabilities: new Set<string>(),
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordMessage: vi.fn().mockResolvedValue({}),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({}),
+        getRecentConversation: vi.fn().mockResolvedValue({ results: [] }),
+        getStatus: vi.fn().mockResolvedValue({}),
+        getCoreKnowledge: vi.fn().mockResolvedValue({ core: [] }),
+        embed: vi.fn().mockResolvedValue({}),
+        runMaintenance: vi.fn().mockResolvedValue({}),
+        close: vi.fn().mockResolvedValue(undefined),
+        ...overrides,
+      };
+    }
+
+    beforeEach(async () => {
+      transport = mockTransport();
+      transport.contextPercent = -1;
+      setUserRegistryOverride(MASTER_REGISTRY);
+      abmindReturn = null;
+      const spinMod = await import("./spin.js");
+      vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+        session.transport = transport;
+      });
+      vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
+        id, userId: "master", platform: "telegram", chatId: 100,
+        delivery: "streaming", active: true, status: "ready",
+        idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+        log: [], shortIndex: 1,
+        busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      }));
+      vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
+        id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+        delivery: "streaming", active: true, status: "ready",
+        idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+        log: [], shortIndex: 1,
+        busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      }));
+      vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+        async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
+          id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+          delivery: "streaming", active: true, status: "ready",
+          idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+          log: [], shortIndex: 1,
+          busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+          compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        }),
+      );
+    });
+
+    afterEach(() => {
+      setUserRegistryOverride(null);
+      vi.restoreAllMocks();
+    });
+
+    it("records cleaned text for [NO_REPLY] + text response", async () => {
+      transport.sendPrompt = vi.fn().mockResolvedValue("[NO_REPLY]\n\n[REACT:🤷]\n\nSleep finished — 5 things done.") as any;
+      const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 10 }), adapter, deps);
+
+      // recordMessage should be called with cleaned text (no [NO_REPLY] marker)
+      expect(recordMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ role: "assistant", content: "Sleep finished — 5 things done." }),
+        expect.any(String),
+      );
+    });
+
+    it("does not record assistant response for exact [NO_REPLY] (no text)", async () => {
+      transport.sendPrompt = vi.fn().mockResolvedValue("[NO_REPLY]") as any;
+      const recordMessage = vi.fn().mockResolvedValue({ id: null });
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 11 }), adapter, deps);
+
+      // Should not send anything
+      expect(adapter.sendMessage).not.toHaveBeenCalled();
+      // User message IS recorded (by buildPrompt), but assistant response should NOT be
+      const assistantCalls = (recordMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: unknown[]) => (c[0] as { role?: string })?.role === "assistant",
+      );
+      expect(assistantCalls).toHaveLength(0);
+    });
+  });
+});
+
+describe("#1619 incremental block delivery wiring", () => {
+  let transport: IKiroTransport;
+
+  const MASTER_REG: UserRegistry = {
+    users: [{ userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
+    byPlatformId: new Map([["master:telegram", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+    byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+  };
+
+  beforeEach(async () => {
+    transport = mockTransport();
+    setUserRegistryOverride(MASTER_REG);
+    const spinMod = await import("./spin.js");
+    const mockSession: ManagedSession = {
+      id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+      delivery: "streaming", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    };
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      console.log("ensureSessionTransport: setting transport id=", (transport as any)._id);
+      session.transport = transport;
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => ({
+      ...mockSession, id,
+    }));
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => ({ ...mockSession }));
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+      async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
+        ...mockSession, delivery: "streaming",
+      }),
+    );
+  });
+
+  afterEach(() => {
+    setUserRegistryOverride(null);
+    vi.restoreAllMocks();
+  });
+
+  it("installs callbacks before spin() — a fast first thinking delta becomes a marked progress block", async () => {
+    const fake = transport as any;
+    fake.sendPrompt = vi.fn(async () => {
+      // Fast first delta: the model begins reasoning before the pipeline
+      // would have had time to wire callbacks after spin().
+      fake.onOutputDelta?.({ kind: "thinking", text: "pondering the question" });
+      await fake.onSegmentBreak?.("Pre-tool text.");
+      return "Pre-tool text.\n\nFinal answer.";
+    });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {});
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: unknown[]) => String(c[1]));
+    // Thinking was coalesced into exactly one marked progress block.
+    expect(sent.filter((t) => t.startsWith("💭 "))).toEqual(["💭 pondering the question"]);
+    // The pre-tool segment arrived once...
+    expect(sent.filter((t) => t.includes("Pre-tool text."))).toHaveLength(1);
+    // ...and the terminal answer excludes the already-delivered prefix.
+    expect(sent).toContain("Final answer.");
+  });
+
+  it("guest/group/TUI turns never receive master-chat progress blocks", async () => {
+    const fake = transport as any;
+    fake.sendPrompt = vi.fn(async () => {
+      fake.onOutputDelta?.({ kind: "thinking", text: "secret reasoning" });
+      return "answer";
+    });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {});
+    await handleInboundMessage(makeMsg({ isGroup: true }), adapter, deps);
+    await new Promise((r) => setTimeout(r, 20));
+    const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: unknown[]) => String(c[1]));
+    expect(sent.some((t) => t.startsWith("💭 "))).toBe(false);
+    expect(sent).toContain("answer");
+  });
+
+  it("an interim segment send failure keeps the complete final response (never lost)", async () => {
+    const fake = transport as any;
+    fake.sendPrompt = vi.fn(async () => {
+      await fake.onSegmentBreak?.("Lost segment text.");
+      return "Lost segment text.\n\nFinal answer.";
+    });
+    const adapter = mockAdapter({
+      sendMessage: vi.fn()
+        .mockRejectedValueOnce(new Error("network down"))
+        .mockResolvedValue(1),
+    });
+    const deps = mockDeps(transport, {});
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    await new Promise((r) => setTimeout(r, 20));
+    const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: unknown[]) => String(c[1]));
+    // The interim attempt failed (recorded), and the terminal delivery merged
+    // the failed segment into the complete final answer — nothing lost,
+    // nothing delivered twice.
+    const terminal = sent.filter((t) => t.includes("Final answer."));
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]).toContain("Lost segment text.");
+    expect(terminal[0]).toContain("Final answer.");
   });
 });

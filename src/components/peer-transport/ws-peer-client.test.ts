@@ -284,6 +284,8 @@ describe("WsPeerClient state machine", () => {
     ws.emit("close");
 
     expect(client.currentState).toBe("waiting");
+    expect(client.lastError).toBe("ECONNREFUSED");
+    expect(client.lastErrorAt).toBeGreaterThan(0);
   });
 
   it("stale generation close callback does not schedule reconnect", async () => {
@@ -317,15 +319,79 @@ describe("WsPeerClient state machine", () => {
     expect(client.currentState).toBe("connecting");
   });
 
-  it("prolonged refusal: one dial per backoff step, bounded at 5s-to-300s, resets after authenticated open", async () => {
+  it("cancelRetry clears timer and returns true when waiting", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+
+    client.requestConnect({ reason: "udp-doorbell", delayMs: 5000 });
+    expect(client.currentState).toBe("waiting");
+
+    const cancelled = client.cancelRetry();
+    expect(cancelled).toBe(true);
+    expect(client.currentState).toBe("idle");
+    expect(client.nextRetryAt).toBeNull();
+
+    // Timer must not fire after cancel
+    vi.advanceTimersByTime(5000);
+    expect(client.currentState).toBe("idle");
+  });
+
+  it("cancelRetry returns false when already idle", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+
+    const cancelled = client.cancelRetry();
+    expect(cancelled).toBe(false);
+    expect(client.currentState).toBe("idle");
+  });
+
+  it("forceRetry transitions waiting to connecting and clears nextRetryAt", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+
+    client.requestConnect({ reason: "udp-doorbell", delayMs: 5000 });
+    expect(client.currentState).toBe("waiting");
+    expect(client.nextRetryAt).toBeGreaterThan(0);
+
+    const ok = client.forceRetry();
+    expect(ok).toBe(true);
+    expect(client.currentState).toBe("connecting");
+    expect(client.nextRetryAt).toBeNull();
+  });
+
+  it("forceRetry is no-op on a connected client", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+
+    client.requestConnect({ reason: "startup" });
+    expect(client.currentState).toBe("connecting");
+
+    const ok = client.forceRetry();
+    expect(ok).toBe(false);
+  });
+
+  it("forceRetry is no-op on a destroyed client", async () => {
+    const { WsPeerClient } = await import("./ws-peer-client.js");
+    const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
+
+    client.destroy();
+    const ok = client.forceRetry();
+    expect(ok).toBe(false);
+  });
+
+  it("prolonged refusal: one dial per backoff step, bounded at 5s-to-3600s, resets after authenticated open", async () => {
     // Pin jitter to its midpoint (0.8 + 0.5*0.4 = 1.0) so each step's exact
-    // delay is deterministic: 5s, 10s, 20s, 40s, 80s, 160s, 300s (capped), 300s...
+    // delay is deterministic: 5s, 10s, 20s, 40s, 80s, 160s, 320s, 640s, 1280s,
+    // 2560s, 3600s (capped), 3600s...
     vi.spyOn(Math, "random").mockReturnValue(0.5);
 
     const { WsPeerClient } = await import("./ws-peer-client.js");
     const client = new WsPeerClient("testpeer", { host: "10.0.0.1", port: 7100, verifyKey: "abc123", transport: "ws-outbound" });
 
-    const expectedDelays = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000];
+    const expectedDelays = [
+      5_000, 10_000, 20_000, 40_000, 80_000, 160_000,
+      320_000, 640_000, 1_280_000, 2_560_000, 3_600_000, 3_600_000,
+    ];
 
     client.requestConnect({ reason: "startup" });
     expect(mockWsInstances.length).toBe(1);
@@ -352,8 +418,8 @@ describe("WsPeerClient state machine", () => {
       expect(client.currentState).toBe("connecting");
     }
 
-    // Backoff is capped at 300s — never exceeds it even after many steps.
-    expect((client as any).backoffMs).toBe(300_000);
+    // Backoff is capped at 3600s — never exceeds it even after many steps.
+    expect((client as any).backoffMs).toBe(3_600_000);
 
     // A successful authenticated open resets backoff to the initial value.
     const finalWs = mockWsInstances[mockWsInstances.length - 1];
@@ -361,7 +427,7 @@ describe("WsPeerClient state machine", () => {
     expect(client.currentState).toBe("connected");
     expect((client as any).backoffMs).toBe(5_000);
 
-    // After reset, the next refusal starts the sequence over at 5s, not 300s.
+    // After reset, the next refusal starts the sequence over at 5s, not 3600s.
     finalWs.emit("error", new Error("ECONNREFUSED"));
     finalWs.emit("close");
     expect(client.currentState).toBe("waiting");

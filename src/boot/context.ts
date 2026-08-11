@@ -9,7 +9,7 @@
 export type PhaseResult = "ran" | "skipped";
 
 import type { Config } from "../types/index.js";
-import type { MemoryConfig, AbmindClient } from "abmind";
+import type { MemoryConfig } from "abmind";
 import { createDisabledRuntime } from "../components/memory-runtime.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { HeartbeatSystem } from "../components/heartbeat-system.js";
@@ -25,6 +25,7 @@ import type { AgentApiServer } from "../components/agent-api-server.js";
 import type { PlatformAdapter } from "../types/platform.js";
 import { spin as spinInstance } from "../components/spin.js";
 import type { ModelHealthRegistry } from "../components/transport/model-health-registry.js";
+import type { ResolvedHailMary } from "../components/transport-config.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
 import { SubagentRuntime as SubagentRuntimeClass } from "../components/subagent-runtime.js";
@@ -42,7 +43,6 @@ type SleepUnavailable = import("../capabilities/sleep/index.js").SleepUnavailabl
 export interface PlatformFlags {
   telegram: boolean;
   discord: boolean;
-  irc: boolean;
   /** #1315: abtars-native TUI socket adapter (unix-domain socket at ~/.abtars/tui.sock). */
   tui: boolean;
   web: boolean;
@@ -64,10 +64,27 @@ export interface BootCtx {
 
   // ── Slots (set by respective phases) ──────────────────────────────────
   runtime: SubagentRuntime;
-  /** #1380: daemon-backed memory client when available. */
-  client: AbmindClient | null;
+  /** #1380/#1508: memory client (local abmind or abtars signed WSS). */
+  client: import("../components/abmind-client-contract.js").AbmindClientLike | null;
   /** #1380: daemon-backed memory runtime facade. Set by phase-memory. */
   memoryRuntime: import("../components/memory-runtime.js").AbtarsMemoryRuntime;
+  /**
+   * #1527: late-bound durable context provider. Transport construction and
+   * memory negotiation boot in parallel, so phase-pipeline-deps populates
+   * this holder once memory is ready; Pi transports read it per call.
+   */
+  durableContextProvider: import("../components/transport/pi-core-context.js").DurableContextProviderHolder;
+  /**
+   * #1552: bridge-owned durable memory_store quota service. Created and
+   * closed by phase-pipeline-deps / bridge shutdown; read by every Pi
+   * transport through the memory-tool dependency holder.
+   */
+  memoryStoreQuota: import("../components/memory-store-quota.js").MemoryStoreQuota | null;
+  /**
+   * #1552: late-bound memory-tool dependencies (runtime + quota). Populated
+   * by phase-pipeline-deps once memory resolves; cleared before shutdown.
+   */
+  memoryToolDependencies: import("../components/memory-store-quota.js").MemoryToolDependenciesHolder;
   transport: IKiroTransport | null;
   heartbeat: HeartbeatSystem | null;
   cronQueue: CronQueue | null;
@@ -95,7 +112,7 @@ export interface BootCtx {
   sleepUnavailable: SleepUnavailable | null;
   sleepHandle: SleepHandle | null;
   modelHealthRegistry: ModelHealthRegistry | null;
-  hailMary: { model: string; endpoint: string; apiKey?: string } | null;
+  hailMary: (ResolvedHailMary & { apiKey?: string }) | null;
   selfHealerTask: { enabled: boolean } | null;
   dashboardServer: IDashboardSlot | null;
   agentApiServer: AgentApiServer | null;
@@ -130,6 +147,22 @@ export interface BootCtx {
 
   // ── #1314: Pi coding executor ──────────────────────────────────────────
   piExecutorService?: import("../components/pi-executor/pi-run-service.js").PiRunService;
+  /** #1357: Disposer for Pi executor capability registration. Called on shutdown. */
+  _piCapDisposer?: () => void;
+}
+
+/**
+ * Detach memory tools before closing their quota ledger.
+ *
+ * Transports keep the holder by reference, so clearing it first makes any
+ * late tool execution fail closed instead of observing a closed quota.
+ */
+export function clearMemoryToolDependencies(
+  ctx: Pick<BootCtx, "memoryToolDependencies" | "memoryStoreQuota">,
+): void {
+  ctx.memoryToolDependencies.current = null;
+  ctx.memoryStoreQuota?.close();
+  ctx.memoryStoreQuota = null;
 }
 
 /**
@@ -142,7 +175,7 @@ export interface BootCtx {
 export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
   const defaults: BootCtx = {
     // Static — must be overridden in phase-config before use
-    platforms: { telegram: false, discord: false, irc: false, tui: false, web: false, agent: false },
+    platforms: { telegram: false, discord: false, tui: false, web: false, agent: false },
     config: null as unknown as Config,           // set in phase-config
     memoryConfig: null as unknown as MemoryConfig, // set in phase-config
     startedAt: Date.now(),
@@ -156,6 +189,9 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     runtime: new SubagentRuntimeClass(),
     client: null,
     memoryRuntime: createDisabledRuntime(),
+    durableContextProvider: { current: null },
+    memoryStoreQuota: null,
+    memoryToolDependencies: { current: null },
     transport: null,
     heartbeat: null,
     cronQueue: null,

@@ -4,10 +4,11 @@ import { randomUUID } from "node:crypto";
 import { abtarsHome } from "../../paths.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { TaskKind } from "./task-types.js";
+import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 
 const TAG = "task_history_store";
 
-export type TaskOutcome = "success" | "failed" | "noop" | "deferred" | "skipped" | "cancelled";
+export type TaskOutcome = "success" | "failed" | "noop" | "deferred" | "skipped" | "cancelled" | "definition_failed" | "timed_out" | "unknown";
 
 export interface TaskRunEvent {
   runId: string;
@@ -18,9 +19,18 @@ export interface TaskRunEvent {
   finishedAt: number;
   outcome: TaskOutcome;
   exitCode?: number;
+  /** #1610: short operational context for diagnostics and task status. */
   detail?: string;
+  /** #1610: bounded user-facing payload for successful scheduled one-shot
+   * announce runs. Populates the Kanban `result_summary`; never conflated with
+   * operational `detail`. Absent for non-agent and non-announce runs. */
+  deliveryText?: string;
   resultPath?: string;
   kanbanCardId?: number;
+  /** #1502 Task 9: groups attempts 1 and 2 without relying on retrying alone. */
+  groupId?: string;
+  /** #1520: structured failure data. Legacy string-only records remain readable. */
+  diagnostic?: TaskFailureDiagnosticV1;
 }
 
 function historyPath(): string {
@@ -31,8 +41,8 @@ function ensureDir(): void {
   mkdirSync(dirname(historyPath()), { recursive: true });
 }
 
-export function appendRun(event: Omit<TaskRunEvent, "runId">): string {
-  const runId = randomUUID().slice(0, 12);
+export function appendRun(event: Omit<TaskRunEvent, "runId"> & { runId?: string }): string {
+  const runId = event.runId ?? randomUUID().slice(0, 12);
   const full: TaskRunEvent = { ...event, runId };
   ensureDir();
   try {
@@ -90,6 +100,25 @@ export function todaySuccessCount(taskId: string, now: number = Date.now()): num
     e.outcome === "success" &&
     e.finishedAt >= todayStart
   ).length;
+}
+
+export function hasRun(runId: string): boolean {
+  const lines = readAllLines();
+  const events = parseEvents(lines);
+  return events.some(e => e.runId === runId);
+}
+
+/** Return the durable terminal event for a run, when one exists. */
+export function getRun(runId: string): TaskRunEvent | undefined {
+  const lines = readAllLines();
+  return parseEvents(lines).find(e => e.runId === runId);
+}
+
+export function appendRunOnce(event: Omit<TaskRunEvent, "runId"> & { runId?: string }): string | null {
+  const runId = event.runId ?? randomUUID().slice(0, 12);
+  if (hasRun(runId)) return null;
+  appendRun({ ...event, runId });
+  return runId;
 }
 
 export function latestOutcomeByTask(_now: number = Date.now()): Map<string, TaskRunEvent> {
