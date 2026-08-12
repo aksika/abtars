@@ -24,6 +24,19 @@ export const MAX_WORKER_CLAIMS_COUNT = 30;
 export const MAX_WORKER_RISKS_COUNT = 20;
 export const MAX_CONTRACT_JSON_BYTES = 50_000;
 export const MAX_ENVELOPE_JSON_BYTES = 150_000;
+export const MAX_WORKSPACE_ALIAS_LENGTH = 128;
+
+/** #1638: bounded workspace-alias syntax. Rejects path separators, traversal,
+ * absolute paths, and NUL/control characters — the alias is a name, never a
+ * locator. */
+export function isValidWorkspaceAlias(alias: string): boolean {
+  if (typeof alias !== "string") return false;
+  if (alias.length === 0 || alias.length > MAX_WORKSPACE_ALIAS_LENGTH) return false;
+  if (/[\x00-\x1f\x7f/\\]/.test(alias)) return false;
+  if (alias.includes("..")) return false;
+  if (alias.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(alias)) return false;
+  return true;
+}
 
 export type ArtifactKind = "file" | "directory" | "report" | "logical";
 
@@ -84,6 +97,9 @@ export interface WorkerAcceptanceContractV1 {
   readonly verification_commands: readonly VerificationCommand[];
   readonly required_capabilities: readonly string[];
   readonly supports_root_criteria?: readonly string[];
+  /** #1638: typed coding marker. Present routes every attempt in this
+   * contract lineage to the Pi executor; absent routes to Spin. */
+  readonly workspace_alias?: string;
   readonly limits: {
     readonly max_duration_ms?: number;
     readonly max_tokens?: number;
@@ -503,6 +519,16 @@ export function validateContract(raw: unknown): ValidationResult {
     }
   }
 
+  // #1638: workspace_alias is a typed bounded identifier when present.
+  if (obj["workspace_alias"] !== undefined && typeof obj["workspace_alias"] === "string") {
+    const trimmed = (obj["workspace_alias"] as string).trim();
+    if (trimmed.length === 0) {
+      errors.push(error("bad_format", "$.workspace_alias", "workspace_alias must be non-empty when present"));
+    } else if (!isValidWorkspaceAlias(trimmed)) {
+      errors.push(error("bad_format", "$.workspace_alias", `invalid workspace_alias "${trimmed}" — bounded alias required (no separators, traversal, or control characters)`));
+    }
+  }
+
   if (obj["limits"] !== undefined) {
     if (typeof obj["limits"] !== "object" || obj["limits"] === null) {
       errors.push(error("type_error", "$.limits", "limits must be an object"));
@@ -615,6 +641,7 @@ export function normalizeContract(raw: unknown): NormalizeResult {
 
   const capabilitiesRaw = Array.isArray(obj["required_capabilities"]) ? (obj["required_capabilities"] as string[]) : [];
   const supportsRootCriteriaRaw = Array.isArray(obj["supports_root_criteria"]) ? (obj["supports_root_criteria"] as string[]) : undefined;
+  const workspaceAliasRaw = typeof obj["workspace_alias"] === "string" ? (obj["workspace_alias"] as string).trim() : undefined;
   const limitsRaw = (typeof obj["limits"] === "object" && obj["limits"] !== null) ? (obj["limits"] as Record<string, unknown>) : {};
   const provenanceRaw = (typeof obj["provenance"] === "object" && obj["provenance"] !== null) ? (obj["provenance"] as Record<string, unknown>) : undefined;
 
@@ -641,6 +668,11 @@ export function normalizeContract(raw: unknown): NormalizeResult {
   };
   if (supportsRootCriteriaRaw !== undefined && supportsRootCriteriaRaw.length > 0) {
     built["supports_root_criteria"] = supportsRootCriteriaRaw;
+  }
+  // An explicitly present alias — even whitespace-only — must reach the
+  // validator so "non-empty when present" is enforced, not silently dropped.
+  if (workspaceAliasRaw !== undefined) {
+    built["workspace_alias"] = workspaceAliasRaw;
   }
 
   const digest = computeDigest(built);

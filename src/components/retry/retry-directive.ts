@@ -165,6 +165,8 @@ export function deriveContractRevision(
     })),
     required_capabilities: [...original.required_capabilities],
     supports_root_criteria: original.supports_root_criteria ? [...original.supports_root_criteria] : undefined,
+    // #1638: the workspace marker is immutable within one card lineage.
+    workspace_alias: original.workspace_alias,
     limits: { ...original.limits },
     provenance: { ...original.provenance },
   };
@@ -223,6 +225,12 @@ export function validateContractRevision(original: WorkerAcceptanceContractV1, r
 
   if (JSON.stringify(revised.limits) !== JSON.stringify(original.limits)) {
     errors.push("limits cannot be weakened");
+  }
+
+  // #1638: the workspace marker is immutable within one card lineage — a
+  // retry cannot move coding work to Spin or Spin work to Pi.
+  if ((revised.workspace_alias ?? undefined) !== (original.workspace_alias ?? undefined)) {
+    errors.push("workspace_alias cannot change within a contract lineage");
   }
 
   return errors;

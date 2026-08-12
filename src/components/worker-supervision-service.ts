@@ -2,8 +2,8 @@ import { existsSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
-import { normalizeContract, createContractId, createAttemptId, validateEnvelope } from "./worker-contract.js";
-import { AGENT_EXECUTOR_ID } from "./worker-executor-identity.js";
+import { normalizeContract, createContractId, createAttemptId, validateEnvelope, isValidWorkspaceAlias } from "./worker-contract.js";
+import { resolveWorkerExecutorIntent } from "./worker-executor-routing.js";
 import { logWarn } from "./logger.js";
 import { logSwarmTrace } from "./swarm-trace.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation, RetryContext } from "./worker-contract.js";
@@ -12,6 +12,7 @@ import type { ContractRow } from "./worker-supervision-store.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
 import { validateCriterionMapping } from "./project-acceptance/project-contract.js";
 import { rootCriterionIds } from "./project-acceptance/project-criterion-coverage.js";
+import { loadPiConfig } from "./pi-executor/config.js";
 
 const TAG = "worker-supervision-service";
 const MAX_RESULT_LENGTH = 500;
@@ -99,6 +100,7 @@ export class WorkerSupervisionService {
       limits?: { max_duration_ms?: number; max_tokens?: number };
       contractId?: string;
       attemptId?: string;
+      workspaceAlias?: string;
     },
   ): { contract: WorkerAcceptanceContractV1; attemptId: string } | { error: string } {
     if (this.store.contractExists(cardId)) {
@@ -107,6 +109,15 @@ export class WorkerSupervisionService {
 
     if (!opts?.criteria || opts.criteria.length === 0) {
       return { error: "supervised children require at least one acceptance criterion; goal-only supervised dispatch is rejected" };
+    }
+
+    // #1638: an alias that is not configured on this host is rejected at
+    // contract creation — coding work never silently falls back to Spin.
+    // A disabled/incompatible Pi is a runtime eligibility failure settled by
+    // the generic dispatch path, not a contract-creation rejection.
+    if (opts?.workspaceAlias) {
+      const aliasErrors = validateConfiguredWorkspaceAlias(opts.workspaceAlias);
+      if (aliasErrors.length > 0) return { error: `workspace_alias rejected: ${aliasErrors.join("; ")}` };
     }
 
     // #1604 R3: a supervised child under a contract-bearing root must declare
@@ -140,6 +151,9 @@ export class WorkerSupervisionService {
     if (opts?.supportsRootCriteria && opts.supportsRootCriteria.length > 0) {
       raw["supports_root_criteria"] = opts.supportsRootCriteria;
     }
+    if (opts?.workspaceAlias) {
+      raw["workspace_alias"] = opts.workspaceAlias;
+    }
     if (opts?.limits && Object.keys(opts.limits).length > 0) {
       raw["limits"] = opts.limits;
     }
@@ -152,13 +166,16 @@ export class WorkerSupervisionService {
     const attemptId = this.store.db.transaction(() => {
       this.store.insertContract(normalized.contract, cardId);
       const id = opts?.attemptId ?? createAttemptId();
+      // #1638: the contract-derived intent owns routing — one resolver for
+      // initial creation and retry, no capability/catalog reinterpretation.
+      const intent = resolveWorkerExecutorIntent(normalized.contract);
       this.store.insertAttempt({
         id,
         card_id: cardId,
         contract_id: normalized.contract.id,
         ordinal: this.store.nextOrdinal(cardId),
-        executor_kind: "agent",
-        executor_id: AGENT_EXECUTOR_ID,
+        executor_kind: intent.kind,
+        executor_id: intent.id,
         status: "pending",
         started_at: new Date().toISOString(),
       });
@@ -250,6 +267,10 @@ export class WorkerSupervisionService {
 
     if (contract.required_capabilities.length > 0) {
       lines.push(`  <required-capabilities>${contract.required_capabilities.join(", ")}</required-capabilities>`);
+    }
+
+    if (contract.workspace_alias) {
+      lines.push(`  <workspace>${contract.workspace_alias}</workspace>`);
     }
 
     lines.push("</worker-contract>");
@@ -539,6 +560,33 @@ export class WorkerSupervisionService {
       return { criterion_id: c.id, status, evidence_ids: evidenceIds };
     });
   }
+}
+
+/**
+ * #1638: validate an alias against the enabled Pi configuration. The syntax
+ * rule is bounded-identifier only; configuration presence is authoritative
+ * for contract creation. A disabled/unconfigured Pi does NOT reject here —
+ * the attempt is created as Pi and the generic dispatch path settles it as a
+ * runtime eligibility failure, never as a silent Spin fallback. Only a
+ * syntactically invalid alias or a known alias absent from a readable
+ * configuration rejects contract creation.
+ */
+export function validateConfiguredWorkspaceAlias(alias: string): string[] {
+  const errors: string[] = [];
+  if (!isValidWorkspaceAlias(alias)) {
+    errors.push(`invalid alias syntax "${alias}"`);
+    return errors;
+  }
+  try {
+    const config = loadPiConfig();
+    if (!config) return errors; // disabled/unconfigured — runtime eligibility, dispatch settles it
+    if (!(alias in config.workspaceAliases)) {
+      errors.push(`unknown workspace alias "${alias}" — not in configured Pi workspace aliases`);
+    }
+  } catch (err) {
+    errors.push(`Pi configuration unreadable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return errors;
 }
 
 interface ExecError {

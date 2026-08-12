@@ -154,6 +154,32 @@ describe("retry-directive", () => {
     expect(errors).toContain("root goal changed");
   });
 
+  it("#1638: revision derivation preserves workspace_alias", () => {
+    const aliasContract = { ...sampleContract, workspace_alias: "repo-a" };
+    const directive = buildDirective(aliasContract, "a_test_1", 2, sampleClassification as any, sampleDecision, sampleRationale, {
+      mode: "repair",
+      instruction: "Fix it",
+      authoredBy: "orc",
+    });
+    const revised = deriveContractRevision(aliasContract, directive, 2, 2);
+    expect(revised.workspace_alias).toBe("repo-a");
+    expect(validateContractRevision(aliasContract, revised)).toEqual([]);
+  });
+
+  it("#1638: revision validation rejects a changed or removed workspace_alias", () => {
+    const aliasContract = { ...sampleContract, workspace_alias: "repo-a" };
+    const directive = buildDirective(aliasContract, "a_test_1", 2, sampleClassification as any, sampleDecision, sampleRationale, {
+      mode: "repair",
+      instruction: "Fix it",
+      authoredBy: "orc",
+    });
+    const revised = deriveContractRevision(aliasContract, directive, 2, 2);
+    const removed = { ...revised, workspace_alias: undefined };
+    expect(validateContractRevision(aliasContract, removed as any)).toContain("workspace_alias cannot change within a contract lineage");
+    const changed = { ...revised, workspace_alias: "repo-b" };
+    expect(validateContractRevision(aliasContract, changed as any)).toContain("workspace_alias cannot change within a contract lineage");
+  });
+
   it("fingerprint differs for different mode", () => {
     const d1 = buildDirective(sampleContract, "a_test_1", 2, sampleClassification as any, sampleDecision, sampleRationale, {
       mode: "clean_rerun",

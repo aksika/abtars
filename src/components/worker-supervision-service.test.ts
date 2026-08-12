@@ -89,6 +89,70 @@ describe("WorkerSupervisionService", () => {
     }
   });
 
+  it("#1638: an alias contract creates a Pi attempt with pi-coding", () => {
+    const svc = new Service();
+    const result = svc.createChild("Coding work", 101, 100, "orc", {
+      criteria: [{ id: "c1", description: "Must work" }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
+      workspaceAlias: "repo-a",
+    });
+    expect("error" in result).toBe(false);
+    if (!("error" in result)) {
+      expect(result.contract.workspace_alias).toBe("repo-a");
+      const attempt = new Store().getAttempt(result.attemptId);
+      expect(attempt?.executor_kind).toBe("pi");
+      expect(attempt?.executor_id).toBe("pi-coding");
+    }
+  });
+
+  it("#1638: a no-alias contract creates a Spin attempt with spin-local", () => {
+    const svc = new Service();
+    const result = svc.createChild("Report work", 101, 100, "orc", {
+      criteria: [{ id: "c1", description: "Must work" }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
+    });
+    expect("error" in result).toBe(false);
+    if (!("error" in result)) {
+      const attempt = new Store().getAttempt(result.attemptId);
+      expect(attempt?.executor_kind).toBe("agent");
+      expect(attempt?.executor_id).toBe("spin-local");
+    }
+  });
+
+  it("#1638: a syntactically invalid alias rejects contract creation transactionally", () => {
+    const svc = new Service();
+    const result = svc.createChild("Coding work", 101, 100, "orc", {
+      criteria: [{ id: "c1", description: "Must work" }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
+      workspaceAlias: "../escape",
+    });
+    expect("error" in result).toBe(true);
+    if ("error" in result) expect(result.error).toContain("workspace_alias rejected");
+    expect(svc.cardHasContract(101)).toBe(false);
+  });
+
+  it("#1638: an alias unknown to a readable Pi config rejects contract creation", () => {
+    const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+    const { join: pjoin } = require("node:path") as typeof import("node:path");
+    const configDir = pjoin(TEST_HOME, "config");
+    require("node:fs").mkdirSync(configDir, { recursive: true });
+    writeFileSync(pjoin(configDir, "pi-executor.json"), JSON.stringify({
+      enabled: true,
+      command: "pi",
+      workspaceAliases: { "repo-a": { path: "/tmp/repo-a" } },
+      maxConcurrent: 1,
+    }));
+    const svc = new Service();
+    const result = svc.createChild("Coding work", 101, 100, "orc", {
+      criteria: [{ id: "c1", description: "Must work" }],
+      expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/report.md", required: true, criterion_ids: ["c1"] }],
+      workspaceAlias: "repo-b",
+    });
+    expect("error" in result).toBe(true);
+    if ("error" in result) expect(result.error).toContain("unknown workspace alias");
+    expect(svc.cardHasContract(101)).toBe(false);
+  });
+
   it("rejects root-criterion mappings that are unknown to the immutable root contract", () => {
     const rootStore = new ReviewStore();
     rootStore.insertContract({

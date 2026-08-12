@@ -388,6 +388,38 @@ describe("normalizeContract", () => {
       expect(result.contract.provenance.authored_by).toBe("unknown");
     }
   });
+
+  it("#1638: preserves a valid workspace_alias and includes it in the digest", () => {
+    const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: "repo-a" });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.contract.workspace_alias).toBe("repo-a");
+      const noAlias = normalizeContract(MINIMAL_CONTRACT);
+      if (noAlias.ok) {
+        expect(noAlias.contract.digest).not.toBe(result.contract.digest);
+      }
+    }
+  });
+
+  it("#1638: trims whitespace around the alias", () => {
+    const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: "  repo-a  " });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.contract.workspace_alias).toBe("repo-a");
+    }
+  });
+
+  it("#1638: rejects traversal, separators, absolute, and control-char aliases", () => {
+    for (const bad of ["../x", "a/b", "a\\b", "/abs", "C:\\x", "a\x00b", "a\x1fb", ""]) {
+      const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: bad });
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("#1638: rejects an alias over the length bound", () => {
+    const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: "x".repeat(129) });
+    expect(result.ok).toBe(false);
+  });
 });
 
 describe("createContractId / createAttemptId", () => {

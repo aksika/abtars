@@ -1263,7 +1263,31 @@ async function dispatchOnePass(): Promise<void> {
     if (!latestAttempt || latestAttempt.lifecycle !== "pending") continue;
 
     const executor = dispatchExecutor(latestAttempt.executor_kind, latestAttempt.executor_id);
-    if (!executor) continue;
+    if (!executor) {
+      // #1638: a coding (Pi) attempt with no live Pi service is a runtime
+      // eligibility failure — settle through the normal Worker start-failure
+      // path with bounded evidence. Never leave the attempt pending because
+      // no adapter was constructed, and never fall back to Spin.
+      if (latestAttempt.executor_kind === "pi") {
+        const eligibilityClaim = store.claimAttempt(
+          card.id,
+          latestAttempt.contract_id,
+          latestAttempt.executor_kind,
+          latestAttempt.executor_id,
+          latestAttempt.generation || 1,
+        );
+        if (eligibilityClaim && store.markAttemptStartObservable(eligibilityClaim.attemptId)) {
+          store.terminalSettlement({
+            attemptId: eligibilityClaim.attemptId,
+            expectedGeneration: eligibilityClaim.generation,
+            desiredState: "failed",
+            stableReason: "pi_executor_unavailable",
+          });
+        }
+        kanbanFail(card.id, "Pi executor unavailable for coding child");
+      }
+      continue;
+    }
     const capacityKey = `${executor.kind}:${executor.id}`;
     let capacity = capacities.get(capacityKey);
     if (!capacity) {
