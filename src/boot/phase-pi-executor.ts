@@ -170,6 +170,18 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const { setPiService: setReconcilerService, requestReconcile, requestWorkerDispatch } = await import("../components/reconciler.js");
   setReconcilerService(service);
 
+  // #1638: supervised/standalone terminal router. Every Pi process terminal
+  // observation goes through the coordinator; supervised runs settle through
+  // the Worker attempt, standalone runs keep their own card settlement.
+  try {
+    const { SupervisedPiSettlement } = await import("../components/pi-executor/supervised-pi-settlement.js");
+    const { WorkerSupervisionStore } = await import("../components/worker-supervision-store.js");
+    const coordinator = new SupervisedPiSettlement(store, new WorkerSupervisionStore(taskDb));
+    executor.setSettlementRouter((observation) => coordinator.settlePiExecution(observation));
+  } catch (err) {
+    logWarn(TAG, `Supervised Pi settlement coordinator unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // #1638: shared post-release wake — every Pi capacity/workspace release
   // fans out to supervised Worker dispatch AND queued standalone Pi cards.
   // Advisory + idempotent; runs only after the release transaction (and

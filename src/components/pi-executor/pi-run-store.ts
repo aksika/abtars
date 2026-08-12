@@ -488,6 +488,50 @@ export class PiRunStore {
     });
   }
 
+  /**
+   * #1638 — Terminal transition for a SUPERVISED Pi run: updates the run row
+   * only, never the W card. Must run inside the supervised settlement
+   * coordinator's transaction (never standalone). Revalidates generation and
+   * status; returns committed|stale|conflict so the coordinator can abort.
+   */
+  settleSupervisedRunInTransaction(input: {
+    runId: string;
+    generation: number;
+    expectedStatuses: PiRunStatus[];
+    outcome: PiTerminalOutcome;
+    metadata: PiTerminalMetadata;
+  }): { committed: boolean; reason?: "stale_generation" | "wrong_status" | "missing" } {
+    const runRow = this.db.prepare(
+      `SELECT execution_generation, status FROM pi_runs WHERE id = ?`
+    ).get(input.runId) as { execution_generation: number; status: string } | undefined;
+    if (!runRow) return { committed: false, reason: "missing" };
+    if (runRow.execution_generation !== input.generation) return { committed: false, reason: "stale_generation" };
+    if (!input.expectedStatuses.includes(runRow.status as PiRunStatus)) return { committed: false, reason: "wrong_status" };
+
+    const runSet = [`status = ?`, `updated_at = datetime('now')`, `pending_request_id = NULL`, `pending_request_type = NULL`];
+    const runParams: unknown[] = [input.outcome];
+    if (input.metadata.resultSummary !== undefined) { runSet.push(`result_summary = ?`); runParams.push(input.metadata.resultSummary); }
+    if (input.metadata.changedFilesSummary !== undefined) { runSet.push(`changed_files_summary = ?`); runParams.push(input.metadata.changedFilesSummary); }
+    if (input.metadata.usageJson !== undefined) { runSet.push(`usage_json = ?`); runParams.push(input.metadata.usageJson); }
+    if (input.metadata.error !== undefined) { runSet.push(`error = ?`); runParams.push(input.metadata.error); }
+    if (input.metadata.piSessionId !== undefined) { runSet.push(`pi_session_id = ?`); runParams.push(input.metadata.piSessionId); }
+
+    const runResult = this.db.prepare(
+      `UPDATE pi_runs SET ${runSet.join(", ")} WHERE id = ? AND execution_generation = ? AND status IN (${input.expectedStatuses.map(() => "?").join(",")})`
+    ).run(...runParams, input.runId, input.generation, ...input.expectedStatuses);
+    if (runResult.changes === 0) return { committed: false, reason: "wrong_status" };
+
+    if (this.remoteEmitter) {
+      this.remoteEmitter.emitTransitionInTx({
+        runId: input.runId,
+        fromStatus: runRow.status,
+        toStatus: input.outcome,
+      });
+    }
+
+    return { committed: true };
+  }
+
   touchActivity(id: string): void {
     this.db.prepare(`UPDATE pi_runs SET last_rpc_activity_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`).run(id);
   }

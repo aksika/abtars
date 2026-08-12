@@ -714,12 +714,10 @@ describe("WorkerSupervisionStore", () => {
       expect(chargedAfter.charged_tokens).toBe(150);
     });
 
-    // #1638 Task 1 characterization: TODAY a supplied envelope on a
-    // non-completed outcome is DISCARDED and the absence envelope is written.
-    // Task 6 deliberately changes this to persist genuine failure evidence.
-    // This assertion pins the pre-change behavior so the Task 6 diff is
-    // intentional, not incidental.
-    it("CHARACTERIZATION: non-completed settlement discards a supplied envelope and writes the absence envelope", () => {
+    // #1638 Task 1 characterization → Task 6 behavior: a supplied envelope
+    // on a non-completed outcome is now PERSISTED (genuine failure evidence);
+    // the absence envelope remains the fallback when none is supplied.
+    it("non-completed settlement persists a supplied envelope (Task 6)", () => {
       const s = new Store();
       s.insertContract(TEST_CONTRACT, 101);
       const aid = setupAttempt(s, "pending");
@@ -729,7 +727,7 @@ describe("WorkerSupervisionStore", () => {
         attempt: {
           id: aid, ordinal: 1, contract_id: TEST_CONTRACT.id,
           contract_digest: TEST_CONTRACT.digest,
-          executor_kind: "agent", executor_id: "spin-local",
+          executor_kind: "pi", executor_id: "pi-coding",
           started_at: "2026-01-01T00:00:00.000Z", finished_at: "2026-01-01T00:01:00.000Z",
         },
         outcome: "failed",
@@ -745,8 +743,10 @@ describe("WorkerSupervisionStore", () => {
       });
       expect(result.kind).toBe("settled");
       const stored = s.getResultByAttempt(aid);
-      expect(stored?.envelope.worker_report.summary).not.toBe("real failure evidence");
+      expect(stored?.envelope.worker_report.summary).toBe("real failure evidence");
       expect(stored?.envelope.outcome).toBe("failed");
+      expect(stored?.envelope.attempt.executor_kind).toBe("pi");
+      expect(stored?.envelope.error?.code).toBe("INPUT_REQUESTED");
     });
 
     // #1638 Task 1 characterization: no-alias contract settles a failed

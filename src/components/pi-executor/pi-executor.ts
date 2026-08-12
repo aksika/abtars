@@ -26,12 +26,25 @@ interface OwnedProcess {
   unsubUi: (() => void) | null;
 }
 
+export interface PiTerminalObservation {
+  runId: string;
+  generation: number;
+  outcome: PiTerminalOutcome;
+  metadata: { resultSummary?: string; changedFilesSummary?: string; usageJson?: string; error?: string; piSessionId?: string };
+  envelope?: import("../worker-contract.js").WorkerResultEnvelopeV1;
+  canonicalPath?: string;
+}
+
 export class PiExecutor {
   private readonly config_: PiExecutorConfig;
   private readonly store: PiRunStore;
   private readonly live = new Map<string, OwnedProcess>();
   private _stopped = false;
   private _onCapacityReleased: (() => void) | null = null;
+  /** #1638 — optional supervised/standalone settlement router (wired at boot
+   * when the coordinator exists). When set, every terminal observation goes
+   * through it so supervised runs settle through the Worker attempt. */
+  private _settlementRouter: ((input: PiTerminalObservation) => unknown) | null = null;
   /** #1358 — Lifecycle transition subscribers (multi). */
   private _transitionSubs = new Set<(runId: string, fromStatus: string | undefined, toStatus: string) => void>();
   /** Progress event subscribers (multi). */
@@ -47,6 +60,11 @@ export class PiExecutor {
   get isStopped(): boolean { return this._stopped; }
   get piStore(): PiRunStore { return this.store; }
   get config(): PiExecutorConfig { return this.config_; }
+
+  /** #1638 — route every terminal observation through the coordinator. */
+  setSettlementRouter(router: (input: PiTerminalObservation) => unknown): void {
+    this._settlementRouter = router;
+  }
 
   /** Register a callback fired when a Pi slot is released. */
   onCapacityReleased(cb: () => void): void {
@@ -459,6 +477,37 @@ export class PiExecutor {
 
   // ── settlement ───────────────────────────────────────────────────────────
 
+  /** #1638 — route a terminal observation through the coordinator when wired;
+   * standalone falls through to the existing PiRunStore.settleTerminal().
+   * Returns { committed, supervised } so the caller skips Pi-lane card events
+   * for supervised runs (the Worker lane owns those). */
+  private settleTerminalObservation(observation: PiTerminalObservation): { committed: boolean; supervised: boolean } {
+    if (this._settlementRouter) {
+      try {
+        const result = this._settlementRouter(observation);
+        if (result && typeof result === "object" && "kind" in result) {
+          const kind = (result as { kind: string }).kind;
+          const supervised = (result as { supervised?: boolean }).supervised === true;
+          return { committed: kind === "settled" || kind === "replayed", supervised };
+        }
+        return { committed: true, supervised: false };
+      } catch (err) {
+        logWarn(TAG, `settlement router failed for ${observation.runId}: ${err instanceof Error ? err.message : String(err)}`);
+        return { committed: false, supervised: false };
+      }
+    }
+    return {
+      committed: this.store.settleTerminal({
+        runId: observation.runId,
+        generation: observation.generation,
+        expectedStatuses: ["running", "cancelling", "starting", "awaiting_input"],
+        outcome: observation.outcome,
+        metadata: observation.metadata,
+      }).committed,
+      supervised: false,
+    };
+  }
+
   private async _settleAndCleanup(
     owned: OwnedProcess,
     outcome: PiTerminalOutcome,
@@ -467,23 +516,28 @@ export class PiExecutor {
     if (owned.settling) return;
     owned.settling = true;
 
-    const settlement = this.store.settleTerminal({
+    const { committed, supervised } = this.settleTerminalObservation({
       runId: owned.runId,
       generation: owned.generation,
-      expectedStatuses: ["running", "cancelling", "starting", "awaiting_input"],
       outcome,
       metadata,
     });
 
-    if (settlement.committed) {
-      if (settlement.outcome === "completed") {
-        nerve.fire("card:done", settlement.cardId);
-      } else {
-        nerve.fire("card:failed", settlement.cardId);
+    if (committed) {
+      // #1638: supervised runs settle through the Worker lane — the W card
+      // and its events are owned there; only standalone Pi cards get a
+      // Pi-lane card event here.
+      if (!supervised) {
+        const cardId = this.store.get(owned.runId)?.cardId ?? 0;
+        if (outcome === "completed") {
+          nerve.fire("card:done", cardId);
+        } else {
+          nerve.fire("card:failed", cardId);
+        }
       }
-      this._fireTransition(owned.runId, undefined, settlement.outcome);
+      this._fireTransition(owned.runId, undefined, outcome);
     } else {
-      logWarn(TAG, `Terminal CAS lost for ${owned.runId} (gen=${owned.generation} outcome=${outcome}): ${settlement.reason}`);
+      logWarn(TAG, `Terminal CAS lost for ${owned.runId} (gen=${owned.generation} outcome=${outcome})`);
     }
 
     this._releaseOwned(owned);
@@ -494,15 +548,17 @@ export class PiExecutor {
     outcome: PiTerminalOutcome,
     metadata: { error?: string; changedFilesSummary?: string },
   ): Promise<void> {
-    const settlement = this.store.settleTerminal({
+    void expectedStatuses;
+    const { committed, supervised } = this.settleTerminalObservation({
       runId,
       generation,
-      expectedStatuses,
       outcome,
       metadata,
     });
-    if (settlement.committed) {
-      nerve.fire("card:failed", settlement.cardId);
+    if (committed) {
+      if (!supervised) {
+        nerve.fire("card:failed", this.store.get(runId)?.cardId ?? 0);
+      }
       this._fireTransition(runId, undefined, outcome);
     }
   }

@@ -1009,6 +1009,8 @@ export class WorkerSupervisionStore {
     } catch { return undefined; }
   }
 
+  /** Public terminal-settlement wrapper — opens one transaction around the
+   * canonical body. */
   terminalSettlement(input: {
     attemptId: string;
     expectedGeneration: number;
@@ -1019,127 +1021,143 @@ export class WorkerSupervisionStore {
     now?: number;
   }): { kind: "settled" | "replayed" | "stale" | "conflict" | "budget_violation"; lifecycle?: AttemptLifecycle; chargedTokens?: number } {
     try {
-      return this.db.transaction(() => {
-        const attempt = this.db.prepare(`SELECT * FROM worker_attempts WHERE id = ?`).get(input.attemptId) as AttemptRow | undefined;
-        if (!attempt) return { kind: "stale" };
-        const latest = this.db.prepare(`SELECT id FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(attempt.card_id) as { id: string } | undefined;
-        if (!latest || latest.id !== input.attemptId) return { kind: "stale" };
-        if (attempt.generation !== input.expectedGeneration) return { kind: "stale" };
-
-        const terminalLifecycles: AttemptLifecycle[] = ["completed", "failed", "cancelled", "timed_out"];
-        if (terminalLifecycles.includes(attempt.lifecycle)) {
-          if (input.envelope) {
-            const existing = this.db.prepare(`SELECT envelope_digest FROM worker_results WHERE attempt_id = ?`).get(input.attemptId) as { envelope_digest: string } | undefined;
-            if (!existing) return { kind: "stale", lifecycle: attempt.lifecycle };
-            if (existing) {
-              const newDigest = this.computeEnvelopeDigest(JSON.stringify(input.envelope));
-              if (existing.envelope_digest !== newDigest) return { kind: "conflict" };
-            }
-          }
-          return { kind: "replayed", lifecycle: attempt.lifecycle, chargedTokens: attempt.charged_tokens };
-        }
-
-        const allowedFrom: AttemptLifecycle[] = input.desiredState === "timed_out" || input.desiredState === "cancelled"
-          ? ["pending", "claimed", "starting", "running", "cancel_requested"]
-          : ["claimed", "starting", "running", "cancel_requested"];
-        if (!allowedFrom.includes(attempt.lifecycle)) return { kind: "stale" };
-
-        let effectiveState = input.desiredState;
-        const now = input.now ?? Date.now();
-
-        if (input.desiredState === "completed") {
-          if (attempt.hard_deadline_at && now >= new Date(attempt.hard_deadline_at).getTime()) {
-            effectiveState = "timed_out";
-          }
-        }
-
-        const usage = input.normalizedUsage
-          && Number.isFinite(input.normalizedUsage.input) && input.normalizedUsage.input >= 0
-          && Number.isFinite(input.normalizedUsage.output) && input.normalizedUsage.output >= 0
-          ? input.normalizedUsage
-          : undefined;
-        let chargeTokens = 0;
-        let budgetViolation = false;
-
-        if (attempt.reserved_tokens > 0) {
-          if (usage && usage.trustworthy) {
-            chargeTokens = usage.input + usage.output;
-            if (chargeTokens > attempt.reserved_tokens) {
-              chargeTokens = usage.input + usage.output;
-              budgetViolation = true;
-            }
-          } else {
-            chargeTokens = attempt.reserved_tokens;
-          }
-        } else if (usage && usage.trustworthy) {
-          chargeTokens = usage.input + usage.output;
-        }
-
-        if (budgetViolation && effectiveState === "completed") {
-          effectiveState = "failed";
-        }
-
-        const settledAt = new Date(now).toISOString();
-
-        if (attempt.usage_charged_at == null) {
-          this.db.prepare(`
-            UPDATE worker_attempts
-            SET input_tokens = ?, output_tokens = ?, charged_tokens = ?, usage_charged_at = ?
-            WHERE id = ? AND usage_charged_at IS NULL
-          `).run(usage?.input ?? null, usage?.output ?? null, chargeTokens, settledAt, input.attemptId);
-
-          const card = this.db.prepare(`SELECT parent_id FROM kanban_board WHERE id = ?`).get(attempt.card_id) as { parent_id: number | null } | undefined;
-          this.db.prepare(`
-            UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now')
-            WHERE id = ?
-          `).run(chargeTokens, attempt.card_id);
-          if (card?.parent_id) {
-            this.db.prepare(`
-              UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now')
-              WHERE id = ? AND type = 'O'
-            `).run(chargeTokens, card.parent_id);
-          }
-        }
-
-        const durableStatus = effectiveState === "completed" ? "settled" : effectiveState;
-        this.db.prepare(`
-          UPDATE worker_attempts
-          SET lifecycle = ?, status = ?, settled_at = ?, cancel_reason = ?
-          WHERE id = ? AND lifecycle = ?
-        `).run(effectiveState, durableStatus, settledAt,
-              budgetViolation ? `token_budget_exceeded: ${input.stableReason}`
-                : effectiveState !== input.desiredState ? `late_completion_timed_out: ${input.stableReason}` : input.stableReason,
-              input.attemptId, attempt.lifecycle);
-
-        const leaseStore = new ExecutorLeaseStore(this.db);
-        leaseStore.closeLease(input.attemptId, attempt.generation, `terminal:${effectiveState}`);
-
-        if (effectiveState === "completed" && input.envelope) {
-          const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
-          if (!existingResult) {
-            this.insertResult(input.attemptId, input.envelope);
-          }
-        } else if (effectiveState === "failed" || effectiveState === "cancelled" || effectiveState === "timed_out") {
-          // #1588: record evidence of absence — a non-completed terminal
-          // settlement must not leave worker_results empty, or the reviewer
-          // cannot tell "no evidence" from "evidence says failed". Criteria
-          // are derived as not_run, never passed.
-          const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
-          if (!existingResult) {
-            this.insertResult(input.attemptId, this.buildAbsenceEnvelope(attempt, effectiveState, now));
-          }
-        }
-
-        logSwarmTrace({ event: `attempt_${effectiveState}`, card: attempt.card_id, attempt: input.attemptId, generation: attempt.generation, to: effectiveState, reason: input.stableReason });
-
-        const violationResult = budgetViolation
-          ? { kind: "budget_violation" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id }
-          : { kind: "settled" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id };
-        return violationResult;
-      });
+      return this.db.transaction(() => this.settleAttemptInTransaction(input));
     } catch {
       return { kind: "conflict" };
     }
+  }
+
+  /** #1638 — The canonical single terminal-settlement body. Runs INSIDE an
+   * already-open transaction (the public wrapper or the supervised Pi
+   * settlement coordinator). Owns every attempt terminal transition, charge,
+   * result persistence, lease close, and card token rollup. When the caller
+   * supplies a valid envelope on a non-completed outcome, it is persisted;
+   * the evidence-of-absence envelope remains the fallback. */
+  settleAttemptInTransaction(input: {
+    attemptId: string;
+    expectedGeneration: number;
+    desiredState: "completed" | "failed" | "cancelled" | "timed_out";
+    stableReason: string;
+    normalizedUsage?: { input: number; output: number; trustworthy: boolean };
+    envelope?: WorkerResultEnvelopeV1;
+    now?: number;
+  }): { kind: "settled" | "replayed" | "stale" | "conflict" | "budget_violation"; lifecycle?: AttemptLifecycle; chargedTokens?: number } {
+    const attempt = this.db.prepare(`SELECT * FROM worker_attempts WHERE id = ?`).get(input.attemptId) as AttemptRow | undefined;
+    if (!attempt) return { kind: "stale" };
+    const latest = this.db.prepare(`SELECT id FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(attempt.card_id) as { id: string } | undefined;
+    if (!latest || latest.id !== input.attemptId) return { kind: "stale" };
+    if (attempt.generation !== input.expectedGeneration) return { kind: "stale" };
+
+    const terminalLifecycles: AttemptLifecycle[] = ["completed", "failed", "cancelled", "timed_out"];
+    if (terminalLifecycles.includes(attempt.lifecycle)) {
+      if (input.envelope) {
+        const existing = this.db.prepare(`SELECT envelope_digest FROM worker_results WHERE attempt_id = ?`).get(input.attemptId) as { envelope_digest: string } | undefined;
+        if (!existing) return { kind: "stale", lifecycle: attempt.lifecycle };
+        if (existing) {
+          const newDigest = this.computeEnvelopeDigest(JSON.stringify(input.envelope));
+          if (existing.envelope_digest !== newDigest) return { kind: "conflict" };
+        }
+      }
+      return { kind: "replayed", lifecycle: attempt.lifecycle, chargedTokens: attempt.charged_tokens };
+    }
+
+    const allowedFrom: AttemptLifecycle[] = input.desiredState === "timed_out" || input.desiredState === "cancelled"
+      ? ["pending", "claimed", "starting", "running", "cancel_requested"]
+      : ["claimed", "starting", "running", "cancel_requested"];
+    if (!allowedFrom.includes(attempt.lifecycle)) return { kind: "stale" };
+
+    let effectiveState = input.desiredState;
+    const now = input.now ?? Date.now();
+
+    if (input.desiredState === "completed") {
+      if (attempt.hard_deadline_at && now >= new Date(attempt.hard_deadline_at).getTime()) {
+        effectiveState = "timed_out";
+      }
+    }
+
+    const usage = input.normalizedUsage
+      && Number.isFinite(input.normalizedUsage.input) && input.normalizedUsage.input >= 0
+      && Number.isFinite(input.normalizedUsage.output) && input.normalizedUsage.output >= 0
+      ? input.normalizedUsage
+      : undefined;
+    let chargeTokens = 0;
+    let budgetViolation = false;
+
+    if (attempt.reserved_tokens > 0) {
+      if (usage && usage.trustworthy) {
+        chargeTokens = usage.input + usage.output;
+        if (chargeTokens > attempt.reserved_tokens) {
+          chargeTokens = usage.input + usage.output;
+          budgetViolation = true;
+        }
+      } else {
+        chargeTokens = attempt.reserved_tokens;
+      }
+    } else if (usage && usage.trustworthy) {
+      chargeTokens = usage.input + usage.output;
+    }
+
+    if (budgetViolation && effectiveState === "completed") {
+      effectiveState = "failed";
+    }
+
+    const settledAt = new Date(now).toISOString();
+
+    if (attempt.usage_charged_at == null) {
+      this.db.prepare(`
+        UPDATE worker_attempts
+        SET input_tokens = ?, output_tokens = ?, charged_tokens = ?, usage_charged_at = ?
+        WHERE id = ? AND usage_charged_at IS NULL
+      `).run(usage?.input ?? null, usage?.output ?? null, chargeTokens, settledAt, input.attemptId);
+
+      const card = this.db.prepare(`SELECT parent_id FROM kanban_board WHERE id = ?`).get(attempt.card_id) as { parent_id: number | null } | undefined;
+      this.db.prepare(`
+        UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(chargeTokens, attempt.card_id);
+      if (card?.parent_id) {
+        this.db.prepare(`
+          UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now')
+          WHERE id = ? AND type = 'O'
+        `).run(chargeTokens, card.parent_id);
+      }
+    }
+
+    const durableStatus = effectiveState === "completed" ? "settled" : effectiveState;
+    this.db.prepare(`
+      UPDATE worker_attempts
+      SET lifecycle = ?, status = ?, settled_at = ?, cancel_reason = ?
+      WHERE id = ? AND lifecycle = ?
+    `).run(effectiveState, durableStatus, settledAt,
+          budgetViolation ? `token_budget_exceeded: ${input.stableReason}`
+            : effectiveState !== input.desiredState ? `late_completion_timed_out: ${input.stableReason}` : input.stableReason,
+          input.attemptId, attempt.lifecycle);
+
+    const leaseStore = new ExecutorLeaseStore(this.db);
+    leaseStore.closeLease(input.attemptId, attempt.generation, `terminal:${effectiveState}`);
+
+    if (effectiveState === "completed" && input.envelope) {
+      const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
+      if (!existingResult) {
+        this.insertResult(input.attemptId, input.envelope);
+      }
+    } else if (effectiveState === "failed" || effectiveState === "cancelled" || effectiveState === "timed_out") {
+      // #1588/#1638: persist genuine failure evidence when the caller
+      // supplied a valid envelope (e.g. a Pi input request); the absence
+      // envelope remains the fallback so results are never empty. The
+      // reviewer can distinguish "no evidence" from "evidence says failed".
+      const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
+      if (!existingResult) {
+        this.insertResult(input.attemptId, input.envelope ?? this.buildAbsenceEnvelope(attempt, effectiveState, now));
+      }
+    }
+
+    logSwarmTrace({ event: `attempt_${effectiveState}`, card: attempt.card_id, attempt: input.attemptId, generation: attempt.generation, to: effectiveState, reason: input.stableReason });
+
+    const violationResult = budgetViolation
+      ? { kind: "budget_violation" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id }
+      : { kind: "settled" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id };
+    return violationResult;
   }
 
   getActiveSupervisedAttempts(): AttemptRow[] {
