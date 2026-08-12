@@ -167,6 +167,12 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const { setPiService: setCmdService } = await import("../components/commands/handlers-pi.js");
   setCmdService(service);
 
+  // #1638: advisory Pi capacity view for check_workers
+  try {
+    const { setPiCapacityService } = await import("../components/pi-capacity-view.js");
+    setPiCapacityService(service);
+  } catch { /* best effort */ }
+
   const { setPiService: setReconcilerService, requestReconcile, requestWorkerDispatch } = await import("../components/reconciler.js");
   setReconcilerService(service);
 

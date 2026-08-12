@@ -344,7 +344,19 @@ const checkWorkersTool: ToolDefinition = {
       const sup = supervisionSummary(c.id);
       return `${icon} #${c.id} ${c.title || "(untitled)"} (${c.status})${tokens}${source}${sup}${result}`;
     });
-    return `${header}\nWorkers (${children.length}):\n${lines.join("\n")}${inputNote}`;
+    // #1638: advisory Pi capacity suffix — enabled/health, global active/max/
+    // free, and deduped busy aliases. Never raw canonical paths. Advisory
+    // only: admission invariants stay transactionally enforced.
+    let piSuffix = "";
+    try {
+      const { getPiCapacityView } = await import("../pi-capacity-view.js");
+      const view = getPiCapacityView();
+      if (view.enabled) {
+        const busyAliases = [...view.busyAliases].sort().join(",");
+        piSuffix = `\npi: enabled healthy=${view.healthy} active=${view.active} max=${view.max} free=${view.free}${busyAliases ? ` busy_aliases=${busyAliases}` : ""}`;
+      }
+    } catch { /* Pi lane absent — no suffix */ }
+    return `${header}\nWorkers (${children.length}):\n${lines.join("\n")}${piSuffix}${inputNote}`;
   },
 };
 
