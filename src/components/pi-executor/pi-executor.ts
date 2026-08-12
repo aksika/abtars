@@ -1,10 +1,11 @@
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import { SupervisedPiRpcClient, PiRpcError, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
+import { PiRpcError, SupervisedPiRpcClient, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
 import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import { PiRunStore, type PiTerminalOutcome } from "./pi-run-store.js";
 import type { PiExecutorConfig } from "./config.js";
-import { resolveAndValidateWorkspace, buildTrustArgs, buildChildEnv, validatePersistedSession, type SessionProof } from "./config.js";
+import { validatePersistedSession, type SessionProof } from "./config.js";
+import { PiRuntimeHost } from "./pi-runtime-host.js";
 import type { PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim, ResumeCapability } from "./types.js";
 import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
 import { nerve } from "../nerve.js";
@@ -48,6 +49,10 @@ export interface PiTerminalObservation {
 export class PiExecutor {
   private readonly config_: PiExecutorConfig;
   private readonly store: PiRunStore;
+  /** #1635 — shared Pi runtime host: the single process cap and spawn path
+   * across `/pi run`, supervised workers, interactive turns, and native
+   * handoffs. */
+  readonly host: PiRuntimeHost;
   private readonly live = new Map<string, OwnedProcess>();
   private _stopped = false;
   private _onCapacityReleased: (() => void) | null = null;
@@ -75,9 +80,13 @@ export class PiExecutor {
   constructor(config: PiExecutorConfig, store: PiRunStore) {
     this.config_ = config;
     this.store = store;
+    this.host = new PiRuntimeHost(config);
+    // #1635 — every slot release (executor-owned or interactive/native)
+    // fans out to the shared post-release wake wired at boot.
+    this.host.setOnSlotReleased(() => { this._onCapacityReleased?.(); });
   }
 
-  get activeCount(): number { return this.live.size; }
+  get activeCount(): number { return this.host.reservedCount; }
   get maxConcurrent(): number { return this.config_.maxConcurrent; }
   get isStopped(): boolean { return this._stopped; }
   get piStore(): PiRunStore { return this.store; }
@@ -145,6 +154,14 @@ export class PiExecutor {
     if (!run || run.executionGeneration !== generation) return "error";
     if (run.status !== "starting") return "error";
 
+    // #1635 — synchronously reserve the shared process slot before spawn.
+    // Capacity contention settles this generation; the reconciler's advisory
+    // gate already checked the same cap, this is the authoritative fence.
+    if (!this.host.tryReserveSlot()) {
+      await this._settleAndCleanupGen(runId, generation, ["starting"], "failed", { error: "Pi capacity exhausted" });
+      return "error";
+    }
+
     this._fireTransition(runId, "queued", "starting");
 
     // Register live ownership immediately, before spawn
@@ -168,6 +185,11 @@ export class PiExecutor {
       const owned = await this._startProcess(run, sessionId);
       if (!owned) {
         this.live.delete(runId);
+        // #1635 — the pre-live failure path releases the reserved slot. The
+        // ws/launch-error branch already settled this generation inside
+        // `_startProcess`; the CAS-fail branch settles nothing, so the
+        // release here covers both (releaseSlot is guarded).
+        this.host.releaseSlot();
         // #1647 — a launch failure still ends the generation's external C
         // session (generation-fenced by the spin layer).
         this._endExternalSession?.(sessionId, { runId, generation });
@@ -213,6 +235,9 @@ export class PiExecutor {
       if (owned) {
         await this._settleAndCleanup(owned, "failed", { error });
       } else {
+        // #1635 — no owned process: release the reserved slot alongside the
+        // generation settlement.
+        this.host.releaseSlot();
         // Keep even pre-live exceptions on the single terminal router; a
         // direct PiRunStore transition would strand the Worker attempt.
         await this._settleAndCleanupGen(runId, generation, ["starting"], "failed", { error });
@@ -326,38 +351,30 @@ export class PiExecutor {
   }
 
   private async _startProcess(run: PiRunRecord, sessionId: string): Promise<OwnedProcess | null> {
-    const ws = resolveAndValidateWorkspace(run.workspaceAlias, this.config);
-    if (ws.error) {
-      await this._settleAndCleanupGen(run.id, run.executionGeneration, ["starting"], "failed", { error: ws.error });
-      return null;
-    }
-
     const gen = run.executionGeneration;
-    const client = new SupervisedPiRpcClient();
 
-    const args = [
-      ...this.config_.fixedArgs,
-      "--mode", "rpc",
-      ...buildTrustArgs(this.config),
-    ];
-
-    const env = buildChildEnv(this.config, run);
-
-    try {
-      await client.launch(this.config_.command, args, ws.canonicalPath, env);
-    } catch (err) {
-      await client.close().catch(() => {});
-      const msg = err instanceof Error ? err.message : String(err);
-      await this._settleAndCleanupGen(run.id, gen, ["starting"], "failed", { error: `Launch failed: ${msg}` });
+    // #1635 — spawn through the shared runtime host (canonical workspace
+    // resolution, args/trust/env construction, process launch).
+    const launched = await this.host.launch({
+      workspaceAlias: run.workspaceAlias,
+      envIdentity: {
+        id: run.id,
+        ownerPrincipalId: run.ownerPrincipalId,
+        executionGeneration: gen,
+      },
+    });
+    if (!launched.ok) {
+      await this._settleAndCleanupGen(run.id, gen, ["starting"], "failed", { error: launched.error });
       return null;
     }
+    const client = launched.client;
 
     if (!this.store.casTransition(run.id, ["starting"], "starting", { observedPid: client.pid })) {
       await client.close();
       return null;
     }
 
-    const beforeEvidence = captureGitEvidence(ws.canonicalPath);
+    const beforeEvidence = captureGitEvidence(launched.canonicalPath);
     const unsubTermination = client.onTermination((event) => {
       this._onChildTerminated(run.id, gen, event);
     });
@@ -368,7 +385,7 @@ export class PiExecutor {
       client,
       generation: gen,
       runId: run.id,
-      workspacePath: ws.canonicalPath,
+      workspacePath: launched.canonicalPath,
       sessionId,
       beforeEvidence,
       abortTimer: null,
@@ -696,7 +713,9 @@ export class PiExecutor {
     if (this.live.get(owned.runId) === owned) {
       this.live.delete(owned.runId);
     }
-    this._onCapacityReleased?.();
+    // #1635 — release the shared process slot; the host fires the post-release
+    // wake (queued standalone cards + supervised dispatch).
+    this.host.releaseSlot();
   }
 
   // ── cancellation ─────────────────────────────────────────────────────────

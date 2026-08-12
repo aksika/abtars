@@ -158,10 +158,16 @@ const DANGEROUS_NODE_VARS = ["NODE_OPTIONS", "NODE_PATH", "NODE_DEBUG", "NODE_EX
  * #1405 — Build the child process environment from fixed baseline + explicit
  * allowlist + ABMIND correlation variables. Deny-by-default: no process.env
  * values cross unless explicitly allowlisted or in the fixed baseline.
+ *
+ * #1635 — `memoryMode: "none"` (interactive coding sessions) structurally
+ * disables abmind: the disable flag is set and the three ABMIND correlation
+ * variables are omitted. `/pi run` (default "abmind") keeps its byte-identical
+ * existing environment.
  */
 export function buildChildEnv(
   config: PiExecutorConfig,
   run: { id: string; ownerPrincipalId: string; executionGeneration: number },
+  memoryMode: "none" | "abmind" = "abmind",
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of FIXED_ENV_BASELINE) {
@@ -172,6 +178,10 @@ export function buildChildEnv(
     if (DANGEROUS_NODE_VARS.includes(name)) continue;
     const val = process.env[name];
     if (val) env[name] = val;
+  }
+  if (memoryMode === "none") {
+    env["ABMIND_HOOKS_DISABLED"] = "true";
+    return env;
   }
   env["ABMIND_USER_ID"] = run.ownerPrincipalId;
   env["ABMIND_PARENT_EXECUTION_ID"] = `pi-run-${run.id}-gen-${run.executionGeneration}`;
