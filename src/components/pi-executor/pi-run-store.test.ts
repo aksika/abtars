@@ -629,4 +629,50 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       expect(card.status).toBe("running");
     });
   });
+
+  describe("queueSupervisedGeneration (#1638)", () => {
+    function seedInterrupted(store: PiRunStore, cardId: number, resumeCapability = "available"): string {
+      const db = (store as any).db as TaskDatabase;
+      db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type) VALUES (?, ?, 'agent', 'queued', 'W')`).run(cardId, `w-${cardId}`);
+      db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id, origin, execution_generation, current_session_id, pi_session_file, resume_capability, status) VALUES (?, ?, 'repo-a', 'g', 'p', 'supervised', 1, 's1', '/sessions/s1.md', ?, 'interrupted')`).run(`pirun_q_${cardId}`, cardId, resumeCapability);
+      return `pirun_q_${cardId}`;
+    }
+
+    it("advances only the run generation, never the W card", () => {
+      const store = makeStore();
+      const runId = seedInterrupted(store, 7901);
+      const advanced = store.queueSupervisedGeneration({ runId, expectedGeneration: 1, newSessionId: "s2", sessionFile: "/sessions/s1.md", continuity: "resumed" });
+      expect(advanced.committed).toBe(true);
+      expect(advanced.newGeneration).toBe(2);
+      const run = store.get(runId);
+      expect(run?.executionGeneration).toBe(2);
+      expect(run?.status).toBe("queued");
+      expect(run?.currentSessionId).toBe("s2");
+      const db = (store as any).db as TaskDatabase;
+      const card = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(7901) as { status: string };
+      expect(card.status).toBe("queued");
+    });
+
+    it("rejects resumed when the session is not durable, and stale generation", () => {
+      const store = makeStore();
+      const runId = seedInterrupted(store, 7902, "never_started");
+      const notResumable = store.queueSupervisedGeneration({ runId, expectedGeneration: 1, newSessionId: "s2", continuity: "resumed" });
+      expect(notResumable.committed).toBe(false);
+      expect(notResumable.reason).toBe("not_resumable");
+      const stale = store.queueSupervisedGeneration({ runId, expectedGeneration: 99, newSessionId: "s2", continuity: "fresh" });
+      expect(stale.committed).toBe(false);
+      expect(stale.reason).toBe("stale");
+    });
+
+    it("resolveSessionContinuity decides resumed vs fresh from durable state", () => {
+      const store = makeStore();
+      const resumedRun = seedInterrupted(store, 7903, "available");
+      const resumed = store.resolveSessionContinuity(resumedRun);
+      expect(resumed.continuity).toBe("resumed");
+      expect(resumed.sessionFile).toBe("/sessions/s1.md");
+      const freshRun = seedInterrupted(store, 7904, "never_started");
+      const fresh = store.resolveSessionContinuity(freshRun);
+      expect(fresh.continuity).toBe("fresh");
+    });
+  });
 });

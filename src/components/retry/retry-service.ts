@@ -45,6 +45,9 @@ export interface OrcRetryResponse {
   addedChecks?: string[];
   preferredExecutorId?: string;
   rationale?: string;
+  /** #1638: the answer to a Pi worker's live question. Valid only for an
+   * input_requested source with action retry. */
+  inputAnswer?: string;
 }
 
 export type AcceptRetryResult =
@@ -260,6 +263,15 @@ export class RetryService {
       return { kind: "error", message: "needs fresh input" };
     }
 
+    // #1638: an input_answer is accepted only for an input_requested source
+    // with action retry — otherwise it is a caller error, not a retry.
+    if (response.inputAnswer) {
+      const classification = this.retryStore.getClassification(attemptId);
+      if (!classification || classification.primary !== "input_requested") {
+        return { kind: "error", message: "input_answer is valid only for an input_requested failure" };
+      }
+    }
+
     // Action is "retry" — build directive and allocate
     const classification = this.retryStore.getClassification(attemptId);
     if (!classification) return { kind: "error", message: `no classification for ${attemptId}` };
@@ -293,7 +305,9 @@ export class RetryService {
       contract, attemptId, targetOrdinal, classification, existingDecision.decision, rationale,
       {
         mode,
-        instruction: response.strategy ?? `Repair: ${classification.primary}`,
+        instruction: response.inputAnswer
+          ? `Answer from Orc: ${response.inputAnswer}\n${response.strategy ?? `Repair: ${classification.primary}`}`
+          : response.strategy ?? `Repair: ${classification.primary}`,
         doNotRepeat: response.doNotRepeat,
         addedInputs: response.addedInputs,
         addedChecks: response.addedChecks,

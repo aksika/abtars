@@ -392,6 +392,7 @@ const reviewWorkerFailureTool: ToolDefinition = {
       do_not_repeat: { type: "string", description: "JSON array of things not to repeat on the next attempt" },
       preferred_executor: { type: "string", description: "Optional preferred executor ID for the retry" },
       rationale: { type: "string", description: "Rationale for the decision" },
+      input_answer: { type: "string", description: "#1638: the answer to a Pi worker's live question. Valid only for an input_requested source with action retry; carried into the retry instruction." },
     },
     required: ["attempt_id", "action"],
   },
@@ -422,6 +423,9 @@ const reviewWorkerFailureTool: ToolDefinition = {
         doNotRepeat,
         preferredExecutorId: args.preferred_executor,
         rationale: args.rationale,
+        // #1638: bounded answer for a live Pi question; validated by the
+        // retry service against an input_requested source + retry action.
+        inputAnswer: args.input_answer?.slice(0, 4000),
       };
 
       const result = service.reviewFailure({ attemptId, cardId: projectCardId, response });

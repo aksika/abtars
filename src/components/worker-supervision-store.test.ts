@@ -684,6 +684,22 @@ describe("WorkerSupervisionStore", () => {
       }
     });
 
+    it("#1638: input_requested charges zero and releases the reservation", () => {
+      const s = new Store();
+      const aid = setupAttempt(s, "pending", 5000);
+      s.lifecycleTransition(aid, ["pending"], "running");
+      const result = s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "failed",
+        stableReason: "input_requested", terminalCause: "input_requested",
+      });
+      expect(result.kind).toBe("settled");
+      if (result.kind === "settled") {
+        expect(result.chargedTokens).toBe(0);
+      }
+      const attempt = s.getAttempt(aid);
+      expect(attempt?.charged_tokens).toBe(0);
+    });
+
     it("returns stale for generation mismatch", () => {
       const s = new Store();
       const aid = setupAttempt(s, "pending");

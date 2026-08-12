@@ -176,8 +176,25 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   try {
     const { SupervisedPiSettlement } = await import("../components/pi-executor/supervised-pi-settlement.js");
     const { WorkerSupervisionStore } = await import("../components/worker-supervision-store.js");
-    const coordinator = new SupervisedPiSettlement(store, new WorkerSupervisionStore(taskDb));
+    const coordinator = new SupervisedPiSettlement(store, new WorkerSupervisionStore(taskDb), config);
     executor.setSettlementRouter((observation) => coordinator.settlePiExecution(observation));
+    // #1638: a supervised Pi input request suspends the run and settles the
+    // attempt as input_requested (structured question evidence, zero charge).
+    executor.setInputSuspendHook(async (runId, generation, request) => {
+      const run = store.get(runId);
+      if (!run) return false;
+      // only supervised runs suspend — standalone keeps awaiting_input
+      const binding = new WorkerSupervisionStore(taskDb).getAttemptForExecutorResource("pi", runId, generation);
+      if (!binding) return false;
+      const question = String((request as { message?: unknown }).message ?? (request as { title?: unknown }).title ?? "input requested");
+      const sessionFile = run.piSessionFile ?? undefined;
+      const outcome = coordinator.suspendForInput({ runId, generation, question, requestId: request.id ?? `req_${Date.now()}`, sessionFile });
+      if (outcome.suspended) {
+        logInfo(TAG, `Supervised Pi run ${runId} suspended for input (gen ${generation}) — Worker attempt settled input_requested`);
+        try { requestWorkerDispatch(); } catch { /* best effort */ }
+      }
+      return outcome.suspended;
+    });
   } catch (err) {
     logWarn(TAG, `Supervised Pi settlement coordinator unavailable: ${err instanceof Error ? err.message : String(err)}`);
   }

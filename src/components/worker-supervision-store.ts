@@ -1019,6 +1019,7 @@ export class WorkerSupervisionStore {
     normalizedUsage?: { input: number; output: number; trustworthy: boolean };
     envelope?: WorkerResultEnvelopeV1;
     now?: number;
+    terminalCause?: "input_requested";
   }): { kind: "settled" | "replayed" | "stale" | "conflict" | "budget_violation"; lifecycle?: AttemptLifecycle; chargedTokens?: number } {
     try {
       return this.db.transaction(() => this.settleAttemptInTransaction(input));
@@ -1041,6 +1042,10 @@ export class WorkerSupervisionStore {
     normalizedUsage?: { input: number; output: number; trustworthy: boolean };
     envelope?: WorkerResultEnvelopeV1;
     now?: number;
+    /** #1638: semantic terminal cause. `input_requested` always charges zero
+     * tokens and releases the reservation — never a caller-selected billing
+     * policy. */
+    terminalCause?: "input_requested";
   }): { kind: "settled" | "replayed" | "stale" | "conflict" | "budget_violation"; lifecycle?: AttemptLifecycle; chargedTokens?: number } {
     const attempt = this.db.prepare(`SELECT * FROM worker_attempts WHERE id = ?`).get(input.attemptId) as AttemptRow | undefined;
     if (!attempt) return { kind: "stale" };
@@ -1083,7 +1088,11 @@ export class WorkerSupervisionStore {
     let chargeTokens = 0;
     let budgetViolation = false;
 
-    if (attempt.reserved_tokens > 0) {
+    // #1638: input_requested is semantic — the worker stopped to ask a live
+    // question; it always charges zero and releases its reservation.
+    if (input.terminalCause === "input_requested") {
+      chargeTokens = 0;
+    } else if (attempt.reserved_tokens > 0) {
       if (usage && usage.trustworthy) {
         chargeTokens = usage.input + usage.output;
         if (chargeTokens > attempt.reserved_tokens) {

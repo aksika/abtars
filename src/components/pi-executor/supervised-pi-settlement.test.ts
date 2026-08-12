@@ -67,7 +67,7 @@ function setupSupervisedAttempt(workerStore: WorkerSupervisionStore, piStore: Pi
   workerStore.lifecycleTransition("a_sup", ["claimed"], "starting");
   const run = piStore.createSupervisedRun({ cardId: 901, workspaceAlias: "repo-a", goal: "g", ownerPrincipalId: "p", sessionId: "s" });
   // the adapter claims the shared workspace before launch — run queued->starting
-  const wsClaim = piStore.claimSupervisedGeneration({ runId: run.runId, expectedGeneration: run.generation, canonicalPath: "/canon/repo-a" });
+  const wsClaim = piStore.claimSupervisedGeneration({ runId: run.runId, expectedGeneration: run.generation, canonicalPath: "/tmp/repo-a" });
   if (wsClaim.kind !== "claimed") throw new Error("setup: workspace claim failed");
   workerStore.bindExecutorResource({ attemptId: "a_sup", expectedAttemptGeneration: 1, executorKind: "pi", resourceId: run.runId, resourceGeneration: run.generation, continuity: "initial" });
   return { cardId: 901, attemptId: "a_sup", runId: run.runId };
@@ -80,7 +80,7 @@ describe("SupervisedPiSettlement (#1638)", () => {
     const workerStore = new WorkerSupervisionStore(db);
     const { cardId, attemptId, runId } = setupSupervisedAttempt(workerStore, piStore);
 
-    const coordinator = new SupervisedPiSettlement(piStore, workerStore);
+    const coordinator = new SupervisedPiSettlement(piStore, workerStore, { enabled: true, command: "pi", fixedArgs: [], workspaceAliases: { "repo-a": { path: "/tmp/repo-a" } }, allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000, projectTrust: "never", sessionStorageRoot: "/tmp/sessions" } as any);
     const observation = coordinator.settlePiExecution({
       runId, generation: 1, outcome: "completed", metadata: { resultSummary: "done" },
     });
@@ -106,7 +106,7 @@ describe("SupervisedPiSettlement (#1638)", () => {
     const workerStore = new WorkerSupervisionStore(db);
     const { cardId, attemptId, runId } = setupSupervisedAttempt(workerStore, piStore);
 
-    const coordinator = new SupervisedPiSettlement(piStore, workerStore);
+    const coordinator = new SupervisedPiSettlement(piStore, workerStore, { enabled: true, command: "pi", fixedArgs: [], workspaceAliases: { "repo-a": { path: "/tmp/repo-a" } }, allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000, projectTrust: "never", sessionStorageRoot: "/tmp/sessions" } as any);
     const observation = coordinator.settlePiExecution({
       runId, generation: 1, outcome: "failed", metadata: { error: "input requested" },
       envelope: {
@@ -133,7 +133,7 @@ describe("SupervisedPiSettlement (#1638)", () => {
     const piStore = new PiRunStore({ db });
     const workerStore = new WorkerSupervisionStore(db);
     const { cardId, attemptId, runId } = setupSupervisedAttempt(workerStore, piStore);
-    const coordinator = new SupervisedPiSettlement(piStore, workerStore);
+    const coordinator = new SupervisedPiSettlement(piStore, workerStore, { enabled: true, command: "pi", fixedArgs: [], workspaceAliases: { "repo-a": { path: "/tmp/repo-a" } }, allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000, projectTrust: "never", sessionStorageRoot: "/tmp/sessions" } as any);
     const input = { runId, generation: 1, outcome: "completed" as const, metadata: { resultSummary: "done" } };
     expect(coordinator.settlePiExecution(input).kind).toBe("settled");
     const second = coordinator.settlePiExecution(input);
@@ -145,7 +145,7 @@ describe("SupervisedPiSettlement (#1638)", () => {
     const piStore = new PiRunStore({ db });
     const workerStore = new WorkerSupervisionStore(db);
     const { cardId, attemptId, runId } = setupSupervisedAttempt(workerStore, piStore);
-    const coordinator = new SupervisedPiSettlement(piStore, workerStore);
+    const coordinator = new SupervisedPiSettlement(piStore, workerStore, { enabled: true, command: "pi", fixedArgs: [], workspaceAliases: { "repo-a": { path: "/tmp/repo-a" } }, allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000, projectTrust: "never", sessionStorageRoot: "/tmp/sessions" } as any);
     const observation = coordinator.settlePiExecution({
       runId, generation: 99, outcome: "failed", metadata: {},
     });
@@ -161,7 +161,7 @@ describe("SupervisedPiSettlement (#1638)", () => {
     const runId = piStore.generateId();
     db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type) VALUES (?, 'pi card', 'pi', 'running', 'pi')`).run(910);
     db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id, origin, execution_generation, current_session_id, status) VALUES (?, ?, 'ws', 'g', 'p', 'user', 1, 's', 'running')`).run(runId, 910);
-    const coordinator = new SupervisedPiSettlement(piStore, workerStore);
+    const coordinator = new SupervisedPiSettlement(piStore, workerStore, { enabled: true, command: "pi", fixedArgs: [], workspaceAliases: { "repo-a": { path: "/tmp/repo-a" } }, allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000, projectTrust: "never", sessionStorageRoot: "/tmp/sessions" } as any);
     const observation = coordinator.settlePiExecution({ runId, generation: 1, outcome: "completed", metadata: { resultSummary: "ok" } });
     expect(observation.kind).toBe("settled");
     if (observation.kind === "settled") {
@@ -170,5 +170,55 @@ describe("SupervisedPiSettlement (#1638)", () => {
     // standalone path transitions the Pi card
     const card = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(910) as { status: string };
     expect(card.status).toBe("done");
+  });
+
+  it("suspendForInput settles the attempt as input_requested with zero charge and interrupted run", () => {
+    const db = createTestDb();
+    const piStore = new PiRunStore({ db });
+    const workerStore = new WorkerSupervisionStore(db);
+    const { cardId, attemptId, runId } = setupSupervisedAttempt(workerStore, piStore);
+    workerStore.db.prepare("UPDATE worker_attempts SET reserved_tokens = 500 WHERE id = ?").run(attemptId);
+    // durable session file + workspace dir inside the configured roots
+    const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+    mkdirSync("/tmp/sessions", { recursive: true });
+    writeFileSync("/tmp/sessions/s1.md", "session", "utf-8");
+    mkdirSync("/tmp/repo-a", { recursive: true });
+
+    const coordinator = new SupervisedPiSettlement(piStore, workerStore, { enabled: true, command: "pi", fixedArgs: [], workspaceAliases: { "repo-a": { path: "/tmp/repo-a" } }, allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000, projectTrust: "never", sessionStorageRoot: "/tmp/sessions" } as any);
+    const outcome = coordinator.suspendForInput({
+      runId, generation: 1, question: "which schema should I use?", requestId: "req-1",
+      sessionFile: "/tmp/sessions/s1.md",
+    });
+    expect(outcome.suspended).toBe(true);
+
+    const attempt = workerStore.getAttempt(attemptId);
+    expect(attempt?.lifecycle).toBe("failed");
+    expect(attempt?.charged_tokens).toBe(0);
+    const result = workerStore.getResultByAttempt(attemptId);
+    expect(result?.envelope.error?.code).toBe("INPUT_REQUESTED");
+    expect(result?.envelope.worker_report.summary).toContain("which schema");
+    // run interrupted + resumable when the session file is durable
+    const run = piStore.get(runId);
+    expect(run?.status).toBe("interrupted");
+    expect(run?.resumeCapability).toBe("available");
+    // workspace released
+    expect(piStore.listWorkspaceClaims()).toHaveLength(0);
+    // W card untouched by the Pi lane
+    const card = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(cardId) as { status: string };
+    expect(card.status).toBe("queued");
+  });
+
+  it("suspendForInput marks the run non-resumable when the session file is missing", () => {
+    const db = createTestDb();
+    const piStore = new PiRunStore({ db });
+    const workerStore = new WorkerSupervisionStore(db);
+    const { attemptId, runId } = setupSupervisedAttempt(workerStore, piStore);
+    const coordinator = new SupervisedPiSettlement(piStore, workerStore, { enabled: true, command: "pi", fixedArgs: [], workspaceAliases: { "repo-a": { path: "/tmp/repo-a" } }, allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000, projectTrust: "never", sessionStorageRoot: "/tmp/sessions" } as any);
+    const outcome = coordinator.suspendForInput({ runId, generation: 1, question: "q", requestId: "req-2", sessionFile: undefined });
+    expect(outcome.suspended).toBe(true);
+    const run = piStore.get(runId);
+    expect(run?.status).toBe("interrupted");
+    expect(run?.resumeCapability).toBe("never_started");
+    expect(workerStore.getAttempt(attemptId)?.lifecycle).toBe("failed");
   });
 });

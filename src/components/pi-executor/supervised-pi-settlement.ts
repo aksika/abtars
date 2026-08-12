@@ -16,6 +16,7 @@ import type { PiRunStore, PiTerminalMetadata, PiTerminalOutcome } from "./pi-run
 import type { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
 import { logWarn } from "../logger.js";
+import { validateSessionFile, resolveAndValidateWorkspace, type PiExecutorConfig } from "./config.js";
 
 const TAG = "supervised-pi-settlement";
 
@@ -42,6 +43,7 @@ export class SupervisedPiSettlement {
   constructor(
     private readonly piStore: PiRunStore,
     private readonly workerStore: WorkerSupervisionStore,
+    private readonly piConfig: PiExecutorConfig,
   ) {}
 
   /** Route one terminal Pi observation: supervised iff a Worker binding exists. */
@@ -69,8 +71,7 @@ export class SupervisedPiSettlement {
     attemptGeneration: number,
     contractId: string,
     input: PiTerminalObservation,
-  ): PiSettlementObservation {
-    try {
+  ): PiSettlementObservation {    try {
       return this.workerStore.db.transaction(() => {
         // Re-read + validate the latest attempt inside the transaction.
         const attempt = this.workerStore.getAttemptForExecutorResource("pi", input.runId, input.generation);
@@ -128,6 +129,114 @@ export class SupervisedPiSettlement {
     } catch (err) {
       logWarn(TAG, `supervised settlement failed for ${input.runId}: ${err instanceof Error ? err.message : String(err)}`);
       return { kind: "error", message: String(err) };
+    }
+  }
+
+  /**
+   * #1638 — supervised input suspension. A live Pi question on a supervised
+   * run never parks the process in awaiting_input: the question becomes
+   * structured Worker failure evidence (input_requested), the run moves to
+   * resumable interrupted, the workspace claim is released, and the attempt
+   * settles through the canonical body with zero charge. Orc's answer on a
+   * retry resumes the preserved session when durable.
+   */
+  suspendForInput(input: {
+    runId: string;
+    generation: number;
+    question: string;
+    requestId: string;
+    sessionFile?: string;
+  }): { suspended: boolean; reason?: string } {
+    const attempt = this.workerStore.getAttemptForExecutorResource("pi", input.runId, input.generation);
+    if (!attempt) return { suspended: false, reason: "not supervised" };
+    const run = this.piStore.get(input.runId);
+    if (!run) return { suspended: false, reason: "run missing" };
+
+    // Prove the session file is durable AND inside the configured session
+    // root BEFORE stopping the process. No proof -> the next generation must
+    // be fresh; the question still settles as input_requested.
+    let resumeAvailable = false;
+    let sessionFile = input.sessionFile;
+    if (sessionFile) {
+      const validated = validateSessionFile(this.piConfig.sessionStorageRoot, sessionFile);
+      resumeAvailable = validated.error === undefined;
+      if (validated.error) {
+        sessionFile = undefined;
+        logWarn(TAG, `input suspend ${input.runId}: session not durable (${validated.error}) — next generation will be fresh`);
+      }
+    }
+
+    // Canonical workspace path for the generation-fenced release.
+    const ws = resolveAndValidateWorkspace(run.workspaceAlias, this.piConfig);
+    const canonicalPath = ws.error ? undefined : ws.canonicalPath;
+
+    try {
+      return this.workerStore.db.transaction(() => {
+        const latest = this.workerStore.getLatestAttempt(attempt.card_id);
+        if (!latest || latest.id !== attempt.id) return { suspended: false, reason: "stale attempt" };
+
+        // run -> interrupted (resumable when the session is durable)
+        const interrupted = this.piStore.casTransition(input.runId, ["running", "awaiting_input", "starting"], "interrupted", {
+          pendingRequestId: null,
+          pendingRequestType: null,
+          piSessionFile: sessionFile ?? undefined,
+          resumeCapability: resumeAvailable ? "available" : "never_started",
+        });
+        if (!interrupted) return { suspended: false, reason: "run transition lost" };
+
+        // canonical Worker settlement with the structured question envelope
+        const envelope: WorkerResultEnvelopeV1 = {
+          schema_version: 1,
+          attempt: {
+            id: attempt.id,
+            ordinal: attempt.ordinal,
+            contract_id: attempt.contract_id,
+            contract_digest: attempt.contract_id,
+            executor_kind: "pi",
+            executor_id: attempt.executor_id,
+            started_at: attempt.started_at,
+            finished_at: new Date().toISOString(),
+          },
+          outcome: "failed",
+          criteria: [],
+          checks: [],
+          artifacts: [],
+          worker_report: {
+            summary: `Pi asked for input: ${input.question.slice(0, 500)}`,
+            claims: [],
+            unresolved_risks: [],
+          },
+          error: {
+            code: "INPUT_REQUESTED",
+            message: input.question.slice(0, 2000),
+            retryable: true,
+          },
+        };
+        const settlement = this.workerStore.settleAttemptInTransaction({
+          attemptId: attempt.id,
+          expectedGeneration: attempt.generation,
+          desiredState: "failed",
+          stableReason: `pi_input_requested:${input.requestId.slice(0, 40)}`,
+          envelope,
+          terminalCause: "input_requested",
+        });
+        if (settlement.kind === "stale" || settlement.kind === "conflict") {
+          return { suspended: false, reason: `settlement ${settlement.kind}` };
+        }
+
+        if (canonicalPath) {
+          this.piStore.releaseWorkspaceClaim({
+            canonicalPath,
+            runId: input.runId,
+            generation: input.generation,
+          });
+        }
+
+        return { suspended: true };
+      });
+    } catch (err) {
+      logWarn(TAG, `input suspension failed for ${input.runId}: ${err instanceof Error ? err.message : String(err)}`);
+      return { suspended: false, reason: String(err) };
     }
   }
 }

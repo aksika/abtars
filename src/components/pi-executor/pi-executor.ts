@@ -45,6 +45,11 @@ export class PiExecutor {
    * when the coordinator exists). When set, every terminal observation goes
    * through it so supervised runs settle through the Worker attempt. */
   private _settlementRouter: ((input: PiTerminalObservation) => unknown) | null = null;
+  /** #1638 — supervised input suspension hook. When set, an input request on
+   * a SUPERVISED run suspends the run (interrupted) and settles the Worker
+   * attempt as input_requested instead of leaving the process in
+   * awaiting_input. Standalone runs keep the existing awaiting_input path. */
+  private _inputSuspendHook: ((runId: string, generation: number, request: RpcExtensionUIRequest) => Promise<boolean>) | null = null;
   /** #1358 — Lifecycle transition subscribers (multi). */
   private _transitionSubs = new Set<(runId: string, fromStatus: string | undefined, toStatus: string) => void>();
   /** Progress event subscribers (multi). */
@@ -64,6 +69,11 @@ export class PiExecutor {
   /** #1638 — route every terminal observation through the coordinator. */
   setSettlementRouter(router: (input: PiTerminalObservation) => unknown): void {
     this._settlementRouter = router;
+  }
+
+  /** #1638 — wire supervised input suspension (see coordinator). */
+  setInputSuspendHook(hook: (runId: string, generation: number, request: RpcExtensionUIRequest) => Promise<boolean>): void {
+    this._inputSuspendHook = hook;
   }
 
   /** Register a callback fired when a Pi slot is released. */
@@ -632,6 +642,13 @@ export class PiExecutor {
     if (dialogMethods.has(method)) {
       const owned = this.live.get(runId);
       if (!owned) return;
+      // #1638: supervised runs suspend for input instead of parking in
+      // awaiting_input — the question becomes structured Worker failure
+      // evidence and Orc answers on the retry.
+      if (this._inputSuspendHook) {
+        const suspended = await this._inputSuspendHook(runId, owned.generation, request);
+        if (suspended) return;
+      }
       // #1358 review — the "ui" progress row is stored BEFORE the
       // awaiting_input transition so the in-transaction event emitter can
       // attach title/prompt/options to the public projection. A stray row on

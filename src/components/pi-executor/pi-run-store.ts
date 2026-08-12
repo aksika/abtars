@@ -532,6 +532,73 @@ export class PiRunStore {
     return { committed: true };
   }
 
+  /**
+   * #1638 — Advance ONLY the subordinate Pi run to a new execution
+   * generation for a supervised retry. Validates the old generation and
+   * resumability, clears transient run fields, and NEVER touches the W card
+   * (unlike queueResumeGeneration). The retry attempt owns Worker card
+   * queueing through the retry store.
+   */
+  queueSupervisedGeneration(input: {
+    runId: string;
+    expectedGeneration: number;
+    newSessionId: string;
+    sessionFile?: string;
+    continuity: "resumed" | "fresh";
+  }): { committed: boolean; newGeneration?: number; reason?: "stale" | "not_resumable" | "missing" } {
+    return this.db.transaction(() => {
+      const row = this.db.prepare(
+        `SELECT id, execution_generation, status, resume_capability FROM pi_runs WHERE id = ?`
+      ).get(input.runId) as { id: string; execution_generation: number; status: string; resume_capability: string } | undefined;
+      if (!row) return { committed: false, reason: "missing" };
+      if (row.execution_generation !== input.expectedGeneration) return { committed: false, reason: "stale" };
+      if ((row.status as string) !== "interrupted" && (row.status as string) !== "failed") return { committed: false, reason: "not_resumable" };
+      if (input.continuity === "resumed" && (row.resume_capability as string) !== "available") return { committed: false, reason: "not_resumable" };
+
+      const newGen = input.expectedGeneration + 1;
+      const runResult = this.db.prepare(`
+        UPDATE pi_runs
+        SET status = 'queued',
+            execution_generation = ?,
+            current_session_id = ?,
+            pi_session_file = COALESCE(?, pi_session_file),
+            observed_pid = NULL,
+            pending_request_id = NULL,
+            pending_request_type = NULL,
+            result_summary = NULL,
+            changed_files_summary = NULL,
+            usage_json = NULL,
+            error = NULL,
+            updated_at = datetime('now')
+        WHERE id = ? AND execution_generation = ? AND status IN ('interrupted', 'failed')
+      `).run(newGen, input.newSessionId, input.sessionFile ?? null, input.runId, input.expectedGeneration);
+      if (runResult.changes === 0) return { committed: false, reason: "stale" };
+
+      // #1358 review — mechanism A: the supervised generation bump commits
+      // with its fact; the origin never sees a W-card transition here.
+      if (this.remoteEmitter) {
+        this.remoteEmitter.emitTransitionInTx({
+          runId: input.runId,
+          fromStatus: row.status as string,
+          toStatus: "queued",
+          newGeneration: newGen,
+        });
+      }
+
+      return { committed: true, newGeneration: newGen };
+    });
+  }
+
+  /** #1638 — resolve the durable session continuity decision for a retry:
+   * reuse the session file when durable and compatible, else fresh. */
+  resolveSessionContinuity(runId: string): { continuity: "resumed" | "fresh"; sessionId: string; sessionFile?: string } {
+    const run = this.get(runId);
+    if (run?.piSessionFile && run.resumeCapability === "available") {
+      return { continuity: "resumed", sessionId: run.currentSessionId ?? `s_${Date.now()}`, sessionFile: run.piSessionFile };
+    }
+    return { continuity: "fresh", sessionId: `s_${Date.now()}` };
+  }
+
   touchActivity(id: string): void {
     this.db.prepare(`UPDATE pi_runs SET last_rpc_activity_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`).run(id);
   }
