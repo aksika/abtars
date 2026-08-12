@@ -187,6 +187,12 @@ const spawnWorkerTool: ToolDefinition = {
     }
     let cardId: number;
     try {
+      // #1644: the bound Orc invocation context is the only spawn authority —
+      // tool arguments can never choose or override root ID, generation, or
+      // run ID. createChild re-checks the durable root inside its transaction.
+      const authority = context?.orcContext
+        ? { projectCardId: context.orcContext.projectCardId, projectGeneration: context.orcContext.projectGeneration }
+        : undefined;
       cardId = spin.spawnChild(projectCardId, {
         goal,
         title: args.title || goal.slice(0, 40),
@@ -195,6 +201,7 @@ const spawnWorkerTool: ToolDefinition = {
         ...(hasStructuredData ? {} : { timeoutMs: maxDurationMs }),
         contract,
         settlementOwner: "spin",
+        authority,
       });
     } catch (err) {
       if (err instanceof Error && (err as Error & { code?: string }).code === "agent_cap_reached") {
@@ -482,16 +489,28 @@ const defineProjectContractTool: ToolDefinition = {
     },
     required: ["goal", "criteria", "project_card_id"],
   },
-  async execute(args: Record<string, string>): Promise<string> {
+  async execute(args: Record<string, string>, context?: ToolExecutionContext): Promise<string> {
     const cardId = Number(args.project_card_id);
     if (!Number.isSafeInteger(cardId) || cardId < 1) return "[err] project_card_id is required and must be a positive integer.";
 
     try {
       const { normalizeContract, createContractId } = await import("../project-acceptance/project-contract.js");
-      const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
+      const { ProjectReviewStore, authorizeActiveProjectWork } = await import("../project-acceptance/project-review-store.js");
 
       const store = new ProjectReviewStore();
       const supervision = store.getSupervision(cardId);
+
+      // #1644: contract authoring is a supervised mutation — the bound Orc
+      // invocation context is the only authority; tool arguments cannot
+      // choose or override the root ID or generation.
+      const bound = context?.orcContext;
+      if (!bound) return "[err] No active Orc project. define_project_contract only works during a project contract-authoring turn.";
+      if (bound.projectCardId !== cardId) {
+        return `[err] project_card_id ${cardId} does not match the bound project ${bound.projectCardId}`;
+      }
+      if (supervision && bound.projectGeneration !== supervision.generation) {
+        return `[err] Bound project generation ${bound.projectGeneration} is stale; current generation is ${supervision.generation}`;
+      }
 
       // Only valid when awaiting_contract or no supervision yet
       if (supervision && supervision.state !== "awaiting_contract") {
@@ -554,8 +573,20 @@ const defineProjectContractTool: ToolDefinition = {
         return `[err] Invalid contract:\n${errs}\n\nAttempt ${attemptNum}/${MAX_INVALID_CONTRACT_PROPOSALS}. Provide a corrected contract.`;
       }
 
-      // Insert contract + initialize supervision + project budget
+      // Insert contract + initialize supervision + project budget — all in one
+      // transaction that also re-verifies the durable project authority so a
+      // stale authoring turn can never write after terminal settlement.
       store.db.transaction(() => {
+        const rootCard = store.db.prepare(`SELECT source, source_id FROM kanban_board WHERE id = ?`).get(cardId) as { source: string | null; source_id: string | null } | undefined;
+        const authority = {
+          projectCardId: cardId,
+          projectGeneration: bound.projectGeneration,
+          scheduledRunId: rootCard?.source === "task" && rootCard.source_id != null ? rootCard.source_id : undefined,
+        };
+        const rejection = authorizeActiveProjectWork(store.db, authority);
+        if (rejection) {
+          throw new Error(`project mutation rejected: ${rejection}`);
+        }
         store.insertContract(normalized.contract);
         store.initializeSupervision(cardId, normalized.contract.id, "executing");
 

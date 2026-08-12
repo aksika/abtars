@@ -6,6 +6,8 @@ import { normalizeContract, createContractId, createAttemptId, validateEnvelope,
 import { resolveWorkerExecutorIntent } from "./worker-executor-routing.js";
 import { logWarn } from "./logger.js";
 import { logSwarmTrace } from "./swarm-trace.js";
+import { nerve } from "./nerve.js";
+import { authorizeActiveProjectWork, emitProjectAuthorityRejection, type ProjectMutationAuthority } from "./project-acceptance/project-review-store.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation, RetryContext } from "./worker-contract.js";
 import type { TaskDatabase } from "./tasks/kanban-board.js";
 import type { ContractRow } from "./worker-supervision-store.js";
@@ -88,10 +90,13 @@ export class WorkerSupervisionService {
 
   createChild(
     rawGoal: string,
-    cardId: number,
     rootCardId: number,
     authoredBy: string,
     opts?: {
+      cardId?: number;
+      title?: string;
+      source?: string;
+      priority?: string;
       criteria?: Array<{ id: string; description: string }>;
       expectedArtifacts?: Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>;
       verificationCommands?: Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>;
@@ -101,10 +106,14 @@ export class WorkerSupervisionService {
       contractId?: string;
       attemptId?: string;
       workspaceAlias?: string;
+      /** #1644: immutable project authority. Never supplied by tool arguments
+       *  beyond the bound Orc invocation context; when absent it is derived
+       *  from the durable root state at creation (repair path). */
+      authority?: { projectCardId: number; projectGeneration: number };
     },
-  ): { contract: WorkerAcceptanceContractV1; attemptId: string } | { error: string } {
-    if (this.store.contractExists(cardId)) {
-      return { error: `card #${cardId} already has a contract` };
+  ): { contract: WorkerAcceptanceContractV1; attemptId: string; cardId: number } | { error: string } {
+    if (opts?.cardId !== undefined && this.store.contractExists(opts.cardId)) {
+      return { error: `card #${opts.cardId} already has a contract` };
     }
 
     if (!opts?.criteria || opts.criteria.length === 0) {
@@ -134,7 +143,7 @@ export class WorkerSupervisionService {
       criteria: opts.criteria,
       provenance: {
         root_card_id: rootCardId,
-        card_id: cardId,
+        card_id: opts?.cardId ?? 0,
         authored_by: authoredBy,
         created_at: new Date().toISOString(),
       },
@@ -163,26 +172,83 @@ export class WorkerSupervisionService {
       return { error: `contract validation failed: ${normalized.errors.map(e => e.message).join("; ")}` };
     }
 
-    const attemptId = this.store.db.transaction(() => {
-      this.store.insertContract(normalized.contract, cardId);
-      const id = opts?.attemptId ?? createAttemptId();
-      // #1638: the contract-derived intent owns routing — one resolver for
-      // initial creation and retry, no capability/catalog reinterpretation.
-      const intent = resolveWorkerExecutorIntent(normalized.contract);
-      this.store.insertAttempt({
-        id,
-        card_id: cardId,
-        contract_id: normalized.contract.id,
-        ordinal: this.store.nextOrdinal(cardId),
-        executor_kind: intent.kind,
-        executor_id: intent.id,
-        status: "pending",
-        started_at: new Date().toISOString(),
-      });
-      return id;
-    });
+    let result: { attemptId: string; cardId: number };
+    try {
+      result = this.store.db.transaction<{ attemptId: string; cardId: number }>(() => {
+        // #1644: the immutable authority tuple is resolved once, inside the
+        // mutating transaction, and persisted on the attempt. A caller-supplied
+        // authority (Orc invocation context) is checked against the durable
+        // root; the repair path derives it from the current durable state.
+        const rootCard = this.store.db.prepare(`SELECT source, source_id FROM kanban_board WHERE id = ?`).get(rootCardId) as { source: string | null; source_id: string | null } | undefined;
+        const supervision = this.store.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(rootCardId) as { generation: number } | undefined;
+        const scheduledRunId = rootCard?.source === "task" && rootCard.source_id != null ? rootCard.source_id : undefined;
+        // #1644: the root card ID comes from the parent chain, never from a
+        // caller-chosen value; only the bound generation (Orc context) and the
+        // durable run identity are admitted into the tuple.
+        const authority: ProjectMutationAuthority = {
+          projectCardId: rootCardId,
+          projectGeneration: opts?.authority?.projectGeneration ?? supervision?.generation ?? 1,
+          scheduledRunId,
+        };
+        const rejection = authorizeActiveProjectWork(this.store.db, authority);
+        if (rejection) {
+          emitProjectAuthorityRejection("child_creation", authority, rejection);
+          throw new Error(`project mutation rejected: ${rejection}`);
+        }
 
-    return { contract: normalized.contract, attemptId };
+        let cardId = opts?.cardId;
+        if (cardId === undefined) {
+          const inserted = this.store.db.prepare(`
+            INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer, max_agents, delivery_ready)
+            VALUES (?, ?, NULL, ?, 'W', NULL, NULL, NULL, ?, ?, 'deliver', NULL, NULL, NULL, NULL, 1)
+          `).run(
+            opts?.title ?? rawGoal.slice(0, 80),
+            opts?.source ?? "agent",
+            opts?.priority ?? "MEDIUM",
+            rootCardId,
+            JSON.stringify({ supervised: true }),
+          );
+          cardId = Number(inserted.lastInsertRowid);
+        }
+
+        this.store.insertContract(normalized.contract, cardId);
+        const id = opts?.attemptId ?? createAttemptId();
+        // #1638: the contract-derived intent owns routing — one resolver for
+        // initial creation and retry, no capability/catalog reinterpretation.
+        const intent = resolveWorkerExecutorIntent(normalized.contract);
+        this.store.insertAttempt({
+          id,
+          card_id: cardId,
+          contract_id: normalized.contract.id,
+          ordinal: this.store.nextOrdinal(cardId),
+          executor_kind: intent.kind,
+          executor_id: intent.id,
+          status: "pending",
+          started_at: new Date().toISOString(),
+          root_project_card_id: authority.projectCardId,
+          root_project_generation: authority.projectGeneration,
+          scheduled_run_id: authority.scheduledRunId ?? null,
+        });
+        return { attemptId: id, cardId };
+      });
+    } catch (err) {
+      // #1644: a rejected project mutation (terminal root, generation/run
+      // mismatch, missing authority) returns a typed error — the caller states
+      // the project is terminal or the caller is stale and must stop.
+      if (err instanceof Error && err.message.startsWith("project mutation rejected:")) {
+        return { error: err.message };
+      }
+      throw err;
+    }
+
+    // #1644: the child card is committed with its contract and attempt in one
+    // transaction; the queued wake fires only after commit so it always
+    // observes a fully initialized child.
+    if (opts?.cardId === undefined) {
+      nerve.fire("card:queued", result.cardId);
+    }
+
+    return { contract: normalized.contract, attemptId: result.attemptId, cardId: result.cardId };
   }
 
   getContractForCard(cardId: number): WorkerAcceptanceContractV1 | undefined {
@@ -280,41 +346,33 @@ export class WorkerSupervisionService {
   collectAndSettle(
     cardId: number,
     workerResult: string,
-    workingDir?: string,
-    attemptId?: string,
-    generation?: number,
+    workingDir: string | undefined,
+    attemptId: string,
+    generation: number,
     telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
   ): { settled: boolean; summary: string; envelope?: WorkerResultEnvelopeV1; stale?: boolean; budgetViolation?: boolean } {
-    if (!attemptId && !this.getContractForCard(cardId)) {
-      return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
-    }
+    // #1644: settlement identity is required. Missing attempt ID or expected
+    // generation fails closed and never selects the latest attempt — the
+    // generationless no-attempt path was removed.
     const attempts = this.store.getAttemptsForCard(cardId);
     const latestAttempt = attempts[attempts.length - 1];
-    let targetAttempt = attemptId ? this.store.getAttempt(attemptId) : latestAttempt;
+    const targetAttempt = this.store.getAttempt(attemptId);
     if (!latestAttempt || !targetAttempt || targetAttempt.card_id !== cardId) {
       return { settled: false, summary: "stale execution result ignored", stale: true };
     }
-    if (attemptId && (latestAttempt.id !== attemptId || (generation !== undefined && targetAttempt.generation !== generation))) {
+    if (latestAttempt.id !== attemptId || targetAttempt.generation !== generation) {
       return { settled: false, summary: "stale execution result ignored", stale: true };
     }
 
-    // Settled evidence must use the exact contract named by the attempt. The
-    // card's latest revision is only valid for the legacy no-attempt path.
-    const contract = attemptId
-      ? this.getContract(targetAttempt.contract_id)
-      : this.getContractForCard(cardId);
+    // Settled evidence must use the exact contract named by the attempt.
+    const contract = this.getContract(targetAttempt.contract_id);
     if (!contract) return { settled: false, summary: workerResult.slice(0, MAX_RESULT_LENGTH) };
 
-    // Keep the legacy direct service API usable for callers that have not yet
-    // been migrated to Reconciler-issued claims. Production supervised Spin
-    // always supplies attemptId and therefore cannot bypass the claim path.
-    if (!attemptId && targetAttempt.lifecycle === "pending") {
-      const claim = this.store.claimAttempt(cardId, contract.id, targetAttempt.executor_kind, targetAttempt.executor_id, targetAttempt.generation || 1);
-      if (!claim) return { settled: false, summary: "execution claim rejected", stale: true };
-      targetAttempt = this.store.getAttempt(claim.attemptId);
-      if (!targetAttempt || !this.store.markAttemptRunning(targetAttempt.id)) {
-        return { settled: false, summary: "execution claim rejected", stale: true };
-      }
+    // #1644: preflight project-authority check so a stale result for a
+    // terminal root is rejected before verification commands run. The
+    // authoritative gate is inside terminalSettlement's transaction.
+    if (this.store.authorizeAttemptForProjectWork(targetAttempt, "worker_result_settlement") !== null) {
+      return { settled: false, summary: "stale execution result ignored", stale: true };
     }
 
     const workerReport = this.parseWorkerReport(workerResult);

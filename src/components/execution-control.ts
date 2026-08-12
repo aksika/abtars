@@ -202,7 +202,7 @@ export class SpinBindRejectionError extends Error {
 function cardHasSupervision(cardId: number): boolean {
   try {
     const store = new WorkerSupervisionStore();
-    return store.contractExists(cardId) && store.hasLiveClaim(cardId);
+    return store.contractExists(cardId);
   } catch { return false; }
 }
 

@@ -104,11 +104,13 @@ describe("blocked settlement → requester round trip (#1630)", () => {
       criteria: JSON.stringify([{ id: "c1" }]), // structurally invalid — fails normalization
       required_outputs: JSON.stringify([{ id: "o1", description: "Output", kind: "logical", required: true }]),
     };
-    const first = await defineTool!.execute(args as never);
+    // #1644: contract authoring requires the bound Orc invocation context.
+    const context = { userId: "test", orcContext: { version: 1, runId: `or_${cardId}_1`, intentKey: `contract:${cardId}:1`, projectCardId: cardId, projectGeneration: 1, ownershipGeneration: 1, ownerPeer: "local", ownerInstanceId: "test", origin: { kind: "local" } } } as never;
+    const first = await defineTool!.execute(args as never, context);
     expect(first).toContain("[err] Invalid contract");
-    const second = await defineTool!.execute(args as never);
+    const second = await defineTool!.execute(args as never, context);
     expect(second).toContain("[err] Invalid contract");
-    const third = await defineTool!.execute(args as never);
+    const third = await defineTool!.execute(args as never, context);
     expect(third).toContain("blocked");
 
     const supervision = new ProjectReviewStore().getSupervision(cardId);

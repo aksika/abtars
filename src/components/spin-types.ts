@@ -245,6 +245,9 @@ export interface SpinRequest {
   executionScope?: import("./tasks/task-package.js").ToolExecutionScope;
   /** #1480: Orc invocation context for durable project ownership fencing. */
   orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  /** #1644: immutable project authority for supervised child creation — bound
+   *  from the Orc invocation context, never from tool arguments. */
+  authority?: { projectCardId: number; projectGeneration: number };
 }
 
 // ── #1271: unified session API ──────────────────────────────────────────

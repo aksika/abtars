@@ -13,6 +13,21 @@ if (!abtarsHome || !abtarsHome.includes("/tmp/")) {
   process.exit(1);
 }
 
+/**
+ * #1644: the bound Orc invocation authority for scripted tool calls. Reads the
+ * durable supervision generation so every spawn/authoring call carries the
+ * exact project generation the fence checks against.
+ */
+function makeOrcContext(projectCardId: number): { projectCardId: number; projectGeneration: number } {
+  try {
+    const { ProjectReviewStore } = require("../../components/project-acceptance/project-review-store.js") as typeof import("../../components/project-acceptance/project-review-store.js");
+    const sup = new ProjectReviewStore().getSupervision(projectCardId);
+    return { projectCardId, projectGeneration: sup?.generation ?? 1 };
+  } catch {
+    return { projectCardId, projectGeneration: 1 };
+  }
+}
+
 const scenario: string = process.env["SCENARIO"] ?? "happy_path";
 const scenarioId = `swarm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 const logsDir = join(abtarsHome, "logs");
@@ -313,7 +328,7 @@ async function runHappyPath(): Promise<LocalSwarmResult> {
       { id: "o1", description: "Summary report", kind: "report", required: true },
     ]),
     constraints: JSON.stringify(["None"]),
-  });
+  }, { userId: "test", orcContext: makeOrcContext(projectCardId) as never });
   if (contractResult.startsWith("[err]")) fail("define_contract", "CONTRACT_FAILED", contractResult);
 
   requestReconcile(projectCardId);
@@ -321,7 +336,7 @@ async function runHappyPath(): Promise<LocalSwarmResult> {
   emitCheckpoint("contract_defined");
 
   const childCardIds: number[] = [];
-  const orcContext = { projectCardId };
+  const orcContext = makeOrcContext(projectCardId);
 
   for (let i = 0; i < 3; i++) {
     const spawnResult = await spawnWorkerTool.execute({
@@ -458,7 +473,8 @@ async function runRestartRecovery(): Promise<LocalSwarmResult> {
   activeChildCardIds.push(childCardId);
 
   const svc = new WorkerSupervisionSvc();
-  const createResult = svc.createChild("Restart work", childCardId, projectCardId, "orc", {
+  const createResult = svc.createChild("Restart work", projectCardId, "orc", {
+    cardId: childCardId,
     criteria: [{ id: "c1", description: "Restart criterion" }],
     expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/restart.md", required: true, criterion_ids: ["c1"] }], verificationCommands: [], requiredCapabilities: [],
     supportsRootCriteria: ["c1"],
@@ -525,11 +541,11 @@ async function runCapacityDeadline(): Promise<LocalSwarmResult> {
     ),
     required_outputs: JSON.stringify([{ id: "o1", description: "Report", kind: "report", required: true }]),
     constraints: JSON.stringify([]),
-  });
+  }, { userId: "test", orcContext: makeOrcContext(projectCardId) as never });
 
   requestReconcile(projectCardId);
   await new Promise(r => setTimeout(r, 200));
-  const orcContext = { projectCardId };
+  const orcContext = makeOrcContext(projectCardId);
   const childCardIds: number[] = [];
 
   for (let i = 0; i < 5; i++) {
@@ -639,12 +655,12 @@ async function runPriorityAge(): Promise<LocalSwarmResult> {
     ),
     required_outputs: JSON.stringify([{ id: "o1", description: "Report", kind: "report", required: true }]),
     constraints: JSON.stringify([]),
-  });
+  }, { userId: "test", orcContext: makeOrcContext(projectCardId) as never });
 
   requestReconcile(projectCardId);
   await new Promise(r => setTimeout(r, 200));
 
-  const orcContext = { projectCardId };
+  const orcContext = makeOrcContext(projectCardId);
 
   const past = new Date(Date.now() - 180_000).toISOString();
   const backdatedCardId = kanbanEnqueue("Aged LOW worker", "test", undefined, {
@@ -654,7 +670,8 @@ async function runPriorityAge(): Promise<LocalSwarmResult> {
   db.prepare("UPDATE kanban_board SET created_at = ? WHERE id = ?").run(past, backdatedCardId);
   activeChildCardIds.push(backdatedCardId);
   const svc = new WorkerSupervisionSvc();
-  svc.createChild("Aged low priority work", backdatedCardId, projectCardId, "orc", {
+  svc.createChild("Aged low priority work", projectCardId, "orc", {
+    cardId: backdatedCardId,
     criteria: [{ id: "c_aged", description: "Aged criterion" }],
     expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/aged.md", required: true, criterion_ids: ["c_aged"] }], verificationCommands: [], requiredCapabilities: [],
     supportsRootCriteria: ["c1"],
@@ -746,8 +763,9 @@ async function runTokenBudget(): Promise<LocalSwarmResult> {
     childCardIds.push(cardId);
 
     const result = svc.createChild(
-      `Budget work ${i}`, cardId, projectCardId, "orc",
+      `Budget work ${i}`, projectCardId, "orc",
       {
+        cardId,
         criteria: [{ id: `c_b${i}`, description: `Budget criterion ${i}` }],
         expectedArtifacts: [{ id: `a_b${i}`, kind: "file", ref: `out/budget-${i}.md`, required: true, criterion_ids: [`c_b${i}`] }],
         verificationCommands: [],
@@ -809,7 +827,7 @@ function requestWorkerDispatchFrom(_requestReconcileFn: (id: number) => void): v
  * fourth is refused with no card created; a terminal Worker releases capacity.
  */
 async function runScheduledCap(): Promise<LocalSwarmResult> {
-  const { spin, kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, kanbanComplete } = await setupEnvironment();
+  const { spin, kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, kanbanComplete, ProjectReviewStore } = await setupEnvironment();
 
   const projectCardId = kanbanEnqueue("Capped scheduled project", "task", undefined, {
     type: "O", priority: "MEDIUM", deliveryMode: "deliver", maxAgents: 4,
@@ -817,6 +835,9 @@ async function runScheduledCap(): Promise<LocalSwarmResult> {
   activeProjectCardId = projectCardId;
   kanbanRunning(projectCardId);
   if (kanbanGetCard(projectCardId)?.max_agents !== 4) fail("max_agents", "CAP_NOT_PERSISTED", "max_agents not durably stored");
+  // #1644: supervised child creation requires durable project supervision —
+  // initialize the root before the cap scenario spawns lanes.
+  new ProjectReviewStore().initializeSupervision(projectCardId, `pc_cap_${projectCardId}`, "executing");
 
   const admitted: number[] = [];
   let refusal: string | null = null;
@@ -990,13 +1011,13 @@ async function runPiCoding(): Promise<LocalSwarmResult> {
       { id: "o1", description: "Coding result", kind: "report", required: true },
     ]),
     constraints: JSON.stringify(["None"]),
-  });
+  }, { userId: "test", orcContext: makeOrcContext(projectCardId) as never });
   if (contractResult.startsWith("[err]")) fail("define_contract", "CONTRACT_FAILED", contractResult);
   requestReconcile(projectCardId);
   await new Promise(r => setTimeout(r, 200));
   emitCheckpoint("contract_defined");
 
-  const orcContext = { projectCardId };
+  const orcContext = makeOrcContext(projectCardId);
   const spawnResult = await spawnWorkerTool.execute({
     goal: "Implement the coding task",
     title: "Pi Coder",

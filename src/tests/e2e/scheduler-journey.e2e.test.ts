@@ -29,6 +29,20 @@ vi.mock("node:child_process", async () => {
 });
 import * as child_process from "node:child_process";
 
+// #1644: record bounded swarm-trace rejection evidence without changing log
+// behavior — the mock is a passthrough that also captures swarm-trace lines.
+const swarmTrace = vi.hoisted(() => ({ lines: [] as Array<{ tag: string; msg: string }> }));
+vi.mock("../../components/logger.js", async () => {
+  const actual = await vi.importActual<typeof import("../../components/logger.js")>("../../components/logger.js");
+  return {
+    ...actual,
+    logTrace: (tag: string, msg: string) => {
+      if (tag === "swarm-trace") swarmTrace.lines.push({ tag, msg });
+      return actual.logTrace(tag, msg);
+    },
+  };
+});
+
 import type { ScheduledTask } from "../../components/tasks/task-types.js";
 import type { TaskFailureDiagnosticV1 } from "../../components/tasks/task-failure.js";
 
@@ -320,6 +334,7 @@ beforeEach(async () => {
     sleepCycleCalls: 0, sentMessages: [], sentDocuments: [], injectedReminders: [],
     pausedNotifications: [], spawnedCommands: [], dispatchedGoals: [],
   };
+  swarmTrace.lines = [];
   vi.mocked(child_process.spawn).mockImplementation(((
     _file: string,
     args: readonly string[],
@@ -1667,6 +1682,81 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
     expect(events("deferred-task")[0]!.outcome).toBe("deferred");
     expect(cascadeDiagnostics).toHaveLength(1);
     expect(cascadeNotifications).toHaveLength(1);
+  });
+});
+
+describe("#1644 E2E — scheduled-project terminal authority (incident shape)", () => {
+  it("blocks once after all lanes fail; a stale spawn, a late result, and delivery all lose their authority", async () => {
+    const queue = await makeQueue();
+    const { fixture, orc } = await makeFixture({ workerCount: 3, reviewMode: "blocked" });
+    forceDue("project-task");
+    await tick.runTaskTick(makeTickCtx(queue));
+    const { runId, rootCardId } = await waitForReach(fixture, "executing");
+
+    // All three lanes fail; a stale Orc turn claims its run BEFORE the
+    // terminal settlement (the incident's verification-handoff shape).
+    fixture.failWorkers();
+    const armed = fixture.armStaleSpawn("Web verification handoff");
+    expect("error" in armed).toBe(false);
+    if ("error" in armed) throw new Error(armed.error);
+    fixture.block("all lanes failed; review abandoned");
+    await waitFor(() => !stateStore.readState("project-task")?.activeRun);
+
+    // 1. Exactly one failed history entry; the root is blocked.
+    const ev = events("project-task");
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.runId).toBe(runId);
+    expect(ev[0]!.outcome).toBe("failed");
+    expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId)?.state).toBe("blocked");
+
+    // 2. The stale Orc run was superseded by the terminal settlement.
+    const runRow = orc.getStore().db.prepare(`SELECT state, outcome FROM orc_project_runs WHERE id = ?`).get(armed.runId) as { state: string; outcome: string } | undefined;
+    expect(runRow).toBeDefined();
+    expect(runRow!.state).toBe("superseded");
+    expect(runRow!.outcome).toBe("project_terminal");
+
+    // 3. The paused stale spawn cannot create a child post-terminal — no
+    // durable child card, contract, or attempt beyond the three original lanes.
+    const stale = fixture.releaseStaleSpawn();
+    expect(stale.rejected).toBe(true);
+    if (stale.error) expect(stale.error).toContain("project_terminal");
+    const children = board.kanbanGetChildren(rootCardId).filter(c => c.type === "W");
+    expect(children).toHaveLength(3);
+    const contracts = orc.getStore().db.prepare(`SELECT COUNT(*) AS cnt FROM worker_contracts`).get() as { cnt: number };
+    expect(contracts.cnt).toBe(3);
+
+    // 4. A late worker result is rejected at the project-authority fence: the
+    // failed lane attempt keeps its durable state and no result row appears.
+    const workerCard = children[0]!;
+    const supStore = new WorkerSupervisionStoreClass();
+    const attempt = supStore.getLatestAttempt(workerCard.id)!;
+    expect(attempt.lifecycle).toBe("failed");
+    const late = fixture.submitLateWorkerResult(workerCard.id, attempt.id);
+    expect(late.settled).toBe(false);
+    expect(late.stale).toBe(true);
+    expect(supStore.getAttempt(attempt.id)!.lifecycle).toBe("failed");
+    expect(supStore.getResultByAttempt(attempt.id)).toBeUndefined();
+
+    // 5. The delivery poll (captured platform boundary) sends nothing: the
+    // blocked root is not done, no artifact was attached, delivery never
+    // released.
+    const root = board.kanbanGetCard(rootCardId)!;
+    expect(root.status).toBe("failed");
+    expect(root.delivery_ready).toBe(0);
+    expect(root.result_path).toBeNull();
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.sentDocuments).toHaveLength(0);
+    expect(doubles.sentMessages).toHaveLength(0);
+
+    // 6. Bounded structured rejection traces: child creation and the late
+    // worker result each emitted exactly one primary rejection record.
+    const rejections = swarmTrace.lines.filter(l => l.msg.includes("project_mutation_rejected"));
+    expect(rejections.filter(l => l.msg.includes("child_creation"))).toHaveLength(1);
+    expect(rejections.filter(l => l.msg.includes("worker_result_settlement"))).toHaveLength(1);
+    expect(rejections.every(l => l.msg.includes("project_terminal"))).toBe(true);
+    // No content leak: bounded trace carries no prompts or results.
+    expect(rejections.every(l => !l.msg.includes("<summary>"))).toBe(true);
   });
 });
 

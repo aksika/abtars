@@ -1,6 +1,7 @@
 import { nerve } from "./nerve.js";
 import { spin } from "./spin.js";
 import {
+  kanbanComplete,
   kanbanFail,
   kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds, kanbanStrandedQueuedProjectIds,
   kanbanQueuedDispatchOrder, kanbanPromoteDueRetry, kanbanTransition, sqliteNow, KANBAN_TERMINAL_STATUSES,
@@ -1275,7 +1276,23 @@ async function dispatchOnePass(): Promise<void> {
     if (!hasContract) continue;
 
     const latestAttempt = store.getLatestAttempt(card.id);
-    if (!latestAttempt || latestAttempt.lifecycle !== "pending") continue;
+    // #1644: a terminal attempt whose card was never transitioned (executor-
+    // settled lanes such as Pi settle the attempt but never touch the W card)
+    // is completed/failed here from the durable attempt state. The card must
+    // never lag the attempt — a project cannot reach review otherwise.
+    if (!latestAttempt) continue;
+    if (store.isAttemptTerminal(latestAttempt.lifecycle)) {
+      if (card.status === "queued" || card.status === "running") {
+        if (latestAttempt.lifecycle === "completed") {
+          kanbanComplete(card.id, null, "worker completed");
+        } else {
+          kanbanFail(card.id, `worker ${latestAttempt.lifecycle}`);
+        }
+        dispatchPumpState.dirty = true;
+      }
+      continue;
+    }
+    if (latestAttempt.lifecycle !== "pending") continue;
 
     const executor = dispatchExecutor(latestAttempt.executor_kind, latestAttempt.executor_id);
     if (!executor) {
@@ -1417,6 +1434,15 @@ async function dispatchOnePass(): Promise<void> {
     if (observation.kind === "started" || observation.kind === "already_started") {
       store.markAttemptRunning(claim.attemptId);
       logSwarmTrace({ event: "worker_started", card: card.id, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
+      // #1644: an executor that settles the attempt synchronously inside start
+      // (Pi lanes) leaves the W card untransitioned — complete it from the
+      // durable attempt state and re-run the pump.
+      const afterStart = store.getLatestAttempt(card.id);
+      if (afterStart && store.isAttemptTerminal(afterStart.lifecycle) && (card.status === "queued" || card.status === "running")) {
+        if (afterStart.lifecycle === "completed") kanbanComplete(card.id, null, "worker completed");
+        else kanbanFail(card.id, `worker ${afterStart.lifecycle}`);
+        dispatchPumpState.dirty = true;
+      }
     } else if (observation.kind === "deferred" && observation.provesNoStart === true) {
       // #1638: proven-no-start contention (Pi capacity/workspace busy). The
       // attempt returns to pending without settling or consuming retry; a

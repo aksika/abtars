@@ -25,6 +25,166 @@ export const VALID_PROJECT_STATES: readonly ProjectState[] = [
 
 export const TERMINAL_PROJECT_STATES: readonly ProjectState[] = ["blocked", "accepted"];
 
+// ── #1644: project mutation authority ────────────────────────────────────────
+//
+// Every supervised downstream mutation carries a durable authority tuple: the
+// root project card ID, the project supervision generation, and the scheduled
+// runId when the root came from a scheduled run. The predicates below run on
+// the caller's database connection inside the caller's transaction — a
+// preflight read is never the authorization; the mutating statement or
+// transaction decides the winner.
+
+export interface ProjectMutationAuthority {
+  projectCardId: number;
+  projectGeneration: number;
+  /** task_runs.run_id when the root is a scheduled project (kanban source_id). */
+  scheduledRunId?: string;
+}
+
+export type ProjectAuthorityRejection =
+  | "missing_authority"
+  | "project_missing"
+  | "project_terminal"
+  | "generation_mismatch"
+  | "run_mismatch"
+  | "run_failed";
+
+interface RootProjectRow {
+  type: string | null;
+  source: string | null;
+  source_id: string | null;
+  status: string | null;
+}
+
+interface RootSupervisionRow {
+  state: string;
+  generation: number;
+}
+
+function baseProjectAuthorityCheck(
+  db: TaskDatabase,
+  authority: ProjectMutationAuthority | undefined,
+): ProjectAuthorityRejection | null {
+  if (!authority || !Number.isSafeInteger(authority.projectCardId) || authority.projectCardId < 1
+      || !Number.isSafeInteger(authority.projectGeneration) || authority.projectGeneration < 1) {
+    return "missing_authority";
+  }
+  const card = db.prepare(`SELECT type, source, source_id, status FROM kanban_board WHERE id = ?`)
+    .get(authority.projectCardId) as unknown as RootProjectRow | undefined;
+  if (!card || card.type !== "O") return "project_missing";
+  const sup = db.prepare(`SELECT state, generation FROM project_supervision WHERE project_card_id = ?`)
+    .get(authority.projectCardId) as unknown as RootSupervisionRow | undefined;
+  if (!sup) return "project_missing";
+  if (sup.generation !== authority.projectGeneration) return "generation_mismatch";
+  return null;
+}
+
+/** Run-identity/outcome half of the authority check. Shared by both predicates. */
+function runAuthorityCheck(
+  db: TaskDatabase,
+  card: RootProjectRow,
+  authority: ProjectMutationAuthority,
+  requireTerminalSuccess: boolean,
+): ProjectAuthorityRejection | null {
+  const isScheduled = card.source === "task" && card.source_id != null;
+  if (isScheduled) {
+    if (authority.scheduledRunId === undefined || authority.scheduledRunId !== card.source_id) return "run_mismatch";
+    const run = db.prepare(`SELECT finished_at, outcome FROM task_runs WHERE run_id = ?`)
+      .get(authority.scheduledRunId) as { finished_at: number | null; outcome: string | null } | undefined;
+    if (!run) return "run_mismatch";
+    if (requireTerminalSuccess) {
+      if (run.finished_at === null || run.outcome !== "success") return "run_failed";
+    } else if (run.finished_at !== null) {
+      return "run_failed";
+    }
+    return null;
+  }
+  if (authority.scheduledRunId !== undefined) return "run_mismatch";
+  return null;
+}
+
+/**
+ * #1644: active-work authorization. True only when the root card exists as a
+ * supervised project at the exact generation, is not terminal, and — for a
+ * scheduled root — the correlated scheduled run is still live. Non-scheduled
+ * projects authorize without a run identity. Runs on the caller's connection,
+ * intended to be evaluated inside the caller's transaction.
+ */
+export function authorizeActiveProjectWork(
+  db: TaskDatabase,
+  authority: ProjectMutationAuthority | undefined,
+): ProjectAuthorityRejection | null {
+  const base = baseProjectAuthorityCheck(db, authority);
+  if (base) return base;
+  const card = db.prepare(`SELECT type, source, source_id, status FROM kanban_board WHERE id = ?`)
+    .get(authority!.projectCardId) as unknown as RootProjectRow;
+  const sup = db.prepare(`SELECT state, generation FROM project_supervision WHERE project_card_id = ?`)
+    .get(authority!.projectCardId) as unknown as RootSupervisionRow;
+  if (TERMINAL_PROJECT_STATES.includes(sup.state as ProjectState)) return "project_terminal";
+  return runAuthorityCheck(db, card, authority!, false);
+}
+
+/**
+ * #1644: delivery authorization. Requires an `accepted` project at the exact
+ * generation and, for a scheduled root, a terminal `task_runs` row with
+ * `outcome='success'` for the exact run. A claim for run N can never authorize
+ * run N+1. Runs on the caller's connection, intended to be evaluated inside
+ * the caller's transaction.
+ */
+export function authorizeProjectDelivery(
+  db: TaskDatabase,
+  authority: ProjectMutationAuthority | undefined,
+): ProjectAuthorityRejection | null {
+  const base = baseProjectAuthorityCheck(db, authority);
+  if (base) return base;
+  const card = db.prepare(`SELECT type, source, source_id, status FROM kanban_board WHERE id = ?`)
+    .get(authority!.projectCardId) as unknown as RootProjectRow;
+  const sup = db.prepare(`SELECT state, generation FROM project_supervision WHERE project_card_id = ?`)
+    .get(authority!.projectCardId) as unknown as RootSupervisionRow;
+  if (sup.state !== "accepted") return "project_terminal";
+  return runAuthorityCheck(db, card, authority!, true);
+}
+
+/** #1644: one bounded rejection trace per rejected project mutation. */
+export function emitProjectAuthorityRejection(
+  operation: string,
+  authority: ProjectMutationAuthority | undefined,
+  reason: ProjectAuthorityRejection,
+  extra?: { cardId?: number; attemptId?: string },
+): void {
+  logSwarmTrace({
+    event: "project_mutation_rejected",
+    operation: operation.slice(0, 120),
+    project: authority?.projectCardId ?? extra?.cardId ?? 0,
+    card: extra?.cardId ?? authority?.projectCardId,
+    generation: authority?.projectGeneration ?? 0,
+    attempt: extra?.attemptId,
+    reason,
+  });
+}
+
+/**
+ * #1644: true when `cardId` sits (transitively) under a root card of type `O`
+ * that has a `project_supervision` row. Used to fail closed on legacy worker
+ * attempts that lack the immutable lineage columns — a supervised project
+ * attempt must never infer its authority later.
+ */
+export function cardIsSupervisedProjectChild(db: TaskDatabase, cardId: number): boolean {
+  try {
+    let current = db.prepare(`SELECT id, parent_id, type FROM kanban_board WHERE id = ?`).get(cardId) as { id: number; parent_id: number | null; type: string | null } | undefined;
+    let hops = 0;
+    while (current && current.parent_id != null && hops < 20) {
+      current = db.prepare(`SELECT id, parent_id, type FROM kanban_board WHERE id = ?`).get(current.parent_id) as { id: number; parent_id: number | null; type: string | null } | undefined;
+      hops++;
+    }
+    if (!current || current.type !== "O") return false;
+    const sup = db.prepare(`SELECT 1 FROM project_supervision WHERE project_card_id = ?`).get(current.id);
+    return sup !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 // ── Case status ───────────────────────────────────────────────────────────────
 
 export type ReviewCaseStatus = "open" | "superseded" | "accepted";
@@ -713,6 +873,12 @@ export class ProjectReviewStore {
       `).run(decisionId, now, cardId);
       if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
 
+      // #1644: acceptance is terminal — invalidate every stale owner for the
+      // exact settled generation in the same transaction. The supervision row
+      // (just CAS'd by this settlement) is the authoritative generation.
+      const settledSupervision = this.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(cardId) as { generation: number } | undefined;
+      this.invalidateOwnershipInTransaction(cardId, settledSupervision?.generation ?? 1, reviewCaseId, now);
+
       // Update kanban card via projectStateToKanban mapping — #1590: through
       // the transition helper inside this transaction. The service layer fires
       // card:done after commit, so emit is disabled here.
@@ -791,6 +957,56 @@ export class ProjectReviewStore {
     return { decisionId: settledId };
   }
 
+  /**
+   * #1644: terminal settlement invalidates every stale owner durably, in the
+   * settlement's own transaction. Supersedes active Orc runs for the exact
+   * project generation, abandons other open review ownership, and marks active
+   * descendant attempts cancellation-requested (pending ones cancelled) so no
+   * stale callback can later reactivate ownership or be accepted. In-process
+   * process cancellation happens after commit and is best-effort cleanup, not
+   * the correctness boundary. Runs only against tables that exist on the
+   * caller's database (partial test databases skip the cleanup statements;
+   * production always has them).
+   */
+  private invalidateOwnershipInTransaction(projectCardId: number, generation: number, reviewCaseId: string, now: string): void {
+    const tableExists = (name: string): boolean => {
+      const row = this.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(name);
+      return row !== undefined;
+    };
+
+    if (tableExists("orc_project_runs")) {
+      // Supersede live Orc runs for the exact settled generation — a released
+      // stale Orc turn can no longer claim, bind, or validate.
+      this.db.prepare(`
+        UPDATE orc_project_runs
+        SET state = 'superseded', outcome = 'project_terminal', released_at = ?, updated_at = ?
+        WHERE project_card_id = ? AND project_generation = ? AND state IN ('scheduled','dispatching','running')
+      `).run(now, now, projectCardId, generation);
+    }
+
+    // Close open review ownership for the settled generation, except the
+    // settling request itself (the caller marks it settled).
+    this.db.prepare(`
+      UPDATE project_review_requests SET status = 'abandoned', updated_at = ?, last_error = 'project terminal'
+      WHERE project_card_id = ? AND status IN ('pending','dispatched') AND review_case_id != ?
+    `).run(now, projectCardId, reviewCaseId);
+
+    if (tableExists("worker_attempts")) {
+      // Durable cancellation marks for live descendant attempts of this exact
+      // generation. The executor layer observes cancel_requested and stops the
+      // processes best-effort; even if it never does, the attempts can no
+      // longer be claimed or accepted.
+      this.db.prepare(`
+        UPDATE worker_attempts SET lifecycle = 'cancel_requested', cancel_reason = 'project_terminal'
+        WHERE root_project_card_id = ? AND root_project_generation = ? AND lifecycle IN ('claimed','starting','running')
+      `).run(projectCardId, generation);
+      this.db.prepare(`
+        UPDATE worker_attempts SET lifecycle = 'cancelled', status = 'cancelled', cancel_reason = 'project_terminal', settled_at = ?
+        WHERE root_project_card_id = ? AND root_project_generation = ? AND lifecycle = 'pending'
+      `).run(now, projectCardId, generation);
+    }
+  }
+
   private settleBlockedInTransaction(
     cardId: number,
     reviewCaseId: string,
@@ -811,6 +1027,12 @@ export class ProjectReviewStore {
       WHERE project_card_id = ? AND state NOT IN ('accepted', 'blocked')
     `).run(blockerClass, settledId, now, cardId);
     if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
+
+    // #1644: blocked is terminal — invalidate every stale owner for the exact
+    // settled generation in the same transaction. The supervision row (just
+    // CAS'd by this settlement) is the authoritative generation.
+    const settledSupervision = this.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(cardId) as { generation: number } | undefined;
+    this.invalidateOwnershipInTransaction(cardId, settledSupervision?.generation ?? 1, reviewCaseId, now);
 
     // #1590: through the transition helper inside this transaction. The
     // service layer fires card:failed after commit, so emit is disabled.

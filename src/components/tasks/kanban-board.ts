@@ -215,7 +215,8 @@ export type TransitionActor =
   | "restart_recovery"      // pi-run-store 626
   | "pi_origin_projection"  // boot/phase-pi-executor 105
   | "budget_enforcement"    // reconciler 1015
-  | "stale_repair";         // doctor-fixes 166
+  | "stale_repair"          // doctor-fixes 166
+  | "retry_requeue";        // retry-store successor allocation (#1644)
 
 export interface TransitionRequest {
   readonly cardId: number;
@@ -329,6 +330,12 @@ const EXTRA_PREDICATES = new Set<string>([
   "COALESCE(delivery_attempts, 0) < 5",                    // kanbanClaimDelivery
   "next_retry_at IS NOT NULL AND unixepoch(next_retry_at) <= ?", // kanbanPromoteDueRetry
   "delivery_result IS NULL",                                // kanban-delivery markUnknown
+  // #1644: scheduled-project delivery claim — exact root/run/generation,
+  // accepted supervision, terminal successful task run, delivery released.
+  "COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')",
+  // #1644: non-scheduled project delivery claim — accepted supervision at the
+  // exact generation, delivery released.
+  "COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
 ]);
 
 /** SQLite datetime('now')-compatible UTC timestamp for co-written columns. */
@@ -692,6 +699,43 @@ export function kanbanClaimDelivery(id: number): boolean {
   return true;
 }
 
+/**
+ * #1644: project-aware delivery claim. Atomically performs `done ->
+ * delivering` and increments `delivery_attempts` only while the exact root
+ * card/run/project-generation authority holds inside the claim transaction:
+ * accepted supervision at the supplied generation, delivery released, and —
+ * for a scheduled root — `source_id` matching the run and a terminal
+ * successful `task_runs` row. A claim for run N can never authorize run N+1.
+ */
+export function kanbanClaimProjectDelivery(
+  cardId: number,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+): boolean {
+  const d = dbOrNull();
+  if (!d) return false;
+  const row = d.prepare("SELECT COALESCE(delivery_attempts, 0) AS attempts FROM kanban_board WHERE id = ?").get(cardId) as { attempts: number } | undefined;
+  const outcome = kanbanTransition({
+    cardId,
+    from: ["done"],
+    to: "delivering",
+    actor: "delivery_claim",
+    reason: "project delivery claim",
+    fields: { delivery_attempts: (row?.attempts ?? 0) + 1 },
+    extraPredicate: authority.scheduledRunId !== undefined
+      ? "COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')"
+      : "COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
+    extraPredicateParams: authority.scheduledRunId !== undefined
+      ? [authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId]
+      : [authority.projectGeneration],
+    emit: false,
+  });
+  if (outcome.kind !== "applied") {
+    logDebug("kanban-delivery", `project_delivery_skipped_duplicate card=${cardId}`);
+    return false;
+  }
+  return true;
+}
+
 export function kanbanMarkDelivered(id: number): void {
   kanbanTransition({
     cardId: id, from: ["delivering"], to: "delivered", actor: "delivery_settle",
@@ -881,6 +925,71 @@ export function kanbanSetDeliveryReady(cardId: number): void {
     `UPDATE kanban_board SET delivery_ready = 1, updated_at = datetime('now')
      WHERE id = ? AND status = 'done' AND delivery_ready = 0`
   ).run(cardId) as { changes?: number };
+  if ((result.changes ?? 0) === 1) nerve.fire("card:done", cardId);
+}
+
+/**
+ * #1644: project-aware artifact attach. The single winning successful
+ * scheduled settlement may attach the validated result path only while the
+ * exact root/run/project-generation authority holds inside this statement:
+ * accepted supervision at the supplied generation and, for a scheduled root,
+ * `source_id` matching the run with a terminal successful `task_runs` row. A
+ * stale result path from a failed or older run is never attached — it may
+ * remain on disk but is not product output.
+ */
+export function kanbanAttachProjectResult(
+  cardId: number,
+  resultPath: string,
+  summary: string,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+): void {
+  const d = dbOrNull();
+  if (!d) return;
+  if (authority.scheduledRunId !== undefined) {
+    d.prepare(
+      `UPDATE kanban_board SET result_path = ?, result_summary = ?, updated_at = datetime('now')
+       WHERE id = ? AND status = 'done' AND result_path IS NULL
+         AND source_id = ?
+         AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)
+         AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')`
+    ).run(resultPath, summary.slice(0, 4000), cardId, authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId);
+    return;
+  }
+  d.prepare(
+    `UPDATE kanban_board SET result_path = ?, result_summary = ?, updated_at = datetime('now')
+     WHERE id = ? AND status = 'done' AND result_path IS NULL
+       AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)`
+  ).run(resultPath, summary.slice(0, 4000), cardId, authority.projectGeneration);
+}
+
+/**
+ * #1644: project-aware delivery release. Sets `delivery_ready = 1` only while
+ * the exact root/run/project-generation authority holds inside this statement.
+ * A late promise from a failed or older run loses this CAS and never releases
+ * delivery.
+ */
+export function kanbanSetProjectDeliveryReady(
+  cardId: number,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+): void {
+  const d = dbOrNull();
+  if (!d) return;
+  let result: { changes?: number };
+  if (authority.scheduledRunId !== undefined) {
+    result = d.prepare(
+      `UPDATE kanban_board SET delivery_ready = 1, updated_at = datetime('now')
+       WHERE id = ? AND status = 'done' AND delivery_ready = 0
+         AND source_id = ?
+         AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)
+         AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')`
+    ).run(cardId, authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId) as { changes?: number };
+  } else {
+    result = d.prepare(
+      `UPDATE kanban_board SET delivery_ready = 1, updated_at = datetime('now')
+       WHERE id = ? AND status = 'done' AND delivery_ready = 0
+         AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)`
+    ).run(cardId, authority.projectGeneration) as { changes?: number };
+  }
   if ((result.changes ?? 0) === 1) nerve.fire("card:done", cardId);
 }
 

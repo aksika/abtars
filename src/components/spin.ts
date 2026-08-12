@@ -1157,24 +1157,34 @@ export class Spin {
         try {
           const svc = new WorkerSupervisionService();
           const generation = spec.executionControl?.generation;
-          const outcome = svc.collectAndSettle(cardId, result, session.workingDir, spec.attemptId, generation, usage ?? undefined);
-          if (outcome.settled) {
-            workerSummary = outcome.summary;
-            if (outcome.envelope) {
-              const criteria = outcome.envelope.criteria;
-              criteriaVerdict = criteria.length > 0
-                ? criteria.every(c => c.status === "passed") ? "passed" : "failed"
-                : "unreadable";
+          // #1644: settlement identity is required — a supervised result
+          // without attempt ID/generation never settles (the generationless
+          // no-attempt path was removed).
+          if (spec.attemptId === undefined || generation === undefined) {
+            if (spec.contractId) {
+              staleWorkerResult = true;
+              logWarn(TAG, `Card ${cardId}: supervised Worker result without attempt identity (attemptId=${spec.attemptId ?? "none"}, generation=${generation ?? "none"}) — rejected`);
             }
-            if (spec.executionControl) {
-              spec.executionControl.markTerminal(outcome.envelope ? "completed" : "failed");
+          } else {
+            const outcome = svc.collectAndSettle(cardId, result, session.workingDir, spec.attemptId, generation, usage ?? undefined);
+            if (outcome.settled) {
+              workerSummary = outcome.summary;
+              if (outcome.envelope) {
+                const criteria = outcome.envelope.criteria;
+                criteriaVerdict = criteria.length > 0
+                  ? criteria.every(c => c.status === "passed") ? "passed" : "failed"
+                  : "unreadable";
+              }
+              if (spec.executionControl) {
+                spec.executionControl.markTerminal(outcome.envelope ? "completed" : "failed");
+              }
+            } else if (outcome.stale) {
+              staleWorkerResult = true;
+              if (outcome.budgetViolation && spec.settlementOwner !== "caller") {
+                kanbanRetryOrFail(cardId, outcome.summary);
+              }
+              logWarn(TAG, `Card ${cardId}: ${outcome.budgetViolation ? "budget-violating" : "stale"} Worker result ignored (attempt=${spec.attemptId ?? "unknown"})`);
             }
-          } else if (outcome.stale) {
-            staleWorkerResult = true;
-            if (outcome.budgetViolation && spec.settlementOwner !== "caller") {
-              kanbanRetryOrFail(cardId, outcome.summary);
-            }
-            logWarn(TAG, `Card ${cardId}: ${outcome.budgetViolation ? "budget-violating" : "stale"} Worker result ignored (attempt=${spec.attemptId ?? "unknown"})`);
           }
         } catch (err) {
           if (spec.contractId) {
@@ -1584,20 +1594,16 @@ export class Spin {
 
     }
 
-    // Create card (kanbanEnqueue is synchronous, no spin start)
-    const cardTitle = request.title ?? request.goal.slice(0, 80);
-    const cardId = kanbanEnqueue(cardTitle, request.source ?? "agent", undefined, {
-      priority: (request.priority ?? "MEDIUM") as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-      type: "W",
-      parent_id: parentCardId,
-      notes: request.contract ? JSON.stringify({ supervised: true }) : undefined,
-    });
-    // Create contract + attempt BEFORE spin starts, so the card is never
-    // visible to Reconciler/Spin without supervision data.
-    if (request.contract && cardId) {
+    // Create card + contract + attempt atomically (supervised path) so the
+    // card is never visible to Reconciler/Spin without supervision data and
+    // cannot outlive a rejected project-authority check.
+    if (request.contract) {
       const service = new WorkerSupervisionService();
       const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
-      const result = service.createChild(request.goal, cardId, rootCardId, "orc", {
+      const result = service.createChild(request.goal, rootCardId, "orc", {
+        title: request.title ?? request.goal.slice(0, 80),
+        source: request.source ?? "agent",
+        priority: (request.priority ?? "MEDIUM") as string,
         criteria: request.contract.criteria as Array<{ id: string; description: string }>,
         expectedArtifacts: request.contract.expected_artifacts as Array<{ id: string; kind: "file" | "directory" | "report" | "logical"; ref: string; required: boolean; criterion_ids: string[] }>,
         verificationCommands: request.contract.verification_commands as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
@@ -1605,19 +1611,28 @@ export class Spin {
         supportsRootCriteria: request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : undefined,
         limits: { ...request.contract.limits },
         workspaceAlias: request.contract.workspace_alias,
+        // #1644: the bound Orc invocation context is the only spawn authority
+        // for tool-driven work; tool arguments cannot choose or override it.
+        authority: request.authority,
       });
       if ("error" in result) {
         throw new Error(`Contract creation rejected: ${result.error}`);
       }
       request.attemptId = result.attemptId;
       // Reconciler is the single scheduling authority for supervised Workers.
-      // kanbanEnqueue already emitted card:queued; because contract creation is
-      // synchronous, the queued wake observes a fully initialized attempt.
-      // Starting Spin here would race the claim and allow a Worker to execute
-      // without the durable ownership transition being the source of truth.
-      return cardId;
+      // createChild already emitted card:queued after commit; because contract
+      // creation is synchronous, the queued wake observes a fully initialized
+      // attempt. Starting Spin here would race the claim and allow a Worker to
+      // execute without the durable ownership transition being the source of
+      // truth.
+      return result.cardId;
     }
     // No contract — legacy unsupervised path.
+    const cardId = kanbanEnqueue(request.title ?? request.goal.slice(0, 80), request.source ?? "agent", undefined, {
+      priority: (request.priority ?? "MEDIUM") as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+      type: "W",
+      parent_id: parentCardId,
+    });
     void this.spin({
       type: "W",
       goal: request.goal,
@@ -1626,7 +1641,6 @@ export class Spin {
       title: request.title,
       priority: request.priority as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | undefined,
       source: request.source,
-      contractId: request.contract?.id,
       attemptId: request.attemptId,
       executionControl: request.executionControl,
       executionScope: request.executionScope,

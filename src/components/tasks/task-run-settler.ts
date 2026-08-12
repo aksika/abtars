@@ -1,7 +1,7 @@
 import { logDebug, logInfo, logWarn, redactSecrets } from "../logger.js";
 import { nextRunFromSchedule, settleActiveRun, setRunOutcome, readState } from "./task-state-store.js";
 import { appendRunOnce, type TaskRunEvent } from "./task-history-store.js";
-import { kanbanAttachResult, kanbanComplete, kanbanFail, kanbanSetDeliveryReady } from "./kanban-board.js";
+import { kanbanAttachResult, kanbanAttachProjectResult, kanbanComplete, kanbanFail, kanbanGetCard, kanbanSetDeliveryReady, kanbanSetProjectDeliveryReady, requireTaskDatabase } from "./kanban-board.js";
 import { logTaskDebug } from "./task-log-ctx.js";
 import { makeTaskFailure, decideFailurePolicy, formatTaskFailure, AUTO_PAUSE_FAILURE_THRESHOLD, AUTO_RESUME_COOLDOWN_MS } from "./task-failure.js";
 import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
@@ -295,15 +295,47 @@ function applyPostSettlementSideEffects(opts: {
     // the truthful fallback follow. Normal settlement and history-led repair
     // share this one selection.
     const summary = deliveryText || detail || "completed";
-    if (attachResult && resultPath) kanbanAttachResult(cardId, resultPath, summary);
-    else kanbanComplete(cardId, resultPath ?? null, summary);
-    if (releaseDelivery && outcome === "success") kanbanSetDeliveryReady(cardId);
+    // #1644: a supervised project root's artifact attach and delivery release
+    // are fenced to the exact root/run/project-generation authority — a late
+    // success callback for a terminal-blocked root, mismatched generation, or
+    // failed run loses its predicate and mutates nothing. Plain cards keep the
+    // existing unfenced settlement path.
+    const card = kanbanGetCard(cardId);
+    const projectAuthority = card && card.type === "O" && card.source === "task" && card.source_id != null
+      ? { scheduledRunId: card.source_id }
+      : card && card.type === "O" ? {} : undefined;
+    if (projectAuthority !== undefined) {
+      const generation = readProjectSupervisionGeneration(cardId) ?? 1;
+      const authority = { projectGeneration: generation, ...projectAuthority };
+      if (attachResult && resultPath) kanbanAttachProjectResult(cardId, resultPath, summary, authority);
+      else kanbanComplete(cardId, resultPath ?? null, summary);
+      if (releaseDelivery && outcome === "success") kanbanSetProjectDeliveryReady(cardId, authority);
+    } else {
+      if (attachResult && resultPath) kanbanAttachResult(cardId, resultPath, summary);
+      else kanbanComplete(cardId, resultPath ?? null, summary);
+      if (releaseDelivery && outcome === "success") kanbanSetDeliveryReady(cardId);
+    }
   } else if (outcome !== "deferred") {
     // `unknown` still terminates its card: the project was not delivered and
     // the owner is gone, so a running card would orphan forever. The message
     // carries the owner_lost diagnostic — a truthful statement, not a claim
     // about whether the run's side effects completed.
     kanbanFail(cardId, formatTaskFailure(diagnostic).slice(0, 1000));
+  }
+}
+
+/**
+ * #1644: current supervision generation for a project root card, read on the
+ * shared task database. Only used to build the delivery-side authority — the
+ * mutating statements re-check generation inside their own predicates.
+ */
+function readProjectSupervisionGeneration(cardId: number): number | undefined {
+  try {
+    const db = requireTaskDatabase();
+    const row = db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(cardId) as { generation: number } | undefined;
+    return row?.generation;
+  } catch {
+    return undefined;
   }
 }
 

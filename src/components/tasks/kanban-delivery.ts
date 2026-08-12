@@ -1,5 +1,5 @@
 import type { KanbanCard } from "./kanban-board.js";
-import { kanbanMarkDelivered, kanbanClaimDelivery, kanbanGetCard, kanbanPending, kanbanTransition, sqliteNow } from "./kanban-board.js";
+import { kanbanMarkDelivered, kanbanClaimDelivery, kanbanClaimProjectDelivery, kanbanGetCard, kanbanPending, kanbanTransition, sqliteNow } from "./kanban-board.js";
 import { logDebug, logWarn } from "../logger.js";
 import { logSwarmTrace } from "../swarm-trace.js";
 const TAG = "kanban-delivery";
@@ -58,9 +58,15 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
       }
       return;
     }
-  }
-
-  if (!kanbanClaimDelivery(card.id)) {
+    // #1644: the project-aware claim rechecks the exact root/run/generation
+    // and successful run outcome inside the claim transaction. A stale claim
+    // for a blocked project, mismatched generation, or failed run loses the
+    // CAS and is never sent.
+    if (!kanbanClaimProjectDelivery(fresh.id, { projectGeneration: sup.generation, scheduledRunId: fresh.source_id ?? undefined })) {
+      logSwarmTrace({ event: "delivery_claim_lost", card: fresh.id, reason: "project_authority_lost_or_claimed" });
+      return;
+    }
+  } else if (!kanbanClaimDelivery(card.id)) {
     logSwarmTrace({ event: "delivery_claim_lost", card: card.id, reason: "already_claimed_or_delivered" });
     return;
   }

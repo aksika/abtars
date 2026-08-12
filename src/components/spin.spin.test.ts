@@ -124,6 +124,14 @@ vi.mock("./tasks/kanban-board.js", () => ({
   kanbanProgress: () => {},
   // #1411: internal card data accessor for test assertions
   _kanbanGetCardRaw: (id: number) => _cards.get(id) ?? null,
+  // #1644: the lease emitter path (attemptId + executionControl present)
+  // constructs ExecutorLeaseStore — a no-op in-memory stub is enough here
+  // (the worker-supervision service itself is mocked).
+  requireTaskDatabase: () => ({
+    prepare: () => ({ run: () => ({ changes: 0 }), get: () => undefined, all: () => [] }),
+    exec: () => {},
+    transaction: (fn: () => unknown) => fn(),
+  }),
   _kanbanSetCardField: (id: number, field: string, value: unknown) => {
     const c = _cards.get(id);
     if (c) (c as any)[field] = value;
@@ -529,9 +537,12 @@ describe("spin(spec) — unified session API (#1271)", () => {
         envelope: makeEnvelope([{ criterion_id: "c1", status: "failed", evidence_ids: [] }, { criterion_id: "c2", status: "failed", evidence_ids: [] }]),
       };
       const cardId = kanbanEnqueue("worker lane", "peer");
+      // #1644: supervised settlement requires the attempt identity the
+      // reconciler claim path would have provided.
+      const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", callbackPeer: "kp", await: true });
+      await spin.spin({ type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -548,9 +559,10 @@ describe("spin(spec) — unified session API (#1271)", () => {
         envelope: makeEnvelope([{ criterion_id: "c1", status: "passed", evidence_ids: ["v1"] }, { criterion_id: "c2", status: "passed", evidence_ids: ["v2"] }]),
       };
       const cardId = kanbanEnqueue("worker lane", "peer");
+      const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", await: true });
+      await spin.spin({ type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);

@@ -49,6 +49,20 @@ export interface ScheduledProjectScript {
   setReviewMode(mode: "accept" | "needs_input" | "blocked" | "repair" | "die"): void;
   /** Answer the pending input request. */
   answerInput(text: string): void;
+  /**
+   * #1644: claim an Orc run for the project now (the stale-turn holder) and
+   * pause the turn before any spawn. The claimed run is what a terminal
+   * settlement must supersede; releaseStaleSpawn() then proves the paused
+   * spawn loses its project authority.
+   */
+  armStaleSpawn(goal: string): { runId: string; projectGeneration: number } | { error: string };
+  /** #1644: release the paused stale spawn after terminal settlement — the
+   *  child creation must be rejected by the project authority (typed error,
+   *  no durable child/contract/attempt). */
+  releaseStaleSpawn(): { rejected: boolean; error?: string };
+  /** #1644: submit a late worker result after terminal settlement — must be
+   *  rejected as stale by the attempt/project authority. */
+  submitLateWorkerResult(cardId: number, attemptId: string): { settled: boolean; summary: string; stale?: boolean; budgetViolation?: boolean };
   holdAcceptance: boolean;
   /** Last scripted turn outcome. */
   lastTurn: "authored" | "reviewed" | "input_requested" | "failed" | "none";
@@ -87,6 +101,7 @@ export function makeScheduledProjectFixture(
     reviewMode: options.reviewMode,
     lastTurn: "none" as ScheduledProjectScript["lastTurn"],
     admittedRoot: undefined as number | undefined,
+    staleSpawn: undefined as { goal: string; context: OrcInvocationContextV1 } | undefined,
   };
 
   const workersOfRoot = (): ReturnType<typeof kanban.kanbanGetChildren> => {
@@ -183,6 +198,48 @@ export function makeScheduledProjectFixture(
       if (pending.length === 0) throw new Error(`fixture.answerInput: no pending input for root #${state.admittedRoot}`);
       for (const req of pending) store.answerInputRequest(req.id, text);
     },
+    armStaleSpawn: (goal) => {
+      const rootId = state.admittedRoot;
+      if (rootId === undefined) return { error: "armStaleSpawn: no admitted root" };
+      const supervision = new ReviewStore().getSupervision(rootId);
+      if (!supervision) return { error: "armStaleSpawn: no supervision" };
+      const claim = orc.getStore().claimIntent({
+        projectCardId: rootId,
+        intentKind: "operator_turn",
+        intentRef: `stale-${Date.now()}`,
+        originKind: "local",
+        sourcePeer: null,
+        cardSource: "local",
+        expectedProjectGeneration: supervision.generation,
+      }, "test-fixture", "fixture-stale-holder");
+      if (claim.kind !== "claimed" && claim.kind !== "idempotent") {
+        return { error: `armStaleSpawn: claim rejected (${claim.kind})` };
+      }
+      state.staleSpawn = { goal, context: claim.context };
+      return { runId: claim.context.runId, projectGeneration: claim.context.projectGeneration };
+    },
+    releaseStaleSpawn: () => {
+      const stale = state.staleSpawn;
+      const rootId = state.admittedRoot;
+      if (!stale || rootId === undefined) return { rejected: false, error: "releaseStaleSpawn: no armed stale spawn" };
+      const svc = new WorkerSvc();
+      const result = svc.createChild(stale.goal, rootId, "stale-orc", {
+        criteria: [{ id: "stale_c1", description: "stale handoff criterion" }],
+        expectedArtifacts: [{ id: "stale_a1", kind: "file", ref: "out/stale.md", required: true, criterion_ids: ["stale_c1"] }],
+        supportsRootCriteria: ["c1"],
+        // The stale turn is bound to the generation it claimed — never the
+        // project's current durable state.
+        authority: { projectCardId: rootId, projectGeneration: stale.context.projectGeneration },
+      });
+      const rejected = "error" in result;
+      if (rejected) state.staleSpawn = undefined;
+      return { rejected, error: "error" in result ? result.error : undefined };
+    },
+    submitLateWorkerResult: (cardId, attemptId) => {
+      const attempt = new WorkerStore().getAttempt(attemptId);
+      const svc = new WorkerSvc();
+      return svc.collectAndSettle(cardId, "<summary>late result</summary>", undefined, attemptId, attempt?.generation ?? 1);
+    },
   };
 
   const orc = new OrcCtor({
@@ -220,7 +277,8 @@ export function makeScheduledProjectFixture(
             // a claimed running attempt, not just a running card.
             try {
               const svc = new WorkerSvc();
-              const created = svc.createChild(`Work lane ${i}`, workerId, projectId, "fixture-orc", {
+              const created = svc.createChild(`Work lane ${i}`, projectId, "fixture-orc", {
+                cardId: workerId,
                 criteria: [{ id: `w${i}`, description: "lane done" }],
                 expectedArtifacts: [{ id: `a${i}`, kind: "file", ref: `out/lane-${i}.md`, required: true, criterion_ids: [`w${i}`] }],
                 supportsRootCriteria: ["c1"],
@@ -275,7 +333,8 @@ export function makeScheduledProjectFixture(
           kanban.kanbanRunning(repairWorkerId);
           try {
             const svc = new WorkerSvc();
-            const created = svc.createChild("Repair: rework", repairWorkerId, projectId, "fixture-orc", {
+            const created = svc.createChild("Repair: rework", projectId, "fixture-orc", {
+              cardId: repairWorkerId,
               criteria: [{ id: "w1", description: "repair done" }],
               expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/repair.md", required: true, criterion_ids: ["w1"] }],
               // #1604: the repair item names the affected root criterion.
