@@ -6,6 +6,7 @@ import type { TaskDatabase } from "../tasks/kanban-board.js";
 import { kanbanTransition, sqliteNow } from "../tasks/kanban-board.js";
 import { completePendingRequestInTransaction, ensureRequestLedgerSchema } from "../pi-request-ledger.js";
 import { validatePersistedSession, type SessionProof } from "./config.js";
+import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
 
 export type RpcDelivery = "not_written" | "written_unacknowledged";
 
@@ -113,11 +114,15 @@ const ROLLBACK_SENTINEL = Symbol("pi_run_store_rollback");
 export class PiRunStore {
   private readonly db: TaskDatabase;
   private readonly sessionStorageRoot: string;
+  /** #1635 — shared raw canonical-workspace claim seam (also used by
+   * interactive coding sessions over the same connection). */
+  private readonly claims: PiWorkspaceClaimStore;
   private remoteEmitter: RemotePiTransitionEmitter | null = null;
 
   constructor(deps: PiRunStoreDeps) {
     this.db = deps.db;
     this.sessionStorageRoot = deps.sessionStorageRoot;
+    this.claims = new PiWorkspaceClaimStore(deps.db);
     this.migrate();
     ensureRequestLedgerSchema(this.db);
   }
@@ -256,19 +261,9 @@ export class PiRunStore {
     )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_approvals_run ON remote_pi_approvals_consumed(run_id)`);
 
-    // #1638 — Shared canonical-workspace claim. At most one process-holding
-    // run generation per canonical path across standalone and supervised Pi
-    // lanes. The canonical path is an equality key only — never shown raw in
-    // Orc output. Alias synonyms resolve to the same key and therefore
-    // contend on the same claim.
-    this.db.exec(`CREATE TABLE IF NOT EXISTS pi_workspace_claims (
-      canonical_path TEXT PRIMARY KEY,
-      run_id TEXT NOT NULL,
-      execution_generation INTEGER NOT NULL,
-      owner_kind TEXT NOT NULL CHECK(owner_kind IN ('standalone','supervised')),
-      acquired_at TEXT NOT NULL,
-      UNIQUE(run_id, execution_generation)
-    )`);
+    // #1638 — Shared canonical-workspace claim (now owned by
+    // PiWorkspaceClaimStore, which migrates the owner-kind domain to include
+    // 'interactive' — see pi-workspace-claim-store.ts).
   }
 
   /**
@@ -1015,35 +1010,27 @@ export class PiRunStore {
     if ((runRow.execution_generation as number) !== input.expectedGeneration) return { kind: "stale", reason: "generation" };
     if ((runRow.status as string) !== "queued" && (runRow.status as string) !== "starting") return { kind: "stale", reason: "not_queued" };
 
-    // The exact same (run,generation) holder is idempotent — even when the
-    // run already advanced to starting by an earlier claim.
-    const exactHolder = this.db.prepare(`
-      SELECT run_id FROM pi_workspace_claims WHERE canonical_path = ? AND run_id = ? AND execution_generation = ?
-    `).get(input.canonicalPath, input.runId, input.expectedGeneration) as { run_id: string } | undefined;
-    if (exactHolder) return { kind: "idempotent", runId: input.runId, generation: input.expectedGeneration };
-
-    try {
-      this.db.prepare(`
-        INSERT INTO pi_workspace_claims (canonical_path, run_id, execution_generation, owner_kind, acquired_at)
-        VALUES (?, ?, ?, ?, datetime('now'))
-      `).run(input.canonicalPath, input.runId, input.expectedGeneration, input.ownerKind);
-    } catch {
-      const holder = this.db.prepare(`
-        SELECT run_id, execution_generation FROM pi_workspace_claims WHERE canonical_path = ?
-      `).get(input.canonicalPath) as { run_id: string; execution_generation: number } | undefined;
-      if (holder && holder.run_id === input.runId && holder.execution_generation === input.expectedGeneration) {
-        return { kind: "idempotent", runId: input.runId, generation: input.expectedGeneration };
-      }
-      return { kind: "busy", holderRunId: holder?.run_id ?? "unknown" };
-    }
+    // #1635 — raw idempotent primary-key claim (shared seam). The exact same
+    // (run,generation) holder is idempotent — even when the run already
+    // advanced to starting by an earlier claim.
+    const claim = this.claims.tryAcquireInTx({
+      canonicalPath: input.canonicalPath,
+      ownerId: input.runId,
+      generation: input.expectedGeneration,
+      ownerKind: input.ownerKind,
+    });
+    if (claim.kind === "idempotent") return { kind: "idempotent", runId: input.runId, generation: input.expectedGeneration };
+    if (claim.kind === "busy") return { kind: "busy", holderRunId: claim.holderOwnerId };
 
     const runChanged = this.db.prepare(
       `UPDATE pi_runs SET status = 'starting', updated_at = datetime('now') WHERE id = ? AND status = 'queued'`
     ).run(input.runId);
     if (runChanged.changes === 0) {
-      this.db.prepare(`
-        DELETE FROM pi_workspace_claims WHERE canonical_path = ? AND run_id = ? AND execution_generation = ?
-      `).run(input.canonicalPath, input.runId, input.expectedGeneration);
+      this.claims.releaseExact({
+        canonicalPath: input.canonicalPath,
+        ownerId: input.runId,
+        generation: input.expectedGeneration,
+      });
       return { kind: "stale", reason: "run_claim_lost" };
     }
 
@@ -1074,15 +1061,13 @@ export class PiRunStore {
      * intentionally leave the run terminal/starting state unchanged. */
     restoreQueued?: boolean;
   }): PiReleaseResult {
-    const result = this.db.prepare(`
-      DELETE FROM pi_workspace_claims
-      WHERE canonical_path = ? AND run_id = ? AND execution_generation = ?
-    `).run(input.canonicalPath, input.runId, input.generation);
-    if (result.changes === 0) {
-      const anyHolder = this.db.prepare(`
-        SELECT run_id FROM pi_workspace_claims WHERE canonical_path = ?
-      `).get(input.canonicalPath) as { run_id: string } | undefined;
-      return { released: false, reason: anyHolder ? "not_holder" : "missing" };
+    const result = this.claims.releaseExact({
+      canonicalPath: input.canonicalPath,
+      ownerId: input.runId,
+      generation: input.generation,
+    });
+    if (!result.released) {
+      return { released: false, reason: result.reason === "missing" ? "missing" : "not_holder" };
     }
     let restoredQueued = false;
     if (input.restoreQueued) {
@@ -1100,22 +1085,16 @@ export class PiRunStore {
    * and execution generation are still an exact fence, so a late terminal
    * observation cannot free a newer generation's claim. */
   releaseWorkspaceClaimForGeneration(input: { runId: string; generation: number }): boolean {
-    const result = this.db.prepare(`
-      DELETE FROM pi_workspace_claims
-      WHERE run_id = ? AND execution_generation = ?
-    `).run(input.runId, input.generation);
-    return result.changes === 1;
+    return this.claims.releaseForGeneration({ ownerId: input.runId, generation: input.generation });
   }
 
   /** #1638 — List every currently held canonical workspace claim. */
-  listWorkspaceClaims(): Array<{ canonicalPath: string; runId: string; generation: number; ownerKind: "standalone" | "supervised" }> {
-    return (this.db.prepare(`
-      SELECT canonical_path, run_id, execution_generation, owner_kind FROM pi_workspace_claims
-    `).all() as Array<{ canonical_path: string; run_id: string; execution_generation: number; owner_kind: "standalone" | "supervised" }>).map(r => ({
-      canonicalPath: r.canonical_path,
-      runId: r.run_id,
-      generation: r.execution_generation,
-      ownerKind: r.owner_kind,
+  listWorkspaceClaims(): Array<{ canonicalPath: string; runId: string; generation: number; ownerKind: "standalone" | "supervised" | "interactive" }> {
+    return this.claims.list().map(c => ({
+      canonicalPath: c.canonicalPath,
+      runId: c.ownerId,
+      generation: c.generation,
+      ownerKind: c.ownerKind,
     }));
   }
 
