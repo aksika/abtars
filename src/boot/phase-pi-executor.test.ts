@@ -16,6 +16,9 @@ const mockPiExecutor = vi.hoisted(() => vi.fn(function () {
   return {
     onTransition: vi.fn(),
     onProgress: vi.fn(),
+    onCapacityReleased: vi.fn(),
+    setSettlementRouter: vi.fn(),
+    setInputSuspendHook: vi.fn(),
     startWithClaim: vi.fn(),
   };
 }));
@@ -99,6 +102,7 @@ vi.mock("../components/commands/handlers-pi.js", () => ({
 vi.mock("../components/reconciler.js", () => ({
   setPiService: vi.fn(),
   requestReconcile: vi.fn(),
+  requestWorkerDispatch: vi.fn(),
 }));
 
 describe("phasePiExecutor — #1440 disabled seed and enabled boot", () => {
