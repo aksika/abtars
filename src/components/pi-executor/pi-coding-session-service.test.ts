@@ -397,4 +397,98 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
     expect(result.kind).toBe("error");
     expect(h.store.get(sessionId)!.state).toBe("idle");
   });
+
+  describe("resume and restart reconciliation #1635", () => {
+    it("a missing session file refuses resume with a truthful capability and submits nothing", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      const savedFile = writeSession(h.root, "t.jsonl", "sess-1");
+      fake.FakeClient.defaultState = { sessionId: "sess-1", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+      await h.service.startTurn({ sessionId, text: "first", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+      fake.FakeClient.instances[0]!.emitEvent(agentEnd());
+      await vi.waitFor(() => {
+        expect(h.store.get(sessionId)!.state).toBe("idle");
+      });
+      expect(h.store.get(sessionId)!.resumeCapability).toBe("available");
+      // the transcript disappears out-of-band
+      rmSync(savedFile);
+      fake.FakeClient.defaultState = { sessionId: "sess-1", sessionFile: undefined, isStreaming: false, isCompacting: false };
+      const result = await h.service.startTurn({ sessionId, text: "second", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+      expect(result.kind).toBe("not_resumable");
+      if (result.kind === "not_resumable") {
+        expect(result.capability).toBe("session_missing");
+      }
+      const rec = h.store.get(sessionId)!;
+      expect(rec.resumeCapability).toBe("session_missing");
+      expect(rec.state).toBe("idle");
+      // nothing was submitted to a fresh process and no second process survived
+      expect(fake.FakeClient.instances[1]!.prompts).toEqual([]);
+      expect(h.service.liveCount).toBe(0);
+      expect(h.claims.list()).toHaveLength(0);
+    });
+
+    it("reconcileOnBoot marks a live session interrupted with a proof-derived capability", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      const savedFile = writeSession(h.root, "t.jsonl", "sess-1");
+      fake.FakeClient.defaultState = { sessionId: "sess-1", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+      await h.service.startTurn({ sessionId, text: "go", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+      // simulate a crash: the process is gone but the row is still running with a lease + claim
+      expect(h.claims.list()).toHaveLength(1);
+      h.service.reconcileOnBoot();
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("interrupted");
+      expect(rec.resumeCapability).toBe("available");
+      expect(rec.leaseGeneration).toBeUndefined();
+      expect(h.claims.list()).toHaveLength(0);
+    });
+
+    it("reconcileOnBoot yields never_started when no identity was ever established", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      h.store.casTransition(sessionId, "idle", "running", { observedPid: 123, pendingRequestId: null, pendingRequestType: null }, 1);
+      h.claims.tryAcquireInTx({ canonicalPath: h.wsPath, ownerId: sessionId, generation: 1, ownerKind: "interactive" });
+      h.service.reconcileOnBoot();
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("interrupted");
+      expect(rec.resumeCapability).toBe("never_started");
+      expect(h.claims.list()).toHaveLength(0);
+    });
+
+    it("reconcileOnBoot clears stale leases on non-live rows", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      h.store.setLease(sessionId, { frontend: "telegram-rpc", owner: "tg:1", generation: 1, acquiredAt: "2026-08-12" }, 1);
+      h.service.reconcileOnBoot();
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("idle");
+      expect(rec.leaseGeneration).toBeUndefined();
+    });
+
+    it("an interrupted session resumes the same transcript after reconciliation", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      const savedFile = writeSession(h.root, "t.jsonl", "sess-1");
+      fake.FakeClient.defaultState = { sessionId: "sess-1", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+      await h.service.startTurn({ sessionId, text: "first", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+      fake.FakeClient.instances[0]!.emitEvent(agentEnd());
+      await vi.waitFor(() => {
+        expect(h.store.get(sessionId)!.state).toBe("idle");
+      });
+      // start a second turn (running), then a crash happens before agent_end
+      fake.FakeClient.defaultState = { sessionId: "sess-1", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+      await h.service.startTurn({ sessionId, text: "second", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+      expect(h.store.get(sessionId)!.state).toBe("running");
+      h.service.reconcileOnBoot();
+      expect(h.store.get(sessionId)!.state).toBe("interrupted");
+      expect(h.store.get(sessionId)!.resumeCapability).toBe("available");
+      fake.FakeClient.defaultState = { sessionId: "sess-1", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+      const result = await h.service.startTurn({ sessionId, text: "resumed prompt", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+      expect(result.kind).toBe("started");
+      const client = fake.FakeClient.instances[2]!;
+      expect(client.switches).toContain(savedFile);
+      expect(client.prompts).toEqual(["resumed prompt"]);
+      expect(h.store.get(sessionId)!.state).toBe("running");
+    });
+  });
 });

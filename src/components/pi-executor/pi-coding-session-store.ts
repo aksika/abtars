@@ -178,6 +178,23 @@ export class PiCodingSessionStore {
     return row ? this.rowToRecord(row) : null;
   }
 
+  /** #1635 — rows in live states (a live process may have existed at crash
+   * time). Used by boot reconciliation to mark them interrupted. */
+  listLive(): PiCodingSessionRecord[] {
+    return (this.db.prepare(
+      `SELECT * FROM pi_coding_sessions WHERE state IN ('starting','running','awaiting_input','resuming')`
+    ).all() as Record<string, unknown>[]).map(r => this.rowToRecord(r));
+  }
+
+  /** #1635 — rows carrying a stale writer lease outside the live states
+   * (a crash between process exit and lease clear). */
+  listStaleLeases(): PiCodingSessionRecord[] {
+    return (this.db.prepare(
+      `SELECT * FROM pi_coding_sessions
+       WHERE lease_generation IS NOT NULL AND state NOT IN ('starting','running','awaiting_input','resuming')`
+    ).all() as Record<string, unknown>[]).map(r => this.rowToRecord(r));
+  }
+
   /**
    * #1635 — CAS state transition with typed updates. Enforces expected state
    * and, when provided, an exact generation fence (a stale runtime may never

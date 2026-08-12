@@ -423,6 +423,42 @@ export class PiCodingSessionService {
     this.live.clear();
   }
 
+  /**
+   * #1635 — Boot reconciliation (Task 5). A crash mid-turn leaves rows in live
+   * states with a stale lease/claim. Mark them `interrupted` with a capability
+   * derived from the persisted-session proof — never from the presence of a
+   * session id — and release every generation-owned resource so workers on
+   * the same checkout proceed.
+   */
+  reconcileOnBoot(): void {
+    for (const rec of this.deps.store.listLive()) {
+      const capability = this.capabilityForRow(rec);
+      this.deps.store.casTransition(rec.sessionId, ["starting", "running", "awaiting_input", "resuming"], "interrupted", {
+        resumeCapability: capability,
+        pendingRequestId: null,
+        pendingRequestType: null,
+      }, rec.runtimeGeneration);
+      this.deps.claims.releaseForGeneration({ ownerId: rec.sessionId, generation: rec.runtimeGeneration });
+      this.deps.store.clearLease(rec.sessionId, rec.runtimeGeneration);
+      logInfo(TAG, `Coding session ${rec.sessionId} interrupted at boot (capability ${capability})`);
+    }
+    for (const rec of this.deps.store.listStaleLeases()) {
+      if (rec.leaseGeneration === undefined) continue;
+      this.deps.store.clearLease(rec.sessionId, rec.leaseGeneration);
+      logInfo(TAG, `Coding session ${rec.sessionId}: cleared stale lease (gen ${rec.leaseGeneration})`);
+    }
+  }
+
+  /** Proof-derived capability for a row, truthful by construction. */
+  private capabilityForRow(rec: PiCodingSessionRecord): ResumeCapability {
+    const proof = validatePersistedSession({
+      sessionStorageRoot: this.deps.config.sessionStorageRoot,
+      expectedSessionId: rec.piSessionId,
+      sessionFile: rec.piSessionFile,
+    });
+    return proof.ok ? "available" : proof.capability;
+  }
+
   // ── internals ─────────────────────────────────────────────────────────────
 
   private authorize(sessionId: string, ownerPrincipal: string): PiCodingSessionRecord | null {
