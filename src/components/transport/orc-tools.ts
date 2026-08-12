@@ -8,6 +8,7 @@
 import type { ToolDefinition, ToolExecutionContext } from "./tool-registry.js";
 import { logInfo } from "../logger.js";
 import { logSwarmTrace } from "../swarm-trace.js";
+import { nerve } from "../nerve.js";
 import { REVIEW_PROJECT_PARAMETERS, INVALID_CONTRACT_PROPOSALS_EXHAUSTED } from "../project-acceptance/project-review-contract.js";
 
 const TAG = "orc-tools";
@@ -142,10 +143,15 @@ const spawnWorkerTool: ToolDefinition = {
     // the durable supervised attempt.
     const hasStructuredData = criteria.provided || artifacts.provided || commands.provided || caps.provided || supportsRootCriteria.provided
       || args.max_tokens !== undefined;
+    // A project supervision row makes the root a supervised mutation domain.
+    // A duration-only legacy spawn has no immutable attempt lineage and would
+    // otherwise bypass the #1644 fence after terminal settlement.
+    if (sup && !hasStructuredData) {
+      return "[err] supervised projects require structured worker criteria; duration-only workers cannot be spawned under a project contract";
+    }
     if (hasStructuredData && (criteria.error || criteriaRaw.length === 0)) return SUPERVISED_SPAWN_GUIDANCE;
     const parseError = [criteria, artifacts, commands, caps, supportsRootCriteria].find(parsed => parsed.error)?.error;
     if (parseError) return `[err] ${parseError}`;
-
     if (projectCard?.max_tokens != null && args.max_tokens === undefined) {
       return "[err] max_tokens is required when spawning a worker under a capped project";
     }
@@ -190,8 +196,18 @@ const spawnWorkerTool: ToolDefinition = {
       // #1644: the bound Orc invocation context is the only spawn authority —
       // tool arguments can never choose or override root ID, generation, or
       // run ID. createChild re-checks the durable root inside its transaction.
-      const authority = context?.orcContext
-        ? { projectCardId: context.orcContext.projectCardId, projectGeneration: context.orcContext.projectGeneration }
+      const authority = context?.orcContext && hasStructuredData
+        ? {
+          projectCardId: context.orcContext.projectCardId,
+          projectGeneration: context.orcContext.projectGeneration,
+          ...(projectCard?.source === "task"
+            // `OrcInvocationContextV1.runId` identifies the durable Orc
+            // ownership row. Scheduled-project authority instead carries the
+            // task-run correlation stored on the root card; using the Orc run
+            // ID here would reject every valid scheduled child as run-stale.
+            ? { scheduledRunId: projectCard.source_id ?? "" }
+            : {}),
+        }
         : undefined;
       cardId = spin.spawnChild(projectCardId, {
         goal,
@@ -387,12 +403,21 @@ const cancelWorkerTool: ToolDefinition = {
     if (!projectCardId) return "[err] No active Orc project and no project_card_id provided.";
     const cardId = parseInt(args.card_id ?? "", 10);
     if (isNaN(cardId)) return "[err] Invalid card_id.";
-    const { kanbanGetCard, kanbanFail } = await import("../tasks/kanban-board.js");
+    const { kanbanGetCard } = await import("../tasks/kanban-board.js");
     const card = kanbanGetCard(cardId);
     if (!card) return `[err] Card #${cardId} not found.`;
     if (card.parent_id !== projectCardId) return `[err] Card #${cardId} is not a child of this project.`;
     if (card.status === "done" || card.status === "delivered") return `Card #${cardId} already completed.`;
-    kanbanFail(cardId, "cancelled by Orc");
+    const project = kanbanGetCard(projectCardId);
+    const { WorkerSupervisionStore } = await import("../worker-supervision-store.js");
+    const authority = {
+      projectCardId,
+      projectGeneration: context?.orcContext?.projectGeneration ?? 0,
+      ...(project?.source === "task" ? { scheduledRunId: project.source_id ?? "" } : {}),
+    };
+    const cancelled = new WorkerSupervisionStore().cancelProjectChild(cardId, authority, "cancelled by Orc");
+    if (!cancelled) return "[err] project mutation rejected: worker cancellation is stale or no longer live";
+    try { nerve.fire("card:failed", cardId); } catch {}
     logInfo(TAG, `cancel_worker card:${cardId} (parent:${projectCardId})`);
     return `x Worker #${cardId} cancelled.`;
   },
@@ -420,6 +445,8 @@ const reviewWorkerFailureTool: ToolDefinition = {
   async execute(args: Record<string, string>, context): Promise<string> {
     const projectCardId = resolveCardId(args, context);
     if (!projectCardId) return "[err] No active Orc project.";
+    const bound = context?.orcContext;
+    if (!bound) return "[err] No active Orc project.";
     const attemptId = args.attempt_id;
     if (!attemptId) return "[err] attempt_id is required";
     const action = args.action;
@@ -430,11 +457,30 @@ const reviewWorkerFailureTool: ToolDefinition = {
       const { providerForAdapter } = await import("../retry/local-executor-catalog.js");
       const { SpinWorkerAdapter } = await import("../spin-worker-adapter.js");
       const { AGENT_EXECUTOR_ID } = await import("../worker-executor-identity.js");
+      const { WorkerSupervisionStore } = await import("../worker-supervision-store.js");
+      const { kanbanGetCard } = await import("../tasks/kanban-board.js");
       const catalog = new LocalExecutorCatalog({
         spinProvider: providerForAdapter(new SpinWorkerAdapter(), AGENT_EXECUTOR_ID),
       });
       const service = new RetryService({ executorCatalog: catalog });
-      const packet = service.getReviewPacket(attemptId, projectCardId);
+      // The tool is project-scoped, but retry contracts and attempts are
+      // child-card scoped. Resolve that child from the durable attempt and
+      // verify its parent before handing it to the retry boundary; passing the
+      // root ID here would allow a malformed review to target the wrong
+      // contract/card lineage.
+      const attempt = new WorkerSupervisionStore().getAttempt(attemptId);
+      if (!attempt) return `[err] attempt ${attemptId} not found`;
+      const workerCard = kanbanGetCard(attempt.card_id);
+      if (!workerCard || workerCard.parent_id !== projectCardId || workerCard.type !== "W") {
+        return `[err] attempt ${attemptId} is not a child of project ${projectCardId}`;
+      }
+      const projectCard = kanbanGetCard(projectCardId);
+      const authority = {
+        projectCardId: bound.projectCardId,
+        projectGeneration: bound.projectGeneration,
+        ...(projectCard?.source === "task" ? { scheduledRunId: projectCard.source_id ?? "" } : {}),
+      };
+      const packet = service.getReviewPacket(attemptId, attempt.card_id);
       if ("error" in packet) return `[err] ${packet.error}`;
 
       const doNotRepeat: string[] = args.do_not_repeat ? JSON.parse(args.do_not_repeat) : [];
@@ -449,7 +495,7 @@ const reviewWorkerFailureTool: ToolDefinition = {
         inputAnswer: args.input_answer?.slice(0, 4000),
       };
 
-      const result = service.reviewFailure({ attemptId, cardId: projectCardId, response });
+      const result = service.reviewFailure({ attemptId, cardId: attempt.card_id, response, authority });
 
       if (action === "retry") {
         if (result.kind === "created") {
@@ -531,6 +577,11 @@ const defineProjectContractTool: ToolDefinition = {
       // Build raw contract object (schema v2 — #1605)
       const now = new Date().toISOString();
       const card = (await import("../tasks/kanban-board.js")).kanbanGetCard(cardId);
+      const authority = {
+        projectCardId: cardId,
+        projectGeneration: bound.projectGeneration,
+        ...(card?.source === "task" ? { scheduledRunId: card.source_id ?? "" } : {}),
+      };
       const raw: Record<string, unknown> = {
         schema_version: 2,
         id: createContractId(),
@@ -560,29 +611,31 @@ const defineProjectContractTool: ToolDefinition = {
 
         // Track invalid proposals
         if (supervision) {
-          const row = store.db.prepare(`SELECT invalid_contract_proposals FROM project_supervision WHERE project_card_id = ?`).get(cardId) as { invalid_contract_proposals: number } | undefined;
-          const attempts = (row?.invalid_contract_proposals ?? 0) + 1;
-          store.db.prepare(`UPDATE project_supervision SET invalid_contract_proposals = ? WHERE project_card_id = ?`).run(attempts, cardId);
-          if (attempts >= MAX_INVALID_CONTRACT_PROPOSALS) {
-            store.settleBlocked(cardId, "contract_admission", { action: "blocked", reason: "Invalid contract proposals exhausted" }, INVALID_CONTRACT_PROPOSALS_EXHAUSTED);
-            return `✗ Project blocked after ${attempts} invalid proposals.\n${errs}`;
+          const decisionId = `rd_block_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          const record = store.recordInvalidContractProposal(
+            cardId,
+            bound.projectGeneration,
+            MAX_INVALID_CONTRACT_PROPOSALS,
+            { action: "blocked", reason: "Invalid contract proposals exhausted" },
+            INVALID_CONTRACT_PROPOSALS_EXHAUSTED,
+            decisionId,
+            authority,
+          );
+          if (record.kind === "blocked") {
+            try { nerve.fire("card:failed", cardId); } catch {}
+            return `✗ Project blocked after ${record.total} invalid proposals.\n${errs}`;
           }
+          if (record.kind === "ignored") return "[err] project mutation rejected: contract authoring authority is stale";
+          return `[err] Invalid contract:\n${errs}\n\nAttempt ${record.total}/${MAX_INVALID_CONTRACT_PROPOSALS}. Provide a corrected contract.`;
         }
 
-        const attemptNum = supervision ? (store.db.prepare(`SELECT invalid_contract_proposals FROM project_supervision WHERE project_card_id = ?`).get(cardId) as { invalid_contract_proposals: number } | undefined)?.invalid_contract_proposals ?? 1 : 1;
-        return `[err] Invalid contract:\n${errs}\n\nAttempt ${attemptNum}/${MAX_INVALID_CONTRACT_PROPOSALS}. Provide a corrected contract.`;
+        return `[err] Invalid contract:\n${errs}\n\nAttempt 1/${MAX_INVALID_CONTRACT_PROPOSALS}. Provide a corrected contract.`;
       }
 
       // Insert contract + initialize supervision + project budget — all in one
       // transaction that also re-verifies the durable project authority so a
       // stale authoring turn can never write after terminal settlement.
       store.db.transaction(() => {
-        const rootCard = store.db.prepare(`SELECT source, source_id FROM kanban_board WHERE id = ?`).get(cardId) as { source: string | null; source_id: string | null } | undefined;
-        const authority = {
-          projectCardId: cardId,
-          projectGeneration: bound.projectGeneration,
-          scheduledRunId: rootCard?.source === "task" && rootCard.source_id != null ? rootCard.source_id : undefined,
-        };
         const rejection = authorizeActiveProjectWork(store.db, authority);
         if (rejection) {
           throw new Error(`project mutation rejected: ${rejection}`);
@@ -739,15 +792,23 @@ const reviewProjectTool: ToolDefinition = {
       if (openCase.generation !== supervision.generation) return JSON.stringify({ error: `Case generation ${openCase.generation} does not match supervision generation ${supervision.generation}` });
       if (openCase.status !== "open") return JSON.stringify({ error: `Review case "${decision.review_case_id}" is ${openCase.status}, not open` });
 
+      const rootCard = store.db.prepare(`SELECT source, source_id FROM kanban_board WHERE id = ?`).get(projectCardId) as { source: string | null; source_id: string | null } | undefined;
+      const authority = {
+        projectCardId: bound.projectCardId,
+        projectGeneration: bound.projectGeneration,
+        ...(rootCard?.source === "task" ? { scheduledRunId: rootCard.source_id ?? "" } : {}),
+      };
+
       // Transition from review_requested to reviewing only when ready to
       // process a structurally complete decision — the narrow step above
       // already guarantees structural completeness.
       if (supervision.state === "review_requested") {
-        store.stateTransition(projectCardId, ["review_requested"], "reviewing");
+        const transitioned = store.stateTransition(projectCardId, ["review_requested"], "reviewing", undefined, { authority });
+        if (!transitioned) return JSON.stringify({ error: "project mutation rejected: review ownership is stale" });
       }
 
       const service = new ProjectReviewService();
-      const result = service.processDecision(decision);
+      const result = service.processDecision(decision, authority);
 
       switch (result.kind) {
         case "accepted":

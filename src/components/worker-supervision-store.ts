@@ -1,4 +1,4 @@
-import { requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
+import { kanbanTransition, requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "./worker-contract.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { logSwarmTrace } from "./swarm-trace.js";
@@ -499,6 +499,23 @@ export class WorkerSupervisionStore {
     return result.changes > 0;
   }
 
+  /** #1644: lifecycle mutations that can keep project work alive or accept a
+   * result must decide authority and the CAS on the same database transaction. */
+  private authorizedLifecycleTransition(
+    attemptId: string,
+    fromLifecycles: readonly AttemptLifecycle[],
+    toLifecycle: AttemptLifecycle,
+    operation: string,
+    extraSets?: Record<string, string | null>,
+  ): boolean {
+    return this.db.transaction(() => {
+      const attempt = this.getAttempt(attemptId);
+      if (!attempt || !fromLifecycles.includes(attempt.lifecycle)) return false;
+      if (this.authorizeAttemptForProjectWork(attempt, operation) !== null) return false;
+      return this.lifecycleTransition(attemptId, fromLifecycles, toLifecycle, extraSets);
+    });
+  }
+
   claimAttempt(
     cardId: number,
     contractId: string,
@@ -603,7 +620,7 @@ export class WorkerSupervisionStore {
   }
 
   markAttemptStartObservable(attemptId: string): boolean {
-    return this.lifecycleTransition(attemptId, ["claimed"], "starting");
+    return this.authorizedLifecycleTransition(attemptId, ["claimed"], "starting", "attempt_start");
   }
 
   // ── #1638: executor-neutral runtime resource binding ─────────────────────
@@ -620,25 +637,29 @@ export class WorkerSupervisionStore {
     resourceGeneration: number;
     continuity: "initial" | "resumed" | "fresh";
   }): "bound" | "idempotent" | "stale" | "conflict" {
-    const attempt = this.db.prepare(`SELECT id, generation, executor_kind, lifecycle, executor_resource_id, executor_resource_generation FROM worker_attempts WHERE id = ?`).get(input.attemptId) as {
-      id: string; generation: number; executor_kind: string; lifecycle: AttemptLifecycle;
-      executor_resource_id: string | null; executor_resource_generation: number | null;
-    } | undefined;
-    if (!attempt) return "stale";
-    if (attempt.generation !== input.expectedAttemptGeneration) return "stale";
-    if (attempt.executor_kind !== input.executorKind) return "conflict";
-    if (attempt.lifecycle !== "claimed" && attempt.lifecycle !== "starting") return "stale";
-    if (attempt.executor_resource_id !== null && attempt.executor_resource_generation !== null) {
-      return attempt.executor_resource_id === input.resourceId
-        && attempt.executor_resource_generation === input.resourceGeneration
-        ? "idempotent" : "conflict";
-    }
-    const updated = this.db.prepare(`
-      UPDATE worker_attempts
-      SET executor_resource_id = ?, executor_resource_generation = ?, execution_continuity = ?
-      WHERE id = ? AND executor_resource_id IS NULL
-    `).run(input.resourceId, input.resourceGeneration, input.continuity, input.attemptId);
-    return updated.changes === 1 ? "bound" : "conflict";
+    return this.db.transaction(() => {
+      const attempt = this.db.prepare(`SELECT id, card_id, generation, executor_kind, lifecycle, executor_resource_id, executor_resource_generation, root_project_card_id, root_project_generation, scheduled_run_id FROM worker_attempts WHERE id = ?`).get(input.attemptId) as {
+        id: string; card_id: number; generation: number; executor_kind: string; lifecycle: AttemptLifecycle;
+        executor_resource_id: string | null; executor_resource_generation: number | null;
+        root_project_card_id: number | null; root_project_generation: number | null; scheduled_run_id: string | null;
+      } | undefined;
+      if (!attempt) return "stale";
+      if (attempt.generation !== input.expectedAttemptGeneration) return "stale";
+      if (attempt.executor_kind !== input.executorKind) return "conflict";
+      if (attempt.lifecycle !== "claimed" && attempt.lifecycle !== "starting") return "stale";
+      if (attempt.executor_resource_id !== null && attempt.executor_resource_generation !== null) {
+        return attempt.executor_resource_id === input.resourceId
+          && attempt.executor_resource_generation === input.resourceGeneration
+          ? "idempotent" : "conflict";
+      }
+      if (this.authorizeAttemptForProjectWork(attempt, "executor_resource_bind") !== null) return "stale";
+      const updated = this.db.prepare(`
+        UPDATE worker_attempts
+        SET executor_resource_id = ?, executor_resource_generation = ?, execution_continuity = ?
+        WHERE id = ? AND generation = ? AND lifecycle IN ('claimed', 'starting') AND executor_resource_id IS NULL
+      `).run(input.resourceId, input.resourceGeneration, input.continuity, input.attemptId, input.expectedAttemptGeneration);
+      return updated.changes === 1 ? "bound" : "conflict";
+    });
   }
 
   getExecutorResourceBinding(attemptId: string): { resourceId: string; resourceGeneration: number; continuity: "initial" | "resumed" | "fresh" } | undefined {
@@ -661,7 +682,7 @@ export class WorkerSupervisionStore {
   }
 
   markAttemptRunning(attemptId: string): boolean {
-    const ok = this.lifecycleTransition(attemptId, ["claimed", "starting"], "running");
+    const ok = this.authorizedLifecycleTransition(attemptId, ["claimed", "starting"], "running", "attempt_running");
     if (ok) {
       const attempt = this.getAttempt(attemptId);
       if (attempt) logSwarmTrace({ event: "attempt_running", card: attempt.card_id, attempt: attemptId, generation: attempt.generation, executor: attempt.executor_id });
@@ -675,6 +696,53 @@ export class WorkerSupervisionStore {
     });
   }
 
+  /** #1644: cancel_worker owns both the child lifecycle and its card CAS.
+   * The bound project authority is checked on this connection before either
+   * mutation, so an Orc turn cannot fail a child after the root is terminal. */
+  cancelProjectChild(
+    cardId: number,
+    authority: ProjectMutationAuthority,
+    reason: string,
+  ): boolean {
+    return this.db.transaction(() => {
+      const card = this.db.prepare(`SELECT parent_id, type, status FROM kanban_board WHERE id = ?`).get(cardId) as {
+        parent_id: number | null;
+        type: string | null;
+        status: string;
+      } | undefined;
+      if (!card || card.parent_id !== authority.projectCardId || card.type !== "W") return false;
+      if (card.status !== "queued" && card.status !== "running") return false;
+      const rootRejection = authorizeActiveProjectWork(this.db, authority);
+      if (rootRejection) {
+        emitProjectAuthorityRejection("cancel_worker", authority, rootRejection, { cardId });
+        return false;
+      }
+
+      const attempt = this.getLatestAttempt(cardId);
+      if (!attempt) return false;
+      if (this.authorizeAttemptForProjectWork(attempt, "cancel_worker") !== null) return false;
+
+      if (attempt.lifecycle === "pending") {
+        if (!this.cancelPendingAttempt(attempt.id, reason)) return false;
+      } else if (attempt.lifecycle === "claimed" || attempt.lifecycle === "starting" || attempt.lifecycle === "running") {
+        if (!this.requestCancel(attempt.id, reason)) return false;
+      } else if (attempt.lifecycle !== "cancel_requested") {
+        return false;
+      }
+
+      const outcome = kanbanTransition({
+        cardId,
+        from: ["queued", "running"],
+        to: "failed",
+        actor: "settle_failed",
+        reason: reason.slice(0, 300),
+        fields: { error: reason.slice(0, 1000), completed_at: new Date().toISOString() },
+        emit: false,
+      }, this.db);
+      return outcome.kind === "applied" || outcome.kind === "reasserted";
+    });
+  }
+
   /** Cancel work that has not been claimed yet so it can never be dispatched. */
   cancelPendingAttempt(attemptId: string, reason: string): boolean {
     return this.lifecycleTransition(attemptId, ["pending"], "cancelled", {
@@ -685,7 +753,7 @@ export class WorkerSupervisionStore {
   }
 
   completeAttempt(attemptId: string): boolean {
-    const ok = this.lifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed", {
+    const ok = this.authorizedLifecycleTransition(attemptId, ["claimed", "starting", "running", "cancel_requested"], "completed", "attempt_complete", {
       status: "settled",
       settled_at: new Date().toISOString(),
     });
@@ -883,6 +951,10 @@ export class WorkerSupervisionStore {
         if (!latest || latest.id !== input.attemptId) return "stale";
         if (attempt.generation !== input.expectedGeneration) return "stale";
         if (attempt.lifecycle !== "starting") return "stale";
+        // Returning a live claim to pending is still project work. A terminal
+        // root must win before this requeue mutation, otherwise a stale
+        // adapter could create a fresh dispatch opportunity after invalidation.
+        if (this.authorizeAttemptForProjectWork(attempt, "attempt_defer") !== null) return "stale";
 
         const updated = this.db.prepare(`
           UPDATE worker_attempts

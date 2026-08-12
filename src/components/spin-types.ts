@@ -247,7 +247,7 @@ export interface SpinRequest {
   orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
   /** #1644: immutable project authority for supervised child creation — bound
    *  from the Orc invocation context, never from tool arguments. */
-  authority?: { projectCardId: number; projectGeneration: number };
+  authority?: { projectCardId: number; projectGeneration: number; scheduledRunId?: string };
 }
 
 // ── #1271: unified session API ──────────────────────────────────────────

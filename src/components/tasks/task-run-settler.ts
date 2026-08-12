@@ -1,7 +1,7 @@
 import { logDebug, logInfo, logWarn, redactSecrets } from "../logger.js";
 import { nextRunFromSchedule, settleActiveRun, setRunOutcome, readState } from "./task-state-store.js";
 import { appendRunOnce, type TaskRunEvent } from "./task-history-store.js";
-import { kanbanAttachResult, kanbanAttachProjectResult, kanbanComplete, kanbanFail, kanbanGetCard, kanbanSetDeliveryReady, kanbanSetProjectDeliveryReady, requireTaskDatabase } from "./kanban-board.js";
+import { kanbanAttachResult, kanbanAttachProjectResult, kanbanComplete, kanbanCompleteProject, kanbanFail, kanbanGetCard, kanbanSetDeliveryReady, kanbanSetProjectDeliveryReady, requireTaskDatabase } from "./kanban-board.js";
 import { logTaskDebug } from "./task-log-ctx.js";
 import { makeTaskFailure, decideFailurePolicy, formatTaskFailure, AUTO_PAUSE_FAILURE_THRESHOLD, AUTO_RESUME_COOLDOWN_MS } from "./task-failure.js";
 import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
@@ -301,14 +301,22 @@ function applyPostSettlementSideEffects(opts: {
     // failed run loses its predicate and mutates nothing. Plain cards keep the
     // existing unfenced settlement path.
     const card = kanbanGetCard(cardId);
-    const projectAuthority = card && card.type === "O" && card.source === "task" && card.source_id != null
-      ? { scheduledRunId: card.source_id }
-      : card && card.type === "O" ? {} : undefined;
-    if (projectAuthority !== undefined) {
-      const generation = readProjectSupervisionGeneration(cardId) ?? 1;
+    const generation = card?.type === "O" ? readProjectSupervisionGeneration(cardId) : undefined;
+    // A task-sourced project is scheduled even when its source_id is
+    // malformed. Treat the missing run identity as a failed closed admission,
+    // rather than falling through to the non-scheduled delivery path.
+    const scheduledProject = card && card.type === "O" && card.source === "task";
+    // A scheduled O root without supervision is not a legacy card: fail
+    // closed rather than allowing a task callback to complete it. Non-
+    // scheduled O cards without supervision retain their pre-project path.
+    if (scheduledProject && (generation === undefined || card.source_id == null)) return;
+    const projectAuthority = scheduledProject
+      ? { scheduledRunId: card!.source_id! }
+      : card && card.type === "O" && generation !== undefined ? {} : undefined;
+    if (projectAuthority !== undefined && generation !== undefined) {
       const authority = { projectGeneration: generation, ...projectAuthority };
       if (attachResult && resultPath) kanbanAttachProjectResult(cardId, resultPath, summary, authority);
-      else kanbanComplete(cardId, resultPath ?? null, summary);
+      else kanbanCompleteProject(cardId, resultPath ?? null, summary, authority);
       if (releaseDelivery && outcome === "success") kanbanSetProjectDeliveryReady(cardId, authority);
     } else {
       if (attachResult && resultPath) kanbanAttachResult(cardId, resultPath, summary);

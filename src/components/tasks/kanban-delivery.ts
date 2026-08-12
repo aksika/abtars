@@ -62,7 +62,10 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     // and successful run outcome inside the claim transaction. A stale claim
     // for a blocked project, mismatched generation, or failed run loses the
     // CAS and is never sent.
-    if (!kanbanClaimProjectDelivery(fresh.id, { projectGeneration: sup.generation, scheduledRunId: fresh.source_id ?? undefined })) {
+    if (!kanbanClaimProjectDelivery(fresh.id, {
+      projectGeneration: sup.generation,
+      scheduledRunId: fresh.source === "task" ? (fresh.source_id ?? "") : undefined,
+    })) {
       logSwarmTrace({ event: "delivery_claim_lost", card: fresh.id, reason: "project_authority_lost_or_claimed" });
       return;
     }

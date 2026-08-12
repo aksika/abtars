@@ -562,9 +562,9 @@ describe("Reconciler — #1411 domain guard", () => {
       mod.requestReconcile(1);
       await flush();
 
-      expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
-      expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["review_ready"], "review_requested");
-      expect(reviewStoreMock.insertReviewRequest).toHaveBeenCalledWith(1, "rc_test_1", 1);
+      expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 }, { authority: { projectCardId: 1, projectGeneration: 1 } });
+      expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["review_ready"], "review_requested", undefined, { authority: { projectCardId: 1, projectGeneration: 1 } });
+      expect(reviewStoreMock.insertReviewRequest).toHaveBeenCalledWith(1, "rc_test_1", 1, undefined, { projectCardId: 1, projectGeneration: 1 });
       expect(reviewClaims).toEqual([[1, 1, "rc_test_1"]]);
       expect(dispatchMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "O", cardId: 1 }));
       expect(kanbanCompleteMock).not.toHaveBeenCalled();
@@ -829,8 +829,8 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await new Promise(r => setTimeout(r, 10));
     await flush();
 
-    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
-    expect(reviewStoreMock.insertReviewRequest).toHaveBeenCalledWith(1, "rc_test_1", 1);
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 }, { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } });
+    expect(reviewStoreMock.insertReviewRequest).toHaveBeenCalledWith(1, "rc_test_1", 1, undefined, { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" });
     expect(claims).toHaveLength(0); // case creation is the Reconciler owner — no continuation claim
   });
 
@@ -960,8 +960,8 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await new Promise(r => setTimeout(r, 10));
     await flush();
 
-    expect(reviewStoreMock.recordCoverageReviewable).toHaveBeenCalledWith(1, "cov-sig", ["c1"]);
-    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(reviewStoreMock.recordCoverageReviewable).toHaveBeenCalledWith(1, "cov-sig", ["c1"], { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" });
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 }, { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } });
     expect(kanbanFailMock).not.toHaveBeenCalled();
   });
 
@@ -990,8 +990,8 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await flush();
 
     expect(reviewStoreMock.claimCoverageRound).not.toHaveBeenCalled();
-    expect(reviewStoreMock.recordCoverageReviewable).toHaveBeenCalledWith(1, "cov-sig", ["c1"]);
-    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(reviewStoreMock.recordCoverageReviewable).toHaveBeenCalledWith(1, "cov-sig", ["c1"], { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" });
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 }, { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } });
     expect(kanbanFailMock).not.toHaveBeenCalled();
   });
 
@@ -1015,7 +1015,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
     expect(reviewStoreMock.recordCoverageClear).toHaveBeenCalled();
     expect(reviewStoreMock.claimCoverageRound).not.toHaveBeenCalled();
-    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 }, { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } });
     expect(kanbanFailMock).not.toHaveBeenCalled();
   });
 
@@ -1055,7 +1055,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
     // review case creation is the owner — no scheduled continuation claim
     expect(claims).toHaveLength(0);
-    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 }, { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } });
     expect(kanbanFailMock).not.toHaveBeenCalled();
     expect(reviewStoreMock.claimCoverageRound).not.toHaveBeenCalled();
   });
@@ -1158,8 +1158,8 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await flush();
 
     expect(reviewStoreMock.claimCoverageRound).not.toHaveBeenCalled();
-    expect(reviewStoreMock.recordCoverageReviewable).toHaveBeenCalledWith(1, "cov-sig", ["c1"]);
-    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 });
+    expect(reviewStoreMock.recordCoverageReviewable).toHaveBeenCalledWith(1, "cov-sig", ["c1"], { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" });
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 }, { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } });
     const coverageDispatches = claims.filter(c => c.goal.includes("[COVERAGE GAP]"));
     expect(coverageDispatches).toHaveLength(0);
     expect(kanbanFailMock).not.toHaveBeenCalled();
@@ -1274,6 +1274,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
       expect.arrayContaining(["executing", "needs_input", "reviewing"]),
       "blocked",
       expect.anything(),
+      { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } },
     );
   });
 
@@ -1354,7 +1355,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     mod.requestReconcile(1);
     await flush();
 
-    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["needs_input"], "executing");
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["needs_input"], "executing", undefined, { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } });
     expect(claims).toHaveLength(0);
   });
 
@@ -1398,8 +1399,10 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
     let repairState: "repair_planned" | "repairing" = "repair_planned";
     reviewStoreMock.getSupervision.mockImplementation(() => supervision({ state: repairState }));
-    reviewStoreMock.setState.mockImplementation((_projectId: number, nextState: string) => {
+    reviewStoreMock.stateTransition.mockImplementation((_projectId: number, fromStates: string[], nextState: string) => {
+      if (!fromStates.includes(repairState)) return false;
       repairState = nextState as "repair_planned" | "repairing";
+      return true;
     });
     reviewStoreMock.getLatestDecisionForProject.mockReturnValue({
       id: "rd_repair_1",
@@ -1434,6 +1437,12 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
       goal: expect.stringContaining("[repair-item:r2]"),
     }));
     expect(spawnChildMock.mock.calls[0]?.[1]?.goal).not.toContain("r1");
-    expect(reviewStoreMock.setState).toHaveBeenCalledWith(1, "repairing");
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(
+      1,
+      ["repair_planned"],
+      "repairing",
+      undefined,
+      { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } },
+    );
   });
 });

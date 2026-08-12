@@ -19,7 +19,7 @@ import { LeaseReconciliationService } from "./executor-lease-reconciler.js";
 import type { LifecycleWakeScheduler } from "./lifecycle-wake-scheduler.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { AGENT_EXECUTOR_ID, type ExecutorKind } from "./worker-executor-identity.js";
-import { ProjectReviewStore, type ProjectState, type ProjectSupervisionRow } from "./project-acceptance/project-review-store.js";
+import { ProjectReviewStore, type ProjectMutationAuthority, type ProjectState, type ProjectSupervisionRow } from "./project-acceptance/project-review-store.js";
 import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js";
 import { readProjectCriterionCoverage, coverageSignature } from "./project-acceptance/project-criterion-coverage.js";
 import { delegatedCriterionIds } from "./project-acceptance/project-contract.js";
@@ -35,6 +35,15 @@ import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
 
 const TAG = "reconciler";
+
+function projectMutationAuthority(projectCardId: number, projectGeneration: number): ProjectMutationAuthority {
+  const root = kanbanGetCard(projectCardId);
+  return {
+    projectCardId,
+    projectGeneration,
+    ...(root?.source === "task" ? { scheduledRunId: root.source_id ?? "" } : {}),
+  };
+}
 
 let _shutdownRequested = false;
 
@@ -278,11 +287,15 @@ function settleAuthoringExhausted(
   const supervision = reviewStore.getSupervision(projectId);
   const generation = supervision?.generation ?? 1;
   const failureReason = runStore.lastAuthoringFailureCode(projectId, generation);
+  const authority = supervision ? projectMutationAuthority(projectId, generation) : undefined;
   reviewStore.settleBlocked(
     projectId,
     "contract_authoring",
     { action: "blocked", reason: `${blockerClass}: ${failureReason ?? "no contract produced"}` },
     blockerClass,
+    undefined,
+    undefined,
+    authority,
   );
   try { nerve.fire("card:failed", projectId); } catch {}
 }
@@ -639,15 +652,17 @@ function findActiveScheduledRun(card: KanbanCard): { entry: import("./tasks/task
  * the state, and "none" when a prerequisite is missing (fall through to the
  * scheduled Orc continuation).
  */
-function handleInputState(projectId: number, _supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): BranchResult {
+function handleInputState(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): BranchResult {
   const answered = reviewStore.getAnsweredInputRequests(projectId);
   if (answered.length > 0) {
     logInfo(TAG, `Project ${projectId}: ${answered.length} input(s) answered — resuming execution`);
-    reviewStore.clearInputNotice(projectId);
+    const authority = projectMutationAuthority(projectId, supervision.generation);
+    reviewStore.clearInputNotice(projectId, authority);
     // The resume transition re-opens execution; the following case creation
     // owns the review_round advance (a fresh read bumps exactly once).
-    reviewStore.stateTransition(projectId, ["needs_input"], "executing");
-    return "transitioned";
+    return reviewStore.stateTransition(projectId, ["needs_input"], "executing", undefined, { authority })
+      ? "transitioned"
+      : "none";
   }
   const pending = reviewStore.getPendingInputRequests().filter(r => r.project_card_id === projectId);
   if (pending.length > 0) return "owned";
@@ -699,6 +714,7 @@ function hasRepairWorkerForItem(
 }
 
 function handleRepairState(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): BranchResult {
+  const authority = projectMutationAuthority(projectId, supervision.generation);
   if (supervision.state === "repair_planned") {
     const decision = reviewStore.getLatestDecisionForProject(projectId);
     if (!decision) {
@@ -747,16 +763,18 @@ function handleRepairState(projectId: number, supervision: ProjectSupervisionRow
         logWarn(TAG, `Project ${projectId}: failed to dispatch repair worker for item ${item.id} — ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    reviewStore.setState(projectId, "repairing");
-    return "transitioned";
+    return reviewStore.stateTransition(projectId, ["repair_planned"], "repairing", undefined, { authority })
+      ? "transitioned"
+      : "none";
   }
   if (supervision.state === "repairing") {
     const children = kanbanGetChildren(projectId);
     const allTerminal = children.length > 0 && children.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status));
     if (allTerminal) {
       logInfo(TAG, `Project ${projectId}: all repair children terminal — creating new review round`);
-      reviewStore.setState(projectId, "executing", { repair_round: supervision.repair_round + 1 });
-      return "transitioned";
+      return reviewStore.stateTransition(projectId, ["repairing"], "executing", { repair_round: supervision.repair_round + 1 }, { authority })
+        ? "transitioned"
+        : "none";
     }
     if (children.length === 0) {
       logWarn(TAG, `Project ${projectId}: repairing with no children — falling through to the no-owner decision`);
@@ -783,13 +801,24 @@ async function handleReviewState(projectId: number, supervision: ProjectSupervis
   if (!openCase) return; // no open case — the inspection classifies this as none
   const existingReq = reviewStore.getReviewRequestByCaseId(openCase.id);
   if (!existingReq) {
-    const { id: rrId } = reviewStore.insertReviewRequest(projectId, openCase.id, supervision.generation);
+    const authority = projectMutationAuthority(projectId, supervision.generation);
+    const { id: rrId } = reviewStore.insertReviewRequest(projectId, openCase.id, supervision.generation, undefined, authority);
+    if (!rrId) return;
     scheduleOrcReview(projectId, supervision.generation, openCase.id, rrId);
   } else if (existingReq.status === "pending") {
     scheduleOrcReview(projectId, supervision.generation, openCase.id, existingReq.id);
   } else if (existingReq.status === "abandoned") {
     logWarn(TAG, `Project ${projectId}: review request abandoned — settling blocked`);
-    reviewStore.settleBlocked(projectId, openCase.id, { action: "blocked", reason: "Review request abandoned (attempts/deadline)" }, REVIEW_REQUEST_ABANDONED);
+    const authority = projectMutationAuthority(projectId, supervision.generation);
+    reviewStore.settleBlocked(
+      projectId,
+      openCase.id,
+      { action: "blocked", reason: "Review request abandoned (attempts/deadline)" },
+      REVIEW_REQUEST_ABANDONED,
+      undefined,
+      undefined,
+      authority,
+    );
     try { nerve.fire("card:failed", projectId); } catch {}
   }
 }
@@ -810,15 +839,16 @@ async function handleReviewState(projectId: number, supervision: ProjectSupervis
  * COVERAGE_ROUND_GRACE_MS instead, since it creates no observable claim.
  */
 function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): "blocked" | "waiting" | "reviewable" {
+  const authority = projectMutationAuthority(projectId, supervision.generation);
   const coverage = readProjectCriterionCoverage(projectId);
 
   // 1. Undeterminable or missing root contract — fail closed, never "covered".
   if (coverage.kind === "undeterminable") {
-    settleCoverageBlocked(projectId, reviewStore, `coverage_undeterminable: ${coverage.reason}`);
+    settleCoverageBlocked(projectId, reviewStore, `coverage_undeterminable: ${coverage.reason}`, undefined, authority);
     return "blocked";
   }
   if (coverage.kind === "no_project_contract") {
-    settleCoverageBlocked(projectId, reviewStore, "coverage_undeterminable: no project contract");
+    settleCoverageBlocked(projectId, reviewStore, "coverage_undeterminable: no project contract", undefined, authority);
     return "blocked";
   }
 
@@ -830,7 +860,7 @@ function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, 
 
   // 2. Fully covered — record the clean evaluation and proceed.
   if (uncovered.length === 0) {
-    reviewStore.recordCoverageClear(projectId, signature);
+    if (reviewStore.recordCoverageClear(projectId, signature, authority) === false) return "waiting";
     return "reviewable";
   }
 
@@ -838,7 +868,7 @@ function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, 
   // The round cap is a loop guard only: an exhausted cap means the gap reaches
   // review immediately (repair re-entry cannot restart coverage looping).
   if (supervision.coverage_rounds >= MAX_COVERAGE_ROUNDS) {
-    if (reviewStore.recordCoverageReviewable(projectId, signature, uncovered)) {
+    if (reviewStore.recordCoverageReviewable(projectId, signature, uncovered, authority)) {
       logInfo(TAG, `Project ${projectId}: coverage round cap reached (${uncovered.join(", ")}) — proceeding to review_ready`);
       return "reviewable";
     }
@@ -850,7 +880,7 @@ function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, 
     if (Number.isFinite(elapsed) && elapsed >= COVERAGE_ROUND_GRACE_MS) {
       // #1605: the Orc had its coverage turn and the gap is unchanged — it is
       // an evidence gap for the review, not a terminal gate decision.
-      if (reviewStore.recordCoverageReviewable(projectId, signature, uncovered)) {
+      if (reviewStore.recordCoverageReviewable(projectId, signature, uncovered, authority)) {
         logInfo(TAG, `Project ${projectId}: coverage gap persisted for review (${uncovered.join(", ")}) — proceeding to review_ready`);
         return "reviewable";
       }
@@ -864,7 +894,7 @@ function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, 
 
   // New signature below cap — claim one coverage round; the CAS makes
   // concurrent wakes single-claimant.
-  if (!reviewStore.claimCoverageRound(projectId, signature, uncovered, MAX_COVERAGE_ROUNDS)) {
+  if (!reviewStore.claimCoverageRound(projectId, signature, uncovered, MAX_COVERAGE_ROUNDS, authority)) {
     logInfo(TAG, `Project ${projectId}: coverage round claimed by another wake — waiting`);
     return "waiting";
   }
@@ -873,21 +903,59 @@ function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, 
 }
 
 /** #1604: freeze a project as blocked, naming the coverage fact in the reason and the durable column. */
-function settleCoverageBlocked(projectId: number, reviewStore: ProjectReviewStore, reason: string, uncoveredIds?: readonly string[]): void {
-  reviewStore.stateTransition(
+const LIVE_PROJECT_STATES: readonly ProjectState[] = [
+  "awaiting_contract", "executing", "review_ready", "review_requested", "reviewing",
+  "repair_planned", "repairing", "needs_input",
+];
+
+function blockProjectWithInvalidation(
+  reviewStore: ProjectReviewStore,
+  projectId: number,
+  reason: string,
+  extraSets?: Record<string, string | number | null>,
+  options?: { failCard?: boolean; authority?: ProjectMutationAuthority },
+): boolean {
+  const terminalizer = (reviewStore as unknown as {
+    blockProject?: (
+      cardId: number,
+      blockerReason: string,
+      sets?: Record<string, string | number | null>,
+      opts?: { failCard?: boolean; authority?: ProjectMutationAuthority },
+    ) => boolean;
+  }).blockProject;
+  if (terminalizer) return terminalizer.call(reviewStore, projectId, reason, extraSets, options);
+
+  // Test doubles and older injected stores do not expose the #1644 helper.
+  // Production always takes the shared transactional path above.
+  const transitioned = reviewStore.stateTransition(projectId, LIVE_PROJECT_STATES, "blocked", {
+    blocked_reason: reason.slice(0, 500),
+    ...extraSets,
+  }, options?.authority ? { authority: options.authority } : undefined);
+  if (options?.failCard !== false) kanbanFail(projectId, reason.slice(0, 1000));
+  return transitioned;
+}
+
+function settleCoverageBlocked(
+  projectId: number,
+  reviewStore: ProjectReviewStore,
+  reason: string,
+  uncoveredIds: readonly string[] | undefined,
+  authority: ProjectMutationAuthority,
+): void {
+  // Coverage is a terminal project decision even though it has no review
+  // decision row. Use the same transaction as review/abort blocking so stale
+  // Orc runs, review ownership, and descendant attempts are invalidated
+  // before the root card is failed.
+  const blocked = blockProjectWithInvalidation(
+    reviewStore,
     projectId,
-    ["awaiting_contract", "executing", "review_ready", "review_requested", "reviewing", "repair_planned", "repairing", "needs_input"],
-    "blocked",
-    {
-      blocked_reason: reason.slice(0, 500),
-      ...(uncoveredIds !== undefined ? { coverage_uncovered_ids: JSON.stringify(uncoveredIds) } : {}),
-    },
+    reason,
+    uncoveredIds !== undefined ? { coverage_uncovered_ids: JSON.stringify(uncoveredIds) } : undefined,
+    { authority },
   );
-  // Match every other terminal blocked path (abortProject, settleBlocked):
-  // the supervision row alone would leave a non-scheduled card running
-  // forever. Scheduled roots are failed again by the settler — kanbanFail is
-  // idempotent for an already-failed card.
-  kanbanFail(projectId, reason.slice(0, 1000));
+  if (blocked) {
+    try { nerve.fire("card:failed", projectId); } catch {}
+  }
   logWarn(TAG, `Project ${projectId}: coverage gate blocked — ${reason}`);
 }
 
@@ -928,6 +996,7 @@ function dispatchCoverageRound(projectId: number, uncovered: readonly string[]):
  * could never be claimed and would stall recovery forever.
  */
 async function createReviewCase(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, roundOffset: 0 | 1 = 1): Promise<void> {
+  const authority = projectMutationAuthority(projectId, supervision.generation);
   if (supervision.state === "executing") {
     const coverageGate = runCoverageGate(projectId, supervision, reviewStore);
     if (coverageGate === "waiting" || coverageGate === "blocked") return;
@@ -939,6 +1008,7 @@ async function createReviewCase(projectId: number, supervision: ProjectSupervisi
     ["executing", "review_ready"] as ProjectState[],
     "review_ready",
     { review_round: nextRound },
+    { authority },
   );
   if (!transitioned) {
     logWarn(TAG, `Project ${projectId}: failed to transition to review_ready`);
@@ -958,9 +1028,10 @@ async function createReviewCase(projectId: number, supervision: ProjectSupervisi
   reviewStore.db.transaction(() => {
     const { id: cId } = reviewStore.insertReviewCase(projectId, supervision.generation, nextRound, snapshot, snapshotDigest);
     caseId = cId;
-    const transitioned2 = reviewStore.stateTransition(projectId, ["review_ready"] as ProjectState[], "review_requested");
+    const transitioned2 = reviewStore.stateTransition(projectId, ["review_ready"] as ProjectState[], "review_requested", undefined, { authority });
     if (!transitioned2) throw new Error(`failed to transition project ${projectId} to review_requested`);
-    const { id: rrId } = reviewStore.insertReviewRequest(projectId, cId, supervision.generation);
+    const { id: rrId } = reviewStore.insertReviewRequest(projectId, cId, supervision.generation, undefined, authority);
+    if (!rrId) throw new Error(`failed to authorize review request for project ${projectId}`);
     reviewRequestId = rrId;
   });
   logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created, request ${reviewRequestId} (gen=${supervision.generation}, round=${nextRound})`);
@@ -1587,12 +1658,22 @@ async function abortProject(projectId: number, children: KanbanCard[], reason: s
   // Freeze supervision before cancelling child executors. Late Orc review
   // results must not be able to move an aborted project back to accepted.
   const reviewStore = new ProjectReviewStore();
-  reviewStore.stateTransition(
+  const blocked = blockProjectWithInvalidation(
+    reviewStore,
     projectId,
-    ["awaiting_contract", "executing", "review_ready", "review_requested", "reviewing", "repair_planned", "repairing", "needs_input"],
-    "blocked",
-    { blocked_reason: `aborted: ${reason}`.slice(0, 500) },
+    `aborted: ${reason}`,
+    undefined,
+    {
+      failCard: !opts?.skipRootFail,
+      authority: (() => {
+        const supervision = reviewStore.getSupervision(projectId);
+        return supervision ? projectMutationAuthority(projectId, supervision.generation) : undefined;
+      })(),
+    },
   );
+  if (blocked && !opts?.skipRootFail) {
+    try { nerve.fire("card:failed", projectId); } catch {}
+  }
   const store = new WorkerSupervisionStore();
   for (const card of children) {
     if (card.status !== "running" && card.status !== "queued") continue;
@@ -1627,9 +1708,6 @@ async function abortProject(projectId: number, children: KanbanCard[], reason: s
   // #1546: the last-resort settler performs the one root card mutation after
   // winning settlement; a second root fail would emit a duplicate terminal
   // event (proved by the focused exactly-once settlement test).
-  if (!opts?.skipRootFail) {
-    kanbanFail(projectId, reason);
-  }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

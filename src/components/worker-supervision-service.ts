@@ -109,9 +109,13 @@ export class WorkerSupervisionService {
       /** #1644: immutable project authority. Never supplied by tool arguments
        *  beyond the bound Orc invocation context; when absent it is derived
        *  from the durable root state at creation (repair path). */
-      authority?: { projectCardId: number; projectGeneration: number };
+      authority?: { projectCardId: number; projectGeneration: number; scheduledRunId?: string };
     },
   ): { contract: WorkerAcceptanceContractV1; attemptId: string; cardId: number } | { error: string } {
+    // A bound Orc context owns the root identity. The parent/root argument is
+    // only a legacy/repair input and must not be able to redirect a supervised
+    // child into another project.
+    const boundRootCardId = opts?.authority?.projectCardId ?? rootCardId;
     if (opts?.cardId !== undefined && this.store.contractExists(opts.cardId)) {
       return { error: `card #${opts.cardId} already has a contract` };
     }
@@ -132,7 +136,7 @@ export class WorkerSupervisionService {
     // #1604 R3: a supervised child under a contract-bearing root must declare
     // the root criteria it supports; validated unconditionally so an omitted
     // mapping is rejected here, at spawn time, not at settlement.
-    const mappingError = validateWorkerRootCriteria(rootCardId, opts?.contractId ?? "(pending)", opts?.supportsRootCriteria ?? []);
+    const mappingError = validateWorkerRootCriteria(boundRootCardId, opts?.contractId ?? "(pending)", opts?.supportsRootCriteria ?? []);
     if (mappingError) return { error: mappingError };
 
     const contractId = opts?.contractId ?? createContractId();
@@ -142,7 +146,7 @@ export class WorkerSupervisionService {
       goal: rawGoal,
       criteria: opts.criteria,
       provenance: {
-        root_card_id: rootCardId,
+        root_card_id: boundRootCardId,
         card_id: opts?.cardId ?? 0,
         authored_by: authoredBy,
         created_at: new Date().toISOString(),
@@ -179,14 +183,20 @@ export class WorkerSupervisionService {
         // mutating transaction, and persisted on the attempt. A caller-supplied
         // authority (Orc invocation context) is checked against the durable
         // root; the repair path derives it from the current durable state.
-        const rootCard = this.store.db.prepare(`SELECT source, source_id FROM kanban_board WHERE id = ?`).get(rootCardId) as { source: string | null; source_id: string | null } | undefined;
-        const supervision = this.store.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(rootCardId) as { generation: number } | undefined;
-        const scheduledRunId = rootCard?.source === "task" && rootCard.source_id != null ? rootCard.source_id : undefined;
+        const rootCard = this.store.db.prepare(`SELECT source, source_id FROM kanban_board WHERE id = ?`).get(boundRootCardId) as { source: string | null; source_id: string | null } | undefined;
+        const supervision = this.store.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(boundRootCardId) as { generation: number } | undefined;
+        // A bound authority is immutable: if it is present, do not fill a
+        // missing scheduled run ID from current durable state. Only the
+        // repair path (no bound authority) may derive the run identity at
+        // creation time.
+        const scheduledRunId = opts?.authority !== undefined
+          ? opts.authority.scheduledRunId
+          : (rootCard?.source === "task" ? (rootCard.source_id ?? "") : undefined);
         // #1644: the root card ID comes from the parent chain, never from a
         // caller-chosen value; only the bound generation (Orc context) and the
         // durable run identity are admitted into the tuple.
         const authority: ProjectMutationAuthority = {
-          projectCardId: rootCardId,
+          projectCardId: boundRootCardId,
           projectGeneration: opts?.authority?.projectGeneration ?? supervision?.generation ?? 1,
           scheduledRunId,
         };
@@ -205,10 +215,15 @@ export class WorkerSupervisionService {
             opts?.title ?? rawGoal.slice(0, 80),
             opts?.source ?? "agent",
             opts?.priority ?? "MEDIUM",
-            rootCardId,
+            boundRootCardId,
             JSON.stringify({ supervised: true }),
           );
           cardId = Number(inserted.lastInsertRowid);
+        } else {
+          const existing = this.store.db.prepare(`SELECT parent_id, type FROM kanban_board WHERE id = ?`).get(cardId) as { parent_id: number | null; type: string | null } | undefined;
+          if (!existing || existing.parent_id !== boundRootCardId || existing.type !== "W") {
+            throw new Error(`project mutation rejected: child_card_mismatch`);
+          }
         }
 
         this.store.insertContract(normalized.contract, cardId);

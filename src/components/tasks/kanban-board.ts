@@ -10,6 +10,7 @@ import { mkdirSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 import { logWarn, logDebug, redactSecrets } from "../logger.js";
+import { logSwarmTrace } from "../swarm-trace.js";
 import { isValidSessionType } from "../spin-profiles.js";
 import { initTaskStateSchema } from "./task-state-schema.js";
 
@@ -212,6 +213,7 @@ export type TransitionActor =
   | "pi_run_settle"         // pi-run-store 317/322
   | "pi_run_dispatch"       // pi-run-store 518
   | "pi_resume_generation"  // pi-run-store 574 (queueResumeGeneration)
+  | "pi_interrupt"          // pi-run-store 590 (interruptGeneration)
   | "restart_recovery"      // pi-run-store 626
   | "pi_origin_projection"  // boot/phase-pi-executor 105
   | "budget_enforcement"    // reconciler 1015
@@ -332,11 +334,35 @@ const EXTRA_PREDICATES = new Set<string>([
   "delivery_result IS NULL",                                // kanban-delivery markUnknown
   // #1644: scheduled-project delivery claim — exact root/run/generation,
   // accepted supervision, terminal successful task run, delivery released.
-  "COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')",
+  "type = 'O' AND source = 'task' AND COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')",
   // #1644: non-scheduled project delivery claim — accepted supervision at the
   // exact generation, delivery released.
-  "COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
+  "type = 'O' AND source != 'task' AND COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
+  // #1644: project-root completion — exact accepted generation and, for a
+  // scheduled root, the terminal task run that owns the callback. This is
+  // distinct from delivery: noop/skipped runs may complete an accepted root,
+  // while artifact attach/release still require outcome='success'.
+  "type = 'O' AND source = 'task' AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL)",
+  "type = 'O' AND source != 'task' AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
 ]);
+
+/** #1644: trace a project-aware CAS rejection with only bounded authority
+ * context. Duplicate terminal observations are left quiet by callers. */
+function traceProjectMutationRejected(
+  operation: string,
+  cardId: number,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+): void {
+  logSwarmTrace({
+    event: "project_mutation_rejected",
+    operation: operation.slice(0, 120),
+    project: cardId,
+    card: cardId,
+    generation: authority.projectGeneration,
+    run: authority.scheduledRunId,
+    reason: "authority_lost",
+  });
+}
 
 /** SQLite datetime('now')-compatible UTC timestamp for co-written columns. */
 export function sqliteNow(): string {
@@ -624,6 +650,44 @@ export function kanbanComplete(id: number, resultPath: string | null, summary: s
   }
 }
 
+/**
+ * #1644: complete a supervised project root only while its exact accepted
+ * generation still owns the callback. Scheduled roots additionally require
+ * the matching task run to be terminal; this prevents a late success/noop
+ * callback from completing a root left live by an older or terminal owner.
+ */
+export function kanbanCompleteProject(
+  cardId: number,
+  resultPath: string | null,
+  summary: string,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+  emit = true,
+): boolean {
+  const outcome = kanbanTransition({
+    cardId,
+    from: ["running", "queued"],
+    to: "done",
+    actor: "settle_done",
+    reason: "project settlement complete",
+    fields: {
+      result_path: resultPath,
+      result_summary: summary.slice(0, 4000),
+      completed_at: sqliteNow(),
+    },
+    extraPredicate: authority.scheduledRunId !== undefined
+      ? "type = 'O' AND source = 'task' AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL)"
+      : "type = 'O' AND source != 'task' AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
+    extraPredicateParams: authority.scheduledRunId !== undefined
+      ? [authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId]
+      : [authority.projectGeneration],
+    emit,
+  });
+  if (outcome.kind === "no_op" && outcome.observed !== "done" && outcome.observed !== "delivering" && outcome.observed !== "delivered") {
+    traceProjectMutationRejected("project_completion", cardId, authority);
+  }
+  return outcome.kind === "applied";
+}
+
 export function kanbanFail(id: number, error: string, emit = true): void {
   // #1590: `done` is included because task-run-settler fails an accepted
   // project card when artifact validation later detects a stale artifact
@@ -722,8 +786,8 @@ export function kanbanClaimProjectDelivery(
     reason: "project delivery claim",
     fields: { delivery_attempts: (row?.attempts ?? 0) + 1 },
     extraPredicate: authority.scheduledRunId !== undefined
-      ? "COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')"
-      : "COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
+      ? "type = 'O' AND source = 'task' AND COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')"
+      : "type = 'O' AND source != 'task' AND COALESCE(delivery_attempts, 0) < 5 AND delivery_ready = 1 AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
     extraPredicateParams: authority.scheduledRunId !== undefined
       ? [authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId]
       : [authority.projectGeneration],
@@ -731,6 +795,9 @@ export function kanbanClaimProjectDelivery(
   });
   if (outcome.kind !== "applied") {
     logDebug("kanban-delivery", `project_delivery_skipped_duplicate card=${cardId}`);
+    if (outcome.observed !== "done" && outcome.observed !== "delivering" && outcome.observed !== "delivered") {
+      traceProjectMutationRejected("project_delivery_claim", cardId, authority);
+    }
     return false;
   }
   return true;
@@ -945,21 +1012,30 @@ export function kanbanAttachProjectResult(
 ): void {
   const d = dbOrNull();
   if (!d) return;
+  let result: { changes?: number };
   if (authority.scheduledRunId !== undefined) {
-    d.prepare(
+    result = d.prepare(
       `UPDATE kanban_board SET result_path = ?, result_summary = ?, updated_at = datetime('now')
-       WHERE id = ? AND status = 'done' AND result_path IS NULL
+       WHERE id = ? AND type = 'O' AND source = 'task' AND status = 'done' AND result_path IS NULL
          AND source_id = ?
          AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)
          AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')`
-    ).run(resultPath, summary.slice(0, 4000), cardId, authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId);
-    return;
+    ).run(resultPath, summary.slice(0, 4000), cardId, authority.scheduledRunId, authority.projectGeneration, authority.scheduledRunId) as { changes?: number };
+  } else {
+    result = d.prepare(
+      `UPDATE kanban_board SET result_path = ?, result_summary = ?, updated_at = datetime('now')
+       WHERE id = ? AND type = 'O' AND source != 'task' AND status = 'done' AND result_path IS NULL
+         AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)`
+    ).run(resultPath, summary.slice(0, 4000), cardId, authority.projectGeneration) as { changes?: number };
   }
-  d.prepare(
-    `UPDATE kanban_board SET result_path = ?, result_summary = ?, updated_at = datetime('now')
-     WHERE id = ? AND status = 'done' AND result_path IS NULL
-       AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)`
-  ).run(resultPath, summary.slice(0, 4000), cardId, authority.projectGeneration);
+  if ((result.changes ?? 0) !== 1) {
+    // A callback that already attached its result is an idempotent duplicate;
+    // a missing result on a non-done/unauthorized root is a real rejection.
+    const current = d.prepare("SELECT status, result_path FROM kanban_board WHERE id = ?").get(cardId) as { status?: string; result_path?: string | null } | undefined;
+    if (current?.status !== "done" || current.result_path == null) {
+      traceProjectMutationRejected("project_artifact_attach", cardId, authority);
+    }
+  }
 }
 
 /**
@@ -978,7 +1054,7 @@ export function kanbanSetProjectDeliveryReady(
   if (authority.scheduledRunId !== undefined) {
     result = d.prepare(
       `UPDATE kanban_board SET delivery_ready = 1, updated_at = datetime('now')
-       WHERE id = ? AND status = 'done' AND delivery_ready = 0
+       WHERE id = ? AND type = 'O' AND source = 'task' AND status = 'done' AND delivery_ready = 0
          AND source_id = ?
          AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)
          AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL AND tr.outcome = 'success')`
@@ -986,11 +1062,19 @@ export function kanbanSetProjectDeliveryReady(
   } else {
     result = d.prepare(
       `UPDATE kanban_board SET delivery_ready = 1, updated_at = datetime('now')
-       WHERE id = ? AND status = 'done' AND delivery_ready = 0
+       WHERE id = ? AND type = 'O' AND source != 'task' AND status = 'done' AND delivery_ready = 0
          AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)`
     ).run(cardId, authority.projectGeneration) as { changes?: number };
   }
   if ((result.changes ?? 0) === 1) nerve.fire("card:done", cardId);
+  else {
+    // A ready card is an idempotent duplicate; every other failed CAS means
+    // the callback lost project terminal/generation/run authority.
+    const current = d.prepare("SELECT status, delivery_ready FROM kanban_board WHERE id = ?").get(cardId) as { status?: string; delivery_ready?: number } | undefined;
+    if (current?.status !== "done" || current.delivery_ready !== 1) {
+      traceProjectMutationRejected("project_delivery_release", cardId, authority);
+    }
+  }
 }
 
 export function kanbanAddTokens(id: number, tokens: number): void {

@@ -1543,7 +1543,9 @@ export class Spin {
 
     // #1516: Central Worker admission authority — enforce the durable project
     // agent cap before any card, contract, attempt, or reservation is created.
-    const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+    // #1644: a bound Orc context owns the root identity; the caller's parent
+    // argument cannot redirect project work to another root.
+    const rootCardId = request.authority?.projectCardId ?? resolveRootId(parentCardId) ?? parentCardId;
     const slot = checkWorkerSlotForProject(rootCardId);
     if (!slot.ok) {
       const err = new Error(`agent_cap_reached: active=${slot.active} worker_limit=${slot.workerLimit} — wait for active workers to complete before spawning more`);
@@ -1582,7 +1584,7 @@ export class Spin {
       if (!preCheck.ok) {
         throw new Error(`Contract validation failed: ${preCheck.errors.map(e => e.message).join("; ")}`);
       }
-      const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+      const rootCardId = request.authority?.projectCardId ?? resolveRootId(parentCardId) ?? parentCardId;
       // #1604 R3: required mapping — the pre-check runs before any card is
       // created, so an omitted mapping fails the spawn, never the settlement.
       const mappingError = validateWorkerRootCriteria(
@@ -1599,7 +1601,7 @@ export class Spin {
     // cannot outlive a rejected project-authority check.
     if (request.contract) {
       const service = new WorkerSupervisionService();
-      const rootCardId = resolveRootId(parentCardId) ?? parentCardId;
+      const rootCardId = request.authority?.projectCardId ?? resolveRootId(parentCardId) ?? parentCardId;
       const result = service.createChild(request.goal, rootCardId, "orc", {
         title: request.title ?? request.goal.slice(0, 80),
         source: request.source ?? "agent",
@@ -1626,6 +1628,13 @@ export class Spin {
       // execute without the durable ownership transition being the source of
       // truth.
       return result.cardId;
+    }
+    // A project-owned child must carry the contract/attempt tuple that records
+    // its immutable authority. The legacy unsupervised branch has no durable
+    // lineage and would otherwise let a stale Orc create work that cannot be
+    // fenced at settlement time.
+    if (request.authority) {
+      throw new Error("project mutation rejected: supervised child contract required");
     }
     // No contract — legacy unsupervised path.
     const cardId = kanbanEnqueue(request.title ?? request.goal.slice(0, 80), request.source ?? "agent", undefined, {

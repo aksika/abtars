@@ -1,4 +1,5 @@
 import { ProjectReviewStore } from "./project-review-store.js";
+import type { ProjectMutationAuthority } from "./project-review-store.js";
 import { ProjectReviewValidator, type ProjectReviewDecisionV1 } from "./project-review-validator.js";
 import type { ValidationIssue } from "./project-review-contract.js";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
@@ -112,7 +113,7 @@ export class ProjectReviewService {
    * count against the invalid-proposal budget; warnings ride along on
    * successful outcomes and never increment the counter.
    */
-  processDecision(decision: ProjectReviewDecisionV1): ReviewOutcome {
+  processDecision(decision: ProjectReviewDecisionV1, authority?: ProjectMutationAuthority): ReviewOutcome {
     // Load the case
     const caseRow = this.store.getReviewCase(decision.review_case_id);
     if (!caseRow) {
@@ -175,6 +176,7 @@ export class ProjectReviewService {
         REVIEW_PROTOCOL_EXHAUSTED,
         peerEvent,
         decisionId,
+        authority,
       );
       if (record.kind === "blocked") {
         try { nerve.fire("card:failed", cardId); } catch {}
@@ -213,6 +215,7 @@ export class ProjectReviewService {
           deliveredSynthesis,
           peerEvent,
           acceptanceId,
+          authority,
         );
 
         // Fire events after commit
@@ -237,6 +240,7 @@ export class ProjectReviewService {
           decision,
           caseSnapshot.generation,
           totalRepairTokens,
+          authority,
         );
 
         return {
@@ -261,6 +265,7 @@ export class ProjectReviewService {
           blocker.blocker_class,
           peerEvent,
           decisionId,
+          authority,
         );
         // Fire events after commit
         try { nerve.fire("card:failed", cardId); } catch {}
@@ -284,6 +289,7 @@ export class ProjectReviewService {
             expectedResponseKind: inputReq.expected_response_kind,
             context: inputReq.context,
           },
+          authority,
         );
         // #1480: durable run release is owned by the bound Orc execution;
         // no process-global active-card state is cleared here.

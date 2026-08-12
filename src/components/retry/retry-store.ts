@@ -176,6 +176,72 @@ export class RetryStore {
     return result.changes > 0;
   }
 
+  /** #1644: Orc worker-failure decisions are project mutations too. The
+   * authority check and decision CAS share one transaction so a stale review
+   * cannot stop/requeue work after the root has terminalized. */
+  compareAndSetProjectDecisionStatus(
+    sourceAttemptId: string,
+    cardId: number,
+    fromStatus: DecisionStatus,
+    toStatus: DecisionStatus,
+    authority?: ProjectMutationAuthority,
+  ): boolean {
+    if (!isValidTransition(fromStatus, toStatus)) return false;
+    return this.db.transaction(() => {
+      const attempt = this.db.prepare(`
+        SELECT card_id, root_project_card_id, root_project_generation, scheduled_run_id
+        FROM worker_attempts WHERE id = ?
+      `).get(sourceAttemptId) as {
+        card_id: number;
+        root_project_card_id: number | null;
+        root_project_generation: number | null;
+        scheduled_run_id: string | null;
+      } | undefined;
+      if (!attempt || attempt.card_id !== cardId) return false;
+
+      if (authority) {
+        const attemptRunId = attempt.scheduled_run_id ?? undefined;
+        if (attempt.root_project_card_id == null || attempt.root_project_generation == null) {
+          emitProjectAuthorityRejection("worker_failure_review", authority, "missing_authority", { cardId, attemptId: sourceAttemptId });
+          return false;
+        }
+        if (attempt.root_project_card_id !== authority.projectCardId) {
+          emitProjectAuthorityRejection("worker_failure_review", authority, "missing_authority", { cardId, attemptId: sourceAttemptId });
+          return false;
+        }
+        if (attempt.root_project_generation !== authority.projectGeneration) {
+          emitProjectAuthorityRejection("worker_failure_review", authority, "generation_mismatch", { cardId, attemptId: sourceAttemptId });
+          return false;
+        }
+        if (attemptRunId !== authority.scheduledRunId) {
+          emitProjectAuthorityRejection("worker_failure_review", authority, "run_mismatch", { cardId, attemptId: sourceAttemptId });
+          return false;
+        }
+        const rejection = authorizeActiveProjectWork(this.db, authority);
+        if (rejection) {
+          emitProjectAuthorityRejection("worker_failure_review", authority, rejection, { cardId, attemptId: sourceAttemptId });
+          return false;
+        }
+      } else if (attempt.root_project_card_id != null) {
+        if (this.authorizeAttemptForProjectWork({
+          card_id: attempt.card_id,
+          root_project_card_id: attempt.root_project_card_id,
+          root_project_generation: attempt.root_project_generation,
+          scheduled_run_id: attempt.scheduled_run_id,
+        }, "worker_failure_review") !== null) return false;
+      } else if (cardIsSupervisedProjectChild(this.db, cardId)) {
+        emitProjectAuthorityRejection("worker_failure_review", undefined, "missing_authority", { cardId, attemptId: sourceAttemptId });
+        return false;
+      }
+
+      const result = this.db.prepare(`
+        UPDATE retry_policy_decisions SET status = ?, updated_at = ?
+        WHERE source_attempt_id = ? AND status = ?
+      `).run(toStatus, new Date().toISOString(), sourceAttemptId, fromStatus);
+      return result.changes === 1;
+    });
+  }
+
   // ── Directives ─────────────────────────────────────────────────────────
 
   insertDirective(directive: RetryDirectiveV1, targetAttemptId?: string): "created" | "idempotent" | "conflict" {
@@ -222,18 +288,51 @@ export class RetryStore {
     _earliestClaimAt: string,
     budgetReservation: { tokens: number; cost: number; switches: number },
     attemptInsert: { id: string; card_id: number; contract_id: string; ordinal: number; executor_kind: ExecutorKind; executor_id: string; status: string; started_at: string; source_attempt_id: string; earliest_claim_at: string },
+    authority?: ProjectMutationAuthority,
   ): AcceptRetryOutcome {
     try {
       return this.db.transaction((): AcceptRetryOutcome => {
         // 1. Reload source attempt — must be terminal
-        const source = this.db.prepare(`SELECT lifecycle, status, root_project_card_id, root_project_generation, scheduled_run_id FROM worker_attempts WHERE id = ?`).get(sourceAttemptId) as { lifecycle: string; status: string; root_project_card_id: number | null; root_project_generation: number | null; scheduled_run_id: string | null } | undefined;
+        const source = this.db.prepare(`SELECT card_id, lifecycle, status, root_project_card_id, root_project_generation, scheduled_run_id FROM worker_attempts WHERE id = ?`).get(sourceAttemptId) as { card_id: number; lifecycle: string; status: string; root_project_card_id: number | null; root_project_generation: number | null; scheduled_run_id: string | null } | undefined;
         if (!source) return { kind: "stale_source" };
         if (!["completed", "failed", "cancelled", "timed_out"].includes(source.lifecycle)) return { kind: "stale_source" };
+        // The source attempt, retry request, target contract, and successor
+        // card all belong to one durable card lineage. Without these checks a
+        // malformed directive could copy a valid authority tuple from card A
+        // while re-queuing and creating work on card B.
+        if (source.card_id !== cardId || attemptInsert.card_id !== cardId ||
+            attemptInsert.id !== targetAttemptId || attemptInsert.contract_id !== revisedContract.id ||
+            attemptInsert.source_attempt_id !== sourceAttemptId) {
+          return { kind: "conflict" };
+        }
 
         // #1644: a supervised project attempt cannot allocate a successor once
         // its root is terminal or its immutable generation/run no longer
         // authorizes active work. Retries inherit the source lineage verbatim.
-        if (source.root_project_card_id != null) {
+        if (authority) {
+          const sourceRunId = source.scheduled_run_id ?? undefined;
+          if (source.root_project_card_id == null || source.root_project_generation == null) {
+            emitProjectAuthorityRejection("retry_allocation", authority, "missing_authority", { cardId, attemptId: sourceAttemptId });
+            return { kind: "stale_source" };
+          }
+          if (source.root_project_card_id !== authority.projectCardId) {
+            emitProjectAuthorityRejection("retry_allocation", authority, "missing_authority", { cardId, attemptId: sourceAttemptId });
+            return { kind: "stale_source" };
+          }
+          if (source.root_project_generation !== authority.projectGeneration) {
+            emitProjectAuthorityRejection("retry_allocation", authority, "generation_mismatch", { cardId, attemptId: sourceAttemptId });
+            return { kind: "stale_source" };
+          }
+          if (sourceRunId !== authority.scheduledRunId) {
+            emitProjectAuthorityRejection("retry_allocation", authority, "run_mismatch", { cardId, attemptId: sourceAttemptId });
+            return { kind: "stale_source" };
+          }
+          const rejection = authorizeActiveProjectWork(this.db, authority);
+          if (rejection) {
+            emitProjectAuthorityRejection("retry_allocation", authority, rejection, { cardId, attemptId: sourceAttemptId });
+            return { kind: "stale_source" };
+          }
+        } else if (source.root_project_card_id != null) {
           const rejection = this.authorizeAttemptForProjectWork({
             card_id: cardId,
             root_project_card_id: source.root_project_card_id,

@@ -14,6 +14,7 @@ import { LocalExecutorCatalog } from "./local-executor-catalog.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "../worker-contract.js";
 import type { AttemptRow } from "../worker-supervision-store.js";
 import { resolveWorkerExecutorIntent } from "../worker-executor-routing.js";
+import type { ProjectMutationAuthority } from "../project-acceptance/project-review-store.js";
 
 const GLOBAL_MAX_TOKENS = 1_000_000;
 
@@ -244,8 +245,8 @@ export class RetryService {
     return outcome as AcceptRetryResult;
   }
 
-  reviewFailure(input: { attemptId: string; cardId: number; response: OrcRetryResponse }): AcceptRetryResult {
-    const { attemptId, cardId, response } = input;
+  reviewFailure(input: { attemptId: string; cardId: number; response: OrcRetryResponse; authority: ProjectMutationAuthority }): AcceptRetryResult {
+    const { attemptId, cardId, response, authority } = input;
 
     const existingDecision = this.retryStore.getDecision(attemptId);
     if (!existingDecision) return { kind: "error", message: `no decision for ${attemptId}` };
@@ -254,12 +255,26 @@ export class RetryService {
     }
 
     if (response.action === "stop") {
-      this.retryStore.compareAndSetDecisionStatus(attemptId, existingDecision.status as DecisionStatus, "stopped");
+      const stopped = this.retryStore.compareAndSetProjectDecisionStatus(
+        attemptId,
+        cardId,
+        existingDecision.status as DecisionStatus,
+        "stopped",
+        authority,
+      );
+      if (!stopped) return { kind: "stale_source" };
       return { kind: "error", message: "Orc chose stop" };
     }
 
     if (response.action === "needs_input") {
-      this.retryStore.compareAndSetDecisionStatus(attemptId, existingDecision.status as DecisionStatus, "needs_input");
+      const needsInput = this.retryStore.compareAndSetProjectDecisionStatus(
+        attemptId,
+        cardId,
+        existingDecision.status as DecisionStatus,
+        "needs_input",
+        authority,
+      );
+      if (!needsInput) return { kind: "stale_source" };
       return { kind: "error", message: "needs fresh input" };
     }
 
@@ -350,6 +365,7 @@ export class RetryService {
         source_attempt_id: attemptId,
         earliest_claim_at: earliestClaimAt,
       },
+      authority,
     );
 
     if (outcome.kind === "created") return { kind: "created" as const, targetAttemptId };
