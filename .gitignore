@@ -47,3 +47,5 @@ abtars-backup-*.zip
 test-results/pi-production-e2e/
 # #1598 report-pipeline E2E results (run artifacts; kept out of git)
 test-results/report-pipeline-e2e/
+# Epic17 local Pi/TUI journey results (run artifacts; kept out of git)
+test-results/pi-local-journey/

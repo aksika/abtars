@@ -36,7 +36,13 @@ import { FIXTURE_MODEL_A, FIXTURE_MODEL_B, FIXTURE_PROVIDER, FIXTURE_API_KEY_ENV
 
 const here = dirname(fileURLToPath(import.meta.url));
 const abtarsRoot = resolve(here, "..");
-const homeHost = process.env["HOME"] ?? "/home/qakosal";
+const homeHost = requireHostHome();
+
+function requireHostHome(): string {
+  const home = process.env["HOME"];
+  if (!home) throw new Error("HOME is not set — this harness needs the host home to seed an isolated pi config");
+  return home;
+}
 const SENTINEL_ENV = "PI_JOURNEY_SENTINEL";
 const JOURNEY_DEADLINE_MS = 55 * 60_000;
 
@@ -337,14 +343,22 @@ async function setup(): Promise<void> {
   mkdirSync(join(piHome, "agent", "sessions"), { recursive: true });
   const sessionRoot = realpathSync(join(piHome, "agent", "sessions"));
 
-  // The z.ai provider has no balance (429 on every call). Route the Pi child's
-  // default model to the openrouter provider (real key, free kimi-k2.6 tier)
-  // via the isolated settings file — the same file pi 0.83 resolves at boot.
+  // Route the Pi child's default model through the isolated settings file —
+  // the same file pi 0.83 resolves at boot. The provider/model pair is read
+  // from the environment so no credential or account detail lives in the repo.
+  // NOTE: this path still reaches a hosted provider and therefore costs money
+  // per run. It is a supplementary live smoke only. The automated gate must use
+  // a local endpoint instead — see the deterministic-port ticket.
   const settingsPath = join(piHome, "agent", "settings.json");
+  const journeyProvider = process.env["PI_JOURNEY_PROVIDER"];
+  const journeyModel = process.env["PI_JOURNEY_MODEL"];
+  if (!journeyProvider || !journeyModel) {
+    throw new Error("set PI_JOURNEY_PROVIDER and PI_JOURNEY_MODEL — this harness does not hardcode a provider or account");
+  }
   try {
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
-    settings["defaultProvider"] = "openrouter";
-    settings["defaultModel"] = "moonshotai/kimi-k2.6";
+    settings["defaultProvider"] = journeyProvider;
+    settings["defaultModel"] = journeyModel;
     settings["defaultThinkingLevel"] = "low";
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
   } catch {
