@@ -1,0 +1,115 @@
+{
+  "kind": "pi-local-journey",
+  "runRoot": "/tmp/pi-journey-0ZPMJJ",
+  "startedAt": 1786405535414,
+  "durationMs": 370943,
+  "passed": 19,
+  "failed": 2,
+  "checks": [
+    {
+      "step": "smoke",
+      "ok": true,
+      "detail": "TUI pipeline exchange reached the fixture provider"
+    },
+    {
+      "step": "run1-start",
+      "ok": true,
+      "detail": "runId=c22d22ce-739 card=#1 session=1786405562_C_03 gen=1"
+    },
+    {
+      "step": "run1-session-visible",
+      "ok": true,
+      "detail": "C session listed at index #3"
+    },
+    {
+      "step": "run1-attach",
+      "ok": true,
+      "detail": "attached to exact Pi session 1786405562_C_03"
+    },
+    {
+      "step": "run1-running",
+      "ok": true,
+      "detail": "status=running gen=1"
+    },
+    {
+      "step": "child-env",
+      "ok": true,
+      "detail": "pid=326008 sentinelLeak=false nodeOptionsLeak=false correlation=true isolatedHome=true"
+    },
+    {
+      "step": "run1-steer",
+      "ok": true,
+      "detail": "steer accepted"
+    },
+    {
+      "step": "run1-steer-applied",
+      "ok": true,
+      "detail": "steer-flag file appeared in the workspace"
+    },
+    {
+      "step": "run1-reply",
+      "ok": true,
+      "detail": "no UI request surfaced in the real run; reply machinery covered by focused unit suites (awaiting_input not exercised live)"
+    },
+    {
+      "step": "run1-cancel-accepted",
+      "ok": false,
+      "detail": "run reached terminal status completed before cancel could be issued"
+    },
+    {
+      "step": "bridge-restart-1",
+      "ok": true,
+      "detail": "bridge respawned (pid 326469)"
+    },
+    {
+      "step": "restart-preserves-terminal",
+      "ok": true,
+      "detail": "status after restart=completed (terminal stays terminal)"
+    },
+    {
+      "step": "stale-steer-rejected",
+      "ok": true,
+      "detail": "reply: ❌ Run c22d22ce-739 is not active (status: completed)"
+    },
+    {
+      "step": "stale-reply-rejected",
+      "ok": true,
+      "detail": "reply: ❌ Run c22d22ce-739 is not active (status: completed)"
+    },
+    {
+      "step": "run2-start",
+      "ok": true,
+      "detail": "runId=39b366a1-4af gen=1"
+    },
+    {
+      "step": "run2-first-turn-settled",
+      "ok": true,
+      "detail": "first output file present — pi session flushed"
+    },
+    {
+      "step": "run2-running",
+      "ok": true,
+      "detail": "run2 active before restart"
+    },
+    {
+      "step": "bridge-restart-2",
+      "ok": true,
+      "detail": "bridge respawned (pid 326753)"
+    },
+    {
+      "step": "run2-interrupt-on-restart",
+      "ok": true,
+      "detail": "run2 status after restart=interrupted (expected interrupted)"
+    },
+    {
+      "step": "run2-resume",
+      "ok": true,
+      "detail": "generation=2 new session=1786405666_C_03"
+    },
+    {
+      "step": "lane-setup",
+      "ok": false,
+      "detail": "Timed out waiting for run 39b366a1-4af status running/awaiting_input/completed/failed after 240000ms\n"
+    }
+  ]
+}

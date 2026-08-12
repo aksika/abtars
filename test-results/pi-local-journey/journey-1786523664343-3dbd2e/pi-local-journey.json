@@ -1,0 +1,130 @@
+{
+  "kind": "pi-local-journey",
+  "runRoot": "/tmp/pi-journey-vdSAfe",
+  "startedAt": 1786523256548,
+  "durationMs": 407801,
+  "passed": 22,
+  "failed": 2,
+  "checks": [
+    {
+      "step": "smoke",
+      "ok": true,
+      "detail": "TUI pipeline exchange reached the fixture provider"
+    },
+    {
+      "step": "run1-start",
+      "ok": true,
+      "detail": "runId=d54066a1-a2e card=#1 session=1786523314_C_03 gen=1"
+    },
+    {
+      "step": "run1-session-visible",
+      "ok": true,
+      "detail": "C session listed at index #3"
+    },
+    {
+      "step": "run1-attach",
+      "ok": true,
+      "detail": "attached to exact Pi session 1786523314_C_03"
+    },
+    {
+      "step": "run1-running",
+      "ok": true,
+      "detail": "status=running gen=1"
+    },
+    {
+      "step": "child-env",
+      "ok": true,
+      "detail": "pid=1210639 sentinelLeak=false nodeOptionsLeak=false correlation=true isolatedHome=true"
+    },
+    {
+      "step": "run1-steer",
+      "ok": true,
+      "detail": "steer accepted"
+    },
+    {
+      "step": "run1-reply",
+      "ok": true,
+      "detail": "no UI request surfaced in the real run; reply machinery covered by focused unit suites (awaiting_input not exercised live)"
+    },
+    {
+      "step": "run1-cancel-accepted",
+      "ok": true,
+      "detail": "cancel accepted"
+    },
+    {
+      "step": "run1-cancelled",
+      "ok": true,
+      "detail": "terminal status=cancelled"
+    },
+    {
+      "step": "run1-child-gone",
+      "ok": true,
+      "detail": "no pi child remains after cancel"
+    },
+    {
+      "step": "no-orphan-session-after-cancel",
+      "ok": false,
+      "detail": "STILL LISTED: #3 Code (pi, ready) ← attached"
+    },
+    {
+      "step": "run1-steer-applied",
+      "ok": true,
+      "detail": "steer-flag file in workspace (applied before cancel)"
+    },
+    {
+      "step": "bridge-restart-1",
+      "ok": true,
+      "detail": "bridge respawned (pid 1250657)"
+    },
+    {
+      "step": "restart-preserves-terminal",
+      "ok": true,
+      "detail": "status after restart=cancelled (terminal stays terminal)"
+    },
+    {
+      "step": "stale-steer-rejected",
+      "ok": true,
+      "detail": "reply: ❌ Run d54066a1-a2e is not active (status: cancelled)"
+    },
+    {
+      "step": "stale-reply-rejected",
+      "ok": true,
+      "detail": "reply: ❌ Run d54066a1-a2e is not active (status: cancelled)"
+    },
+    {
+      "step": "run2-start",
+      "ok": true,
+      "detail": "runId=3e0eb1b8-1c1 gen=1"
+    },
+    {
+      "step": "run2-first-turn-settled",
+      "ok": true,
+      "detail": "first output file present — pi session flushed"
+    },
+    {
+      "step": "run2-running",
+      "ok": true,
+      "detail": "run2 active before restart"
+    },
+    {
+      "step": "bridge-restart-2",
+      "ok": true,
+      "detail": "bridge respawned (pid 1273416)"
+    },
+    {
+      "step": "run2-interrupt-on-restart",
+      "ok": true,
+      "detail": "run2 status after restart=interrupted (expected interrupted)"
+    },
+    {
+      "step": "run2-resume",
+      "ok": true,
+      "detail": "generation=2 new session=1786523423_C_03"
+    },
+    {
+      "step": "lane-setup",
+      "ok": false,
+      "detail": "Timed out waiting for run 3e0eb1b8-1c1 status running/awaiting_input/completed/failed after 240000ms\n"
+    }
+  ]
+}

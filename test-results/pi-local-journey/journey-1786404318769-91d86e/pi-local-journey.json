@@ -1,0 +1,140 @@
+{
+  "kind": "pi-local-journey",
+  "runRoot": "/tmp/pi-journey-Ohg5jc",
+  "startedAt": 1786403848937,
+  "durationMs": 469838,
+  "passed": 20,
+  "failed": 6,
+  "checks": [
+    {
+      "step": "smoke",
+      "ok": true,
+      "detail": "TUI pipeline exchange reached the fixture provider"
+    },
+    {
+      "step": "run1-start",
+      "ok": true,
+      "detail": "runId=0b95120d-58f card=#1 session=1786403878_C_03 gen=1"
+    },
+    {
+      "step": "run1-session-visible",
+      "ok": true,
+      "detail": "C session listed at index #3"
+    },
+    {
+      "step": "run1-attach",
+      "ok": true,
+      "detail": "attached to exact Pi session 1786403878_C_03"
+    },
+    {
+      "step": "run1-running",
+      "ok": true,
+      "detail": "status=running gen=1"
+    },
+    {
+      "step": "child-env",
+      "ok": true,
+      "detail": "pid=311417 sentinelLeak=false nodeOptionsLeak=false correlation=true isolatedHome=true"
+    },
+    {
+      "step": "run1-steer",
+      "ok": true,
+      "detail": "steer accepted"
+    },
+    {
+      "step": "run1-steer-applied",
+      "ok": true,
+      "detail": "steer-flag file appeared in the workspace"
+    },
+    {
+      "step": "run1-reply",
+      "ok": true,
+      "detail": "no UI request surfaced in the real run; reply machinery covered by focused unit suites (awaiting_input not exercised live)"
+    },
+    {
+      "step": "run1-cancel-accepted",
+      "ok": false,
+      "detail": "run reached terminal status completed before cancel could be issued"
+    },
+    {
+      "step": "bridge-restart-1",
+      "ok": true,
+      "detail": "bridge respawned (pid 312153)"
+    },
+    {
+      "step": "restart-preserves-terminal",
+      "ok": false,
+      "detail": "status after restart=completed (expected cancelled)"
+    },
+    {
+      "step": "run1-resume",
+      "ok": false,
+      "detail": "resume reply: ❌ Failed to queue resume generation: not_resumable"
+    },
+    {
+      "step": "stale-steer-rejected",
+      "ok": true,
+      "detail": "reply: ❌ Run 0b95120d-58f is not active (status: completed)"
+    },
+    {
+      "step": "stale-reply-rejected",
+      "ok": true,
+      "detail": "reply: ❌ Run 0b95120d-58f is not active (status: completed)"
+    },
+    {
+      "step": "no-orphan-session-after-complete",
+      "ok": true,
+      "detail": "no live Code session after terminal completion"
+    },
+    {
+      "step": "run2-start",
+      "ok": true,
+      "detail": "runId=6317de8c-4d2 gen=1"
+    },
+    {
+      "step": "run3-queued",
+      "ok": true,
+      "detail": "runId=1ef0258d-267 (capacity 1 — expected queued)"
+    },
+    {
+      "step": "run3-stays-queued",
+      "ok": true,
+      "detail": "run3 status after create=queued (capacity held by run2)"
+    },
+    {
+      "step": "run2-terminal",
+      "ok": true,
+      "detail": "run2 terminal status=completed"
+    },
+    {
+      "step": "run3-auto-start-on-release",
+      "ok": false,
+      "detail": "run3 did NOT start within 75s after capacity release (contract violation candidate)"
+    },
+    {
+      "step": "bridge-restart-2",
+      "ok": true,
+      "detail": "bridge respawned (pid 313379)"
+    },
+    {
+      "step": "restart-run2-state",
+      "ok": true,
+      "detail": "run2 status after restart=completed (terminal stays terminal; active becomes interrupted)"
+    },
+    {
+      "step": "run2-interrupt-on-restart",
+      "ok": false,
+      "detail": "run2 was already terminal before restart — interrupt path not exercised"
+    },
+    {
+      "step": "run3-preserved-queued",
+      "ok": true,
+      "detail": "run3 status after restart=queued (preserved queued)"
+    },
+    {
+      "step": "lane-setup",
+      "ok": false,
+      "detail": "Timed out waiting for run 1ef0258d-267 status starting/running/completed/failed after 240000ms\n"
+    }
+  ]
+}

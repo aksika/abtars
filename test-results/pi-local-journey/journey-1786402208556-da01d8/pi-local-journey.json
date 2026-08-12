@@ -1,0 +1,60 @@
+{
+  "kind": "pi-local-journey",
+  "runRoot": "/tmp/pi-journey-SaiWK8",
+  "startedAt": 1786401472774,
+  "durationMs": 735782,
+  "passed": 7,
+  "failed": 3,
+  "checks": [
+    {
+      "step": "smoke",
+      "ok": true,
+      "detail": "TUI pipeline exchange reached the fixture provider"
+    },
+    {
+      "step": "run1-start",
+      "ok": true,
+      "detail": "runId=b400cc29-361 card=#1 session=1786401515_C_03 gen=1"
+    },
+    {
+      "step": "run1-session-visible",
+      "ok": true,
+      "detail": "C session listed at index #3"
+    },
+    {
+      "step": "run1-attach",
+      "ok": true,
+      "detail": "attached to exact Pi session 1786401515_C_03"
+    },
+    {
+      "step": "run1-running",
+      "ok": true,
+      "detail": "status=running gen=1"
+    },
+    {
+      "step": "child-env",
+      "ok": false,
+      "detail": "no pi child found while run1 running"
+    },
+    {
+      "step": "run1-steer",
+      "ok": true,
+      "detail": "steer accepted"
+    },
+    {
+      "step": "run1-steer-applied",
+      "ok": false,
+      "detail": "steer-flag file never appeared within 7 min"
+    },
+    {
+      "step": "run1-reply",
+      "ok": true,
+      "detail": "no UI request surfaced in the real run; reply machinery covered by focused unit suites (awaiting_input not exercised live)"
+    },
+    {
+      "step": "lane-setup",
+      "ok": false,
+      "detail": "Timed out waiting for run b400cc29-361 status running/awaiting_input after 120000ms\n"
+    }
+  ]
+}
